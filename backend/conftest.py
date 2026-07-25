@@ -4,6 +4,7 @@ created schema (drop_all + create_all) for isolation. No SQLite anywhere.
 """
 import os
 import re
+from urllib.parse import quote, unquote
 
 import pymysql
 import pytest
@@ -38,13 +39,18 @@ def _parts():
         raise RuntimeError(
             "DATABASE_URL (or TEST_DATABASE_URL) must be mysql+aiomysql://... to run tests")
     user, pw, host, port, db = m.groups()
-    return user, pw, host, int(port), db
+    # pw arrives percent-encoded from the URL (# -> %23). SQLAlchemy decodes it when it
+    # parses the DSN, but pymysql is handed the value directly and needs it raw.
+    return unquote(user), unquote(pw), host, int(port), db
 
 
 def _test_dsn() -> str:
+    """_parts() hands back a decoded password for pymysql; SQLAlchemy parses a URL,
+    so it has to go back in percent-encoded or a '#' truncates the DSN."""
     user, pw, host, port, db = _parts()
     suffix = "" if db.endswith("_test") else "_test"
-    return f"mysql+aiomysql://{user}:{pw}@{host}:{port}/{db}{suffix}"
+    return (f"mysql+aiomysql://{quote(user, safe='')}:{quote(pw, safe='')}"
+            f"@{host}:{port}/{db}{suffix}")
 
 
 def _ensure_test_db() -> str | None:

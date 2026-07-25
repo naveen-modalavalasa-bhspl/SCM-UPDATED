@@ -45,31 +45,61 @@ export interface MasterUom {
   is_active: boolean;
 }
 
-/** factor = how many `to_uom` fit in one `from_uom`. BOX -> PCS, factor 12. */
+/**
+ * factor = how many `to_uom` fit in one `from_uom`. BOX -> PCS, factor 12.
+ * The live mst_uom_conversions table has no is_active column, so neither does this.
+ */
 export interface MasterUomConversion {
   id: number;
   from_uom_id: number;
-  from_uom_code?: string | null;
   to_uom_id: number;
-  to_uom_code?: string | null;
   factor: number;
-  is_active: boolean;
 }
 
-export type LocationType = "SITE" | "WAREHOUSE" | "ZONE" | "BIN";
+export type WarehouseType = "MAIN" | "TRANSIT" | "QUARANTINE" | "SCRAP";
+export type BinType = "ZONE" | "RACK" | "SHELF" | "STORAGE" | "STAGING";
 
-export interface MasterLocation {
+/** whs_warehouses — the location master. Soft-linked to an HCM facility. */
+export interface MasterWarehouse {
   id: number;
   code: string;
   name: string;
-  location_type: LocationType;
-  parent_id?: number | null;
-  parent_name?: string | null;
-  hcm_facility_id?: number | null;
+  facility_id?: number | null;
+  facility_name?: string | null;
+  office_id?: number | null;
+  office_name?: string | null;
+  warehouse_type: WarehouseType;
   address?: string | null;
-  city?: string | null;
-  state?: string | null;
-  is_stock_point: boolean;
+  incharge_id?: number | null;
+  incharge_name?: string | null;
+  is_bin_managed: boolean;
+  is_active: boolean;
+}
+
+/** whs_bins — storage inside a warehouse. `path` and `level` derive from the parent. */
+export interface MasterBin {
+  id: number;
+  warehouse_id: number;
+  code: string;
+  name?: string | null;
+  parent_id?: number | null;
+  bin_type: BinType;
+  path?: string | null;
+  level: number;
+  capacity_qty?: number | null;
+  is_pickable: boolean;
+  is_active: boolean;
+}
+
+/** mst_projects — owns stock, never items. */
+export interface Project {
+  id: number;
+  code: string;
+  name: string;
+  office_id?: number | null;
+  office_name?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
   is_active: boolean;
 }
 

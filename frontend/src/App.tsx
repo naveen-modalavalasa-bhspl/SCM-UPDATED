@@ -20,6 +20,10 @@ import { GRNListPage } from "@/modules/logistics/pages/GRNListPage";
 import { StockPage } from "@/modules/logistics/pages/StockPage";
 import { IssuesPage } from "@/modules/logistics/pages/IssuesPage";
 import { AdminPage } from "@/modules/admin/pages/AdminPage";
+import { UsersPage } from "@/modules/admin/pages/UsersPage";
+import { GroupsPage } from "@/modules/admin/pages/GroupsPage";
+import { RulesPage } from "@/modules/admin/pages/RulesPage";
+import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { MastersPage } from "@/modules/masters/pages/MastersPage";
 
 const queryClient = new QueryClient({
@@ -53,6 +57,12 @@ function AppRoutes() {
         <Route path="stock" element={<StockPage />} />
         <Route path="issues" element={<IssuesPage />} />
         <Route path="admin" element={<AdminPage />} />
+        <Route path="admin/users" element={<UsersPage />} />
+        <Route path="admin/groups" element={<GroupsPage />} />
+        <Route path="admin/rules" element={<RulesPage />} />
+        <Route path="admin/audit" element={<AuditPage />} />
+        {/* Numbering and notifications live as tabs on the Masters screen. */}
+        <Route path="admin/numbering" element={<MastersPage />} />
         <Route path="masters" element={<MastersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
