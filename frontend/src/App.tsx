@@ -16,9 +16,9 @@ import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
 import { IndentApprovalsPage } from "@/modules/indents/pages/ApprovalsPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
-import { GRNListPage } from "@/modules/logistics/pages/GRNListPage";
-import { StockPage } from "@/modules/logistics/pages/StockPage";
-import { IssuesPage } from "@/modules/logistics/pages/IssuesPage";
+// The warehouse module owns goods receipt, stock and issues now; it routes its own
+// sub-pages, so these paths hand the whole subtree to it.
+import { WarehouseModule } from "@/modules/warehouse";
 import { AdminPage } from "@/modules/admin/pages/AdminPage";
 import { UsersPage } from "@/modules/admin/pages/UsersPage";
 import { GroupsPage } from "@/modules/admin/pages/GroupsPage";
@@ -26,6 +26,7 @@ import { RulesPage } from "@/modules/admin/pages/RulesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { MastersPage } from "@/modules/masters/pages/MastersPage";
 import { InventoryOverviewPage } from "@/modules/inventory/pages/OverviewPage";
+import { InventoryTransactionsPage } from "@/modules/inventory/pages/InventoryTransactionsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -54,10 +55,12 @@ function AppRoutes() {
         <Route path="indents/:id" element={<IndentDetailPage />} />
         <Route path="approvals" element={<IndentApprovalsPage />} />
         <Route path="pos" element={<POListPage />} />
-        <Route path="grn" element={<GRNListPage />} />
-        <Route path="stock" element={<StockPage />} />
-        <Route path="issues" element={<IssuesPage />} />
+        <Route path="grn/*" element={<WarehouseModule />} />
+        <Route path="stock/*" element={<WarehouseModule />} />
+        <Route path="issues/*" element={<WarehouseModule />} />
+        <Route path="warehouse/*" element={<WarehouseModule />} />
         <Route path="inventory" element={<InventoryOverviewPage />} />
+        <Route path="inventory/transactions" element={<InventoryTransactionsPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/users" element={<UsersPage />} />
         <Route path="admin/groups" element={<GroupsPage />} />
