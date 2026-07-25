@@ -103,7 +103,10 @@ class ConditionOperator(str, Enum):
     LT = "LT"
     LTE = "LTE"
     EQ = "EQ"
+    NEQ = "NEQ"      # added: rules engine needs exclusion ("category is not X")
     IN = "IN"
+    NOT_IN = "NOT_IN"    # added
+    BETWEEN = "BETWEEN"  # added: "field_value" is "lo,hi"
 
 
 class ConditionLogic(str, Enum):
@@ -121,3 +124,74 @@ class RefType(str, Enum):
 class Priority(str, Enum):
     NORMAL = "NORMAL"
     URGENT = "URGENT"
+
+
+# ---- Masters & Admin (this build) ----
+
+class WarehouseType(str, Enum):
+    """whs_warehouses.warehouse_type. The live column defaults to MAIN."""
+    MAIN = "MAIN"
+    TRANSIT = "TRANSIT"
+    QUARANTINE = "QUARANTINE"
+    SCRAP = "SCRAP"
+
+
+class BinType(str, Enum):
+    """whs_bins.bin_type. Bins nest through parent_id, so ZONE/RACK/SHELF are the same
+    table at different levels rather than three tables."""
+    ZONE = "ZONE"
+    RACK = "RACK"
+    SHELF = "SHELF"
+    STORAGE = "STORAGE"
+    STAGING = "STAGING"
+
+
+class GroupType(str, Enum):
+    """How rbac_user_groups derives its members. LOCATION groups are the
+    "sub-groups by place"; they hang off a parent group via parent_id."""
+    ROLE = "ROLE"
+    POSITION = "POSITION"
+    LOCATION = "LOCATION"
+
+
+class RuleActionType(str, Enum):
+    ROUTE_APPROVAL = "ROUTE_APPROVAL"          # delegates to platform/workflow/engine.py
+    ROUTE_FULFILLMENT = "ROUTE_FULFILLMENT"
+    SPLIT_FULFILLMENT = "SPLIT_FULFILLMENT"
+    NOTIFY = "NOTIFY"
+    SET_FIELD = "SET_FIELD"
+
+
+class FulfillmentTarget(str, Enum):
+    INVENTORY = "INVENTORY"
+    WAREHOUSE = "WAREHOUSE"
+    PROCUREMENT = "PROCUREMENT"
+
+
+class RecipientType(str, Enum):
+    ROLE = "ROLE"
+    POSITION = "POSITION"
+    GROUP = "GROUP"
+    EMPLOYEE = "EMPLOYEE"
+
+
+class NotificationChannel(str, Enum):
+    IN_APP = "IN_APP"
+    EMAIL = "EMAIL"
+
+
+class AuditAction(str, Enum):
+    CREATE = "CREATE"
+    UPDATE = "UPDATE"
+    DEACTIVATE = "DEACTIVATE"
+    ACTIVATE = "ACTIVATE"
+    LOGIN = "LOGIN"
+    ACCESS_GRANTED = "ACCESS_GRANTED"
+    ACCESS_REVOKED = "ACCESS_REVOKED"
+
+
+class ResetPolicy(str, Enum):
+    """When sys_doc_series.last_number returns to zero."""
+    NEVER = "NEVER"
+    YEARLY = "YEARLY"
+    MONTHLY = "MONTHLY"

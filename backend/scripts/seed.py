@@ -45,9 +45,14 @@ ROLE_PERMS = {
                               P.PO_VIEW, P.PO_APPROVE, P.PO_REJECT, P.STOCK_VIEW],
     RoleCode.PROCUREMENT.value: [P.INDENT_VIEW, P.PO_VIEW, P.PO_CREATE, P.PO_EDIT,
                                  P.PO_SUBMIT, P.PO_SEND_VENDOR, P.MASTER_VENDOR_MANAGE,
-                                 P.MASTER_ITEM_MANAGE, P.STOCK_VIEW],
+                                 P.MASTER_ITEM_MANAGE, P.MASTER_CATEGORY_MANAGE,
+                                 P.MASTER_UOM_MANAGE, P.MASTER_PROJECT_MANAGE,
+                                 P.STOCK_VIEW],
+    # Store keeps the warehouse/bin master: they are the people who know the physical
+    # layout, and the Warehouse module needs somebody able to create bins on day one.
     RoleCode.STORE.value: [P.GRN_VIEW, P.GRN_CREATE, P.GRN_QC, P.STOCK_VIEW,
-                           P.STOCK_ADJUST, P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_ISSUE],
+                           P.STOCK_ADJUST, P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_ISSUE,
+                           P.MASTER_LOCATION_MANAGE],
 }
 
 # username -> (employee_id, full name, role code, department_id, position_id)
@@ -85,6 +90,19 @@ PAGE_TREE = [
 
     ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
     ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
+    ("masters", "/masters", "Masters", "database", P.MASTER_ITEM_MANAGE, 92, "grp_settings"),
+    ("admin_users", "/admin/users", "Users & Access", "users",
+     P.ADMIN_USERS_MANAGE, 93, "grp_settings"),
+    ("admin_groups", "/admin/groups", "User Groups", "users",
+     P.ADMIN_GROUPS_MANAGE, 94, "grp_settings"),
+    ("admin_rules", "/admin/rules", "Rules Engine", "git-branch",
+     P.ADMIN_RULES_MANAGE, 95, "grp_settings"),
+    ("admin_numbering", "/admin/numbering", "Document Numbering", "hash",
+     P.ADMIN_NUMBERING_MANAGE, 96, "grp_settings"),
+    ("admin_notifications", "/admin/notifications", "Notifications", "bell",
+     P.ADMIN_NOTIFICATIONS_MANAGE, 97, "grp_settings"),
+    ("admin_audit", "/admin/audit", "Audit Log", "scroll-text",
+     P.ADMIN_AUDIT_VIEW, 98, "grp_settings"),
 ]
 
 
@@ -127,7 +145,10 @@ async def seed_pages(db):
         page.path = path
         page.name = name
         page.icon = icon
-        page.required_permission_code = perm
+        # The column is `required_permission`. Assigning `required_permission_code`
+        # here silently set a plain Python attribute, so no page ever got its
+        # permission and every menu entry was visible to everyone.
+        page.required_permission = perm
         page.sort_order = order
         page.is_active = True
         await db.flush()
@@ -227,7 +248,7 @@ async def seed_masters(db):
     for i, (name, cat, uom) in enumerate(catalog, start=1):
         await get_or_create(db, Item, defaults={
             "name": name, "category_id": cat_rows[cat].id, "category_name": cat_rows[cat].name,
-            "uom_id": uom_rows[uom].id, "uom_code": uom, "reorder_level": 10,
+            "uom_id": uom_rows[uom].id, "uom_code": uom,
             "is_active": True}, code=f"IT-{i:04d}")
 
     for i in range(1, 6):

@@ -51,11 +51,20 @@ ISSUE_ISSUE = "issue.issue"
 # --- Masters ---
 MASTER_ITEM_MANAGE = "master.item.manage"
 MASTER_VENDOR_MANAGE = "master.vendor.manage"
+MASTER_CATEGORY_MANAGE = "master.category.manage"
+MASTER_UOM_MANAGE = "master.uom.manage"
+MASTER_LOCATION_MANAGE = "master.location.manage"
+MASTER_PROJECT_MANAGE = "master.project.manage"
 
 # --- Admin ---
 ADMIN_ROLES_MANAGE = "admin.roles.manage"
 ADMIN_WORKFLOW_MANAGE = "admin.workflow.manage"
 ADMIN_USERS_MANAGE = "admin.users.manage"
+ADMIN_GROUPS_MANAGE = "admin.groups.manage"
+ADMIN_RULES_MANAGE = "admin.rules.manage"
+ADMIN_NUMBERING_MANAGE = "admin.numbering.manage"
+ADMIN_AUDIT_VIEW = "admin.audit.view"
+ADMIN_NOTIFICATIONS_MANAGE = "admin.notifications.manage"
 
 
 ALL_PERMISSIONS: list[Perm] = [
@@ -83,9 +92,21 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(ISSUE_ISSUE, "logistics", "issue", "issue", "Issue stock to a department"),
     Perm(MASTER_ITEM_MANAGE, "masters", "item", "manage", "Manage items"),
     Perm(MASTER_VENDOR_MANAGE, "masters", "vendor", "manage", "Manage vendors"),
+    Perm(MASTER_CATEGORY_MANAGE, "masters", "category", "manage", "Manage item categories"),
+    Perm(MASTER_UOM_MANAGE, "masters", "uom", "manage", "Manage units of measure"),
+    Perm(MASTER_LOCATION_MANAGE, "masters", "location", "manage",
+         "Manage warehouses & bins"),
+    Perm(MASTER_PROJECT_MANAGE, "masters", "project", "manage", "Manage projects"),
     Perm(ADMIN_ROLES_MANAGE, "admin", "roles", "manage", "Manage roles & permissions"),
     Perm(ADMIN_WORKFLOW_MANAGE, "admin", "workflow", "manage", "Manage approval workflows"),
     Perm(ADMIN_USERS_MANAGE, "admin", "users", "manage", "Manage users & HCM sync"),
+    Perm(ADMIN_GROUPS_MANAGE, "admin", "groups", "manage", "Manage user groups"),
+    Perm(ADMIN_RULES_MANAGE, "admin", "rules", "manage", "Manage the rules engine"),
+    Perm(ADMIN_NUMBERING_MANAGE, "admin", "numbering", "manage",
+         "Manage document numbering series"),
+    Perm(ADMIN_AUDIT_VIEW, "admin", "audit", "view", "View the audit log"),
+    Perm(ADMIN_NOTIFICATIONS_MANAGE, "admin", "notifications", "manage",
+         "Manage notification settings"),
 ]
 
 ALL_CODES: list[str] = [p.code for p in ALL_PERMISSIONS]

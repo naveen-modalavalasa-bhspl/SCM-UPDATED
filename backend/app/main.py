@@ -57,10 +57,12 @@ def _include_routers() -> None:
         "app.platform.hcm.router",
         "app.platform.rbac.router",
         "app.platform.workflow.router",
+        "app.platform.rules.router",
+        "app.platform.admin.router",
         "app.modules.indents.router",
         "app.modules.procurement.router",
         "app.modules.logistics.router",
-        "app.shared.masters_router",
+        "app.shared.masters.router",
     ]
     for path in router_paths:
         try:
