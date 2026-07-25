@@ -5,8 +5,10 @@ RBAC/settings concerns and are served by platform/admin, which imports the same
 factory — platform may import shared, but not the other way round (rule 5).
 """
 from datetime import date
+import re
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ValidationError
@@ -17,9 +19,10 @@ from app.shared.enums import (
 )
 from app.shared.masters.crud import MasterDef
 from app.shared.models.master import (
-    Attribute, AttributeMapping, Bom, BomItem, Brand, Feature, Item, ItemCategory,
-    ItemClass, Packaging, PriceList, PriceListItem, Project, Uom, UomConversion,
-    Vendor,
+    Attribute, AttributeMapping, Bom, BomItem, Brand, BrandManufacturer,
+    DosageForm, Feature, GeneralName, Item, ItemCategory, ItemClass, ItemSubClass,
+    Manufacturer, Packaging, PriceList, PriceListItem, Project, Uom,
+    UomConversion, Vendor,
 )
 from app.shared.models.warehouse import Bin, Warehouse
 
@@ -27,39 +30,153 @@ from app.shared.models.warehouse import Bin, Warehouse
 # --------------------------------------------------------------------------- #
 #  Items
 # --------------------------------------------------------------------------- #
+def build_item_code(category_path: str, general_code: str, brand_code: str,
+                    manufacturer_code: str) -> str:
+    """Build the immutable item identity code from approved master-data codes."""
+    if not re.fullmatch(r"\d{6}", category_path or ""):
+        raise ValidationError("Select a Level 3 category with a six-digit category path")
+    parts = [general_code, brand_code, manufacturer_code]
+    if any(not re.fullmatch(r"[A-Z0-9]+", (part or "").strip().upper())
+           for part in parts):
+        raise ValidationError(
+            "General name, brand and manufacturer codes must be letters and numbers only"
+        )
+    code = "-".join([category_path, *(part.strip().upper() for part in parts)])
+    if len(code) > 50:
+        raise ValidationError("Generated item code exceeds 50 characters")
+    return code
+
+
 class ItemIn(BaseModel):
-    code: str
     name: str
     short_name: str | None = None
-    uom_id: int | None = None
-    category_id: int | None = None
+    category_id: int
+    general_name_id: int
+    brand_id: int
+    manufacturer_id: int
+    item_class_id: int
+    item_sub_class_id: int | None = None
+    uom_id: int
     item_type: str | None = None
     hsn_code: str | None = None
+    description: str | None = None
+    has_components: bool = False
+    barcode_type: str | None = None
+    barcode_value: str | None = None
     tax_percent: float | None = None
+    cgst_rate: float = 0
+    sgst_rate: float = 0
+    igst_rate: float = 0
     is_batch_tracked: bool = False
     is_serial_tracked: bool = False
+    has_expiry: bool = False
+    requires_qi: bool = False
+    shelf_life_days: int = 0
+    safety_stock: float = 0
+    reorder_level: float = 0
+    reorder_qty: float = 0
+    lead_time_days: int = 0
+    min_order_qty: float = 0
+    max_order_qty: float = 0
+    purchase_price: float = 0
+    selling_price: float = 0
+    mrp: float = 0
+    dosage_form_id: int | None = None
+    valuation_method: str = "FIFO"
+    requires_special_storage: bool = False
+    storage_conditions: str | None = None
+    requires_special_transport: bool = False
+    transport_conditions: str | None = None
     is_active: bool = True
 
 
 def item_out(i: Item) -> dict:
-    return {"id": i.id, "code": i.code, "name": i.name, "short_name": i.short_name,
+    numeric = (
+        "tax_percent", "cgst_rate", "sgst_rate", "igst_rate", "safety_stock",
+        "reorder_level", "reorder_qty", "min_order_qty", "max_order_qty",
+        "purchase_price", "selling_price", "mrp",
+    )
+    out = {"id": i.id, "code": i.code, "name": i.name, "short_name": i.short_name,
             "uom_id": i.uom_id, "uom_code": i.uom_code, "category_id": i.category_id,
             "category_name": i.category_name, "item_type": i.item_type,
-            "hsn_code": i.hsn_code,
-            "tax_percent": float(i.tax_percent) if i.tax_percent is not None else None,
+            "general_name_id": i.general_name_id, "general_name_code": i.general_name_code,
+            "general_name": i.general_name, "brand_id": i.brand_id,
+            "brand_code": i.brand_code, "brand_name": i.brand_name,
+            "manufacturer_id": i.manufacturer_id,
+            "manufacturer_code": i.manufacturer_code,
+            "manufacturer_name": i.manufacturer_name,
+            "item_class_id": i.item_class_id, "item_class_code": i.item_class_code,
+            "item_class_name": i.item_class_name,
+            "item_sub_class_id": i.item_sub_class_id,
+            "item_sub_class_code": i.item_sub_class_code,
+            "item_sub_class_name": i.item_sub_class_name,
+            "hsn_code": i.hsn_code, "description": i.description,
+            "has_components": i.has_components, "barcode_type": i.barcode_type,
+            "barcode_value": i.barcode_value,
             "is_batch_tracked": i.is_batch_tracked,
-            "is_serial_tracked": i.is_serial_tracked, "is_active": i.is_active}
+            "is_serial_tracked": i.is_serial_tracked, "has_expiry": i.has_expiry,
+            "requires_qi": i.requires_qi, "shelf_life_days": i.shelf_life_days,
+            "lead_time_days": i.lead_time_days, "dosage_form_id": i.dosage_form_id,
+            "dosage_form_code": i.dosage_form_code,
+            "dosage_form_name": i.dosage_form_name,
+            "valuation_method": i.valuation_method,
+            "requires_special_storage": i.requires_special_storage,
+            "storage_conditions": i.storage_conditions,
+            "requires_special_transport": i.requires_special_transport,
+            "transport_conditions": i.transport_conditions,
+            "is_active": i.is_active}
+    out.update({key: float(getattr(i, key) or 0) for key in numeric})
+    return out
 
 
 async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     """Snapshot uom_code and category_name onto the row so an item list renders from
     one query instead of joining two masters (rule: minimise joins per screen)."""
-    uom = await db.get(Uom, data.uom_id) if data.uom_id else None
-    category = await db.get(ItemCategory, data.category_id) if data.category_id else None
+    uom = await db.get(Uom, data.uom_id)
+    category = await db.get(ItemCategory, data.category_id)
+    general = await db.get(GeneralName, data.general_name_id)
+    brand = await db.get(Brand, data.brand_id)
+    manufacturer = await db.get(Manufacturer, data.manufacturer_id)
+    item_class = await db.get(ItemClass, data.item_class_id)
+    sub_class = await db.get(ItemSubClass, data.item_sub_class_id) \
+        if data.item_sub_class_id else None
+    dosage = await db.get(DosageForm, data.dosage_form_id) \
+        if data.dosage_form_id else None
+    if not all((uom, category, general, brand, manufacturer, item_class)):
+        raise ValidationError("Category, general name, brand, manufacturer, class and UOM are required")
+    if category.level != 3:
+        raise ValidationError("Select a Level 3 category with a six-digit category path")
+    mapping = await db.scalar(select(BrandManufacturer.id).where(
+        BrandManufacturer.brand_id == brand.id,
+        BrandManufacturer.manufacturer_id == manufacturer.id,
+        BrandManufacturer.is_active.is_(True),
+    ))
+    if mapping is None:
+        raise ValidationError("The selected manufacturer is not mapped to this brand")
+    if sub_class and sub_class.item_class_id != item_class.id:
+        raise ValidationError("The selected subclass does not belong to this item class")
+    if data.has_expiry and data.shelf_life_days <= 0:
+        raise ValidationError("Shelf life must be greater than zero for expiring items")
+    if data.max_order_qty and data.min_order_qty > data.max_order_qty:
+        raise ValidationError("Minimum order quantity cannot exceed maximum order quantity")
+    code = build_item_code(
+        category.path, general.code, brand.code, manufacturer.code,
+    )
     for key, value in data.model_dump().items():
         setattr(item, key, value)
-    item.uom_code = uom.code if uom else None
-    item.category_name = category.name if category else None
+    item.code = code
+    item.uom_code = uom.code
+    item.category_name = category.name
+    item.general_name_code, item.general_name = general.code, general.name
+    item.brand_code, item.brand_name = brand.code, brand.name
+    item.manufacturer_code, item.manufacturer_name = manufacturer.code, manufacturer.name
+    item.item_class_code, item.item_class_name = item_class.code, item_class.name
+    item.item_sub_class_code = sub_class.code if sub_class else None
+    item.item_sub_class_name = sub_class.name if sub_class else None
+    item.dosage_form_code = dosage.code if dosage else None
+    item.dosage_form_name = dosage.name if dosage else None
+    item.item_type = item_class.code
+    item.tax_percent = max(data.cgst_rate + data.sgst_rate, data.igst_rate)
 
 
 # --------------------------------------------------------------------------- #
@@ -69,12 +186,14 @@ class CategoryIn(BaseModel):
     code: str
     name: str
     parent_id: int | None = None
+    segment_code: str | None = None
     is_active: bool = True
 
 
 def category_out(c: ItemCategory) -> dict:
     return {"id": c.id, "code": c.code, "name": c.name, "parent_id": c.parent_id,
-            "level": c.level, "is_active": c.is_active}
+            "level": c.level, "segment_code": c.segment_code, "path": c.path,
+            "is_active": c.is_active}
 
 
 async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) -> None:
@@ -85,9 +204,23 @@ async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) 
     parent = await db.get(ItemCategory, data.parent_id) if data.parent_id else None
     if data.parent_id is not None and parent is None:
         raise ValidationError("Parent category not found")
-    for key, value in data.model_dump().items():
+    level = (parent.level or 1) + 1 if parent else 1
+    if level > 3:
+        raise ValidationError("Item categories support only Level 1, 2 and 3")
+    segment = data.segment_code
+    if not segment:
+        sibling_max = await db.scalar(select(func.max(ItemCategory.segment_code)).where(
+            ItemCategory.parent_id == data.parent_id
+            if data.parent_id is not None else ItemCategory.parent_id.is_(None)
+        ))
+        segment = f"{int(sibling_max or -1) + 1:02d}"
+    if len(segment) != 2 or not segment.isdigit() or not 0 <= int(segment) <= 99:
+        raise ValidationError("Category segment must be two digits from 00 to 99")
+    for key, value in data.model_dump(exclude={"segment_code"}).items():
         setattr(cat, key, value)
-    cat.level = (parent.level or 1) + 1 if parent else 1
+    cat.level = level
+    cat.segment_code = segment
+    cat.path = f"{parent.path if parent else ''}{segment}"
 
 
 # --------------------------------------------------------------------------- #
@@ -96,11 +229,13 @@ async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) 
 class UomIn(BaseModel):
     code: str
     name: str
+    uom_class: str | None = None
     is_active: bool = True
 
 
 def uom_out(u: Uom) -> dict:
-    return {"id": u.id, "code": u.code, "name": u.name, "is_active": u.is_active}
+    return {"id": u.id, "code": u.code, "name": u.name,
+            "uom_class": u.uom_class, "is_active": u.is_active}
 
 
 class UomConversionIn(BaseModel):
@@ -286,20 +421,60 @@ def vendor_out(v: Vendor) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-#  Simple lookups: brands, item classes, packaging, features
+#  Item identity lookups
 # --------------------------------------------------------------------------- #
-class BrandIn(BaseModel):
-    code: str
+class NamedCodeIn(BaseModel):
+    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
     name: str
-    manufacturer: str | None = None
+    description: str | None = None
+    is_active: bool = True
+
+
+def named_code_out(row) -> dict:
+    return {"id": row.id, "code": row.code, "name": row.name,
+            "description": getattr(row, "description", None),
+            "is_active": row.is_active}
+
+
+class BrandIn(BaseModel):
+    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
+    name: str
     description: str | None = None
     is_active: bool = True
 
 
 def brand_out(b: Brand) -> dict:
     return {"id": b.id, "code": b.code, "name": b.name,
-            "manufacturer": b.manufacturer, "description": b.description,
+            "description": b.description,
             "is_active": b.is_active}
+
+
+class BrandManufacturerIn(BaseModel):
+    brand_id: int
+    manufacturer_id: int
+    is_active: bool = True
+
+
+def brand_manufacturer_out(row: BrandManufacturer) -> dict:
+    return {"id": row.id, "brand_id": row.brand_id,
+            "brand_code": row.brand_code, "brand_name": row.brand_name,
+            "manufacturer_id": row.manufacturer_id,
+            "manufacturer_code": row.manufacturer_code,
+            "manufacturer_name": row.manufacturer_name,
+            "is_active": row.is_active}
+
+
+async def apply_brand_manufacturer(
+    db: AsyncSession, row: BrandManufacturer, data: BrandManufacturerIn,
+) -> None:
+    brand = await db.get(Brand, data.brand_id)
+    manufacturer = await db.get(Manufacturer, data.manufacturer_id)
+    if not brand or not manufacturer:
+        raise ValidationError("Brand and manufacturer are required")
+    row.brand_id, row.brand_code, row.brand_name = brand.id, brand.code, brand.name
+    row.manufacturer_id = manufacturer.id
+    row.manufacturer_code, row.manufacturer_name = manufacturer.code, manufacturer.name
+    row.is_active = data.is_active
 
 
 class ItemClassIn(BaseModel):
@@ -314,6 +489,33 @@ def item_class_out(c: ItemClass) -> dict:
     return {"id": c.id, "code": c.code, "name": c.name,
             "description": c.description, "is_capitalised": c.is_capitalised,
             "is_active": c.is_active}
+
+
+class ItemSubClassIn(BaseModel):
+    item_class_id: int
+    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
+    name: str
+    description: str | None = None
+    is_active: bool = True
+
+
+def item_sub_class_out(row: ItemSubClass) -> dict:
+    return {"id": row.id, "item_class_id": row.item_class_id,
+            "item_class_code": row.item_class_code,
+            "item_class_name": row.item_class_name, "code": row.code,
+            "name": row.name, "description": row.description,
+            "is_active": row.is_active}
+
+
+async def apply_item_sub_class(
+    db: AsyncSession, row: ItemSubClass, data: ItemSubClassIn,
+) -> None:
+    item_class = await db.get(ItemClass, data.item_class_id)
+    if not item_class:
+        raise ValidationError("Item class not found")
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.item_class_code, row.item_class_name = item_class.code, item_class.name
 
 
 class PackagingIn(BaseModel):
@@ -625,6 +827,18 @@ MASTERS: list[MasterDef] = [
               serialize=category_out, search_cols=("name", "code"),
               apply=apply_category),
 
+    MasterDef(path="general-names", name="General name", model=GeneralName,
+              schema=NamedCodeIn, manage_perm=perms.MASTER_ITEM_MANAGE,
+              serialize=named_code_out, search_cols=("name", "code")),
+
+    MasterDef(path="manufacturers", name="Manufacturer", model=Manufacturer,
+              schema=NamedCodeIn, manage_perm=perms.MASTER_BRAND_MANAGE,
+              serialize=named_code_out, search_cols=("name", "code")),
+
+    MasterDef(path="dosage-forms", name="Dosage form", model=DosageForm,
+              schema=NamedCodeIn, manage_perm=perms.MASTER_ITEM_MANAGE,
+              serialize=named_code_out, search_cols=("name", "code")),
+
     MasterDef(path="uom", name="UOM", model=Uom, schema=UomIn,
               manage_perm=perms.MASTER_UOM_MANAGE, serialize=uom_out,
               search_cols=("name", "code"), order_col="code", paginated=False),
@@ -658,9 +872,21 @@ MASTERS: list[MasterDef] = [
               manage_perm=perms.MASTER_BRAND_MANAGE, serialize=brand_out,
               search_cols=("name", "code", "manufacturer")),
 
+    MasterDef(path="brand-manufacturers", name="Brand manufacturer",
+              model=BrandManufacturer, schema=BrandManufacturerIn,
+              manage_perm=perms.MASTER_BRAND_MANAGE,
+              serialize=brand_manufacturer_out, order_col="brand_name",
+              apply=apply_brand_manufacturer,
+              filters=("brand_id", "manufacturer_id")),
+
     MasterDef(path="item-classes", name="Item class", model=ItemClass,
               schema=ItemClassIn, manage_perm=perms.MASTER_CLASS_MANAGE,
               serialize=item_class_out, search_cols=("name", "code")),
+
+    MasterDef(path="item-sub-classes", name="Item subclass", model=ItemSubClass,
+              schema=ItemSubClassIn, manage_perm=perms.MASTER_CLASS_MANAGE,
+              serialize=item_sub_class_out, search_cols=("name", "code"),
+              apply=apply_item_sub_class, filters=("item_class_id",)),
 
     MasterDef(path="packaging", name="Packaging", model=Packaging,
               schema=PackagingIn, manage_perm=perms.MASTER_PACKAGING_MANAGE,

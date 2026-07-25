@@ -4,16 +4,20 @@ import { mastersApi } from "../api";
 /** Masters that go through the backend's MasterDef factory: same four verbs each. */
 const CRUD_MASTERS = [
   "items", "categories", "vendors", "warehouses", "bins", "projects",
-  "brands", "itemClasses", "packaging", "features", "attributes",
+  "brands", "manufacturers", "generalNames", "dosageForms",
+  "brandManufacturers", "itemClasses", "itemSubClasses",
+  "packaging", "features", "attributes",
   "attributeMappings", "priceLists", "priceListItems", "boms", "bomItems",
 ] as const;
 
 describe("masters api", () => {
   it("covers every master the Masters screen shows a tab for", () => {
     expect(Object.keys(mastersApi).sort()).toEqual([
-      "attributeMappings", "attributes", "bins", "bomItems", "boms", "brands",
-      "categories", "departments", "docSeries", "facilities", "features",
-      "itemClasses", "itemSpecs", "items", "packaging", "priceListItems",
+      "attributeMappings", "attributes", "bins", "bomItems", "boms",
+      "brandManufacturers", "brands", "categories", "departments", "docSeries",
+      "dosageForms", "facilities", "features", "generalNames",
+      "itemClasses", "itemSpecs", "itemSubClasses", "items", "manufacturers",
+      "packaging", "priceListItems",
       "priceLists", "projects", "roles", "uom", "uomConversions", "vendors",
       "warehouses",
     ]);

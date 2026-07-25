@@ -4,11 +4,13 @@ import { Tab, Tabs } from "@heroui/react";
 import { PageHeader, type Column } from "@/shared/components";
 import { mastersApi } from "../api";
 import { MasterCrud, type Option } from "../components/MasterCrud";
+import { ItemMasterTab } from "../components/ItemMasterTab";
 import type {
   DocSeries, MasterAttribute, MasterAttributeMapping, MasterBin, MasterBom,
-  MasterBrand, MasterCategory, MasterFeature, MasterItem, MasterItemClass,
+  MasterBrand, MasterCategory, MasterFeature, MasterItemClass,
   MasterPackaging, MasterPriceList, MasterRole, MasterUom, MasterUomConversion,
-  MasterVendor, MasterWarehouse, Project, RefRow,
+  MasterVendor, MasterWarehouse, Project, RefRow, NamedMaster,
+  MasterBrandManufacturer, MasterItemSubClass,
 } from "../types";
 
 const Active = ({ on }: { on: boolean }) => (
@@ -31,55 +33,91 @@ const BIN_TYPES: Option[] = ["ZONE", "RACK", "SHELF", "STORAGE", "STAGING"]
 const RESET_POLICIES: Option[] = ["NEVER", "YEARLY", "MONTHLY"]
   .map((v) => ({ value: v, label: v }));
 
-function ItemsTab({ uoms, cats }: { uoms: Option[]; cats: Option[] }) {
-  const columns: Column<MasterItem>[] = [
-    { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
-    { key: "name", header: "Name", render: (r) => r.name },
-    { key: "cat", header: "Category", render: (r) => r.category_name ?? "—", hideOnNarrow: true },
-    { key: "uom", header: "UOM", render: (r) => r.uom_code ?? "—", hideOnNarrow: true },
-    { key: "hsn", header: "HSN", render: (r) => r.hsn_code ?? "—", hideOnNarrow: true },
-    { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
-  ];
-  return (
-    <MasterCrud<MasterItem>
-      title="Item" queryKey="items" searchable managePerm="master.item.manage"
-      columns={columns}
-      renderCard={(r) => (
-        <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <Code>{r.code}</Code><Active on={r.is_active} />
-          </div>
-          <div className="text-sm text-body">{r.name}</div>
-          <div className="text-xs text-muted">{r.category_name ?? "—"} · {r.uom_code ?? "—"}</div>
-        </div>
-      )}
-      fetchList={(search) => mastersApi.items.list({ search, size: 100 }).then((p) => p.items)}
-      fields={[
-        { key: "code", label: "Code", required: true },
-        { key: "name", label: "Name", required: true },
-        { key: "short_name", label: "Short name" },
-        { key: "category_id", label: "Category", type: "select", options: cats },
-        { key: "uom_id", label: "Unit of measure", type: "select", options: uoms },
-        { key: "item_type", label: "Item type" },
-        { key: "hsn_code", label: "HSN code" },
-        { key: "tax_percent", label: "Tax %", type: "number" },
-        { key: "is_batch_tracked", label: "Batch tracked", type: "switch" },
-        { key: "is_serial_tracked", label: "Serial tracked", type: "switch" },
-        { key: "is_active", label: "Active", type: "switch" },
-      ]}
-      emptyForm={{ code: "", name: "", short_name: "", category_id: null, uom_id: null,
-                   item_type: "", hsn_code: "", tax_percent: null,
-                   is_batch_tracked: false, is_serial_tracked: false, is_active: true }}
-      toForm={(r) => ({ code: r.code, name: r.name, short_name: r.short_name ?? "",
-        category_id: r.category_id ?? null, uom_id: r.uom_id ?? null, item_type: r.item_type ?? "",
-        hsn_code: r.hsn_code ?? "", tax_percent: r.tax_percent ?? null,
-        is_batch_tracked: r.is_batch_tracked ?? false,
-        is_serial_tracked: r.is_serial_tracked ?? false, is_active: r.is_active })}
-      onCreate={(v) => mastersApi.items.create(v as Partial<MasterItem>)}
-      onUpdate={(id, v) => mastersApi.items.update(id, v as Partial<MasterItem>)}
-      onDeactivate={mastersApi.items.deactivate}
-    />
-  );
+function ItemsTab() {
+  return <ItemMasterTab />;
+}
+
+function NamedLookupTab({
+  title, queryKey, api, managePerm = "master.item.manage",
+}: {
+  title: string;
+  queryKey: string;
+  managePerm?: string;
+  api: {
+    list: (p?: {
+      search?: string; page?: number; size?: number; include_inactive?: boolean;
+      [filter: string]: string | number | boolean | undefined;
+    }) => Promise<{ items: NamedMaster[] }>;
+    create: (v: Partial<NamedMaster>) => Promise<NamedMaster>;
+    update: (id: number, v: Partial<NamedMaster>) => Promise<NamedMaster>;
+    deactivate: (id: number) => Promise<unknown>;
+  };
+}) {
+  return <MasterCrud<NamedMaster>
+    title={title} queryKey={queryKey} searchable managePerm={managePerm}
+    columns={[
+      { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
+      { key: "name", header: "Name", render: (r) => r.name },
+      { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
+    ]}
+    renderCard={(r) => <div><Code>{r.code}</Code><div>{r.name}</div></div>}
+    fetchList={(search) => api.list({ search, size: 300 }).then((r) => r.items)}
+    fields={[{key:"code",label:"Code",required:true},{key:"name",label:"Name",required:true},
+      {key:"description",label:"Description"},{key:"is_active",label:"Active",type:"switch"}]}
+    emptyForm={{code:"",name:"",description:"",is_active:true}}
+    toForm={(r)=>({code:r.code,name:r.name,description:r.description??"",is_active:r.is_active})}
+    onCreate={(v)=>api.create(v as Partial<NamedMaster>)}
+    onUpdate={(id,v)=>api.update(id,v as Partial<NamedMaster>)}
+    onDeactivate={api.deactivate}
+  />;
+}
+
+function BrandManufacturersTab() {
+  const brands = useQuery({queryKey:["masters","brands-map"],queryFn:()=>mastersApi.brands.list({size:300}).then(r=>r.items)});
+  const manufacturers = useQuery({queryKey:["masters","manufacturers-map"],queryFn:()=>mastersApi.manufacturers.list({size:300}).then(r=>r.items)});
+  const brandOpts = (brands.data??[]).map(r=>({value:r.id,label:`${r.code} — ${r.name}`}));
+  const manufacturerOpts = (manufacturers.data??[]).map(r=>({value:r.id,label:`${r.code} — ${r.name}`}));
+  return <MasterCrud<MasterBrandManufacturer>
+    title="Brand / Manufacturer mapping" queryKey="brand-manufacturers"
+    managePerm="master.brand.manage"
+    columns={[
+      {key:"brand",header:"Brand",render:r=>r.brand_name??"—"},
+      {key:"manufacturer",header:"Manufacturer",render:r=>r.manufacturer_name??"—"},
+      {key:"active",header:"Status",render:r=><Active on={r.is_active}/>}
+    ]}
+    renderCard={r=><div>{r.brand_name} — {r.manufacturer_name}</div>}
+    fetchList={()=>mastersApi.brandManufacturers.list({size:500}).then(r=>r.items)}
+    fields={[
+      {key:"brand_id",label:"Brand",type:"select",options:brandOpts,required:true},
+      {key:"manufacturer_id",label:"Manufacturer",type:"select",options:manufacturerOpts,required:true},
+      {key:"is_active",label:"Active",type:"switch"}]}
+    emptyForm={{brand_id:null,manufacturer_id:null,is_active:true}}
+    toForm={r=>({brand_id:r.brand_id,manufacturer_id:r.manufacturer_id,is_active:r.is_active})}
+    onCreate={v=>mastersApi.brandManufacturers.create(v as Partial<MasterBrandManufacturer>)}
+    onUpdate={(id,v)=>mastersApi.brandManufacturers.update(id,v as Partial<MasterBrandManufacturer>)}
+    onDeactivate={mastersApi.brandManufacturers.deactivate}
+  />;
+}
+
+function ItemSubClassesTab() {
+  const classes=useQuery({queryKey:["masters","classes-sub"],queryFn:()=>mastersApi.itemClasses.list({size:300}).then(r=>r.items)});
+  const classOpts=(classes.data??[]).map(r=>({value:r.id,label:`${r.code} — ${r.name}`}));
+  return <MasterCrud<MasterItemSubClass>
+    title="Item subclass" queryKey="item-subclasses" searchable managePerm="master.class.manage"
+    columns={[{key:"code",header:"Code",render:r=><Code>{r.code}</Code>},
+      {key:"name",header:"Name",render:r=>r.name},
+      {key:"class",header:"Item Class",render:r=>r.item_class_name??"—"}]}
+    renderCard={r=><div><Code>{r.code}</Code><div>{r.name}</div></div>}
+    fetchList={search=>mastersApi.itemSubClasses.list({search,size:300}).then(r=>r.items)}
+    fields={[{key:"item_class_id",label:"Item Class",type:"select",options:classOpts,required:true},
+      {key:"code",label:"Code",required:true},{key:"name",label:"Name",required:true},
+      {key:"description",label:"Description"},{key:"is_active",label:"Active",type:"switch"}]}
+    emptyForm={{item_class_id:null,code:"",name:"",description:"",is_active:true}}
+    toForm={r=>({item_class_id:r.item_class_id,code:r.code,name:r.name,description:r.description??"",is_active:r.is_active})}
+    onCreate={v=>mastersApi.itemSubClasses.create(v as Partial<MasterItemSubClass>)}
+    onUpdate={(id,v)=>mastersApi.itemSubClasses.update(id,v as Partial<MasterItemSubClass>)}
+    onDeactivate={mastersApi.itemSubClasses.deactivate}
+  />;
 }
 
 function CategoriesTab({ cats }: { cats: Option[] }) {
@@ -814,7 +852,9 @@ function ReadOnlyTab<T extends { id: number }>(
 }
 
 const TABS = [
-  "items", "categories", "item-classes", "brands", "features", "packaging",
+  "items", "categories", "general-names", "item-classes", "item-sub-classes",
+  "brands", "manufacturers", "brand-manufacturers", "dosage-forms",
+  "features", "packaging",
   "attributes", "attribute-mappings", "uom", "conversions", "warehouses", "bins",
   "projects", "vendors", "price-lists", "boms", "roles", "numbering",
   "departments", "facilities",
@@ -822,7 +862,10 @@ const TABS = [
 
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   items: "Items", categories: "Categories", "item-classes": "Item Classes",
-  brands: "Brands", features: "Features", packaging: "Packaging",
+  "general-names": "General Names", "item-sub-classes": "Item Subclasses",
+  brands: "Brands", manufacturers: "Manufacturers",
+  "brand-manufacturers": "Brand Manufacturers", "dosage-forms": "Dosage Forms",
+  features: "Features", packaging: "Packaging",
   attributes: "Attributes", "attribute-mappings": "Attribute Mapping",
   uom: "UOM", conversions: "Conversions", warehouses: "Warehouses", bins: "Bins",
   projects: "Projects", vendors: "Vendors", "price-lists": "Price Lists",
@@ -894,10 +937,15 @@ export function MastersPage() {
         {TABS.map((key) => <Tab key={key} title={TAB_LABELS[key]} />)}
       </Tabs>
 
-      {tab === "items" && <ItemsTab uoms={uomOpts} cats={catOpts} />}
+      {tab === "items" && <ItemsTab />}
       {tab === "categories" && <CategoriesTab cats={catOpts} />}
+      {tab === "general-names" && <NamedLookupTab title="General name" queryKey="general-names" api={mastersApi.generalNames} />}
       {tab === "item-classes" && <ItemClassesTab />}
+      {tab === "item-sub-classes" && <ItemSubClassesTab />}
       {tab === "brands" && <BrandsTab />}
+      {tab === "manufacturers" && <NamedLookupTab title="Manufacturer" queryKey="manufacturers" api={mastersApi.manufacturers} managePerm="master.brand.manage" />}
+      {tab === "brand-manufacturers" && <BrandManufacturersTab />}
+      {tab === "dosage-forms" && <NamedLookupTab title="Dosage form" queryKey="dosage-forms" api={mastersApi.dosageForms} />}
       {tab === "features" && <FeaturesTab />}
       {tab === "packaging" && <PackagingTab uoms={uomOpts} />}
       {tab === "attributes" && <AttributesTab />}
