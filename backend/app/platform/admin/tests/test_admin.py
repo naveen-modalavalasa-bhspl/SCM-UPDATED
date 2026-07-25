@@ -2,7 +2,9 @@
 import pytest
 from sqlalchemy import select
 
-from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmPositionAssignment
+from app.platform.hcm.models import (
+    HcmEmployee, HcmFacility, HcmPosition, HcmPositionAssignment,
+)
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.models import Role, UserRole
 from app.platform.settings.models import AuditLog, UserCredential
@@ -36,6 +38,26 @@ async def test_list_users_shows_who_has_access(client, admin, staff):
     by_id = {u["employee_id"]: u for u in body["items"]}
     assert by_id[1]["has_access"] is True      # the admin themselves
     assert by_id[10]["has_access"] is False
+
+
+async def test_list_users_shows_hcm_position_role_before_scm_roles(
+        client, admin, staff, db):
+    db.add(HcmPosition(
+        id=701, name="District Office Position", role_id=14, role_name="DEO",
+        is_active=True, synced_at=utcnow(),
+    ))
+    db.add(HcmPositionAssignment(
+        id=701, employee_id=10, position_id=701, position_name="District Officer",
+        is_primary=True, is_active=True, synced_at=utcnow(),
+    ))
+    await db.commit()
+
+    body = (await client.get("/api/admin/users?search=E10", headers=admin)).json()
+    employee = next(row for row in body["items"] if row["employee_id"] == 10)
+    assert employee["roles"][0] == {
+        "id": 14, "code": "DEO", "name": "DEO",
+        "source": "HCM", "assignable": False,
+    }
 
 
 async def test_filter_to_employees_without_access(client, admin, staff):

@@ -30,7 +30,13 @@ export interface AdminUserRow {
   has_access: boolean;
   locked: boolean;
   last_login_at?: string | null;
-  roles: { id: number; code: string; name: string }[];
+  roles: {
+    id: number;
+    code: string;
+    name: string;
+    source: "HCM" | "SCM";
+    assignable: boolean;
+  }[];
   positions: { id: number; name: string }[];
 }
 
@@ -38,6 +44,38 @@ export interface AccessSummary {
   active_employees: number;
   users_with_access: number;
   active_roles: number;
+}
+
+export interface PageAccessMatrix {
+  pages: {
+    code: string;
+    name: string;
+    module?: string | null;
+    always_on: boolean;
+    required_permission?: string | null;
+  }[];
+  roles: {
+    id: number;
+    code: string;
+    name: string;
+    source: "HCM" | "SCM";
+    page_codes: string[];
+  }[];
+}
+
+export interface FeatureAccessMatrix {
+  features: {
+    code: string;
+    module: string;
+    description: string;
+  }[];
+  roles: {
+    id: number;
+    code: string;
+    name: string;
+    source: "HCM" | "SCM";
+    permission_codes: string[];
+  }[];
 }
 
 /** Returned once, on grant or reset. The password is never readable again. */

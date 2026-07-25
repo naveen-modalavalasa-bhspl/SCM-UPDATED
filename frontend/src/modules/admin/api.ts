@@ -1,9 +1,9 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  AccessSummary, AdminUserRow, AuditRow, Conflict, GrantResult, GroupMember,
+  AccessSummary, AdminUserRow, AuditRow, Conflict, FeatureAccessMatrix, GrantResult, GroupMember,
   NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult, SyncResult,
-  SyncStatus, UserGroup,
+  SyncStatus, UserGroup, PageAccessMatrix,
 } from "./types";
 
 type ListParams = { search?: string; page?: number; size?: number };
@@ -91,10 +91,28 @@ export const adminApi = {
     remove: (id: number) =>
       api.delete(`/api/admin/notifications/${id}`).then((r) => r.data),
   },
-  roles: () => all<{ id: number; code: string; name: string; is_active: boolean }>(
+  roles: () => all<{
+    id: number;
+    code: string;
+    name: string;
+    is_active: boolean;
+    source: "HCM" | "SCM";
+    assignable: boolean;
+  }>(
     "/api/admin/roles"),
   // HCM's org roles ("Network Technicians"), derived from hcm_positions. Distinct
   // from roles() above, which is SCM permission roles.
   hcmRoles: () => all<{ id: number; name: string; positions: number }>(
     "/api/admin/hcm-roles"),
+  pageAccess: () =>
+    api.get<PageAccessMatrix>("/api/rbac/page-access").then((r) => r.data),
+  setPageAccess: (roleId: number, pageCodes: string[]) =>
+    api.put(`/api/rbac/roles/${roleId}/page-access`, { page_codes: pageCodes })
+      .then((r) => r.data),
+  featureAccess: () =>
+    api.get<FeatureAccessMatrix>("/api/rbac/feature-access").then((r) => r.data),
+  setFeatureAccess: (roleId: number, permissionCodes: string[]) =>
+    api.put(`/api/rbac/roles/${roleId}/feature-access`, {
+      permission_codes: permissionCodes,
+    }).then((r) => r.data),
 };

@@ -6,6 +6,7 @@ import { CardBody } from "@heroui/react";
 import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { indentApi, masterApi } from "../api";
+import { ItemCombobox } from "../components/ItemCombobox";
 
 interface Line {
   item_id: number | "";
@@ -59,10 +60,10 @@ export function IndentFormPage() {
               {lines.map((line, i) => (
                 <div key={i} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px] sm:items-end">
                   <Field label={i === 0 ? "Item" : ""}>
-                    <Select
-                      placeholder="Select item…"
+                    <ItemCombobox
+                      placeholder="Type item code or name…"
                       value={line.item_id}
-                      onChange={(v) => setLine(i, { item_id: v ? Number(v) : "" })}
+                      onChange={(value) => setLine(i, { item_id: value })}
                       options={itemOptions}
                     />
                   </Field>

@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.core.security import hash_password
-from app.platform.hcm.models import HcmEmployee, HcmPositionAssignment
+from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmPositionAssignment
 from app.platform.rbac.models import Role, UserRole
+from app.platform.rbac.service import HCM_ROLE_DESCRIPTION_PREFIX
 from app.platform.settings.models import UserCredential, UserSession
 from app.platform.settings.service import write_audit
 from app.shared.enums import AuditAction
@@ -23,18 +24,45 @@ TEMP_PASSWORD_BYTES = 9   # ~12 url-safe characters
 
 
 async def _roles_by_employee(db: AsyncSession, employee_ids: list[int]) -> dict[int, list[dict]]:
-    """One query for every employee's roles, so a page of users is two queries rather
-    than two per row."""
+    """HCM position roles first, with temporary SCM roles appended."""
     if not employee_ids:
         return {}
-    rows = (await db.execute(
+    hcm_rows = (await db.execute(
+        select(HcmPositionAssignment.employee_id, HcmPosition.role_id,
+               HcmPosition.role_name)
+        .join(HcmPosition, HcmPosition.id == HcmPositionAssignment.position_id)
+        .where(
+            HcmPositionAssignment.employee_id.in_(employee_ids),
+            HcmPositionAssignment.is_active.is_(True),
+            HcmPosition.is_active.is_(True),
+            HcmPosition.role_id.isnot(None),
+        )
+        .order_by(HcmPositionAssignment.is_primary.desc(), HcmPosition.role_name)
+    )).all()
+    scm_rows = (await db.execute(
         select(UserRole.employee_id, Role.id, Role.code, Role.name)
         .join(Role, Role.id == UserRole.role_id)
-        .where(UserRole.employee_id.in_(employee_ids))
+        .where(
+            UserRole.employee_id.in_(employee_ids),
+            or_(Role.description.is_(None),
+                ~Role.description.startswith(HCM_ROLE_DESCRIPTION_PREFIX)),
+        )
     )).all()
     out: dict[int, list[dict]] = {}
-    for employee_id, role_id, code, name in rows:
-        out.setdefault(employee_id, []).append({"id": role_id, "code": code, "name": name})
+    seen: set[tuple[int, str, int]] = set()
+    for employee_id, role_id, name in hcm_rows:
+        key = (employee_id, "HCM", role_id)
+        if key not in seen:
+            out.setdefault(employee_id, []).append({
+                "id": role_id, "code": name, "name": name,
+                "source": "HCM", "assignable": False,
+            })
+            seen.add(key)
+    for employee_id, role_id, code, name in scm_rows:
+        out.setdefault(employee_id, []).append({
+            "id": role_id, "code": code, "name": name,
+            "source": "SCM", "assignable": True,
+        })
     return out
 
 
@@ -180,7 +208,11 @@ async def reset_password(db: AsyncSession, employee_id: int, actor) -> dict:
 async def _set_roles(db: AsyncSession, employee_id: int, role_ids: list[int],
                      actor) -> None:
     valid = set((await db.execute(
-        select(Role.id).where(Role.id.in_(role_ids), Role.is_active.is_(True))
+        select(Role.id).where(
+            Role.id.in_(role_ids), Role.is_active.is_(True),
+            or_(Role.description.is_(None),
+                ~Role.description.startswith(HCM_ROLE_DESCRIPTION_PREFIX)),
+        )
     )).scalars().all()) if role_ids else set()
     missing = set(role_ids or []) - valid
     if missing:
@@ -205,7 +237,7 @@ async def set_roles(db: AsyncSession, employee_id: int, role_ids: list[int],
     if await db.get(HcmEmployee, employee_id) is None:
         raise NotFoundError("Employee not found")
     before = [r["id"] for r in (await _roles_by_employee(db, [employee_id]))
-              .get(employee_id, [])]
+              .get(employee_id, []) if r["source"] == "SCM"]
     await _set_roles(db, employee_id, role_ids, actor)
     await write_audit(db, entity="rbac_user_roles", entity_id=employee_id,
                       action=AuditAction.UPDATE, actor=actor,

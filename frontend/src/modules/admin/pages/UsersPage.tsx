@@ -17,6 +17,7 @@ import type { AdminUserRow, GrantResult } from "../types";
  */
 export function UsersPage() {
   const qc = useQueryClient();
+  const [view, setView] = useState<"users" | "pages" | "features">("users");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "with" | "without">("all");
   const [selected, setSelected] = useState<AdminUserRow | null>(null);
@@ -69,7 +70,7 @@ export function UsersPage() {
 
   const open = (row: AdminUserRow) => {
     setSelected(row);
-    setRoleIds(row.roles.map((r) => r.id));
+    setRoleIds(row.roles.filter((r) => r.source === "SCM").map((r) => r.id));
     setIssued(null);
     setError(null);
   };
@@ -92,7 +93,20 @@ export function UsersPage() {
     { key: "position", header: "Position", hideOnNarrow: true,
       render: (r) => r.positions[0]?.name ?? "—" },
     { key: "roles", header: "Roles", hideOnNarrow: true,
-      render: (r) => r.roles.length ? r.roles.map((x) => x.code).join(", ") : "—" },
+      render: (r) => r.roles.length ? (
+        <div className="flex flex-wrap gap-1">
+          {r.roles.map((role) => (
+            <span
+              key={`${role.source}:${role.id}`}
+              className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                role.source === "HCM" ? "bg-brand/10 text-brand" : "bg-content2 text-muted"
+              }`}
+            >
+              {role.name}<span className="ml-1 opacity-60">{role.source}</span>
+            </span>
+          ))}
+        </div>
+      ) : "—" },
     { key: "access", header: "Access",
       render: (r) => <AccessPill on={r.has_access} locked={r.locked} /> },
   ];
@@ -101,6 +115,30 @@ export function UsersPage() {
     <>
       <PageHeader eyebrow="Admin" title="Users & access" />
 
+      <div className="mb-5 flex gap-6 border-b border-line">
+        {([
+          ["users", "Users & roles"],
+          ["pages", "Page access"],
+          ["features", "Feature controls"],
+        ] as const).map(
+          ([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setView(key)}
+              className={`border-b-2 px-1 pb-3 text-sm font-semibold ${
+                view === key
+                  ? "border-brand text-brand"
+                  : "border-transparent text-muted hover:text-body"
+              }`}
+            >
+              {label}
+            </button>
+          ),
+        )}
+      </div>
+
+      {view === "users" ? (
+        <>
       <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <StatCard label="Active employees" value={summary.data?.active_employees ?? "—"} />
         <StatCard label="Can sign in" value={summary.data?.users_with_access ?? "—"} />
@@ -151,6 +189,12 @@ export function UsersPage() {
           </div>
         )}
       />
+        </>
+      ) : view === "pages" ? (
+        <PageAccessMatrix />
+      ) : (
+        <FeatureAccessMatrix />
+      )}
 
       <Modal isOpen={selected !== null} onOpenChange={() => setSelected(null)}
              placement="center" scrollBehavior="inside">
@@ -194,9 +238,31 @@ export function UsersPage() {
                 )}
 
                 <div>
-                  <div className="mb-2 text-sm font-semibold text-ink">Roles</div>
+                  <div className="mb-2 text-sm font-semibold text-ink">
+                    HCM roles (from position)
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selected?.roles.filter((role) => role.source === "HCM").map((role) => (
+                      <span key={`hcm:${role.id}`}
+                            className="rounded-full bg-brand/10 px-2.5 py-1 text-xs font-semibold text-brand">
+                        {role.name}
+                      </span>
+                    ))}
+                    {!selected?.roles.some((role) => role.source === "HCM") && (
+                      <span className="text-xs text-muted">No HCM role on the position.</span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs text-muted">
+                    Controlled by HCM and cannot be changed here.
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-2 text-sm font-semibold text-ink">
+                    Additional SCM access roles
+                  </div>
                   <div className="space-y-1.5">
-                    {(roles.data ?? []).map((role) => (
+                    {(roles.data ?? []).filter((role) => role.assignable).map((role) => (
                       <div key={role.id}
                            className="flex items-center justify-between rounded-lg px-1 py-1">
                         <span className="text-sm text-body">{role.name}</span>
@@ -261,5 +327,226 @@ export function UsersPage() {
         </ModalContent>
       </Modal>
     </>
+  );
+}
+
+
+function PageAccessMatrix() {
+  const qc = useQueryClient();
+  const matrix = useQuery({
+    queryKey: ["admin", "page-access"],
+    queryFn: adminApi.pageAccess,
+  });
+  const update = useMutation({
+    mutationFn: ({ roleId, pageCodes }: { roleId: number; pageCodes: string[] }) =>
+      adminApi.setPageAccess(roleId, pageCodes),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "page-access"] }),
+  });
+
+  if (matrix.isLoading) {
+    return <div className="rounded-2xl border border-line bg-content1 p-8 text-sm text-muted">
+      Loading page access…
+    </div>;
+  }
+  if (!matrix.data) {
+    return <div className="rounded-2xl border border-line bg-content1 p-8 text-sm text-bad">
+      Page access could not be loaded.
+    </div>;
+  }
+
+  const toggle = (roleId: number, held: string[], pageCode: string) => {
+    const next = held.includes(pageCode)
+      ? held.filter((code) => code !== pageCode)
+      : [...held, pageCode];
+    update.mutate({ roleId, pageCodes: next });
+  };
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-line bg-content1">
+      <div className="border-b border-line px-5 py-4">
+        <h2 className="text-base font-semibold text-ink">Page access by role</h2>
+        <p className="mt-1 text-sm text-muted">
+          HCM roles are listed first. My Desk and other public pages are always available.
+        </p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-max border-collapse text-sm">
+          <thead className="bg-content2">
+            <tr>
+              <th className="sticky left-0 z-10 min-w-56 bg-content2 px-4 py-3 text-left font-semibold text-ink">
+                Role
+              </th>
+              {matrix.data.pages.map((page) => (
+                <th key={page.code}
+                    className="max-w-36 px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-body">
+                  {page.name}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.data.roles.map((role) => (
+              <tr key={role.id} className="border-t border-line">
+                <td className="sticky left-0 z-10 bg-content1 px-4 py-3">
+                  <div className="font-semibold text-ink">{role.name}</div>
+                  <div className="text-[11px] font-medium text-muted">{role.source}</div>
+                </td>
+                {matrix.data.pages.map((page) => {
+                  const checked = page.always_on || role.page_codes.includes(page.code);
+                  return (
+                    <td key={page.code} className="px-3 py-3 text-center">
+                      <button
+                        type="button"
+                        disabled={page.always_on || update.isPending}
+                        title={page.always_on ? "Always on" : `${role.name}: ${page.name}`}
+                        onClick={() => toggle(role.id, role.page_codes, page.code)}
+                        className={`inline-flex h-6 w-6 items-center justify-center rounded-md border transition ${
+                          checked
+                            ? page.always_on
+                              ? "border-line bg-content2 text-muted"
+                              : "border-brand bg-brand text-white"
+                            : "border-line bg-content1 text-transparent hover:border-brand"
+                        }`}
+                      >
+                        <Check className="h-4 w-4" />
+                      </button>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {update.isError && (
+        <div className="border-t border-line bg-bad-bg px-5 py-3 text-sm text-bad">
+          {(update.error as Error).message}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function FeatureAccessMatrix() {
+  const qc = useQueryClient();
+  const [search, setSearch] = useState("");
+  const matrix = useQuery({
+    queryKey: ["admin", "feature-access"],
+    queryFn: adminApi.featureAccess,
+  });
+  const update = useMutation({
+    mutationFn: ({
+      roleId, permissionCodes,
+    }: { roleId: number; permissionCodes: string[] }) =>
+      adminApi.setFeatureAccess(roleId, permissionCodes),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "feature-access"] }),
+  });
+
+  if (matrix.isLoading) {
+    return <div className="rounded-2xl border border-line bg-content1 p-8 text-sm text-muted">
+      Loading feature controls…
+    </div>;
+  }
+  if (!matrix.data) {
+    return <div className="rounded-2xl border border-line bg-content1 p-8 text-sm text-bad">
+      Feature controls could not be loaded.
+    </div>;
+  }
+
+  const needle = search.trim().toLowerCase();
+  const features = matrix.data.features.filter((feature) =>
+    !needle
+    || feature.code.toLowerCase().includes(needle)
+    || feature.module.toLowerCase().includes(needle)
+    || feature.description.toLowerCase().includes(needle));
+  const toggle = (roleId: number, held: string[], permissionCode: string) => {
+    const next = held.includes(permissionCode)
+      ? held.filter((code) => code !== permissionCode)
+      : [...held, permissionCode];
+    update.mutate({ roleId, permissionCodes: next });
+  };
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-line bg-content1">
+      <div className="border-b border-line px-5 py-4">
+        <h2 className="text-base font-semibold text-ink">Feature controls by role</h2>
+        <p className="mt-1 text-sm text-muted">
+          Control actions such as raising, editing, submitting and approving indents.
+        </p>
+        <div className="relative mt-4 max-w-md">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search feature, e.g. Create indents"
+            className="h-10 w-full rounded-xl border border-line bg-content1 pl-9 pr-3 text-sm outline-none focus:border-brand"
+          />
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-max border-collapse text-sm">
+          <thead className="bg-content2">
+            <tr>
+              <th className="sticky left-0 z-10 min-w-56 bg-content2 px-4 py-3 text-left font-semibold text-ink">
+                Role
+              </th>
+              {features.map((feature) => (
+                <th key={feature.code}
+                    title={feature.code}
+                    className="max-w-44 px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-body">
+                  <div>{feature.description}</div>
+                  <div className="mt-0.5 text-[10px] font-normal normal-case text-muted">
+                    {feature.module}
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.data.roles.map((role) => (
+              <tr key={role.id} className="border-t border-line">
+                <td className="sticky left-0 z-10 bg-content1 px-4 py-3">
+                  <div className="font-semibold text-ink">{role.name}</div>
+                  <div className="text-[11px] font-medium text-muted">{role.source}</div>
+                </td>
+                {features.map((feature) => {
+                  const checked = role.permission_codes.includes(feature.code);
+                  return (
+                    <td key={feature.code} className="px-3 py-3 text-center">
+                      <button
+                        type="button"
+                        disabled={update.isPending}
+                        title={`${role.name}: ${feature.description}`}
+                        onClick={() => toggle(
+                          role.id, role.permission_codes, feature.code,
+                        )}
+                        className={`inline-flex h-6 w-6 items-center justify-center rounded-md border transition ${
+                          checked
+                            ? "border-brand bg-brand text-white"
+                            : "border-line bg-content1 text-transparent hover:border-brand"
+                        }`}
+                      >
+                        <Check className="h-4 w-4" />
+                      </button>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!features.length && (
+        <div className="border-t border-line px-5 py-6 text-sm text-muted">
+          No feature controls match that search.
+        </div>
+      )}
+      {update.isError && (
+        <div className="border-t border-line bg-bad-bg px-5 py-3 text-sm text-bad">
+          {(update.error as Error).message}
+        </div>
+      )}
+    </div>
   );
 }

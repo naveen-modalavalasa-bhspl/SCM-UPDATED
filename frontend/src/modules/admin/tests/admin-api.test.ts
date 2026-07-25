@@ -38,4 +38,12 @@ describe("admin api", () => {
         .toBe("function");
     }
   });
+
+  it("exposes role page and feature access controls", () => {
+    for (const fn of [
+      "pageAccess", "setPageAccess", "featureAccess", "setFeatureAccess",
+    ]) {
+      expect(typeof adminApi[fn as keyof typeof adminApi]).toBe("function");
+    }
+  });
 });
