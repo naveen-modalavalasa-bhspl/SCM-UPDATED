@@ -17,6 +17,12 @@ def _synced():
 
 
 class HcmEmployee(Base):
+    """Identity for the whole system; there is no local users table.
+
+    Never carries bank, salary, EPFO, health, PAN, Aadhaar, date of birth or gender —
+    SCM reads none of it (rule 10). `raw` is filtered through mappers.scrub_raw()
+    before it is written, so a sensitive field HCM adds later is dropped on arrival.
+    """
     __tablename__ = "hcm_employees"
     id = _pk()
     emp_code = Column(String(50), unique=True, nullable=True)
@@ -28,6 +34,9 @@ class HcmEmployee(Base):
     section_id = Column(BigInteger, nullable=True)
     office_id = Column(BigInteger, index=True, nullable=True)
     office_name = Column(String(200), nullable=True)
+    # An employee's HCM project, which is what stock raised by them defaults to.
+    project_id = Column(BigInteger, index=True, nullable=True)
+    project_name = Column(String(200), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True, index=True)
     raw = _raw()
     synced_at = _synced()
@@ -116,6 +125,14 @@ class HcmPosition(Base):
     parent_position_id = Column(BigInteger, index=True, nullable=True)
     department_id = Column(BigInteger, index=True, nullable=True)
     office_id = Column(BigInteger, nullable=True)
+    # HCM's own org role ("Network Technicians"), which is NOT an SCM permission role.
+    # rbac_roles decides what someone may do; this describes what they are. Kept so
+    # groups and rules can target the real org structure.
+    role_id = Column(BigInteger, index=True, nullable=True)
+    role_name = Column(String(200), nullable=True)
+    job_name = Column(String(200), nullable=True)
+    project_id = Column(BigInteger, index=True, nullable=True)
+    project_name = Column(String(200), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     raw = _raw()
     synced_at = _synced()

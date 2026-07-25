@@ -146,6 +146,16 @@ NEW_COLUMNS = [
     ("stk_balance", "project_name", "project_name VARCHAR(200) NULL"),
     ("stk_ledger", "project_id",
      "project_id BIGINT NOT NULL DEFAULT 0 COMMENT '0 = no project'"),
+    # HCM's org role and project, mirrored onto the position. role_name here is
+    # "Network Technicians" — what someone IS — and is unrelated to rbac_roles,
+    # which is what they MAY DO.
+    ("hcm_positions", "role_id", "role_id BIGINT NULL"),
+    ("hcm_positions", "role_name", "role_name VARCHAR(200) NULL"),
+    ("hcm_positions", "job_name", "job_name VARCHAR(200) NULL"),
+    ("hcm_positions", "project_id", "project_id BIGINT NULL"),
+    ("hcm_positions", "project_name", "project_name VARCHAR(200) NULL"),
+    ("hcm_employees", "project_id", "project_id BIGINT NULL"),
+    ("hcm_employees", "project_name", "project_name VARCHAR(200) NULL"),
 ]
 
 # (table, index, columns, unique)
@@ -154,6 +164,10 @@ NEW_INDEXES = [
     ("stk_ledger", "ix_stk_ledger_project_id", "project_id", False),
     ("stk_balance", "uq_stk_balance_item_wh_bin_batch_proj",
      "item_id, warehouse_id, bin_id, batch_id, project_id", True),
+    # HCM_ROLE groups resolve by joining assignments to positions on role_id.
+    ("hcm_positions", "ix_hcm_positions_role_id", "role_id", False),
+    ("hcm_positions", "ix_hcm_positions_project_id", "project_id", False),
+    ("hcm_employees", "ix_hcm_employees_project_id", "project_id", False),
 ]
 
 EVENTS = [

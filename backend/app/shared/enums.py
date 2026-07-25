@@ -148,9 +148,17 @@ class BinType(str, Enum):
 
 class GroupType(str, Enum):
     """How rbac_user_groups derives its members. LOCATION groups are the
-    "sub-groups by place"; they hang off a parent group via parent_id."""
+    "sub-groups by place"; they hang off a parent group via parent_id.
+
+    ROLE and HCM_ROLE are different things and both are needed. ROLE means an SCM
+    permission role from rbac_roles (APPROVER, STORE) — what someone may do. HCM_ROLE
+    means the org role mirrored from HCM ("Network Technicians") — what someone is.
+    An employee typically holds several HCM positions and roles at once; that is
+    normal and the resolver unions them.
+    """
     ROLE = "ROLE"
     POSITION = "POSITION"
+    HCM_ROLE = "HCM_ROLE"
     LOCATION = "LOCATION"
 
 
