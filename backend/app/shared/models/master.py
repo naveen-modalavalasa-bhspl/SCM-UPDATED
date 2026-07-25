@@ -19,6 +19,7 @@ class Uom(Base):
     id = pk()
     code = Column(String(20), unique=True, nullable=False)
     name = Column(String(100), nullable=False)
+    uom_class = Column(String(30), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
 
@@ -61,6 +62,7 @@ class DosageForm(Base):
     id = pk()
     code = Column(String(10), unique=True, nullable=False)
     name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
 

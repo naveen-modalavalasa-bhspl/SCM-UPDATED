@@ -6,6 +6,7 @@ import type {
   MasterItemClass, MasterItemSpec, MasterPackaging, MasterPriceList,
   MasterPriceListItem, MasterRole, MasterUom, MasterUomConversion, MasterVendor,
   MasterWarehouse, Project, RefRow,
+  MasterBrandManufacturer, MasterItemSubClass, NamedMaster,
 } from "./types";
 
 type ListParams = {
@@ -41,7 +42,12 @@ export const mastersApi = {
   bins: crud<MasterBin>("/api/bins"),
   projects: crud<Project>("/api/projects"),
   brands: crud<MasterBrand>("/api/brands"),
+  manufacturers: crud<NamedMaster>("/api/manufacturers"),
+  generalNames: crud<NamedMaster>("/api/general-names"),
+  dosageForms: crud<NamedMaster>("/api/dosage-forms"),
+  brandManufacturers: crud<MasterBrandManufacturer>("/api/brand-manufacturers"),
   itemClasses: crud<MasterItemClass>("/api/item-classes"),
+  itemSubClasses: crud<MasterItemSubClass>("/api/item-sub-classes"),
   packaging: crud<MasterPackaging>("/api/packaging"),
   features: crud<MasterFeature>("/api/features"),
   attributes: crud<MasterAttribute>("/api/attributes"),

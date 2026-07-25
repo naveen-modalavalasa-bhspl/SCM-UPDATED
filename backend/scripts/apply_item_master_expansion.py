@@ -43,6 +43,7 @@ TABLES = {
             id BIGINT NOT NULL AUTO_INCREMENT,
             code VARCHAR(10) NOT NULL,
             name VARCHAR(200) NOT NULL,
+            description VARCHAR(300) NULL,
             is_active TINYINT(1) NOT NULL DEFAULT 1,
             PRIMARY KEY (id),
             UNIQUE KEY uq_mst_dosage_forms_code (code)
@@ -79,6 +80,9 @@ TABLES = {
 }
 
 COLUMNS = {
+    "mst_dosage_forms": {
+        "description": "VARCHAR(300) NULL AFTER name",
+    },
     "mst_item_categories": {
         "segment_code": "VARCHAR(2) NULL AFTER level",
     },
@@ -203,6 +207,39 @@ def apply(check_only: bool = False) -> None:
                     print(f"{'OK' if exists else 'MISSING'} index {table}.{name}")
                     if not exists and not check_only:
                         cursor.execute(f"ALTER TABLE {table} ADD {ddl}")
+            if not check_only:
+                cursor.execute(
+                    "SELECT id,code,name,manufacturer FROM mst_brands "
+                    "WHERE manufacturer IS NOT NULL AND manufacturer<>''"
+                )
+                for brand_id, brand_code, brand_name, manufacturer_name in cursor.fetchall():
+                    base = re.sub(r"[^A-Z0-9]", "", manufacturer_name.upper())[:10] or "MFR"
+                    code, suffix = base, 1
+                    while True:
+                        cursor.execute(
+                            "SELECT id,name FROM mst_manufacturers WHERE code=%s", (code,)
+                        )
+                        found = cursor.fetchone()
+                        if not found or found[1].lower() == manufacturer_name.lower():
+                            break
+                        suffix += 1
+                        tail = str(suffix)
+                        code = f"{base[:10-len(tail)]}{tail}"
+                    if not found:
+                        cursor.execute(
+                            "INSERT INTO mst_manufacturers(code,name) VALUES(%s,%s)",
+                            (code, manufacturer_name),
+                        )
+                        manufacturer_id = cursor.lastrowid
+                    else:
+                        manufacturer_id = found[0]
+                    cursor.execute(
+                        "INSERT IGNORE INTO mst_brand_manufacturers"
+                        "(brand_id,brand_code,brand_name,manufacturer_id,"
+                        "manufacturer_code,manufacturer_name) VALUES(%s,%s,%s,%s,%s,%s)",
+                        (brand_id, brand_code, brand_name, manufacturer_id,
+                         code, manufacturer_name),
+                    )
         if check_only:
             db.rollback()
         else:

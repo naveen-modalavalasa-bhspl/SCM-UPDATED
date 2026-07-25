@@ -7,11 +7,53 @@ export interface MasterItem {
   uom_code?: string | null;
   category_id?: number | null;
   category_name?: string | null;
+  general_name_id?: number | null;
+  general_name_code?: string | null;
+  general_name?: string | null;
+  brand_id?: number | null;
+  brand_code?: string | null;
+  brand_name?: string | null;
+  manufacturer_id?: number | null;
+  manufacturer_code?: string | null;
+  manufacturer_name?: string | null;
+  item_class_id?: number | null;
+  item_class_code?: string | null;
+  item_class_name?: string | null;
+  item_sub_class_id?: number | null;
+  item_sub_class_code?: string | null;
+  item_sub_class_name?: string | null;
   item_type?: string | null;
   hsn_code?: string | null;
+  description?: string | null;
+  has_components: boolean;
+  barcode_type?: string | null;
+  barcode_value?: string | null;
   tax_percent?: number | null;
+  cgst_rate: number;
+  sgst_rate: number;
+  igst_rate: number;
   is_batch_tracked?: boolean;
   is_serial_tracked?: boolean;
+  has_expiry: boolean;
+  requires_qi: boolean;
+  shelf_life_days: number;
+  safety_stock: number;
+  reorder_level: number;
+  reorder_qty: number;
+  lead_time_days: number;
+  min_order_qty: number;
+  max_order_qty: number;
+  purchase_price: number;
+  selling_price: number;
+  mrp: number;
+  dosage_form_id?: number | null;
+  dosage_form_code?: string | null;
+  dosage_form_name?: string | null;
+  valuation_method: string;
+  requires_special_storage: boolean;
+  storage_conditions?: string | null;
+  requires_special_transport: boolean;
+  transport_conditions?: string | null;
   is_active: boolean;
 }
 
@@ -22,7 +64,33 @@ export interface MasterCategory {
   parent_id?: number | null;
   path?: string | null;
   level?: number | null;
+  segment_code?: string | null;
   is_active: boolean;
+}
+
+export interface NamedMaster {
+  id: number;
+  code: string;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
+}
+
+export interface MasterBrandManufacturer {
+  id: number;
+  brand_id: number;
+  brand_code?: string | null;
+  brand_name?: string | null;
+  manufacturer_id: number;
+  manufacturer_code?: string | null;
+  manufacturer_name?: string | null;
+  is_active: boolean;
+}
+
+export interface MasterItemSubClass extends NamedMaster {
+  item_class_id: number;
+  item_class_code?: string | null;
+  item_class_name?: string | null;
 }
 
 export interface MasterVendor {
@@ -42,6 +110,7 @@ export interface MasterUom {
   id: number;
   code: string;
   name: string;
+  uom_class?: string | null;
   is_active: boolean;
 }
 

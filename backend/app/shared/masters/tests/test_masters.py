@@ -2,12 +2,19 @@
 and the tree guards on categories and locations."""
 import pytest
 
+from app.core.exceptions import ValidationError
 from app.platform.rbac import permissions as perms
+from app.shared.masters.defs import ItemIn, apply_item, build_item_code
+from app.shared.models.master import (
+    Brand, BrandManufacturer, GeneralName, Item, ItemCategory, ItemClass,
+    Manufacturer, Uom,
+)
 from app.shared.enums import BinType, WarehouseType
 
 MANAGE_ALL = [perms.MASTER_ITEM_MANAGE, perms.MASTER_CATEGORY_MANAGE,
               perms.MASTER_UOM_MANAGE, perms.MASTER_LOCATION_MANAGE,
-              perms.MASTER_VENDOR_MANAGE, perms.MASTER_PROJECT_MANAGE]
+              perms.MASTER_VENDOR_MANAGE, perms.MASTER_PROJECT_MANAGE,
+              perms.MASTER_BRAND_MANAGE, perms.MASTER_CLASS_MANAGE]
 
 
 @pytest.fixture
@@ -25,38 +32,129 @@ async def viewer(client, make_user, login):
 
 
 # ------------------------------- items ------------------------------- #
-async def test_create_item_snapshots_uom_and_category(client, admin):
+def test_generated_item_code_contains_all_identity_parts():
+    assert build_item_code("101010", "slide", "lab", "acme") == \
+        "101010-SLIDE-LAB-ACME"
+
+
+def test_generated_item_code_rejects_an_incomplete_category_path():
+    with pytest.raises(ValidationError, match="six-digit"):
+        build_item_code("1010", "SLIDE", "LAB", "ACME")
+
+
+async def item_payload(client, admin, *, name="Bolt"):
+    """Create the identity masters needed by the generated item-code contract."""
+    l1 = (await client.post("/api/item-categories",
+                            json={"code": "L1", "name": "Level 1"},
+                            headers=admin)).json()
+    l2 = (await client.post("/api/item-categories",
+                            json={"code": "L2", "name": "Level 2",
+                                  "parent_id": l1["id"]},
+                            headers=admin)).json()
+    l3 = (await client.post("/api/item-categories",
+                            json={"code": "L3", "name": "Level 3",
+                                  "parent_id": l2["id"]},
+                            headers=admin)).json()
+    general = (await client.post("/api/general-names",
+                                 json={"code": "GEN", "name": "General"},
+                                 headers=admin)).json()
+    brand = (await client.post("/api/brands",
+                               json={"code": "BR", "name": "Brand"},
+                               headers=admin)).json()
+    manufacturer = (await client.post("/api/manufacturers",
+                                      json={"code": "MFR", "name": "Maker"},
+                                      headers=admin)).json()
+    await client.post("/api/brand-manufacturers", json={
+        "brand_id": brand["id"], "manufacturer_id": manufacturer["id"],
+    }, headers=admin)
+    item_class = (await client.post("/api/item-classes",
+                                    json={"code": "CON", "name": "Consumable"},
+                                    headers=admin)).json()
     uom = (await client.post("/api/uom", json={"code": "PCS", "name": "Pieces"},
                              headers=admin)).json()
-    cat = (await client.post("/api/item-categories",
-                             json={"code": "CON", "name": "Consumables"},
-                             headers=admin)).json()
+    return {
+        "name": name, "category_id": l3["id"], "general_name_id": general["id"],
+        "brand_id": brand["id"], "manufacturer_id": manufacturer["id"],
+        "item_class_id": item_class["id"], "uom_id": uom["id"],
+    }
 
-    r = await client.post("/api/items", json={
-        "code": "IT-1", "name": "Bolt", "uom_id": uom["id"],
-        "category_id": cat["id"]}, headers=admin)
+
+async def test_item_code_uses_category_general_brand_and_manufacturer(db):
+    category = ItemCategory(
+        code="MIC", name="Microscopy", level=3, segment_code="10",
+        path="101010", is_active=True,
+    )
+    general = GeneralName(code="SLIDE", name="Microscope Slide", is_active=True)
+    brand = Brand(code="LAB", name="Lab Brand", is_active=True)
+    manufacturer = Manufacturer(code="ACME", name="Acme Medical", is_active=True)
+    item_class = ItemClass(code="CON", name="Consumable", is_active=True)
+    uom = Uom(code="PK", name="Pack", is_active=True)
+    db.add_all([category, general, brand, manufacturer, item_class, uom])
+    await db.flush()
+    db.add(BrandManufacturer(
+        brand_id=brand.id, manufacturer_id=manufacturer.id, is_active=True,
+    ))
+    await db.flush()
+
+    item = Item()
+    await apply_item(db, item, ItemIn(
+        name="Microscope Slides", category_id=category.id,
+        general_name_id=general.id, brand_id=brand.id,
+        manufacturer_id=manufacturer.id, item_class_id=item_class.id,
+        uom_id=uom.id,
+    ))
+    assert item.code == "101010-SLIDE-LAB-ACME"
+    assert item.manufacturer_name == "Acme Medical"
+    assert item.brand_name == "Lab Brand"
+
+
+async def test_item_rejects_manufacturer_not_mapped_to_brand(db):
+    category = ItemCategory(
+        code="MIC", name="Microscopy", level=3, path="101010", is_active=True,
+    )
+    general = GeneralName(code="SLIDE", name="Slide", is_active=True)
+    brand = Brand(code="LAB", name="Lab Brand", is_active=True)
+    manufacturer = Manufacturer(code="OTHER", name="Other", is_active=True)
+    item_class = ItemClass(code="CON", name="Consumable", is_active=True)
+    uom = Uom(code="PK", name="Pack", is_active=True)
+    db.add_all([category, general, brand, manufacturer, item_class, uom])
+    await db.flush()
+    with pytest.raises(ValidationError, match="not mapped"):
+        await apply_item(db, Item(), ItemIn(
+            name="Slides", category_id=category.id, general_name_id=general.id,
+            brand_id=brand.id, manufacturer_id=manufacturer.id,
+            item_class_id=item_class.id, uom_id=uom.id,
+        ))
+
+
+async def test_create_item_snapshots_uom_and_category(client, admin):
+    r = await client.post("/api/items", json=await item_payload(client, admin),
+                          headers=admin)
     assert r.status_code == 200, r.text
     body = r.json()
     # Snapshots let the item list render without joining two masters.
     assert body["uom_code"] == "PCS"
-    assert body["category_name"] == "Consumables"
+    assert body["category_name"] == "Level 3"
+    assert body["code"] == "000000-GEN-BR-MFR"
 
 
 async def test_item_list_is_paginated_and_searchable(client, admin):
-    for i in range(3):
-        await client.post("/api/items", json={"code": f"IT-{i}", "name": f"Widget {i}"},
-                          headers=admin)
+    await client.post("/api/items",
+                      json=await item_payload(client, admin, name="Widget 1"),
+                      headers=admin)
     page = (await client.get("/api/items", headers=admin)).json()
     assert {"items", "total", "page", "size"} <= page.keys()
-    assert page["total"] == 3
+    assert page["total"] == 1
 
     found = (await client.get("/api/items?search=Widget 1", headers=admin)).json()
     assert [i["name"] for i in found["items"]] == ["Widget 1"]
 
 
 async def test_deactivate_hides_item_from_the_default_list(client, admin):
-    item = (await client.post("/api/items", json={"code": "IT-X", "name": "Old"},
-                              headers=admin)).json()
+    item = (await client.post(
+        "/api/items", json=await item_payload(client, admin, name="Old"),
+        headers=admin,
+    )).json()
 
     assert (await client.delete(f"/api/items/{item['id']}",
                                 headers=admin)).status_code == 200
@@ -68,7 +166,10 @@ async def test_deactivate_hides_item_from_the_default_list(client, admin):
 
 
 async def test_write_requires_the_manage_permission(client, viewer):
-    r = await client.post("/api/items", json={"code": "X", "name": "X"}, headers=viewer)
+    r = await client.post("/api/items", json={
+        "name": "X", "category_id": 1, "general_name_id": 1, "brand_id": 1,
+        "manufacturer_id": 1, "item_class_id": 1, "uom_id": 1,
+    }, headers=viewer)
     assert r.status_code == 403
 
 
@@ -82,8 +183,10 @@ async def test_unauthenticated_read_is_rejected(client):
 
 
 async def test_update_missing_row_is_404(client, admin):
-    r = await client.put("/api/items/9999", json={"code": "A", "name": "A"},
-                         headers=admin)
+    r = await client.put("/api/items/9999", json={
+        "name": "A", "category_id": 1, "general_name_id": 1, "brand_id": 1,
+        "manufacturer_id": 1, "item_class_id": 1, "uom_id": 1,
+    }, headers=admin)
     assert r.status_code == 404
 
 
