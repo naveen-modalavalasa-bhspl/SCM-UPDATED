@@ -3,11 +3,11 @@ and the tree guards on categories and locations."""
 import pytest
 
 from app.platform.rbac import permissions as perms
-from app.shared.enums import LocationType
+from app.shared.enums import BinType, WarehouseType
 
 MANAGE_ALL = [perms.MASTER_ITEM_MANAGE, perms.MASTER_CATEGORY_MANAGE,
               perms.MASTER_UOM_MANAGE, perms.MASTER_LOCATION_MANAGE,
-              perms.MASTER_VENDOR_MANAGE]
+              perms.MASTER_VENDOR_MANAGE, perms.MASTER_PROJECT_MANAGE]
 
 
 @pytest.fixture
@@ -109,38 +109,87 @@ async def test_category_cannot_be_its_own_parent(client, admin):
     assert r.status_code == 400
 
 
-# ----------------------------- locations ----------------------------- #
-async def test_location_tree_snapshots_the_parent_name(client, admin):
-    site = (await client.post("/api/locations", json={
-        "code": "SITE1", "name": "Chennai Site",
-        "location_type": LocationType.SITE.value}, headers=admin)).json()
-    warehouse = (await client.post("/api/locations", json={
-        "code": "WH1", "name": "Main Warehouse",
-        "location_type": LocationType.WAREHOUSE.value,
-        "parent_id": site["id"], "is_stock_point": True}, headers=admin)).json()
-
-    assert warehouse["parent_name"] == "Chennai Site"
-    assert warehouse["is_stock_point"] is True
+# ------------------------ warehouses and bins ------------------------ #
+async def warehouse(client, admin, code="WH1", name="Main Warehouse"):
+    return (await client.post("/api/warehouses", json={
+        "code": code, "name": name, "warehouse_type": WarehouseType.MAIN.value,
+        "is_bin_managed": True}, headers=admin)).json()
 
 
-async def test_invalid_location_type_is_rejected(client, admin):
-    r = await client.post("/api/locations", json={
-        "code": "X", "name": "X", "location_type": "PLANET"}, headers=admin)
+async def test_create_warehouse(client, admin):
+    body = await warehouse(client, admin)
+    assert body["code"] == "WH1"
+    assert body["is_bin_managed"] is True
+
+
+async def test_invalid_warehouse_type_is_rejected(client, admin):
+    r = await client.post("/api/warehouses", json={
+        "code": "X", "name": "X", "warehouse_type": "MOON"}, headers=admin)
     assert r.status_code == 400
 
 
-async def test_location_loop_is_rejected(client, admin):
-    a = (await client.post("/api/locations", json={
-        "code": "A", "name": "A",
-        "location_type": LocationType.SITE.value}, headers=admin)).json()
-    b = (await client.post("/api/locations", json={
-        "code": "B", "name": "B", "location_type": LocationType.WAREHOUSE.value,
+async def test_bin_path_and_level_derive_from_the_parent(client, admin):
+    wh = await warehouse(client, admin)
+    zone = (await client.post("/api/bins", json={
+        "warehouse_id": wh["id"], "code": "A", "name": "Zone A",
+        "bin_type": BinType.ZONE.value}, headers=admin)).json()
+    rack = (await client.post("/api/bins", json={
+        "warehouse_id": wh["id"], "code": "A-01", "name": "Rack 1",
+        "bin_type": BinType.RACK.value, "parent_id": zone["id"]}, headers=admin)).json()
+
+    assert (zone["path"], zone["level"]) == ("A", 1)
+    assert (rack["path"], rack["level"]) == ("A/A-01", 2)
+
+
+async def test_invalid_bin_type_is_rejected(client, admin):
+    wh = await warehouse(client, admin)
+    r = await client.post("/api/bins", json={
+        "warehouse_id": wh["id"], "code": "X", "bin_type": "CUPBOARD"}, headers=admin)
+    assert r.status_code == 400
+
+
+async def test_bin_parent_must_be_in_the_same_warehouse(client, admin):
+    first = await warehouse(client, admin, "WH1", "One")
+    second = await warehouse(client, admin, "WH2", "Two")
+    zone = (await client.post("/api/bins", json={
+        "warehouse_id": first["id"], "code": "A",
+        "bin_type": BinType.ZONE.value}, headers=admin)).json()
+
+    r = await client.post("/api/bins", json={
+        "warehouse_id": second["id"], "code": "B", "bin_type": BinType.RACK.value,
+        "parent_id": zone["id"]}, headers=admin)
+    assert r.status_code == 400
+
+
+async def test_bin_loop_is_rejected(client, admin):
+    wh = await warehouse(client, admin)
+    a = (await client.post("/api/bins", json={
+        "warehouse_id": wh["id"], "code": "A",
+        "bin_type": BinType.ZONE.value}, headers=admin)).json()
+    b = (await client.post("/api/bins", json={
+        "warehouse_id": wh["id"], "code": "B", "bin_type": BinType.RACK.value,
         "parent_id": a["id"]}, headers=admin)).json()
 
     # Making A a child of B would close the loop A -> B -> A.
-    r = await client.put(f"/api/locations/{a['id']}", json={
-        "code": "A", "name": "A", "location_type": LocationType.SITE.value,
+    r = await client.put(f"/api/bins/{a['id']}", json={
+        "warehouse_id": wh["id"], "code": "A", "bin_type": BinType.ZONE.value,
         "parent_id": b["id"]}, headers=admin)
+    assert r.status_code == 400
+
+
+# ----------------------------- projects ----------------------------- #
+async def test_create_project(client, admin):
+    r = await client.post("/api/projects",
+                          json={"code": "PRJ-01", "name": "Metro Line 3"},
+                          headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["code"] == "PRJ-01"
+
+
+async def test_project_end_date_cannot_precede_start(client, admin):
+    r = await client.post("/api/projects", json={
+        "code": "PRJ-02", "name": "Bad", "start_date": "2026-12-01",
+        "end_date": "2026-01-01"}, headers=admin)
     assert r.status_code == 400
 
 

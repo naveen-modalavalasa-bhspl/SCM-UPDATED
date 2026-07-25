@@ -6,9 +6,9 @@ from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmPositionAssignm
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.models import Role, UserRole
 from app.platform.settings.models import AuditLog, UserCredential
-from app.shared.enums import GroupType, LocationType
+from app.shared.enums import GroupType, WarehouseType
 from app.shared.models.base import utcnow
-from app.shared.models.master import Location
+from app.shared.models.warehouse import Warehouse
 
 ADMIN_PERMS = [perms.ADMIN_USERS_MANAGE, perms.ADMIN_GROUPS_MANAGE,
                perms.ADMIN_AUDIT_VIEW, perms.MASTER_LOCATION_MANAGE]
@@ -171,8 +171,8 @@ async def test_location_subgroup_intersects_with_its_parent(client, admin, staff
                 UserRole(employee_id=11, role_id=role.id)])
     db.add(HcmFacility(id=500, name="Chennai Plant", office_id=100,
                        is_active=True, synced_at=utcnow()))
-    db.add(Location(id=900, code="CHN", name="Chennai",
-                    location_type=LocationType.SITE.value, hcm_facility_id=500))
+    db.add(Warehouse(id=900, code="CHN", name="Chennai",
+                     warehouse_type=WarehouseType.MAIN.value, facility_id=500))
     await db.commit()
 
     parent = (await client.post("/api/admin/groups", headers=admin, json={
@@ -212,8 +212,8 @@ async def test_group_type_must_carry_its_own_key(client, admin):
 
 
 async def test_location_group_must_have_a_parent(client, admin, db):
-    db.add(Location(id=901, code="X", name="X",
-                    location_type=LocationType.SITE.value))
+    db.add(Warehouse(id=901, code="X", name="X",
+                     warehouse_type=WarehouseType.MAIN.value))
     await db.commit()
     r = await client.post("/api/admin/groups", headers=admin, json={
         "code": "G", "name": "G", "group_type": GroupType.LOCATION.value,

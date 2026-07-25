@@ -1,8 +1,8 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  DocSeries, MasterCategory, MasterItem, MasterLocation, MasterRole, MasterUom,
-  MasterUomConversion, MasterVendor, RefRow,
+  DocSeries, MasterCategory, MasterItem, MasterBin, MasterRole, MasterUom, MasterUomConversion,
+  MasterVendor, MasterWarehouse, Project, RefRow,
 } from "./types";
 
 type ListParams = { search?: string; page?: number; size?: number; include_inactive?: boolean };
@@ -30,7 +30,9 @@ export const mastersApi = {
   items: crud<MasterItem>("/api/items"),
   categories: crud<MasterCategory>("/api/item-categories"),
   vendors: crud<MasterVendor>("/api/vendors"),
-  locations: crud<MasterLocation>("/api/locations"),
+  warehouses: crud<MasterWarehouse>("/api/warehouses"),
+  bins: crud<MasterBin>("/api/bins"),
+  projects: crud<Project>("/api/projects"),
 
   // UOM and its conversions are unpaginated: both are short lookup lists.
   uom: {

@@ -34,6 +34,8 @@ interface Props<T extends { id: number }> {
   managePerm: string;
   onCreate: (v: Values) => Promise<unknown>;
   onUpdate: (id: number, v: Values) => Promise<unknown>;
+  /** Omit for masters the backend cannot deactivate (no is_active column). */
+  onDeactivate?: (id: number) => Promise<unknown>;
   searchable?: boolean;
   readOnly?: boolean;
 }
@@ -65,6 +67,15 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const save = useMutation({
     mutationFn: (v: Values) =>
       editingId == null ? p.onCreate(v) : p.onUpdate(editingId, v),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["masters", p.queryKey] });
+      setOpen(false);
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const deactivate = useMutation({
+    mutationFn: (id: number) => p.onDeactivate!(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["masters", p.queryKey] });
       setOpen(false);
@@ -151,12 +162,29 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                   );
                 })}
               </ModalBody>
-              <ModalFooter>
-                <Button variant="ghost" onClick={onClose}>Cancel</Button>
-                <Button onClick={() => { setError(null); save.mutate(buildPayload(p.fields, values)); }}
-                        disabled={save.isPending}>
-                  {save.isPending ? "Saving…" : "Save"}
-                </Button>
+              <ModalFooter className="justify-between">
+                {/* Deactivate sits apart from Save so it is never the button you hit
+                    by reflex. Records are deactivated, never deleted: documents
+                    reference them by id. */}
+                <div>
+                  {editingId != null && p.onDeactivate && Boolean(values.is_active) && (
+                    <Can do={p.managePerm}>
+                      <Button variant="ghost"
+                              className="text-bad hover:bg-bad-bg"
+                              onClick={() => { setError(null); deactivate.mutate(editingId); }}
+                              disabled={deactivate.isPending}>
+                        {deactivate.isPending ? "Deactivating…" : "Deactivate"}
+                      </Button>
+                    </Can>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="ghost" onClick={onClose}>Cancel</Button>
+                  <Button onClick={() => { setError(null); save.mutate(buildPayload(p.fields, values)); }}
+                          disabled={save.isPending}>
+                    {save.isPending ? "Saving…" : "Save"}
+                  </Button>
+                </div>
               </ModalFooter>
             </>
           )}
