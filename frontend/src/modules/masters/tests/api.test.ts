@@ -4,13 +4,18 @@ import { mastersApi } from "../api";
 /** Masters that go through the backend's MasterDef factory: same four verbs each. */
 const CRUD_MASTERS = [
   "items", "categories", "vendors", "warehouses", "bins", "projects",
+  "brands", "itemClasses", "packaging", "features", "attributes",
+  "attributeMappings", "priceLists", "priceListItems", "boms", "bomItems",
 ] as const;
 
 describe("masters api", () => {
   it("covers every master the Masters screen shows a tab for", () => {
     expect(Object.keys(mastersApi).sort()).toEqual([
-      "bins", "categories", "departments", "docSeries", "facilities", "items",
-      "projects", "roles", "uom", "uomConversions", "vendors", "warehouses",
+      "attributeMappings", "attributes", "bins", "bomItems", "boms", "brands",
+      "categories", "departments", "docSeries", "facilities", "features",
+      "itemClasses", "itemSpecs", "items", "packaging", "priceListItems",
+      "priceLists", "projects", "roles", "uom", "uomConversions", "vendors",
+      "warehouses",
     ]);
   });
 
@@ -42,5 +47,10 @@ describe("masters api", () => {
     expect("deactivate" in mastersApi.uomConversions).toBe(true);
     // The route exists and returns a clear 400; what matters is that the UI does not
     // offer a Deactivate button for this master (MastersPage omits onDeactivate).
+  });
+
+  it("item specs are read and saved per item, not created", () => {
+    // mst_item_specs is keyed by item_id, so there is no create or deactivate.
+    expect(Object.keys(mastersApi.itemSpecs).sort()).toEqual(["get", "save"]);
   });
 });

@@ -136,43 +136,163 @@ TABLES: dict[str, dict] = {
                  "everything else is SCM's to edit. customer_*, manager_* and "
                  "budget_amount exist in the table but are not mapped.",
     },
+    "mst_brands": {
+        "label": "Brand Master",
+        "group": "Item classification",
+        "purpose": "Manufacturer brands, so the same brand stops appearing under "
+                   "several spellings.",
+        "owner": "shared/masters",
+        "api": "/api/brands",
+        "perm": "master.brand.manage",
+        "screen": "Masters > Brands",
+        "consumers": "Item specifications, procurement comparisons",
+        "status": "Live, 5 seeded",
+        "notes": "Replaces the free-text mst_item_specs.brand column, which is still "
+                 "there and still text — items are not migrated onto brand_id yet.",
+    },
+    "mst_item_classes": {
+        "label": "Item Class Master",
+        "group": "Item classification",
+        "purpose": "Broad classification, coarser than a category: consumable, "
+                   "capital asset, spare, service.",
+        "owner": "shared/masters",
+        "api": "/api/item-classes",
+        "perm": "master.class.manage",
+        "screen": "Masters > Item Classes",
+        "consumers": "Items, attribute mapping, reporting",
+        "status": "Live, 5 seeded",
+        "notes": "is_capitalised marks assets, which are not consumed on issue. "
+                 "Replaces the free-text mst_items.item_type; items are not migrated "
+                 "onto a class_id yet.",
+    },
+    "mst_packaging": {
+        "label": "Packaging Master",
+        "group": "Item classification",
+        "purpose": "How an item is packed for handling: box of 12, carton of 50, "
+                   "with dimensions and weight.",
+        "owner": "shared/masters",
+        "api": "/api/packaging",
+        "perm": "master.packaging.manage",
+        "screen": "Masters > Packaging",
+        "consumers": "Warehouse put-away and picking, dispatch packing",
+        "status": "Live, 4 seeded",
+        "notes": "qty_per_pack is expressed in uom_id, so it stays consistent with "
+                 "mst_uom_conversions instead of being a second conversion rule.",
+    },
+    "mst_features": {
+        "label": "Feature Master",
+        "group": "Item classification",
+        "purpose": "Yes/no traits an item can carry: fragile, hazardous, cold-chain.",
+        "owner": "shared/masters",
+        "api": "/api/features",
+        "perm": "master.feature.manage",
+        "screen": "Masters > Features",
+        "consumers": "Warehouse handling rules, dispatch checks",
+        "status": "Live, 5 seeded",
+        "notes": "A feature has no value — an item either has it or does not. That is "
+                 "what separates it from an attribute. affects_handling flags the ones "
+                 "that change how goods must be moved.",
+    },
+    "mst_attributes": {
+        "label": "Attribute Master",
+        "group": "Item classification",
+        "purpose": "The DEFINITION of an item property: \"Voltage\", a NUMBER, in volts.",
+        "owner": "shared/masters",
+        "api": "/api/attributes",
+        "perm": "master.attribute.manage",
+        "screen": "Masters > Attributes",
+        "consumers": "Attribute mapping, item specifications, RFQ",
+        "status": "Live, 6 seeded",
+        "notes": "Definition only. The per-item VALUE lives in "
+                 "mst_item_specs.specifications, keyed by attribute code. Splitting "
+                 "them is what lets one attribute be reused across categories. "
+                 "allowed_values applies only when data_type is LIST.",
+    },
+    "mst_attribute_mappings": {
+        "label": "Attribute Mapping",
+        "group": "Item classification",
+        "purpose": "Which attributes items of a given kind should carry — a template, "
+                   "not a value.",
+        "owner": "shared/masters",
+        "api": "/api/attribute-mappings",
+        "perm": "master.attribute.manage",
+        "screen": "Masters > Attribute Mapping",
+        "consumers": "The item screen, to decide which fields to show",
+        "status": "Live",
+        "notes": "target_type CATEGORY or ITEM_CLASS. Unique on "
+                 "attribute + target_type + target_id, so the same attribute cannot be "
+                 "mapped twice to one target.",
+    },
+    "mst_price_lists": {
+        "label": "Price List Master",
+        "group": "Commercial masters",
+        "purpose": "A named set of rates valid for a period, optionally per vendor or "
+                   "project.",
+        "owner": "shared/masters",
+        "api": "/api/price-lists",
+        "perm": "master.price.manage",
+        "screen": "Masters > Price Lists",
+        "consumers": "Procurement (PO rates), indent value estimates, BOM costing",
+        "status": "Live",
+        "notes": "Rates were previously scattered across mst_vendor_items.last_rate "
+                 "and mst_bom_items.estimated_rate with no history. Those columns "
+                 "still exist; nothing is migrated onto price lists yet.",
+    },
+    "mst_price_list_items": {
+        "label": "Price List Lines",
+        "group": "Commercial masters",
+        "purpose": "One item's rate inside a price list.",
+        "owner": "shared/masters",
+        "api": "/api/price-list-items?price_list_id=",
+        "perm": "master.price.manage",
+        "screen": "Masters > Price Lists",
+        "consumers": "Procurement rate lookup",
+        "status": "Live",
+        "notes": "min_qty allows slab pricing: several rows for the same item at "
+                 "different minimum quantities. Unique on list + item + min_qty. The "
+                 "rate is per the item's own stocking unit.",
+    },
     "mst_boms": {
         "label": "Bill of Materials",
-        "group": "Not yet wired",
-        "purpose": "Assembly definitions: which components make up a finished item.",
-        "owner": "DB team",
-        "api": "not exposed",
-        "perm": "—",
-        "screen": "—",
-        "consumers": "Future manufacturing or kitting flows",
-        "status": "In DB, NOT mapped in the ORM",
-        "notes": "Created by the DB team. No model, no endpoint, no screen. Left alone "
-                 "deliberately — out of scope for Admin & Masters.",
+        "group": "Assembly masters",
+        "purpose": "What an assembled or kitted item is made of.",
+        "owner": "shared/masters",
+        "api": "/api/boms",
+        "perm": "master.bom.manage",
+        "screen": "Masters > BOM",
+        "consumers": "Kitting, indent explosion, cost estimation",
+        "status": "Live (table was pre-built by the DB team)",
+        "notes": "Left unmapped by the app: version, output_uom_code, vehicle_type, "
+                 "estimated_cost, created_by_*. Costing is not wired up.",
     },
     "mst_bom_items": {
         "label": "BOM Lines",
-        "group": "Not yet wired",
-        "purpose": "Component lines belonging to a BOM.",
-        "owner": "DB team",
-        "api": "not exposed",
-        "perm": "—",
-        "screen": "—",
-        "consumers": "Future manufacturing or kitting flows",
-        "status": "In DB, NOT mapped in the ORM",
-        "notes": "As above.",
+        "group": "Assembly masters",
+        "purpose": "Component lines of a BOM.",
+        "owner": "shared/masters",
+        "api": "/api/bom-items?bom_id=",
+        "perm": "master.bom.manage",
+        "screen": "Masters > BOM",
+        "consumers": "Kitting, indent explosion",
+        "status": "Live (table was pre-built by the DB team)",
+        "notes": "child_bom_id lets a BOM contain another BOM, which is how a kit of "
+                 "sub-kits is modelled. The API rejects a BOM that contains itself, "
+                 "but does NOT yet detect a longer A->B->A loop.",
     },
     "mst_item_specs": {
         "label": "Item Specifications",
-        "group": "Not yet wired",
-        "purpose": "Free-form technical attributes per item.",
-        "owner": "DB team",
-        "api": "not exposed",
-        "perm": "—",
-        "screen": "—",
-        "consumers": "Future item-detail screens, RFQ specifications",
-        "status": "In DB, NOT mapped in the ORM",
-        "notes": "The brief's 'item attributes' requirement would be served by this "
-                 "table when someone wires it up.",
+        "group": "Item classification",
+        "purpose": "Technical detail for one item, plus the answers to whatever "
+                   "attributes its category requires.",
+        "owner": "shared/masters",
+        "api": "GET/PUT /api/item-specs/{item_id}",
+        "perm": "master.spec.manage",
+        "screen": "Masters > Items (per item)",
+        "consumers": "Item detail, RFQ specifications, attribute values",
+        "status": "Live (table was pre-built by the DB team)",
+        "notes": "PRIMARY KEY is item_id, not a surrogate id — an item has at most one "
+                 "spec row, so the API upserts with PUT and there is no create or "
+                 "deactivate. GET returns an empty spec rather than 404.",
     },
     "whs_warehouses": {
         "label": "Warehouse Master (Location)",
@@ -293,6 +413,23 @@ COLUMN_NOTES: dict[tuple[str, str], str] = {
     ("rbac_user_groups", "group_type"): "ROLE | HCM_ROLE | POSITION | LOCATION",
     ("rbac_user_groups", "role_id"): "rbac_roles.id for ROLE; hcm_positions.role_id for HCM_ROLE",
     ("rbac_user_groups", "location_id"): "whs_warehouses.id — there is no location table",
+    ("mst_item_classes", "is_capitalised"): "Asset: not consumed when issued",
+    ("mst_packaging", "qty_per_pack"): "How many uom_id fit in one pack. Must be > 0",
+    ("mst_features", "affects_handling"): "Warns on the item screen (hazardous, cold)",
+    ("mst_attributes", "data_type"): "TEXT | NUMBER | BOOLEAN | DATE | LIST",
+    ("mst_attributes", "allowed_values"): "Required when data_type is LIST, else unused",
+    ("mst_attribute_mappings", "target_type"): "CATEGORY | ITEM_CLASS",
+    ("mst_attribute_mappings", "target_id"): "Category id or item-class id, per target_type",
+    ("mst_price_lists", "price_type"): "PURCHASE | SALE | TRANSFER",
+    ("mst_price_list_items", "min_qty"): "Slab pricing: rate applies from this quantity",
+    ("mst_price_list_items", "rate"): "Per the item's own stocking unit",
+    ("mst_boms", "bom_type"): "GENERAL | KIT | ASSEMBLY | VEHICLE",
+    ("mst_boms", "output_qty"): "How many parent items one run makes. Must be > 0",
+    ("mst_bom_items", "child_bom_id"): "A nested BOM, for a kit built from sub-kits",
+    ("mst_bom_items", "scrap_percent"): "Expected wastage on top of quantity",
+    ("mst_item_specs", "item_id"): "PRIMARY KEY — one spec per item, upserted with PUT",
+    ("mst_item_specs", "specifications"): "Attribute answers, keyed by attribute code",
+    ("mst_item_specs", "brand"): "Free text. mst_brands exists but items are not migrated",
 }
 
 
@@ -646,7 +783,18 @@ def main() -> None:
     finally:
         conn.close()
 
-    build(schema, database, out_path)
+    try:
+        build(schema, database, out_path)
+    except PermissionError:
+        # Excel locks the file while it is open. Write beside it rather than losing
+        # the run, and say plainly which file is the fresh one.
+        stamped = re.sub(r"\.xlsx$", f"_{datetime.now():%Y%m%d_%H%M}.xlsx", out_path)
+        build(schema, database, stamped)
+        print(f"{out_path} is open in Excel, so it could not be replaced.")
+        print(f"Wrote {stamped} instead — close Excel and re-run to update the "
+              f"main file.")
+        out_path = stamped
+
     total = sum(len(v["columns"]) for v in schema.values())
     print(f"Wrote {out_path}")
     print(f"  {len(schema)} tables, {total} columns, read live from {database}")

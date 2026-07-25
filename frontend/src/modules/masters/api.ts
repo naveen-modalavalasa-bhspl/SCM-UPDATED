@@ -1,11 +1,18 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  DocSeries, MasterCategory, MasterItem, MasterBin, MasterRole, MasterUom, MasterUomConversion,
-  MasterVendor, MasterWarehouse, Project, RefRow,
+  DocSeries, MasterAttribute, MasterAttributeMapping, MasterBin, MasterBom,
+  MasterBomItem, MasterBrand, MasterCategory, MasterFeature, MasterItem,
+  MasterItemClass, MasterItemSpec, MasterPackaging, MasterPriceList,
+  MasterPriceListItem, MasterRole, MasterUom, MasterUomConversion, MasterVendor,
+  MasterWarehouse, Project, RefRow,
 } from "./types";
 
-type ListParams = { search?: string; page?: number; size?: number; include_inactive?: boolean };
+type ListParams = {
+  search?: string; page?: number; size?: number; include_inactive?: boolean;
+  // Child masters accept a parent filter, e.g. bom-items?bom_id=1.
+  [filter: string]: string | number | boolean | undefined;
+};
 
 const page = <T>(url: string, params: ListParams) =>
   api.get<Paginated<T>>(url, { params }).then((r) => r.data);
@@ -33,6 +40,25 @@ export const mastersApi = {
   warehouses: crud<MasterWarehouse>("/api/warehouses"),
   bins: crud<MasterBin>("/api/bins"),
   projects: crud<Project>("/api/projects"),
+  brands: crud<MasterBrand>("/api/brands"),
+  itemClasses: crud<MasterItemClass>("/api/item-classes"),
+  packaging: crud<MasterPackaging>("/api/packaging"),
+  features: crud<MasterFeature>("/api/features"),
+  attributes: crud<MasterAttribute>("/api/attributes"),
+  attributeMappings: crud<MasterAttributeMapping>("/api/attribute-mappings"),
+  priceLists: crud<MasterPriceList>("/api/price-lists"),
+  priceListItems: crud<MasterPriceListItem>("/api/price-list-items"),
+  boms: crud<MasterBom>("/api/boms"),
+  bomItems: crud<MasterBomItem>("/api/bom-items"),
+
+  // Specs hang off an item rather than having their own id, so they are read and
+  // saved per item and there is nothing to create or deactivate.
+  itemSpecs: {
+    get: (itemId: number) =>
+      api.get<MasterItemSpec>(`/api/item-specs/${itemId}`).then((r) => r.data),
+    save: (itemId: number, body: Partial<MasterItemSpec>) =>
+      api.put<MasterItemSpec>(`/api/item-specs/${itemId}`, body).then((r) => r.data),
+  },
 
   // UOM and its conversions are unpaginated: both are short lookup lists.
   uom: {

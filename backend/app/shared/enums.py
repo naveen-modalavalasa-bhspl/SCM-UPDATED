@@ -176,6 +176,37 @@ class FulfillmentTarget(str, Enum):
     PROCUREMENT = "PROCUREMENT"
 
 
+class AttributeDataType(str, Enum):
+    """What kind of value an attribute holds. Drives the input the UI shows and how
+    the value is validated before it is stored."""
+    TEXT = "TEXT"
+    NUMBER = "NUMBER"
+    BOOLEAN = "BOOLEAN"
+    DATE = "DATE"
+    LIST = "LIST"        # one of mst_attributes.allowed_values
+
+
+class AttributeTarget(str, Enum):
+    """What an attribute mapping attaches to. A mapping says "items of this kind need
+    this attribute"; the per-item VALUE lives in mst_item_specs.specifications."""
+    CATEGORY = "CATEGORY"
+    ITEM_CLASS = "ITEM_CLASS"
+
+
+class PriceType(str, Enum):
+    PURCHASE = "PURCHASE"
+    SALE = "SALE"
+    TRANSFER = "TRANSFER"
+
+
+class BomType(str, Enum):
+    """mst_boms.bom_type. The live column defaults to GENERAL."""
+    GENERAL = "GENERAL"
+    KIT = "KIT"
+    ASSEMBLY = "ASSEMBLY"
+    VEHICLE = "VEHICLE"
+
+
 class RecipientType(str, Enum):
     ROLE = "ROLE"
     POSITION = "POSITION"

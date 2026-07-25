@@ -134,3 +134,167 @@ export interface RefRow {
   name: string;
   is_stock_location?: boolean;
 }
+
+// --------------------------------------------------------------------------- //
+//  Brands, classes, packaging, features, attributes, price lists, BOM, specs
+// --------------------------------------------------------------------------- //
+
+export interface MasterBrand {
+  id: number;
+  code: string;
+  name: string;
+  manufacturer?: string | null;
+  description?: string | null;
+  is_active: boolean;
+}
+
+export interface MasterItemClass {
+  id: number;
+  code: string;
+  name: string;
+  description?: string | null;
+  /** Assets, not consumed when issued. */
+  is_capitalised: boolean;
+  is_active: boolean;
+}
+
+export interface MasterPackaging {
+  id: number;
+  code: string;
+  name: string;
+  uom_id?: number | null;
+  uom_code?: string | null;
+  qty_per_pack?: number | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  weight_kg?: number | null;
+  is_returnable: boolean;
+  is_active: boolean;
+}
+
+export interface MasterFeature {
+  id: number;
+  code: string;
+  name: string;
+  description?: string | null;
+  affects_handling: boolean;
+  is_active: boolean;
+}
+
+export type AttributeDataType = "TEXT" | "NUMBER" | "BOOLEAN" | "DATE" | "LIST";
+
+export interface MasterAttribute {
+  id: number;
+  code: string;
+  name: string;
+  data_type: AttributeDataType;
+  unit?: string | null;
+  /** Only used when data_type is LIST. */
+  allowed_values: string[];
+  description?: string | null;
+  is_active: boolean;
+}
+
+export type AttributeTarget = "CATEGORY" | "ITEM_CLASS";
+
+/** Says which attributes items of a kind must carry. The values live on the spec. */
+export interface MasterAttributeMapping {
+  id: number;
+  attribute_id: number;
+  attribute_code?: string | null;
+  attribute_name?: string | null;
+  target_type: AttributeTarget;
+  target_id: number;
+  target_name?: string | null;
+  is_required: boolean;
+  sort_order: number;
+  is_active: boolean;
+}
+
+export type PriceType = "PURCHASE" | "SALE" | "TRANSFER";
+
+export interface MasterPriceList {
+  id: number;
+  code: string;
+  name: string;
+  price_type: PriceType;
+  currency: string;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  description?: string | null;
+  is_active: boolean;
+}
+
+export interface MasterPriceListItem {
+  id: number;
+  price_list_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_id?: number | null;
+  uom_code?: string | null;
+  rate: number;
+  /** Slab pricing: this rate applies from this quantity upwards. */
+  min_qty: number;
+  discount_percent: number;
+  is_active: boolean;
+}
+
+export type BomType = "GENERAL" | "KIT" | "ASSEMBLY" | "VEHICLE";
+
+export interface MasterBom {
+  id: number;
+  code: string;
+  name: string;
+  bom_type: BomType;
+  parent_item_id?: number | null;
+  parent_item_code?: string | null;
+  parent_item_name?: string | null;
+  output_qty: number;
+  project_id?: number | null;
+  project_name?: string | null;
+  department_id?: number | null;
+  department_name?: string | null;
+  description?: string | null;
+  total_items: number;
+  is_default: boolean;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  is_active: boolean;
+}
+
+export interface MasterBomItem {
+  id: number;
+  bom_id: number;
+  line_no: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  category_name?: string | null;
+  uom_id?: number | null;
+  uom_code?: string | null;
+  quantity: number;
+  scrap_percent: number;
+  child_bom_id?: number | null;
+  is_optional: boolean;
+  remarks?: string | null;
+}
+
+/** Keyed by item_id, so it is saved with PUT and never created separately. */
+export interface MasterItemSpec {
+  item_id: number;
+  description?: string | null;
+  brand?: string | null;
+  model_no?: string | null;
+  part_no?: string | null;
+  manufacturer?: string | null;
+  specifications: Record<string, unknown>;
+  storage_conditions?: string | null;
+  shelf_life_days?: number | null;
+  image_url?: string | null;
+}

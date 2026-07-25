@@ -324,3 +324,78 @@ async def seed():
 
 if __name__ == "__main__":
     asyncio.run(seed())
+
+
+# --------------------------------------------------------------------------- #
+#  Lookup masters added by the Brands / Classes / Attributes / Price Lists work.
+#  Safe to run against a populated database: every row is get_or_create by code.
+# --------------------------------------------------------------------------- #
+async def seed_lookup_masters(db):
+    from app.shared.enums import AttributeDataType, AttributeTarget
+    from app.shared.models.master import (
+        Attribute, AttributeMapping, Brand, Feature, ItemClass, Packaging,
+    )
+
+    brands = [("3M", "3M", "3M India Ltd"), ("PHIL", "Philips", "Philips India"),
+              ("SIEM", "Siemens", "Siemens Healthineers"),
+              ("GE", "GE Healthcare", "GE Healthcare India"),
+              ("GEN", "Generic", None)]
+    for code, name, manufacturer in brands:
+        await get_or_create(db, Brand, defaults={
+            "name": name, "manufacturer": manufacturer, "is_active": True}, code=code)
+
+    # is_capitalised marks assets, which are not consumed when issued.
+    classes = [("CONSUMABLE", "Consumable", False), ("CAPITAL", "Capital Asset", True),
+               ("SPARE", "Spare Part", False), ("SERVICE", "Service", False),
+               ("STATIONERY", "Stationery", False)]
+    for code, name, capitalised in classes:
+        await get_or_create(db, ItemClass, defaults={
+            "name": name, "is_capitalised": capitalised, "is_active": True}, code=code)
+
+    features = [("FRAGILE", "Fragile", True), ("HAZARD", "Hazardous", True),
+                ("COLDCHAIN", "Cold chain", True), ("EXPIRY", "Has expiry", True),
+                ("SERIALISED", "Serialised", False)]
+    for code, name, handling in features:
+        await get_or_create(db, Feature, defaults={
+            "name": name, "affects_handling": handling, "is_active": True}, code=code)
+
+    uom_nos = (await db.execute(select(Uom).where(Uom.code == "NOS"))).scalar_one_or_none()
+    packs = [("EACH", "Each", 1), ("BOX10", "Box of 10", 10),
+             ("BOX12", "Box of 12", 12), ("CARTON50", "Carton of 50", 50)]
+    for code, name, qty in packs:
+        await get_or_create(db, Packaging, defaults={
+            "name": name, "qty_per_pack": qty,
+            "uom_id": uom_nos.id if uom_nos else None,
+            "uom_code": uom_nos.code if uom_nos else None,
+            "is_active": True}, code=code)
+
+    attributes = [
+        ("VOLTAGE", "Voltage", AttributeDataType.NUMBER.value, "volts", None),
+        ("WATTAGE", "Wattage", AttributeDataType.NUMBER.value, "watts", None),
+        ("LENGTH", "Length", AttributeDataType.NUMBER.value, "mm", None),
+        ("MATERIAL", "Material", AttributeDataType.LIST.value, None,
+         ["Steel", "Plastic", "Copper", "Aluminium"]),
+        ("COLOUR", "Colour", AttributeDataType.LIST.value, None,
+         ["Black", "White", "Red", "Blue"]),
+        ("STERILE", "Sterile", AttributeDataType.BOOLEAN.value, None, None),
+    ]
+    attr_rows = {}
+    for code, name, data_type, unit, allowed in attributes:
+        row, _ = await get_or_create(db, Attribute, defaults={
+            "name": name, "data_type": data_type, "unit": unit,
+            "allowed_values": allowed, "is_active": True}, code=code)
+        attr_rows[code] = row
+
+    # Which attributes an electrical item should carry. The per-item VALUES go into
+    # mst_item_specs.specifications; this only says which fields to ask for.
+    electrical = (await db.execute(
+        select(ItemCategory).where(ItemCategory.code == "ELEC"))).scalar_one_or_none()
+    if electrical is not None:
+        for order, code in enumerate(("VOLTAGE", "WATTAGE", "MATERIAL")):
+            attribute = attr_rows[code]
+            await get_or_create(db, AttributeMapping, defaults={
+                "attribute_code": attribute.code, "attribute_name": attribute.name,
+                "target_name": electrical.name, "is_required": code == "VOLTAGE",
+                "sort_order": order, "is_active": True},
+                attribute_id=attribute.id,
+                target_type=AttributeTarget.CATEGORY.value, target_id=electrical.id)
