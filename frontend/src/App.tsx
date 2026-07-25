@@ -26,7 +26,11 @@ import { RulesPage } from "@/modules/admin/pages/RulesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { MastersPage } from "@/modules/masters/pages/MastersPage";
 import { InventoryOverviewPage } from "@/modules/inventory/pages/OverviewPage";
-import { InventoryTransactionsPage } from "@/modules/inventory/pages/InventoryTransactionsPage";
+// Each inventory screen is its own route so it can appear in the left rail.
+import { StockBalanceView } from "@/modules/inventory/components/StockBalanceView";
+import { StockLedgerView } from "@/modules/inventory/components/StockLedgerView";
+import { StockReplenishmentView } from "@/modules/inventory/components/StockReplenishmentView";
+import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -60,7 +64,10 @@ function AppRoutes() {
         <Route path="issues/*" element={<WarehouseModule />} />
         <Route path="warehouse/*" element={<WarehouseModule />} />
         <Route path="inventory" element={<InventoryOverviewPage />} />
-        <Route path="inventory/transactions" element={<InventoryTransactionsPage />} />
+        <Route path="inventory/stock-balance" element={<StockBalanceView />} />
+        <Route path="inventory/ledger" element={<StockLedgerView />} />
+        <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
+        <Route path="inventory/transfers" element={<StockTransferView />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/users" element={<UsersPage />} />
         <Route path="admin/groups" element={<GroupsPage />} />
