@@ -59,7 +59,10 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const [values, setValues] = useState<Values>(p.emptyForm);
   const [error, setError] = useState<string | null>(null);
 
-  const { data = [], isLoading } = useQuery({
+  // loadError is surfaced, never swallowed. Defaulting a failed list to [] made a
+  // broken request look like an empty master, which hid a 422 on every tab that asked
+  // for more rows than the API allowed.
+  const { data = [], isLoading, error: loadError, refetch } = useQuery({
     queryKey: ["masters", p.queryKey, search],
     queryFn: () => p.fetchList(search),
   });
@@ -112,15 +115,27 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
         </div>
       </div>
 
-      <ResponsiveList
-        data={data}
-        loading={isLoading}
-        keyOf={(r) => r.id}
-        columns={p.columns}
-        renderCard={p.renderCard}
-        onRowClick={canEdit ? openEdit : undefined}
-        empty={`No ${p.title.toLowerCase()} yet.`}
-      />
+      {loadError ? (
+        <div className="rounded-xl border border-bad/30 bg-bad-bg px-4 py-3">
+          <div className="text-sm font-semibold text-bad">
+            Could not load {p.title.toLowerCase()}s.
+          </div>
+          <p className="mt-1 text-xs text-body">{(loadError as Error).message}</p>
+          <Button variant="ghost" className="mt-2" onClick={() => refetch()}>
+            Try again
+          </Button>
+        </div>
+      ) : (
+        <ResponsiveList
+          data={data}
+          loading={isLoading}
+          keyOf={(r) => r.id}
+          columns={p.columns}
+          renderCard={p.renderCard}
+          onRowClick={canEdit ? openEdit : undefined}
+          empty={`No ${p.title.toLowerCase()} yet.`}
+        />
+      )}
 
       <Modal isOpen={open} onOpenChange={setOpen} placement="center" scrollBehavior="inside">
         <ModalContent>
