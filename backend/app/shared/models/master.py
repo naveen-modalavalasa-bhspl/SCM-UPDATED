@@ -33,6 +33,34 @@ class ItemCategory(Base):
     # NOT NULL in the live table with DB default 1; mirror the default so inserts that
     # don't compute a tree level still satisfy the constraint. (path is left unmapped.)
     level = Column(Integer, nullable=False, default=1)
+    segment_code = Column(String(2), nullable=True)
+    path = Column(String(500), nullable=True, unique=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class GeneralName(Base):
+    __tablename__ = "mst_general_names"
+    id = pk()
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class Manufacturer(Base):
+    __tablename__ = "mst_manufacturers"
+    id = pk()
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class DosageForm(Base):
+    __tablename__ = "mst_dosage_forms"
+    id = pk()
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
 
 
@@ -47,13 +75,56 @@ class Item(Base):
     short_name = Column(String(100), nullable=True)
     category_id = Column(ForeignKey("mst_item_categories.id"), index=True, nullable=True)
     category_name = Column(String(200), nullable=True)   # snapshot
+    general_name_id = Column(ForeignKey("mst_general_names.id"), index=True, nullable=True)
+    general_name_code = Column(String(10), nullable=True)
+    general_name = Column(String(200), nullable=True)
+    brand_id = Column(ForeignKey("mst_brands.id"), index=True, nullable=True)
+    brand_code = Column(String(10), nullable=True)
+    brand_name = Column(String(200), nullable=True)
+    manufacturer_id = Column(ForeignKey("mst_manufacturers.id"), index=True, nullable=True)
+    manufacturer_code = Column(String(10), nullable=True)
+    manufacturer_name = Column(String(200), nullable=True)
+    item_class_id = Column(ForeignKey("mst_item_classes.id"), index=True, nullable=True)
+    item_class_code = Column(String(10), nullable=True)
+    item_class_name = Column(String(200), nullable=True)
+    item_sub_class_id = Column(ForeignKey("mst_item_sub_classes.id"), index=True,
+                               nullable=True)
+    item_sub_class_code = Column(String(10), nullable=True)
+    item_sub_class_name = Column(String(200), nullable=True)
     uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
     uom_code = Column(String(20), nullable=True)          # snapshot
     item_type = Column(String(30), nullable=True)
     hsn_code = Column(String(20), nullable=True)
+    description = Column(Text, nullable=True)
+    has_components = Column(Boolean, nullable=False, default=False)
+    barcode_type = Column(String(20), nullable=True)
+    barcode_value = Column(String(100), nullable=True)
     tax_percent = Column(Numeric(6, 3), nullable=True)
+    cgst_rate = Column(Numeric(6, 3), nullable=False, default=0)
+    sgst_rate = Column(Numeric(6, 3), nullable=False, default=0)
+    igst_rate = Column(Numeric(6, 3), nullable=False, default=0)
     is_batch_tracked = Column(Boolean, nullable=False, default=False)
     is_serial_tracked = Column(Boolean, nullable=False, default=False)
+    has_expiry = Column(Boolean, nullable=False, default=False)
+    requires_qi = Column(Boolean, nullable=False, default=False)
+    shelf_life_days = Column(Integer, nullable=False, default=0)
+    safety_stock = Column(Numeric(16, 3), nullable=False, default=0)
+    reorder_level = Column(Numeric(16, 3), nullable=False, default=0)
+    reorder_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    lead_time_days = Column(Integer, nullable=False, default=0)
+    min_order_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    max_order_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    purchase_price = Column(Numeric(16, 4), nullable=False, default=0)
+    selling_price = Column(Numeric(16, 4), nullable=False, default=0)
+    mrp = Column(Numeric(16, 4), nullable=False, default=0)
+    dosage_form_id = Column(ForeignKey("mst_dosage_forms.id"), index=True, nullable=True)
+    dosage_form_code = Column(String(10), nullable=True)
+    dosage_form_name = Column(String(200), nullable=True)
+    valuation_method = Column(String(20), nullable=False, default="FIFO")
+    requires_special_storage = Column(Boolean, nullable=False, default=False)
+    storage_conditions = Column(String(300), nullable=True)
+    requires_special_transport = Column(Boolean, nullable=False, default=False)
+    transport_conditions = Column(String(300), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = created_at_col()
     updated_at = updated_at_col()
@@ -126,6 +197,23 @@ class Brand(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
+class BrandManufacturer(Base):
+    __tablename__ = "mst_brand_manufacturers"
+    id = pk()
+    brand_id = Column(ForeignKey("mst_brands.id"), index=True, nullable=False)
+    brand_code = Column(String(10), nullable=True)
+    brand_name = Column(String(200), nullable=True)
+    manufacturer_id = Column(ForeignKey("mst_manufacturers.id"), index=True,
+                             nullable=False)
+    manufacturer_code = Column(String(10), nullable=True)
+    manufacturer_name = Column(String(200), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("brand_id", "manufacturer_id",
+                         name="uq_brand_manufacturer"),
+    )
+
+
 class ItemClass(Base):
     """Broad classification, coarser than a category. Replaces the free-text
     mst_items.item_type, which defaulted to 'CONSUMABLE' and was never validated."""
@@ -137,6 +225,21 @@ class ItemClass(Base):
     # Items of a capitalised class are assets, not consumed on issue.
     is_capitalised = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+
+
+class ItemSubClass(Base):
+    __tablename__ = "mst_item_sub_classes"
+    id = pk()
+    item_class_id = Column(ForeignKey("mst_item_classes.id"), index=True, nullable=False)
+    item_class_code = Column(String(10), nullable=True)
+    item_class_name = Column(String(200), nullable=True)
+    code = Column(String(10), nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("item_class_id", "code", name="uq_item_sub_class_code"),
+    )
 
 
 class Packaging(Base):

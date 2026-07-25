@@ -184,6 +184,9 @@ async def sync_all(db: AsyncSession, client: HcmClient | None = None) -> list[Hc
     logs = []
     for entity_key, *_ in PLAN:
         logs.append(await sync_entity(db, entity_key, client))
+    from app.platform.rbac.service import sync_hcm_roles
+    await sync_hcm_roles(db)
+    await db.commit()
     return logs
 
 
@@ -201,6 +204,9 @@ async def sync_needed(db: AsyncSession, client: HcmClient | None = None) -> list
     logs = []
     for entity_key in NEEDED_ENTITIES:
         logs.append(await sync_entity(db, entity_key, client))
+    from app.platform.rbac.service import sync_hcm_roles
+    await sync_hcm_roles(db)
+    await db.commit()
     return logs
 
 
@@ -228,5 +234,9 @@ async def run_background(entities: list[str] | None = None) -> None:
         async with SessionLocal() as db:
             for key in keys:
                 await sync_entity(db, key, client)
+            if "positions" in keys:
+                from app.platform.rbac.service import sync_hcm_roles
+                await sync_hcm_roles(db)
+                await db.commit()
     finally:
         _running = False

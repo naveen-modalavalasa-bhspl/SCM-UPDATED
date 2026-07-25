@@ -17,6 +17,7 @@ from app.platform.hcm.models import (
     HcmEmployee, HcmFacility, HcmPosition, HcmPositionAssignment,
 )
 from app.platform.rbac.models import Role, UserGroup, UserGroupMember, UserRole
+from app.platform.rbac.service import HCM_ROLE_DESCRIPTION_PREFIX
 from app.shared.enums import GroupType
 from app.shared.models.warehouse import Warehouse
 
@@ -214,11 +215,18 @@ async def remove_member(db: AsyncSession, group_id: int, employee_id: int) -> di
 
 
 async def list_roles(db: AsyncSession) -> dict:
-    """SCM permission roles (rbac_roles). Serves the Masters screen's Roles tab."""
-    rows = (await db.execute(select(Role).order_by(Role.name))).scalars().all()
+    """HCM roles first; temporary SCM access roles are appended."""
+    rows = (await db.execute(select(Role).order_by(
+        Role.description.startswith(HCM_ROLE_DESCRIPTION_PREFIX).desc(), Role.name,
+    ))).scalars().all()
     return {"items": [{"id": r.id, "code": r.code, "name": r.name,
                        "description": r.description, "is_system": r.is_system,
-                       "is_active": r.is_active} for r in rows]}
+                       "is_active": r.is_active,
+                       "source": ("HCM" if (r.description or "").startswith(
+                           HCM_ROLE_DESCRIPTION_PREFIX) else "SCM"),
+                       "assignable": not (r.description or "").startswith(
+                           HCM_ROLE_DESCRIPTION_PREFIX)}
+                      for r in rows]}
 
 
 async def list_hcm_roles(db: AsyncSession) -> dict:
