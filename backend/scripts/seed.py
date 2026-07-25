@@ -83,23 +83,39 @@ PAGE_TREE = [
     ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
     ("po_list", "/pos", "Purchase Orders", "shopping-cart", P.PO_VIEW, 31, "grp_purchasing"),
 
-    # The warehouse module routes its own sub-pages, so the menu points at its three
-    # entry screens. These live here rather than being hardcoded in AppLayout: the
-    # left rail is built from rbac_pages, and a hardcoded branch would be invisible
-    # to page-access control and would drift the moment somebody renames a screen.
+    # Every working screen is its own menu entry. A single "Transactions" entry that
+    # hid six screens behind in-page tabs meant nobody could reach a screen from the
+    # rail, bookmark it, or be denied access to it individually. These live here and
+    # not in AppLayout because the rail is built from rbac_pages — a hardcoded branch
+    # is invisible to page-access control.
     ("grp_warehouse", "/warehouse", "Warehouse", "truck", P.STOCK_VIEW, 40, None),
     ("wh_dashboard", "/warehouse", "Dashboard", "layout-dashboard",
      P.STOCK_VIEW, 41, "grp_warehouse"),
-    ("wh_transactions", "/warehouse/transactions", "Transactions", "boxes",
-     P.STOCK_VIEW, 42, "grp_warehouse"),
+    ("wh_inward", "/warehouse/material-inward", "Material Inward", "truck",
+     P.GRN_VIEW, 42, "grp_warehouse"),
+    ("wh_grn", "/warehouse/grn", "Goods Receipt", "file-text",
+     P.GRN_VIEW, 43, "grp_warehouse"),
+    ("wh_qc", "/warehouse/quality-inspection", "Quality Inspection", "check-circle",
+     P.GRN_QC, 44, "grp_warehouse"),
+    ("wh_putaway", "/warehouse/putaway", "Put-away", "package",
+     P.STOCK_ADJUST, 45, "grp_warehouse"),
+    ("wh_returns", "/warehouse/purchase-returns", "Purchase Returns", "rotate-ccw",
+     P.GRN_VIEW, 46, "grp_warehouse"),
+    ("wh_issues", "/warehouse/material-issues", "Material Issues", "send",
+     P.ISSUE_VIEW, 47, "grp_warehouse"),
     ("wh_masters", "/warehouse/masters", "Warehouse Masters", "settings",
-     P.MASTER_LOCATION_MANAGE, 43, "grp_warehouse"),
+     P.MASTER_LOCATION_MANAGE, 48, "grp_warehouse"),
 
-    ("grp_inventory", "/inventory", "Inventory", "package", P.STOCK_VIEW, 45, None),
-    ("inv_overview", "/inventory", "Overview", "layout-dashboard",
-     P.STOCK_VIEW, 46, "grp_inventory"),
-    ("inv_transactions", "/inventory/transactions", "Stock & Transfers", "arrow-left-right",
-     P.STOCK_VIEW, 47, "grp_inventory"),
+    ("grp_inventory", "/inventory/stock-balance", "Inventory", "package",
+     P.STOCK_VIEW, 50, None),
+    ("inv_balance", "/inventory/stock-balance", "Stock Balance", "boxes",
+     P.STOCK_VIEW, 52, "grp_inventory"),
+    ("inv_ledger", "/inventory/ledger", "Stock Ledger", "history",
+     P.STOCK_VIEW, 53, "grp_inventory"),
+    ("inv_replenishment", "/inventory/replenishment", "Replenishment", "refresh-cw",
+     P.STOCK_VIEW, 54, "grp_inventory"),
+    ("inv_transfers", "/inventory/transfers", "Transfers", "arrow-left-right",
+     P.STOCK_ADJUST, 55, "grp_inventory"),
 
     ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
     ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
