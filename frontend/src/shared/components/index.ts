@@ -5,4 +5,5 @@ export { Button, Card, PageHeader, StatCard, Field, Input, Select } from "./ui";
 export { StatusPill } from "./StatusPill";
 export { ResponsiveList, type Column } from "./ResponsiveList";
 export { Placeholder } from "./Placeholder";
+export { SubNav, type SubNavItem } from "./SubNav";
 export { Can } from "./Can";
