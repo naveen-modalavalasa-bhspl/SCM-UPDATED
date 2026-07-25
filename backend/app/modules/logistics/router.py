@@ -54,9 +54,11 @@ stock_router = APIRouter(prefix="/api/stock")
 
 @stock_router.get("", response_model=Page[StockRow])
 async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
-                     facility_id: int | None = None, db: AsyncSession = Depends(get_db),
+                     warehouse_id: int | None = None, project_id: int | None = None,
+                     bin_id: int | None = None, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_stock(db, params, item_id, facility_id)
+    return await service.list_stock(db, params, item_id, warehouse_id, project_id,
+                                    bin_id)
 
 
 @stock_router.get("/movements", response_model=Page[MovementRow])

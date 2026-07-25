@@ -20,6 +20,7 @@ import { GRNListPage } from "@/modules/logistics/pages/GRNListPage";
 import { StockPage } from "@/modules/logistics/pages/StockPage";
 import { IssuesPage } from "@/modules/logistics/pages/IssuesPage";
 import { AdminPage } from "@/modules/admin/pages/AdminPage";
+import { MastersPage } from "@/modules/masters/pages/MastersPage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -52,6 +53,7 @@ function AppRoutes() {
         <Route path="stock" element={<StockPage />} />
         <Route path="issues" element={<IssuesPage />} />
         <Route path="admin" element={<AdminPage />} />
+        <Route path="masters" element={<MastersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
