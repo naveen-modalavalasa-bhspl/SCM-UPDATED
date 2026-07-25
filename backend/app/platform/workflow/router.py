@@ -19,7 +19,8 @@ async def doc_history(doc_type: str, doc_id: int,
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     actions = await engine.history(db, doc_type, doc_id)
     return {"items": [
-        {"stage_sequence": a.stage_sequence, "actor_user_id": a.actor_user_id,
+        {"stage_sequence": a.stage_sequence, "actor_id": a.actor_id,
+         "actor_name": a.actor_name, "actor_position": a.actor_position,
          "action": a.action, "comments": a.comments,
          "acted_at": a.acted_at.isoformat() if a.acted_at else None}
         for a in actions

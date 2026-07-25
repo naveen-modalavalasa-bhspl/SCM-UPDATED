@@ -39,8 +39,8 @@ export function IndentListPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Indents"
-        title="All indents"
+        eyebrow="Material Requests"
+        title="All requests"
         actions={
           <Can do="indent.create">
             <Button onClick={() => nav("/indents/new")}><Plus className="h-4 w-4" /> New indent</Button>

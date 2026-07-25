@@ -88,8 +88,9 @@ export function IndentDetailPage() {
           <CardBody className="p-5">
             <dl className="grid grid-cols-2 gap-4 lg:grid-cols-1">
               <Detail label="Requested by" value={indent.requested_by_name} />
+              <Detail label="Position" value={indent.position_name} />
               <Detail label="Department" value={indent.department_name} />
-              <Detail label="Deliver to" value={indent.facility_name} />
+              <Detail label="Deliver to" value={indent.office_name} />
               <Detail label="Priority" value={indent.priority} />
               {isPending && <Detail label="With" value={indent.current_approver_name} />}
             </dl>

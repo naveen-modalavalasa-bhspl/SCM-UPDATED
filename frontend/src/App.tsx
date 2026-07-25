@@ -6,7 +6,6 @@ import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
 import { LoginPage } from "@/pages/LoginPage";
 import { DashboardPage } from "@/pages/DashboardPage";
-import { Placeholder } from "@/shared/components/Placeholder";
 import { IndentListPage } from "@/modules/indents/pages/ListPage";
 import { IndentFormPage } from "@/modules/indents/pages/FormPage";
 import { IndentDetailPage } from "@/modules/indents/pages/DetailPage";
@@ -15,6 +14,7 @@ import { IndentBoardPage } from "@/modules/indents/pages/BoardPage";
 import { IndentAcknowledgmentsPage } from "@/modules/indents/pages/AcknowledgmentsPage";
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
+import { IndentApprovalsPage } from "@/modules/indents/pages/ApprovalsPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 import { GRNListPage } from "@/modules/logistics/pages/GRNListPage";
 import { StockPage } from "@/modules/logistics/pages/StockPage";
@@ -25,6 +25,7 @@ import { GroupsPage } from "@/modules/admin/pages/GroupsPage";
 import { RulesPage } from "@/modules/admin/pages/RulesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { MastersPage } from "@/modules/masters/pages/MastersPage";
+import { InventoryOverviewPage } from "@/modules/inventory/pages/OverviewPage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -51,11 +52,12 @@ function AppRoutes() {
         <Route path="indents/notifications" element={<IndentNotificationsPage />} />
         <Route path="indents/new" element={<IndentFormPage />} />
         <Route path="indents/:id" element={<IndentDetailPage />} />
-        <Route path="approvals" element={<Placeholder title="My Approvals" />} />
+        <Route path="approvals" element={<IndentApprovalsPage />} />
         <Route path="pos" element={<POListPage />} />
         <Route path="grn" element={<GRNListPage />} />
         <Route path="stock" element={<StockPage />} />
         <Route path="issues" element={<IssuesPage />} />
+        <Route path="inventory" element={<InventoryOverviewPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/users" element={<UsersPage />} />
         <Route path="admin/groups" element={<GroupsPage />} />

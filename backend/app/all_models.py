@@ -16,6 +16,7 @@ for _mod in (
     "app.platform.rules.models",
     "app.platform.settings.models",
     "app.modules.indents.models",
+    "app.modules.inventory.models",
     "app.modules.procurement.models",
     "app.modules.logistics.models",
 ):

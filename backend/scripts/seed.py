@@ -30,7 +30,7 @@ from app.shared.enums import ApprovalMode, ApproverType, ConditionOperator, DocT
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, ItemCategory, Uom, Vendor
 
-PASSWORD = "password123"
+PASSWORD = "Bavya@123"
 
 # fixed hcm ids for the demo bootstrap
 POS_PLANT_HEAD, POS_PROC_HEAD, POS_STORE_MGR, POS_DEPT_HEAD = 9001, 9002, 9003, 9004
@@ -70,12 +70,12 @@ USERS = [
 PAGE_TREE = [
     ("home", "/", "Home", "home", None, 0, None),
 
-    ("grp_indents", "/indents/dashboard", "Indents", "file-text", P.INDENT_VIEW, 10, None),
-    ("ind_dashboard", "/indents/dashboard", "Dashboard", "layout-dashboard", P.INDENT_VIEW, 11, "grp_indents"),
-    ("ind_list", "/indents", "List", "list", P.INDENT_VIEW, 12, "grp_indents"),
-    ("ind_board", "/indents/board", "Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
+    ("grp_indents", "/indents/dashboard", "Material Requests", "file-text", P.INDENT_VIEW, 10, None),
+    ("ind_dashboard", "/indents/dashboard", "Overview", "layout-dashboard", P.INDENT_VIEW, 11, "grp_indents"),
+    ("ind_list", "/indents", "All Requests", "list", P.INDENT_VIEW, 12, "grp_indents"),
+    ("ind_board", "/indents/board", "Status Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
     ("ind_ack", "/indents/acknowledgments", "Acknowledgments", "check-circle", P.INDENT_VIEW, 14, "grp_indents"),
-    ("ind_reports", "/indents/reports", "Reports", "bar-chart", P.INDENT_VIEW, 15, "grp_indents"),
+    ("ind_reports", "/indents/reports", "Activity Ledger", "bar-chart", P.INDENT_VIEW, 15, "grp_indents"),
     ("ind_notifications", "/indents/notifications", "Notifications", "bell", P.INDENT_VIEW, 16, "grp_indents"),
 
     ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
@@ -87,6 +87,8 @@ PAGE_TREE = [
     ("grn", "/grn", "Goods Receipt", "truck", P.GRN_VIEW, 41, "grp_warehouse"),
     ("stock", "/stock", "Stock", "package", P.STOCK_VIEW, 42, "grp_warehouse"),
     ("issues", "/issues", "Issues", "send", P.ISSUE_VIEW, 43, "grp_warehouse"),
+
+    ("grp_inventory", "/inventory", "Inventory", "package", P.STOCK_VIEW, 45, None),
 
     ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
     ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
@@ -203,11 +205,11 @@ async def seed_users(db, roles):
         await get_or_create(db, HcmEmployee, defaults={
             "full_name": name, "emp_code": f"HR-EMP-{emp_id:05d}",
             "email": f"{username}@bhspl.in", "department_id": dept_id,
-            "office_id": OFFICE_ID, "position_id": position_id,
+            "office_id": OFFICE_ID,
             "is_active": True, "synced_at": utcnow()}, id=emp_id)
         await get_or_create(db, UserCredential, defaults={
-            "password_hash": hash_password(PASSWORD), "is_active": True,
-            "username": username}, employee_id=emp_id)
+            "password_hash": hash_password(PASSWORD),
+            "must_change": False}, employee_id=emp_id)
         await get_or_create(db, UserRole, employee_id=emp_id, role_id=roles[role_code].id)
         if position_id:
             await get_or_create(db, HcmPositionAssignment, defaults={
@@ -263,24 +265,31 @@ async def _ensure_workflow(db, code, name, doc_type, stages):
     wf = (await db.execute(select(Workflow).where(Workflow.code == code))).scalar_one_or_none()
     if wf:
         return wf
-    wf = Workflow(code=code, name=name, doc_type=doc_type, is_active=True, effective_from=utcnow())
+    wf = Workflow(
+        code=code, name=name, doc_type=doc_type, is_active=True,
+        effective_from=utcnow().date(),
+    )
     db.add(wf)
     await db.flush()
     for s in stages:
         stage = Stage(workflow_id=wf.id, sequence=s["seq"], name=s["name"],
                       approver_type=s["approver_type"], approval_mode=s.get("mode", ApprovalMode.ANY_ONE.value),
                       position_id=s.get("position_id"), role_id=s.get("role_id"),
-                      user_id=s.get("user_id"), sla_hours=s.get("sla_hours"))
+                      employee_id=s.get("employee_id"), sla_hours=s.get("sla_hours"))
         db.add(stage)
         await db.flush()
         for field, op, value in s.get("conditions", []):
-            db.add(StageCondition(stage_id=stage.id, field=field, operator=op, value=str(value)))
+            db.add(StageCondition(
+                stage_id=stage.id, field_name=field, operator=op,
+                field_value=str(value),
+            ))
     return wf
 
 
 async def seed_workflows(db, roles):
     await _ensure_workflow(db, "WF-INDENT", "Indent Approval", DocType.INDENT.value, [
-        {"seq": 1, "name": "Dept Head", "approver_type": ApproverType.DEPT_HEAD.value, "sla_hours": 24},
+        {"seq": 1, "name": "Reporting Manager",
+         "approver_type": ApproverType.REPORTING_MANAGER.value, "sla_hours": 24},
     ])
     await _ensure_workflow(db, "WF-PO", "PO Approval", DocType.PO.value, [
         {"seq": 1, "name": "Procurement Head", "approver_type": ApproverType.POSITION.value,

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { CardBody } from "@heroui/react";
 import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { indentApi, masterApi } from "../api";
 
 interface Line {
@@ -13,23 +14,21 @@ interface Line {
 
 export function IndentFormPage() {
   const nav = useNavigate();
+  const { me } = useAuth();
   const qc = useQueryClient();
   const [priority, setPriority] = useState("NORMAL");
   const [requiredDate, setRequiredDate] = useState("");
-  const [facilityId, setFacilityId] = useState<number | "">("");
   const [remarks, setRemarks] = useState("");
   const [lines, setLines] = useState<Line[]>([{ item_id: "", quantity: "" }]);
   const [error, setError] = useState<string | null>(null);
 
   const { data: items = [] } = useQuery({ queryKey: ["items"], queryFn: () => masterApi.items() });
-  const { data: facilities = [] } = useQuery({ queryKey: ["facilities"], queryFn: masterApi.facilities });
 
   const create = useMutation({
     mutationFn: () =>
       indentApi.create({
         priority,
         required_date: requiredDate || null,
-        facility_id: facilityId === "" ? null : facilityId,
         remarks: remarks || null,
         items: lines
           .filter((l) => l.item_id !== "" && l.quantity !== "")
@@ -50,7 +49,7 @@ export function IndentFormPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Indents" title="New indent" />
+      <PageHeader eyebrow="Material Requests" title="New request" />
 
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -109,12 +108,21 @@ export function IndentFormPage() {
             <Field label="Required date">
               <Input type="date" value={requiredDate} onChange={(e) => setRequiredDate(e.target.value)} />
             </Field>
-            <Field label="Deliver to store">
+            <Field label="Raised as">
+              <Input value={me?.active_position?.name ?? "No position assigned"} disabled />
+            </Field>
+            <Field label="Delivery location">
               <Select
-                placeholder="Select facility…"
-                value={facilityId}
-                onChange={(v) => setFacilityId(v ? Number(v) : "")}
-                options={facilities.map((f) => ({ value: f.id, label: f.name }))}
+                placeholder="Office is assigned from your position"
+                value={me?.active_position?.office_id ?? me?.employee.office_id ?? ""}
+                onChange={() => undefined}
+                isDisabled
+                options={(me?.active_position?.office_id ?? me?.employee.office_id) ? [{
+                  value: me?.active_position?.office_id ?? me!.employee.office_id!,
+                  label: me?.active_position?.office_name
+                    ?? me?.employee.office_name
+                    ?? "Tagged office",
+                }] : []}
               />
             </Field>
             <Field label="Remarks">

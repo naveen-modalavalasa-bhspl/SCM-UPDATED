@@ -1,9 +1,10 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LogOut, Boxes } from "lucide-react";
-import { Avatar, Tab, Tabs } from "@heroui/react";
+import { Avatar, Select, SelectItem, Tab, Tabs } from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { MenuIcon } from "@/shared/layout/icons";
 import type { MenuItem } from "@/shared/types";
+import { MaterialRequestsNav } from "@/modules/indents/components/MaterialRequestsNav";
 
 const matches = (path: string, loc: string) =>
   loc === path || (path !== "/" && loc.startsWith(path));
@@ -29,7 +30,7 @@ function Brand() {
 }
 
 export function AppLayout() {
-  const { me, logout } = useAuth();
+  const { me, logout, switchPosition } = useAuth();
   const menu = me?.menu ?? [];
   const nav = useNavigate();
   const loc = useLocation().pathname;
@@ -43,6 +44,28 @@ export function AppLayout() {
     .sort((a, b) => b.child.path.length - a.child.path.length)[0];
   const activeRoot = best?.root ?? menu[0];
   const tabs = activeRoot?.children ?? [];
+  const positionSelector = (compact = false) => me?.positions.length ? (
+    <Select
+      aria-label="Working position"
+      label={compact ? undefined : "Working as"}
+      size="sm"
+      variant="bordered"
+      selectedKeys={me.active_position ? [String(me.active_position.id)] : []}
+      onSelectionChange={async (keys) => {
+        const id = Number(Array.from(keys)[0]);
+        if (id && id !== me.active_position?.id) {
+          await switchPosition(id);
+          nav("/");
+        }
+      }}
+      className={compact ? "w-52" : "mt-2 w-full"}
+      classNames={{ trigger: "border-line bg-content1" }}
+    >
+      {me.positions.map((position) => (
+        <SelectItem key={String(position.id)}>{position.name}</SelectItem>
+      ))}
+    </Select>
+  ) : null;
 
   return (
     <div className="flex min-h-full">
@@ -78,6 +101,7 @@ export function AppLayout() {
             <LogOut className="h-4 w-4" />
           </button>
         </div>
+        {positionSelector()}
       </aside>
 
       {/* Main column */}
@@ -91,11 +115,19 @@ export function AppLayout() {
               <MenuIcon name={activeRoot?.icon} className="h-4 w-4 text-brand" />
               <span className="font-display text-lg font-bold text-ink">{activeRoot?.name}</span>
             </div>
-            <Avatar size="sm" name={me?.employee.name ?? "U"} className="bg-brand-050 text-brand" />
+            <div className="flex items-center gap-2">
+              <div className="md:hidden">{positionSelector(true)}</div>
+              <Avatar size="sm" name={me?.employee.name ?? "U"} className="bg-brand-050 text-brand" />
+            </div>
           </div>
 
           {/* Module options surface here as tabs */}
-          {tabs.length > 0 && (
+          {activeRoot?.code === "grp_indents" && (
+            <div className="px-2 md:px-6">
+              <MaterialRequestsNav embedded />
+            </div>
+          )}
+          {tabs.length > 0 && activeRoot?.code !== "grp_indents" && (
             <div className="overflow-x-auto px-2 md:px-6">
               <Tabs
                 aria-label="Module sections"

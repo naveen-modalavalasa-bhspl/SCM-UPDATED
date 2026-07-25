@@ -12,6 +12,8 @@ const KPI = [
   { key: "rejected", label: "Rejected", icon: XCircle, tone: "text-bad" },
   { key: "this_month", label: "Raised this month", icon: CalendarDays, tone: "text-brand" },
   { key: "draft", label: "In draft", icon: PencilLine, tone: "text-muted" },
+  { key: "total_qty", label: "Units requested", icon: FileText, tone: "text-info" },
+  { key: "approval_rate", label: "Approval rate %", icon: CheckCircle2, tone: "text-ok" },
 ] as const;
 
 // status -> bar color, for the distribution strip
@@ -51,8 +53,8 @@ export function IndentDashboardPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Indents"
-        title="Dashboard"
+        eyebrow="Material Requests"
+        title="Overview"
         actions={
           <Can do="indent.create">
             <Button onClick={() => nav("/indents/new")}><Plus className="h-4 w-4" /> New indent</Button>
