@@ -3,7 +3,7 @@
 This is where routing bugs hide, so it is tested directly. Handles all five
 approver types and expands through active delegations.
 """
-from datetime import datetime, timezone
+from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,14 +26,13 @@ async def _role_holders(db: AsyncSession, role_id: int | None) -> list[HcmEmploy
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def _reporting_manager(db: AsyncSession, requester_id: int | None) -> list[HcmEmployee]:
-    """Walk one level up the position tree from the requester's position."""
-    if requester_id is None:
+async def _reporting_manager(
+    db: AsyncSession, requester_id: int | None, requester_position_id: int | None,
+) -> list[HcmEmployee]:
+    """Walk one level up from the position selected when the document was raised."""
+    if requester_id is None or requester_position_id is None:
         return []
-    requester = await hcm_service.get_employee(db, requester_id)
-    if not requester or not requester.position_id:
-        return []
-    position = await hcm_service.get_position(db, requester.position_id)
+    position = await hcm_service.get_position(db, requester_position_id)
     if not position or not position.parent_position_id:
         return []
     return await hcm_service.get_position_holders(db, position.parent_position_id)
@@ -42,27 +41,22 @@ async def _reporting_manager(db: AsyncSession, requester_id: int | None) -> list
 async def _expand_delegations(db: AsyncSession, approvers: list[HcmEmployee]) -> list[HcmEmployee]:
     if not approvers:
         return approvers
-    now = datetime.now(timezone.utc)
+    today = date.today()
     ids = {a.id for a in approvers}
     rows = (await db.execute(
         select(Delegation).where(Delegation.is_active.is_(True),
-                                 Delegation.from_user_id.in_(ids))
+                                 Delegation.from_employee_id.in_(ids))
     )).scalars().all()
     result = {a.id: a for a in approvers}
     for d in rows:
-        if d.valid_from and _aware(d.valid_from) > now:
+        if d.valid_from and d.valid_from > today:
             continue
-        if d.valid_to and _aware(d.valid_to) < now:
+        if d.valid_to and d.valid_to < today:
             continue
-        delegate = await hcm_service.get_employee(db, d.to_user_id)
+        delegate = await hcm_service.get_employee(db, d.to_employee_id)
         if delegate and delegate.is_active:
             result[delegate.id] = delegate
     return list(result.values())
-
-
-def _aware(dt: datetime) -> datetime:
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
 
 async def resolve_approvers(db: AsyncSession, stage, instance, doc_context: dict) -> list[HcmEmployee]:
     t = stage.approver_type
@@ -75,12 +69,14 @@ async def resolve_approvers(db: AsyncSession, stage, instance, doc_context: dict
     elif t == ApproverType.ROLE.value:
         approvers = await _role_holders(db, stage.role_id)
     elif t == ApproverType.SPECIFIC_USER.value:
-        emp = await hcm_service.get_employee(db, stage.user_id) if stage.user_id else None
+        emp = await hcm_service.get_employee(db, stage.employee_id) if stage.employee_id else None
         approvers = [emp] if emp and emp.is_active else []
     elif t == ApproverType.DEPT_HEAD.value:
         head = await hcm_service.get_department_head(db, dept_id) if dept_id else None
         approvers = [head] if head and head.is_active else []
     elif t == ApproverType.REPORTING_MANAGER.value:
-        approvers = await _reporting_manager(db, instance.started_by)
+        approvers = await _reporting_manager(
+            db, instance.started_by_id, (doc_context or {}).get("requester_position_id"),
+        )
 
     return await _expand_delegations(db, approvers)

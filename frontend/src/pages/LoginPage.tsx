@@ -49,14 +49,15 @@ export function LoginPage() {
 
             <form onSubmit={submit} className="flex flex-col gap-4">
               <Input
-                label="Username"
+                label="Employee ID"
                 variant="bordered"
                 radius="md"
                 value={username}
                 onValueChange={setUsername}
                 autoFocus
                 autoComplete="username"
-                placeholder="e.g. requester"
+                inputMode="numeric"
+                placeholder="Enter your employee ID"
               />
               <Input
                 label="Password"

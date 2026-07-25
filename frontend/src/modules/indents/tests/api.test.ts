@@ -4,7 +4,10 @@ import { indentApi } from "../api";
 describe("indents api", () => {
   it("exposes the indent operations", () => {
     expect(Object.keys(indentApi).sort()).toEqual(
-      ["approve", "create", "get", "list", "reject", "stats", "submit"].sort(),
+      [
+        "acknowledgments", "activity", "approve", "create", "get", "list",
+        "notifications", "pendingApprovals", "reject", "stats", "submit",
+      ].sort(),
     );
   });
 });

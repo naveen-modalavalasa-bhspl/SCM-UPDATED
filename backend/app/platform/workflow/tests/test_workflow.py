@@ -3,6 +3,8 @@
 Covers a 3-stage flow, a conditional stage skipped/included, rejection at stage 2,
 an ALL-mode stage with two approvers, and every resolver approver_type + delegation.
 """
+from datetime import date, timedelta
+
 import pytest
 
 from app.core.exceptions import PermissionError_, ValidationError
@@ -20,14 +22,20 @@ from app.shared.models.base import utcnow
 
 async def _emp(db, id, name="Emp", position_id=None):
     e = HcmEmployee(id=id, full_name=f"{name}{id}", emp_code=f"E{id}",
-                    is_active=True, position_id=position_id, synced_at=utcnow())
+                    is_active=True, synced_at=utcnow())
     db.add(e)
     await db.flush()
+    if position_id is not None:
+        db.add(HcmPositionAssignment(
+            id=10_000 + id, employee_id=id, position_id=position_id,
+            is_active=True, is_primary=True, synced_at=utcnow(),
+        ))
+        await db.flush()
     return e
 
 
 async def _workflow(db, doc_type, stages):
-    """stages = list of dict(approver_type, mode, position_id/role_id/user_id, seq)."""
+    """stages = list of approver configuration dictionaries."""
     wf = Workflow(code=f"WF_{doc_type}", name=doc_type, doc_type=doc_type, is_active=True)
     db.add(wf)
     await db.flush()
@@ -36,12 +44,16 @@ async def _workflow(db, doc_type, stages):
         stage = Stage(
             workflow_id=wf.id, sequence=s["seq"], name=s.get("name", f"S{s['seq']}"),
             approver_type=s["approver_type"], approval_mode=s.get("mode", ApprovalMode.ANY_ONE.value),
-            position_id=s.get("position_id"), role_id=s.get("role_id"), user_id=s.get("user_id"),
+            position_id=s.get("position_id"), role_id=s.get("role_id"),
+            employee_id=s.get("employee_id"),
         )
         db.add(stage)
         await db.flush()
         for c in s.get("conditions", []):
-            db.add(StageCondition(stage_id=stage.id, field=c[0], operator=c[1], value=str(c[2])))
+            db.add(StageCondition(
+                stage_id=stage.id, field_name=c[0], operator=c[1],
+                field_value=str(c[2]),
+            ))
         made.append(stage)
     await db.flush()
     return wf, made
@@ -52,23 +64,23 @@ async def _workflow(db, doc_type, stages):
 async def test_three_stage_specific_user_flow(db):
     e1, e2, e3, e4 = [await _emp(db, i) for i in (1, 2, 3, 4)]
     await _workflow(db, "INDENT", [
-        {"seq": 1, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e2.id},
-        {"seq": 2, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e3.id},
-        {"seq": 3, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e4.id},
+        {"seq": 1, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e2.id},
+        {"seq": 2, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e3.id},
+        {"seq": 3, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e4.id},
     ])
 
     inst = await engine.start(db, "INDENT", 100, {}, e1)
     assert inst.status == InstanceStatus.IN_PROGRESS.value
-    assert inst.current_stage_sequence == 1
+    assert inst.current_sequence == 1
 
     # wrong approver at stage 1 is rejected
     with pytest.raises(PermissionError_):
         await engine.act(db, "INDENT", 100, "APPROVE", e3)
 
     await engine.act(db, "INDENT", 100, "APPROVE", e2)
-    assert (await engine._load_instance(db, "INDENT", 100)).current_stage_sequence == 2
+    assert (await engine._load_instance(db, "INDENT", 100)).current_sequence == 2
     await engine.act(db, "INDENT", 100, "APPROVE", e3)
-    assert (await engine._load_instance(db, "INDENT", 100)).current_stage_sequence == 3
+    assert (await engine._load_instance(db, "INDENT", 100)).current_sequence == 3
     final = await engine.act(db, "INDENT", 100, "APPROVE", e4)
     assert final.status == InstanceStatus.APPROVED.value
 
@@ -79,13 +91,13 @@ async def test_three_stage_specific_user_flow(db):
 async def test_conditional_stage_skipped_when_amount_low(db):
     e1, e2, e3 = [await _emp(db, i) for i in (1, 2, 3)]
     await _workflow(db, "PO", [
-        {"seq": 1, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e2.id},
-        {"seq": 2, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e3.id,
+        {"seq": 1, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e2.id},
+        {"seq": 2, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e3.id,
          "conditions": [("total_amount", ConditionOperator.GT.value, 500000)]},
     ])
     # amount below threshold -> stage 2 skipped -> approving stage 1 completes it
     inst = await engine.start(db, "PO", 1, {"total_amount": 100000}, e1)
-    assert inst.current_stage_sequence == 1
+    assert inst.current_sequence == 1
     final = await engine.act(db, "PO", 1, "APPROVE", e2)
     assert final.status == InstanceStatus.APPROVED.value
 
@@ -93,23 +105,24 @@ async def test_conditional_stage_skipped_when_amount_low(db):
 async def test_conditional_stage_included_when_amount_high(db):
     e1, e2, e3 = [await _emp(db, i) for i in (1, 2, 3)]
     await _workflow(db, "PO", [
-        {"seq": 1, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e2.id},
-        {"seq": 2, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e3.id,
+        {"seq": 1, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e2.id},
+        {"seq": 2, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e3.id,
          "conditions": [("total_amount", ConditionOperator.GT.value, 500000)]},
     ])
     await engine.start(db, "PO", 2, {"total_amount": 600000}, e1)
-    mid = await engine.act(db, "PO", 2, "APPROVE", e2)
+    context = {"total_amount": 600000}
+    mid = await engine.act(db, "PO", 2, "APPROVE", e2, context=context)
     assert mid.status == InstanceStatus.IN_PROGRESS.value
-    assert mid.current_stage_sequence == 2
-    final = await engine.act(db, "PO", 2, "APPROVE", e3)
+    assert mid.current_sequence == 2
+    final = await engine.act(db, "PO", 2, "APPROVE", e3, context=context)
     assert final.status == InstanceStatus.APPROVED.value
 
 
 async def test_rejection_at_stage_two(db):
     e1, e2, e3 = [await _emp(db, i) for i in (1, 2, 3)]
     await _workflow(db, "INDENT", [
-        {"seq": 1, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e2.id},
-        {"seq": 2, "approver_type": ApproverType.SPECIFIC_USER.value, "user_id": e3.id},
+        {"seq": 1, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e2.id},
+        {"seq": 2, "approver_type": ApproverType.SPECIFIC_USER.value, "employee_id": e3.id},
     ])
     await engine.start(db, "INDENT", 5, {}, e1)
     await engine.act(db, "INDENT", 5, "APPROVE", e2)
@@ -150,7 +163,7 @@ async def test_resolver_dept_head(db):
     db.add(HcmDepartment(id=3, name="Mech", head_employee_id=head.id, synced_at=utcnow()))
     await db.flush()
     stage = Stage(workflow_id=1, sequence=1, name="s", approver_type=ApproverType.DEPT_HEAD.value)
-    inst = Instance(doc_type="INDENT", doc_id=1, workflow_id=1, started_by=999)
+    inst = Instance(doc_type="INDENT", doc_id=1, workflow_id=1, started_by_id=999)
     approvers = await resolver.resolve_approvers(db, stage, inst, {"department_id": 3})
     assert [a.id for a in approvers] == [head.id]
 
@@ -165,19 +178,26 @@ async def test_resolver_reporting_manager(db):
     await db.flush()
     stage = Stage(workflow_id=1, sequence=1, name="s",
                   approver_type=ApproverType.REPORTING_MANAGER.value)
-    inst = Instance(doc_type="INDENT", doc_id=1, workflow_id=1, started_by=requester.id)
-    approvers = await resolver.resolve_approvers(db, stage, inst, {})
+    inst = Instance(doc_type="INDENT", doc_id=1, workflow_id=1, started_by_id=requester.id)
+    approvers = await resolver.resolve_approvers(
+        db, stage, inst, {"requester_position_id": 101},
+    )
     assert [a.id for a in approvers] == [mgr.id]
 
 
 async def test_resolver_expands_delegation(db):
     approver = await _emp(db, 30, "Appr")
     delegate = await _emp(db, 31, "Deleg")
-    db.add(Delegation(from_user_id=approver.id, to_user_id=delegate.id, is_active=True))
+    db.add(Delegation(
+        from_employee_id=approver.id, to_employee_id=delegate.id,
+        valid_from=date.today() - timedelta(days=1),
+        valid_to=date.today() + timedelta(days=1), is_active=True,
+    ))
     await db.flush()
     stage = Stage(workflow_id=1, sequence=1, name="s",
-                  approver_type=ApproverType.SPECIFIC_USER.value, user_id=approver.id)
-    inst = Instance(doc_type="INDENT", doc_id=1, workflow_id=1, started_by=999)
+                  approver_type=ApproverType.SPECIFIC_USER.value,
+                  employee_id=approver.id)
+    inst = Instance(doc_type="INDENT", doc_id=1, workflow_id=1, started_by_id=999)
     approvers = await resolver.resolve_approvers(db, stage, inst, {})
     ids = {a.id for a in approvers}
     assert approver.id in ids and delegate.id in ids

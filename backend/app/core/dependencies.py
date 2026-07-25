@@ -30,6 +30,16 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         raise PermissionError_("Invalid user")
+    from app.platform.rbac.service import get_assigned_position, get_default_position
+
+    position_id = payload.get("position_id")
+    position = (
+        await get_assigned_position(db, user.id, int(position_id))
+        if position_id is not None else await get_default_position(db, user.id)
+    )
+    if position_id is not None and position is None:
+        raise PermissionError_("Selected position is no longer assigned")
+    user.active_position_id = position["id"] if position else None
     return user
 
 
@@ -41,7 +51,9 @@ def require_permission(code: str):
     ):
         from app.platform.rbac.service import get_user_permissions
 
-        perms = await get_user_permissions(db, user)
+        perms = await get_user_permissions(
+            db, user, getattr(user, "active_position_id", None),
+        )
         if code not in perms:
             raise PermissionError_(f"Missing permission: {code}")
         return user
