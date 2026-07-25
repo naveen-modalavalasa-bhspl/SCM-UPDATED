@@ -83,12 +83,23 @@ PAGE_TREE = [
     ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
     ("po_list", "/pos", "Purchase Orders", "shopping-cart", P.PO_VIEW, 31, "grp_purchasing"),
 
-    ("grp_warehouse", "/stock", "Warehouse", "truck", P.STOCK_VIEW, 40, None),
-    ("grn", "/grn", "Goods Receipt", "truck", P.GRN_VIEW, 41, "grp_warehouse"),
-    ("stock", "/stock", "Stock", "package", P.STOCK_VIEW, 42, "grp_warehouse"),
-    ("issues", "/issues", "Issues", "send", P.ISSUE_VIEW, 43, "grp_warehouse"),
+    # The warehouse module routes its own sub-pages, so the menu points at its three
+    # entry screens. These live here rather than being hardcoded in AppLayout: the
+    # left rail is built from rbac_pages, and a hardcoded branch would be invisible
+    # to page-access control and would drift the moment somebody renames a screen.
+    ("grp_warehouse", "/warehouse", "Warehouse", "truck", P.STOCK_VIEW, 40, None),
+    ("wh_dashboard", "/warehouse", "Dashboard", "layout-dashboard",
+     P.STOCK_VIEW, 41, "grp_warehouse"),
+    ("wh_transactions", "/warehouse/transactions", "Transactions", "boxes",
+     P.STOCK_VIEW, 42, "grp_warehouse"),
+    ("wh_masters", "/warehouse/masters", "Warehouse Masters", "settings",
+     P.MASTER_LOCATION_MANAGE, 43, "grp_warehouse"),
 
     ("grp_inventory", "/inventory", "Inventory", "package", P.STOCK_VIEW, 45, None),
+    ("inv_overview", "/inventory", "Overview", "layout-dashboard",
+     P.STOCK_VIEW, 46, "grp_inventory"),
+    ("inv_transactions", "/inventory/transactions", "Stock & Transfers", "arrow-left-right",
+     P.STOCK_VIEW, 47, "grp_inventory"),
 
     ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
     ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
