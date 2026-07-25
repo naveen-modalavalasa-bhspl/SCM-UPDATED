@@ -19,7 +19,12 @@ copy .env.example .env          # set DATABASE_URL=mysql+aiomysql://root:<pw>@12
 # create the schema once (MySQL must be running):  CREATE DATABASE scm_erp;
 .venv/Scripts/python -m alembic upgrade head
 .venv/Scripts/python -m scripts.seed
-.venv/Scripts/python -m uvicorn app.main:app --reload    # http://localhost:8000
+# --reload-dir app: without it the reloader also watches .venv, so a pip install
+# triggers a several-hundred-file reload that can wedge the server.
+.venv/Scripts/python -m uvicorn app.main:app --reload --reload-dir app   # :8000
+# Reachable from other machines on the LAN (needs CORS_ALLOW_PRIVATE_NETWORK=true
+# in .env, and a one-off inbound firewall rule for ports 8000 and 5173):
+.venv/Scripts/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
 .venv/Scripts/python -m pytest                            # 29 tests, on MySQL scm_erp_test
 ```
 Tests create/use a separate `scm_erp_test` database from the same `.env` credentials.
