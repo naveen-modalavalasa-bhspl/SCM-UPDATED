@@ -47,7 +47,9 @@ export interface GrantResult {
   temporary_password?: string | null;
 }
 
-export type GroupType = "ROLE" | "POSITION" | "LOCATION";
+// ROLE is an SCM permission role (what you may do); HCM_ROLE is the HRMS org role
+// (what you are). Both exist on purpose.
+export type GroupType = "ROLE" | "HCM_ROLE" | "POSITION" | "LOCATION";
 
 export interface UserGroup {
   id: number;

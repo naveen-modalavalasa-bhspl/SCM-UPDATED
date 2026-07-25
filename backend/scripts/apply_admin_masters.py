@@ -117,6 +117,142 @@ NEW_TABLES: dict[str, str] = {
             KEY ix_rule_executions_doc_id (doc_id),
             KEY ix_rule_executions_acted_at (acted_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    # ---- masters added for the Brands / Classes / Attributes / Price Lists work ----
+    "mst_brands": """
+        CREATE TABLE mst_brands (
+            id           BIGINT       NOT NULL AUTO_INCREMENT,
+            code         VARCHAR(50)  NOT NULL,
+            name         VARCHAR(200) NOT NULL,
+            manufacturer VARCHAR(200) NULL,
+            description  VARCHAR(300) NULL,
+            is_active    TINYINT(1)   NOT NULL DEFAULT 1,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_mst_brands_code (code),
+            KEY ix_mst_brands_name (name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    "mst_item_classes": """
+        CREATE TABLE mst_item_classes (
+            id             BIGINT       NOT NULL AUTO_INCREMENT,
+            code           VARCHAR(50)  NOT NULL,
+            name           VARCHAR(200) NOT NULL,
+            description    VARCHAR(300) NULL,
+            is_capitalised TINYINT(1)   NOT NULL DEFAULT 0
+                           COMMENT 'assets, not consumed on issue',
+            is_active      TINYINT(1)   NOT NULL DEFAULT 1,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_mst_item_classes_code (code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    "mst_packaging": """
+        CREATE TABLE mst_packaging (
+            id            BIGINT        NOT NULL AUTO_INCREMENT,
+            code          VARCHAR(50)   NOT NULL,
+            name          VARCHAR(200)  NOT NULL,
+            uom_id        BIGINT        NULL,
+            uom_code      VARCHAR(20)   NULL,
+            qty_per_pack  DECIMAL(16,3) NULL COMMENT 'how many uom in one pack',
+            length_cm     DECIMAL(10,2) NULL,
+            width_cm      DECIMAL(10,2) NULL,
+            height_cm     DECIMAL(10,2) NULL,
+            weight_kg     DECIMAL(10,3) NULL,
+            is_returnable TINYINT(1)    NOT NULL DEFAULT 0,
+            is_active     TINYINT(1)    NOT NULL DEFAULT 1,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_mst_packaging_code (code),
+            KEY ix_mst_packaging_uom_id (uom_id),
+            CONSTRAINT fk_mst_packaging_uom FOREIGN KEY (uom_id)
+                REFERENCES mst_uom (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    "mst_features": """
+        CREATE TABLE mst_features (
+            id               BIGINT       NOT NULL AUTO_INCREMENT,
+            code             VARCHAR(50)  NOT NULL,
+            name             VARCHAR(200) NOT NULL,
+            description      VARCHAR(300) NULL,
+            affects_handling TINYINT(1)   NOT NULL DEFAULT 0,
+            is_active        TINYINT(1)   NOT NULL DEFAULT 1,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_mst_features_code (code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    "mst_attributes": """
+        CREATE TABLE mst_attributes (
+            id             BIGINT       NOT NULL AUTO_INCREMENT,
+            code           VARCHAR(50)  NOT NULL,
+            name           VARCHAR(200) NOT NULL,
+            data_type      VARCHAR(20)  NOT NULL DEFAULT 'TEXT'
+                           COMMENT 'TEXT|NUMBER|BOOLEAN|DATE|LIST',
+            unit           VARCHAR(30)  NULL COMMENT 'volts, mm, kg',
+            allowed_values JSON         NULL COMMENT 'options when data_type=LIST',
+            description    VARCHAR(300) NULL,
+            is_active      TINYINT(1)   NOT NULL DEFAULT 1,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_mst_attributes_code (code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    "mst_attribute_mappings": """
+        CREATE TABLE mst_attribute_mappings (
+            id             BIGINT       NOT NULL AUTO_INCREMENT,
+            attribute_id   BIGINT       NOT NULL,
+            attribute_code VARCHAR(50)  NULL,
+            attribute_name VARCHAR(200) NULL,
+            target_type    VARCHAR(20)  NOT NULL COMMENT 'CATEGORY|ITEM_CLASS',
+            target_id      BIGINT       NOT NULL,
+            target_name    VARCHAR(200) NULL,
+            is_required    TINYINT(1)   NOT NULL DEFAULT 0,
+            sort_order     INT          NOT NULL DEFAULT 0,
+            is_active      TINYINT(1)   NOT NULL DEFAULT 1,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_attr_map_attr_target (attribute_id, target_type, target_id),
+            KEY ix_attr_map_target (target_type, target_id),
+            CONSTRAINT fk_attr_map_attribute FOREIGN KEY (attribute_id)
+                REFERENCES mst_attributes (id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    "mst_price_lists": """
+        CREATE TABLE mst_price_lists (
+            id           BIGINT       NOT NULL AUTO_INCREMENT,
+            code         VARCHAR(50)  NOT NULL,
+            name         VARCHAR(200) NOT NULL,
+            price_type   VARCHAR(20)  NOT NULL DEFAULT 'PURCHASE'
+                         COMMENT 'PURCHASE|SALE|TRANSFER',
+            currency     VARCHAR(3)   NOT NULL DEFAULT 'INR',
+            vendor_id    BIGINT       NULL,
+            vendor_name  VARCHAR(200) NULL,
+            project_id   BIGINT       NULL,
+            project_name VARCHAR(200) NULL,
+            valid_from   DATE         NULL,
+            valid_to     DATE         NULL,
+            description  VARCHAR(300) NULL,
+            is_active    TINYINT(1)   NOT NULL DEFAULT 1,
+            created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                         ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_mst_price_lists_code (code),
+            KEY ix_mst_price_lists_vendor_id (vendor_id),
+            KEY ix_mst_price_lists_project_id (project_id),
+            CONSTRAINT fk_price_list_vendor FOREIGN KEY (vendor_id)
+                REFERENCES mst_vendors (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    "mst_price_list_items": """
+        CREATE TABLE mst_price_list_items (
+            id               BIGINT        NOT NULL AUTO_INCREMENT,
+            price_list_id    BIGINT        NOT NULL,
+            item_id          BIGINT        NOT NULL,
+            item_code        VARCHAR(50)   NULL,
+            item_name        VARCHAR(300)  NULL,
+            uom_id           BIGINT        NULL,
+            uom_code         VARCHAR(20)   NULL,
+            rate             DECIMAL(16,4) NOT NULL,
+            min_qty          DECIMAL(16,3) NOT NULL DEFAULT 0
+                             COMMENT 'slab pricing: rate applies from this quantity',
+            discount_percent DECIMAL(6,3)  NOT NULL DEFAULT 0,
+            is_active        TINYINT(1)    NOT NULL DEFAULT 1,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_price_list_item_qty (price_list_id, item_id, min_qty),
+            KEY ix_price_list_items_item_id (item_id),
+            CONSTRAINT fk_price_list_item_list FOREIGN KEY (price_list_id)
+                REFERENCES mst_price_lists (id) ON DELETE CASCADE,
+            CONSTRAINT fk_price_list_item_item FOREIGN KEY (item_id)
+                REFERENCES mst_items (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     "sys_notification_rules": """
         CREATE TABLE sys_notification_rules (
             id             BIGINT       NOT NULL AUTO_INCREMENT,

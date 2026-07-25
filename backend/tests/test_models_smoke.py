@@ -14,6 +14,10 @@ def test_all_tables_registered():
     # sys_local_credentials.
     expected = {
         "mst_items", "mst_vendors", "mst_uom", "mst_uom_conversions", "mst_projects",
+        "mst_brands", "mst_item_classes", "mst_packaging", "mst_features",
+        "mst_attributes", "mst_attribute_mappings",
+        "mst_price_lists", "mst_price_list_items",
+        "mst_boms", "mst_bom_items", "mst_item_specs",
         "whs_warehouses", "whs_bins",
         "hcm_employees", "hcm_positions", "hcm_position_assignments", "sys_hcm_sync_log",
         "rbac_permissions", "rbac_roles", "rbac_user_roles", "rbac_pages",

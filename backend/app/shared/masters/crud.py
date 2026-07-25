@@ -9,9 +9,10 @@ written down. Adding a master is a new MasterDef, not a new file.
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -47,6 +48,34 @@ class MasterDef:
     # on the admin screen show everything so a deactivated row can be reactivated.
     default_active_only: bool = False
     paginated: bool = True
+    # Columns exposed as optional ?column=value query filters. Child masters use this
+    # so BOM lines can be fetched for one BOM instead of all of them.
+    filters: Sequence[str] = ()
+
+
+async def _write(db: AsyncSession, defn: MasterDef, commit: bool = False) -> None:
+    """Flush (or commit), turning a database constraint error into a readable 400.
+
+    MySQL raises the duplicate-key error on the FLUSH, not the commit, so both go
+    through here. Without it the admin sees a bare 500 when they reuse a code, which
+    says nothing about what went wrong or how to fix it.
+    """
+    try:
+        await (db.commit() if commit else db.flush())
+    except IntegrityError as exc:
+        await db.rollback()
+        detail = str(getattr(exc, "orig", exc))
+        label = defn.name.lower()
+        article = "An" if label[:1] in "aeiou" else "A"
+        if "Duplicate entry" in detail or "UNIQUE" in detail.upper():
+            # Not always the code: mappings clash on attribute + target, price lines
+            # on list + item + quantity. So the message stays about the whole row.
+            raise ValidationError(
+                f"{article} {label} with these details already exists.") from exc
+        if "foreign key" in detail.lower():
+            raise ValidationError(
+                f"That {label} points at a record that does not exist.") from exc
+        raise
 
 
 async def _apply_fields(db: AsyncSession, defn: MasterDef, row, data: BaseModel) -> None:
@@ -78,6 +107,7 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
     # depend on them. Writing needs the master's own manage permission (rule 6).
     @router.get(base, name=f"list_{defn.path}")
     async def list_rows(
+        request: Request,
         params: PageParams = Depends(),
         search: str | None = None,
         include_inactive: bool = False,
@@ -87,6 +117,12 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         stmt = select(defn.model)
         if defn.default_active_only and not include_inactive:
             stmt = stmt.where(defn.model.is_active.is_(True))
+        # Declared filters are read off the query string rather than being separate
+        # parameters, because each master declares a different set of them.
+        for column in defn.filters:
+            raw = request.query_params.get(column)
+            if raw not in (None, ""):
+                stmt = stmt.where(getattr(defn.model, column) == raw)
         if search:
             clause = _search_clause(defn, search)
             if clause is not None:
@@ -110,10 +146,10 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         row = defn.model()
         await _apply_fields(db, defn, row, data)
         db.add(row)
-        await db.flush()
+        await _write(db, defn)
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.CREATE, actor=user, after=defn.serialize(row))
-        await db.commit()
+        await _write(db, defn, commit=True)
         await db.refresh(row)
         return defn.serialize(row)
 
@@ -129,11 +165,11 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
             raise NotFoundError(f"{defn.name} not found")
         before = defn.serialize(row)
         await _apply_fields(db, defn, row, data)
-        await db.flush()
+        await _write(db, defn)
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.UPDATE, actor=user,
                      before=before, after=defn.serialize(row))
-        await db.commit()
+        await _write(db, defn, commit=True)
         await db.refresh(row)
         return defn.serialize(row)
 
@@ -154,5 +190,5 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         await db.flush()
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.DEACTIVATE, actor=user)
-        await db.commit()
+        await _write(db, defn, commit=True)
         return {"success": True, "id": row_id, "is_active": False}

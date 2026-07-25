@@ -55,6 +55,14 @@ MASTER_CATEGORY_MANAGE = "master.category.manage"
 MASTER_UOM_MANAGE = "master.uom.manage"
 MASTER_LOCATION_MANAGE = "master.location.manage"
 MASTER_PROJECT_MANAGE = "master.project.manage"
+MASTER_BRAND_MANAGE = "master.brand.manage"
+MASTER_CLASS_MANAGE = "master.class.manage"
+MASTER_PACKAGING_MANAGE = "master.packaging.manage"
+MASTER_FEATURE_MANAGE = "master.feature.manage"
+MASTER_ATTRIBUTE_MANAGE = "master.attribute.manage"
+MASTER_PRICE_MANAGE = "master.price.manage"
+MASTER_BOM_MANAGE = "master.bom.manage"
+MASTER_SPEC_MANAGE = "master.spec.manage"
 
 # --- Admin ---
 ADMIN_ROLES_MANAGE = "admin.roles.manage"
@@ -97,6 +105,15 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(MASTER_LOCATION_MANAGE, "masters", "location", "manage",
          "Manage warehouses & bins"),
     Perm(MASTER_PROJECT_MANAGE, "masters", "project", "manage", "Manage projects"),
+    Perm(MASTER_BRAND_MANAGE, "masters", "brand", "manage", "Manage brands"),
+    Perm(MASTER_CLASS_MANAGE, "masters", "class", "manage", "Manage item classes"),
+    Perm(MASTER_PACKAGING_MANAGE, "masters", "packaging", "manage", "Manage packaging"),
+    Perm(MASTER_FEATURE_MANAGE, "masters", "feature", "manage", "Manage features"),
+    Perm(MASTER_ATTRIBUTE_MANAGE, "masters", "attribute", "manage",
+         "Manage attributes & attribute mapping"),
+    Perm(MASTER_PRICE_MANAGE, "masters", "price", "manage", "Manage price lists"),
+    Perm(MASTER_BOM_MANAGE, "masters", "bom", "manage", "Manage bills of material"),
+    Perm(MASTER_SPEC_MANAGE, "masters", "spec", "manage", "Manage item specifications"),
     Perm(ADMIN_ROLES_MANAGE, "admin", "roles", "manage", "Manage roles & permissions"),
     Perm(ADMIN_WORKFLOW_MANAGE, "admin", "workflow", "manage", "Manage approval workflows"),
     Perm(ADMIN_USERS_MANAGE, "admin", "users", "manage", "Manage users & HCM sync"),
