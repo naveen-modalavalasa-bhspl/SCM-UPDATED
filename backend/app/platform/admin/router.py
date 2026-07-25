@@ -112,6 +112,13 @@ async def list_roles(db: AsyncSession = Depends(get_db), user=Depends(get_curren
     return await groups.list_roles(db)
 
 
+@router.get("/hcm-roles")
+async def list_hcm_roles(db: AsyncSession = Depends(get_db),
+                         user=Depends(get_current_user)):
+    """HCM's org roles, derived from hcm_positions. Not SCM permission roles."""
+    return await groups.list_hcm_roles(db)
+
+
 # ------------------------ document numbering ------------------------ #
 @router.get("/doc-series")
 async def list_series(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):

@@ -12,7 +12,19 @@ export default defineConfig({
     alias: { "@": path.resolve(__dirname, "src") },
   },
   server: {
+    // Listen on every interface so phones and other machines on the LAN can open
+    // the app. The /api proxy still points at apiTarget, so a device only needs to
+    // reach this port — the backend can stay on localhost.
+    host: true,
     port: 5173,
+    strictPort: true,
+    proxy: {
+      "/api": { target: apiTarget, changeOrigin: true },
+    },
+  },
+  preview: {
+    host: true,
+    port: 4173,
     proxy: {
       "/api": { target: apiTarget, changeOrigin: true },
     },

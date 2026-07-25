@@ -34,6 +34,9 @@ app = FastAPI(title="SCM ERP", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    # Set CORS_ALLOW_PRIVATE_NETWORK=true to let other machines on the LAN use the
+    # app. None when the flag is off, which leaves the explicit list as the only rule.
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

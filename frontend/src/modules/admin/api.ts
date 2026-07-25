@@ -93,4 +93,8 @@ export const adminApi = {
   },
   roles: () => all<{ id: number; code: string; name: string; is_active: boolean }>(
     "/api/admin/roles"),
+  // HCM's org roles ("Network Technicians"), derived from hcm_positions. Distinct
+  // from roles() above, which is SCM permission roles.
+  hcmRoles: () => all<{ id: number; name: string; positions: number }>(
+    "/api/admin/hcm-roles"),
 };

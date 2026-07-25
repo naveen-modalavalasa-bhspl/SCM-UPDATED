@@ -8,12 +8,14 @@ A sub-group is a LOCATION group hanging off a parent: the parent decides *who*, 
 child narrows it to *where*, so members are the parent's members restricted to the
 employees at that place.
 """
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
-from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmPositionAssignment
+from app.platform.hcm.models import (
+    HcmEmployee, HcmFacility, HcmPosition, HcmPositionAssignment,
+)
 from app.platform.rbac.models import Role, UserGroup, UserGroupMember, UserRole
 from app.shared.enums import GroupType
 from app.shared.models.warehouse import Warehouse
@@ -45,6 +47,9 @@ async def _validate(db: AsyncSession, data, group_id: int | None) -> UserGroup |
 
     required = {
         GroupType.ROLE.value: ("role_id", data.role_id),
+        # HCM_ROLE reuses role_id, but it points at hcm_positions.role_id rather than
+        # rbac_roles.id — the two id spaces are unrelated.
+        GroupType.HCM_ROLE.value: ("role_id", data.role_id),
         GroupType.POSITION.value: ("position_id", data.position_id),
         GroupType.LOCATION.value: ("location_id", data.location_id),
     }[data.group_type]
@@ -124,6 +129,17 @@ async def _employee_ids_for_rule(db: AsyncSession, group: UserGroup) -> set[int]
                 HcmPositionAssignment.is_active.is_(True)))
         return set(rows.scalars().all())
 
+    if group.group_type == GroupType.HCM_ROLE.value:
+        # HCM's org role, held through a position. An employee with several positions
+        # in the same role appears once, because this is a set.
+        rows = await db.execute(
+            select(HcmPositionAssignment.employee_id)
+            .join(HcmPosition, HcmPosition.id == HcmPositionAssignment.position_id)
+            .where(HcmPosition.role_id == group.role_id,
+                   HcmPositionAssignment.is_active.is_(True),
+                   HcmPosition.is_active.is_(True)))
+        return set(rows.scalars().all())
+
     # LOCATION: whs_warehouses -> hcm_facility -> office -> employees in that office.
     warehouse = await db.get(Warehouse, group.location_id)
     if warehouse is None or warehouse.facility_id is None:
@@ -198,8 +214,27 @@ async def remove_member(db: AsyncSession, group_id: int, employee_id: int) -> di
 
 
 async def list_roles(db: AsyncSession) -> dict:
-    """Role master, read side. Serves the Masters screen's Roles tab."""
+    """SCM permission roles (rbac_roles). Serves the Masters screen's Roles tab."""
     rows = (await db.execute(select(Role).order_by(Role.name))).scalars().all()
     return {"items": [{"id": r.id, "code": r.code, "name": r.name,
                        "description": r.description, "is_system": r.is_system,
                        "is_active": r.is_active} for r in rows]}
+
+
+async def list_hcm_roles(db: AsyncSession) -> dict:
+    """The distinct org roles HCM defines, with how many positions carry each.
+
+    These are HCM's roles ("Network Technicians"), not SCM permission roles. There is
+    no hcm_roles table — the role lives denormalised on each position — so the list is
+    derived. It exists so an HCM_ROLE group can be picked from a dropdown rather than
+    by typing an id.
+    """
+    rows = (await db.execute(
+        select(HcmPosition.role_id, HcmPosition.role_name,
+               func.count(HcmPosition.id).label("positions"))
+        .where(HcmPosition.role_id.isnot(None), HcmPosition.is_active.is_(True))
+        .group_by(HcmPosition.role_id, HcmPosition.role_name)
+        .order_by(HcmPosition.role_name)
+    )).all()
+    return {"items": [{"id": r.role_id, "name": r.role_name or f"Role {r.role_id}",
+                       "positions": r.positions} for r in rows]}

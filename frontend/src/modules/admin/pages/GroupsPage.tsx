@@ -11,8 +11,12 @@ import { mastersApi } from "@/modules/masters/api";
 import { adminApi } from "../api";
 import type { GroupType, UserGroup } from "../types";
 
+// ROLE and HCM_ROLE are different things. ROLE is an SCM permission role — what
+// someone may do. HCM_ROLE is the org role mirrored from HRMS ("Network
+// Technicians") — what someone is.
 const GROUP_TYPES = [
-  { value: "ROLE", label: "By role" },
+  { value: "ROLE", label: "By SCM role (permissions)" },
+  { value: "HCM_ROLE", label: "By HRMS org role" },
   { value: "POSITION", label: "By position" },
   { value: "LOCATION", label: "By place (sub-group)" },
 ];
@@ -35,6 +39,9 @@ export function GroupsPage() {
     queryFn: () => adminApi.groups.list({ size: 100 }),
   });
   const roles = useQuery({ queryKey: ["admin", "roles"], queryFn: adminApi.roles });
+  const hcmRoles = useQuery({
+    queryKey: ["admin", "hcm-roles"], queryFn: adminApi.hcmRoles,
+  });
   const warehouses = useQuery({
     queryKey: ["masters", "warehouses-all"],
     queryFn: () => mastersApi.warehouses.list({ size: 200 }).then((p) => p.items),
@@ -143,6 +150,16 @@ export function GroupsPage() {
                     <Select value={draft.role_id ?? ""}
                             options={(roles.data ?? []).map((r) => ({ value: r.id, label: r.name }))}
                             onChange={(v) => patch({ role_id: v === "" ? null : Number(v) })} />
+                  </Field>
+                )}
+                {draft?.group_type === "HCM_ROLE" && (
+                  <Field label="HRMS role">
+                    <Select value={draft.role_id ?? ""}
+                            options={(hcmRoles.data ?? []).map((r) => ({
+                              value: r.id, label: r.name,
+                            }))}
+                            onChange={(v) => patch({ role_id: v === "" ? null : Number(v) })}
+                            placeholder="e.g. Network Technicians" />
                   </Field>
                 )}
                 {draft?.group_type === "POSITION" && (
