@@ -9,6 +9,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
+from app.shared.enums import IndentItemStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 
 
@@ -70,6 +71,11 @@ class IndentItem(Base):
     approved_quantity = Column("approved_qty", Numeric(16, 3), nullable=False, default=0)
     ordered_quantity = Column("ordered_qty", Numeric(16, 3), nullable=False, default=0)
     received_quantity = Column("received_qty", Numeric(16, 3), nullable=False, default=0)
+    # Set by inventory allocation after approval: how much of this line came out of
+    # stock. The remainder becomes an MR line. Flow doc §3 steps 3-5.
+    allocated_quantity = Column("allocated_qty", Numeric(16, 3), nullable=False, default=0)
+    status = Column(String(20), nullable=False,
+                    default=IndentItemStatus.PENDING.value)
     remarks = Column(String(500), nullable=True)
 
     indent = relationship("Indent", back_populates="items")

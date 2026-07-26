@@ -13,6 +13,11 @@ class IndentStatus(str, Enum):
     PENDING_APPROVAL = "PENDING_APPROVAL"   # added: engine uses it (addendum Part D)
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    # Set by inventory allocation once an approved indent has been checked against
+    # stock (flow doc §3 steps 3-5).
+    ALLOCATED = "ALLOCATED"                       # every line reserved from stock
+    PARTIALLY_FULFILLED = "PARTIALLY_FULFILLED"   # some reserved, rest went to an MR
+    PENDING_PROCUREMENT = "PENDING_PROCUREMENT"   # nothing on hand, all of it to an MR
     PARTIALLY_ORDERED = "PARTIALLY_ORDERED"
     ORDERED = "ORDERED"
     CLOSED = "CLOSED"
@@ -71,6 +76,7 @@ class UserRole(str, Enum):
 
 class DocType(str, Enum):
     INDENT = "INDENT"
+    MR = "MR"          # material request — the indent -> procurement bridge
     PO = "PO"
     GRN = "GRN"
     ISSUE = "ISSUE"
@@ -119,6 +125,7 @@ class RefType(str, Enum):
     ISSUE = "ISSUE"
     ADJUSTMENT = "ADJUSTMENT"
     TRANSFER = "TRANSFER"
+    RESERVATION = "RESERVATION"
 
 
 class Priority(str, Enum):
@@ -129,21 +136,70 @@ class Priority(str, Enum):
 # ---- Masters & Admin (this build) ----
 
 class WarehouseType(str, Enum):
-    """whs_warehouses.warehouse_type. The live column defaults to MAIN."""
+    """whs_warehouses.warehouse_type. The live column defaults to MAIN.
+
+    LIP (Local Inventory Point) and MDP (Material Distribution Point) from flow doc §1
+    are stocking points like any other — they hold real stock and can fulfil an indent.
+    They differ only in who they serve, so they are a type here rather than a table.
+    """
     MAIN = "MAIN"
+    LIP = "LIP"
+    MDP = "MDP"
     TRANSIT = "TRANSIT"
     QUARANTINE = "QUARANTINE"
     SCRAP = "SCRAP"
 
 
 class BinType(str, Enum):
-    """whs_bins.bin_type. Bins nest through parent_id, so ZONE/RACK/SHELF are the same
-    table at different levels rather than three tables."""
+    """whs_bins.bin_type. Bins nest through parent_id, so the whole
+    Warehouse → Floor → Line → Rack → Bin → Lot hierarchy of flow doc §1 is this one
+    table at different levels rather than six tables. COLD_ROOM marks temperature-
+    controlled storage."""
+    FLOOR = "FLOOR"
+    LINE = "LINE"
     ZONE = "ZONE"
     RACK = "RACK"
     SHELF = "SHELF"
+    BIN = "BIN"
+    LOT = "LOT"
+    COLD_ROOM = "COLD_ROOM"
     STORAGE = "STORAGE"
     STAGING = "STAGING"
+
+
+# ---- Inventory: reservations and material requests ----
+
+class ReservationStatus(str, Enum):
+    """inv_reservations.status. Released and consumed rows are kept, never deleted —
+    "who held this stock in March" must stay answerable."""
+    ACTIVE = "ACTIVE"
+    RELEASED = "RELEASED"
+    CONSUMED = "CONSUMED"
+
+
+class MRStatus(str, Enum):
+    """inv_material_requests.status. The bridge from a short indent to procurement."""
+    DRAFT = "DRAFT"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    ORDERED = "ORDERED"
+    CANCELLED = "CANCELLED"
+
+
+class PickStrategy(str, Enum):
+    """FEFO for anything carrying a batch or an expiry date — picking the nearest
+    expiry first is the entire point of tracking expiry. FIFO for everything else."""
+    FEFO = "FEFO"
+    FIFO = "FIFO"
+
+
+class IndentItemStatus(str, Enum):
+    """ind_indent_items.status. Set by allocation, per line, after approval."""
+    PENDING = "PENDING"
+    ALLOCATED = "ALLOCATED"
+    SHORT = "SHORT"
+    ISSUED = "ISSUED"
 
 
 class GroupType(str, Enum):
