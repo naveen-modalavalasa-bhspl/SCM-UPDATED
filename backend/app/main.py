@@ -64,8 +64,8 @@ def _include_routers() -> None:
         "app.platform.admin.router",
         "app.modules.indents.router",
         "app.modules.procurement.router",
-        "app.modules.logistics.router",
         "app.modules.inventory.router",
+        "app.modules.logistics.router",
         "app.shared.masters.router",
     ]
     for path in router_paths:
