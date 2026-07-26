@@ -1,8 +1,9 @@
 # SCM ERP — Project Rules & Architecture
 
-Doc precedence: **03 overrides 02 overrides 01** where they conflict.
-Full specs: `docs/01_BUILD_GUIDE.md`, `docs/02_ADDENDUM.md`, `docs/03_HCM_AND_DB.md`.
-Read them before making structural changes.
+Doc precedence: **04 overrides 03 overrides 02 overrides 01** where they conflict.
+Full specs: `docs/01_BUILD_GUIDE.md`, `docs/02_ADDENDUM.md`, `docs/03_HCM_AND_DB.md`,
+`docs/04_SCM_BUSINESS_FLOW.md` (the business owner's end-to-end flow — the authority on
+what the system must do). Read them before making structural changes.
 
 Stack: FastAPI (async) + SQLAlchemy 2.0 async + Alembic + **MySQL** (prod) +
 React 18 + Vite + TypeScript + TanStack Query + axios + Tailwind v4.

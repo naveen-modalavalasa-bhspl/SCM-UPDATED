@@ -44,26 +44,11 @@ USERS = [
     ("planthead", 900006, "Padma Planthead", RoleCode.APPROVER.value),
 ]
 
-# (code, path, name, icon, required_permission, sort_order, parent_code)
-PAGE_TREE = [
-    ("home", "/", "Home", "home", None, 0, None),
-    ("grp_indents", "/indents/dashboard", "Indents", "file-text", P.INDENT_VIEW, 10, None),
-    ("ind_dashboard", "/indents/dashboard", "Dashboard", "layout-dashboard", P.INDENT_VIEW, 11, "grp_indents"),
-    ("ind_list", "/indents", "List", "list", P.INDENT_VIEW, 12, "grp_indents"),
-    ("ind_board", "/indents/board", "Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
-    ("ind_ack", "/indents/acknowledgments", "Acknowledgments", "check-circle", P.INDENT_VIEW, 14, "grp_indents"),
-    ("ind_reports", "/indents/reports", "Reports", "bar-chart", P.INDENT_VIEW, 15, "grp_indents"),
-    ("ind_notifications", "/indents/notifications", "Notifications", "bell", P.INDENT_VIEW, 16, "grp_indents"),
-    ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
-    ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
-    ("po_list", "/pos", "Purchase Orders", "shopping-cart", P.PO_VIEW, 31, "grp_purchasing"),
-    ("grp_warehouse", "/stock", "Warehouse", "truck", P.STOCK_VIEW, 40, None),
-    ("grn", "/grn", "Goods Receipt", "truck", P.GRN_VIEW, 41, "grp_warehouse"),
-    ("stock", "/stock", "Stock", "package", P.STOCK_VIEW, 42, "grp_warehouse"),
-    ("issues", "/issues", "Issues", "send", P.ISSUE_VIEW, 43, "grp_warehouse"),
-    ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
-    ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
-]
+# The menu has ONE source of truth: scripts/seed.py PAGE_TREE (per CLAUDE.md, that is
+# where a module dev adds a screen). Keeping a second copy here silently deleted every
+# page the copy had not caught up with — Inventory and the warehouse sub-pages vanished
+# from the rail the moment this script ran.
+from scripts.seed import PAGE_TREE  # noqa: E402
 
 
 async def _get(db, model, **filt):
@@ -113,6 +98,13 @@ async def seed():
         for code, *_rest, parent in PAGE_TREE:
             page = await db.get(Page, code_to_id[code])
             page.parent_id = code_to_id[parent] if parent else None
+        valid_page_codes = {code for code, *_rest in PAGE_TREE}
+        stale_pages = (await db.execute(
+            select(Page).where(Page.code.notin_(valid_page_codes))
+        )).scalars().all()
+        for page in stale_pages:
+            await db.delete(page)
+        await db.flush()
 
         # employees + credentials + roles
         for emp_code, emp_id, name, role_code in USERS:
