@@ -9,11 +9,13 @@ Inventory is the base module — it imports nothing from app.modules — so ever
 module can call move_stock() without inverting the import chain.
 """
 from sqlalchemy import (
-    BigInteger, Column, Date, DateTime, ForeignKey, Index, Numeric, String,
-    UniqueConstraint,
+    BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String,
+    Text, UniqueConstraint,
 )
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
+from app.shared.enums import Priority, ReservationStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col, utcnow
 
 """0 rather than NULL means "not set" for bin, batch and project.
@@ -94,3 +96,99 @@ class StockMovement(Base):
 Index("ix_stk_ledger_item_created", StockMovement.item_id,
       StockMovement.created_at.desc())
 Index("ix_stk_ledger_ref", StockMovement.ref_type, StockMovement.ref_id)
+
+
+class Reservation(Base):
+    """One row per promised quantity — stock spoken for but not yet issued.
+
+    Exists so stk_balance.reserved_qty is explainable: a reserved quantity with no
+    matching ACTIVE reservation is a bug the system can detect. Rows are never
+    deleted, only moved to RELEASED or CONSUMED, because "who held this stock in
+    March" has to stay answerable.
+
+    Reserving is not a stock movement — nothing has physically moved — so there is no
+    stk_ledger row and total_qty is untouched. See allocation.py.
+    """
+    __tablename__ = "inv_reservations"
+    id = pk()
+    stock_id = Column(ForeignKey("stk_balance.id", ondelete="CASCADE"),
+                      index=True, nullable=False)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    # denormalised from the stock row so a reservation report needs no join
+    warehouse_id = Column(BigInteger, index=True, nullable=False)
+    bin_id = Column(BigInteger, nullable=False, default=NO_BIN)
+    batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
+    project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
+    quantity = Column(Numeric(16, 3), nullable=False)
+    ref_type = Column(String(30), nullable=False)      # RefType
+    ref_id = Column(BigInteger, nullable=False)
+    ref_no = Column(String(50), nullable=True)
+    ref_line_id = Column(BigInteger, index=True, nullable=True)   # ind_indent_items.id
+    status = Column(String(20), nullable=False, index=True,
+                    default=ReservationStatus.ACTIVE.value)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+    released_at = Column(DateTime, nullable=True)
+
+
+Index("ix_inv_reservations_ref", Reservation.ref_type, Reservation.ref_id)
+Index("ix_inv_reservations_active", Reservation.status, Reservation.item_id)
+
+
+class MaterialRequest(Base):
+    """The bridge from a short indent to procurement.
+
+    Flow doc §4.2 raises it at inventory level; §5.1 has procurement approve it. It
+    lives in inventory rather than procurement so the import chain stays one-way —
+    inventory is the base module and procurement reads it, not the reverse.
+    """
+    __tablename__ = "inv_material_requests"
+    id = pk()
+    mr_no = Column(String(30), unique=True, nullable=False)
+    mr_date = Column(Date, nullable=True)
+    # backward pointer to the indent that ran short (business flow: each doc points back)
+    indent_id = Column(BigInteger, index=True, nullable=True)
+    indent_no = Column(String(30), nullable=True)
+    requested_by_id = soft_fk()
+    requested_by_name = Column(String(200), nullable=True)
+    department_id = soft_fk()
+    department_name = Column(String(200), nullable=True)
+    facility_id = soft_fk()
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)
+    status = Column(String(30), nullable=False, index=True)
+    priority = Column(String(20), nullable=False, default=Priority.NORMAL.value)
+    required_by = Column(Date, nullable=True)
+    remarks = Column(Text, nullable=True)
+    # denormalised from wf_ so list screens need no join
+    current_approver_name = Column(String(200), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("MaterialRequestItem", back_populates="mr",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+Index("ix_inv_material_requests_status", MaterialRequest.status,
+      MaterialRequest.created_at.desc())
+
+
+class MaterialRequestItem(Base):
+    __tablename__ = "inv_material_request_items"
+    id = pk()
+    mr_id = Column(ForeignKey("inv_material_requests.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    line_no = Column(Integer, nullable=False, default=1)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)     # snapshot
+    item_name = Column(String(300), nullable=True)    # snapshot
+    uom_code = Column(String(20), nullable=True)      # snapshot
+    quantity = Column(Numeric(16, 3), nullable=False)
+    ordered_quantity = Column(Numeric(16, 3), nullable=False, default=0)
+    project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
+    indent_item_id = Column(BigInteger, index=True, nullable=True)
+    remarks = Column(String(500), nullable=True)
+
+    mr = relationship("MaterialRequest", back_populates="items")

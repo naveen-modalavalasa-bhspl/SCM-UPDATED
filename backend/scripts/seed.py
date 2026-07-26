@@ -117,13 +117,16 @@ PAGE_TREE = [
     ("inv_transfers", "/inventory/transfers", "Transfers", "arrow-left-right",
      P.STOCK_ADJUST, 55, "grp_inventory"),
 
+    ("masters", "/masters", "Masters", "database", P.MASTER_ITEM_MANAGE, 60, None),
+
+    ("grp_rbac", "/rbac/access", "RBAC", "shield", P.ADMIN_ROLES_MANAGE, 80, None),
+    ("rbac_access", "/rbac/access", "Roles & Access", "shield",
+     P.ADMIN_ROLES_MANAGE, 81, "grp_rbac"),
+    ("rbac_groups", "/rbac/groups", "User Groups", "users",
+     P.ADMIN_GROUPS_MANAGE, 82, "grp_rbac"),
+
     ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
     ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
-    ("masters", "/masters", "Masters", "database", P.MASTER_ITEM_MANAGE, 92, "grp_settings"),
-    ("admin_users", "/admin/users", "Users & Access", "users",
-     P.ADMIN_USERS_MANAGE, 93, "grp_settings"),
-    ("admin_groups", "/admin/groups", "User Groups", "users",
-     P.ADMIN_GROUPS_MANAGE, 94, "grp_settings"),
     ("admin_rules", "/admin/rules", "Rules Engine", "git-branch",
      P.ADMIN_RULES_MANAGE, 95, "grp_settings"),
     ("admin_numbering", "/admin/numbering", "Document Numbering", "hash",

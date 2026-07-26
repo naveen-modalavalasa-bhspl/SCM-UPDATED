@@ -10,7 +10,10 @@ from app.core.database import Base
 import app.all_models  # noqa: F401  (registers every table)
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# alembic.ini is read by configparser, which treats '%' as interpolation. The live
+# password is percent-encoded (# -> %23), so an unescaped URL raises
+# "invalid interpolation syntax" and every alembic command that touches the DB dies.
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

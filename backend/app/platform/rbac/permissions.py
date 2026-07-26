@@ -42,6 +42,12 @@ GRN_QC = "grn.qc"
 # --- Stock ---
 STOCK_VIEW = "stock.view"
 STOCK_ADJUST = "stock.adjust"
+STOCK_RESERVE = "stock.reserve"
+STOCK_TRANSFER = "stock.transfer"
+MR_VIEW = "mr.view"
+MR_CREATE = "mr.create"
+MR_APPROVE = "mr.approve"
+MR_REJECT = "mr.reject"
 
 # --- Issues ---
 ISSUE_VIEW = "issue.view"
@@ -93,8 +99,17 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(GRN_VIEW, "logistics", "grn", "view", "View GRNs"),
     Perm(GRN_CREATE, "logistics", "grn", "create", "Create GRNs"),
     Perm(GRN_QC, "logistics", "grn", "qc", "QC pass/fail a GRN"),
-    Perm(STOCK_VIEW, "logistics", "stock", "view", "View stock"),
-    Perm(STOCK_ADJUST, "logistics", "stock", "adjust", "Adjust stock"),
+    # module is "inventory": stk_* moved there when Inventory became the base module.
+    Perm(STOCK_VIEW, "inventory", "stock", "view", "View stock"),
+    Perm(STOCK_ADJUST, "inventory", "stock", "adjust", "Adjust stock"),
+    Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
+    Perm(STOCK_TRANSFER, "inventory", "stock", "transfer",
+         "Transfer stock between warehouses"),
+    Perm(MR_VIEW, "inventory", "material_request", "view", "View material requests"),
+    Perm(MR_CREATE, "inventory", "material_request", "create", "Create material requests"),
+    Perm(MR_APPROVE, "inventory", "material_request", "approve",
+         "Approve material requests"),
+    Perm(MR_REJECT, "inventory", "material_request", "reject", "Reject material requests"),
     Perm(ISSUE_VIEW, "logistics", "issue", "view", "View issues"),
     Perm(ISSUE_CREATE, "logistics", "issue", "create", "Create issues"),
     Perm(ISSUE_ISSUE, "logistics", "issue", "issue", "Issue stock to a department"),
