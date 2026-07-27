@@ -5,10 +5,15 @@ import {
 } from "@heroui/react";
 import { Check, Copy, KeyRound, Search, ShieldOff, UserPlus } from "lucide-react";
 import {
-  Button, Can, PageHeader, ResponsiveList, StatCard, type Column,
+  Button, Can, PageHeader, ResponsiveList, Select, StatCard, type Column,
 } from "@/shared/components";
 import { rbacApi } from "../api";
+import { PermissionMatrix } from "../components/PermissionMatrix";
+import { ReportingView } from "../components/ReportingView";
+import { AccessLookup } from "../components/AccessLookup";
 import type { AdminUserRow, GrantResult } from "../types";
+
+const PAGE_SIZE = 50;
 
 /**
  * There is no users table: identity is the HCM employee mirror. "Creating a user"
@@ -17,9 +22,12 @@ import type { AdminUserRow, GrantResult } from "../types";
  */
 export function UsersPage() {
   const qc = useQueryClient();
-  const [view, setView] = useState<"users" | "pages" | "features">("users");
+  const [view, setView] = useState<
+    "users" | "pages" | "features" | "matrix" | "reporting" | "lookup">("users");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "with" | "without">("all");
+  const [roleId, setRoleId] = useState<number | null>(null);
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<AdminUserRow | null>(null);
   const [roleIds, setRoleIds] = useState<number[]>([]);
   const [issued, setIssued] = useState<GrantResult | null>(null);
@@ -30,11 +38,13 @@ export function UsersPage() {
   });
   const roles = useQuery({ queryKey: ["rbac", "roles"], queryFn: rbacApi.roles });
   const users = useQuery({
-    queryKey: ["rbac", "users", search, filter],
+    queryKey: ["rbac", "users", search, filter, roleId, page],
     queryFn: () => rbacApi.users.list({
       search: search || undefined,
       with_access: filter === "all" ? undefined : filter === "with",
-      size: 50,
+      role_id: roleId ?? undefined,
+      page,
+      size: PAGE_SIZE,
     }),
   });
 
@@ -120,6 +130,9 @@ export function UsersPage() {
           ["users", "Users & roles"],
           ["pages", "Page access"],
           ["features", "Feature controls"],
+          ["matrix", "Permission matrix"],
+          ["reporting", "Reporting"],
+          ["lookup", "Access lookup"],
         ] as const).map(
           ([key, label]) => (
             <button
@@ -150,9 +163,22 @@ export function UsersPage() {
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
             placeholder="Search name, code or email…"
             className="h-11 w-full rounded-xl border border-line bg-content1 pl-9 pr-3 text-sm outline-none focus:border-brand"
+          />
+        </div>
+        <div className="min-w-0 sm:w-56">
+          <Select
+            value={roleId ?? ""}
+            placeholder="All roles"
+            options={[
+              { value: "", label: "All roles" },
+              ...(roles.data ?? []).map((role) => ({
+                value: role.id, label: `${role.name} (${role.source})`,
+              })),
+            ]}
+            onChange={(v) => { setRoleId(v === "" ? null : Number(v)); setPage(1); }}
           />
         </div>
         <div className="flex gap-1 rounded-xl bg-content2 p-1">
@@ -160,7 +186,7 @@ export function UsersPage() {
             .map(([key, label]) => (
               <button
                 key={key}
-                onClick={() => setFilter(key)}
+                onClick={() => { setFilter(key); setPage(1); }}
                 className={`h-9 rounded-lg px-3 text-sm font-medium transition ${
                   filter === key ? "bg-content1 text-ink shadow-sm" : "text-muted hover:text-body"
                 }`}
@@ -189,9 +215,33 @@ export function UsersPage() {
           </div>
         )}
       />
+
+      {(users.data?.total ?? 0) > PAGE_SIZE && (
+        <div className="mt-4 flex items-center justify-center gap-3">
+          <button disabled={page === 1} onClick={() => setPage((p) => p - 1)}
+                  className="h-11 rounded-xl px-4 text-sm font-medium text-body disabled:text-muted">
+            Previous
+          </button>
+          <span className="text-sm text-muted">
+            Page {page} of {Math.ceil((users.data?.total ?? 0) / PAGE_SIZE)}
+          </span>
+          <button
+            disabled={page * PAGE_SIZE >= (users.data?.total ?? 0)}
+            onClick={() => setPage((p) => p + 1)}
+            className="h-11 rounded-xl px-4 text-sm font-medium text-body disabled:text-muted">
+            Next
+          </button>
+        </div>
+      )}
         </>
       ) : view === "pages" ? (
         <PageAccessMatrix />
+      ) : view === "matrix" ? (
+        <PermissionMatrix />
+      ) : view === "reporting" ? (
+        <ReportingView />
+      ) : view === "lookup" ? (
+        <AccessLookup />
       ) : (
         <FeatureAccessMatrix />
       )}
