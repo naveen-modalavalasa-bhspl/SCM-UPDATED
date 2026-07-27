@@ -54,8 +54,12 @@ backend/app/
     workflow/  engine.py, resolver.py, conditions.py    — approval engine (wf_*)
     auth/      login + /api/auth/me
     settings/  sys_ tables (settings, doc numbers, sync log, sessions, credentials)
-  modules/     indents (ind_), procurement (pro_), logistics (lgs_/stk_)
+  modules/     inventory (stk_/inv_), indents (ind_), procurement (pro_),
+               logistics (lgs_)
                — each: models.py schemas.py service.py router.py tests/
+               inventory is the BASE module: it imports nothing from app.modules, so
+               indents can call allocate_for_indent() on approval without inverting
+               the chain. It owns stock, reservations and material requests.
 frontend/src/  shared/{api,auth,components,layout}, pages/, and
   modules/{indents,procurement,logistics}  — each mirrors the backend module:
                api.ts  types.ts  pages/  components/  tests/
@@ -95,15 +99,22 @@ Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock
 3. Never a raw status string — always the enum from `app/shared/enums.py`.
 4. Only the lead edits `core/`, `shared/`, `platform/`.
 5. Imports one way: modules → platform → shared → core. Modules may import
-   earlier modules in the chain (logistics → procurement → indents), never later.
+   earlier modules in the chain, never later. The chain is:
+   `inventory → indents → procurement → logistics → warehouse`.
 6. Every endpoint has `Depends(require_permission("<code>"))`. Hiding a button is
    not security — the backend check is. Permission codes live only in
    `platform/rbac/permissions.py`; never invent one inline.
-7. Stock changes ONLY through `logistics.service.move_stock()`. Never assign
-   `stk_stock.quantity` directly. `stk_movements` is append-only.
+7. Physical stock changes ONLY through `inventory.service.move_stock()`, which
+   always writes a `stk_ledger` row. Reservation columns (`available_qty` <->
+   `reserved_qty`) change ONLY through `inventory.allocation`. Nothing else
+   assigns to `stk_balance`. `stk_ledger` is append-only. Reserving is not a
+   movement: `total_qty` is untouched and no ledger row is written.
 8. Approvals ONLY through `platform/workflow/engine.py` (`start`, `act`,
    `current_approvers`, `pending_for_user`, `history`). No approval logic in a
    module. Engine owns the chain; the module owns the document status.
+   Configuration must never strand a document: a missing workflow, a stage that
+   resolves to nobody, and a missing `sys_doc_series` row all fall back
+   (`platform/workflow/fallback.py`, `shared/numbering.py`) and log loudly.
 9. Every state change: load → validate current status → change → write audit
    row → commit. Never delete a `wf_actions` row.
 10. Async everywhere. `hcm_*` tables are READ-ONLY — written only by
@@ -158,6 +169,15 @@ was applied; these are the resolved conflicts:
 - **e2e** includes the `send-to-vendor` step (the GRN guard requires
   `SENT_TO_VENDOR`), which the doc's short arrow-chain omitted.
 
-Frontend built: shared client/auth/layout, `<Can>`, `<ResponsiveList>`, and the three
-indents pages (List/Form/Detail). Other module screens are week-2 scope (placeholder
-pages); their backends are complete and tested.
+- **Tests need a local MySQL.** The live `SCM` account cannot `CREATE DATABASE`, so
+  the suite cannot build its `_test` schema on the shared server. Set
+  `TEST_DATABASE_URL` in `backend/.env` to a MySQL you own; without it every
+  DB-backed test silently skips. The suite drops and recreates ~85 tables per test,
+  so a full run takes ~10 minutes.
+
+Frontend built: shared client/auth/layout, `<Can>`, `<ResponsiveList>`, the indents
+pages, admin/masters/rbac, and the inventory screens (stock balance, ledger, transfers,
+fulfilment queue, material requests) on real endpoints. Procurement screens and the
+warehouse module are still to come — the warehouse frontend currently in the repo was
+built against a different backend contract and is to be rewritten (see
+`docs/04_SCM_BUSINESS_FLOW.md`).

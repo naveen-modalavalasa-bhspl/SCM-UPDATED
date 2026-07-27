@@ -25,7 +25,16 @@ def _d(value) -> Decimal:
 
 async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate, user) -> PurchaseOrder:
     indent = await indent_service.get_indent(db, indent_id)
-    if indent.status not in (IndentStatus.APPROVED.value, IndentStatus.PARTIALLY_ORDERED.value):
+    # An approved indent that the availability check could not fill lands in
+    # PENDING_PROCUREMENT or PARTIALLY_FULFILLED. Those are still approved indents --
+    # they are in fact the ones that most need buying -- so they convert to a PO too.
+    BUYABLE = (
+        IndentStatus.APPROVED.value,
+        IndentStatus.PARTIALLY_ORDERED.value,
+        IndentStatus.PENDING_PROCUREMENT.value,
+        IndentStatus.PARTIALLY_FULFILLED.value,
+    )
+    if indent.status not in BUYABLE:
         raise ValidationError("Only approved indents can be converted to a PO")
     if not data.lines:
         raise ValidationError("PO must have at least one line")

@@ -29,8 +29,15 @@ _DSN_RE = re.compile(r"mysql\+aiomysql://([^:]+):([^@]*)@([^:/]+):(\d+)/(.+)")
 def _source_url() -> str:
     """TEST_DATABASE_URL wins so the suite can point at a local MySQL. The app's
     DATABASE_URL may name a shared server whose account cannot CREATE DATABASE, or
-    which only accepts connections from whitelisted hosts."""
-    return os.getenv("TEST_DATABASE_URL") or settings.DATABASE_URL
+    which only accepts connections from whitelisted hosts.
+
+    Checked in os.environ first (a one-off override on the command line), then in
+    settings, which is what actually reads .env — putting it only in .env and reading
+    only os.getenv silently did nothing, and every DB test kept skipping.
+    """
+    return (os.getenv("TEST_DATABASE_URL")
+            or settings.TEST_DATABASE_URL
+            or settings.DATABASE_URL)
 
 
 def _parts():
@@ -164,7 +171,12 @@ def make_user(db):
                 select(Permission).where(Permission.code == code)
             )).scalar_one_or_none()
             if perm is None:
-                perm = Permission(code=code)
+                # module/resource/action are NOT NULL. Derive them from the code
+                # ("indent.view" -> indents/indent/view) rather than passing None,
+                # which sends an explicit NULL and raises 1048.
+                head, _, tail = code.partition(".")
+                perm = Permission(code=code, module=head, resource=head,
+                                  action=tail or "view", description=code)
                 db.add(perm)
                 await db.flush()
             db.add(RolePermission(role_id=role.id, permission_id=perm.id))

@@ -8,7 +8,7 @@ import {
   Button, Can, Field, Input, PageHeader, ResponsiveList, Select, type Column,
 } from "@/shared/components";
 import { mastersApi } from "@/modules/masters/api";
-import { adminApi } from "../api";
+import { rbacApi } from "../api";
 import type { GroupType, UserGroup } from "../types";
 
 // ROLE and HCM_ROLE are different things. ROLE is an SCM permission role — what
@@ -35,12 +35,12 @@ export function GroupsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const groups = useQuery({
-    queryKey: ["admin", "groups"],
-    queryFn: () => adminApi.groups.list({ size: 100 }),
+    queryKey: ["rbac", "groups"],
+    queryFn: () => rbacApi.groups.list({ size: 100 }),
   });
-  const roles = useQuery({ queryKey: ["admin", "roles"], queryFn: adminApi.roles });
+  const roles = useQuery({ queryKey: ["rbac", "roles"], queryFn: rbacApi.roles });
   const hcmRoles = useQuery({
-    queryKey: ["admin", "hcm-roles"], queryFn: adminApi.hcmRoles,
+    queryKey: ["rbac", "hcm-roles"], queryFn: rbacApi.hcmRoles,
   });
   const warehouses = useQuery({
     queryKey: ["masters", "warehouses-all"],
@@ -48,23 +48,23 @@ export function GroupsPage() {
   });
   // Members are resolved server-side from the group's rule, so this is always current.
   const members = useQuery({
-    queryKey: ["admin", "groups", viewing?.id, "members"],
-    queryFn: () => adminApi.groups.members(viewing!.id),
+    queryKey: ["rbac", "groups", viewing?.id, "members"],
+    queryFn: () => rbacApi.groups.members(viewing!.id),
     enabled: viewing !== null,
   });
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["admin", "groups"] });
+  const refresh = () => qc.invalidateQueries({ queryKey: ["rbac", "groups"] });
 
   const save = useMutation({
     mutationFn: () => (editingId == null
-      ? adminApi.groups.create(draft!)
-      : adminApi.groups.update(editingId, draft!)),
+      ? rbacApi.groups.create(draft!)
+      : rbacApi.groups.update(editingId, draft!)),
     onSuccess: () => { setDraft(null); refresh(); },
     onError: (e: Error) => setError(e.message),
   });
 
   const deactivate = useMutation({
-    mutationFn: (id: number) => adminApi.groups.deactivate(id),
+    mutationFn: (id: number) => rbacApi.groups.deactivate(id),
     onSuccess: () => { setDraft(null); refresh(); },
     onError: (e: Error) => setError(e.message),
   });
@@ -92,7 +92,7 @@ export function GroupsPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Admin" title="User groups" />
+      <PageHeader eyebrow="RBAC" title="User groups" />
 
       <div className="mb-4 flex items-center justify-between gap-3">
         <p className="text-sm text-muted">

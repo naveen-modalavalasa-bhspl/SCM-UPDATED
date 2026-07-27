@@ -1,10 +1,10 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  DocSeries, MasterAttribute, MasterAttributeMapping, MasterBin, MasterBom,
+  MasterAttribute, MasterAttributeMapping, MasterBin, MasterBom,
   MasterBomItem, MasterBrand, MasterCategory, MasterFeature, MasterItem,
   MasterItemClass, MasterItemSpec, MasterPackaging, MasterPriceList,
-  MasterPriceListItem, MasterRole, MasterUom, MasterUomConversion, MasterVendor,
+  MasterPriceListItem, MasterUom, MasterUomConversion, MasterVendor,
   MasterWarehouse, Project, RefRow,
   MasterBrandManufacturer, MasterItemSubClass, NamedMaster,
 } from "./types";
@@ -74,17 +74,6 @@ export const mastersApi = {
   uomConversions: {
     ...crud<MasterUomConversion>("/api/uom-conversions"),
     listAll: () => all<MasterUomConversion>("/api/uom-conversions"),
-  },
-
-  roles: () => all<MasterRole>("/api/admin/roles"),
-  docSeries: {
-    listAll: () => all<DocSeries>("/api/admin/doc-series"),
-    create: (body: Partial<DocSeries>) =>
-      api.post<DocSeries>("/api/admin/doc-series", body).then((r) => r.data),
-    update: (id: number, body: Partial<DocSeries>) =>
-      api.put<DocSeries>(`/api/admin/doc-series/${id}`, body).then((r) => r.data),
-    deactivate: (id: number) =>
-      api.delete(`/api/admin/doc-series/${id}`).then((r) => r.data),
   },
 
   departments: () => all<RefRow>("/api/departments"),

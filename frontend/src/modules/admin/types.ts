@@ -17,97 +17,19 @@ export interface Schedule {
   next_run: string | null;
 }
 
-// --------------------------------------------------------------------------- //
-//  Admin module: users, groups, rules, audit, notifications
-// --------------------------------------------------------------------------- //
+export type ResetPolicy = "NEVER" | "YEARLY" | "MONTHLY";
 
-export interface AdminUserRow {
-  employee_id: number;
-  emp_code?: string | null;
-  full_name: string;
-  email?: string | null;
-  department_name?: string | null;
-  has_access: boolean;
-  locked: boolean;
-  last_login_at?: string | null;
-  roles: {
-    id: number;
-    code: string;
-    name: string;
-    source: "HCM" | "SCM";
-    assignable: boolean;
-  }[];
-  positions: { id: number; name: string }[];
-}
-
-export interface AccessSummary {
-  active_employees: number;
-  users_with_access: number;
-  active_roles: number;
-}
-
-export interface PageAccessMatrix {
-  pages: {
-    code: string;
-    name: string;
-    module?: string | null;
-    always_on: boolean;
-    required_permission?: string | null;
-  }[];
-  roles: {
-    id: number;
-    code: string;
-    name: string;
-    source: "HCM" | "SCM";
-    page_codes: string[];
-  }[];
-}
-
-export interface FeatureAccessMatrix {
-  features: {
-    code: string;
-    module: string;
-    description: string;
-  }[];
-  roles: {
-    id: number;
-    code: string;
-    name: string;
-    source: "HCM" | "SCM";
-    permission_codes: string[];
-  }[];
-}
-
-/** Returned once, on grant or reset. The password is never readable again. */
-export interface GrantResult {
-  success: boolean;
-  employee_id: number;
-  temporary_password?: string | null;
-}
-
-// ROLE is an SCM permission role (what you may do); HCM_ROLE is the HRMS org role
-// (what you are). Both exist on purpose.
-export type GroupType = "ROLE" | "HCM_ROLE" | "POSITION" | "LOCATION";
-
-export interface UserGroup {
+export interface DocSeries {
   id: number;
-  code: string;
-  name: string;
-  description?: string | null;
-  parent_id?: number | null;
-  group_type: GroupType;
-  role_id?: number | null;
-  position_id?: number | null;
-  location_id?: number | null;
+  doc_type: string;
+  fiscal_year: string;
+  prefix: string;
+  pattern: string;
+  last_number: number;
+  reset_policy: ResetPolicy;
+  last_reset_period?: string | null;
   is_active: boolean;
-}
-
-export interface GroupMember {
-  id: number;
-  emp_code?: string | null;
-  full_name: string;
-  email?: string | null;
-  department_name?: string | null;
+  preview: string;
 }
 
 export type Operator =

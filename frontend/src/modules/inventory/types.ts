@@ -191,3 +191,141 @@ export interface StockTransferRow {
   remarks?: string;
   lines?: StockTransferLineItem[];
 }
+
+/** The backend's list envelope: every list endpoint returns this shape. */
+export interface Page<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+/** Exactly what GET /api/stock returns -- the live stk_balance columns. */
+export interface StockRow {
+  id: number;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  bin_id: number;
+  bin_code?: string | null;
+  batch_id: number;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  project_id: number;
+  project_name?: string | null;
+  available_qty: number;
+  reserved_qty: number;
+  total_qty: number;
+  updated_at?: string | null;
+}
+
+/** Exactly what GET /api/stock/movements returns -- the live stk_ledger columns. */
+export interface MovementRow {
+  id: number;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  direction: "IN" | "OUT";
+  quantity: number;
+  balance_after: number;
+  ref_type?: string | null;
+  ref_no?: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+}
+
+export interface MaterialRequestItem {
+  id: number;
+  line_no: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  quantity: number;
+  ordered_quantity: number;
+  indent_item_id?: number | null;
+  remarks?: string | null;
+}
+
+export interface MaterialRequestListRow {
+  id: number;
+  mr_no: string;
+  mr_date?: string | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  requested_by_name?: string | null;
+  department_name?: string | null;
+  status: string;
+  priority: string;
+  required_by?: string | null;
+  current_approver_name?: string | null;
+  created_at: string;
+}
+
+export interface MaterialRequest extends MaterialRequestListRow {
+  project_name?: string | null;
+  remarks?: string | null;
+  approved_at?: string | null;
+  items: MaterialRequestItem[];
+}
+
+/** One warehouse's share of what is on hand for an item. */
+export interface AllocationWarehouseOption {
+  warehouse_id: number;
+  warehouse_name: string | null;
+  available_qty: number;
+}
+
+/** A line on the allocation screen: what was asked for, what is actually there. */
+export interface AllocationProposalLine {
+  indent_item_id: number;
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  requested_qty: number;
+  already_allocated: number;
+  available_total: number;
+  competing_demand: number;
+  warehouses: AllocationWarehouseOption[];
+}
+
+export interface AllocationProposal {
+  indent_id: number;
+  indent_no: string;
+  department_name: string | null;
+  requested_by_name: string | null;
+  status: string;
+  lines: AllocationProposalLine[];
+}
+
+export interface AllocationDecision {
+  indent_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  requested_qty: number;
+  quantity: number;
+  warehouse_id: number | null;
+  project_id?: number;
+}
+
+export interface AllocationListRow {
+  id: number;
+  allocation_no: string;
+  indent_id: number;
+  indent_no: string | null;
+  status: string;
+  allocated_by_name: string | null;
+  current_approver_name: string | null;
+  approved_at: string | null;
+  created_at: string;
+}

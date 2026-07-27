@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm import service as hcm_service
-from app.platform.workflow import resolver
+from app.platform.workflow import fallback, resolver
 from app.platform.workflow.conditions import stage_applies
 from app.platform.workflow.models import (
     Action, Instance, Pending, Stage, StageCondition, Workflow,
@@ -34,14 +34,19 @@ def _normalize_action(action: str) -> str:
     return _ACTION_ALIASES.get(a, a)
 
 
-async def _active_workflow(db: AsyncSession, doc_type: str) -> Workflow:
+async def _active_workflow(db: AsyncSession, doc_type: str) -> tuple[Workflow, bool]:
+    """The configured workflow, or the hardcoded ladder materialised as one.
+
+    Returns (workflow, was_fallback). Missing configuration must never stop a document
+    being submitted — see platform/workflow/fallback.py.
+    """
     wf = (await db.execute(
         select(Workflow).where(Workflow.doc_type == doc_type, Workflow.is_active.is_(True))
         .order_by(Workflow.id.desc())
     )).scalars().first()
     if wf is None:
-        raise ValidationError(f"No active approval workflow for doc type {doc_type}")
-    return wf
+        return await fallback.ensure_workflow(db, doc_type), True
+    return wf, False
 
 
 async def _stages(db: AsyncSession, workflow_id: int) -> list[Stage]:
@@ -99,6 +104,17 @@ async def _stage_satisfied(db, instance, stage, approver_ids: set[int]) -> bool:
     return count >= 1   # ANY_ONE (default)
 
 
+async def _stage_used_fallback(db: AsyncSession, instance: Instance, stage: Stage) -> bool:
+    """Did the ladder supply this stage's approvers rather than its configuration?"""
+    row = (await db.execute(
+        select(Action.id).where(
+            Action.instance_id == instance.id,
+            Action.action == ApprovalAction.FALLBACK.value,
+        )
+    )).scalars().first()
+    return row is not None
+
+
 async def _clear_pending(db: AsyncSession, instance_id: int) -> None:
     rows = (await db.execute(
         select(Pending).where(Pending.instance_id == instance_id)
@@ -112,7 +128,26 @@ async def _materialize_pending(
 ) -> list:
     approvers = await resolver.resolve_approvers(db, stage, instance, context)
     if not approvers:
-        raise ValidationError(f"No approver found for workflow stage {stage.name}")
+        # A vacant position or a role with no holders must not strand the document.
+        # Only THIS stage is substituted; the rest of the configured chain is
+        # untouched and still runs as designed.
+        approvers, reason = await fallback.resolve(
+            db, instance.started_by_id, context.get("requester_position_id"))
+        await fallback.record(db, instance, f"{fallback.REASON_EMPTY_STAGE}/{reason}",
+                              approvers, stage.name)
+    if not approvers:
+        # Nobody at all -- no configured approver, no reporting line, not even an
+        # admin. Raising here would kill the CALLER's transaction, and the caller is
+        # often an unrelated document: an approved indent that raises a material
+        # request would fail its own approval because the MR could not find an
+        # approver. That is exactly the "system never fails" rule being broken by the
+        # thing meant to enforce it.
+        #
+        # So the document is created and left visibly stuck with no pending approvers,
+        # recorded in both wf_actions and the audit log, instead of taking the caller
+        # down with it. An admin fixes the configuration and the document moves.
+        await fallback.record(db, instance, fallback.REASON_NO_APPROVER, [], stage.name)
+        return []
     for approver in approvers:
         db.add(Pending(
             instance_id=instance.id,
@@ -133,7 +168,7 @@ async def _materialize_pending(
 # ---------------- public API (the only five) ----------------
 
 async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance:
-    wf = await _active_workflow(db, doc_type)
+    wf, used_fallback = await _active_workflow(db, doc_type)
     applicable = await _applicable_stages(db, wf.id, context)
 
     instance = Instance(
@@ -157,6 +192,9 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
         actor_position=context.get("requester_position_name"),
         action=ApprovalAction.SUBMITTED.value,
     ))
+    if used_fallback:
+        await fallback.record(db, instance, fallback.REASON_NO_WORKFLOW, [],
+                              wf.name)
     await db.flush()
     if applicable:
         await _materialize_pending(db, instance, applicable[0], context)
@@ -196,7 +234,14 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
     if user.id not in pending_ids:
         raise PermissionError_("You are not a valid approver for the current stage")
     active_position_id = getattr(user, "active_position_id", None)
-    if stage.approver_type == ApproverType.POSITION.value:
+    # The position checks below stop someone approving from the wrong hat. They are
+    # meaningless when the fallback picked this stage's approvers — it chose people
+    # precisely BECAUSE the configured position produced nobody, so requiring them to
+    # hold that position would lock the document again, which is what the fallback
+    # exists to prevent. Authority is still enforced: user.id must be in pending_ids.
+    if await _stage_used_fallback(db, instance, stage):
+        pass
+    elif stage.approver_type == ApproverType.POSITION.value:
         if active_position_id != stage.position_id:
             raise PermissionError_("Switch to the approval position before acting")
     elif stage.approver_type == ApproverType.REPORTING_MANAGER.value:

@@ -11,9 +11,14 @@ from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+# inventory is the base module (imports nothing from app.modules), so calling it from
+# here is the legal direction. This is the §3 stock-availability fork.
+from app.modules.inventory import allocations
+from app.modules.inventory import service as inventory_service
 from app.platform.hcm.models import (
     HcmDepartment, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
+from app.platform.rules import evaluator as rules
 from app.platform.workflow import engine
 from app.platform.workflow.models import Action, Instance
 from app.platform.settings.service import write_audit
@@ -21,8 +26,8 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item
 from app.shared.numbering import next_number
 from app.modules.indents.enums import (
-    ApprovalAction, AuditAction, DocType, IndentActivityType, IndentStatus,
-    InstanceStatus, MaterialDirection,
+    AllocationStatus, ApprovalAction, AuditAction, DocType, IndentActivityType,
+    IndentItemStatus, IndentStatus, InstanceStatus, MaterialDirection, RuleActionType,
 )
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentUpdate
@@ -257,9 +262,13 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
         indent.status = IndentStatus.APPROVED.value
         indent.approved_at = utcnow()
         indent.current_approver_name = None
+        await _fulfil(db, indent, user)
     elif instance.status == InstanceStatus.REJECTED.value:
         indent.status = IndentStatus.REJECTED.value
         indent.current_approver_name = None
+        # Whatever this indent was holding goes back on the shelf immediately —
+        # otherwise a rejected request quietly keeps stock out of everyone's reach.
+        await inventory_service.release_for_indent(db, indent.id)
     else:
         await _refresh_current_approver(db, indent)
 
@@ -275,14 +284,76 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
 
 
 async def approved_pending_po(db: AsyncSession, params: PageParams) -> dict:
-    """Approved indents not yet fully converted to POs — the procurement screen."""
+    """Approved indents not yet fully converted to POs — the procurement screen.
+
+    Includes the allocation outcomes: an indent inventory could not fill is precisely
+    the one procurement needs to see. Filtering on APPROVED alone would leave this
+    screen permanently empty now that approval hands off to allocation.
+    """
     stmt = (
         select(Indent).options(selectinload(Indent.items))
-        .where(Indent.status.in_([IndentStatus.APPROVED.value,
-                                  IndentStatus.PARTIALLY_ORDERED.value]))
+        .where(Indent.status.in_([
+            IndentStatus.APPROVED.value,
+            IndentStatus.PENDING_PROCUREMENT.value,
+            IndentStatus.PARTIALLY_FULFILLED.value,
+            IndentStatus.PARTIALLY_ORDERED.value,
+        ]))
         .order_by(Indent.created_at.desc())
     )
     return await paginate(db, stmt, params)
+
+
+def _fulfilment_warehouse_types(actions) -> list[str] | None:
+    """Which warehouse types may fulfil this indent. None means "any".
+
+    A routing event that matches no rule must not strand the document: we fall through
+    to "any warehouse", and the no-match row rules.fire() already wrote to
+    rule_executions records that we did. Configuration failing is not the document's
+    problem.
+    """
+    routes = rules.actions_of_type(actions, RuleActionType.ROUTE_FULFILLMENT.value)
+    for action in routes:
+        types = (action.params or {}).get("warehouse_types")
+        if types:
+            return list(types)
+    return None
+
+
+async def _fulfil(db: AsyncSession, indent: Indent, user) -> None:
+    """Flow doc §3 step 3: hand the approved indent to inventory. Reserve NOTHING.
+
+    An earlier version allocated here automatically — it reserved everything available
+    and raised an MR for the rest. That was wrong. Sixty bags of cement with four
+    projects wanting it is a judgement somebody makes: how much this project gets, out
+    of which warehouse, and what waits. Doing it by rule makes the system a queue.
+
+    So this only records where the indent should go (the rule engine's routing) and
+    parks it in the Fulfilment Queue for a person. Stock moves when that person's
+    allocation is approved — see modules/inventory/allocations.py.
+    """
+    ctx = {
+        "indent_id": indent.id,
+        "department_id": indent.department_id,
+        "department_name": indent.department_name,
+        "facility_id": indent.office_id,
+        "project_id": indent.project_id,
+        "project_name": indent.project_name,
+        "priority": indent.priority,
+        "required_by": indent.required_date,
+        "requester_position_id": indent.position_id,
+        "total_qty": float(indent.total_qty or 0),
+    }
+    actions = await rules.fire(db, "INDENT_APPROVED", ctx,
+                               doc_type=DocType.INDENT.value, doc_id=indent.id)
+
+    # The routing decision is still worth recording even though nothing acts on it
+    # yet: it is what will pre-filter the warehouses the allocator is offered.
+    _fulfilment_warehouse_types(actions)
+
+    for line in indent.items:
+        line.allocated_quantity = 0
+        line.status = IndentItemStatus.PENDING.value
+    indent.status = IndentStatus.AWAITING_ALLOCATION.value
 
 
 async def _refresh_current_approver(db: AsyncSession, indent: Indent) -> None:
@@ -305,9 +376,14 @@ async def indent_stats(db: AsyncSession, department_id: int | None = None) -> di
     this_month = await db.scalar(month_stmt)
 
     S = IndentStatus
-    approved_active = (counts.get(S.APPROVED.value, 0)
-                       + counts.get(S.ORDERED.value, 0)
-                       + counts.get(S.PARTIALLY_ORDERED.value, 0))
+    # "Cleared its approval chain and is still moving." An indent no longer rests at
+    # APPROVED -- it goes to AWAITING_ALLOCATION and on through the allocation
+    # outcomes -- so counting only APPROVED would report zero approvals forever.
+    approved_active = sum(counts.get(v, 0) for v in (
+        S.APPROVED.value, S.AWAITING_ALLOCATION.value, S.ALLOCATED.value,
+        S.PARTIALLY_FULFILLED.value, S.PENDING_PROCUREMENT.value,
+        S.ORDERED.value, S.PARTIALLY_ORDERED.value,
+    ))
     line_totals = (
         select(func.count(IndentItem.id), func.coalesce(func.sum(IndentItem.quantity), 0))
         .join(Indent, Indent.id == IndentItem.indent_id)
@@ -460,6 +536,9 @@ async def list_notifications(db: AsyncSession, params: PageParams, user) -> dict
         .where(Indent.requested_by_id == user.id)
         .where(Indent.status.in_([
             IndentStatus.PENDING_APPROVAL.value, IndentStatus.APPROVED.value,
+            IndentStatus.AWAITING_ALLOCATION.value, IndentStatus.ALLOCATED.value,
+            IndentStatus.PARTIALLY_FULFILLED.value,
+            IndentStatus.PENDING_PROCUREMENT.value,
             IndentStatus.REJECTED.value, IndentStatus.PARTIALLY_ORDERED.value,
             IndentStatus.ORDERED.value, IndentStatus.CLOSED.value,
         ]))
@@ -474,6 +553,22 @@ async def list_notifications(db: AsyncSession, params: PageParams, user) -> dict
         ),
         IndentStatus.APPROVED: (
             "Request approved", lambda row: f"{row.indent_no} has been approved."
+        ),
+        IndentStatus.AWAITING_ALLOCATION: (
+            "Request approved",
+            lambda row: f"{row.indent_no} is approved and with inventory.",
+        ),
+        IndentStatus.ALLOCATED: (
+            "Stock set aside",
+            lambda row: f"Stock for {row.indent_no} has been set aside.",
+        ),
+        IndentStatus.PARTIALLY_FULFILLED: (
+            "Part of it is coming from stock",
+            lambda row: f"Some of {row.indent_no} is from stock; the rest is on order.",
+        ),
+        IndentStatus.PENDING_PROCUREMENT: (
+            "Going to procurement",
+            lambda row: f"{row.indent_no} is being bought in.",
         ),
         IndentStatus.REJECTED: (
             "Request rejected", lambda row: f"{row.indent_no} has been rejected."
@@ -505,3 +600,135 @@ async def list_notifications(db: AsyncSession, params: PageParams, user) -> dict
         })
     page["items"] = items
     return page
+
+
+# ---------------- allocation endpoints' service layer ----------------
+#
+# Allocation is a decision ABOUT an indent, so it lives here. The mechanics --
+# proposing, reserving, raising the MR -- live in modules/inventory/allocations.py.
+# Indents may import inventory (the base module); inventory must never import indents.
+
+
+async def allocation_proposal(db: AsyncSession, indent_id: int) -> dict:
+    """What the allocation screen needs: the indent lines, what is on the shelf for
+    each, split by warehouse, and how much other indents are already waiting on.
+
+    Read-only. Reserves nothing.
+    """
+    stmt = select(Indent).options(selectinload(Indent.items)).where(
+        Indent.id == indent_id)
+    indent = (await db.execute(stmt)).scalar_one_or_none()
+    if indent is None:
+        raise NotFoundError(f"Indent {indent_id} not found")
+
+    lines = [{
+        "indent_item_id": line.id,
+        "item_id": line.item_id,
+        "item_code": line.item_code,
+        "item_name": line.item_name,
+        "uom_code": line.uom_code,
+        "requested_qty": float(line.approved_quantity or line.quantity or 0),
+        "already_allocated": float(line.allocated_quantity or 0),
+        "project_id": indent.project_id,
+    } for line in indent.items]
+
+    proposal = await allocations.propose(db, indent_id, lines)
+    return {
+        "indent_id": indent.id,
+        "indent_no": indent.indent_no,
+        "department_name": indent.department_name,
+        "requested_by_name": indent.requested_by_name,
+        "status": indent.status,
+        "lines": [{**p, "available_total": float(p["available_total"]),
+                   "competing_demand": float(p["competing_demand"]),
+                   "warehouses": [{**w, "available_qty": float(w["available_qty"])}
+                                  for w in p["warehouses"]]}
+                  for p in proposal],
+    }
+
+
+async def decide_allocation(db: AsyncSession, body, user):
+    """A person has decided how much to give. Record it and send it for approval."""
+    indent = await db.get(Indent, body.indent_id)
+    if indent is None:
+        raise NotFoundError(f"Indent {body.indent_id} not found")
+
+    return await allocations.create(
+        db, indent.id, indent.indent_no,
+        [d.model_dump() for d in body.decisions], user,
+        ctx={"department_id": indent.department_id, "remarks": body.remarks},
+    )
+
+
+async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, user,
+                            comments: str = ""):
+    """Approve or reject. Approval reserves the stock and updates the indent."""
+    alloc = await allocations.act(db, allocation_id, action, user, comments)
+
+    if alloc.status == AllocationStatus.APPROVED.value:
+        indent = await db.get(Indent, alloc.indent_id)
+        if indent is not None:
+            requested = sum(float(i.requested_qty or 0) for i in alloc.items)
+            given = sum(float(i.quantity or 0) for i in alloc.items)
+            for line in alloc.items:
+                item_line = await db.get(IndentItem, line.indent_item_id)
+                if item_line is not None:
+                    item_line.allocated_quantity = line.quantity
+                    item_line.status = (IndentItemStatus.ALLOCATED.value
+                                        if line.quantity and line.quantity > 0
+                                        else IndentItemStatus.SHORT.value)
+            if given <= 0:
+                indent.status = IndentStatus.PENDING_PROCUREMENT.value
+            elif given >= requested:
+                indent.status = IndentStatus.ALLOCATED.value
+            else:
+                indent.status = IndentStatus.PARTIALLY_FULFILLED.value
+            await db.commit()
+            await db.refresh(alloc)
+    return alloc
+
+
+async def item_demand(db: AsyncSession, item_id: int) -> dict:
+    """Every indent still waiting on this item, plus what is on the shelf for it.
+
+    This is the view Balu described: 60 bags of cement, four projects want it, split
+    it. Deciding one indent at a time hides the competition, which is exactly the
+    information the allocator needs.
+    """
+    from app.modules.inventory import allocations
+
+    stmt = (
+        select(Indent, IndentItem)
+        .join(IndentItem, IndentItem.indent_id == Indent.id)
+        .where(IndentItem.item_id == item_id,
+               Indent.status == IndentStatus.AWAITING_ALLOCATION.value)
+        .order_by(Indent.created_at)
+    )
+    rows = (await db.execute(stmt)).all()
+
+    item = await db.get(Item, item_id)
+    proposal = await allocations.propose(db, 0, [
+        {"indent_item_id": 0, "item_id": item_id, "project_id": None}])
+    stock = proposal[0] if proposal else {"available_total": 0, "warehouses": []}
+
+    return {
+        "item_id": item_id,
+        "item_code": item.code if item else None,
+        "item_name": item.name if item else None,
+        "uom_code": item.uom_code if item else None,
+        "available_total": float(stock["available_total"]),
+        "warehouses": [{**w, "available_qty": float(w["available_qty"])}
+                       for w in stock["warehouses"]],
+        "demand": [{
+            "indent_id": ind.id,
+            "indent_no": ind.indent_no,
+            "indent_item_id": line.id,
+            "requested_by_name": ind.requested_by_name,
+            "department_name": ind.department_name,
+            "project_name": ind.project_name,
+            "priority": ind.priority,
+            "required_date": ind.required_date.isoformat() if ind.required_date else None,
+            "requested_qty": float(line.approved_quantity or line.quantity or 0),
+            "raised_at": ind.created_at.isoformat() if ind.created_at else None,
+        } for ind, line in rows],
+    }

@@ -172,31 +172,6 @@ export interface Project {
   is_active: boolean;
 }
 
-export interface MasterRole {
-  id: number;
-  code: string;
-  name: string;
-  description?: string | null;
-  is_system: boolean;
-  is_active: boolean;
-}
-
-export type ResetPolicy = "NEVER" | "YEARLY" | "MONTHLY";
-
-export interface DocSeries {
-  id: number;
-  doc_type: string;
-  fiscal_year: string;
-  prefix: string;
-  pattern: string;
-  last_number: number;
-  reset_policy: ResetPolicy;
-  last_reset_period?: string | null;
-  is_active: boolean;
-  /** Server-rendered example of the next number, so the pattern is checkable. */
-  preview: string;
-}
-
 export interface RefRow {
   id: number;
   code?: string;

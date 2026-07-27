@@ -14,11 +14,11 @@ describe("masters api", () => {
   it("covers every master the Masters screen shows a tab for", () => {
     expect(Object.keys(mastersApi).sort()).toEqual([
       "attributeMappings", "attributes", "bins", "bomItems", "boms",
-      "brandManufacturers", "brands", "categories", "departments", "docSeries",
+      "brandManufacturers", "brands", "categories", "departments",
       "dosageForms", "facilities", "features", "generalNames",
       "itemClasses", "itemSpecs", "itemSubClasses", "items", "manufacturers",
       "packaging", "priceListItems",
-      "priceLists", "projects", "roles", "uom", "uomConversions", "vendors",
+      "priceLists", "projects", "uom", "uomConversions", "vendors",
       "warehouses",
     ]);
   });
@@ -36,15 +36,13 @@ describe("masters api", () => {
   it("short lookup lists also offer an unpaginated listAll", () => {
     expect(typeof mastersApi.uom.listAll).toBe("function");
     expect(typeof mastersApi.uomConversions.listAll).toBe("function");
-    expect(typeof mastersApi.docSeries.listAll).toBe("function");
   });
 
-  it("HCM-mirrored masters and roles are read-only", () => {
+  it("HCM-mirrored masters are read-only", () => {
     // hcm_* is written only by the sync (rule 10), so these are plain fetchers
     // with no create/update attached.
     expect(typeof mastersApi.departments).toBe("function");
     expect(typeof mastersApi.facilities).toBe("function");
-    expect(typeof mastersApi.roles).toBe("function");
   });
 
   it("uom conversions cannot be deactivated: the live table has no is_active", () => {

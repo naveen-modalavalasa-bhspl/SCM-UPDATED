@@ -6,9 +6,9 @@ import { mastersApi } from "../api";
 import { MasterCrud, type Option } from "../components/MasterCrud";
 import { ItemMasterTab } from "../components/ItemMasterTab";
 import type {
-  DocSeries, MasterAttribute, MasterAttributeMapping, MasterBin, MasterBom,
+  MasterAttribute, MasterAttributeMapping, MasterBin, MasterBom,
   MasterBrand, MasterCategory, MasterFeature, MasterItemClass,
-  MasterPackaging, MasterPriceList, MasterRole, MasterUom, MasterUomConversion,
+  MasterPackaging, MasterPriceList, MasterUom, MasterUomConversion,
   MasterVendor, MasterWarehouse, Project, RefRow, NamedMaster,
   MasterBrandManufacturer, MasterItemSubClass,
 } from "../types";
@@ -30,9 +30,6 @@ const WAREHOUSE_TYPES: Option[] = ["MAIN", "TRANSIT", "QUARANTINE", "SCRAP"]
   .map((v) => ({ value: v, label: v }));
 const BIN_TYPES: Option[] = ["ZONE", "RACK", "SHELF", "STORAGE", "STAGING"]
   .map((v) => ({ value: v, label: v }));
-const RESET_POLICIES: Option[] = ["NEVER", "YEARLY", "MONTHLY"]
-  .map((v) => ({ value: v, label: v }));
-
 function ItemsTab() {
   return <ItemMasterTab />;
 }
@@ -391,51 +388,6 @@ function ConversionsTab({ uoms }: { uoms: Option[] }) {
       onCreate={(v) => mastersApi.uomConversions.create(v as Partial<MasterUomConversion>)}
       onUpdate={(id, v) => mastersApi.uomConversions.update(id, v as Partial<MasterUomConversion>)}
       /* mst_uom_conversions has no is_active column, so there is nothing to deactivate. */
-    />
-  );
-}
-
-function NumberingTab() {
-  const columns: Column<DocSeries>[] = [
-    { key: "doc", header: "Document", render: (r) => <Code>{r.doc_type}</Code> },
-    { key: "fy", header: "Fiscal year", render: (r) => r.fiscal_year },
-    { key: "pattern", header: "Pattern", render: (r) => <Code>{r.pattern}</Code>, hideOnNarrow: true },
-    // The server renders the preview, so what is shown is what will be issued.
-    { key: "preview", header: "Next number", render: (r) => <Code>{r.preview}</Code> },
-    { key: "reset", header: "Resets", render: (r) => r.reset_policy, hideOnNarrow: true },
-    { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
-  ];
-  return (
-    <MasterCrud<DocSeries>
-      title="Numbering series" queryKey="doc-series" managePerm="admin.numbering.manage"
-      columns={columns}
-      renderCard={(r) => (
-        <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <Code>{r.doc_type}</Code><Active on={r.is_active} />
-          </div>
-          <div className="text-sm text-body">Next: <Code>{r.preview}</Code></div>
-          <div className="text-xs text-muted">{r.fiscal_year} · resets {r.reset_policy}</div>
-        </div>
-      )}
-      fetchList={() => mastersApi.docSeries.listAll()}
-      fields={[
-        { key: "doc_type", label: "Document type (INDENT/PO/GRN/ISSUE)", required: true },
-        { key: "fiscal_year", label: "Fiscal year", required: true },
-        { key: "prefix", label: "Prefix", required: true },
-        { key: "pattern", label: "Pattern", placeholder: "{PREFIX}/{FY}/{SEQ:5}" },
-        { key: "reset_policy", label: "Reset", type: "select", options: RESET_POLICIES },
-        { key: "is_active", label: "Active", type: "switch" },
-      ]}
-      /* last_number is deliberately absent: rewinding it would reissue a number
-         that a live document already carries. */
-      emptyForm={{ doc_type: "", fiscal_year: "", prefix: "",
-                   pattern: "{PREFIX}/{FY}/{SEQ:5}", reset_policy: "NEVER", is_active: true }}
-      toForm={(r) => ({ doc_type: r.doc_type, fiscal_year: r.fiscal_year, prefix: r.prefix,
-        pattern: r.pattern, reset_policy: r.reset_policy, is_active: r.is_active })}
-      onCreate={(v) => mastersApi.docSeries.create(v as Partial<DocSeries>)}
-      onUpdate={(id, v) => mastersApi.docSeries.update(id, v as Partial<DocSeries>)}
-      onDeactivate={mastersApi.docSeries.deactivate}
     />
   );
 }
@@ -832,7 +784,7 @@ function BomsTab({ items, projects }: { items: Option[]; projects: Option[] }) {
   );
 }
 
-/** Read-only lists: roles, and the HCM mirrors (rule 10 — sync owns those tables). */
+/** Read-only HCM mirrors (rule 10 — sync owns those tables). */
 function ReadOnlyTab<T extends { id: number }>(
   { title, fetchList, columns, renderCard }: {
     title: string;
@@ -856,7 +808,7 @@ const TABS = [
   "brands", "manufacturers", "brand-manufacturers", "dosage-forms",
   "features", "packaging",
   "attributes", "attribute-mappings", "uom", "conversions", "warehouses", "bins",
-  "projects", "vendors", "price-lists", "boms", "roles", "numbering",
+  "projects", "vendors", "price-lists", "boms",
   "departments", "facilities",
 ] as const;
 
@@ -869,7 +821,7 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   attributes: "Attributes", "attribute-mappings": "Attribute Mapping",
   uom: "UOM", conversions: "Conversions", warehouses: "Warehouses", bins: "Bins",
   projects: "Projects", vendors: "Vendors", "price-lists": "Price Lists",
-  boms: "BOM", roles: "Roles", numbering: "Numbering",
+  boms: "BOM",
   departments: "Departments", facilities: "Facilities",
 };
 
@@ -927,7 +879,7 @@ export function MastersPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Admin" title="Master data" />
+      <PageHeader eyebrow="Masters" title="Master data" />
       <Tabs
         aria-label="Master type"
         variant="solid" color="primary" radius="full"
@@ -961,25 +913,6 @@ export function MastersPage() {
       {tab === "bins" && <BinsTab warehouses={whOpts} bins={binOpts} />}
       {tab === "projects" && <ProjectsTab />}
       {tab === "vendors" && <VendorsTab />}
-      {tab === "numbering" && <NumberingTab />}
-      {tab === "roles" && (
-        <ReadOnlyTab<MasterRole>
-          title="Roles" fetchList={mastersApi.roles}
-          columns={[
-            { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
-            { key: "name", header: "Name", render: (r) => r.name },
-            { key: "desc", header: "Description", render: (r) => r.description ?? "—", hideOnNarrow: true },
-            { key: "sys", header: "", render: (r) => (r.is_system ? "System" : ""), hideOnNarrow: true },
-            { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
-          ]}
-          renderCard={(r) => (
-            <div className="flex items-center justify-between">
-              <div><Code>{r.code}</Code><div className="text-sm text-body">{r.name}</div></div>
-              <Active on={r.is_active} />
-            </div>
-          )}
-        />
-      )}
       {tab === "departments" && (
         <ReadOnlyTab<RefRow>
           title="Departments" fetchList={mastersApi.departments}

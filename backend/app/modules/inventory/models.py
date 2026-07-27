@@ -136,6 +136,65 @@ Index("ix_inv_reservations_ref", Reservation.ref_type, Reservation.ref_id)
 Index("ix_inv_reservations_active", Reservation.status, Reservation.item_id)
 
 
+class Allocation(Base):
+    """Inventory's decision on how much stock an approved indent actually gets.
+
+    This is a document, not a calculation. Sixty bags of cement with four projects
+    wanting it is a judgement: who gets what, from which warehouse, and what waits.
+    Recording it means "why did this project get 40 and not 60" has an answer, and it
+    can go through its own approval chain (DocType.ALLOCATION) where a site wants the
+    inventory manager to sign off on what an executive proposed.
+
+    Nothing is reserved until this reaches APPROVED.
+    """
+    __tablename__ = "inv_allocations"
+    id = pk()
+    allocation_no = Column(String(30), unique=True, nullable=False)
+    indent_id = Column(BigInteger, index=True, nullable=False)
+    indent_no = Column(String(30), nullable=True)
+    status = Column(String(30), nullable=False)
+    allocated_by_id = soft_fk()
+    allocated_by_name = Column(String(200), nullable=True)
+    department_id = soft_fk()
+    remarks = Column(Text, nullable=True)
+    current_approver_name = Column(String(200), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("AllocationItem", back_populates="allocation",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+Index("ix_inv_allocations_status_created", Allocation.status,
+      Allocation.created_at.desc())
+
+
+class AllocationItem(Base):
+    """One decision: this indent line gets this much, out of this warehouse.
+
+    A line can appear more than once when the allocator splits it across warehouses.
+    quantity may be zero -- "give nothing now" is a valid, recorded decision.
+    """
+    __tablename__ = "inv_allocation_items"
+    id = pk()
+    allocation_id = Column(ForeignKey("inv_allocations.id", ondelete="CASCADE"),
+                           index=True, nullable=False)
+    indent_item_id = Column(BigInteger, index=True, nullable=False)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    requested_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    quantity = Column(Numeric(16, 3), nullable=False, default=0)   # what to give
+    warehouse_id = Column(BigInteger, nullable=True)
+    warehouse_name = Column(String(200), nullable=True)
+    project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
+    remarks = Column(String(500), nullable=True)
+
+    allocation = relationship("Allocation", back_populates="items")
+
+
 class MaterialRequest(Base):
     """The bridge from a short indent to procurement.
 
@@ -157,7 +216,9 @@ class MaterialRequest(Base):
     facility_id = soft_fk()
     project_id = soft_fk()
     project_name = Column(String(200), nullable=True)
-    status = Column(String(30), nullable=False, index=True)
+    # No index=True here: the composite below already leads with status, and an
+    # auto-named single-column index would collide with it (MySQL 1061).
+    status = Column(String(30), nullable=False)
     priority = Column(String(20), nullable=False, default=Priority.NORMAL.value)
     required_by = Column(Date, nullable=True)
     remarks = Column(Text, nullable=True)
@@ -171,7 +232,7 @@ class MaterialRequest(Base):
                          cascade="all, delete-orphan", lazy="selectin")
 
 
-Index("ix_inv_material_requests_status", MaterialRequest.status,
+Index("ix_inv_material_requests_status_created", MaterialRequest.status,
       MaterialRequest.created_at.desc())
 
 

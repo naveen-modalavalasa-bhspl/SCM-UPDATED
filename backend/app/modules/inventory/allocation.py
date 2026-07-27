@@ -28,6 +28,7 @@ def _d(value) -> Decimal:
 async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: int,
                   ref_no: str | None, user, *, project_id: int = NO_PROJECT,
                   warehouse_types: list[str] | None = None,
+                  warehouse_ids: list[int] | None = None,
                   ref_line_id: int | None = None, item=None) -> tuple[Decimal, Decimal]:
     """Reserve up to `qty`. Returns (reserved, shortfall).
 
@@ -41,7 +42,8 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
     strategy = (availability.pick_strategy_for(item) if item is not None
                 else PickStrategy.FIFO.value)
     rows = await availability.candidate_stock(db, item_id, project_id,
-                                              warehouse_types, strategy)
+                                              warehouse_types, strategy,
+                                              warehouse_ids=warehouse_ids)
 
     remaining, reserved_total = qty, ZERO
     for stock in rows:

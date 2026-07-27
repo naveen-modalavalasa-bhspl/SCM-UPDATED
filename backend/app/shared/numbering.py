@@ -3,15 +3,17 @@
 Each series row: (doc_type, fiscal_year, prefix, pattern, last_number). We lock the
 row, bump last_number, and format. `pattern` supports {prefix}/{fy}/{num} placeholders.
 """
+import logging
 import re
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ValidationError
 from app.platform.settings.models import DocSeries
 from app.shared.enums import ResetPolicy
+
+logger = logging.getLogger(__name__)
 
 
 def _fiscal_year(now: datetime | None = None) -> str:
@@ -64,6 +66,16 @@ def current_period(policy: str | None, now: datetime | None = None) -> str | Non
     return None
 
 
+# Prefixes for the series auto-created when none is configured. Anything not listed
+# falls back to the first three letters of the doc type.
+_DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
+                     "issue": "ISS", "gatepass": "GP"}
+
+
+def default_prefix(doc_type: str) -> str:
+    return _DEFAULT_PREFIXES.get(doc_type.lower(), doc_type[:3].upper())
+
+
 async def next_number(db: AsyncSession, doc_type: str) -> str:
     fy = _fiscal_year()
     row = (await db.execute(
@@ -72,7 +84,19 @@ async def next_number(db: AsyncSession, doc_type: str) -> str:
         ).order_by(DocSeries.fiscal_year.desc()).with_for_update()
     )).scalars().first()
     if row is None:
-        raise ValidationError(f"No active document series for '{doc_type}'")
+        # A missing series must not block the document. Numbering is configuration,
+        # and configuration that nobody filled in should degrade, not stop work —
+        # the same rule the approval fallback follows. The row is created here so the
+        # sequence is still gapless and still admin-editable afterwards.
+        logger.warning(
+            "No active document series for %r; creating a default one (prefix %s). "
+            "Configure it under Settings > Document Numbering.",
+            doc_type, default_prefix(doc_type))
+        row = DocSeries(doc_type=doc_type, fiscal_year=fy,
+                        prefix=default_prefix(doc_type), pattern=DEFAULT_PATTERN,
+                        last_number=0, is_active=True)
+        db.add(row)
+        await db.flush()
 
     # The reset happens here, under the same row lock that guards the increment, so two
     # concurrent documents at a period boundary cannot both reset and both take number 1.
