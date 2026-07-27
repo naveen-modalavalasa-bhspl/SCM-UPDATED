@@ -547,9 +547,30 @@ export function StockBalanceView() {
             <h3 className="text-sm font-bold text-ink uppercase tracking-wider">Stock Filters & Controls</h3>
           </div>
 
-          <Button variant="primary" onClick={() => handleOpenReplenishModal()}>
-            <RefreshCw className="h-4 w-4" /> Create Replenishment
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                if (!filteredStock || !filteredStock.length) return;
+                const headers = ["Item Code", "Item Name", "Warehouse", "Available Qty", "Reserved Qty", "Total Qty", "UOM"].join(",");
+                const rows = filteredStock.map((i) =>
+                  [`"${i.item_code}"`, `"${i.item_name}"`, `"${i.warehouse_name}"`, i.available_qty, i.reserved_qty, i.physical_qty || i.available_qty, `"${i.uom_code}"`].join(",")
+                );
+                const csvContent = "data:text/csv;charset=utf-8," + [headers, ...rows].join("\n");
+                const link = document.createElement("a");
+                link.setAttribute("href", encodeURI(csvContent));
+                link.setAttribute("download", `stock_balance_${new Date().toISOString().substring(0, 10)}.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+              }}
+            >
+              Export CSV
+            </Button>
+            <Button variant="primary" onClick={() => handleOpenReplenishModal()}>
+              <RefreshCw className="h-4 w-4" /> Create Replenishment
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">

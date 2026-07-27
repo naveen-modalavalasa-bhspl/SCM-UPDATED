@@ -253,3 +253,135 @@ class MaterialRequestItem(Base):
     remarks = Column(String(500), nullable=True)
 
     mr = relationship("MaterialRequest", back_populates="items")
+
+
+class StockAdjustment(Base):
+    """Stock adjustment with reason (damage, expiry, count variance, found).
+
+    Must go through move_stock() so a ledger row is written. Large adjustments
+    require approval before move_stock() is called.
+    """
+    __tablename__ = "inv_adjustments"
+    id = pk()
+    adjustment_no = Column(String(30), unique=True, nullable=False)
+    warehouse_id = Column(BigInteger, index=True, nullable=False)
+    warehouse_name = Column(String(200), nullable=True)
+    reason = Column(String(50), nullable=False)   # DAMAGE, EXPIRY, COUNT_VARIANCE, FOUND, etc.
+    status = Column(String(30), nullable=False)   # DRAFT, PENDING_APPROVAL, APPROVED, REJECTED
+    remarks = Column(Text, nullable=True)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    approved_by_id = soft_fk()
+    approved_by_name = Column(String(200), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("StockAdjustmentItem", back_populates="adjustment",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+class StockAdjustmentItem(Base):
+    __tablename__ = "inv_adjustment_items"
+    id = pk()
+    adjustment_id = Column(ForeignKey("inv_adjustments.id", ondelete="CASCADE"),
+                           index=True, nullable=False)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    bin_id = Column(BigInteger, nullable=False, default=NO_BIN)
+    batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
+    project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
+    direction = Column(String(3), nullable=False)   # StockDirection: IN | OUT
+    quantity = Column(Numeric(16, 3), nullable=False)
+    unit_cost = Column(Numeric(16, 2), nullable=True, default=0.00)
+    remarks = Column(String(500), nullable=True)
+
+    adjustment = relationship("StockAdjustment", back_populates="items")
+
+
+class StockTransferOrder(Base):
+    """Stock Transfer Order (STO): create -> approval -> dispatch -> receive.
+
+    Stock moves physically ONLY upon receipt (via move_stock).
+    """
+    __tablename__ = "inv_sto"
+    id = pk()
+    sto_no = Column(String(30), unique=True, nullable=False)
+    from_warehouse_id = Column(BigInteger, nullable=False)
+    from_warehouse_name = Column(String(200), nullable=True)
+    to_warehouse_id = Column(BigInteger, nullable=False)
+    to_warehouse_name = Column(String(200), nullable=True)
+    from_project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
+    to_project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
+    status = Column(String(30), nullable=False, index=True) # DRAFT, PENDING_APPROVAL, APPROVED, DISPATCHED, RECEIVED, REJECTED, CANCELLED
+    requested_by_id = soft_fk()
+    requested_by_name = Column(String(200), nullable=True)
+    approved_by_name = Column(String(200), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    dispatched_at = Column(DateTime, nullable=True)
+    received_at = Column(DateTime, nullable=True)
+    remarks = Column(Text, nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("StockTransferOrderItem", back_populates="sto",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+class StockTransferOrderItem(Base):
+    __tablename__ = "inv_sto_items"
+    id = pk()
+    sto_id = Column(ForeignKey("inv_sto.id", ondelete="CASCADE"),
+                    index=True, nullable=False)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    requested_qty = Column(Numeric(16, 3), nullable=False)
+    dispatched_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    received_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    remarks = Column(String(500), nullable=True)
+
+    sto = relationship("StockTransferOrder", back_populates="items")
+
+
+class CycleCount(Base):
+    """Cycle count: plan count -> enter counted quantity -> show variance -> post adjustment."""
+    __tablename__ = "inv_cycle_counts"
+    id = pk()
+    count_no = Column(String(30), unique=True, nullable=False)
+    warehouse_id = Column(BigInteger, index=True, nullable=False)
+    warehouse_name = Column(String(200), nullable=True)
+    count_date = Column(Date, nullable=False)
+    status = Column(String(30), nullable=False, index=True) # PLANNED, IN_PROGRESS, COMPLETED, CANCELLED
+    planned_by_name = Column(String(200), nullable=True)
+    posted_by_name = Column(String(200), nullable=True)
+    posted_at = Column(DateTime, nullable=True)
+    remarks = Column(Text, nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("CycleCountItem", back_populates="cycle_count",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+class CycleCountItem(Base):
+    __tablename__ = "inv_cycle_count_items"
+    id = pk()
+    cycle_count_id = Column(ForeignKey("inv_cycle_counts.id", ondelete="CASCADE"),
+                            index=True, nullable=False)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    bin_id = Column(BigInteger, nullable=False, default=NO_BIN)
+    batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
+    snapshot_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    counted_qty = Column(Numeric(16, 3), nullable=True)
+    variance_qty = Column(Numeric(16, 3), nullable=True)
+    remarks = Column(String(500), nullable=True)
+
+    cycle_count = relationship("CycleCount", back_populates="items")
+

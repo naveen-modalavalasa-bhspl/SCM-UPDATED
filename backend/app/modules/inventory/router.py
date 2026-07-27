@@ -8,6 +8,11 @@ from app.core.pagination import Page, PageParams
 from app.modules.inventory import service
 from app.modules.inventory.schemas import (
     ActionIn, MovementRow, MRListRow, MROut, StockRow, TransferIn,
+    AdjustmentIn, AdjustmentOut, AdjustmentListRow, ReplenishmentRow,
+    ReservationRow, ReservationReleaseOut, ItemAvailabilityOut,
+    AgeingSummaryOut, ValuationSummaryOut, NearExpiryAlertRow,
+    STOIn, STOOut, STOListRow, CycleCountIn, CycleCountUpdateIn,
+    CycleCountOut, CycleCountListRow, StockOverviewKPIs,
 )
 from app.platform.rbac import permissions as perms
 from app.shared.enums import ApprovalAction
@@ -45,6 +50,164 @@ async def transfer(body: TransferIn, db: AsyncSession = Depends(get_db),
     await db.commit()
 
 
+@stock_router.post("/adjust", response_model=AdjustmentOut)
+async def create_adjustment(body: AdjustmentIn, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.create_stock_adjustment(db, body, user)
+
+
+@stock_router.get("/adjustments", response_model=Page[AdjustmentListRow])
+async def list_adjustments(params: PageParams = Depends(), warehouse_id: int | None = None,
+                            status: str | None = None, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.list_adjustments(db, params, warehouse_id, status)
+
+
+@stock_router.get("/adjustments/{id}", response_model=AdjustmentOut)
+async def get_adjustment(id: int, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_adjustment(db, id)
+
+
+@stock_router.post("/adjustments/{id}/approve", response_model=AdjustmentOut)
+async def approve_adjustment(id: int, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.act_on_adjustment(db, id, "APPROVE", user)
+
+
+@stock_router.post("/adjustments/{id}/reject", response_model=AdjustmentOut)
+async def reject_adjustment(id: int, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.act_on_adjustment(db, id, "REJECT", user)
+
+
+@stock_router.get("/replenishment", response_model=list[ReplenishmentRow])
+async def replenishment(warehouse_id: int | None = None, category_id: int | None = None,
+                        criticality: str | None = None, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_stock_replenishment(db, warehouse_id, category_id, criticality)
+
+
+@stock_router.get("/ageing", response_model=AgeingSummaryOut)
+async def stock_ageing(warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_stock_ageing(db, warehouse_id)
+
+
+@stock_router.get("/valuation", response_model=ValuationSummaryOut)
+async def stock_valuation(warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_stock_valuation(db, warehouse_id)
+
+
+@stock_router.get("/near-expiry-alerts", response_model=list[NearExpiryAlertRow])
+async def near_expiry_alerts(days: int = 90, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_near_expiry_alerts(db, days)
+
+
+@stock_router.get("/overview-kpis", response_model=StockOverviewKPIs)
+async def overview_kpis(db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_overview_kpis(db)
+
+
+@stock_router.get("/{item_id}/availability", response_model=ItemAvailabilityOut)
+async def item_availability(item_id: int, project_id: int | None = 0,
+                            warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_item_availability(db, item_id, project_id, warehouse_id)
+
+
+# STO Endpoints
+@stock_router.post("/sto", response_model=STOOut)
+async def create_sto(body: STOIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.STOCK_TRANSFER))):
+    return await service.create_sto(db, body, user)
+
+
+@stock_router.get("/sto", response_model=Page[STOListRow])
+async def list_stos(params: PageParams = Depends(), status: str | None = None,
+                    db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.list_stos(db, params, status)
+
+
+@stock_router.get("/sto/{id}", response_model=STOOut)
+async def get_sto(id: int, db: AsyncSession = Depends(get_db),
+                  user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_sto(db, id)
+
+
+@stock_router.post("/sto/{id}/approve", response_model=STOOut)
+async def approve_sto(id: int, db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.STOCK_TRANSFER))):
+    return await service.approve_sto(db, id, user)
+
+
+@stock_router.post("/sto/{id}/dispatch", response_model=STOOut)
+async def dispatch_sto(id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.STOCK_TRANSFER))):
+    return await service.dispatch_sto(db, id, user)
+
+
+@stock_router.post("/sto/{id}/receive", response_model=STOOut)
+async def receive_sto(id: int, db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.STOCK_TRANSFER))):
+    return await service.receive_sto(db, id, user)
+
+
+# Cycle Count Endpoints
+@stock_router.post("/cycle-counts", response_model=CycleCountOut)
+async def create_cycle_count(body: CycleCountIn, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.create_cycle_count(db, body, user)
+
+
+@stock_router.get("/cycle-counts", response_model=Page[CycleCountListRow])
+async def list_cycle_counts(params: PageParams = Depends(), warehouse_id: int | None = None,
+                            status: str | None = None, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.list_cycle_counts(db, params, warehouse_id, status)
+
+
+@stock_router.get("/cycle-counts/{id}", response_model=CycleCountOut)
+async def get_cycle_count(id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_cycle_count(db, id)
+
+
+@stock_router.put("/cycle-counts/{id}", response_model=CycleCountOut)
+async def update_cycle_count(id: int, body: CycleCountUpdateIn, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.update_cycle_count(db, id, body, user)
+
+
+@stock_router.post("/cycle-counts/{id}/post", response_model=CycleCountOut)
+async def post_cycle_count(id: int, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.post_cycle_count(db, id, user)
+
+
+# Reservations Router
+res_router = APIRouter(prefix="/api/reservations")
+
+
+@res_router.get("", response_model=Page[ReservationRow])
+async def list_reservations(params: PageParams = Depends(), item_id: int | None = None,
+                            warehouse_id: int | None = None, status: str | None = None,
+                            ref_type: str | None = None, ref_id: int | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.list_reservations(db, params, item_id, warehouse_id, status, ref_type, ref_id)
+
+
+@res_router.post("/{id}/release", response_model=ReservationReleaseOut)
+async def release_reservation(id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.release_reservation_by_id(db, id)
+
+
 mr_router = APIRouter(prefix="/api/material-requests")
 
 
@@ -76,4 +239,6 @@ async def reject_mr(mr_id: int, body: ActionIn, db: AsyncSession = Depends(get_d
 
 
 router.include_router(stock_router)
+router.include_router(res_router)
 router.include_router(mr_router)
+

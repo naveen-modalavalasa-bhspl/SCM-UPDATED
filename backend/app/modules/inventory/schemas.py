@@ -167,3 +167,313 @@ class AllocationListRow(BaseModel):
 class AllocationOut(AllocationListRow):
     remarks: str | None = None
     items: list[AllocationItemOut] = Field(default_factory=list)
+
+
+# ---------------- Stock Adjustment Schemas ----------------
+
+class AdjustmentItemIn(BaseModel):
+    item_id: int
+    bin_id: int = 0
+    batch_id: int = 0
+    project_id: int = 0
+    direction: str  # IN | OUT
+    quantity: float = Field(gt=0)
+    unit_cost: float = 0.0
+    remarks: str | None = None
+
+
+class AdjustmentIn(BaseModel):
+    warehouse_id: int
+    reason: str  # DAMAGE, EXPIRY, COUNT_VARIANCE, FOUND
+    remarks: str | None = None
+    items: list[AdjustmentItemIn]
+
+
+class AdjustmentItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    bin_id: int
+    batch_id: int
+    project_id: int
+    direction: str
+    quantity: float
+    unit_cost: float | None = 0.0
+    remarks: str | None = None
+
+
+class AdjustmentListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    adjustment_no: str
+    warehouse_id: int
+    warehouse_name: str | None = None
+    reason: str
+    status: str
+    created_by_name: str | None = None
+    approved_by_name: str | None = None
+    approved_at: datetime | None = None
+    created_at: datetime
+
+
+class AdjustmentOut(AdjustmentListRow):
+    remarks: str | None = None
+    items: list[AdjustmentItemOut] = Field(default_factory=list)
+
+
+# ---------------- Stock Replenishment Schema ----------------
+
+class ReplenishmentRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    category_name: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    available_qty: float
+    reorder_level: float
+    min_order_qty: float
+    suggested_order_qty: float
+    lead_time_days: int | None = None
+    last_purchase_price: float | None = None
+    criticality: str | None = None
+
+
+# ---------------- Reservation Schemas ----------------
+
+class ReservationRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    stock_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    bin_id: int
+    batch_id: int
+    project_id: int
+    quantity: float
+    ref_type: str
+    ref_id: int
+    ref_no: str | None = None
+    ref_line_id: int | None = None
+    status: str
+    created_by_name: str | None = None
+    created_at: datetime
+    released_at: datetime | None = None
+
+
+class ReservationReleaseOut(BaseModel):
+    reservation_id: int
+    released_qty: float
+    status: str
+
+
+# ---------------- Live Availability Schemas ----------------
+
+class BatchAvailabilityRow(BaseModel):
+    stock_id: int
+    warehouse_id: int
+    warehouse_name: str | None = None
+    bin_id: int
+    bin_code: str | None = None
+    batch_id: int
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    project_id: int
+    available_qty: float
+    reserved_qty: float
+
+
+class ItemAvailabilityOut(BaseModel):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    total_available_qty: float
+    total_reserved_qty: float
+    total_transit_qty: float
+    pick_strategy: str
+    batches: list[BatchAvailabilityRow] = Field(default_factory=list)
+
+
+# ---------------- Ageing & Valuation Schemas ----------------
+
+class AgeingRow(BaseModel):
+    stock_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    quantity: float
+    days_in_stock: int
+    age_bucket: str  # 0-30, 31-60, 61-90, 90+
+    days_to_expiry: int | None = None
+    expiry_bucket: str | None = None  # EXPIRED, 0-30, 31-60, 61-90, 90+
+
+
+class AgeingSummaryOut(BaseModel):
+    items: list[AgeingRow] = Field(default_factory=list)
+    bucket_0_30_qty: float = 0.0
+    bucket_31_60_qty: float = 0.0
+    bucket_61_90_qty: float = 0.0
+    bucket_90_plus_qty: float = 0.0
+
+
+class ValuationRow(BaseModel):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    total_qty: float
+    moving_avg_cost: float
+    total_stock_value: float
+
+
+class ValuationSummaryOut(BaseModel):
+    items: list[ValuationRow] = Field(default_factory=list)
+    total_portfolio_value: float = 0.0
+
+
+class NearExpiryAlertRow(BaseModel):
+    stock_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    batch_no: str | None = None
+    expiry_date: date
+    days_to_expiry: int
+    quantity: float
+
+
+# ---------------- STO (Stock Transfer Order) Schemas ----------------
+
+class STOItemIn(BaseModel):
+    item_id: int
+    requested_qty: float = Field(gt=0)
+    remarks: str | None = None
+
+
+class STOIn(BaseModel):
+    from_warehouse_id: int
+    to_warehouse_id: int
+    from_project_id: int = 0
+    to_project_id: int = 0
+    remarks: str | None = None
+    items: list[STOItemIn]
+
+
+class STOItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    requested_qty: float
+    dispatched_qty: float
+    received_qty: float
+    remarks: str | None = None
+
+
+class STOListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    sto_no: str
+    from_warehouse_id: int
+    from_warehouse_name: str | None = None
+    to_warehouse_id: int
+    to_warehouse_name: str | None = None
+    status: str
+    requested_by_name: str | None = None
+    approved_by_name: str | None = None
+    created_at: datetime
+
+
+class STOOut(STOListRow):
+    remarks: str | None = None
+    approved_at: datetime | None = None
+    dispatched_at: datetime | None = None
+    received_at: datetime | None = None
+    items: list[STOItemOut] = Field(default_factory=list)
+
+
+# ---------------- Cycle Count Schemas ----------------
+
+class CycleCountIn(BaseModel):
+    warehouse_id: int
+    count_date: date
+    remarks: str | None = None
+    item_ids: list[int] = Field(default_factory=list)
+
+
+class CycleCountItemUpdateIn(BaseModel):
+    id: int
+    counted_qty: float = Field(ge=0)
+    remarks: str | None = None
+
+
+class CycleCountUpdateIn(BaseModel):
+    remarks: str | None = None
+    items: list[CycleCountItemUpdateIn]
+
+
+class CycleCountItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    bin_id: int
+    batch_id: int
+    snapshot_qty: float
+    counted_qty: float | None = None
+    variance_qty: float | None = None
+    remarks: str | None = None
+
+
+class CycleCountListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    count_no: str
+    warehouse_id: int
+    warehouse_name: str | None = None
+    count_date: date
+    status: str
+    planned_by_name: str | None = None
+    posted_by_name: str | None = None
+    created_at: datetime
+
+
+class CycleCountOut(CycleCountListRow):
+    remarks: str | None = None
+    posted_at: datetime | None = None
+    items: list[CycleCountItemOut] = Field(default_factory=list)
+
+
+# ---------------- Overview KPI Schema ----------------
+
+class StockOverviewKPIs(BaseModel):
+    total_stock_value: float
+    items_below_reorder: int
+    near_expiry_30_days: int
+    near_expiry_60_days: int
+    near_expiry_90_days: int
+    total_reserved_qty: float
+    total_available_qty: float
+    dead_stock_count: int
+

@@ -8,9 +8,7 @@ import type {
   MaterialRequestListRow,
   MovementRow,
   Page,
-  ReplenishmentItem,
   ReplenishmentPOItem,
-  StockAdjustmentInput,
   StockBalanceFilter,
   StockBalanceItem,
   StockLedgerFilter,
@@ -174,55 +172,6 @@ export const getFulfillmentQueue = (status = "PARTIALLY_FULFILLED") =>
     })
     .then((r) => r.data);
 
-/**
- * The object the existing views import. New code should use the named exports above.
- *
- * The methods that throw are not yet backed by the API -- manual adjustment,
- * reorder-level replenishment, and multi-step transfer receipt are all in the design
- * spec's Deferred table. They reject loudly rather than returning invented data, so a
- * screen still calling them fails visibly instead of lying.
- */
-export const inventoryApi = {
-  getWarehouses,
-  getCatalogItems,
-  getVendors,
-  getStockBalances,
-  getStockBalance: getStockBalances,
-  getStockLedger,
-  createStockTransfer,
-  createTransfer: createStockTransfer,
-  listMaterialRequests,
-  getMaterialRequest,
-  approveMaterialRequest,
-  rejectMaterialRequest,
-  getFulfillmentQueue,
-
-  adjustStock: async (_input: StockAdjustmentInput): Promise<StockBalanceItem> => {
-    throw new Error("Manual stock adjustment is not available yet");
-  },
-  getReplenishments: async (): Promise<ReplenishmentItem[]> => {
-    throw new Error("Replenishment needs reorder levels, which are not configured yet");
-  },
-  createReplenishmentPO: async (_payload: unknown) => {
-    throw new Error("Replenishment is not available yet");
-  },
-  createPurchaseIndent: async (_items: ReplenishmentPOItem[]) => {
-    throw new Error("Replenishment is not available yet");
-  },
-  getStockTransfers: async (): Promise<StockTransferRow[]> => {
-    throw new Error("Transfer history is not available yet");
-  },
-  receiveStockTransfer: async (_id: number): Promise<StockTransferRow> => {
-    throw new Error("Transfer receipt is not available yet");
-  },
-  cancelStockTransfer: async (_id: number): Promise<StockTransferRow> => {
-    throw new Error("Transfer cancellation is not available yet");
-  },
-  exportStockLedger: async (_params?: StockLedgerFilter) => {
-    throw new Error("Ledger export is not available yet");
-  },
-};
-
 // ---- allocation: the human decision ----
 
 export const getAllocationProposal = (indentId: number) =>
@@ -238,8 +187,127 @@ export const listAllocations = (params?: { status?: string; indent_id?: number }
     .get<Page<AllocationListRow>>("/api/allocations", { params: { ...params, size: 100 } })
     .then((r) => r.data);
 
+// ---- New Inventory Module Endpoints ----
+
+export const getOverviewKPIs = () =>
+  api.get("/api/stock/overview-kpis").then((r) => r.data);
+
+export const createStockAdjustment = (data: any) =>
+  api.post("/api/stock/adjust", data).then((r) => r.data);
+
+export const listStockAdjustments = (params?: { warehouse_id?: number; status?: string; page?: number; size?: number }) =>
+  api.get("/api/stock/adjustments", { params }).then((r) => r.data);
+
+export const approveStockAdjustment = (id: number) =>
+  api.post(`/api/stock/adjustments/${id}/approve`).then((r) => r.data);
+
+export const rejectStockAdjustment = (id: number) =>
+  api.post(`/api/stock/adjustments/${id}/reject`).then((r) => r.data);
+
+export const getReplenishments = (params?: { warehouse_id?: number; category_id?: number; criticality?: string }) =>
+  api.get("/api/stock/replenishment", { params }).then((r) => r.data);
+
+export const getReservations = (params?: { item_id?: number; warehouse_id?: number; status?: string; page?: number; size?: number }) =>
+  api.get("/api/reservations", { params }).then((r) => r.data);
+
+export const releaseReservation = (id: number) =>
+  api.post(`/api/reservations/${id}/release`).then((r) => r.data);
+
+export const getItemAvailability = (itemId: number, projectId?: number, warehouseId?: number) =>
+  api.get(`/api/stock/${itemId}/availability`, { params: { project_id: projectId, warehouse_id: warehouseId } }).then((r) => r.data);
+
+export const getStockAgeing = (warehouseId?: number) =>
+  api.get("/api/stock/ageing", { params: { warehouse_id: warehouseId } }).then((r) => r.data);
+
+export const getStockValuation = (warehouseId?: number) =>
+  api.get("/api/stock/valuation", { params: { warehouse_id: warehouseId } }).then((r) => r.data);
+
+export const getNearExpiryAlerts = (days = 90) =>
+  api.get("/api/stock/near-expiry-alerts", { params: { days } }).then((r) => r.data);
+
+export const createSTO = (data: any) =>
+  api.post("/api/stock/sto", data).then((r) => r.data);
+
+export const listSTOs = (params?: { status?: string; page?: number; size?: number }) =>
+  api.get("/api/stock/sto", { params }).then((r) => r.data);
+
+export const getSTO = (id: number) =>
+  api.get(`/api/stock/sto/${id}`).then((r) => r.data);
+
+export const approveSTO = (id: number) =>
+  api.post(`/api/stock/sto/${id}/approve`).then((r) => r.data);
+
+export const dispatchSTO = (id: number) =>
+  api.post(`/api/stock/sto/${id}/dispatch`).then((r) => r.data);
+
+export const receiveSTO = (id: number) =>
+  api.post(`/api/stock/sto/${id}/receive`).then((r) => r.data);
+
+export const createCycleCount = (data: any) =>
+  api.post("/api/stock/cycle-counts", data).then((r) => r.data);
+
+export const listCycleCounts = (params?: { warehouse_id?: number; status?: string; page?: number; size?: number }) =>
+  api.get("/api/stock/cycle-counts", { params }).then((r) => r.data);
+
+export const getCycleCount = (id: number) =>
+  api.get(`/api/stock/cycle-counts/${id}`).then((r) => r.data);
+
+export const updateCycleCount = (id: number, data: any) =>
+  api.put(`/api/stock/cycle-counts/${id}`, data).then((r) => r.data);
+
+export const postCycleCount = (id: number) =>
+  api.post(`/api/stock/cycle-counts/${id}/post`).then((r) => r.data);
+
+
 export const approveAllocation = (id: number, comments = "") =>
   api.post(`/api/allocations/${id}/approve`, { comments }).then((r) => r.data);
 
 export const rejectAllocation = (id: number, comments = "") =>
   api.post(`/api/allocations/${id}/reject`, { comments }).then((r) => r.data);
+
+export const inventoryApi = {
+  getWarehouses,
+  getCatalogItems,
+  getVendors,
+  getStockBalances,
+  getStockBalance: getStockBalances,
+  getStockLedger,
+  createStockTransfer,
+  createTransfer: createStockTransfer,
+  listMaterialRequests,
+  getMaterialRequest,
+  approveMaterialRequest,
+  rejectMaterialRequest,
+  getFulfillmentQueue,
+
+  // STO methods
+  listSTOs,
+  createSTO,
+  approveSTO,
+  dispatchSTO,
+  receiveSTO,
+  getStockTransfers: async (): Promise<any> => listSTOs(),
+  receiveStockTransfer: async (id: number): Promise<any> => receiveSTO(id),
+  cancelStockTransfer: async (_id: number): Promise<StockTransferRow> => {
+    throw new Error("Transfer cancellation is not available yet");
+  },
+
+  // Adjustments & Replenishment
+  adjustStock: createStockAdjustment,
+  createStockAdjustment,
+  listStockAdjustments,
+  approveStockAdjustment,
+  rejectStockAdjustment,
+  getReplenishments,
+
+  createReplenishmentPO: async (_payload: unknown) => {
+    throw new Error("Replenishment is not available yet");
+  },
+  createPurchaseIndent: async (_items: ReplenishmentPOItem[]) => {
+    throw new Error("Replenishment is not available yet");
+  },
+  exportStockLedger: async (_params?: StockLedgerFilter) => {
+    throw new Error("Ledger export is not available yet");
+  },
+};
+

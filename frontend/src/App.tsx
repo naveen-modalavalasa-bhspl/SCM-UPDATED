@@ -33,6 +33,10 @@ import { StockBalanceView } from "@/modules/inventory/components/StockBalanceVie
 import { StockLedgerView } from "@/modules/inventory/components/StockLedgerView";
 import { StockReplenishmentView } from "@/modules/inventory/components/StockReplenishmentView";
 import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
+import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
+import { CycleCountsView } from "@/modules/inventory/components/CycleCountsView";
+import { ReservationsView } from "@/modules/inventory/components/ReservationsView";
+import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
 import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
 import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
@@ -46,7 +50,11 @@ const queryClient = new QueryClient({
 });
 
 function FullScreen({ children }: { children: ReactNode }) {
-  return <div className="grid min-h-full place-items-center text-muted">{children}</div>;
+  return (
+    <div className="flex h-screen w-screen items-center justify-center font-sans text-lg text-ink">
+      {children}
+    </div>
+  );
 }
 
 function AppRoutes() {
@@ -77,6 +85,10 @@ function AppRoutes() {
         <Route path="inventory/ledger" element={<StockLedgerView />} />
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
         <Route path="inventory/transfers" element={<StockTransferView />} />
+        <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
+        <Route path="inventory/cycle-counts" element={<CycleCountsView />} />
+        <Route path="inventory/reservations" element={<ReservationsView />} />
+        <Route path="inventory/valuation" element={<StockValuationView />} />
         <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />

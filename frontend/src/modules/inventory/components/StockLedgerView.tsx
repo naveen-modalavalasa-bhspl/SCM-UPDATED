@@ -68,7 +68,18 @@ export function StockLedgerView() {
   );
 
   const handleExport = () => {
-    inventoryApi.exportStockLedger(filterParams);
+    if (!ledgerItems || !ledgerItems.length) return;
+    const headers = ["Posting Time", "Transaction Type", "Reference No", "Warehouse", "Item Code", "Item Name", "In Qty", "Out Qty", "Balance Qty"].join(",");
+    const rows = ledgerItems.map((r) =>
+      [`"${r.posting_time}"`, `"${r.transaction_type}"`, `"${r.reference_no}"`, `"${r.warehouse_name}"`, `"${r.item_code}"`, `"${r.item_name}"`, r.in_qty, r.out_qty, r.balance_qty].join(",")
+    );
+    const csvContent = "data:text/csv;charset=utf-8," + [headers, ...rows].join("\n");
+    const link = document.createElement("a");
+    link.setAttribute("href", encodeURI(csvContent));
+    link.setAttribute("download", `stock_ledger_${new Date().toISOString().substring(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const getTagColor = (type: StockLedgerItem["transaction_type"]) => {

@@ -5,7 +5,6 @@ import {
   Plus,
   Trash2,
   CheckCircle,
-  XCircle,
   Truck,
   Eye,
   FileText,
@@ -67,19 +66,56 @@ export function StockTransferView() {
   });
 
   const { data: sourceStockList = [] } = useQuery<StockBalanceItem[]>({
-    queryKey: ["stock-balance-for-source", sourceWhId],
-    queryFn: () => inventoryApi.getStockBalance({ warehouse_id: sourceWhId || undefined, show_zero_stock: false }),
-    enabled: !!sourceWhId,
+    queryKey: ["stock-balance-source", sourceWhId],
+    queryFn: () => (sourceWhId ? inventoryApi.getStockBalances({ warehouse_id: sourceWhId }) : Promise.resolve([])),
+    enabled: Boolean(sourceWhId),
   });
 
-  const { data: transfersList = [], isLoading: isLoadingTransfers } = useQuery<StockTransferRow[]>({
+  const { data: stoPage, isLoading } = useQuery({
     queryKey: ["stock-transfers"],
-    queryFn: inventoryApi.getStockTransfers,
+    queryFn: () => inventoryApi.listSTOs(),
   });
+
+  const transfersList = useMemo(() => {
+    if (!stoPage?.items) return [];
+    return stoPage.items.map((sto: any) => ({
+      id: sto.id,
+      transfer_no: sto.sto_no,
+      transfer_date: sto.created_at ? sto.created_at.substring(0, 10) : "",
+      source_warehouse_id: sto.from_warehouse_id,
+      source_warehouse_name: sto.from_warehouse_name || `Warehouse #${sto.from_warehouse_id}`,
+      destination_warehouse_id: sto.to_warehouse_id,
+      destination_warehouse_name: sto.to_warehouse_name || `Warehouse #${sto.to_warehouse_id}`,
+      status: sto.status,
+      total_items: sto.items ? sto.items.length : 0,
+      total_qty: sto.items ? sto.items.reduce((acc: number, it: any) => acc + (it.requested_qty || 0), 0) : 0,
+      total_value: 0,
+      created_by: sto.requested_by_name || "System",
+      remarks: sto.remarks,
+      lines: sto.items ? sto.items.map((it: any) => ({
+        item_id: it.item_id,
+        item_code: it.item_code,
+        item_name: it.item_name,
+        available_qty: it.requested_qty,
+        transfer_qty: it.requested_qty,
+        uom_code: it.uom_code,
+      })) : [],
+    }));
+  }, [stoPage]);
 
   // Mutations
   const createMutation = useMutation({
-    mutationFn: (payload: StockTransferCreate) => inventoryApi.createStockTransfer(payload),
+    mutationFn: (payload: StockTransferCreate) =>
+      inventoryApi.createSTO({
+        from_warehouse_id: payload.source_warehouse_id,
+        to_warehouse_id: payload.destination_warehouse_id,
+        remarks: payload.remarks,
+        items: payload.lines.map((l) => ({
+          item_id: l.item_id,
+          requested_qty: l.transfer_qty,
+          remarks: l.batch_number ? `Batch: ${l.batch_number}` : undefined,
+        })),
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["stock-transfers"] });
       queryClient.invalidateQueries({ queryKey: ["stock-balance"] });
@@ -87,20 +123,26 @@ export function StockTransferView() {
       resetCreateForm();
     },
     onError: (err: any) => {
-      setFormError(err?.message || "Failed to create stock transfer");
+      setFormError(err?.response?.data?.detail || err?.message || "Failed to create STO");
+    },
+  });
+
+  const approveMutation = useMutation({
+    mutationFn: (id: number) => inventoryApi.approveSTO(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["stock-transfers"] });
+    },
+  });
+
+  const dispatchMutation = useMutation({
+    mutationFn: (id: number) => inventoryApi.dispatchSTO(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["stock-transfers"] });
     },
   });
 
   const receiveMutation = useMutation({
-    mutationFn: (id: number) => inventoryApi.receiveStockTransfer(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["stock-transfers"] });
-      queryClient.invalidateQueries({ queryKey: ["stock-balance"] });
-    },
-  });
-
-  const cancelMutation = useMutation({
-    mutationFn: (id: number) => inventoryApi.cancelStockTransfer(id),
+    mutationFn: (id: number) => inventoryApi.receiveSTO(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["stock-transfers"] });
       queryClient.invalidateQueries({ queryKey: ["stock-balance"] });
@@ -303,24 +345,34 @@ export function StockTransferView() {
             <Eye className="h-3.5 w-3.5" /> View
           </Button>
 
-          {r.status === "IN_TRANSIT" && (
-            <>
-              <Button
-                variant="primary"
-                onClick={() => receiveMutation.mutate(r.id)}
-                disabled={receiveMutation.isPending}
-              >
-                <CheckCircle className="h-3.5 w-3.5" /> Receive at Dest
-              </Button>
+          {r.status === "PENDING_APPROVAL" && (
+            <Button
+              variant="primary"
+              onClick={() => approveMutation.mutate(r.id)}
+              disabled={approveMutation.isPending}
+            >
+              <CheckCircle className="h-3.5 w-3.5" /> Approve STO
+            </Button>
+          )}
 
-              <Button
-                variant="danger"
-                onClick={() => cancelMutation.mutate(r.id)}
-                disabled={cancelMutation.isPending}
-              >
-                <XCircle className="h-3.5 w-3.5" /> Cancel
-              </Button>
-            </>
+          {r.status === "APPROVED" && (
+            <Button
+              variant="secondary"
+              onClick={() => dispatchMutation.mutate(r.id)}
+              disabled={dispatchMutation.isPending}
+            >
+              <Truck className="h-3.5 w-3.5" /> Dispatch
+            </Button>
+          )}
+
+          {(r.status === "DISPATCHED" || r.status === "IN_TRANSIT") && (
+            <Button
+              variant="primary"
+              onClick={() => receiveMutation.mutate(r.id)}
+              disabled={receiveMutation.isPending}
+            >
+              <CheckCircle className="h-3.5 w-3.5" /> Receive at Dest
+            </Button>
           )}
         </div>
       ),
@@ -348,7 +400,7 @@ export function StockTransferView() {
         <ResponsiveList
           data={transfersList}
           columns={listColumns}
-          loading={isLoadingTransfers}
+          loading={isLoading}
           keyOf={(r) => r.id}
           empty="No stock transfer records found."
           renderCard={(r) => (
