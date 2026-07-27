@@ -20,10 +20,12 @@ import { POListPage } from "@/modules/procurement/pages/POListPage";
 // sub-pages, so these paths hand the whole subtree to it.
 import { WarehouseModule } from "@/modules/warehouse";
 import { AdminPage } from "@/modules/admin/pages/AdminPage";
-import { UsersPage } from "@/modules/admin/pages/UsersPage";
-import { GroupsPage } from "@/modules/admin/pages/GroupsPage";
+import { UsersPage } from "@/modules/rbac/pages/UsersPage";
+import { GroupsPage } from "@/modules/rbac/pages/GroupsPage";
 import { RulesPage } from "@/modules/admin/pages/RulesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
+import { NumberingPage } from "@/modules/admin/pages/NumberingPage";
+import { NotificationsPage } from "@/modules/admin/pages/NotificationsPage";
 import { MastersPage } from "@/modules/masters/pages/MastersPage";
 import { InventoryOverviewPage } from "@/modules/inventory/pages/OverviewPage";
 // Each inventory screen is its own route so it can appear in the left rail.
@@ -31,6 +33,12 @@ import { StockBalanceView } from "@/modules/inventory/components/StockBalanceVie
 import { StockLedgerView } from "@/modules/inventory/components/StockLedgerView";
 import { StockReplenishmentView } from "@/modules/inventory/components/StockReplenishmentView";
 import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
+import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
+import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
+import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
+import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialRequestDetailPage";
+import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
+import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -68,13 +76,19 @@ function AppRoutes() {
         <Route path="inventory/ledger" element={<StockLedgerView />} />
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
         <Route path="inventory/transfers" element={<StockTransferView />} />
+        <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
+        <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
+        <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
+        <Route path="inventory/demand" element={<ItemDemandPage />} />
+        <Route path="inventory/material-requests/:id" element={<MaterialRequestDetailPage />} />
         <Route path="admin" element={<AdminPage />} />
-        <Route path="admin/users" element={<UsersPage />} />
-        <Route path="admin/groups" element={<GroupsPage />} />
+        <Route path="rbac/access" element={<UsersPage />} />
+        <Route path="rbac/groups" element={<GroupsPage />} />
         <Route path="admin/rules" element={<RulesPage />} />
         <Route path="admin/audit" element={<AuditPage />} />
-        {/* Numbering and notifications live as tabs on the Masters screen. */}
-        <Route path="admin/numbering" element={<MastersPage />} />
+        <Route path="admin/numbering" element={<NumberingPage />} />
+        <Route path="admin/notifications" element={<NotificationsPage />} />
+        <Route path="admin/fallback-log" element={<FallbackLogPage />} />
         <Route path="masters" element={<MastersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

@@ -110,8 +110,8 @@ export function StockReplenishmentView() {
   const createIndentMutation = useMutation({
     mutationFn: (selectedItems: { item_id: number; suggested_qty: number; vendor_id?: number }[]) =>
       inventoryApi.createPurchaseIndent(selectedItems),
-    onSuccess: (res) => {
-      setFeedbackMsg(res.message);
+    onSuccess: (res: { message?: string } | void) => {
+      setFeedbackMsg((res as { message?: string })?.message ?? "Done");
       queryClient.invalidateQueries({ queryKey: ["stock-replenishment"] });
       setSelectedIds(new Set());
       setIsAddModalOpen(false);

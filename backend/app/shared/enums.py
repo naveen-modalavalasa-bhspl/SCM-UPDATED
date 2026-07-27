@@ -15,9 +15,12 @@ class IndentStatus(str, Enum):
     REJECTED = "REJECTED"
     # Set by inventory allocation once an approved indent has been checked against
     # stock (flow doc §3 steps 3-5).
+    # Approval no longer allocates. It parks the indent here, in front of the person
+    # who decides how much to give and from where.
+    AWAITING_ALLOCATION = "AWAITING_ALLOCATION"
     ALLOCATED = "ALLOCATED"                       # every line reserved from stock
     PARTIALLY_FULFILLED = "PARTIALLY_FULFILLED"   # some reserved, rest went to an MR
-    PENDING_PROCUREMENT = "PENDING_PROCUREMENT"   # nothing on hand, all of it to an MR
+    PENDING_PROCUREMENT = "PENDING_PROCUREMENT"   # nothing given, all of it to an MR
     PARTIALLY_ORDERED = "PARTIALLY_ORDERED"
     ORDERED = "ORDERED"
     CLOSED = "CLOSED"
@@ -56,6 +59,9 @@ class ApprovalAction(str, Enum):
     REJECTED = "REJECTED"
     RETURNED = "RETURNED"        # added: wf_actions (addendum Part D)
     DELEGATED = "DELEGATED"      # added
+    # Written when configuration failed to produce an approver and the hardcoded
+    # reporting-manager ladder took over. Never an action a person performs.
+    FALLBACK = "FALLBACK"
 
 
 class StockDirection(str, Enum):
@@ -76,6 +82,7 @@ class UserRole(str, Enum):
 
 class DocType(str, Enum):
     INDENT = "INDENT"
+    ALLOCATION = "ALLOCATION"   # inventory's decision on how much stock to give
     MR = "MR"          # material request — the indent -> procurement bridge
     PO = "PO"
     GRN = "GRN"
@@ -175,6 +182,16 @@ class ReservationStatus(str, Enum):
     ACTIVE = "ACTIVE"
     RELEASED = "RELEASED"
     CONSUMED = "CONSUMED"
+
+
+class AllocationStatus(str, Enum):
+    """inv_allocations.status. The decision is a document so that "who chose to give
+    40 rather than 60, and when" stays answerable."""
+    DRAFT = "DRAFT"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"          # only now is stock actually reserved
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
 
 
 class MRStatus(str, Enum):

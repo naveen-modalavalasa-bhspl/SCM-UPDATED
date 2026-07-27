@@ -13,10 +13,8 @@ describe("admin api", () => {
 
   it("exposes every admin area the module has screens for", () => {
     expect(Object.keys(adminApi).sort()).toEqual([
-      "audit", "featureAccess", "getSchedule", "groups", "hcmRoles",
-      "notifications", "pageAccess", "roles", "rules", "setFeatureAccess",
-      "setPageAccess", "setSchedule", "syncEntity", "syncLog", "syncNow",
-      "syncStatus", "users",
+      "audit", "docSeries", "getSchedule", "notifications", "rules",
+      "setSchedule", "syncEntity", "syncLog", "syncNow", "syncStatus",
     ]);
   });
 });

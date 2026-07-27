@@ -44,6 +44,10 @@ STOCK_VIEW = "stock.view"
 STOCK_ADJUST = "stock.adjust"
 STOCK_RESERVE = "stock.reserve"
 STOCK_TRANSFER = "stock.transfer"
+ALLOCATION_VIEW = "allocation.view"
+ALLOCATION_CREATE = "allocation.create"
+ALLOCATION_APPROVE = "allocation.approve"
+ALLOCATION_REJECT = "allocation.reject"
 MR_VIEW = "mr.view"
 MR_CREATE = "mr.create"
 MR_APPROVE = "mr.approve"
@@ -105,6 +109,13 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
     Perm(STOCK_TRANSFER, "inventory", "stock", "transfer",
          "Transfer stock between warehouses"),
+    Perm(ALLOCATION_VIEW, "inventory", "allocation", "view", "View stock allocations"),
+    Perm(ALLOCATION_CREATE, "inventory", "allocation", "create",
+         "Decide how much stock an indent gets"),
+    Perm(ALLOCATION_APPROVE, "inventory", "allocation", "approve",
+         "Approve a stock allocation"),
+    Perm(ALLOCATION_REJECT, "inventory", "allocation", "reject",
+         "Reject a stock allocation"),
     Perm(MR_VIEW, "inventory", "material_request", "view", "View material requests"),
     Perm(MR_CREATE, "inventory", "material_request", "create", "Create material requests"),
     Perm(MR_APPROVE, "inventory", "material_request", "approve",

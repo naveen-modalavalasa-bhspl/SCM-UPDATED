@@ -7,7 +7,8 @@ raw status/action strings.
 from enum import Enum
 
 from app.shared.enums import (
-    ApprovalAction, AuditAction, DocType, IndentStatus, InstanceStatus,
+    AllocationStatus, ApprovalAction, AuditAction, DocType, IndentItemStatus,
+    IndentStatus, InstanceStatus, RuleActionType,
 )
 
 
@@ -22,11 +23,14 @@ class MaterialDirection(str, Enum):
 
 
 __all__ = [
+    "AllocationStatus",
     "ApprovalAction",
     "AuditAction",
     "DocType",
     "IndentActivityType",
+    "IndentItemStatus",
     "IndentStatus",
     "InstanceStatus",
     "MaterialDirection",
+    "RuleActionType",
 ]

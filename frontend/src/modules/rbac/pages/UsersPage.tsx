@@ -7,7 +7,7 @@ import { Check, Copy, KeyRound, Search, ShieldOff, UserPlus } from "lucide-react
 import {
   Button, Can, PageHeader, ResponsiveList, StatCard, type Column,
 } from "@/shared/components";
-import { adminApi } from "../api";
+import { rbacApi } from "../api";
 import type { AdminUserRow, GrantResult } from "../types";
 
 /**
@@ -26,12 +26,12 @@ export function UsersPage() {
   const [error, setError] = useState<string | null>(null);
 
   const summary = useQuery({
-    queryKey: ["admin", "users", "summary"], queryFn: adminApi.users.summary,
+    queryKey: ["rbac", "users", "summary"], queryFn: rbacApi.users.summary,
   });
-  const roles = useQuery({ queryKey: ["admin", "roles"], queryFn: adminApi.roles });
+  const roles = useQuery({ queryKey: ["rbac", "roles"], queryFn: rbacApi.roles });
   const users = useQuery({
-    queryKey: ["admin", "users", search, filter],
-    queryFn: () => adminApi.users.list({
+    queryKey: ["rbac", "users", search, filter],
+    queryFn: () => rbacApi.users.list({
       search: search || undefined,
       with_access: filter === "all" ? undefined : filter === "with",
       size: 50,
@@ -39,11 +39,11 @@ export function UsersPage() {
   });
 
   const refresh = () => {
-    qc.invalidateQueries({ queryKey: ["admin", "users"] });
+    qc.invalidateQueries({ queryKey: ["rbac", "users"] });
   };
 
   const grant = useMutation({
-    mutationFn: () => adminApi.users.grant({
+    mutationFn: () => rbacApi.users.grant({
       employee_id: selected!.employee_id, role_ids: roleIds,
     }),
     onSuccess: (r) => { setIssued(r); refresh(); },
@@ -51,19 +51,19 @@ export function UsersPage() {
   });
 
   const saveRoles = useMutation({
-    mutationFn: () => adminApi.users.setRoles(selected!.employee_id, roleIds),
+    mutationFn: () => rbacApi.users.setRoles(selected!.employee_id, roleIds),
     onSuccess: () => { setSelected(null); refresh(); },
     onError: (e: Error) => setError(e.message),
   });
 
   const revoke = useMutation({
-    mutationFn: (id: number) => adminApi.users.revoke(id),
+    mutationFn: (id: number) => rbacApi.users.revoke(id),
     onSuccess: () => { setSelected(null); refresh(); },
     onError: (e: Error) => setError(e.message),
   });
 
   const reset = useMutation({
-    mutationFn: (id: number) => adminApi.users.resetPassword(id),
+    mutationFn: (id: number) => rbacApi.users.resetPassword(id),
     onSuccess: (r) => { setIssued(r); refresh(); },
     onError: (e: Error) => setError(e.message),
   });
@@ -113,7 +113,7 @@ export function UsersPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Admin" title="Users & access" />
+      <PageHeader eyebrow="RBAC" title="Roles & access" />
 
       <div className="mb-5 flex gap-6 border-b border-line">
         {([
@@ -334,13 +334,13 @@ export function UsersPage() {
 function PageAccessMatrix() {
   const qc = useQueryClient();
   const matrix = useQuery({
-    queryKey: ["admin", "page-access"],
-    queryFn: adminApi.pageAccess,
+    queryKey: ["rbac", "page-access"],
+    queryFn: rbacApi.pageAccess,
   });
   const update = useMutation({
     mutationFn: ({ roleId, pageCodes }: { roleId: number; pageCodes: string[] }) =>
-      adminApi.setPageAccess(roleId, pageCodes),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "page-access"] }),
+      rbacApi.setPageAccess(roleId, pageCodes),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["rbac", "page-access"] }),
   });
 
   if (matrix.isLoading) {
@@ -432,15 +432,15 @@ function FeatureAccessMatrix() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const matrix = useQuery({
-    queryKey: ["admin", "feature-access"],
-    queryFn: adminApi.featureAccess,
+    queryKey: ["rbac", "feature-access"],
+    queryFn: rbacApi.featureAccess,
   });
   const update = useMutation({
     mutationFn: ({
       roleId, permissionCodes,
     }: { roleId: number; permissionCodes: string[] }) =>
-      adminApi.setFeatureAccess(roleId, permissionCodes),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "feature-access"] }),
+      rbacApi.setFeatureAccess(roleId, permissionCodes),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["rbac", "feature-access"] }),
   });
 
   if (matrix.isLoading) {

@@ -116,6 +116,12 @@ PAGE_TREE = [
      P.STOCK_VIEW, 54, "grp_inventory"),
     ("inv_transfers", "/inventory/transfers", "Transfers", "arrow-left-right",
      P.STOCK_ADJUST, 55, "grp_inventory"),
+    ("inv_fulfillment", "/inventory/fulfillment", "Fulfilment Queue", "check-circle",
+     P.STOCK_RESERVE, 56, "grp_inventory"),
+    ("inv_demand", "/inventory/demand", "Demand by Item", "boxes",
+     P.ALLOCATION_VIEW, 57, "grp_inventory"),
+    ("inv_mr", "/inventory/material-requests", "Material Requests", "file-text",
+     P.MR_VIEW, 58, "grp_inventory"),
 
     ("masters", "/masters", "Masters", "database", P.MASTER_ITEM_MANAGE, 60, None),
 
@@ -135,6 +141,8 @@ PAGE_TREE = [
      P.ADMIN_NOTIFICATIONS_MANAGE, 97, "grp_settings"),
     ("admin_audit", "/admin/audit", "Audit Log", "scroll-text",
      P.ADMIN_AUDIT_VIEW, 98, "grp_settings"),
+    ("admin_fallback", "/admin/fallback-log", "Fallback Log", "shield",
+     P.ADMIN_AUDIT_VIEW, 99, "grp_settings"),
 ]
 
 

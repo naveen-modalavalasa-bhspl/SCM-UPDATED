@@ -6,17 +6,20 @@ an ALL-mode stage with two approvers, and every resolver approver_type + delegat
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmPosition, HcmPositionAssignment,
 )
 from app.platform.rbac.models import Role, UserRole
-from app.platform.workflow import engine, resolver
+from app.platform.workflow import engine, fallback, resolver
 from app.platform.workflow.models import (
-    Delegation, Instance, Stage, StageCondition, Workflow,
+    Action, Delegation, Instance, Stage, StageCondition, Workflow,
 )
-from app.shared.enums import ApproverType, ApprovalMode, ConditionOperator, InstanceStatus
+from app.shared.enums import (
+    ApprovalAction, ApproverType, ApprovalMode, ConditionOperator, InstanceStatus,
+)
 from app.shared.models.base import utcnow
 
 
@@ -150,10 +153,37 @@ async def test_all_mode_needs_every_approver(db):
     assert final.status == InstanceStatus.APPROVED.value
 
 
-async def test_no_active_workflow_fails_loudly(db):
+async def test_no_active_workflow_falls_back_instead_of_failing(db):
+    """Replaces test_no_active_workflow_fails_loudly.
+
+    That test asserted engine.start() raises when a doc type has no configured
+    workflow. The requirement changed deliberately: missing configuration must never
+    strand a document, so the engine now materialises the hardcoded reporting ladder
+    (platform/workflow/fallback.py) and records that it did. Failing loudly is still
+    the behaviour for a stage that resolves to literally nobody, admins included.
+    """
+    # A valid installation always has an admin; the ladder's terminal safety net
+    # routes to them when the requester has no reporting line.
+    admin = await _emp(db, 90, "Admin")
+    role = Role(code="ADMIN", name="Admin", is_active=True)
+    db.add(role)
+    await db.flush()
+    db.add(UserRole(employee_id=admin.id, role_id=role.id))
+    await db.flush()
+
     e1 = await _emp(db, 1)
-    with pytest.raises(ValidationError):
-        await engine.start(db, "GRN", 1, {}, e1)
+    instance = await engine.start(db, "GRN", 1, {}, e1)
+
+    assert instance.status == InstanceStatus.IN_PROGRESS.value
+    wf = await db.get(Workflow, instance.workflow_id)
+    assert wf.code == "WF-FALLBACK-GRN"
+
+    # and it is visible, not silent
+    logged = (await db.execute(select(Action).where(
+        Action.instance_id == instance.id,
+        Action.action == ApprovalAction.FALLBACK.value))).scalars().all()
+    assert logged, "a fallback that fires silently is one nobody ever fixes"
+    assert any(fallback.REASON_NO_WORKFLOW in (a.comments or "") for a in logged)
 
 
 # ---------------- resolver ----------------

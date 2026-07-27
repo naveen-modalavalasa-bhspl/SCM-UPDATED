@@ -77,7 +77,12 @@ async def test_indent_to_stock_full_flow(client, db, make_user, login):
     h = await login("depthead", "pw")
     r = await client.post(f"/api/indents/{indent_id}/approve", headers=h, json={"comments": "ok"})
     assert r.status_code == 200, r.text
-    assert r.json()["status"] == "APPROVED"
+    # Was "APPROVED". Approval now runs the availability check (flow doc §3 steps 3-5):
+    # this world has no stock, so every line is short and the indent goes straight to
+    # procurement with a material request raised for it.
+    # NOTE: this becomes AWAITING_ALLOCATION once allocation becomes a human decision
+    # -- see docs/superpowers/specs/2026-07-26-allocation-is-a-decision-CHANGE.md
+    assert r.json()["status"] == "PENDING_PROCUREMENT"
 
     # 3. procurement creates PO from the approved indent, submits
     h = await login("proc", "pw")

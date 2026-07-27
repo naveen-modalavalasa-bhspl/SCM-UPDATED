@@ -10,6 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # --- Database (MySQL only) — required ---
     DATABASE_URL: str
+    # Optional: point the test suite at a MySQL the developer can CREATE DATABASE on.
+    # The shared server's SCM account cannot, so without this the 100+ DB-backed tests
+    # skip and the reservation maths goes unverified. Read here rather than straight
+    # from os.environ so it can live in .env like every other setting.
+    TEST_DATABASE_URL: str | None = None
 
     # --- Auth — required ---
     SECRET_KEY: str

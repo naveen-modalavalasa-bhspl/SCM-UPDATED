@@ -45,7 +45,8 @@ def sort_key(strategy: str):
 async def candidate_stock(db: AsyncSession, item_id: int,
                           project_id: int | None = NO_PROJECT,
                           warehouse_types: list[str] | None = None,
-                          strategy: str = PickStrategy.FIFO.value) -> list[Stock]:
+                          strategy: str = PickStrategy.FIFO.value,
+                          warehouse_ids: list[int] | None = None) -> list[Stock]:
     """Rows with something available, in the order they should be drawn down.
 
     Locked FOR UPDATE: two indents approved at the same moment must not both read the
@@ -54,7 +55,11 @@ async def candidate_stock(db: AsyncSession, item_id: int,
     stmt = select(Stock).where(Stock.item_id == item_id, Stock.available_qty > 0)
     if project_id is not None:
         stmt = stmt.where(Stock.project_id == project_id)
-    if warehouse_types:
+    if warehouse_ids:
+        # An allocator picked these warehouses explicitly. That choice wins over any
+        # type filter a rule suggested — a person looked at the shelf and decided.
+        stmt = stmt.where(Stock.warehouse_id.in_(warehouse_ids))
+    elif warehouse_types:
         stmt = stmt.where(Stock.warehouse_id.in_(
             select(Warehouse.id).where(Warehouse.warehouse_type.in_(warehouse_types),
                                        Warehouse.is_active.is_(True))))

@@ -1,7 +1,13 @@
 # Indent + Inventory — Design
 
+> ⚠️ **SUPERSEDED IN PART — read `2026-07-26-allocation-is-a-decision-CHANGE.md` first.**
+> §5 of this document has allocation happen automatically on approval. That is wrong:
+> deciding how much stock to give, to whom, and from where is a human judgement made
+> by inventory, not a rule. The change document replaces §5. Everything else here
+> (module boundaries, reservations, FEFO, MR, fallback) still stands.
+
 **Date:** 2026-07-26
-**Status:** approved (design), pending implementation plan
+**Status:** implemented, with §5 superseded (see the banner above)
 **Scope:** the Indent and Inventory halves of `docs/04_SCM_BUSINESS_FLOW.md`.
 Warehouse is deliberately last and is not covered here.
 

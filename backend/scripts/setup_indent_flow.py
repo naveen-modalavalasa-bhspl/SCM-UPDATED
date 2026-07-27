@@ -39,9 +39,23 @@ WORKFLOW_CODE = "WF-INDENT-REPORTING-MANAGER"
 # resolved from the position they had selected when they raised the indent.
 STAGES = [
     (1, "Reporting Manager", ApproverType.REPORTING_MANAGER.value, None),
-    (2, "Inventory — stock check", ApproverType.ROLE.value, "STORE"),
-    (3, "Warehouse — packing", ApproverType.ROLE.value, "storekeeper"),
 ]
+
+# Removed 2026-07-26, and deliberately not replaced:
+#
+#   (2, "Inventory — stock check", ROLE, "STORE")
+#   (3, "Warehouse — packing",     ROLE, "storekeeper")
+#
+# Neither was a sign-off. Stage 2 was a placeholder for the availability check, which
+# is now code that runs the instant approval completes (modules/inventory
+# allocate_for_indent) — leaving it as an approval stage meant a real manager approved
+# an indent and it then sat waiting on the demo seed user "Sunil Store", who is the
+# only holder of the STORE role. Stage 3 is worse: packing is work someone does, not a
+# decision someone signs.
+#
+# The inventory judgement — how much to give, from where — DOES need a human, but it
+# is its own document, not a stage on the indent's chain. See
+# docs/superpowers/specs/2026-07-26-allocation-is-a-decision-CHANGE.md.
 
 # Everyone may raise an indent, so every role gets the requester permissions.
 # approve/reject are also broad on purpose: the workflow engine decides who may

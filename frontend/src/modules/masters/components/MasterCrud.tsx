@@ -45,7 +45,11 @@ function buildPayload(fields: FormField[], values: Values): Values {
   for (const f of fields) {
     let v = values[f.key];
     if (f.type === "number") v = v === "" || v === null ? null : Number(v);
-    if (f.type === "select") v = v === "" || v === undefined ? null : Number(v);
+    if (f.type === "select") {
+      v = v === "" || v === undefined
+        ? null
+        : (f.options?.find((option) => String(option.value) === String(v))?.value ?? v);
+    }
     out[f.key] = v ?? null;
   }
   return out;
@@ -160,8 +164,17 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                   if (f.type === "select") {
                     return (
                       <Field key={f.key} label={f.label}>
-                        <Select value={(val as number | "") ?? ""} placeholder={f.placeholder ?? "Select…"}
-                                options={f.options ?? []} onChange={(v) => set(f.key, v === "" ? null : Number(v))} />
+                        <Select value={(val as string | number | "") ?? ""}
+                                placeholder={f.placeholder ?? "Select…"}
+                                options={f.options ?? []}
+                                onChange={(next) => set(
+                                  f.key,
+                                  next === ""
+                                    ? null
+                                    : (f.options?.find(
+                                        (option) => String(option.value) === String(next),
+                                      )?.value ?? next),
+                                )} />
                       </Field>
                     );
                   }

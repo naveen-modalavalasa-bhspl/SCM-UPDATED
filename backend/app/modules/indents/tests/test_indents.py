@@ -1,4 +1,4 @@
-"""Indents module tests: creation rules, the DRAFT->PENDING->APPROVED flow through
+"""Indents module tests: creation rules, the DRAFT->PENDING->AWAITING_ALLOCATION flow through
 the engine, edit locking, and an API smoke test with permissions."""
 import pytest
 
@@ -94,7 +94,11 @@ async def test_submit_then_dept_head_approves(db):
     result = await service.act_on_indent(
         db, indent.id, ApprovalAction.APPROVED, "ok", approver,
     )
-    assert result.status == IndentStatus.APPROVED.value
+    # Was APPROVED. Clearing the approval chain now hands the indent to inventory
+    # rather than finishing it: a person decides how much stock it actually gets
+    # (see the allocation change spec). APPROVED no longer appears as a resting
+    # state for an indent that has cleared its chain.
+    assert result.status == IndentStatus.AWAITING_ALLOCATION.value
     assert result.approved_at is not None
 
 
@@ -137,7 +141,7 @@ async def test_indent_stats_counts(db):
     await service.submit_indent(db, approved.id, requester)
     await service.act_on_indent(
         db, approved.id, ApprovalAction.APPROVED, "", approver,
-    )      # APPROVED
+    )      # -> AWAITING_ALLOCATION
 
     stats = await service.indent_stats(db)
     assert stats["total"] == 2
@@ -147,7 +151,7 @@ async def test_indent_stats_counts(db):
     assert stats["total_items"] == 2
     assert stats["total_qty"] == 10
     assert stats["approval_rate"] == 100
-    assert stats["by_status"]["APPROVED"] == 1
+    assert stats["by_status"]["AWAITING_ALLOCATION"] == 1
 
 
 async def test_activity_acknowledgments_and_notifications(db):
