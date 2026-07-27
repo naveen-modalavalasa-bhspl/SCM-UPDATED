@@ -1,14 +1,57 @@
 """sys_settings key-value helpers, the HCM sync schedule, and the audit log."""
+import json
+
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import PageParams, paginate
 from app.platform.settings.models import AuditLog, Setting
+from app.platform.settings.schemas import (
+    CompanySettings, FallbackSettings, HcmSyncSettings, NotificationSettings,
+    NumberingSettings, RegionalSettings, SettingsIn, SettingsOut,
+)
 from app.shared.enums import AuditAction
 
 HCM_ENABLED_KEY = "hcm_sync_enabled"
 HCM_INTERVAL_KEY = "hcm_sync_interval_minutes"
 DEFAULT_INTERVAL = 1440  # daily
+
+SETTINGS_SPEC = {
+    "company": (CompanySettings, {
+        "name": ("company.name", "string"),
+        "legal_name": ("company.legal_name", "string"),
+        "gstin": ("company.gstin", "string"),
+        "address": ("company.address", "string"),
+        "phone": ("company.phone", "string"),
+        "email": ("company.email", "string"),
+    }),
+    "regional": (RegionalSettings, {
+        "fiscal_year": ("regional.fiscal_year", "string"),
+        "default_warehouse_id": ("regional.default_warehouse_id", "int"),
+        "currency": ("regional.currency", "string"),
+        "date_format": ("regional.date_format", "string"),
+        "timezone": ("regional.timezone", "string"),
+    }),
+    "hcm_sync": (HcmSyncSettings, {
+        "enabled": (HCM_ENABLED_KEY, "bool"),
+        "interval_minutes": (HCM_INTERVAL_KEY, "int"),
+    }),
+    "numbering": (NumberingSettings, {
+        "fiscal_year_prefix": ("numbering.fiscal_year_prefix", "string"),
+        "default_pattern": ("numbering.default_pattern", "string"),
+        "reset_policy": ("numbering.reset_policy", "string"),
+    }),
+    "notifications": (NotificationSettings, {
+        "channels": ("notifications.channels", "json"),
+        "email_enabled": ("notifications.email_enabled", "bool"),
+        "in_app_enabled": ("notifications.in_app_enabled", "bool"),
+    }),
+    "fallback": (FallbackSettings, {
+        "workflow_fallback_enabled": ("fallback.workflow_enabled", "bool"),
+        "notify_admin_on_fallback": ("fallback.notify_admin", "bool"),
+        "allow_auto_admin_fallback": ("fallback.allow_auto_admin", "bool"),
+    }),
+}
 
 
 async def get_setting(db: AsyncSession, key: str, default: str | None = None) -> str | None:
@@ -25,6 +68,56 @@ async def set_setting(db: AsyncSession, key: str, value, value_type: str = "stri
         db.add(Setting(setting_key=key, setting_value=str(value), value_type=value_type,
                        category=category, is_editable=True))
     await db.commit()
+
+
+def _decode(value: str | None, value_type: str):
+    if value is None:
+        return None
+    if value_type == "bool":
+        return value.lower() == "true"
+    if value_type == "int":
+        return int(value) if value != "" else None
+    if value_type == "json":
+        return json.loads(value or "null")
+    return value
+
+
+def _encode(value, value_type: str) -> str:
+    if value_type == "bool":
+        return "true" if bool(value) else "false"
+    if value_type == "json":
+        return json.dumps(value)
+    return "" if value is None else str(value)
+
+
+async def get_app_settings(db: AsyncSession) -> SettingsOut:
+    settings = SettingsOut()
+    for group, (model, fields) in SETTINGS_SPEC.items():
+        defaults = getattr(settings, group).model_dump()
+        values = {}
+        for field, (key, value_type) in fields.items():
+            raw = await get_setting(db, key)
+            values[field] = defaults[field] if raw is None else _decode(raw, value_type)
+        setattr(settings, group, model(**values))
+    return settings
+
+
+async def update_app_settings(db: AsyncSession, data: SettingsIn, user) -> SettingsOut:
+    before = (await get_app_settings(db)).model_dump()
+    for group, (_model, fields) in SETTINGS_SPEC.items():
+        values = getattr(data, group).model_dump()
+        for field, (key, value_type) in fields.items():
+            await set_setting(
+                db, key, _encode(values[field], value_type),
+                value_type=value_type, category=group,
+            )
+    after = (await get_app_settings(db)).model_dump()
+    await write_audit(
+        db, entity="sys_settings", entity_id=0, action=AuditAction.UPDATE,
+        actor=user, before=before, after=after, summary="System settings updated",
+    )
+    await db.commit()
+    return await get_app_settings(db)
 
 
 async def get_hcm_schedule(db: AsyncSession) -> tuple[bool, int]:

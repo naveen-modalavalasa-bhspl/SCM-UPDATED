@@ -69,6 +69,17 @@ class StockDirection(str, Enum):
     OUT = "OUT"
 
 
+class AdjustmentReason(str, Enum):
+    DAMAGE = "DAMAGE"
+    SHORTAGE = "SHORTAGE"
+    EXCESS = "EXCESS"
+    CYCLE_COUNT = "CYCLE_COUNT"
+    EXPIRY = "EXPIRY"
+    QUALITY_REJECTION = "QUALITY_REJECTION"
+    OPENING_BALANCE = "OPENING_BALANCE"
+    OTHER = "OTHER"
+
+
 class UserRole(str, Enum):
     """Seed role CODES. Roles are data in rbac_roles; there is no user.role column."""
     ADMIN = "ADMIN"

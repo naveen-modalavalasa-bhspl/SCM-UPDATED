@@ -5,7 +5,7 @@ approver types and expands through active delegations.
 """
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.platform.hcm import service as hcm_service
@@ -38,14 +38,19 @@ async def _reporting_manager(
     return await hcm_service.get_position_holders(db, position.parent_position_id)
 
 
-async def _expand_delegations(db: AsyncSession, approvers: list[HcmEmployee]) -> list[HcmEmployee]:
+async def _expand_delegations(
+    db: AsyncSession, approvers: list[HcmEmployee], doc_type: str | None,
+) -> list[HcmEmployee]:
     if not approvers:
         return approvers
     today = date.today()
     ids = {a.id for a in approvers}
     rows = (await db.execute(
-        select(Delegation).where(Delegation.is_active.is_(True),
-                                 Delegation.from_employee_id.in_(ids))
+        select(Delegation).where(
+            Delegation.is_active.is_(True),
+            Delegation.from_employee_id.in_(ids),
+            or_(Delegation.doc_type.is_(None), Delegation.doc_type == doc_type),
+        )
     )).scalars().all()
     result = {a.id: a for a in approvers}
     for d in rows:
@@ -79,4 +84,4 @@ async def resolve_approvers(db: AsyncSession, stage, instance, doc_context: dict
             db, instance.started_by_id, (doc_context or {}).get("requester_position_id"),
         )
 
-    return await _expand_delegations(db, approvers)
+    return await _expand_delegations(db, approvers, instance.doc_type)

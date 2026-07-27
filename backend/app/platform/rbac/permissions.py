@@ -83,6 +83,7 @@ ADMIN_RULES_MANAGE = "admin.rules.manage"
 ADMIN_NUMBERING_MANAGE = "admin.numbering.manage"
 ADMIN_AUDIT_VIEW = "admin.audit.view"
 ADMIN_NOTIFICATIONS_MANAGE = "admin.notifications.manage"
+ADMIN_SETTINGS_MANAGE = "admin.settings.manage"
 
 
 ALL_PERMISSIONS: list[Perm] = [
@@ -150,6 +151,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(ADMIN_AUDIT_VIEW, "admin", "audit", "view", "View the audit log"),
     Perm(ADMIN_NOTIFICATIONS_MANAGE, "admin", "notifications", "manage",
          "Manage notification settings"),
+    Perm(ADMIN_SETTINGS_MANAGE, "admin", "settings", "manage",
+         "Manage system settings"),
 ]
 
 ALL_CODES: list[str] = [p.code for p in ALL_PERMISSIONS]

@@ -125,7 +125,7 @@ export interface MasterUomConversion {
   factor: number;
 }
 
-export type WarehouseType = "MAIN" | "TRANSIT" | "QUARANTINE" | "SCRAP";
+export type WarehouseType = "MAIN" | "LIP" | "MDP" | "TRANSIT" | "QUARANTINE" | "SCRAP";
 export type BinType = "ZONE" | "RACK" | "SHELF" | "STORAGE" | "STAGING";
 
 /** whs_warehouses — the location master. Soft-linked to an HCM facility. */

@@ -133,6 +133,8 @@ PAGE_TREE = [
 
     ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
     ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
+    ("admin_settings", "/admin/settings", "Company Settings", "settings",
+     P.ADMIN_SETTINGS_MANAGE, 92, "grp_settings"),
     ("admin_rules", "/admin/rules", "Rules Engine", "git-branch",
      P.ADMIN_RULES_MANAGE, 95, "grp_settings"),
     ("admin_numbering", "/admin/numbering", "Document Numbering", "hash",

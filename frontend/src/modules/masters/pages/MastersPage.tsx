@@ -26,7 +26,7 @@ const Code = ({ children }: { children: React.ReactNode }) => (
   <span className="mono font-semibold text-ink">{children}</span>
 );
 
-const WAREHOUSE_TYPES: Option[] = ["MAIN", "TRANSIT", "QUARANTINE", "SCRAP"]
+const WAREHOUSE_TYPES: Option[] = ["MAIN", "LIP", "MDP", "TRANSIT", "QUARANTINE", "SCRAP"]
   .map((v) => ({ value: v, label: v }));
 const BIN_TYPES: Option[] = ["ZONE", "RACK", "SHELF", "STORAGE", "STAGING"]
   .map((v) => ({ value: v, label: v }));

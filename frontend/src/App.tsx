@@ -39,6 +39,7 @@ import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
 import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialRequestDetailPage";
 import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
+import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -82,6 +83,7 @@ function AppRoutes() {
         <Route path="inventory/demand" element={<ItemDemandPage />} />
         <Route path="inventory/material-requests/:id" element={<MaterialRequestDetailPage />} />
         <Route path="admin" element={<AdminPage />} />
+        <Route path="admin/settings" element={<SettingsPage />} />
         <Route path="rbac/access" element={<UsersPage />} />
         <Route path="rbac/groups" element={<GroupsPage />} />
         <Route path="admin/rules" element={<RulesPage />} />
