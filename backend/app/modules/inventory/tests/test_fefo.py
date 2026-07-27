@@ -9,6 +9,8 @@ import pytest
 from app.modules.inventory import allocation, availability
 from app.modules.inventory.models import Stock, NO_BIN, NO_PROJECT
 from app.shared.enums import RefType
+from app.shared.models.master import Item
+from app.shared.models.warehouse import Warehouse
 
 
 def test_sort_key_fefo_orders_earliest_expiry_first():
@@ -35,31 +37,34 @@ def test_pick_strategy_for_batch_tracked_item():
     assert availability.pick_strategy_for(DummyNormalItem()) == "FIFO"
 
 
-async def test_reserve_fefo_draws_from_earliest_expiring_batch_first(db_session, make_user):
+async def test_reserve_fefo_draws_from_earliest_expiring_batch_first(db, make_user):
     user = await make_user(employee_id=99, username="fefo_user", password="pw", permissions=["stock.view"])
     today = date.today()
 
-    # Create stock rows with different expiry dates for item_id 501
+    # stk_balance has real FKs to mst_items and whs_warehouses, so both rows have
+    # to exist before any stock can point at them.
+    warehouse = Warehouse(code="WH-FEFO", name="FEFO Warehouse")
+    item = Item(code="ITEM-FEFO", name="FEFO Item", uom_code="PCS", is_batch_tracked=True)
+    db.add_all([warehouse, item])
+    await db.flush()
+
+    # Create stock rows with different expiry dates for the same item
     s_later = Stock(
-        warehouse_id=1, item_id=501, bin_id=NO_BIN, batch_id=102, batch_no="B-LATER",
+        warehouse_id=warehouse.id, item_id=item.id, bin_id=NO_BIN, batch_id=102, batch_no="B-LATER",
         expiry_date=today + timedelta(days=60), project_id=NO_PROJECT, available_qty=Decimal("50"),
         reserved_qty=Decimal("0"), total_qty=Decimal("50"),
     )
     s_earlier = Stock(
-        warehouse_id=1, item_id=501, bin_id=NO_BIN, batch_id=101, batch_no="B-EARLIER",
+        warehouse_id=warehouse.id, item_id=item.id, bin_id=NO_BIN, batch_id=101, batch_no="B-EARLIER",
         expiry_date=today + timedelta(days=10), project_id=NO_PROJECT, available_qty=Decimal("50"),
         reserved_qty=Decimal("0"), total_qty=Decimal("50"),
     )
-    db_session.add_all([s_later, s_earlier])
-    await db_session.flush()
-
-    class BatchItem:
-        id = 501
-        is_batch_tracked = True
+    db.add_all([s_later, s_earlier])
+    await db.flush()
 
     reserved_qty, shortfall = await allocation.reserve(
-        db_session, item_id=501, qty=30, ref_type=RefType.RESERVATION.value,
-        ref_id=999, ref_no="RES-FEFO-1", user=user, item=BatchItem(),
+        db, item_id=item.id, qty=30, ref_type=RefType.RESERVATION.value,
+        ref_id=999, ref_no="RES-FEFO-1", user=user, item=item,
     )
 
     assert reserved_qty == Decimal("30")

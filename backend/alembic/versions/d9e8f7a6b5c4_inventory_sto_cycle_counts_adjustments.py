@@ -3,14 +3,17 @@
 Hand-written alembic migration for STO, Cycle Count, and Stock Adjustments.
 
 Revision ID: d9e8f7a6b5c4
-Revises: c8d2e3f4a5b6
+Revises: b5c6d7e8f9a0
 Create Date: 2026-07-27
+
+Written against c8d2e3f4a5b6; re-pointed at the tip of the per-developer
+placeholder chain on merge so the repo keeps a single alembic head.
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "d9e8f7a6b5c4"
-down_revision = "c8d2e3f4a5b6"
+down_revision = "b5c6d7e8f9a0"
 branch_labels = None
 depends_on = None
 

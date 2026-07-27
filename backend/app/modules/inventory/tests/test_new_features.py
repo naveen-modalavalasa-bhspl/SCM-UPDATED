@@ -9,12 +9,12 @@ from app.shared.models.master import Item
 from app.shared.models.warehouse import Warehouse
 
 
-async def test_stock_adjustment_flow(db_session, make_user):
+async def test_stock_adjustment_flow(db, make_user):
     user = await make_user(employee_id=101, username="adj_user", password="pw", permissions=["stock.view"])
     wh = Warehouse(code="WH-ADJ", name="Adjustment Warehouse")
     item = Item(code="ITEM-ADJ", name="Adj Item", uom_code="PCS")
-    db_session.add_all([wh, item])
-    await db_session.flush()
+    db.add_all([wh, item])
+    await db.flush()
 
     class AdjItemData:
         item_id = item.id
@@ -32,28 +32,28 @@ async def test_stock_adjustment_flow(db_session, make_user):
         remarks = "Count discrepancy"
         items = [AdjItemData()]
 
-    adj = await service.create_stock_adjustment(db_session, AdjData(), user)
+    adj = await service.create_stock_adjustment(db, AdjData(), user)
     assert adj.status == "APPROVED"
     assert len(adj.items) == 1
 
     # Check stock balance
-    stock = (await db_session.execute(
+    stock = (await db.execute(
         service.select(Stock).where(Stock.item_id == item.id, Stock.warehouse_id == wh.id)
     )).scalar_one()
     assert stock.available_qty == Decimal("10")
 
 
-async def test_sto_workflow(db_session, make_user):
+async def test_sto_workflow(db, make_user):
     user = await make_user(employee_id=102, username="sto_user", password="pw", permissions=["stock.view", "stock.transfer"])
     wh1 = Warehouse(code="WH-SRC", name="Source Warehouse")
     wh2 = Warehouse(code="WH-DST", name="Destination Warehouse")
     item = Item(code="ITEM-STO", name="STO Item", uom_code="BOX")
-    db_session.add_all([wh1, wh2, item])
-    await db_session.flush()
+    db.add_all([wh1, wh2, item])
+    await db.flush()
 
     # Add initial stock in wh1
     await service.move_stock(
-        db_session, item_id=item.id, qty=100, direction="IN",
+        db, item_id=item.id, qty=100, direction="IN",
         ref_type="INIT", ref_id=1, ref_no="INIT", user=user, warehouse_id=wh1.id
     )
 
@@ -70,23 +70,23 @@ async def test_sto_workflow(db_session, make_user):
         remarks = "Need stock"
         items = [STOItemData()]
 
-    sto = await service.create_sto(db_session, STOData(), user)
+    sto = await service.create_sto(db, STOData(), user)
     assert sto.status == "PENDING_APPROVAL"
 
-    sto = await service.approve_sto(db_session, sto.id, user)
+    sto = await service.approve_sto(db, sto.id, user)
     assert sto.status == "APPROVED"
 
-    sto = await service.dispatch_sto(db_session, sto.id, user)
+    sto = await service.dispatch_sto(db, sto.id, user)
     assert sto.status == "DISPATCHED"
 
-    sto = await service.receive_sto(db_session, sto.id, user)
+    sto = await service.receive_sto(db, sto.id, user)
     assert sto.status == "RECEIVED"
 
     # Verify stock moved physically only after receive
-    stock_wh1 = (await db_session.execute(
+    stock_wh1 = (await db.execute(
         service.select(Stock).where(Stock.item_id == item.id, Stock.warehouse_id == wh1.id)
     )).scalar_one()
-    stock_wh2 = (await db_session.execute(
+    stock_wh2 = (await db.execute(
         service.select(Stock).where(Stock.item_id == item.id, Stock.warehouse_id == wh2.id)
     )).scalar_one()
 

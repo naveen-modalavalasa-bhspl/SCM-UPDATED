@@ -339,6 +339,9 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
     await db.flush()
 
     total_qty, total_val = Decimal("0"), Decimal("0")
+    # Collected as we go: adjustment.items is a lazy relationship, and touching it
+    # before the row is reloaded raises MissingGreenlet under async.
+    adj_items: list[StockAdjustmentItem] = []
     for item_data in data.items:
         item = await db.get(Item, item_data.item_id)
         qty = _d(item_data.quantity)
@@ -346,7 +349,7 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
         total_qty += qty
         total_val += (qty * cost)
 
-        db.add(StockAdjustmentItem(
+        adj_items.append(StockAdjustmentItem(
             adjustment_id=adjustment.id,
             item_id=item_data.item_id,
             item_code=item.code if item else None,
@@ -360,6 +363,7 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
             unit_cost=cost,
             remarks=item_data.remarks,
         ))
+    db.add_all(adj_items)
 
     # Auto-approve if small adjustment (qty <= 100 and value <= 5000)
     if total_qty <= Decimal("100") and total_val <= Decimal("5000"):
@@ -369,7 +373,7 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
         adjustment.approved_at = utcnow()
         await db.flush()
         # Post movement
-        for adj_item in adjustment.items:
+        for adj_item in adj_items:
             await move_stock(
                 db, item_id=adj_item.item_id, qty=adj_item.quantity,
                 direction=adj_item.direction, ref_type="ADJUSTMENT",
@@ -379,7 +383,9 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
             )
 
     await db.commit()
-    await db.refresh(adjustment)
+    # Name the relationship: a bare refresh expires it, so the first caller to read
+    # .items (the response model, for one) would lazy-load outside the greenlet.
+    await db.refresh(adjustment, ["items"])
     return adjustment
 
 
