@@ -96,10 +96,9 @@ function queryTextForItem(name: RegExp | string) {
 
 async function selectItem(name: RegExp | string) {
   const item = await screen.findByRole("combobox", { name: "Item" });
+  await waitFor(() => expect(masterApi.items).toHaveBeenCalledWith());
   fireEvent.focus(item);
   fireEvent.change(item, { target: { value: queryTextForItem(name) } });
-  await vi.advanceTimersByTimeAsync(300);
-  await waitFor(() => expect(masterApi.items).toHaveBeenCalled());
   fireEvent.click(await screen.findByRole("option", { name }));
 }
 
@@ -121,24 +120,26 @@ afterEach(() => {
 });
 
 describe("IndentFormPage", () => {
-  it("does not fetch the first 100 items before the user searches", () => {
+  it("loads the existing item list when the form opens", async () => {
     renderForm();
 
-    expect(masterApi.items).not.toHaveBeenCalled();
-    expect(screen.getByText("Attachments are not available for new indents yet.")).toBeInTheDocument();
+    await waitFor(() => expect(masterApi.items).toHaveBeenCalledWith());
+    expect(screen.getByText("Material Requests")).toBeInTheDocument();
+    expect(screen.queryByText("Attachments")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stock availability not checked")).not.toBeInTheDocument();
   });
 
-  it("uses debounced server-side item search", async () => {
+  it("keeps the original client-side item filtering", async () => {
     renderForm();
 
     const item = await screen.findByRole("combobox", { name: "Item" });
+    await waitFor(() => expect(masterApi.items).toHaveBeenCalledWith());
+    fireEvent.focus(item);
     fireEvent.change(item, { target: { value: "Sy" } });
-    expect(masterApi.items).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(300);
-
-    await waitFor(() => expect(masterApi.items).toHaveBeenCalledWith("Sy"));
     expect(await screen.findByRole("option", { name: /Syrup/i })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Powder/i })).not.toBeInTheDocument();
+    expect(masterApi.items).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -154,7 +155,24 @@ describe("IndentFormPage", () => {
 
     expect(screen.getByRole("spinbutton", { name: `Quantity (${uom})` })).toBeInTheDocument();
     expect(screen.getByText(uom)).toBeInTheDocument();
-    expect(screen.getByText("Stock availability not checked")).toBeInTheDocument();
+  });
+
+  it("keeps the complete UOM visible in a non-shrinking, right-aligned suffix", async () => {
+    renderForm();
+
+    await selectItem(/Gloves/i);
+
+    const suffix = screen.getByText("pack");
+    expect(suffix).toHaveClass(
+      "pointer-events-none",
+      "inline-flex",
+      "min-w-[2.5rem]",
+      "shrink-0",
+      "justify-end",
+      "whitespace-nowrap",
+      "text-muted",
+    );
+    expect(suffix).not.toHaveClass("truncate", "overflow-hidden", "text-ellipsis");
   });
 
   it("updates the UOM suffix immediately when the item changes", async () => {
@@ -193,17 +211,20 @@ describe("IndentFormPage", () => {
     expect(screen.getByText("UOM unavailable")).toBeInTheDocument();
   });
 
-  it("sets yesterday as disabled by the date minimum and rejects it if manually entered", async () => {
-    renderForm();
+  it.each(["2026-07-27", "2026-07-26"])(
+    "sets the date minimum and rejects the earlier date %s if manually entered",
+    async (pastDate) => {
+      renderForm();
 
-    const requiredDate = screen.getByLabelText("Required date");
-    expect(requiredDate).toHaveAttribute("min", "2026-07-28");
+      const requiredDate = screen.getByLabelText("Required date");
+      expect(requiredDate).toHaveAttribute("min", "2026-07-28");
 
-    fireEvent.change(requiredDate, { target: { value: "2026-07-27" } });
+      fireEvent.change(requiredDate, { target: { value: pastDate } });
 
-    expect(await screen.findByText("Required date cannot be earlier than today")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create indent" })).toBeDisabled();
-  });
+      expect(await screen.findByText("Required date cannot be earlier than today")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Create indent" })).toBeDisabled();
+    },
+  );
 
   it("accepts today as a required date", async () => {
     renderForm();

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { ReactElement } from "react";
@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
 import { IndentFilterBar } from "../components/IndentFilterBar";
 import { MaterialRequestsNav } from "../components/MaterialRequestsNav";
+import { buildStatusBreakdownData } from "../components/StatusBreakdownChart";
 import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
 import { IndentDashboardPage } from "../pages/DashboardPage";
 import { IndentListPage } from "../pages/ListPage";
@@ -20,7 +21,32 @@ import { groupJourneyHistory } from "../pages/JourneyPage";
 import { indentApi, indentKeys } from "../api";
 import { INDENT_STATUS_OPTIONS } from "../constants";
 import { formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
-import type { Indent, IndentJourney } from "../types";
+import type { Indent, IndentJourney, IndentStats } from "../types";
+
+class ResizeObserverMock implements ResizeObserver {
+  constructor(private readonly callback: ResizeObserverCallback) {}
+
+  observe(target: Element) {
+    const contentRect = {
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 320,
+      top: 0,
+      right: 320,
+      bottom: 320,
+      left: 0,
+      toJSON: () => ({}),
+    } as DOMRectReadOnly;
+    this.callback([{ target, contentRect } as ResizeObserverEntry], this);
+  }
+
+  unobserve() {}
+
+  disconnect() {}
+}
+
+vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 
 const mockAccount = vi.hoisted(() => ({
   employeeId: 1 as number | null,
@@ -299,6 +325,28 @@ function journeyData(overrides: Partial<IndentJourney> = {}): IndentJourney {
   };
 }
 
+function overviewStats(byStatus: Record<string, number>): IndentStats {
+  const total = Object.values(byStatus).reduce((sum, count) => sum + count, 0);
+  const draft = byStatus.DRAFT ?? 0;
+  const awaitingApproval = (byStatus.SUBMITTED ?? 0) + (byStatus.PENDING_APPROVAL ?? 0);
+  const rejected = byStatus.REJECTED ?? 0;
+  const ordered = (byStatus.ORDERED ?? 0) + (byStatus.PARTIALLY_ORDERED ?? 0);
+
+  return {
+    total,
+    draft,
+    awaiting_approval: awaitingApproval,
+    approved_active: Math.max(0, total - draft - awaitingApproval - rejected),
+    rejected,
+    ordered,
+    this_month: total,
+    total_items: total,
+    total_qty: total * 2,
+    approval_rate: total ? 80 : 0,
+    by_status: byStatus,
+  };
+}
+
 beforeEach(() => {
   mockAccount.employeeId = 1;
   mockAccount.activePositionId = 10;
@@ -404,6 +452,329 @@ describe("indent UI shell", () => {
     fireEvent.change(search, { target: { value: "  Bolt  " } });
 
     await waitFor(assertSearch);
+  });
+
+  it("shows only the latest five recent indents in the existing API order", async () => {
+    const indentNumbers = [
+      "IND/RECENT/005",
+      "IND/RECENT/002",
+      "IND/RECENT/009",
+      "IND/RECENT/001",
+      "IND/RECENT/006",
+      "IND/RECENT/003",
+    ];
+    const recentIndents = indentNumbers.map((indentNo, index) => ({
+      id: 100 + index,
+      indent_no: indentNo,
+      requested_by_name: `Requester ${index + 1}`,
+      department_name: "Operations",
+      status: "DRAFT",
+      priority: "NORMAL",
+      total_items: 1,
+      is_bookmarked: "NO",
+      created_at: `2026-07-${String(28 - index).padStart(2, "0")}T10:00:00Z`,
+    }));
+    vi.mocked(indentApi.list).mockResolvedValueOnce({
+      items: recentIndents,
+      total: recentIndents.length,
+      page: 1,
+      size: 6,
+    });
+
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    await screen.findByText(recentIndents[4].indent_no);
+    expect(screen.getAllByText(/^IND\/RECENT\//).map((node) => node.textContent)).toEqual(
+      recentIndents.slice(0, 5).map((indent) => indent.indent_no),
+    );
+    expect(screen.queryByText(recentIndents[5].indent_no)).not.toBeInTheDocument();
+    expect(indentApi.list).toHaveBeenCalledWith(expect.objectContaining({ size: 6 }));
+  });
+
+  it("shows View all in the Recent Indents header and navigates to All Requests", async () => {
+    renderWithProviders(
+      <>
+        <IndentDashboardPage />
+        <LocationProbe />
+      </>,
+      "/indents/dashboard",
+    );
+
+    const heading = await screen.findByRole("heading", { name: "Recent Indents" });
+    const viewAll = screen.getByRole("button", { name: "View all" });
+
+    expect(heading.parentElement).toHaveClass("flex", "items-center", "justify-between", "gap-4");
+    expect(viewAll.parentElement).toBe(heading.parentElement);
+
+    fireEvent.click(viewAll);
+
+    await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(/^\/indents$/));
+  });
+
+  it("renders a solid pseudo-3D pie and keeps the dynamic badge with a sorted, aligned legend", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
+      DRAFT: 1,
+      CLOSED: 0,
+      APPROVED: 3,
+      PENDING_APPROVAL: 4,
+      AWAITING_ALLOCATION: 7,
+    }));
+
+    const { container } = renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    const chart = await screen.findByRole("img", {
+      name: "Status breakdown donut chart. 15 total indents.",
+    });
+    expect(within(chart).queryByTestId("status-donut-total")).not.toBeInTheDocument();
+    expect(within(chart).queryByText("Total Indents")).not.toBeInTheDocument();
+    expect(screen.getByTestId("status-total-badge")).toHaveTextContent(/^15 Indents$/);
+    expect(screen.getByTestId("status-total-badge")).toHaveClass(
+      "ml-auto",
+      "w-fit",
+      "md:absolute",
+      "md:right-5",
+      "md:top-4",
+    );
+    expect(container.querySelectorAll(".recharts-pie")).toHaveLength(2);
+
+    const topColours = {
+      AWAITING_ALLOCATION: "var(--color-info)",
+      PENDING_APPROVAL: "var(--color-warn)",
+      APPROVED: "var(--color-ok)",
+      DRAFT: "var(--color-neutral)",
+    };
+    for (const [status, colour] of Object.entries(topColours)) {
+      const top = within(chart).getByTestId(`status-pie-top-${status}`);
+      const depthLayers = within(chart).getAllByTestId(
+        new RegExp(`^status-pie-depth-${status}-\\d+$`),
+      );
+
+      expect(top).toHaveAttribute("data-layer", "top");
+      expect(top).toHaveAttribute("data-status", status);
+      expect(top).toHaveAttribute("data-base-color", colour);
+      expect(top).toHaveAttribute("data-inner-radius", "0");
+      expect(top).toHaveAttribute("fill", colour);
+      expect(top).not.toHaveAttribute("pointer-events", "none");
+      expect(depthLayers.length).toBeGreaterThan(0);
+
+      for (const depth of depthLayers) {
+        expect(depth).toHaveAttribute("data-layer", "depth");
+        expect(depth).toHaveAttribute("data-status", status);
+        expect(depth).toHaveAttribute("data-base-color", colour);
+        expect(depth).toHaveAttribute("data-inner-radius", "0");
+        expect(depth).toHaveAttribute("pointer-events", "none");
+        expect(depth.getAttribute("fill")).not.toBe(colour);
+        expect(depth.getAttribute("fill")).toMatch(
+          new RegExp(
+            `^color-mix\\(in srgb, ${colour.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\d+%, black \\d+%\\)$`,
+          ),
+        );
+        expect(
+          depth.compareDocumentPosition(top) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+      }
+    }
+    expect(within(chart).queryByTestId("status-pie-top-CLOSED")).not.toBeInTheDocument();
+
+    const legend = screen.getByTestId("status-breakdown-legend");
+    const awaitingAllocation = within(legend).getByRole("button", {
+      name: "Awaiting Allocation: 7 indents, 47%",
+    });
+    expect(within(awaitingAllocation).getByText("Awaiting Allocation")).toBeInTheDocument();
+    const count = screen.getByTestId("status-legend-count-AWAITING_ALLOCATION");
+    const percentage = screen.getByTestId("status-legend-percentage-AWAITING_ALLOCATION");
+    expect(awaitingAllocation).toHaveClass("grid-cols-[minmax(0,1fr)_2.5rem_3rem]");
+    expect(count).toHaveTextContent(/^7$/);
+    expect(count).toHaveClass("text-right", "font-semibold", "text-ink");
+    expect(percentage).toHaveTextContent(/^47%$/);
+    expect(percentage).toHaveClass("text-right", "text-muted");
+    expect(awaitingAllocation).not.toHaveTextContent(/7\s*·\s*47%/);
+
+    expect(within(legend).getAllByRole("button").map((row) => row.getAttribute("aria-label"))).toEqual([
+      "Awaiting Allocation: 7 indents, 47%",
+      "In Approval: 4 indents, 27%",
+      "Approved: 3 indents, 20%",
+      "Draft: 1 indent, 7%",
+    ]);
+    expect(within(legend).queryByText("Closed")).not.toBeInTheDocument();
+    expect(screen.queryByText("AWAITING_ALLOCATION")).not.toBeInTheDocument();
+    expect(container.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId(/^status-slice-label-/)).toHaveLength(0);
+  });
+
+  it("sorts copied status data, calculates percentages, and removes zero counts", () => {
+    const byStatus = {
+      DRAFT: 1,
+      REJECTED: 0,
+      APPROVED: 3,
+    };
+    const original = { ...byStatus };
+
+    const { entries, total } = buildStatusBreakdownData(byStatus);
+
+    expect(total).toBe(4);
+    expect(entries).toEqual([
+      expect.objectContaining({ status: "APPROVED", count: 3, percentage: 75 }),
+      expect.objectContaining({ status: "DRAFT", count: 1, percentage: 25 }),
+    ]);
+    expect(entries.some((entry) => entry.status === "REJECTED")).toBe(false);
+    expect(byStatus).toEqual(original);
+  });
+
+  it("shows the unchanged compact tooltip only for an active top pie surface", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
+      AWAITING_ALLOCATION: 7,
+      PENDING_APPROVAL: 4,
+      APPROVED: 2,
+      DRAFT: 2,
+    }));
+
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    const firstTopSurface = await screen.findByTestId("status-pie-top-AWAITING_ALLOCATION");
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    fireEvent.mouseEnter(firstTopSurface);
+
+    const tooltip = await screen.findByRole("tooltip");
+    expect(within(tooltip).getByText("Awaiting Allocation")).toBeInTheDocument();
+    expect(within(tooltip).getByText("7 indents")).toBeInTheDocument();
+    expect(within(tooltip).getByText("47% of total")).toBeInTheDocument();
+    expect(tooltip).toHaveClass("pointer-events-none", "w-36");
+    expect(screen.getByTestId("status-legend-row-AWAITING_ALLOCATION")).toHaveAttribute("data-active", "true");
+
+    fireEvent.mouseLeave(firstTopSurface);
+    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
+  });
+
+  it("shows the status empty state instead of an empty donut", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
+      DRAFT: 0,
+      CLOSED: 0,
+    }));
+
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    expect(await screen.findByText("No indent status data available")).toBeInTheDocument();
+    expect(screen.getByTestId("status-total-badge")).toHaveTextContent(/^0 Indents$/);
+    expect(screen.queryByRole("img", { name: /Status breakdown donut chart/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Status breakdown legend")).not.toBeInTheDocument();
+  });
+
+  it("renders a single status as a complete solid pie with a 100 percent legend value", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({ ORDERED: 6 }));
+
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    const chart = await screen.findByRole("img", {
+      name: "Status breakdown donut chart. 6 total indents.",
+    });
+    expect(within(chart).queryByTestId("status-donut-total")).not.toBeInTheDocument();
+    expect(within(chart).queryByText("Total Indents")).not.toBeInTheDocument();
+    expect(screen.getByTestId("status-total-badge")).toHaveTextContent(/^6 Indents$/);
+
+    const ordered = screen.getByRole("button", {
+      name: "Ordered: 6 indents, 100%",
+    });
+    expect(within(ordered).getByTestId("status-legend-count-ORDERED")).toHaveTextContent(/^6$/);
+    expect(within(ordered).getByTestId("status-legend-percentage-ORDERED")).toHaveTextContent(/^100%$/);
+    const orderedTop = within(chart).getByTestId("status-pie-top-ORDERED");
+    const orderedDepth = within(chart).getAllByTestId(/^status-pie-depth-ORDERED-\d+$/);
+    expect(orderedTop).toHaveAttribute("data-inner-radius", "0");
+    expect(orderedTop).toHaveAttribute("fill", "#2563eb");
+    expect(orderedDepth.length).toBeGreaterThan(0);
+    expect(orderedDepth.every((layer) => layer.getAttribute("pointer-events") === "none")).toBe(true);
+    expect(chart.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
+  });
+
+  it("keeps tiny percentages in the legend without adding permanent pie labels", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
+      APPROVED: 99,
+      REJECTED: 1,
+    }));
+
+    const { container } = renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    const rejected = await screen.findByRole("button", {
+      name: "Rejected: 1 indent, 1%",
+    });
+    expect(within(rejected).getByTestId("status-legend-count-REJECTED")).toHaveTextContent(/^1$/);
+    expect(within(rejected).getByTestId("status-legend-percentage-REJECTED")).toHaveTextContent(/^1%$/);
+    expect(container.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
+  });
+
+  it("uses a balanced 40/60 desktop split with the legend beside the pie", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
+      DRAFT: 2,
+      APPROVED: 1,
+    }));
+
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    const layout = await screen.findByTestId("status-breakdown-layout");
+    const chart = screen.getByRole("img", { name: /Status breakdown donut chart/i });
+    const legend = screen.getByTestId("status-breakdown-legend");
+
+    expect(layout).toHaveClass(
+      "grid",
+      "md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]",
+      "md:items-center",
+      "md:gap-6",
+    );
+    expect(chart).toHaveClass("h-[250px]", "max-w-[300px]");
+    expect(legend).toHaveClass("md:max-h-[260px]", "md:overflow-y-auto");
+    expect(layout.children[0]).toBe(chart);
+    expect(layout.children[1]).toBe(legend);
+  });
+
+  it("stacks the legend below the centred pie on mobile without horizontal overflow", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
+      DRAFT: 2,
+      APPROVED: 1,
+    }));
+
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    const layout = await screen.findByTestId("status-breakdown-layout");
+    const chart = screen.getByRole("img", { name: /Status breakdown donut chart/i });
+    const legend = screen.getByTestId("status-breakdown-legend");
+    const badge = screen.getByTestId("status-total-badge");
+
+    expect(layout).toHaveClass("grid", "min-w-0", "gap-4");
+    expect(layout).not.toHaveClass("grid-cols-2");
+    expect(chart).toHaveClass("mx-auto", "h-[250px]", "w-full", "max-w-[300px]");
+    expect(legend).toHaveClass("min-w-0");
+    expect(badge).toHaveClass("ml-auto", "w-fit", "md:absolute");
+    expect(badge).not.toHaveClass("absolute");
+    expect(chart.compareDocumentPosition(legend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps the other Overview cards unchanged", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
+      AWAITING_ALLOCATION: 7,
+      PENDING_APPROVAL: 4,
+      APPROVED: 3,
+      DRAFT: 1,
+    }));
+
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+    await screen.findByRole("img", {
+      name: "Status breakdown donut chart. 15 total indents.",
+    });
+
+    for (const label of [
+      "Total indents",
+      "Awaiting approval",
+      "Approved active",
+      "Raised this month",
+      "In draft",
+      "Units requested",
+      "Rejected",
+      "Approval rate",
+      "Recent Indents",
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
   });
 
   it("shows every lifecycle status and deselects a selected status", async () => {
@@ -972,6 +1343,106 @@ describe("indent UI shell", () => {
     expect(screen.getByText("125")).toBeInTheDocument();
     expect(screen.getByText(/Column counts include all 125 matching requests/i)).toBeInTheDocument();
     expect(screen.getByText(/Showing 1 of 125/i)).toBeInTheDocument();
+  });
+
+  it("start-aligns the Board grid while preserving mobile horizontal scrolling", async () => {
+    const { container } = renderWithProviders(<IndentBoardPage />, "/indents/board");
+
+    expect(await screen.findAllByText("No pinned requests")).toHaveLength(6);
+
+    const horizontalScroller = container.querySelector(".overflow-x-auto");
+    const boardGrid = horizontalScroller?.firstElementChild;
+
+    expect(horizontalScroller).toHaveClass(
+      "-mx-4",
+      "overflow-x-auto",
+      "overflow-y-hidden",
+      "px-4",
+      "pb-3",
+      "md:mx-0",
+      "md:px-0",
+    );
+    expect(boardGrid).toHaveClass(
+      "flex",
+      "min-w-max",
+      "items-start",
+      "gap-4",
+      "md:grid",
+      "md:min-w-0",
+      "md:grid-cols-6",
+      "md:items-start",
+    );
+  });
+
+  it("keeps Board columns, bodies and empty states at natural height", async () => {
+    const { container } = renderWithProviders(<IndentBoardPage />, "/indents/board");
+
+    expect(await screen.findAllByText("No pinned requests")).toHaveLength(6);
+
+    const columns = Array.from(container.querySelectorAll(".md\\:grid-cols-6 > section"));
+    expect(columns).toHaveLength(6);
+
+    columns.forEach((column) => {
+      expect(column).toHaveClass("h-fit", "self-start");
+      expect(column).not.toHaveClass("min-h-[26rem]", "h-full", "flex-1");
+
+      const columnBody = column.children[1];
+      expect(columnBody).toHaveClass("flex", "flex-col", "gap-3");
+      expect(columnBody).not.toHaveClass("flex-1", "min-h-72");
+
+      const emptyState = columnBody.firstElementChild;
+      expect(emptyState).toHaveClass("min-h-52");
+      expect(emptyState).not.toHaveClass("flex-1");
+    });
+  });
+
+  it("keeps a one-card Board column compact with its count, pin and empty columns intact", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce({
+      total: 1,
+      draft: 1,
+      awaiting_approval: 0,
+      approved_active: 0,
+      rejected: 0,
+      ordered: 0,
+      this_month: 1,
+      total_items: 1,
+      total_qty: 1,
+      approval_rate: 0,
+      by_status: { DRAFT: 1 },
+    });
+    vi.mocked(indentApi.list).mockResolvedValueOnce({
+      items: [{
+        id: 42,
+        indent_no: "IND/2026/0042",
+        requested_by_name: "A Anil Kumar",
+        department_name: "Operations",
+        status: "DRAFT",
+        priority: "NORMAL",
+        total_items: 1,
+        is_bookmarked: "YES",
+        created_at: "2026-07-27T10:30:00Z",
+      }],
+      total: 1,
+      page: 1,
+      size: 50,
+    });
+
+    renderWithProviders(<IndentBoardPage />, "/indents/board");
+
+    const cardNumber = await screen.findByText("IND/2026/0042");
+    const draftColumn = screen.getByText("Draft").closest("section");
+    expect(draftColumn).not.toBeNull();
+    expect(draftColumn).toHaveClass("h-fit", "self-start");
+
+    const draftBody = draftColumn!.children[1];
+    expect(draftBody).toHaveClass("flex", "flex-col", "gap-3");
+    expect(draftBody).not.toHaveClass("flex-1", "min-h-72");
+    expect(cardNumber.closest("[role='button']")).toBeInTheDocument();
+    expect(within(draftColumn!).getByText("1")).toBeInTheDocument();
+    expect(within(draftColumn!).getByRole("button", { name: "Remove from Board" })).toBeInTheDocument();
+    expect(within(draftColumn!).queryByText("No pinned requests")).not.toBeInTheDocument();
+    expect(screen.getAllByText("No pinned requests")).toHaveLength(5);
+    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(5);
   });
 
   it("keeps partially fulfilled and closed Board cards in mapped columns", async () => {
