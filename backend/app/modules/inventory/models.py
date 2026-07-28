@@ -50,14 +50,20 @@ class Stock(Base):
     expiry_date = Column(Date, nullable=True)
     project_id = Column(BigInteger, index=True, nullable=False, default=NO_PROJECT)
     project_name = Column(String(200), nullable=True)     # snapshot
+    serial_number = Column(String(50), nullable=True)
+    asset_code = Column(String(40), nullable=True)
+    consumable_code = Column(String(40), nullable=True)
     available_qty = Column(Numeric(16, 3), nullable=False, default=0)
     reserved_qty = Column(Numeric(16, 3), nullable=False, default=0)
     transit_qty = Column(Numeric(16, 3), nullable=False, default=0)
     total_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    # The DB team's own costing columns. Both are 0 across the live data today, so the
+    # screens show "not costed" rather than a rupee figure — a real zero beats a
+    # plausible number invented in the frontend.
+    valuation_rate = Column(Numeric(16, 4), nullable=False, default=0)
+    stock_value = Column(Numeric(16, 2), nullable=False, default=0)
     last_movement_at = Column(DateTime, nullable=True)
     updated_at = updated_at_col()
-    # valuation_rate and stock_value are left unmapped: NOT NULL with DB defaults, and
-    # costing is not this build's concern.
     __table_args__ = (
         UniqueConstraint("item_id", "warehouse_id", "bin_id", "batch_id", "project_id",
                          name="uq_stk_balance_item_wh_bin_batch_proj"),

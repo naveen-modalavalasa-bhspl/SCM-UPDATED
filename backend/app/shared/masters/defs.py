@@ -11,28 +11,57 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ValidationError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
 from app.shared.enums import (
-    AttributeDataType, AttributeTarget, BinType, BomType, PriceType, WarehouseType,
+    AttributeDataType, BinType, CategoryTagType, UomClass, WarehouseType,
 )
 from app.shared.masters.crud import MasterDef
 from app.shared.models.master import (
-    Attribute, AttributeMapping, Bom, BomItem, Brand, BrandManufacturer,
-    DosageForm, Feature, GeneralName, Item, ItemCategory, ItemClass, ItemSubClass,
-    Manufacturer, Packaging, PriceList, PriceListItem, Project, Uom,
-    UomConversion, Vendor,
+    Attribute, Bom, BomItem, Brand, BrandManufacturer, CategoryTag,
+    DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory, ItemClass,
+    ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer, Packaging,
+    Project, Spec, Uom, UomConversion, Vendor,
 )
 from app.shared.models.warehouse import Bin, Warehouse
 
 
 # --------------------------------------------------------------------------- #
+#  Shared validation
+# --------------------------------------------------------------------------- #
+async def require_unique(db: AsyncSession, model: type, column: str, value: str,
+                         row, label: str, *, scope=None) -> None:
+    """Reject a duplicate value on `column`, case-insensitively.
+
+    Done in Python rather than with a unique index because the scoped cases cannot be
+    indexed reliably: a Level 1 category has parent_id NULL, and MySQL counts NULLs in
+    a unique index as distinct, so two Level 1 rows named "Furniture" would both pass
+    an index and only collide in the user's head.
+
+    `row` is the row being saved; on an update it is excluded so a row does not clash
+    with itself. `scope` is an extra WHERE clause — the categories use it to scope the
+    check to one parent, which is what lets Furniture be a Level 1 and also a Level 2
+    under a different branch.
+    """
+    text = (value or "").strip()
+    if not text:
+        raise ValidationError(f"{label} is required")
+    stmt = select(model.id).where(func.lower(getattr(model, column)) == text.lower())
+    if scope is not None:
+        stmt = stmt.where(scope)
+    if getattr(row, "id", None) is not None:
+        stmt = stmt.where(model.id != row.id)
+    if await db.scalar(stmt) is not None:
+        raise ValidationError(f"{label} '{text}' already exists")
+
+
+# --------------------------------------------------------------------------- #
 #  Items
 # --------------------------------------------------------------------------- #
-def build_item_code(category_path: str, general_code: str, brand_code: str,
-                    manufacturer_code: str) -> str:
-    """Build the immutable item identity code from approved master-data codes."""
+def build_item_prefix(category_path: str, general_code: str, brand_code: str,
+                      manufacturer_code: str) -> str:
+    """The part of an item code that identity decides: 101010-PARACET-DOLO-DOLO."""
     if not re.fullmatch(r"\d{6}", category_path or ""):
         raise ValidationError("Select a Level 3 category with a six-digit category path")
     parts = [general_code, brand_code, manufacturer_code]
@@ -41,13 +70,50 @@ def build_item_code(category_path: str, general_code: str, brand_code: str,
         raise ValidationError(
             "General name, brand and manufacturer codes must be letters and numbers only"
         )
-    code = "-".join([category_path, *(part.strip().upper() for part in parts)])
+    return "-".join([category_path, *(part.strip().upper() for part in parts)])
+
+
+def build_item_code(category_path: str, general_code: str, brand_code: str,
+                    manufacturer_code: str, serial: int) -> str:
+    """The full item code: identity, then a four-digit serial.
+
+    The serial is what lets one brand and manufacturer carry several items — Dolo
+    650 and Dolo 500 share every other part of the code and differ only here.
+    """
+    if not 1 <= serial <= 9999:
+        raise ValidationError(
+            "This brand and manufacturer already have 9999 items in this category")
+    code = f"{build_item_prefix(category_path, general_code, brand_code, manufacturer_code)}-{serial:04d}"
     if len(code) > 50:
         raise ValidationError("Generated item code exceeds 50 characters")
     return code
 
 
+async def next_item_serial(db: AsyncSession, prefix: str) -> int:
+    """The next free serial for a prefix.
+
+    Reads the existing serials FOR UPDATE, which makes InnoDB hold the range so a
+    second transaction on the same prefix waits rather than picking the same number.
+    Two brand-new prefixes racing is still possible, and the unique index on
+    mst_items.code is what catches that — it surfaces as a readable duplicate
+    message rather than two items sharing a code.
+    """
+    rows = (await db.execute(
+        select(Item.serial_no).where(Item.code.like(f"{prefix}-%")).with_for_update()
+    )).scalars().all()
+    return max([r for r in rows if r] or [0]) + 1
+
+
 class ItemIn(BaseModel):
+    """What the item form sends.
+
+    Deliberately absent, though the columns still exist:
+      · pricing and tax — tax comes from the HSN row at PO/GRN time, and
+        purchase_price is fed by GRN as the stock-valuation cost, not typed here;
+      · stock limits — reorder levels are a warehouse decision, not an item one;
+      · shelf life — expiry is tracked per batch, so a fixed number on the item
+        only ever disagreed with the stock.
+    """
     name: str
     short_name: str | None = None
     category_id: int
@@ -57,30 +123,19 @@ class ItemIn(BaseModel):
     item_class_id: int
     item_sub_class_id: int | None = None
     uom_id: int
-    item_type: str | None = None
-    hsn_code: str | None = None
+    hsn_id: int
+    # Asset or consumable. The asset/consumable code itself is generated during
+    # putaway in the warehouse module — nothing is numbered here.
+    is_asset: bool = False
     description: str | None = None
     has_components: bool = False
     barcode_type: str | None = None
     barcode_value: str | None = None
-    tax_percent: float | None = None
-    cgst_rate: float = 0
-    sgst_rate: float = 0
-    igst_rate: float = 0
     is_batch_tracked: bool = False
     is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
     has_expiry: bool = False
     requires_qi: bool = False
-    shelf_life_days: int = 0
-    safety_stock: float = 0
-    reorder_level: float = 0
-    reorder_qty: float = 0
-    lead_time_days: int = 0
-    min_order_qty: float = 0
-    max_order_qty: float = 0
-    purchase_price: float = 0
-    selling_price: float = 0
-    mrp: float = 0
     dosage_form_id: int | None = None
     valuation_method: str = "FIFO"
     requires_special_storage: bool = False
@@ -91,12 +146,8 @@ class ItemIn(BaseModel):
 
 
 def item_out(i: Item) -> dict:
-    numeric = (
-        "tax_percent", "cgst_rate", "sgst_rate", "igst_rate", "safety_stock",
-        "reorder_level", "reorder_qty", "min_order_qty", "max_order_qty",
-        "purchase_price", "selling_price", "mrp",
-    )
-    out = {"id": i.id, "code": i.code, "name": i.name, "short_name": i.short_name,
+    return {"id": i.id, "code": i.code, "serial_no": i.serial_no, "name": i.name,
+            "short_name": i.short_name,
             "uom_id": i.uom_id, "uom_code": i.uom_code, "category_id": i.category_id,
             "category_name": i.category_name, "item_type": i.item_type,
             "general_name_id": i.general_name_id, "general_name_code": i.general_name_code,
@@ -110,13 +161,15 @@ def item_out(i: Item) -> dict:
             "item_sub_class_id": i.item_sub_class_id,
             "item_sub_class_code": i.item_sub_class_code,
             "item_sub_class_name": i.item_sub_class_name,
-            "hsn_code": i.hsn_code, "description": i.description,
+            "hsn_id": i.hsn_id, "hsn_code": i.hsn_code, "is_asset": i.is_asset,
+            "description": i.description,
             "has_components": i.has_components, "barcode_type": i.barcode_type,
             "barcode_value": i.barcode_value,
             "is_batch_tracked": i.is_batch_tracked,
-            "is_serial_tracked": i.is_serial_tracked, "has_expiry": i.has_expiry,
-            "requires_qi": i.requires_qi, "shelf_life_days": i.shelf_life_days,
-            "lead_time_days": i.lead_time_days, "dosage_form_id": i.dosage_form_id,
+            "is_serial_tracked": i.is_serial_tracked,
+            "is_imei_tracked": i.is_imei_tracked, "has_expiry": i.has_expiry,
+            "requires_qi": i.requires_qi,
+            "dosage_form_id": i.dosage_form_id,
             "dosage_form_code": i.dosage_form_code,
             "dosage_form_name": i.dosage_form_name,
             "valuation_method": i.valuation_method,
@@ -125,25 +178,29 @@ def item_out(i: Item) -> dict:
             "requires_special_transport": i.requires_special_transport,
             "transport_conditions": i.transport_conditions,
             "is_active": i.is_active}
-    out.update({key: float(getattr(i, key) or 0) for key in numeric})
-    return out
 
 
 async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
-    """Snapshot uom_code and category_name onto the row so an item list renders from
-    one query instead of joining two masters (rule: minimise joins per screen)."""
+    """Validates the item's identity and snapshots the codes onto the row.
+
+    Snapshots let an item list render from one query rather than joining seven
+    masters, which is what the list screen actually needs.
+    """
     uom = await db.get(Uom, data.uom_id)
     category = await db.get(ItemCategory, data.category_id)
     general = await db.get(GeneralName, data.general_name_id)
     brand = await db.get(Brand, data.brand_id)
     manufacturer = await db.get(Manufacturer, data.manufacturer_id)
     item_class = await db.get(ItemClass, data.item_class_id)
+    hsn = await db.get(HsnCode, data.hsn_id)
     sub_class = await db.get(ItemSubClass, data.item_sub_class_id) \
         if data.item_sub_class_id else None
     dosage = await db.get(DosageForm, data.dosage_form_id) \
         if data.dosage_form_id else None
     if not all((uom, category, general, brand, manufacturer, item_class)):
         raise ValidationError("Category, general name, brand, manufacturer, class and UOM are required")
+    if hsn is None:
+        raise ValidationError("An HSN code is required")
     if category.level != 3:
         raise ValidationError("Select a Level 3 category with a six-digit category path")
     mapping = await db.scalar(select(BrandManufacturer.id).where(
@@ -155,17 +212,20 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         raise ValidationError("The selected manufacturer is not mapped to this brand")
     if sub_class and sub_class.item_class_id != item_class.id:
         raise ValidationError("The selected subclass does not belong to this item class")
-    if data.has_expiry and data.shelf_life_days <= 0:
-        raise ValidationError("Shelf life must be greater than zero for expiring items")
-    if data.max_order_qty and data.min_order_qty > data.max_order_qty:
-        raise ValidationError("Minimum order quantity cannot exceed maximum order quantity")
-    code = build_item_code(
-        category.path, general.code, brand.code, manufacturer.code,
-    )
+
     for key, value in data.model_dump().items():
         setattr(item, key, value)
-    item.code = code
+    # The code is assigned once and never regenerated. Re-deriving it on every edit
+    # would renumber an item that already has stock, ledger rows and documents
+    # pointing at the code it was created with.
+    if item.code is None:
+        prefix = build_item_prefix(category.path, general.code, brand.code,
+                                   manufacturer.code)
+        item.serial_no = await next_item_serial(db, prefix)
+        item.code = build_item_code(category.path, general.code, brand.code,
+                                    manufacturer.code, item.serial_no)
     item.uom_code = uom.code
+    item.hsn_code = hsn.code
     item.category_name = category.name
     item.general_name_code, item.general_name = general.code, general.name
     item.brand_code, item.brand_name = brand.code, brand.name
@@ -176,7 +236,34 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     item.dosage_form_code = dosage.code if dosage else None
     item.dosage_form_name = dosage.name if dosage else None
     item.item_type = item_class.code
-    item.tax_percent = max(data.cgst_rate + data.sgst_rate, data.igst_rate)
+
+
+async def restrict_items_to_my_groups(db: AsyncSession, user, stmt):
+    """Narrow an item list to what the caller's user groups allow.
+
+    Tagging is opt-in and additive: only groups that actually carry item tags take
+    part, and a user in none of them sees everything. Configuration must never
+    strand a requester with an empty catalogue (rule 8's spirit).
+
+    The import is function-local so the module graph still runs one way — shared
+    must not depend on platform at import time (rule 5), the same dodge crud.py
+    uses to reach the audit writer.
+    """
+    from app.platform.admin.groups import resolve_member_ids
+
+    tagged = (await db.execute(
+        select(ItemGroup.group_id).where(ItemGroup.is_active.is_(True)).distinct()
+    )).scalars().all()
+    if not tagged:
+        return stmt
+    mine = [gid for gid in tagged
+            if user.id in await resolve_member_ids(db, gid)]
+    if not mine:
+        return stmt
+    return stmt.where(Item.id.in_(
+        select(ItemGroup.item_id).where(ItemGroup.group_id.in_(mine),
+                                        ItemGroup.is_active.is_(True))
+    ))
 
 
 # --------------------------------------------------------------------------- #
@@ -207,6 +294,14 @@ async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) 
     level = (parent.level or 1) + 1 if parent else 1
     if level > 3:
         raise ValidationError("Item categories support only Level 1, 2 and 3")
+    # Scoped to the parent, not to the level: Furniture must not appear twice among
+    # the Level 1 roots, but it may still be a Level 2 under a different Level 1.
+    await require_unique(
+        db, ItemCategory, "name", data.name, cat, "A category named",
+        scope=(ItemCategory.parent_id == data.parent_id if data.parent_id is not None
+               else ItemCategory.parent_id.is_(None)),
+    )
+    await require_unique(db, ItemCategory, "code", data.code, cat, "Category code")
     segment = data.segment_code
     if not segment:
         sibling_max = await db.scalar(select(func.max(ItemCategory.segment_code)).where(
@@ -227,15 +322,57 @@ async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) 
 #  UOM and conversions
 # --------------------------------------------------------------------------- #
 class UomIn(BaseModel):
-    code: str
+    code: str = Field(min_length=1, max_length=20)
     name: str
-    uom_class: str | None = None
+    uom_class: str
     is_active: bool = True
 
 
 def uom_out(u: Uom) -> dict:
     return {"id": u.id, "code": u.code, "name": u.name,
             "uom_class": u.uom_class, "is_active": u.is_active}
+
+
+async def apply_uom(db: AsyncSession, row: Uom, data: UomIn) -> None:
+    if data.uom_class not in {c.value for c in UomClass}:
+        raise ValidationError(
+            f"uom_class must be one of {', '.join(c.value for c in UomClass)}")
+    await require_unique(db, Uom, "code", data.code, row, "UOM code")
+    # Name is scoped to the class: "Ton" as a weight and "Ton" as a refrigeration
+    # capacity are different units that happen to share a word.
+    await require_unique(db, Uom, "name", data.name, row, "A unit named",
+                         scope=(Uom.uom_class == data.uom_class))
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+
+
+# The units worth offering for each class, so an admin picks from a list instead of
+# inventing spellings. Not config: these are the SI/trade names, and letting them be
+# edited is how "Litre", "litre" and "Ltr" all end up in the same dropdown.
+UOM_SUGGESTIONS: dict[str, list[tuple[str, str]]] = {
+    UomClass.COUNT.value: [("PCS", "Pieces"), ("NOS", "Numbers"), ("PAIR", "Pair"),
+                           ("SET", "Set"), ("DOZ", "Dozen")],
+    UomClass.LENGTH.value: [("MM", "Millimetre"), ("CM", "Centimetre"),
+                            ("MTR", "Metre"), ("KM", "Kilometre"), ("INCH", "Inch"),
+                            ("FT", "Foot")],
+    UomClass.AREA.value: [("SQM", "Square metre"), ("SQFT", "Square foot"),
+                          ("SQCM", "Square centimetre")],
+    UomClass.VOLUME.value: [("ML", "Millilitre"), ("LTR", "Litre"),
+                            ("CBM", "Cubic metre"), ("GAL", "Gallon")],
+    UomClass.WEIGHT.value: [("MG", "Milligram"), ("GM", "Gram"), ("KG", "Kilogram"),
+                            ("QTL", "Quintal"), ("TON", "Tonne")],
+    UomClass.TEMPERATURE.value: [("CEL", "Celsius"), ("FAH", "Fahrenheit"),
+                                 ("KEL", "Kelvin")],
+    UomClass.TIME.value: [("SEC", "Second"), ("MIN", "Minute"), ("HR", "Hour"),
+                          ("DAY", "Day"), ("MON", "Month"), ("YR", "Year")],
+    UomClass.PRESSURE.value: [("PA", "Pascal"), ("KPA", "Kilopascal"), ("BAR", "Bar"),
+                              ("PSI", "Pounds per square inch")],
+    UomClass.ENERGY.value: [("J", "Joule"), ("KJ", "Kilojoule"), ("CAL", "Calorie"),
+                            ("KWH", "Kilowatt hour"), ("W", "Watt")],
+    UomClass.PACKAGING.value: [("BOX", "Box"), ("CTN", "Carton"), ("TRAY", "Tray"),
+                               ("PLT", "Pallet"), ("BAG", "Bag"), ("DRUM", "Drum"),
+                               ("CONT", "Container"), ("ROLL", "Roll")],
+}
 
 
 class UomConversionIn(BaseModel):
@@ -246,6 +383,8 @@ class UomConversionIn(BaseModel):
 
 def uom_conversion_out(c: UomConversion) -> dict:
     return {"id": c.id, "from_uom_id": c.from_uom_id, "to_uom_id": c.to_uom_id,
+            "from_uom_code": c.from_uom.code if c.from_uom else None,
+            "to_uom_code": c.to_uom.code if c.to_uom else None,
             "factor": float(c.factor) if c.factor is not None else None}
 
 
@@ -255,11 +394,17 @@ async def apply_uom_conversion(db: AsyncSession, row: UomConversion,
         raise ValidationError("A UOM cannot convert to itself")
     if data.factor <= 0:
         raise ValidationError("Conversion factor must be greater than zero")
-    if await db.get(Uom, data.from_uom_id) is None \
-            or await db.get(Uom, data.to_uom_id) is None:
+    from_uom = await db.get(Uom, data.from_uom_id)
+    to_uom = await db.get(Uom, data.to_uom_id)
+    if from_uom is None or to_uom is None:
         raise ValidationError("Both units of measure must exist")
     for key, value in data.model_dump().items():
         setattr(row, key, value)
+    # Attach the loaded rows to the relationships. Serialising a brand-new row would
+    # otherwise have to lazy-load them, and a lazy load on an async session raises
+    # instead of emitting SQL. Reads get them eagerly via lazy="selectin".
+    row.from_uom = from_uom
+    row.to_uom = to_uom
 
 
 # --------------------------------------------------------------------------- #
@@ -436,17 +581,79 @@ def named_code_out(row) -> dict:
             "is_active": row.is_active}
 
 
+def named_code_apply(model: type, label: str):
+    """Every simple lookup wants the same two checks. Written once and bound per
+    master, so a new lookup gets uniqueness by declaring it rather than by
+    remembering to."""
+    async def apply(db: AsyncSession, row, data: BaseModel) -> None:
+        await require_unique(db, model, "name", data.name, row, f"{label} named")
+        await require_unique(db, model, "code", data.code, row, f"{label} code")
+        for key, value in data.model_dump().items():
+            setattr(row, key, value)
+    return apply
+
+
 class BrandIn(BaseModel):
     code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
     name: str
     description: str | None = None
+    # A brand's manufacturers, edited here rather than on a screen of their own. One
+    # brand is routinely made by several plants, and a separate mapping tab meant
+    # creating a brand and then remembering to go somewhere else to make it usable.
+    manufacturer_ids: list[int] = Field(default_factory=list)
     is_active: bool = True
 
 
 def brand_out(b: Brand) -> dict:
+    links = [m for m in (b.manufacturers or []) if m.is_active]
     return {"id": b.id, "code": b.code, "name": b.name,
             "description": b.description,
+            "manufacturer_ids": [m.manufacturer_id for m in links],
+            "manufacturer_names": [m.manufacturer_name for m in links],
             "is_active": b.is_active}
+
+
+async def apply_brand(db: AsyncSession, row: Brand, data: BrandIn) -> None:
+    """Writes the brand and reconciles its mst_brand_manufacturers rows in one go."""
+    if row.id is None:
+        # Marks the collection loaded on a row that has never been queried. Without
+        # it the first read after the create-flush is a lazy load, which on an async
+        # session raises MissingGreenlet instead of emitting SQL. lazy="selectin"
+        # covers rows that arrive via a query; a brand-new one never does.
+        row.manufacturers = []
+    await require_unique(db, Brand, "name", data.name, row, "A brand named")
+    await require_unique(db, Brand, "code", data.code, row, "Brand code")
+    wanted = list(dict.fromkeys(data.manufacturer_ids))    # de-dupe, keep order
+    rows = (await db.execute(
+        select(Manufacturer).where(Manufacturer.id.in_(wanted))
+    )).scalars().all() if wanted else []
+    if len(rows) != len(wanted):
+        raise ValidationError("One of the selected manufacturers does not exist")
+
+    for key, value in data.model_dump(exclude={"manufacturer_ids"}).items():
+        setattr(row, key, value)
+
+    by_id = {link.manufacturer_id: link for link in (row.manufacturers or [])}
+    for manufacturer in rows:
+        link = by_id.get(manufacturer.id)
+        if link is None:
+            # Newly linked. Snapshot the codes so a brand list renders without
+            # joining mst_manufacturers.
+            row.manufacturers.append(BrandManufacturer(
+                brand_code=data.code, brand_name=data.name,
+                manufacturer_id=manufacturer.id, manufacturer_code=manufacturer.code,
+                manufacturer_name=manufacturer.name, is_active=True))
+        else:
+            link.is_active = True
+            link.manufacturer_code, link.manufacturer_name = (
+                manufacturer.code, manufacturer.name)
+    # Unticked links are deactivated, never deleted: items already carry this
+    # brand/manufacturer pair and the row is what proves the pair was once legal.
+    for manufacturer_id, link in by_id.items():
+        if manufacturer_id not in set(wanted):
+            link.is_active = False
+    for link in row.manufacturers:
+        link.brand_code, link.brand_name = data.code, data.name
 
 
 class BrandManufacturerIn(BaseModel):
@@ -478,17 +685,25 @@ async def apply_brand_manufacturer(
 
 
 class ItemClassIn(BaseModel):
-    code: str
+    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
     name: str
     description: str | None = None
-    is_capitalised: bool = False
     is_active: bool = True
 
 
 def item_class_out(c: ItemClass) -> dict:
+    # is_capitalised is deliberately absent. Whether an item is an asset is now a
+    # per-item choice (mst_items.is_asset), because the same class holds both: a
+    # laptop is capitalised, a mouse in the same IT Equipment class is not.
     return {"id": c.id, "code": c.code, "name": c.name,
-            "description": c.description, "is_capitalised": c.is_capitalised,
-            "is_active": c.is_active}
+            "description": c.description, "is_active": c.is_active}
+
+
+async def apply_item_class(db: AsyncSession, row: ItemClass, data: ItemClassIn) -> None:
+    await require_unique(db, ItemClass, "name", data.name, row, "An item class named")
+    await require_unique(db, ItemClass, "code", data.code, row, "Item class code")
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
 
 
 class ItemSubClassIn(BaseModel):
@@ -519,10 +734,13 @@ async def apply_item_sub_class(
 
 
 class PackagingIn(BaseModel):
-    code: str
+    """A kind of container — Tray, Box, Container — and nothing about what it holds.
+
+    qty_per_pack is gone: a tray of milk holds 10 litres and a tray of vials holds
+    200, so the quantity is a property of the item's chain, not of the tray.
+    """
+    code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9-]+$")
     name: str
-    uom_id: int | None = None
-    qty_per_pack: float | None = None
     length_cm: float | None = None
     width_cm: float | None = None
     height_cm: float | None = None
@@ -536,22 +754,22 @@ def _num(value):
 
 
 def packaging_out(p: Packaging) -> dict:
-    return {"id": p.id, "code": p.code, "name": p.name, "uom_id": p.uom_id,
-            "uom_code": p.uom_code, "qty_per_pack": _num(p.qty_per_pack),
+    return {"id": p.id, "code": p.code, "name": p.name,
             "length_cm": _num(p.length_cm), "width_cm": _num(p.width_cm),
             "height_cm": _num(p.height_cm), "weight_kg": _num(p.weight_kg),
             "is_returnable": p.is_returnable, "is_active": p.is_active}
 
 
 async def apply_packaging(db: AsyncSession, row: Packaging, data: PackagingIn) -> None:
-    if data.qty_per_pack is not None and data.qty_per_pack <= 0:
-        raise ValidationError("Quantity per pack must be greater than zero")
-    uom = await db.get(Uom, data.uom_id) if data.uom_id else None
-    if data.uom_id is not None and uom is None:
-        raise ValidationError("Unit of measure not found")
+    for name in ("length_cm", "width_cm", "height_cm", "weight_kg"):
+        value = getattr(data, name)
+        if value is not None and value <= 0:
+            raise ValidationError(
+                f"{name.replace('_', ' ')} must be greater than zero")
+    await require_unique(db, Packaging, "name", data.name, row, "A package named")
+    await require_unique(db, Packaging, "code", data.code, row, "Package code")
     for key, value in data.model_dump().items():
         setattr(row, key, value)
-    row.uom_code = uom.code if uom else None
 
 
 class FeatureIn(BaseModel):
@@ -572,10 +790,12 @@ def feature_out(f: Feature) -> dict:
 #  Attributes and attribute mapping
 # --------------------------------------------------------------------------- #
 class AttributeIn(BaseModel):
-    code: str
+    """A selectable trait: colour, size, grade. Its unit is a real UOM row, not the
+    free text it used to be, so "kg" and "Kg" cannot both exist."""
+    code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_]+$")
     name: str
     data_type: str = AttributeDataType.TEXT.value
-    unit: str | None = None
+    uom_id: int | None = None
     allowed_values: list[str] | None = None
     description: str | None = None
     is_active: bool = True
@@ -583,7 +803,8 @@ class AttributeIn(BaseModel):
 
 def attribute_out(a: Attribute) -> dict:
     return {"id": a.id, "code": a.code, "name": a.name, "data_type": a.data_type,
-            "unit": a.unit, "allowed_values": a.allowed_values or [],
+            "uom_id": a.uom_id, "uom_code": a.uom_code,
+            "allowed_values": a.allowed_values or [],
             "description": a.description, "is_active": a.is_active}
 
 
@@ -594,182 +815,329 @@ async def apply_attribute(db: AsyncSession, row: Attribute, data: AttributeIn) -
     # A LIST attribute with no options would render an empty dropdown nobody can use.
     if data.data_type == AttributeDataType.LIST.value and not data.allowed_values:
         raise ValidationError("A LIST attribute needs at least one allowed value")
+    uom = await db.get(Uom, data.uom_id) if data.uom_id else None
+    if data.uom_id is not None and uom is None:
+        raise ValidationError("Unit of measure not found")
+    await require_unique(db, Attribute, "name", data.name, row, "An attribute named")
+    await require_unique(db, Attribute, "code", data.code, row, "Attribute code")
     for key, value in data.model_dump().items():
         setattr(row, key, value)
-
-
-class AttributeMappingIn(BaseModel):
-    attribute_id: int
-    target_type: str
-    target_id: int
-    is_required: bool = False
-    sort_order: int = 0
-    is_active: bool = True
-
-
-def attribute_mapping_out(m: AttributeMapping) -> dict:
-    return {"id": m.id, "attribute_id": m.attribute_id,
-            "attribute_code": m.attribute_code, "attribute_name": m.attribute_name,
-            "target_type": m.target_type, "target_id": m.target_id,
-            "target_name": m.target_name, "is_required": m.is_required,
-            "sort_order": m.sort_order, "is_active": m.is_active}
-
-
-async def apply_attribute_mapping(db: AsyncSession, row: AttributeMapping,
-                                  data: AttributeMappingIn) -> None:
-    """Snapshots the attribute and target names so the mapping list reads without
-    joining three tables."""
-    if data.target_type not in {t.value for t in AttributeTarget}:
-        raise ValidationError(
-            f"target_type must be one of {', '.join(t.value for t in AttributeTarget)}")
-    attribute = await db.get(Attribute, data.attribute_id)
-    if attribute is None:
-        raise ValidationError("Attribute not found")
-
-    if data.target_type == AttributeTarget.CATEGORY.value:
-        target = await db.get(ItemCategory, data.target_id)
-    else:
-        target = await db.get(ItemClass, data.target_id)
-    if target is None:
-        raise ValidationError(f"{data.target_type.replace('_', ' ').title()} not found")
-
-    for key, value in data.model_dump().items():
-        setattr(row, key, value)
-    row.attribute_code = attribute.code
-    row.attribute_name = attribute.name
-    row.target_name = target.name
+    row.uom_code = uom.code if uom else None
+    # The old free-text column is kept in step so anything still reading it agrees
+    # with the UOM that was actually chosen.
+    row.unit = uom.code if uom else None
 
 
 # --------------------------------------------------------------------------- #
-#  Price lists
+#  Specs — a measurement, as opposed to an attribute's selectable trait
 # --------------------------------------------------------------------------- #
-class PriceListIn(BaseModel):
-    code: str
+class SpecIn(BaseModel):
+    code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_]+$")
     name: str
-    price_type: str = PriceType.PURCHASE.value
-    currency: str = "INR"
-    vendor_id: int | None = None
-    project_id: int | None = None
-    valid_from: date | None = None
-    valid_to: date | None = None
+    uom_id: int | None = None
     description: str | None = None
     is_active: bool = True
 
 
-def price_list_out(p: PriceList) -> dict:
-    return {"id": p.id, "code": p.code, "name": p.name, "price_type": p.price_type,
-            "currency": p.currency, "vendor_id": p.vendor_id,
-            "vendor_name": p.vendor_name, "project_id": p.project_id,
-            "project_name": p.project_name,
-            "valid_from": p.valid_from.isoformat() if p.valid_from else None,
-            "valid_to": p.valid_to.isoformat() if p.valid_to else None,
-            "description": p.description, "is_active": p.is_active}
+def spec_out(s: Spec) -> dict:
+    return {"id": s.id, "code": s.code, "name": s.name, "uom_id": s.uom_id,
+            "uom_code": s.uom_code, "description": s.description,
+            "is_active": s.is_active}
 
 
-async def apply_price_list(db: AsyncSession, row: PriceList, data: PriceListIn) -> None:
-    if data.price_type not in {t.value for t in PriceType}:
-        raise ValidationError(
-            f"price_type must be one of {', '.join(t.value for t in PriceType)}")
-    if data.valid_from and data.valid_to and data.valid_to < data.valid_from:
-        raise ValidationError("valid_to cannot be before valid_from")
-    vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
-    if data.vendor_id is not None and vendor is None:
-        raise ValidationError("Vendor not found")
-    project = await db.get(Project, data.project_id) if data.project_id else None
-    if data.project_id is not None and project is None:
-        raise ValidationError("Project not found")
-
+async def apply_spec(db: AsyncSession, row: Spec, data: SpecIn) -> None:
+    uom = await db.get(Uom, data.uom_id) if data.uom_id else None
+    if data.uom_id is not None and uom is None:
+        raise ValidationError("Unit of measure not found")
+    await require_unique(db, Spec, "name", data.name, row, "A spec named")
+    await require_unique(db, Spec, "code", data.code, row, "Spec code")
     for key, value in data.model_dump().items():
         setattr(row, key, value)
-    row.vendor_name = vendor.name if vendor else None
-    row.project_name = project.name if project else None
+    row.uom_code = uom.code if uom else None
 
 
-class PriceListItemIn(BaseModel):
-    price_list_id: int
-    item_id: int
-    rate: float
-    min_qty: float = 0
-    discount_percent: float = 0
+# --------------------------------------------------------------------------- #
+#  Category tags — attributes, specs and features a category expects
+# --------------------------------------------------------------------------- #
+class CategoryTagIn(BaseModel):
+    category_id: int
+    tag_type: str
+    tag_id: int
+    is_required: bool = False
     is_active: bool = True
 
 
-def price_list_item_out(r: PriceListItem) -> dict:
-    return {"id": r.id, "price_list_id": r.price_list_id, "item_id": r.item_id,
-            "item_code": r.item_code, "item_name": r.item_name, "uom_id": r.uom_id,
-            "uom_code": r.uom_code, "rate": _num(r.rate), "min_qty": _num(r.min_qty),
-            "discount_percent": _num(r.discount_percent), "is_active": r.is_active}
+def category_tag_out(t: CategoryTag) -> dict:
+    return {"id": t.id, "category_id": t.category_id,
+            "category_name": t.category_name, "tag_type": t.tag_type,
+            "tag_id": t.tag_id, "tag_code": t.tag_code, "tag_name": t.tag_name,
+            "tag_uom_code": t.tag_uom_code, "is_required": t.is_required,
+            "is_active": t.is_active}
 
 
-async def apply_price_list_item(db: AsyncSession, row: PriceListItem,
-                                data: PriceListItemIn) -> None:
-    if data.rate < 0:
-        raise ValidationError("Rate cannot be negative")
-    if not 0 <= data.discount_percent <= 100:
-        raise ValidationError("Discount must be between 0 and 100")
-    if await db.get(PriceList, data.price_list_id) is None:
-        raise ValidationError("Price list not found")
-    item = await db.get(Item, data.item_id)
-    if item is None:
-        raise ValidationError("Item not found")
+async def apply_category_tag(db: AsyncSession, row: CategoryTag,
+                             data: CategoryTagIn) -> None:
+    """Snapshots the category and the tagged thing so the tagging list reads without
+    joining four tables — the target table changes with tag_type, so a join would
+    have to be written three times."""
+    if data.tag_type not in {t.value for t in CategoryTagType}:
+        raise ValidationError(
+            f"tag_type must be one of {', '.join(t.value for t in CategoryTagType)}")
+    category = await db.get(ItemCategory, data.category_id)
+    if category is None:
+        raise ValidationError("Category not found")
+
+    model = {CategoryTagType.ATTRIBUTE.value: Attribute,
+             CategoryTagType.SPEC.value: Spec,
+             CategoryTagType.FEATURE.value: Feature}[data.tag_type]
+    target = await db.get(model, data.tag_id)
+    if target is None:
+        raise ValidationError(f"{data.tag_type.title()} not found")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
-    # The rate is per the item's own stocking unit, so it follows the item.
+    row.category_name = category.name
+    row.tag_code, row.tag_name = target.code, target.name
+    # Only a spec carries a unit; the column stays null for the other two.
+    row.tag_uom_code = getattr(target, "uom_code", None)
+
+
+# --------------------------------------------------------------------------- #
+#  Item groups — who may request an item
+# --------------------------------------------------------------------------- #
+class ItemGroupIn(BaseModel):
+    item_id: int
+    group_id: int
+    is_active: bool = True
+
+
+def item_group_out(g: ItemGroup) -> dict:
+    return {"id": g.id, "item_id": g.item_id, "item_code": g.item_code,
+            "item_name": g.item_name, "group_id": g.group_id,
+            "group_name": g.group_name, "is_active": g.is_active}
+
+
+async def apply_item_group(db: AsyncSession, row: ItemGroup,
+                           data: ItemGroupIn) -> None:
+    """rbac_user_groups is a platform table, so the import is function-local: the
+    module graph must still run modules -> platform -> shared -> core (rule 5)."""
+    from app.platform.rbac.models import UserGroup
+
+    item = await db.get(Item, data.item_id)
+    if item is None:
+        raise ValidationError("Item not found")
+    group = await db.get(UserGroup, data.group_id)
+    if group is None:
+        raise ValidationError("User group not found")
+
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
     row.item_code, row.item_name = item.code, item.name
-    row.uom_id, row.uom_code = item.uom_id, item.uom_code
+    row.group_name = group.name
+
+
+# --------------------------------------------------------------------------- #
+#  Item packaging — the tray -> box -> container ladder
+# --------------------------------------------------------------------------- #
+class ItemPackagingIn(BaseModel):
+    item_id: int
+    level: int
+    package_id: int
+    quantity: float
+    uom_id: int | None = None
+    is_active: bool = True
+
+
+def item_packaging_out(p: ItemPackaging) -> dict:
+    return {"id": p.id, "item_id": p.item_id, "level": p.level,
+            "package_id": p.package_id, "package_name": p.package_name,
+            "quantity": _num(p.quantity), "uom_id": p.uom_id,
+            "uom_code": p.uom_code, "is_active": p.is_active}
+
+
+async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
+                               data: ItemPackagingIn) -> None:
+    """Level 1 is measured in the item's own unit; every level above counts the
+    level below it. The rungs are stored, never the running totals — a stored total
+    is one edit away from disagreeing with its own parts."""
+    if data.level < 1:
+        raise ValidationError("Packaging levels start at 1")
+    if data.quantity <= 0:
+        raise ValidationError("Quantity must be greater than zero")
+    item = await db.get(Item, data.item_id)
+    if item is None:
+        raise ValidationError("Item not found")
+    package = await db.get(Packaging, data.package_id)
+    if package is None:
+        raise ValidationError("Package not found")
+    uom = await db.get(Uom, data.uom_id) if data.uom_id else None
+    if data.uom_id is not None and uom is None:
+        raise ValidationError("Unit of measure not found")
+
+    # A ladder with a missing rung cannot be multiplied up, so a level may only be
+    # added directly on top of one that already exists.
+    if data.level > 1:
+        below = await db.scalar(select(ItemPackaging.id).where(
+            ItemPackaging.item_id == data.item_id,
+            ItemPackaging.level == data.level - 1))
+        if below is None:
+            raise ValidationError(
+                f"Add level {data.level - 1} before level {data.level}")
+
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.package_name = package.name
+    # Level 1 measures the item itself; above that the unit is the package below.
+    row.uom_code = uom.code if uom else (item.uom_code if data.level == 1 else None)
+    if uom is None and data.level == 1:
+        row.uom_id = item.uom_id
+
+
+async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
+    """The ladder with its running totals: 1 tray = 10 L, 1 box = 10 trays = 100 L.
+
+    Multiplied up on read rather than stored, so the totals cannot drift from the
+    rungs they come from.
+    """
+    item = await db.get(Item, item_id)
+    if item is None:
+        raise NotFoundError("Item not found")
+    rows = (await db.execute(
+        select(ItemPackaging)
+        .where(ItemPackaging.item_id == item_id, ItemPackaging.is_active.is_(True))
+        .order_by(ItemPackaging.level)
+    )).scalars().all()
+
+    out, running = [], 1.0
+    for row in rows:
+        running *= float(row.quantity or 0)
+        out.append({
+            "level": row.level, "package_id": row.package_id,
+            "package_name": row.package_name, "quantity": _num(row.quantity),
+            "uom_code": row.uom_code,
+            # What one of this package holds, expressed in the item's own unit.
+            "base_quantity": running, "base_uom_code": item.uom_code,
+        })
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  Kit components
+# --------------------------------------------------------------------------- #
+class ItemComponentIn(BaseModel):
+    item_id: int
+    component_item_id: int
+    line_no: int = 1
+    quantity: float = 1
+    uom_id: int | None = None
+    remarks: str | None = None
+    is_active: bool = True
+
+
+def item_component_out(c: ItemComponent) -> dict:
+    return {"id": c.id, "item_id": c.item_id, "line_no": c.line_no,
+            "component_item_id": c.component_item_id,
+            "component_code": c.component_code, "component_name": c.component_name,
+            "quantity": _num(c.quantity), "uom_id": c.uom_id,
+            "uom_code": c.uom_code, "remarks": c.remarks, "is_active": c.is_active}
+
+
+async def apply_item_component(db: AsyncSession, row: ItemComponent,
+                               data: ItemComponentIn) -> None:
+    if data.quantity <= 0:
+        raise ValidationError("Quantity must be greater than zero")
+    # A kit inside itself would make any expansion of its contents recurse forever.
+    if data.item_id == data.component_item_id:
+        raise ValidationError("A kit cannot contain itself")
+    kit = await db.get(Item, data.item_id)
+    if kit is None:
+        raise ValidationError("Item not found")
+    component = await db.get(Item, data.component_item_id)
+    if component is None:
+        raise ValidationError("Component item not found")
+    uom = await db.get(Uom, data.uom_id) if data.uom_id else None
+    if data.uom_id is not None and uom is None:
+        raise ValidationError("Unit of measure not found")
+
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.component_code, row.component_name = component.code, component.name
+    # Defaults to the component's own stocking unit, which is right nearly always
+    # and still overridable when it is not.
+    row.uom_id = uom.id if uom else component.uom_id
+    row.uom_code = uom.code if uom else component.uom_code
+
+
+# --------------------------------------------------------------------------- #
+#  HSN codes — the tax classification
+# --------------------------------------------------------------------------- #
+class HsnIn(BaseModel):
+    code: str = Field(min_length=4, max_length=8, pattern=r"^\d+$")
+    description: str | None = None
+    cgst_rate: float = 0
+    sgst_rate: float = 0
+    igst_rate: float = 0
+    cess_rate: float = 0
+    effective_from: date | None = None
+    is_active: bool = True
+
+
+def hsn_out(h: HsnCode) -> dict:
+    return {"id": h.id, "code": h.code, "description": h.description,
+            "cgst_rate": _num(h.cgst_rate), "sgst_rate": _num(h.sgst_rate),
+            "igst_rate": _num(h.igst_rate), "cess_rate": _num(h.cess_rate),
+            "effective_from": h.effective_from.isoformat() if h.effective_from else None,
+            "is_active": h.is_active}
+
+
+async def apply_hsn(db: AsyncSession, row: HsnCode, data: HsnIn) -> None:
+    for name in ("cgst_rate", "sgst_rate", "igst_rate", "cess_rate"):
+        if not 0 <= getattr(data, name) <= 100:
+            raise ValidationError(f"{name.replace('_', ' ')} must be between 0 and 100")
+    # GST is split as CGST + SGST within a state and charged as IGST across states, so
+    # the two routes must come to the same number. They disagreeing means one of them
+    # is wrong, and the document would tax the same sale differently by destination.
+    if data.igst_rate and round(data.cgst_rate + data.sgst_rate, 3) != round(data.igst_rate, 3):
+        raise ValidationError("CGST + SGST must equal IGST")
+    await require_unique(db, HsnCode, "code", data.code, row, "HSN code")
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
 
 
 # --------------------------------------------------------------------------- #
 #  Bills of material
 # --------------------------------------------------------------------------- #
 class BomIn(BaseModel):
-    code: str
+    """A named, reusable set of items belonging to a project — the standard kit a
+    requester picks instead of typing the same twelve lines every time.
+
+    No parent item, output quantity or assembly type any more: this is a request
+    template, not a manufacturing recipe. Those columns stay in the table but the
+    API no longer reads or writes them.
+    """
+    code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9-]+$")
     name: str
-    bom_type: str = BomType.GENERAL.value
-    parent_item_id: int | None = None
-    output_qty: float = 1
     project_id: int | None = None
-    department_id: int | None = None
     description: str | None = None
-    is_default: bool = False
-    effective_from: date | None = None
-    effective_to: date | None = None
     is_active: bool = True
 
 
 def bom_out(b: Bom) -> dict:
-    return {"id": b.id, "code": b.code, "name": b.name, "bom_type": b.bom_type,
-            "parent_item_id": b.parent_item_id,
-            "parent_item_code": b.parent_item_code,
-            "parent_item_name": b.parent_item_name,
-            "output_qty": _num(b.output_qty), "project_id": b.project_id,
-            "project_name": b.project_name, "department_id": b.department_id,
-            "department_name": b.department_name, "description": b.description,
-            "total_items": b.total_items, "is_default": b.is_default,
-            "effective_from": b.effective_from.isoformat() if b.effective_from else None,
-            "effective_to": b.effective_to.isoformat() if b.effective_to else None,
+    return {"id": b.id, "code": b.code, "name": b.name,
+            "project_id": b.project_id, "project_name": b.project_name,
+            "description": b.description, "total_items": b.total_items,
             "is_active": b.is_active}
 
 
 async def apply_bom(db: AsyncSession, row: Bom, data: BomIn) -> None:
-    if data.bom_type not in {t.value for t in BomType}:
-        raise ValidationError(
-            f"bom_type must be one of {', '.join(t.value for t in BomType)}")
-    if data.output_qty <= 0:
-        raise ValidationError("Output quantity must be greater than zero")
-    if data.effective_from and data.effective_to \
-            and data.effective_to < data.effective_from:
-        raise ValidationError("effective_to cannot be before effective_from")
-    parent = await db.get(Item, data.parent_item_id) if data.parent_item_id else None
-    if data.parent_item_id is not None and parent is None:
-        raise ValidationError("Parent item not found")
     project = await db.get(Project, data.project_id) if data.project_id else None
+    if data.project_id is not None and project is None:
+        raise ValidationError("Project not found")
+    await require_unique(db, Bom, "name", data.name, row, "A BOM named")
+    await require_unique(db, Bom, "code", data.code, row, "BOM code")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
-    row.parent_item_code = parent.code if parent else None
-    row.parent_item_name = parent.name if parent else None
     row.project_name = project.name if project else None
 
 
@@ -778,9 +1146,7 @@ class BomItemIn(BaseModel):
     item_id: int
     line_no: int = 1
     quantity: float = 1
-    scrap_percent: float = 0
-    child_bom_id: int | None = None
-    is_optional: bool = False
+    uom_id: int | None = None
     remarks: str | None = None
 
 
@@ -789,8 +1155,7 @@ def bom_item_out(r: BomItem) -> dict:
             "item_id": r.item_id, "item_code": r.item_code, "item_name": r.item_name,
             "category_name": r.category_name, "uom_id": r.uom_id,
             "uom_code": r.uom_code, "quantity": _num(r.quantity),
-            "scrap_percent": _num(r.scrap_percent), "child_bom_id": r.child_bom_id,
-            "is_optional": r.is_optional, "remarks": r.remarks}
+            "remarks": r.remarks}
 
 
 async def apply_bom_item(db: AsyncSession, row: BomItem, data: BomItemIn) -> None:
@@ -802,15 +1167,16 @@ async def apply_bom_item(db: AsyncSession, row: BomItem, data: BomItemIn) -> Non
     item = await db.get(Item, data.item_id)
     if item is None:
         raise ValidationError("Item not found")
-    # A BOM containing itself would make an expansion recurse forever.
-    if data.child_bom_id is not None and data.child_bom_id == data.bom_id:
-        raise ValidationError("A BOM cannot contain itself")
+    uom = await db.get(Uom, data.uom_id) if data.uom_id else None
+    if data.uom_id is not None and uom is None:
+        raise ValidationError("Unit of measure not found")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
     row.item_code, row.item_name = item.code, item.name
     row.category_name = item.category_name
-    row.uom_id, row.uom_code = item.uom_id, item.uom_code
+    row.uom_id = uom.id if uom else item.uom_id
+    row.uom_code = uom.code if uom else item.uom_code
 
 
 # --------------------------------------------------------------------------- #
@@ -820,7 +1186,9 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="items", name="Item", model=Item, schema=ItemIn,
               manage_perm=perms.MASTER_ITEM_MANAGE, serialize=item_out,
               search_cols=("name", "code"), apply=apply_item,
-              default_active_only=True),
+              default_active_only=True,
+              scope_to_user=restrict_items_to_my_groups,
+              filters=("category_id", "item_class_id", "brand_id", "hsn_id")),
 
     MasterDef(path="item-categories", name="Category", model=ItemCategory,
               schema=CategoryIn, manage_perm=perms.MASTER_CATEGORY_MANAGE,
@@ -829,19 +1197,23 @@ MASTERS: list[MasterDef] = [
 
     MasterDef(path="general-names", name="General name", model=GeneralName,
               schema=NamedCodeIn, manage_perm=perms.MASTER_ITEM_MANAGE,
-              serialize=named_code_out, search_cols=("name", "code")),
+              serialize=named_code_out, search_cols=("name", "code"),
+              apply=named_code_apply(GeneralName, "A general name")),
 
     MasterDef(path="manufacturers", name="Manufacturer", model=Manufacturer,
               schema=NamedCodeIn, manage_perm=perms.MASTER_BRAND_MANAGE,
-              serialize=named_code_out, search_cols=("name", "code")),
+              serialize=named_code_out, search_cols=("name", "code"),
+              apply=named_code_apply(Manufacturer, "A manufacturer")),
 
     MasterDef(path="dosage-forms", name="Dosage form", model=DosageForm,
               schema=NamedCodeIn, manage_perm=perms.MASTER_ITEM_MANAGE,
-              serialize=named_code_out, search_cols=("name", "code")),
+              serialize=named_code_out, search_cols=("name", "code"),
+              apply=named_code_apply(DosageForm, "A dosage form")),
 
     MasterDef(path="uom", name="UOM", model=Uom, schema=UomIn,
               manage_perm=perms.MASTER_UOM_MANAGE, serialize=uom_out,
-              search_cols=("name", "code"), order_col="code", paginated=False),
+              search_cols=("name", "code"), order_col="code", paginated=False,
+              apply=apply_uom, filters=("uom_class",)),
 
     # mst_uom_conversions has no is_active column, so this master cannot be
     # deactivated; the DELETE route still registers and returns a clear 400.
@@ -859,18 +1231,23 @@ MASTERS: list[MasterDef] = [
               search_cols=("code", "name", "path"), order_col="path",
               apply=apply_bin),
 
+    # Read-only: HCM owns projects and platform/hcm/sync.py writes them. A local edit
+    # would survive only until the next sync overwrote it without saying so.
     MasterDef(path="projects", name="Project", model=Project, schema=ProjectIn,
               manage_perm=perms.MASTER_PROJECT_MANAGE, serialize=project_out,
-              search_cols=("name", "code"), apply=apply_project),
+              search_cols=("name", "code"), apply=apply_project, read_only=True),
 
     MasterDef(path="vendors", name="Vendor", model=Vendor, schema=VendorIn,
               manage_perm=perms.MASTER_VENDOR_MANAGE, serialize=vendor_out,
               search_cols=("name", "code"), default_active_only=True),
 
     # ---- simple lookups ----
+    # A brand carries its manufacturers inline, so there is no separate mapping
+    # screen. The list route below stays: the item form reads it to narrow the
+    # manufacturer dropdown to the chosen brand.
     MasterDef(path="brands", name="Brand", model=Brand, schema=BrandIn,
               manage_perm=perms.MASTER_BRAND_MANAGE, serialize=brand_out,
-              search_cols=("name", "code", "manufacturer")),
+              search_cols=("name", "code"), apply=apply_brand),
 
     MasterDef(path="brand-manufacturers", name="Brand manufacturer",
               model=BrandManufacturer, schema=BrandManufacturerIn,
@@ -881,7 +1258,8 @@ MASTERS: list[MasterDef] = [
 
     MasterDef(path="item-classes", name="Item class", model=ItemClass,
               schema=ItemClassIn, manage_perm=perms.MASTER_CLASS_MANAGE,
-              serialize=item_class_out, search_cols=("name", "code")),
+              serialize=item_class_out, search_cols=("name", "code"),
+              apply=apply_item_class),
 
     MasterDef(path="item-sub-classes", name="Item subclass", model=ItemSubClass,
               schema=ItemSubClassIn, manage_perm=perms.MASTER_CLASS_MANAGE,
@@ -895,40 +1273,58 @@ MASTERS: list[MasterDef] = [
 
     MasterDef(path="features", name="Feature", model=Feature, schema=FeatureIn,
               manage_perm=perms.MASTER_FEATURE_MANAGE, serialize=feature_out,
-              search_cols=("name", "code")),
+              search_cols=("name", "code"),
+              apply=named_code_apply(Feature, "A feature")),
 
-    # ---- attributes: the definition, then where it applies ----
+    # ---- what an item can be described by ----
     MasterDef(path="attributes", name="Attribute", model=Attribute,
               schema=AttributeIn, manage_perm=perms.MASTER_ATTRIBUTE_MANAGE,
               serialize=attribute_out, search_cols=("name", "code"),
               apply=apply_attribute),
 
-    MasterDef(path="attribute-mappings", name="Attribute mapping",
-              model=AttributeMapping, schema=AttributeMappingIn,
-              manage_perm=perms.MASTER_ATTRIBUTE_MANAGE,
-              serialize=attribute_mapping_out,
-              search_cols=("attribute_name", "target_name"),
-              order_col="sort_order", apply=apply_attribute_mapping,
-              filters=("attribute_id", "target_type", "target_id")),
+    MasterDef(path="specs", name="Spec", model=Spec, schema=SpecIn,
+              manage_perm=perms.MASTER_SPEC_MANAGE, serialize=spec_out,
+              search_cols=("name", "code"), apply=apply_spec),
 
-    # ---- price lists: header, then lines filtered by header ----
-    MasterDef(path="price-lists", name="Price list", model=PriceList,
-              schema=PriceListIn, manage_perm=perms.MASTER_PRICE_MANAGE,
-              serialize=price_list_out, search_cols=("name", "code"),
-              apply=apply_price_list, filters=("price_type", "vendor_id",
-                                               "project_id")),
+    # One screen for all three tagging relationships: attribute, spec and feature
+    # answer the same two questions of a category, so they share one table.
+    MasterDef(path="category-tags", name="Category tag", model=CategoryTag,
+              schema=CategoryTagIn, manage_perm=perms.MASTER_ATTRIBUTE_MANAGE,
+              serialize=category_tag_out,
+              search_cols=("tag_name", "category_name"), order_col="tag_name",
+              apply=apply_category_tag,
+              filters=("category_id", "tag_type", "tag_id")),
 
-    MasterDef(path="price-list-items", name="Price list line", model=PriceListItem,
-              schema=PriceListItemIn, manage_perm=perms.MASTER_PRICE_MANAGE,
-              serialize=price_list_item_out, search_cols=("item_name", "item_code"),
-              order_col="item_name", apply=apply_price_list_item,
-              filters=("price_list_id", "item_id")),
+    # ---- who may request an item ----
+    MasterDef(path="item-groups", name="Item group", model=ItemGroup,
+              schema=ItemGroupIn, manage_perm=perms.MASTER_ITEM_MANAGE,
+              serialize=item_group_out, search_cols=("item_name", "group_name"),
+              order_col="item_name", apply=apply_item_group,
+              filters=("item_id", "group_id")),
+
+    # ---- an item's packing ladder and, for a kit, its contents ----
+    MasterDef(path="item-packaging", name="Item packaging", model=ItemPackaging,
+              schema=ItemPackagingIn, manage_perm=perms.MASTER_PACKAGING_MANAGE,
+              serialize=item_packaging_out, order_col="level",
+              apply=apply_item_packaging, filters=("item_id",)),
+
+    MasterDef(path="item-components", name="Kit component", model=ItemComponent,
+              schema=ItemComponentIn, manage_perm=perms.MASTER_ITEM_MANAGE,
+              serialize=item_component_out,
+              search_cols=("component_name", "component_code"), order_col="line_no",
+              apply=apply_item_component, filters=("item_id",)),
+
+    # ---- tax classification ----
+    MasterDef(path="hsn-codes", name="HSN code", model=HsnCode, schema=HsnIn,
+              manage_perm=perms.MASTER_HSN_MANAGE, serialize=hsn_out,
+              search_cols=("code", "description"), order_col="code",
+              apply=apply_hsn),
 
     # ---- bills of material ----
     MasterDef(path="boms", name="BOM", model=Bom, schema=BomIn,
               manage_perm=perms.MASTER_BOM_MANAGE, serialize=bom_out,
-              search_cols=("name", "code", "parent_item_name"), apply=apply_bom,
-              filters=("bom_type", "parent_item_id", "project_id")),
+              search_cols=("name", "code"), apply=apply_bom,
+              filters=("project_id",)),
 
     MasterDef(path="bom-items", name="BOM line", model=BomItem, schema=BomItemIn,
               manage_perm=perms.MASTER_BOM_MANAGE, serialize=bom_item_out,

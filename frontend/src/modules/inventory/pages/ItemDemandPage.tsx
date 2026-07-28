@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
+import { Chip } from "@heroui/react";
+import { PageHeader, Button, Card, ResponsiveList, StatCard, type Column } from "@/shared/components";
+import { FilterSelect } from "../components/FilterBar";
 import { api } from "@/shared/api/client";
 import { getCatalogItems } from "../api";
 import type { CatalogItemOption } from "../types";
@@ -11,8 +13,8 @@ import type { CatalogItemOption } from "../types";
  *
  * The per-indent screen answers "what does this request get". This one answers the
  * question that actually decides it: 60 bags of cement, four projects want it, who
- * gets what. Allocating one indent at a time hides the competition, which is the
- * information the allocator most needs.
+ * gets what. The planned split is a scratchpad — nothing is committed until the
+ * indent's own allocation screen is opened, so the numbers here never move stock.
  */
 interface DemandRow {
   indent_id: number;
@@ -37,24 +39,22 @@ interface ItemDemand {
   demand: DemandRow[];
 }
 
-function fmtDate(s: string | null) {
-  return s ? new Date(s).toLocaleDateString(undefined, { day: "2-digit", month: "short" }) : "—";
-}
+const fmtDate = (s: string | null) =>
+  s ? new Date(s).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—";
+
+const daysTo = (s: string | null) =>
+  s ? Math.ceil((new Date(s).getTime() - Date.now()) / 86_400_000) : null;
 
 export function ItemDemandPage() {
   const nav = useNavigate();
   const [itemId, setItemId] = useState("");
   const [split, setSplit] = useState<Record<number, string>>({});
 
-  const { data: items } = useQuery({
-    queryKey: ["catalog-items"],
-    queryFn: getCatalogItems,
-  });
+  const { data: items } = useQuery({ queryKey: ["catalog-items"], queryFn: getCatalogItems });
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["item-demand", itemId],
-    queryFn: () =>
-      api.get<ItemDemand>(`/api/allocations/demand/${itemId}`).then((r) => r.data),
+    queryFn: () => api.get<ItemDemand>(`/api/allocations/demand/${itemId}`).then((r) => r.data),
     enabled: Boolean(itemId),
   });
 
@@ -62,22 +62,130 @@ export function ItemDemandPage() {
 
   const totals = useMemo(() => {
     const asked = (data?.demand ?? []).reduce((n, r) => n + r.requested_qty, 0);
-    const giving = Object.values(split).reduce((n, v) => n + Number(v || 0), 0);
-    return { asked, giving, left: (data?.available_total ?? 0) - giving };
+    const planned = Object.values(split).reduce((n, v) => n + Number(v || 0), 0);
+    return { asked, planned, left: (data?.available_total ?? 0) - planned };
   }, [data, split]);
 
+  /** Give everyone their full ask, oldest first, until the stock runs out. */
+  const suggestSplit = () => {
+    if (!data) return;
+    let left = data.available_total;
+    const next: Record<number, string> = {};
+    [...data.demand]
+      .sort((a, b) => {
+        if (a.priority !== b.priority) return a.priority === "URGENT" ? -1 : 1;
+        return (a.required_date ?? "9999").localeCompare(b.required_date ?? "9999");
+      })
+      .forEach((r) => {
+        const give = Math.min(r.requested_qty, left);
+        left -= give;
+        next[r.indent_item_id] = String(give);
+      });
+    setSplit(next);
+  };
+
+  const columns: Column<DemandRow>[] = [
+    {
+      key: "indent",
+      header: "Indent",
+      render: (r) => (
+        <div>
+          <div className="font-mono text-xs font-semibold text-ink">{r.indent_no}</div>
+          <div className="text-[11px] text-muted">raised {fmtDate(r.raised_at)}</div>
+        </div>
+      ),
+    },
+    {
+      key: "who",
+      header: "Requested by",
+      render: (r) => (
+        <div className="min-w-0">
+          <div className="truncate text-sm text-ink">{r.requested_by_name ?? "—"}</div>
+          <div className="truncate text-[11px] text-muted">
+            {r.department_name ?? "—"}{r.project_name ? ` · ${r.project_name}` : ""}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "priority",
+      header: "Priority",
+      render: (r) => (
+        <Chip size="sm" variant="flat" color={r.priority === "URGENT" ? "danger" : "default"}>{r.priority}</Chip>
+      ),
+    },
+    {
+      key: "needed",
+      header: "Needed By",
+      hideOnNarrow: true,
+      render: (r) => {
+        const d = daysTo(r.required_date);
+        return (
+          <div>
+            <div className="text-sm text-body">{fmtDate(r.required_date)}</div>
+            {d !== null && (
+              <div className={`text-[11px] ${d < 0 ? "text-danger" : d <= 3 ? "text-warning" : "text-muted"}`}>
+                {d < 0 ? `${Math.abs(d)}d overdue` : `in ${d}d`}
+              </div>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      key: "wants",
+      header: "Wants",
+      className: "text-right",
+      render: (r) => (
+        <span className="font-semibold text-ink">
+          {r.requested_qty} <span className="text-[11px] font-normal text-muted">{data?.uom_code}</span>
+        </span>
+      ),
+    },
+    {
+      key: "plan",
+      header: "Plan to give",
+      render: (r) => (
+        <input
+          type="number"
+          min={0}
+          max={r.requested_qty}
+          value={split[r.indent_item_id] ?? ""}
+          placeholder="0"
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => setSplit((p) => ({ ...p, [r.indent_item_id]: e.target.value }))}
+          className="h-11 w-24 rounded-lg border border-line bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand"
+        />
+      ),
+    },
+    {
+      key: "go",
+      header: "",
+      render: (r) => (
+        <Button variant="ghost" onClick={() => nav(`/inventory/allocate/${r.indent_id}`)}>Commit</Button>
+      ),
+    },
+  ];
+
   return (
-    <>
-      <PageHeader eyebrow="Inventory" title="Demand by item" />
+    <div>
+      <PageHeader
+        eyebrow="Inventory"
+        title="Demand by Item"
+        actions={
+          data && data.demand.length > 0 ? (
+            <Button variant="ghost" onClick={suggestSplit}>Suggest a split</Button>
+          ) : undefined
+        }
+      />
 
       <p className="mb-4 text-sm text-muted">
-        Every indent still waiting on one item, and the stock there is to go round.
-        Plan the split here, then open each indent to commit it.
+        Every indent still waiting on one item, and the stock there is to go round. Plan the split
+        here, then commit it on each indent — nothing on this screen moves stock.
       </p>
 
-      <Card className="mb-4 p-4">
-        <Select
-          label="Item"
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
+        <FilterSelect
           value={itemId}
           onChange={setItemId}
           placeholder="Pick an item…"
@@ -86,109 +194,64 @@ export function ItemDemandPage() {
             label: `${i.code} — ${i.name}`,
           }))}
         />
-      </Card>
+        {data && (
+          <span className="text-sm text-muted">
+            {data.warehouses.map((w) => `${w.warehouse_name}: ${w.available_qty}`).join(" · ") || "No stock anywhere"}
+          </span>
+        )}
+      </div>
 
-      {!itemId && <p className="text-muted">Choose an item to see who is waiting for it.</p>}
-      {error && <p className="rounded-lg bg-danger-50 p-4 text-danger">{(error as Error).message}</p>}
-      {isLoading && itemId && <p className="text-muted">Loading…</p>}
+      {!itemId && (
+        <p className="rounded-xl border border-dashed border-line p-8 text-center text-sm text-muted">
+          Choose an item to see who is waiting for it.
+        </p>
+      )}
+
+      {error && (
+        <p className="rounded-lg border border-danger/40 bg-danger/10 p-4 text-sm text-danger">
+          {(error as Error).message}
+        </p>
+      )}
 
       {data && (
         <>
-          <Card className="mb-4 p-4">
-            <div className="flex flex-wrap gap-6 text-sm">
-              <div>
-                <p className="text-muted">On hand</p>
-                <p className="tabular text-lg font-semibold text-ink">
-                  {data.available_total} {data.uom_code}
-                </p>
-              </div>
-              <div>
-                <p className="text-muted">Total asked</p>
-                <p className="tabular text-lg font-semibold text-ink">
-                  {totals.asked} {data.uom_code}
-                </p>
-              </div>
-              <div>
-                <p className="text-muted">Planned</p>
-                <p className="tabular text-lg font-semibold text-ink">{totals.giving}</p>
-              </div>
-              <div>
-                <p className="text-muted">Left after</p>
-                <p
-                  className={`tabular text-lg font-semibold ${
-                    totals.left < 0 ? "text-danger" : "text-ink"
-                  }`}
-                >
-                  {totals.left}
-                </p>
-              </div>
-            </div>
-            {totals.left < 0 && (
-              <p className="mt-2 text-sm text-danger">
-                Planning to give more than there is. Reduce something.
-              </p>
-            )}
-            {data.warehouses.length > 0 && (
-              <p className="mt-3 text-sm text-muted">
-                {data.warehouses
-                  .map((w) => `${w.warehouse_name}: ${w.available_qty}`)
-                  .join(" · ")}
-              </p>
-            )}
-          </Card>
+          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <StatCard label="On Hand" value={`${data.available_total} ${data.uom_code ?? ""}`} />
+            <StatCard label="Total Asked" value={`${totals.asked} ${data.uom_code ?? ""}`} tone={totals.asked > data.available_total ? "text-warning" : "text-ink"} />
+            <StatCard label="Planned" value={totals.planned} />
+            <StatCard label="Left After" value={totals.left} tone={totals.left < 0 ? "text-danger" : "text-ink"} />
+          </div>
 
-          {data.demand.length === 0 ? (
-            <p className="text-muted">Nothing is waiting on this item.</p>
-          ) : (
-            <div className="space-y-3">
-              {data.demand.map((row) => (
-                <Card key={row.indent_item_id} className="p-4">
-                  <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-                    <div>
-                      <span className="mono font-semibold text-ink">{row.indent_no}</span>
-                      <p className="text-sm text-muted">
-                        {row.requested_by_name ?? "—"} · {row.department_name ?? "—"}
-                        {row.project_name ? ` · ${row.project_name}` : ""}
-                      </p>
-                    </div>
-                    <div className="text-sm text-muted">
-                      wants{" "}
-                      <span className="tabular font-semibold text-ink">
-                        {row.requested_qty}
-                      </span>{" "}
-                      {data.uom_code} · needed {fmtDate(row.required_date)}
-                      {row.priority === "URGENT" && (
-                        <span className="ml-2 text-warning">URGENT</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Plan to give">
-                      <Input
-                        type="number"
-                        min={0}
-                        value={split[row.indent_item_id] ?? ""}
-                        placeholder="0"
-                        onChange={(e) =>
-                          setSplit((p) => ({ ...p, [row.indent_item_id]: e.target.value }))
-                        }
-                      />
-                    </Field>
-                    <div className="flex items-end">
-                      <Button
-                        variant="ghost"
-                        onClick={() => nav(`/inventory/allocate/${row.indent_id}`)}
-                      >
-                        Open and commit
-                      </Button>
-                    </div>
-                  </div>
-                </Card>
-              ))}
-            </div>
+          {totals.left < 0 && (
+            <p className="mb-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">
+              The plan gives out {Math.abs(totals.left)} {data.uom_code} more than there is. Reduce something.
+            </p>
           )}
+
+          <Card className="p-2">
+            <ResponsiveList
+              data={data.demand}
+              columns={columns}
+              keyOf={(r) => r.indent_item_id}
+              loading={isLoading}
+              empty="Nothing is waiting on this item."
+              renderCard={(r) => (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-sm font-semibold text-ink">{r.indent_no}</span>
+                    <Chip size="sm" variant="flat" color={r.priority === "URGENT" ? "danger" : "default"}>
+                      {r.priority}
+                    </Chip>
+                  </div>
+                  <p className="text-sm text-body">{r.requested_by_name ?? "—"} · {r.department_name ?? "—"}</p>
+                  <p className="text-sm">Wants <strong>{r.requested_qty} {data.uom_code}</strong> by {fmtDate(r.required_date)}</p>
+                  <Button variant="ghost" onClick={() => nav(`/inventory/allocate/${r.indent_id}`)}>Commit</Button>
+                </div>
+              )}
+            />
+          </Card>
         </>
       )}
-    </>
+    </div>
   );
 }

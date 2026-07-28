@@ -1,167 +1,137 @@
-import { useState, useEffect } from "react";
-import { Table, Card, Tabs, Tag, Statistic, Row, Col, Spin, Alert, Button } from "antd";
-import { DollarOutlined, HistoryOutlined, WarningOutlined, ReloadOutlined } from "@ant-design/icons";
+import { useState } from "react";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
+import { Chip, Tab, Tabs } from "@heroui/react";
+import { IndianRupee, History, TriangleAlert, RefreshCw } from "lucide-react";
+import { Button, Card, PageHeader, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { getStockValuation, getStockAgeing, getNearExpiryAlerts } from "../api";
 
+const inr = (n: number) => `₹${Number(n ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
+
+// ponytail: rows are shaped by the report endpoints and used only here — one loose
+// row type beats three near-identical interfaces nobody else imports.
+type Row = Record<string, any>;
+
+const bucketColor = (b: string) =>
+  b === "0-30" ? "success" : b === "31-60" ? "primary" : b === "61-90" ? "warning" : "danger";
+
 export function StockValuationView() {
-  const [loading, setLoading] = useState(true);
-  const [valuationData, setValuationData] = useState<any>(null);
-  const [ageingData, setAgeingData] = useState<any>(null);
-  const [expiryAlerts, setExpiryAlerts] = useState<any[]>([]);
+  const [tab, setTab] = useState("valuation");
+  const qc = useQueryClient();
 
-  const loadAll = async () => {
-    setLoading(true);
-    try {
-      const [val, age, exp] = await Promise.all([
-        getStockValuation(),
-        getStockAgeing(),
-        getNearExpiryAlerts(90),
-      ]);
-      setValuationData(val);
-      setAgeingData(age);
-      setExpiryAlerts(exp);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [val, age, exp] = useQueries({
+    queries: [
+      { queryKey: ["stock-valuation"], queryFn: () => getStockValuation() },
+      { queryKey: ["stock-ageing"], queryFn: () => getStockAgeing() },
+      { queryKey: ["near-expiry"], queryFn: () => getNearExpiryAlerts(90) },
+    ],
+  });
 
-  useEffect(() => {
-    loadAll();
-  }, []);
+  const loading = val.isLoading || age.isLoading || exp.isLoading;
+  const valuationRows: Row[] = val.data?.items ?? [];
+  const ageingRows: Row[] = age.data?.items ?? [];
+  const expiryRows: Row[] = exp.data ?? [];
 
-  if (loading) {
-    return (
-      <div style={{ textAlign: "center", padding: 50 }}>
-        <Spin size="large" tip="Loading Valuation & Ageing Reports..." />
-      </div>
-    );
-  }
-
-  const valuationColumns = [
-    { title: "Item Code", dataIndex: "item_code", key: "item_code", render: (c: string) => <strong>{c}</strong> },
-    { title: "Item Name", dataIndex: "item_name", key: "item_name" },
-    { title: "Warehouse", dataIndex: "warehouse_name", key: "warehouse_name" },
-    { title: "Total Qty", dataIndex: "total_qty", key: "total_qty" },
-    { title: "Moving Avg Cost", dataIndex: "moving_avg_cost", key: "moving_avg_cost", render: (v: number) => `$${v.toFixed(2)}` },
-    { title: "Total Stock Value", dataIndex: "total_stock_value", key: "total_stock_value", render: (v: number) => <strong>${v.toFixed(2)}</strong> },
+  const valuationCols: Column<Row>[] = [
+    { key: "item_code", header: "Item Code", render: (r) => <strong>{r.item_code}</strong> },
+    { key: "item_name", header: "Item", render: (r) => r.item_name },
+    { key: "warehouse_name", header: "Warehouse", render: (r) => r.warehouse_name, hideOnNarrow: true },
+    { key: "total_qty", header: "Qty", render: (r) => r.total_qty },
+    { key: "moving_avg_cost", header: "Avg Cost", render: (r) => inr(r.moving_avg_cost) },
+    { key: "total_stock_value", header: "Value", render: (r) => <strong>{inr(r.total_stock_value)}</strong> },
   ];
 
-  const ageingColumns = [
-    { title: "Item Code", dataIndex: "item_code", key: "item_code", render: (c: string) => <strong>{c}</strong> },
-    { title: "Warehouse", dataIndex: "warehouse_name", key: "warehouse_name" },
-    { title: "Batch No", dataIndex: "batch_no", key: "batch_no" },
-    { title: "Days in Stock", dataIndex: "days_in_stock", key: "days_in_stock" },
+  const ageingCols: Column<Row>[] = [
+    { key: "item_code", header: "Item Code", render: (r) => <strong>{r.item_code}</strong> },
+    { key: "warehouse_name", header: "Warehouse", render: (r) => r.warehouse_name, hideOnNarrow: true },
+    { key: "batch_no", header: "Batch", render: (r) => r.batch_no ?? "-" },
+    { key: "days_in_stock", header: "Days in Stock", render: (r) => r.days_in_stock },
     {
-      title: "Age Bucket",
-      dataIndex: "age_bucket",
       key: "age_bucket",
-      render: (b: string) => {
-        const color = b === "0-30" ? "green" : b === "31-60" ? "blue" : b === "61-90" ? "orange" : "red";
-        return <Tag color={color}>{b} Days</Tag>;
-      },
+      header: "Age Bucket",
+      render: (r) => (
+        <Chip size="sm" variant="flat" color={bucketColor(r.age_bucket)}>{r.age_bucket} days</Chip>
+      ),
     },
-    { title: "Expiry Date", dataIndex: "expiry_date", key: "expiry_date" },
-    { title: "Days to Expiry", dataIndex: "days_to_expiry", key: "days_to_expiry" },
+    { key: "expiry_date", header: "Expiry", render: (r) => r.expiry_date ?? "-", hideOnNarrow: true },
   ];
 
-  const expiryColumns = [
-    { title: "Item Code", dataIndex: "item_code", key: "item_code", render: (c: string) => <strong>{c}</strong> },
-    { title: "Item Name", dataIndex: "item_name", key: "item_name" },
-    { title: "Warehouse", dataIndex: "warehouse_name", key: "warehouse_name" },
-    { title: "Batch No", dataIndex: "batch_no", key: "batch_no" },
-    { title: "Expiry Date", dataIndex: "expiry_date", key: "expiry_date" },
+  const expiryCols: Column<Row>[] = [
+    { key: "item_code", header: "Item Code", render: (r) => <strong>{r.item_code}</strong> },
+    { key: "item_name", header: "Item", render: (r) => r.item_name },
+    { key: "warehouse_name", header: "Warehouse", render: (r) => r.warehouse_name, hideOnNarrow: true },
+    { key: "batch_no", header: "Batch", render: (r) => r.batch_no ?? "-" },
+    { key: "expiry_date", header: "Expiry", render: (r) => r.expiry_date },
     {
-      title: "Days Remaining",
-      dataIndex: "days_to_expiry",
       key: "days_to_expiry",
-      render: (d: number) => <Tag color={d <= 30 ? "red" : d <= 60 ? "volcano" : "gold"}>{d} Days</Tag>,
+      header: "Days Left",
+      render: (r) => (
+        <Chip size="sm" variant="flat" color={r.days_to_expiry <= 30 ? "danger" : r.days_to_expiry <= 60 ? "warning" : "default"}>
+          {r.days_to_expiry} days
+        </Chip>
+      ),
     },
-    { title: "Available Qty", dataIndex: "quantity", key: "quantity" },
+    { key: "quantity", header: "Available", render: (r) => r.quantity },
   ];
+
+  const card = (r: Row) => (
+    <div className="space-y-1">
+      <div className="font-semibold text-ink">{r.item_name ?? r.item_code}</div>
+      <div className="text-xs text-muted">{r.item_code} · {r.warehouse_name}</div>
+      {r.total_stock_value !== undefined && <div className="text-sm">Value: <strong>{inr(r.total_stock_value)}</strong></div>}
+      {r.age_bucket && <Chip size="sm" variant="flat" color={bucketColor(r.age_bucket)}>{r.age_bucket} days</Chip>}
+      {r.days_to_expiry !== undefined && <div className="text-sm">Expires in {r.days_to_expiry} days</div>}
+    </div>
+  );
+
+  const refresh = () =>
+    ["stock-valuation", "stock-ageing", "near-expiry"].forEach((k) =>
+      qc.invalidateQueries({ queryKey: [k] }),
+    );
 
   return (
-    <div style={{ padding: 24 }}>
-      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
-        <Col>
-          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Stock Valuation, Ageing & Expiry</h2>
-        </Col>
-        <Col>
-          <Button icon={<ReloadOutlined />} onClick={loadAll}>Refresh Reports</Button>
-        </Col>
-      </Row>
+    <div>
+      <PageHeader
+        eyebrow="Inventory"
+        title="Valuation, Ageing & Expiry"
+        actions={
+          <Button variant="ghost" onClick={refresh}>
+            <RefreshCw size={14} /> Refresh
+          </Button>
+        }
+      />
 
-      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-        <Col xs={24} sm={12} md={6}>
-          <Card bordered>
-            <Statistic
-              title="Portfolio Valuation"
-              value={valuationData?.total_portfolio_value || 0}
-              precision={2}
-              prefix={<DollarOutlined />}
-              suffix="USD"
-            />
-          </Card>
-        </Col>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Portfolio Valuation" value={inr(val.data?.total_portfolio_value ?? 0)} icon={<IndianRupee size={16} />} />
+        <StatCard label="Fresh Stock (0-30 d)" value={age.data?.bucket_0_30_qty ?? 0} icon={<History size={16} />} tone="text-success" />
+        <StatCard label="Aged Stock (90+ d)" value={age.data?.bucket_90_plus_qty ?? 0} icon={<History size={16} />} tone="text-danger" />
+        <StatCard label="Near-Expiry (≤90 d)" value={expiryRows.length} icon={<TriangleAlert size={16} />} tone="text-warning" />
+      </div>
 
-        <Col xs={24} sm={12} md={6}>
-          <Card bordered>
-            <Statistic
-              title="Fresh Stock (0-30 Days)"
-              value={ageingData?.bucket_0_30_qty || 0}
-              prefix={<HistoryOutlined style={{ color: "#52c41a" }} />}
-            />
-          </Card>
-        </Col>
-
-        <Col xs={24} sm={12} md={6}>
-          <Card bordered>
-            <Statistic
-              title="Aged Stock (90+ Days)"
-              value={ageingData?.bucket_90_plus_qty || 0}
-              valueStyle={{ color: "#cf1322" }}
-              prefix={<HistoryOutlined style={{ color: "#cf1322" }} />}
-            />
-          </Card>
-        </Col>
-
-        <Col xs={24} sm={12} md={6}>
-          <Card bordered>
-            <Statistic
-              title="Near-Expiry Alerts (&le;90d)"
-              value={expiryAlerts?.length || 0}
-              valueStyle={{ color: "#fa8c16" }}
-              prefix={<WarningOutlined />}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      <Card bordered>
+      <Card className="mt-4 p-3">
         <Tabs
-          items={[
-            {
-              key: "valuation",
-              label: "Stock Valuation",
-              children: <Table dataSource={valuationData?.items || []} columns={valuationColumns} rowKey="item_id" pagination={{ pageSize: 10 }} />,
-            },
-            {
-              key: "ageing",
-              label: "Stock Ageing Report",
-              children: <Table dataSource={ageingData?.items || []} columns={ageingColumns} rowKey="stock_id" pagination={{ pageSize: 10 }} />,
-            },
-            {
-              key: "expiry",
-              label: `Near Expiry Feed (${expiryAlerts.length})`,
-              children: (
-                <div>
-                  <Alert message="Items listed below are expiring within 90 days. Prioritize issues using FEFO." type="warning" showIcon style={{ marginBottom: 16 }} />
-                  <Table dataSource={expiryAlerts} columns={expiryColumns} rowKey="stock_id" pagination={{ pageSize: 10 }} />
-                </div>
-              ),
-            },
-          ]}
+          aria-label="Reports"
+          selectedKey={tab}
+          onSelectionChange={(k) => setTab(String(k))}
+          variant="underlined"
+        >
+          <Tab key="valuation" title="Stock Valuation" />
+          <Tab key="ageing" title="Stock Ageing" />
+          <Tab key="expiry" title={`Near Expiry (${expiryRows.length})`} />
+        </Tabs>
+
+        {tab === "expiry" && (
+          <div className="mb-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-body">
+            Items below expire within 90 days. Issue them first (FEFO).
+          </div>
+        )}
+
+        <ResponsiveList
+          data={tab === "valuation" ? valuationRows : tab === "ageing" ? ageingRows : expiryRows}
+          columns={tab === "valuation" ? valuationCols : tab === "ageing" ? ageingCols : expiryCols}
+          keyOf={(r) => r.stock_id ?? r.item_id ?? `${r.item_code}-${r.warehouse_name}`}
+          loading={loading}
+          empty="Nothing to report."
+          renderCard={card}
         />
       </Card>
     </div>

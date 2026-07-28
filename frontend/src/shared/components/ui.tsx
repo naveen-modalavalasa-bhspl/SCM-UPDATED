@@ -1,11 +1,11 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import {
+  Autocomplete,
+  AutocompleteItem,
   Button as HButton,
   Card as HCard,
   Input as HInput,
-  Select as HSelect,
-  SelectItem,
 } from "@heroui/react";
 
 /* ---------------------------------------------------------------------------
@@ -112,7 +112,13 @@ export function Field({ label, children, hint }: { label: string; children: Reac
   );
 }
 
-export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+  /** Set together: the field turns red and the message renders beneath it. */
+  isInvalid?: boolean;
+  errorMessage?: string;
+}
+
+export function Input({ className, ...props }: InputProps) {
   return (
     <HInput
       variant="bordered"
@@ -128,7 +134,12 @@ export interface SelectOption {
   label: string;
 }
 
-// HeroUI Select with a simple options API. Use Field for the label, pass placeholder here.
+/** Searchable single-select. Typing filters the list, which is what makes a
+ *  300-row master usable; masters routinely feed this that many options.
+ *
+ *  Built on HeroUI's Autocomplete rather than its Select, but the props are
+ *  unchanged so every existing call site keeps working. `allowsCustomValue` stays
+ *  off: the value is always an id from `options`, never whatever was typed. */
 export function Select({
   value,
   onChange,
@@ -137,6 +148,8 @@ export function Select({
   label,
   isDisabled,
   className,
+  isInvalid,
+  errorMessage,
 }: {
   value?: string | number | "";
   onChange: (value: string) => void;
@@ -145,25 +158,32 @@ export function Select({
   label?: string;
   isDisabled?: boolean;
   className?: string;
+  isInvalid?: boolean;
+  errorMessage?: string;
 }) {
-  const selected = value === "" || value === undefined || value === null ? [] : [String(value)];
+  const selected = value === "" || value === undefined || value === null
+    ? null : String(value);
   return (
-    <HSelect
+    <Autocomplete
       variant="bordered"
       radius="md"
       label={label}
-      placeholder={placeholder}
+      placeholder={placeholder ?? "Type to search…"}
       isDisabled={isDisabled}
-      selectedKeys={selected}
-      onSelectionChange={(keys) => {
-        const k = Array.from(keys as Set<string>)[0];
-        onChange(k ? String(k) : "");
+      isInvalid={isInvalid}
+      errorMessage={errorMessage}
+      defaultItems={options}
+      selectedKey={selected}
+      // Clearing the box gives null, which must reach the caller as "" — the same
+      // empty value it passes in — or a cleared field would keep its old id.
+      onSelectionChange={(key) => onChange(key == null ? "" : String(key))}
+      inputProps={{
+        classNames: { inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` },
       }}
-      classNames={{ trigger: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
     >
-      {options.map((o) => (
-        <SelectItem key={String(o.value)}>{o.label}</SelectItem>
-      ))}
-    </HSelect>
+      {(option: SelectOption) => (
+        <AutocompleteItem key={String(option.value)}>{option.label}</AutocompleteItem>
+      )}
+    </Autocomplete>
   );
 }

@@ -56,18 +56,26 @@ export interface StockBalanceItem {
   is_batch_tracked?: boolean;
   asset_code?: string;
   consumable_code?: string;
-  serial_numbers?: string[];
+  /** stk_balance.serial_number — one serial per lot row, null until goods-in records it. */
+  serial_number?: string;
+  barcode_value?: string;
+  transit_qty?: number;
+  project_name?: string;
+  bin_code?: string;
+  batch_id?: number;
+  last_movement_at?: string;
 }
 
+/** Mirrors the query params GET /api/stock actually accepts. */
 export interface StockBalanceFilter {
   warehouse_id?: number | string;
   item_id?: number | string;
-  category?: string;
+  category_id?: number | string;
   search?: string;
-  show_zero_stock?: boolean;
-  low_stock_only?: boolean;
-  expiring_soon?: boolean;
-  group_by?: string;
+  batch_no?: string;
+  include_zero?: boolean;
+  below_reorder?: boolean;
+  expiring_in_days?: number;
   page?: number;
   size?: number;
 }
@@ -108,10 +116,12 @@ export interface StockLedgerItem {
   created_by?: string;
 }
 
+/** Mirrors the query params GET /api/stock/movements actually accepts. */
 export interface StockLedgerFilter {
   item_id?: number | string;
   warehouse_id?: number | string;
-  transaction_type?: string;
+  direction?: string;
+  ref_type?: string;
   date_from?: string;
   date_to?: string;
   search?: string;
@@ -216,10 +226,21 @@ export interface StockRow {
   expiry_date?: string | null;
   project_id: number;
   project_name?: string | null;
+  serial_number?: string | null;
+  asset_code?: string | null;
+  consumable_code?: string | null;
   available_qty: number;
   reserved_qty: number;
+  transit_qty?: number;
   total_qty: number;
+  valuation_rate?: number;
+  stock_value?: number;
+  last_movement_at?: string | null;
   updated_at?: string | null;
+  // filled from mst_items by the backend, not stk_balance columns
+  category_name?: string | null;
+  reorder_level?: number;
+  barcode_value?: string | null;
 }
 
 /** Exactly what GET /api/stock/movements returns -- the live stk_ledger columns. */

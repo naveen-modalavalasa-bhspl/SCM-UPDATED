@@ -1,94 +1,121 @@
-import { useState, useEffect } from "react";
-import { Table, Button, Tag, Card, Space, message, Row, Col, Select } from "antd";
-import { UnlockOutlined, ReloadOutlined } from "@ant-design/icons";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Chip } from "@heroui/react";
+import { Unlock, RefreshCw } from "lucide-react";
+import { Button, Card, PageHeader, ResponsiveList, Select, StatusPill, Can, type Column } from "@/shared/components";
 import { getReservations, releaseReservation } from "../api";
 import type { ReservationRow } from "../types";
 
+const STATUSES = [
+  { value: "ACTIVE", label: "Active Holds" },
+  { value: "RELEASED", label: "Released" },
+  { value: "CONSUMED", label: "Consumed" },
+  { value: "ALL", label: "All Statuses" },
+];
+
 export function ReservationsView() {
-  const [reservations, setReservations] = useState<ReservationRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<string>("ACTIVE");
+  const [status, setStatus] = useState("ACTIVE");
+  const [error, setError] = useState("");
+  const qc = useQueryClient();
 
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      const res = await getReservations({ status: statusFilter !== "ALL" ? statusFilter : undefined });
-      setReservations(res.items || []);
-    } catch (e) {
-      console.error(e);
-      message.error("Failed to load reservations");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data, isLoading } = useQuery({
+    queryKey: ["reservations", status],
+    queryFn: () => getReservations({ status: status !== "ALL" ? status : undefined }),
+  });
+  const rows: ReservationRow[] = data?.items ?? [];
 
-  useEffect(() => {
-    loadData();
-  }, [statusFilter]);
-
-  const handleRelease = async (id: number) => {
-    try {
-      await releaseReservation(id);
-      message.success("Reservation released & stock returned to available");
-      loadData();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || "Failed to release reservation");
-    }
-  };
-
-  const columns = [
-    { title: "ID", dataIndex: "id", key: "id", render: (id: number) => <strong>#{id}</strong> },
-    { title: "Item", dataIndex: "item_code", key: "item_code", render: (code: string, rec: any) => `${code || ""} ${rec.item_name || ""}` },
-    { title: "Warehouse", dataIndex: "warehouse_name", key: "warehouse_name" },
-    { title: "Reserved Qty", dataIndex: "quantity", key: "quantity", render: (q: number) => <strong>{q}</strong> },
-    { title: "Ref Type", dataIndex: "ref_type", key: "ref_type", render: (rt: string) => <Tag>{rt}</Tag> },
-    { title: "Ref No", dataIndex: "ref_no", key: "ref_no" },
-    {
-      title: "Status",
-      dataIndex: "status",
-      key: "status",
-      render: (s: string) => {
-        const color = s === "ACTIVE" ? "green" : s === "RELEASED" ? "orange" : "gray";
-        return <Tag color={color}>{s}</Tag>;
-      },
+  const release = useMutation({
+    mutationFn: releaseReservation,
+    onSuccess: () => {
+      setError("");
+      qc.invalidateQueries({ queryKey: ["reservations"] });
     },
-    { title: "Created At", dataIndex: "created_at", key: "created_at", render: (d: string) => d ? new Date(d).toLocaleString() : "-" },
+    onError: (e: any) => setError(e?.response?.data?.error ?? "Could not release the hold"),
+  });
+
+  const releaseBtn = (r: ReservationRow) =>
+    r.status === "ACTIVE" ? (
+      <Can do="stock.reserve">
+        <Button variant="ghost" onClick={() => release.mutate(r.id)}>
+          <Unlock size={14} /> Release
+        </Button>
+      </Can>
+    ) : null;
+
+  const columns: Column<ReservationRow>[] = [
+    { key: "id", header: "ID", render: (r) => <span className="font-semibold">#{r.id}</span> },
     {
-      title: "Actions",
-      key: "actions",
-      render: (_: any, record: ReservationRow) => (
-        <Space>
-          {record.status === "ACTIVE" && (
-            <Button danger size="small" icon={<UnlockOutlined />} onClick={() => handleRelease(record.id)}>
-              Release Hold
-            </Button>
-          )}
-        </Space>
+      key: "item",
+      header: "Item",
+      render: (r) => (
+        <div>
+          <div className="font-medium text-ink">{r.item_name}</div>
+          <div className="text-[11px] text-muted">{r.item_code}</div>
+        </div>
       ),
     },
+    { key: "warehouse_name", header: "Warehouse", render: (r) => r.warehouse_name ?? "-" },
+    { key: "quantity", header: "Reserved Qty", render: (r) => <span className="font-semibold">{r.quantity}</span> },
+    {
+      key: "ref",
+      header: "Reference",
+      hideOnNarrow: true,
+      render: (r) => (
+        <div>
+          <Chip size="sm" variant="flat">{r.ref_type}</Chip>
+          <div className="text-[11px] text-muted">{r.ref_no}</div>
+        </div>
+      ),
+    },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "created_at",
+      header: "Created",
+      hideOnNarrow: true,
+      render: (r) => (r.created_at ? new Date(r.created_at).toLocaleString() : "-"),
+    },
+    { key: "actions", header: "", render: releaseBtn },
   ];
 
   return (
-    <div style={{ padding: 24 }}>
-      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
-        <Col>
-          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Stock Reservations</h2>
-        </Col>
-        <Col>
-          <Space>
-            <Select value={statusFilter} onChange={setStatusFilter} style={{ width: 140 }}>
-              <Select.Option value="ACTIVE">Active Holds</Select.Option>
-              <Select.Option value="RELEASED">Released</Select.Option>
-              <Select.Option value="CONSUMED">Consumed</Select.Option>
-              <Select.Option value="ALL">All Statuses</Select.Option>
-            </Select>
-            <Button icon={<ReloadOutlined />} onClick={loadData}>Refresh</Button>
-          </Space>
-        </Col>
-      </Row>
+    <div>
+      <PageHeader
+        eyebrow="Inventory"
+        title="Stock Reservations"
+        actions={
+          <>
+            <Select value={status} onChange={setStatus} options={STATUSES} className="w-44" />
+            <Button variant="ghost" onClick={() => qc.invalidateQueries({ queryKey: ["reservations"] })}>
+              <RefreshCw size={14} /> Refresh
+            </Button>
+          </>
+        }
+      />
 
-      <Card bordered>
-        <Table dataSource={reservations} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize: 10 }} />
+      {error && (
+        <div className="mb-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>
+      )}
+
+      <Card className="p-2">
+        <ResponsiveList
+          data={rows}
+          columns={columns}
+          keyOf={(r) => r.id}
+          loading={isLoading}
+          empty="No reservations."
+          renderCard={(r) => (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-ink">{r.item_name}</span>
+                <StatusPill status={r.status} />
+              </div>
+              <div className="text-xs text-muted">{r.item_code} · {r.warehouse_name}</div>
+              <div className="text-sm">Reserved: <strong>{r.quantity}</strong></div>
+              <div className="text-xs text-muted">{r.ref_type} {r.ref_no}</div>
+              {releaseBtn(r)}
+            </div>
+          )}
+        />
       </Card>
     </div>
   );

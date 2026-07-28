@@ -25,10 +25,22 @@ class StockRow(BaseModel):
     expiry_date: date | None = None
     project_id: int
     project_name: str | None = None
+    serial_number: str | None = None
+    asset_code: str | None = None
+    consumable_code: str | None = None
     available_qty: float
     reserved_qty: float
+    transit_qty: float = 0
     total_qty: float
+    valuation_rate: float = 0
+    stock_value: float = 0
+    last_movement_at: datetime | None = None
     updated_at: datetime | None = None
+    # Not stk_balance columns — filled from mst_items by service.list_stock so the
+    # balance screen can show category, reorder level and the printed barcode.
+    category_name: str | None = None
+    reorder_level: float = 0
+    barcode_value: str | None = None
 
 
 class MovementRow(BaseModel):

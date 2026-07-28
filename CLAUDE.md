@@ -181,3 +181,24 @@ fulfilment queue, material requests) on real endpoints. Procurement screens and 
 warehouse module are still to come — the warehouse frontend currently in the repo was
 built against a different backend contract and is to be rewritten (see
 `docs/04_SCM_BUSINESS_FLOW.md`).
+
+**Masters, after the 2026-07-28 overhaul** (`docs/superpowers/specs/2026-07-28-masters-overhaul-design.md`):
+
+- Item codes are `L1L2L3-GEN-BRAND-MFR-0001`. The serial is a locked `MAX+1` per
+  prefix, assigned once at create and **never** regenerated on an edit — stock,
+  ledger rows and documents point at the code the item was created with.
+- Tax lives on `mst_hsn_codes` and is read at PO/GRN time, never copied onto an item.
+  `mst_items.purchase_price` survives as the stock-valuation cost fallback, fed by
+  GRN and hidden from the item form.
+- A brand carries its manufacturers inline; there is no Brand-Manufacturer screen.
+  Category names are unique **within a parent** (checked in Python — MySQL counts
+  NULL `parent_id` values as distinct, so an index cannot do it).
+- `mst_category_tags` is the one tagging surface for attributes, specs and features.
+  `mst_attribute_mappings` is dead but not dropped; the migration copied it across.
+- A package (`mst_packaging`) is a container type only. How much of an item one holds
+  lives on `mst_item_packaging`, one row per level, and the breakdown is multiplied
+  up on read so totals cannot drift from their rungs.
+- Asset vs consumable is a per-item flag. The asset/consumable **code** is generated
+  during putaway in the warehouse module, never in masters.
+- Projects are read-only (HCM owns them): the write routes are not registered.
+  Price lists left the API entirely; the tables remain.

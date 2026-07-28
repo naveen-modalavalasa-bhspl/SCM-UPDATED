@@ -8,14 +8,12 @@ import type {
   MaterialRequestListRow,
   MovementRow,
   Page,
-  ReplenishmentPOItem,
   StockBalanceFilter,
   StockBalanceItem,
   StockLedgerFilter,
   StockLedgerItem,
   StockRow,
   StockTransferCreate,
-  StockTransferRow,
   VendorOption,
   WarehouseOption,
 } from "./types";
@@ -28,9 +26,9 @@ import type {
  * failing: the screens looked correct while showing numbers nobody could trace. Every
  * call here now goes to the real API and every error propagates so the UI can say so.
  *
- * Backend field names win. stk_balance carries available_qty / reserved_qty /
- * total_qty -- there is no physical_qty, valuation_rate or reorder_level, so those are
- * absent rather than faked.
+ * Backend field names win. Every filter here matches a query param the endpoint
+ * actually accepts -- the versions these replaced built a filter object the request
+ * then dropped, so the screens had filter controls that changed nothing.
  */
 
 const unwrap = <T,>(page: Page<T>): T[] => page.items ?? [];
@@ -40,29 +38,37 @@ const num = (v: unknown): number => Number(v ?? 0);
 /**
  * stk_balance -> the shape the existing views read.
  *
- * physical_qty is total_qty (what is on the shelf, reserved or not). Costing fields
- * are zero, not guessed: valuation is explicitly deferred, and a zero reads as "not
- * costed" where a plausible number would read as fact. Same for reorder levels, which
- * no master currently carries.
+ * physical_qty is total_qty (what is on the shelf, reserved or not). category,
+ * reorder level and cost are not stk_balance columns; the backend fills them from
+ * mst_items on the way out (service.list_stock).
  */
 const toBalance = (r: StockRow): StockBalanceItem => ({
   id: r.id,
   item_id: r.item_id,
   item_code: r.item_code ?? "",
   item_name: r.item_name ?? "",
-  category_name: "",
+  category_name: r.category_name ?? "",
   warehouse_id: r.warehouse_id,
   warehouse_name: r.warehouse_name ?? "",
   uom_code: r.uom_code ?? "",
   physical_qty: num(r.total_qty),
   reserved_qty: num(r.reserved_qty),
+  transit_qty: num(r.transit_qty),
   available_qty: num(r.available_qty),
-  reorder_level: 0,
-  valuation_rate: 0,
-  total_value: 0,
+  reorder_level: num(r.reorder_level),
+  valuation_rate: num(r.valuation_rate),
+  total_value: num(r.stock_value),
   batch_number: r.batch_no ?? undefined,
+  batch_id: r.batch_id,
   expiry_date: r.expiry_date ?? undefined,
   storage_location: r.bin_code ?? undefined,
+  bin_code: r.bin_code ?? undefined,
+  project_name: r.project_name ?? undefined,
+  serial_number: r.serial_number ?? undefined,
+  asset_code: r.asset_code ?? undefined,
+  consumable_code: r.consumable_code ?? undefined,
+  barcode_value: r.barcode_value ?? undefined,
+  last_movement_at: r.last_movement_at ?? undefined,
 });
 
 /** stk_ledger -> the shape the ledger view reads. One row is IN or OUT, never both. */
@@ -107,31 +113,46 @@ export const getVendors = () =>
 
 // ---- stock ----
 
+/** Blank strings and "all" mean "no filter" — they must not reach the query string. */
+const clean = <T extends Record<string, unknown>>(params: T) =>
+  Object.fromEntries(
+    Object.entries(params).filter(([, v]) => v !== "" && v !== undefined && v !== null && v !== "all"),
+  );
+
 export const getStockBalances = (params?: StockBalanceFilter) =>
   api
     .get<Page<StockRow>>("/api/stock", {
-      params: {
+      params: clean({
         item_id: params?.item_id,
-        warehouse_id:
-          params?.warehouse_id && params.warehouse_id !== "all"
-            ? params.warehouse_id
-            : undefined,
+        warehouse_id: params?.warehouse_id,
+        category_id: params?.category_id,
+        search: params?.search?.trim(),
+        batch_no: params?.batch_no?.trim(),
+        include_zero: params?.include_zero || undefined,
+        below_reorder: params?.below_reorder || undefined,
+        expiring_in_days: params?.expiring_in_days,
         page: params?.page ?? 1,
         size: params?.size ?? 200,
-      },
+      }),
     })
-    .then((r) => unwrap(r.data).map(toBalance));
+    .then((r) => ({ items: unwrap(r.data).map(toBalance), total: r.data.total }));
 
 export const getStockLedger = (params?: StockLedgerFilter) =>
   api
     .get<Page<MovementRow>>("/api/stock/movements", {
-      params: {
+      params: clean({
         item_id: params?.item_id,
+        warehouse_id: params?.warehouse_id,
+        direction: params?.direction,
+        ref_type: params?.ref_type,
+        search: params?.search?.trim(),
+        date_from: params?.date_from,
+        date_to: params?.date_to,
         page: params?.page ?? 1,
         size: params?.size ?? 200,
-      },
+      }),
     })
-    .then((r) => unwrap(r.data).map(toLedger));
+    .then((r) => ({ items: unwrap(r.data).map(toLedger), total: r.data.total }));
 
 export const createStockTransfer = (payload: StockTransferCreate) =>
   api.post<void>("/api/stock/transfer", payload).then((r) => r.data);
@@ -286,12 +307,6 @@ export const inventoryApi = {
   approveSTO,
   dispatchSTO,
   receiveSTO,
-  getStockTransfers: async (): Promise<any> => listSTOs(),
-  receiveStockTransfer: async (id: number): Promise<any> => receiveSTO(id),
-  cancelStockTransfer: async (_id: number): Promise<StockTransferRow> => {
-    throw new Error("Transfer cancellation is not available yet");
-  },
-
   // Adjustments & Replenishment
   adjustStock: createStockAdjustment,
   createStockAdjustment,
@@ -299,15 +314,5 @@ export const inventoryApi = {
   approveStockAdjustment,
   rejectStockAdjustment,
   getReplenishments,
-
-  createReplenishmentPO: async (_payload: unknown) => {
-    throw new Error("Replenishment is not available yet");
-  },
-  createPurchaseIndent: async (_items: ReplenishmentPOItem[]) => {
-    throw new Error("Replenishment is not available yet");
-  },
-  exportStockLedger: async (_params?: StockLedgerFilter) => {
-    throw new Error("Ledger export is not available yet");
-  },
 };
 

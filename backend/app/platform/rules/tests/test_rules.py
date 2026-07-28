@@ -54,21 +54,21 @@ async def test_create_rule_returns_conditions_and_actions(client, admin):
 async def test_rule_needs_at_least_one_action(client, admin):
     r = await client.post("/api/rules", headers=admin, json={
         "event_code": EVENT, "name": "Empty", "conditions": [], "actions": []})
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_unknown_event_is_rejected(client, admin):
     payload = rule("Orphan", [], FulfillmentTarget.INVENTORY.value)
     payload["event_code"] = "NOT_REGISTERED"
     r = await client.post("/api/rules", headers=admin, json=payload)
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_unknown_operator_is_rejected(client, admin):
     r = await client.post("/api/rules", headers=admin, json=rule(
         "Bad op", [{"field_name": "quantity", "operator": "ROUGHLY",
                     "field_value": "10"}], FulfillmentTarget.INVENTORY.value))
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_between_needs_two_values(client, admin):
@@ -76,7 +76,7 @@ async def test_between_needs_two_values(client, admin):
         "Bad between", [{"field_name": "quantity",
                          "operator": ConditionOperator.BETWEEN.value,
                          "field_value": "10"}], FulfillmentTarget.INVENTORY.value))
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_managing_rules_requires_the_permission(client, make_user, login, event):
@@ -109,10 +109,23 @@ async def test_deactivated_rule_stops_matching(client, admin, db):
 
 
 # ---------------------------- evaluation ---------------------------- #
+async def fresh(db):
+    """Start a new read snapshot on the test session.
+
+    `client` requests run on their own session; `db` is a second one that already has
+    a transaction open by the time a rule is POSTed. InnoDB is REPEATABLE READ, so
+    that snapshot predates the new row and evaluate() sees nothing. Ending the
+    transaction first is the difference between testing the evaluator and testing
+    MySQL's isolation level.
+    """
+    await db.rollback()
+
+
 async def test_matching_rule_returns_its_action(client, admin, db):
     await client.post("/api/rules", headers=admin, json=rule(
         "Bulk", [gt("quantity", 100)], FulfillmentTarget.WAREHOUSE.value))
 
+    await fresh(db)
     actions = await evaluator.evaluate(db, EVENT, {"quantity": 150})
     assert [a.params["target"] for a in actions] == ["WAREHOUSE"]
 
@@ -130,6 +143,7 @@ async def test_priority_orders_the_returned_actions(client, admin, db):
     await client.post("/api/rules", headers=admin, json=rule(
         "First", [], FulfillmentTarget.INVENTORY.value, priority=10))
 
+    await fresh(db)
     actions = await evaluator.evaluate(db, EVENT, {"quantity": 1})
     assert [a.rule_name for a in actions] == ["First", "Second"]
 
@@ -141,6 +155,7 @@ async def test_stop_on_match_suppresses_later_rules(client, admin, db):
     await client.post("/api/rules", headers=admin, json=rule(
         "Never reached", [], FulfillmentTarget.WAREHOUSE.value, priority=20))
 
+    await fresh(db)
     actions = await evaluator.evaluate(db, EVENT, {"quantity": 1})
     assert [a.rule_name for a in actions] == ["Exclusive"]
 
@@ -188,8 +203,9 @@ async def test_same_priority_overlap_is_refused(client, admin):
     r = await client.post("/api/rules", headers=admin, json=rule(
         "To inventory", [gt("quantity", 200)], FulfillmentTarget.INVENTORY.value,
         priority=100))
-    assert r.status_code == 400
-    assert "conflict" in r.json()["error"]["message"].lower()
+    assert r.status_code == 422
+    # One error shape for the whole system: {"success": false, "error": "<text>"}.
+    assert "conflict" in r.json()["error"].lower()
 
 
 async def test_force_overrides_a_conflict(client, admin):

@@ -1,199 +1,199 @@
-import { useState, useEffect } from "react";
-import { Table, Button, Modal, Form, Input, Select, InputNumber, Tag, Card, Space, message, Row, Col } from "antd";
-import { PlusOutlined, CheckOutlined, CloseOutlined, ReloadOutlined } from "@ant-design/icons";
-import { listStockAdjustments, createStockAdjustment, approveStockAdjustment, rejectStockAdjustment, inventoryApi } from "../api";
-import type { WarehouseOption, CatalogItemOption } from "../types";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Chip, Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
+import { Plus, Check, X, RefreshCw } from "lucide-react";
+import {
+  Button, Can, Card, Field, Input, PageHeader, ResponsiveList, Select, StatusPill, type Column,
+} from "@/shared/components";
+import {
+  listStockAdjustments, createStockAdjustment, approveStockAdjustment, rejectStockAdjustment,
+  getWarehouses, getCatalogItems,
+} from "../api";
+
+const REASONS = [
+  { value: "DAMAGE", label: "Damage" },
+  { value: "EXPIRY", label: "Expiry" },
+  { value: "COUNT_VARIANCE", label: "Count Variance" },
+  { value: "FOUND", label: "Found Stock" },
+];
+
+const DIRECTIONS = [
+  { value: "IN", label: "IN (increase)" },
+  { value: "OUT", label: "OUT (decrease)" },
+];
+
+const BLANK = {
+  warehouse_id: "", item_id: "", reason: "COUNT_VARIANCE", direction: "IN",
+  quantity: "", unit_cost: "", remarks: "",
+};
+
+type Adjustment = Record<string, any>;
 
 export function StockAdjustmentsView() {
-  const [adjustments, setAdjustments] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ ...BLANK });
+  const [error, setError] = useState("");
+  const qc = useQueryClient();
 
-  const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
-  const [items, setItems] = useState<CatalogItemOption[]>([]);
-  const [form] = Form.useForm();
+  const { data, isLoading } = useQuery({
+    queryKey: ["stock-adjustments"],
+    queryFn: () => listStockAdjustments(),
+  });
+  const rows: Adjustment[] = data?.items ?? [];
 
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      const res = await listStockAdjustments();
-      setAdjustments(res.items || []);
-    } catch (e) {
-      console.error(e);
-      message.error("Failed to load stock adjustments");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
+  const { data: items = [] } = useQuery({ queryKey: ["catalog-items"], queryFn: getCatalogItems });
 
-  useEffect(() => {
-    loadData();
-    inventoryApi.getWarehouses().then(setWarehouses).catch(console.error);
-    inventoryApi.getCatalogItems().then(setItems).catch(console.error);
-  }, []);
+  const refresh = () => qc.invalidateQueries({ queryKey: ["stock-adjustments"] });
+  const fail = (e: any) => setError(e?.response?.data?.error ?? "The action failed");
 
-  const handleCreate = async (values: any) => {
-    setSubmitting(true);
-    try {
-      await createStockAdjustment({
-        warehouse_id: values.warehouse_id,
-        reason: values.reason,
-        remarks: values.remarks,
-        items: [
-          {
-            item_id: values.item_id,
-            direction: values.direction,
-            quantity: values.quantity,
-            unit_cost: values.unit_cost || 0,
-            remarks: values.item_remarks,
-          },
-        ],
-      });
-      message.success("Stock adjustment created successfully");
-      setIsModalOpen(false);
-      form.resetFields();
-      loadData();
-    } catch (e: any) {
-      console.error(e);
-      message.error(e?.response?.data?.detail || "Failed to create adjustment");
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const create = useMutation({
+    mutationFn: () =>
+      createStockAdjustment({
+        warehouse_id: Number(form.warehouse_id),
+        reason: form.reason,
+        remarks: form.remarks,
+        items: [{
+          item_id: Number(form.item_id),
+          direction: form.direction,
+          quantity: Number(form.quantity),
+          unit_cost: Number(form.unit_cost || 0),
+        }],
+      }),
+    onSuccess: () => { setOpen(false); setForm({ ...BLANK }); setError(""); refresh(); },
+    onError: fail,
+  });
 
-  const handleApprove = async (id: number) => {
-    try {
-      await approveStockAdjustment(id);
-      message.success("Adjustment approved & posted to stock");
-      loadData();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || "Failed to approve adjustment");
-    }
-  };
+  const decide = useMutation({
+    mutationFn: ({ id, approve }: { id: number; approve: boolean }) =>
+      approve ? approveStockAdjustment(id) : rejectStockAdjustment(id),
+    onSuccess: () => { setError(""); refresh(); },
+    onError: fail,
+  });
 
-  const handleReject = async (id: number) => {
-    try {
-      await rejectStockAdjustment(id);
-      message.info("Adjustment rejected");
-      loadData();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || "Failed to reject adjustment");
-    }
-  };
+  const valid = form.warehouse_id && form.item_id && Number(form.quantity) > 0;
 
-  const columns = [
-    { title: "Adj No", dataIndex: "adjustment_no", key: "adjustment_no", render: (text: string) => <strong>{text}</strong> },
-    { title: "Warehouse", dataIndex: "warehouse_name", key: "warehouse_name" },
-    { title: "Reason", dataIndex: "reason", key: "reason", render: (r: string) => <Tag color="blue">{r}</Tag> },
+  const actions = (r: Adjustment) =>
+    r.status === "PENDING_APPROVAL" ? (
+      <Can do="stock.adjust">
+        <div className="flex gap-2">
+          <Button onClick={() => decide.mutate({ id: r.id, approve: true })}>
+            <Check size={14} /> Approve
+          </Button>
+          <Button variant="ghost" onClick={() => decide.mutate({ id: r.id, approve: false })}>
+            <X size={14} /> Reject
+          </Button>
+        </div>
+      </Can>
+    ) : null;
+
+  const columns: Column<Adjustment>[] = [
+    { key: "adjustment_no", header: "Adj No", render: (r) => <strong>{r.adjustment_no}</strong> },
+    { key: "warehouse_name", header: "Warehouse", render: (r) => r.warehouse_name ?? "-" },
+    { key: "reason", header: "Reason", render: (r) => <Chip size="sm" variant="flat">{r.reason}</Chip> },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    { key: "created_by_name", header: "Created By", render: (r) => r.created_by_name ?? "-", hideOnNarrow: true },
     {
-      title: "Status",
-      dataIndex: "status",
-      key: "status",
-      render: (s: string) => {
-        const color = s === "APPROVED" ? "green" : s === "REJECTED" ? "red" : "orange";
-        return <Tag color={color}>{s}</Tag>;
-      },
+      key: "created_at", header: "Created", hideOnNarrow: true,
+      render: (r) => (r.created_at ? new Date(r.created_at).toLocaleString() : "-"),
     },
-    { title: "Created By", dataIndex: "created_by_name", key: "created_by_name" },
-    { title: "Created At", dataIndex: "created_at", key: "created_at", render: (d: string) => d ? new Date(d).toLocaleString() : "-" },
-    {
-      title: "Actions",
-      key: "actions",
-      render: (_: any, record: any) => (
-        <Space>
-          {record.status === "PENDING_APPROVAL" && (
-            <>
-              <Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => handleApprove(record.id)}>
-                Approve
-              </Button>
-              <Button danger size="small" icon={<CloseOutlined />} onClick={() => handleReject(record.id)}>
-                Reject
-              </Button>
-            </>
-          )}
-        </Space>
-      ),
-    },
+    { key: "actions", header: "", render: actions },
   ];
 
   return (
-    <div style={{ padding: 24 }}>
-      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
-        <Col>
-          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Stock Adjustments</h2>
-        </Col>
-        <Col>
-          <Space>
-            <Button icon={<ReloadOutlined />} onClick={loadData}>Refresh</Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>
-              New Adjustment
-            </Button>
-          </Space>
-        </Col>
-      </Row>
+    <div>
+      <PageHeader
+        eyebrow="Inventory"
+        title="Stock Adjustments"
+        actions={
+          <>
+            <Button variant="ghost" onClick={refresh}><RefreshCw size={14} /> Refresh</Button>
+            <Can do="stock.adjust">
+              <Button onClick={() => setOpen(true)}><Plus size={14} /> New Adjustment</Button>
+            </Can>
+          </>
+        }
+      />
 
-      <Card bordered>
-        <Table dataSource={adjustments} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize: 10 }} />
+      {error && (
+        <div className="mb-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>
+      )}
+
+      <Card className="p-2">
+        <ResponsiveList
+          data={rows}
+          columns={columns}
+          keyOf={(r) => r.id}
+          loading={isLoading}
+          empty="No adjustments yet."
+          renderCard={(r) => (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-ink">{r.adjustment_no}</span>
+                <StatusPill status={r.status} />
+              </div>
+              <div className="text-xs text-muted">{r.warehouse_name} · {r.reason}</div>
+              {actions(r)}
+            </div>
+          )}
+        />
       </Card>
 
-      <Modal
-        title="Create Stock Adjustment"
-        open={isModalOpen}
-        onCancel={() => setIsModalOpen(false)}
-        onOk={() => form.submit()}
-        confirmLoading={submitting}
-      >
-        <Form form={form} layout="vertical" onFinish={handleCreate} initialValues={{ direction: "IN", reason: "COUNT_VARIANCE" }}>
-          <Form.Item name="warehouse_id" label="Warehouse" rules={[{ required: true, message: "Select warehouse" }]}>
-            <Select placeholder="Select warehouse">
-              {warehouses.map((w) => (
-                <Select.Option key={w.id} value={w.id}>{w.name}</Select.Option>
-              ))}
-            </Select>
-          </Form.Item>
-
-          <Form.Item name="reason" label="Reason" rules={[{ required: true }]}>
-            <Select>
-              <Select.Option value="DAMAGE">Damage</Select.Option>
-              <Select.Option value="EXPIRY">Expiry</Select.Option>
-              <Select.Option value="COUNT_VARIANCE">Count Variance</Select.Option>
-              <Select.Option value="FOUND">Found Stock</Select.Option>
-            </Select>
-          </Form.Item>
-
-          <Form.Item name="item_id" label="Item" rules={[{ required: true, message: "Select item" }]}>
-            <Select showSearch optionFilterProp="children" placeholder="Select item">
-              {items.map((i) => (
-                <Select.Option key={i.id} value={i.id}>{i.code} - {i.name}</Select.Option>
-              ))}
-            </Select>
-          </Form.Item>
-
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item name="direction" label="Direction" rules={[{ required: true }]}>
-                <Select>
-                  <Select.Option value="IN">IN (Increase)</Select.Option>
-                  <Select.Option value="OUT">OUT (Decrease)</Select.Option>
-                </Select>
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="quantity" label="Quantity" rules={[{ required: true }]}>
-                <InputNumber min={0.001} style={{ width: "100%" }} placeholder="Qty" />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Form.Item name="unit_cost" label="Unit Cost (Optional)">
-            <InputNumber min={0} style={{ width: "100%" }} placeholder="0.00" />
-          </Form.Item>
-
-          <Form.Item name="remarks" label="Remarks">
-            <Input.TextArea rows={2} placeholder="Reason or inspection notes..." />
-          </Form.Item>
-        </Form>
+      <Modal isOpen={open} onClose={() => setOpen(false)} size="lg">
+        <ModalContent>
+          <ModalHeader>Create Stock Adjustment</ModalHeader>
+          <ModalBody className="space-y-3">
+            <Field label="Warehouse">
+              <Select
+                value={form.warehouse_id}
+                onChange={(v) => setForm({ ...form, warehouse_id: v })}
+                options={warehouses.map((w) => ({ value: w.id, label: w.name }))}
+                placeholder="Select warehouse"
+              />
+            </Field>
+            <Field label="Reason">
+              <Select value={form.reason} onChange={(v) => setForm({ ...form, reason: v })} options={REASONS} />
+            </Field>
+            <Field label="Item">
+              <Select
+                value={form.item_id}
+                onChange={(v) => setForm({ ...form, item_id: v })}
+                options={items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}` }))}
+                placeholder="Select item"
+              />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Direction">
+                <Select value={form.direction} onChange={(v) => setForm({ ...form, direction: v })} options={DIRECTIONS} />
+              </Field>
+              <Field label="Quantity">
+                <Input
+                  type="number" min="0.001" step="0.001" value={form.quantity}
+                  onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                />
+              </Field>
+            </div>
+            <Field label="Unit Cost (optional)">
+              <Input
+                type="number" min="0" step="0.01" value={form.unit_cost}
+                onChange={(e) => setForm({ ...form, unit_cost: e.target.value })}
+              />
+            </Field>
+            <Field label="Remarks">
+              <Input
+                value={form.remarks}
+                onChange={(e) => setForm({ ...form, remarks: e.target.value })}
+                placeholder="Reason or inspection notes"
+              />
+            </Field>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button disabled={!valid || create.isPending} onClick={() => create.mutate()}>
+              {create.isPending ? "Saving…" : "Create"}
+            </Button>
+          </ModalFooter>
+        </ModalContent>
       </Modal>
     </div>
   );

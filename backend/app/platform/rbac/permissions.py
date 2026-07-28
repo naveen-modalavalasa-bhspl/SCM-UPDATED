@@ -73,6 +73,7 @@ MASTER_ATTRIBUTE_MANAGE = "master.attribute.manage"
 MASTER_PRICE_MANAGE = "master.price.manage"
 MASTER_BOM_MANAGE = "master.bom.manage"
 MASTER_SPEC_MANAGE = "master.spec.manage"
+MASTER_HSN_MANAGE = "master.hsn.manage"
 
 # --- Admin ---
 ADMIN_ROLES_MANAGE = "admin.roles.manage"
@@ -141,6 +142,7 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(MASTER_PRICE_MANAGE, "masters", "price", "manage", "Manage price lists"),
     Perm(MASTER_BOM_MANAGE, "masters", "bom", "manage", "Manage bills of material"),
     Perm(MASTER_SPEC_MANAGE, "masters", "spec", "manage", "Manage item specifications"),
+    Perm(MASTER_HSN_MANAGE, "masters", "hsn", "manage", "Manage HSN codes and tax rates"),
     Perm(ADMIN_ROLES_MANAGE, "admin", "roles", "manage", "Manage roles & permissions"),
     Perm(ADMIN_WORKFLOW_MANAGE, "admin", "workflow", "manage", "Manage approval workflows"),
     Perm(ADMIN_USERS_MANAGE, "admin", "users", "manage", "Manage users & HCM sync"),

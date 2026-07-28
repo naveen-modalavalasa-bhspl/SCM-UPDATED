@@ -158,7 +158,16 @@ async def transfer_stock(db: AsyncSession, item_id: int, qty, user,
 
 async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None = None,
                      warehouse_id: int | None = None, project_id: int | None = None,
-                     bin_id: int | None = None) -> dict:
+                     bin_id: int | None = None, search: str | None = None,
+                     category_id: int | None = None, batch_no: str | None = None,
+                     include_zero: bool = False, expiring_in_days: int | None = None,
+                     below_reorder: bool = False) -> dict:
+    """The stock balance grid.
+
+    Every filter the screen offers is applied here. They used to live in the frontend
+    query object and were dropped before the request went out, so typing in the search
+    box changed nothing — the list has to be filtered where the rows are.
+    """
     stmt = select(Stock)
     if item_id is not None:
         stmt = stmt.where(Stock.item_id == item_id)
@@ -168,14 +177,80 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
         stmt = stmt.where(Stock.project_id == project_id)
     if bin_id is not None:
         stmt = stmt.where(Stock.bin_id == bin_id)
-    return await paginate(db, stmt.order_by(Stock.item_name), params)
+    if batch_no:
+        stmt = stmt.where(Stock.batch_no.like(f"%{batch_no}%"))
+    if not include_zero:
+        stmt = stmt.where(Stock.total_qty > 0)
+    if expiring_in_days is not None:
+        cutoff = utcnow().date() + timedelta(days=expiring_in_days)
+        stmt = stmt.where(Stock.expiry_date.isnot(None), Stock.expiry_date <= cutoff)
+    if search:
+        # One box covers what a store user actually types: item code or name, the batch,
+        # the bin, a serial off a label, or a scanned item barcode.
+        like = f"%{search}%"
+        barcoded = select(Item.id).where(
+            or_(Item.barcode_value == search, Item.code == search))
+        stmt = stmt.where(or_(
+            Stock.item_code.like(like), Stock.item_name.like(like),
+            Stock.batch_no.like(like), Stock.bin_code.like(like),
+            Stock.serial_number.like(like), Stock.asset_code.like(like),
+            Stock.item_id.in_(barcoded),
+        ))
+    if category_id is not None:
+        stmt = stmt.where(Stock.item_id.in_(
+            select(Item.id).where(Item.category_id == category_id)))
+    if below_reorder:
+        stmt = stmt.where(Stock.item_id.in_(
+            select(Item.id).where(Item.reorder_level > 0)))
+
+    page = await paginate(db, stmt.order_by(Stock.item_name), params)
+
+    # category and reorder level live on mst_items, not stk_balance. One lookup per
+    # page fills them; costing comes off the balance row's own valuation columns.
+    ids = {row.item_id for row in page["items"]}
+    if ids:
+        cols = (await db.execute(
+            select(Item.id, Item.category_name, Item.reorder_level, Item.barcode_value)
+            .where(Item.id.in_(ids))
+        )).all()
+        by_id = {c.id: c for c in cols}
+        for row in page["items"]:
+            item = by_id.get(row.item_id)
+            row.category_name = item.category_name if item else None
+            row.reorder_level = float(item.reorder_level or 0) if item else 0.0
+            row.barcode_value = item.barcode_value if item else None
+    if below_reorder:
+        page["items"] = [r for r in page["items"]
+                         if float(r.available_qty or 0) < r.reorder_level]
+        page["total"] = len(page["items"])
+    return page
 
 
 async def list_movements(db: AsyncSession, params: PageParams,
-                         item_id: int | None = None) -> dict:
+                         item_id: int | None = None, warehouse_id: int | None = None,
+                         direction: str | None = None, ref_type: str | None = None,
+                         search: str | None = None, date_from: date | None = None,
+                         date_to: date | None = None) -> dict:
+    """The stock ledger. Same story as list_stock — the filters have to run here."""
     stmt = select(StockMovement)
     if item_id is not None:
         stmt = stmt.where(StockMovement.item_id == item_id)
+    if warehouse_id is not None:
+        stmt = stmt.where(StockMovement.warehouse_id == warehouse_id)
+    if direction:
+        stmt = stmt.where(StockMovement.direction == direction)
+    if ref_type:
+        stmt = stmt.where(StockMovement.ref_type == ref_type)
+    if date_from is not None:
+        stmt = stmt.where(StockMovement.txn_date >= date_from)
+    if date_to is not None:
+        stmt = stmt.where(StockMovement.txn_date < date_to + timedelta(days=1))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            StockMovement.item_code.like(like), StockMovement.item_name.like(like),
+            StockMovement.ref_no.like(like), StockMovement.batch_no.like(like),
+        ))
     return await paginate(db, stmt.order_by(StockMovement.created_at.desc()), params)
 
 
@@ -671,7 +746,10 @@ async def get_stock_valuation(db: AsyncSession, warehouse_id: int | None = None)
 
     for s in stocks:
         item = await db.get(Item, s.item_id)
-        cost = _d(getattr(item, "last_purchase_price", 0) or getattr(item, "std_cost", 0) or 10.0)
+        # purchase_price is the only cost mst_items carries. The names tried before
+        # (last_purchase_price / std_cost) are not columns, so every item fell through
+        # to the literal 10.0 and the whole valuation was fiction.
+        cost = _d(getattr(item, "purchase_price", 0) or 0)
         stock_val = (s.total_qty or Decimal("0")) * cost
         total_portfolio_val += stock_val
 

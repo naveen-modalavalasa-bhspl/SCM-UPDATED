@@ -43,6 +43,7 @@ import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
 import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialRequestDetailPage";
 import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
+import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
 import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
 
 const queryClient = new QueryClient({
@@ -93,6 +94,7 @@ function AppRoutes() {
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
         <Route path="inventory/demand" element={<ItemDemandPage />} />
+        <Route path="inventory/labels" element={<LabelsPage />} />
         <Route path="inventory/material-requests/:id" element={<MaterialRequestDetailPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/settings" element={<SettingsPage />} />

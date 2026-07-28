@@ -1,7 +1,16 @@
 # Masters Overhaul — Design
 
 Date: 2026-07-28
-Status: approved, in implementation
+Status: implemented (all three phases)
+
+Two deviations from the plan below, both decided during implementation:
+
+- **`mst_attribute_mappings` is not deleted.** The migration copies its CATEGORY
+  rows into `mst_category_tags` and leaves the old table alone, so an admin's
+  existing mappings survive the change without being re-typed.
+- **Item group filtering is opt-in per request** (`?mine=true`) rather than always
+  on. An admin maintaining the item master must still see every item; only a
+  requester picking from it should see a narrowed list.
 
 Rewrites the masters module so item identity, classification, packaging and tagging
 are modelled once and enforced in the backend. Replaces free-text duplicates with

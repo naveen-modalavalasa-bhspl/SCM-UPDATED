@@ -1,4 +1,6 @@
 """Inventory endpoints. No logic — routes call the service."""
+from datetime import date
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,17 +27,25 @@ stock_router = APIRouter(prefix="/api/stock")
 @stock_router.get("", response_model=Page[StockRow])
 async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
                      warehouse_id: int | None = None, project_id: int | None = None,
-                     bin_id: int | None = None, db: AsyncSession = Depends(get_db),
+                     bin_id: int | None = None, search: str | None = None,
+                     category_id: int | None = None, batch_no: str | None = None,
+                     include_zero: bool = False, expiring_in_days: int | None = None,
+                     below_reorder: bool = False, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.STOCK_VIEW))):
     return await service.list_stock(db, params, item_id, warehouse_id, project_id,
-                                    bin_id)
+                                    bin_id, search, category_id, batch_no,
+                                    include_zero, expiring_in_days, below_reorder)
 
 
 @stock_router.get("/movements", response_model=Page[MovementRow])
 async def movements(params: PageParams = Depends(), item_id: int | None = None,
+                    warehouse_id: int | None = None, direction: str | None = None,
+                    ref_type: str | None = None, search: str | None = None,
+                    date_from: date | None = None, date_to: date | None = None,
                     db: AsyncSession = Depends(get_db),
                     user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_movements(db, params, item_id)
+    return await service.list_movements(db, params, item_id, warehouse_id, direction,
+                                        ref_type, search, date_from, date_to)
 
 
 @stock_router.post("/transfer", status_code=204)
@@ -52,7 +62,7 @@ async def transfer(body: TransferIn, db: AsyncSession = Depends(get_db),
 
 @stock_router.post("/adjust", response_model=AdjustmentOut)
 async def create_adjustment(body: AdjustmentIn, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.STOCK_VIEW))):
+                            user=Depends(require_permission(perms.STOCK_ADJUST))):
     return await service.create_stock_adjustment(db, body, user)
 
 
@@ -71,13 +81,13 @@ async def get_adjustment(id: int, db: AsyncSession = Depends(get_db),
 
 @stock_router.post("/adjustments/{id}/approve", response_model=AdjustmentOut)
 async def approve_adjustment(id: int, db: AsyncSession = Depends(get_db),
-                             user=Depends(require_permission(perms.STOCK_VIEW))):
+                             user=Depends(require_permission(perms.STOCK_ADJUST))):
     return await service.act_on_adjustment(db, id, "APPROVE", user)
 
 
 @stock_router.post("/adjustments/{id}/reject", response_model=AdjustmentOut)
 async def reject_adjustment(id: int, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.STOCK_VIEW))):
+                            user=Depends(require_permission(perms.STOCK_ADJUST))):
     return await service.act_on_adjustment(db, id, "REJECT", user)
 
 
@@ -160,7 +170,7 @@ async def receive_sto(id: int, db: AsyncSession = Depends(get_db),
 # Cycle Count Endpoints
 @stock_router.post("/cycle-counts", response_model=CycleCountOut)
 async def create_cycle_count(body: CycleCountIn, db: AsyncSession = Depends(get_db),
-                             user=Depends(require_permission(perms.STOCK_VIEW))):
+                             user=Depends(require_permission(perms.STOCK_ADJUST))):
     return await service.create_cycle_count(db, body, user)
 
 
@@ -179,13 +189,13 @@ async def get_cycle_count(id: int, db: AsyncSession = Depends(get_db),
 
 @stock_router.put("/cycle-counts/{id}", response_model=CycleCountOut)
 async def update_cycle_count(id: int, body: CycleCountUpdateIn, db: AsyncSession = Depends(get_db),
-                             user=Depends(require_permission(perms.STOCK_VIEW))):
+                             user=Depends(require_permission(perms.STOCK_ADJUST))):
     return await service.update_cycle_count(db, id, body, user)
 
 
 @stock_router.post("/cycle-counts/{id}/post", response_model=CycleCountOut)
 async def post_cycle_count(id: int, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.STOCK_VIEW))):
+                            user=Depends(require_permission(perms.STOCK_ADJUST))):
     return await service.post_cycle_count(db, id, user)
 
 
@@ -204,7 +214,7 @@ async def list_reservations(params: PageParams = Depends(), item_id: int | None 
 
 @res_router.post("/{id}/release", response_model=ReservationReleaseOut)
 async def release_reservation(id: int, db: AsyncSession = Depends(get_db),
-                               user=Depends(require_permission(perms.STOCK_VIEW))):
+                               user=Depends(require_permission(perms.STOCK_RESERVE))):
     return await service.release_reservation_by_id(db, id)
 
 

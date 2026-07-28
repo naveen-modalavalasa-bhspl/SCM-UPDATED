@@ -11,9 +11,10 @@ from app.core.dependencies import get_current_user, require_permission
 from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmDepartment, HcmFacility
 from app.platform.rbac import permissions as perms
+from app.shared.enums import UomClass
 from app.shared.masters.crud import build_router
-from app.shared.masters.defs import MASTERS
-from app.shared.models.master import Item, ItemSpec
+from app.shared.masters.defs import MASTERS, UOM_SUGGESTIONS, packaging_breakdown
+from app.shared.models.master import Item, ItemSpec, Uom
 
 router = build_router(MASTERS)
 
@@ -42,6 +43,84 @@ async def list_facilities(db: AsyncSession = Depends(get_db),
 
 
 router.include_router(_hcm)
+
+
+# --------------------------------------------------------------------------- #
+#  UOM suggestions — the standard units for a measurement class
+# --------------------------------------------------------------------------- #
+_uom = APIRouter(tags=["masters"])
+
+
+@_uom.get("/api/uom/suggestions")
+async def uom_suggestions(uom_class: str, db: AsyncSession = Depends(get_db),
+                          user=Depends(get_current_user)):
+    """The known units for a class, each flagged with whether it already exists.
+
+    Offering the list is what stops "Litre", "litre" and "Ltr" becoming three rows:
+    the admin ticks a name rather than typing one.
+    """
+    if uom_class not in {c.value for c in UomClass}:
+        raise ValidationError(
+            f"uom_class must be one of {', '.join(c.value for c in UomClass)}")
+    taken = set((await db.execute(select(Uom.code))).scalars().all())
+    return {"items": [{"code": code, "name": name, "exists": code in taken}
+                      for code, name in UOM_SUGGESTIONS[uom_class]]}
+
+
+class UomBulkIn(BaseModel):
+    uom_class: str
+    codes: list[str]
+
+
+@_uom.post("/api/uom/suggestions")
+async def create_suggested_uoms(
+    data: UomBulkIn, db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.MASTER_UOM_MANAGE)),
+):
+    """Create the ticked suggestions in one call. Codes that already exist are
+    skipped rather than rejected, so ticking the whole list twice is harmless."""
+    if data.uom_class not in {c.value for c in UomClass}:
+        raise ValidationError(
+            f"uom_class must be one of {', '.join(c.value for c in UomClass)}")
+    known = dict(UOM_SUGGESTIONS[data.uom_class])
+    unknown = [code for code in data.codes if code not in known]
+    if unknown:
+        raise ValidationError(
+            f"Not a suggested unit for {data.uom_class}: {', '.join(unknown)}")
+
+    taken = set((await db.execute(select(Uom.code))).scalars().all())
+    created = []
+    for code in data.codes:
+        if code in taken:
+            continue
+        db.add(Uom(code=code, name=known[code], uom_class=data.uom_class,
+                   is_active=True))
+        created.append(code)
+    await db.commit()
+    return {"created": created, "skipped": [c for c in data.codes if c in taken]}
+
+
+router.include_router(_uom)
+
+
+# --------------------------------------------------------------------------- #
+#  Packaging breakdown — the ladder multiplied up
+# --------------------------------------------------------------------------- #
+_packing = APIRouter(tags=["masters"])
+
+
+@_packing.get("/api/items/{item_id}/packaging-breakdown")
+async def item_packaging_breakdown(item_id: int, db: AsyncSession = Depends(get_db),
+                                   user=Depends(get_current_user)):
+    """1 tray = 10 L, 1 box = 10 trays = 100 L, 1 container = 10 boxes = 1000 L.
+
+    Computed from the stored rungs on every read rather than kept as a column, so
+    the totals can never drift from the quantities they come from.
+    """
+    return {"items": await packaging_breakdown(db, item_id)}
+
+
+router.include_router(_packing)
 
 
 # --------------------------------------------------------------------------- #

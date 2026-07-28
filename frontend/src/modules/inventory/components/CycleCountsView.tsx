@@ -1,207 +1,182 @@
-import { useState, useEffect } from "react";
-import { Table, Button, Modal, Form, Select, DatePicker, InputNumber, Tag, Card, Space, message, Row, Col } from "antd";
-import { PlusOutlined, EditOutlined, CheckCircleOutlined, ReloadOutlined } from "@ant-design/icons";
-import { listCycleCounts, createCycleCount, getCycleCount, updateCycleCount, postCycleCount, inventoryApi } from "../api";
-import type { WarehouseOption } from "../types";
-import dayjs from "dayjs";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
+import { Plus, Pencil, CircleCheck, RefreshCw } from "lucide-react";
+import {
+  Button, Can, Card, Field, Input, PageHeader, ResponsiveList, Select, StatusPill, type Column,
+} from "@/shared/components";
+import {
+  listCycleCounts, createCycleCount, getCycleCount, updateCycleCount, postCycleCount, getWarehouses,
+} from "../api";
+
+type Count = Record<string, any>;
+
+const today = () => new Date().toISOString().slice(0, 10);
 
 export function CycleCountsView() {
-  const [counts, setCounts] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isPlanModalOpen, setIsPlanModalOpen] = useState(false);
-  const [isCountModalOpen, setIsCountModalOpen] = useState(false);
-  const [activeCount, setActiveCount] = useState<any>(null);
-  const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
-  const [form] = Form.useForm();
-  const [countForm] = Form.useForm();
+  const [planOpen, setPlanOpen] = useState(false);
+  const [plan, setPlan] = useState({ warehouse_id: "", count_date: today() });
+  const [active, setActive] = useState<Count | null>(null);
+  const [counted, setCounted] = useState<Record<number, string>>({});
+  const [error, setError] = useState("");
+  const qc = useQueryClient();
 
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      const res = await listCycleCounts();
-      setCounts(res.items || []);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data, isLoading } = useQuery({ queryKey: ["cycle-counts"], queryFn: () => listCycleCounts() });
+  const rows: Count[] = data?.items ?? [];
+  const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
 
-  useEffect(() => {
-    loadData();
-    inventoryApi.getWarehouses().then(setWarehouses).catch(console.error);
-  }, []);
+  const refresh = () => qc.invalidateQueries({ queryKey: ["cycle-counts"] });
+  const fail = (e: any) => setError(e?.response?.data?.error ?? "The action failed");
 
-  const handlePlan = async (values: any) => {
-    try {
-      await createCycleCount({
-        warehouse_id: values.warehouse_id,
-        count_date: values.count_date.format("YYYY-MM-DD"),
-        remarks: values.remarks,
-      });
-      message.success("Cycle count planned successfully");
-      setIsPlanModalOpen(false);
-      form.resetFields();
-      loadData();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || "Failed to plan cycle count");
-    }
-  };
+  const create = useMutation({
+    mutationFn: () => createCycleCount({ warehouse_id: Number(plan.warehouse_id), count_date: plan.count_date }),
+    onSuccess: () => { setPlanOpen(false); setPlan({ warehouse_id: "", count_date: today() }); setError(""); refresh(); },
+    onError: fail,
+  });
 
-  const handleOpenCountModal = async (record: any) => {
-    try {
-      const detail = await getCycleCount(record.id);
-      setActiveCount(detail);
-      countForm.setFieldsValue({
-        items: detail.items?.map((it: any) => ({
-          id: it.id,
-          item_name: it.item_name,
-          snapshot_qty: it.snapshot_qty,
-          counted_qty: it.counted_qty ?? it.snapshot_qty,
-        })),
-      });
-      setIsCountModalOpen(true);
-    } catch (e) {
-      message.error("Failed to load count details");
-    }
-  };
-
-  const handleSaveCount = async (values: any) => {
-    try {
-      await updateCycleCount(activeCount.id, {
-        items: values.items.map((it: any) => ({
-          id: it.id,
-          counted_qty: it.counted_qty,
-        })),
-      });
-      message.success("Count updated");
-      setIsCountModalOpen(false);
-      loadData();
-    } catch (e: any) {
-      message.error("Failed to update count");
-    }
-  };
-
-  const handlePostVariance = async (id: number) => {
-    try {
-      await postCycleCount(id);
-      message.success("Cycle count posted & variances adjusted in stock!");
-      loadData();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || "Failed to post cycle count");
-    }
-  };
-
-  const columns = [
-    { title: "Count No", dataIndex: "count_no", key: "count_no", render: (t: string) => <strong>{t}</strong> },
-    { title: "Warehouse", dataIndex: "warehouse_name", key: "warehouse_name" },
-    { title: "Count Date", dataIndex: "count_date", key: "count_date" },
-    {
-      title: "Status",
-      dataIndex: "status",
-      key: "status",
-      render: (s: string) => {
-        const color = s === "COMPLETED" ? "green" : s === "IN_PROGRESS" ? "blue" : "orange";
-        return <Tag color={color}>{s}</Tag>;
-      },
+  const openCounts = useMutation({
+    mutationFn: (id: number) => getCycleCount(id),
+    onSuccess: (detail: Count) => {
+      setActive(detail);
+      setCounted(Object.fromEntries(
+        (detail.items ?? []).map((it: any) => [it.id, String(it.counted_qty ?? it.snapshot_qty ?? 0)]),
+      ));
+      setError("");
     },
-    { title: "Planned By", dataIndex: "planned_by_name", key: "planned_by_name" },
-    {
-      title: "Actions",
-      key: "actions",
-      render: (_: any, record: any) => (
-        <Space>
-          {record.status !== "COMPLETED" && (
-            <>
-              <Button icon={<EditOutlined />} size="small" onClick={() => handleOpenCountModal(record)}>
-                Enter Counts
-              </Button>
-              {record.status === "IN_PROGRESS" && (
-                <Button type="primary" size="small" icon={<CheckCircleOutlined />} onClick={() => handlePostVariance(record.id)}>
-                  Post Variance
-                </Button>
-              )}
-            </>
+    onError: fail,
+  });
+
+  const save = useMutation({
+    mutationFn: () =>
+      updateCycleCount(active!.id, {
+        items: Object.entries(counted).map(([id, qty]) => ({ id: Number(id), counted_qty: Number(qty) })),
+      }),
+    onSuccess: () => { setActive(null); setError(""); refresh(); },
+    onError: fail,
+  });
+
+  const post = useMutation({
+    mutationFn: postCycleCount,
+    onSuccess: () => { setError(""); refresh(); },
+    onError: fail,
+  });
+
+  const actions = (r: Count) =>
+    r.status !== "COMPLETED" ? (
+      <Can do="stock.adjust">
+        <div className="flex gap-2">
+          <Button variant="ghost" onClick={() => openCounts.mutate(r.id)}>
+            <Pencil size={14} /> Enter Counts
+          </Button>
+          {r.status === "IN_PROGRESS" && (
+            <Button onClick={() => post.mutate(r.id)}>
+              <CircleCheck size={14} /> Post Variance
+            </Button>
           )}
-        </Space>
-      ),
-    },
+        </div>
+      </Can>
+    ) : null;
+
+  const columns: Column<Count>[] = [
+    { key: "count_no", header: "Count No", render: (r) => <strong>{r.count_no}</strong> },
+    { key: "warehouse_name", header: "Warehouse", render: (r) => r.warehouse_name ?? "-" },
+    { key: "count_date", header: "Count Date", render: (r) => r.count_date ?? "-" },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    { key: "planned_by_name", header: "Planned By", render: (r) => r.planned_by_name ?? "-", hideOnNarrow: true },
+    { key: "actions", header: "", render: actions },
   ];
 
   return (
-    <div style={{ padding: 24 }}>
-      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
-        <Col>
-          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Cycle Counting</h2>
-        </Col>
-        <Col>
-          <Space>
-            <Button icon={<ReloadOutlined />} onClick={loadData}>Refresh</Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsPlanModalOpen(true)}>
-              Plan Cycle Count
-            </Button>
-          </Space>
-        </Col>
-      </Row>
+    <div>
+      <PageHeader
+        eyebrow="Inventory"
+        title="Cycle Counting"
+        actions={
+          <>
+            <Button variant="ghost" onClick={refresh}><RefreshCw size={14} /> Refresh</Button>
+            <Can do="stock.adjust">
+              <Button onClick={() => setPlanOpen(true)}><Plus size={14} /> Plan Cycle Count</Button>
+            </Can>
+          </>
+        }
+      />
 
-      <Card bordered>
-        <Table dataSource={counts} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize: 10 }} />
+      {error && (
+        <div className="mb-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>
+      )}
+
+      <Card className="p-2">
+        <ResponsiveList
+          data={rows}
+          columns={columns}
+          keyOf={(r) => r.id}
+          loading={isLoading}
+          empty="No cycle counts planned."
+          renderCard={(r) => (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-ink">{r.count_no}</span>
+                <StatusPill status={r.status} />
+              </div>
+              <div className="text-xs text-muted">{r.warehouse_name} · {r.count_date}</div>
+              {actions(r)}
+            </div>
+          )}
+        />
       </Card>
 
-      <Modal
-        title="Plan Cycle Count"
-        open={isPlanModalOpen}
-        onCancel={() => setIsPlanModalOpen(false)}
-        onOk={() => form.submit()}
-      >
-        <Form form={form} layout="vertical" onFinish={handlePlan} initialValues={{ count_date: dayjs() }}>
-          <Form.Item name="warehouse_id" label="Warehouse" rules={[{ required: true }]}>
-            <Select placeholder="Select warehouse">
-              {warehouses.map((w) => (
-                <Select.Option key={w.id} value={w.id}>{w.name}</Select.Option>
-              ))}
-            </Select>
-          </Form.Item>
-          <Form.Item name="count_date" label="Count Date" rules={[{ required: true }]}>
-            <DatePicker style={{ width: "100%" }} />
-          </Form.Item>
-        </Form>
+      <Modal isOpen={planOpen} onClose={() => setPlanOpen(false)}>
+        <ModalContent>
+          <ModalHeader>Plan Cycle Count</ModalHeader>
+          <ModalBody className="space-y-3">
+            <Field label="Warehouse">
+              <Select
+                value={plan.warehouse_id}
+                onChange={(v) => setPlan({ ...plan, warehouse_id: v })}
+                options={warehouses.map((w) => ({ value: w.id, label: w.name }))}
+                placeholder="Select warehouse"
+              />
+            </Field>
+            <Field label="Count Date">
+              <Input type="date" value={plan.count_date} onChange={(e) => setPlan({ ...plan, count_date: e.target.value })} />
+            </Field>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" onClick={() => setPlanOpen(false)}>Cancel</Button>
+            <Button disabled={!plan.warehouse_id || create.isPending} onClick={() => create.mutate()}>
+              {create.isPending ? "Saving…" : "Plan"}
+            </Button>
+          </ModalFooter>
+        </ModalContent>
       </Modal>
 
-      <Modal
-        title={`Enter Counts - ${activeCount?.count_no}`}
-        open={isCountModalOpen}
-        onCancel={() => setIsCountModalOpen(false)}
-        onOk={() => countForm.submit()}
-        width={700}
-      >
-        <Form form={countForm} layout="vertical" onFinish={handleSaveCount}>
-          <Form.List name="items">
-            {(fields) => (
-              <div style={{ maxHeight: 400, overflowY: "auto" }}>
-                {fields.map(({ key, name, ...restField }) => {
-                  const itemVal = countForm.getFieldValue(["items", name]);
-                  const snapshot = itemVal?.snapshot_qty || 0;
-                  return (
-                    <Card key={key} size="small" style={{ marginBottom: 8, background: "#fafafa" }}>
-                      <Row align="middle" gutter={16}>
-                        <Col span={10}>
-                          <strong>{itemVal?.item_name || `Item #${itemVal?.id}`}</strong>
-                          <div style={{ fontSize: 12, color: "#8c8c8c" }}>System Snapshot: {snapshot}</div>
-                        </Col>
-                        <Col span={10}>
-                          <Form.Item {...restField} name={[name, "counted_qty"]} label="Counted Quantity" style={{ margin: 0 }}>
-                            <InputNumber min={0} style={{ width: "100%" }} />
-                          </Form.Item>
-                        </Col>
-                      </Row>
-                    </Card>
-                  );
-                })}
+      <Modal isOpen={!!active} onClose={() => setActive(null)} size="2xl" scrollBehavior="inside">
+        <ModalContent>
+          <ModalHeader>Enter Counts — {active?.count_no}</ModalHeader>
+          <ModalBody className="space-y-2">
+            {(active?.items ?? []).map((it: any) => (
+              <div key={it.id} className="flex items-center justify-between gap-4 rounded-lg border border-line/70 p-3">
+                <div>
+                  <div className="font-medium text-ink">{it.item_name ?? `Item #${it.item_id}`}</div>
+                  <div className="text-xs text-muted">System snapshot: {it.snapshot_qty}</div>
+                </div>
+                <div className="w-36">
+                  <Input
+                    type="number" min="0" step="0.001"
+                    value={counted[it.id] ?? ""}
+                    onChange={(e) => setCounted({ ...counted, [it.id]: e.target.value })}
+                  />
+                </div>
               </div>
-            )}
-          </Form.List>
-        </Form>
+            ))}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" onClick={() => setActive(null)}>Cancel</Button>
+            <Button disabled={save.isPending} onClick={() => save.mutate()}>
+              {save.isPending ? "Saving…" : "Save Counts"}
+            </Button>
+          </ModalFooter>
+        </ModalContent>
       </Modal>
     </div>
   );

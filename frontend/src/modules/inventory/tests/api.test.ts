@@ -50,7 +50,7 @@ describe("inventory api", () => {
       ]),
     );
 
-    const [row] = await inventoryApi.getStockBalances();
+    const { items: [row] } = await inventoryApi.getStockBalances();
 
     // physical is what is on the shelf, reserved or not
     expect(row.physical_qty).toBe(100);
@@ -79,7 +79,7 @@ describe("inventory api", () => {
       ]),
     );
 
-    const [row] = await inventoryApi.getStockLedger();
+    const { items: [row] } = await inventoryApi.getStockLedger();
 
     expect(row.out_qty).toBe(15);
     expect(row.in_qty).toBe(0);

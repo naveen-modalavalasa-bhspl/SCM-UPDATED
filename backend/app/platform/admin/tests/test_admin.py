@@ -94,7 +94,7 @@ async def test_granted_user_can_log_in(client, admin, staff):
 async def test_grant_rejects_an_unknown_role(client, admin, staff):
     r = await client.post("/api/admin/users/grant", headers=admin,
                           json={"employee_id": 10, "role_ids": [999]})
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_grant_rejects_an_unknown_employee(client, admin):
@@ -230,7 +230,7 @@ async def test_explicit_member_is_added_on_top_of_the_rule(client, admin, staff,
 async def test_group_type_must_carry_its_own_key(client, admin):
     r = await client.post("/api/admin/groups", headers=admin, json={
         "code": "G", "name": "G", "group_type": GroupType.ROLE.value})
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_location_group_must_have_a_parent(client, admin, db):
@@ -240,7 +240,7 @@ async def test_location_group_must_have_a_parent(client, admin, db):
     r = await client.post("/api/admin/groups", headers=admin, json={
         "code": "G", "name": "G", "group_type": GroupType.LOCATION.value,
         "location_id": 901})
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_group_loop_is_rejected(client, admin, db):
@@ -258,7 +258,7 @@ async def test_group_loop_is_rejected(client, admin, db):
     r = await client.put(f"/api/admin/groups/{a['id']}", headers=admin, json={
         "code": "A", "name": "A", "group_type": GroupType.ROLE.value,
         "role_id": role.id, "parent_id": b["id"]})
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 # ------------------------------ audit ------------------------------ #

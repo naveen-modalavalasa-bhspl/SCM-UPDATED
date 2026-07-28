@@ -51,6 +51,14 @@ class MasterDef:
     # Columns exposed as optional ?column=value query filters. Child masters use this
     # so BOM lines can be fetched for one BOM instead of all of them.
     filters: Sequence[str] = ()
+    # Masters owned by an upstream system register only the list route. Hiding the
+    # button is not enough (rule 6): the write endpoints must not exist at all, or a
+    # local edit would be silently overwritten by the next sync.
+    read_only: bool = False
+    # Async hook that narrows the list to what this caller may see, applied only when
+    # the request asks for it with ?mine=true. Declared data rather than a branch in
+    # the handler, because only the item master has anything to narrow by.
+    scope_to_user: Callable | None = None
 
 
 async def _write(db: AsyncSession, defn: MasterDef, commit: bool = False) -> None:
@@ -111,12 +119,17 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         params: PageParams = Depends(),
         search: str | None = None,
         include_inactive: bool = False,
+        mine: bool = False,
         db: AsyncSession = Depends(get_db),
         user=Depends(get_current_user),
     ):
         stmt = select(defn.model)
         if defn.default_active_only and not include_inactive:
             stmt = stmt.where(defn.model.is_active.is_(True))
+        # Opt-in, so an admin managing the master still sees everything while a
+        # requester picking from it sees only what their groups allow.
+        if mine and defn.scope_to_user is not None:
+            stmt = await defn.scope_to_user(db, user, stmt)
         # Declared filters are read off the query string rather than being separate
         # parameters, because each master declares a different set of them.
         for column in defn.filters:
@@ -136,6 +149,9 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         page = await paginate(db, stmt, params)
         page["items"] = [defn.serialize(r) for r in page["items"]]
         return page
+
+    if defn.read_only:
+        return
 
     @router.post(base, name=f"create_{defn.path}")
     async def create_row(

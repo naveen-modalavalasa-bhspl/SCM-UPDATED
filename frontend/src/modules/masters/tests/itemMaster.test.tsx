@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ITEM_SECTIONS, ItemSectionTabs, itemCodePreview, manufacturersForBrand,
+  missingRequiredTags,
 } from "../components/ItemMasterTab";
+import type { MasterCategoryTag } from "../types";
 
 const manufacturers = [
   { id: 10, code: "ACME", name: "Acme", is_active: true },
@@ -27,9 +29,43 @@ describe("item master identity", () => {
   });
 
   it("previews the generated L1/L2/L3-general-brand-manufacturer code", () => {
+    expect(itemCodePreview("101010", "paracet", "dolo", "dolo", 1))
+      .toBe("101010-PARACET-DOLO-DOLO-0001");
+    expect(itemCodePreview("101010", "slide", "lab", null, 1)).toBe("");
+  });
+
+  it("shows #### for the serial until the server allocates one", () => {
+    // The serial is a locked MAX+1 on the server. Guessing it in the browser would
+    // show a number that another user may already have taken.
     expect(itemCodePreview("101010", "slide", "lab", "acme"))
-      .toBe("101010-SLIDE-LAB-ACME");
-    expect(itemCodePreview("101010", "slide", "lab", null)).toBe("");
+      .toBe("101010-SLIDE-LAB-ACME-####");
+  });
+
+  it("pads an existing serial back to four digits", () => {
+    expect(itemCodePreview("101010", "slide", "lab", "acme", 42))
+      .toBe("101010-SLIDE-LAB-ACME-0042");
+  });
+});
+
+describe("what a category insists on", () => {
+  const tag = (over: Partial<MasterCategoryTag>): MasterCategoryTag => ({
+    id: 1, category_id: 5, tag_type: "SPEC", tag_id: 9, tag_code: "VOLTAGE",
+    tag_name: "Voltage", is_required: true, is_active: true, ...over,
+  });
+
+  it("names the required fields that are still blank", () => {
+    const tags = [tag({}), tag({ id: 2, tag_code: "COLOUR", tag_name: "Colour",
+                                 tag_type: "ATTRIBUTE", is_required: false })];
+    expect(missingRequiredTags(tags, {}).map((t) => t.tag_name)).toEqual(["Voltage"]);
+    expect(missingRequiredTags(tags, { VOLTAGE: "240" })).toEqual([]);
+  });
+
+  it("treats whitespace as an unanswered field", () => {
+    expect(missingRequiredTags([tag({})], { VOLTAGE: "  " })).toHaveLength(1);
+  });
+
+  it("ignores a required field that has been deactivated", () => {
+    expect(missingRequiredTags([tag({ is_active: false })], {})).toEqual([]);
   });
 });
 
