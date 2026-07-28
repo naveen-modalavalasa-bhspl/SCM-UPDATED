@@ -15,7 +15,7 @@ from app.platform.hcm.models import (
 from app.platform.rbac.models import Role, UserRole
 from app.platform.workflow import engine, fallback, resolver
 from app.platform.workflow.models import (
-    Action, Delegation, Instance, Stage, StageCondition, Workflow,
+    Action, Delegation, Instance, Pending, Stage, StageCondition, Workflow,
 )
 from app.shared.enums import (
     ApprovalAction, ApproverType, ApprovalMode, ConditionOperator, InstanceStatus,
@@ -150,6 +150,64 @@ async def test_all_mode_needs_every_approver(db):
     mid = await engine.act(db, "INDENT", 9, "APPROVE", a1)
     assert mid.status == InstanceStatus.IN_PROGRESS.value   # still waiting on a2
     final = await engine.act(db, "INDENT", 9, "APPROVE", a2)
+    assert final.status == InstanceStatus.APPROVED.value
+
+
+async def test_single_reporting_manager_stage_climbs_to_final_top_pair(db):
+    requester = await _emp(db, 50, "Pilot", position_id=1000)
+    oe = await _emp(db, 51, "OE", position_id=1001)
+    dm = await _emp(db, 52, "DM", position_id=1002)
+    rm = await _emp(db, 53, "RM", position_id=1003)
+    sph = await _emp(db, 54, "SPH", position_id=1004)
+    coo = await _emp(db, 55, "COO", position_id=1005)
+    db.add_all([
+        HcmPosition(id=1000, name="Pilot", parent_position_id=1001,
+                    synced_at=utcnow()),
+        HcmPosition(id=1001, name="OE", parent_position_id=1002,
+                    synced_at=utcnow()),
+        HcmPosition(id=1002, name="DM", parent_position_id=1003,
+                    synced_at=utcnow()),
+        HcmPosition(id=1003, name="RM", parent_position_id=1004,
+                    synced_at=utcnow()),
+        HcmPosition(id=1004, name="SPH", parent_position_id=1005,
+                    synced_at=utcnow()),
+        HcmPosition(id=1005, name="COO", synced_at=utcnow()),
+    ])
+    await db.flush()
+    for employee, position_id in (
+        (requester, 1000), (oe, 1001), (dm, 1002), (rm, 1003), (sph, 1004), (coo, 1005),
+    ):
+        employee.active_position_id = position_id
+    await _workflow(db, "INDENT", [
+        {"seq": 1, "approver_type": ApproverType.REPORTING_MANAGER.value},
+    ])
+
+    instance = await engine.start(
+        db, "INDENT", 44, {"requester_position_id": 1000}, requester,
+    )
+    assert instance.status == InstanceStatus.IN_PROGRESS.value
+    assert {row.approver_id for row in (await db.execute(
+        select(Pending).where(Pending.doc_id == 44)
+    )).scalars().all()} == {oe.id}
+
+    await engine.act(db, "INDENT", 44, "APPROVE", oe, context={"requester_position_id": 1000})
+    assert {row.approver_id for row in (await db.execute(
+        select(Pending).where(Pending.doc_id == 44)
+    )).scalars().all()} == {dm.id}
+
+    await engine.act(db, "INDENT", 44, "APPROVE", dm, context={"requester_position_id": 1000})
+    assert {row.approver_id for row in (await db.execute(
+        select(Pending).where(Pending.doc_id == 44)
+    )).scalars().all()} == {rm.id}
+
+    await engine.act(db, "INDENT", 44, "APPROVE", rm, context={"requester_position_id": 1000})
+    assert {row.approver_id for row in (await db.execute(
+        select(Pending).where(Pending.doc_id == 44)
+    )).scalars().all()} == {sph.id, coo.id}
+
+    final = await engine.act(
+        db, "INDENT", 44, "APPROVE", coo, context={"requester_position_id": 1000},
+    )
     assert final.status == InstanceStatus.APPROVED.value
 
 

@@ -51,23 +51,14 @@ You need **both running** to use the app. Start with the backend.
 
 ---
 
-## 3. Create the database
+## 3. Environment and setup
 
-Open MySQL Workbench (or the `mysql` CLI) and run this once:
+Make sure the local environment is ready before continuing.
 
-```sql
-CREATE DATABASE scm_erp CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-Optional but recommended — a second database so you can run the test suite
-(the suite drops and recreates its schema on every test, so it must never point
-at your working data):
-
-```sql
-CREATE DATABASE scm_erp_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-Note the MySQL user and password you'll use. `root` is fine for local work.
+- Confirm Python 3.11, Node.js 18+, and MySQL 8.0+ are installed.
+- Ensure MySQL is running and the required environment variables are prepared in
+  `backend/.env`.
+- Continue with the backend and frontend setup steps below.
 
 ---
 

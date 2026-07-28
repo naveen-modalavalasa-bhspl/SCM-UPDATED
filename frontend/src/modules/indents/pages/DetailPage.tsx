@@ -1,13 +1,18 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, Send, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, Loader2, Send, X } from "lucide-react";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Skeleton, CardBody,
 } from "@heroui/react";
-import { PageHeader, Button, Card, Can, StatusPill } from "@/shared/components";
+import { PageHeader, Button, Card, StatusPill } from "@/shared/components";
 import { FlowStepper } from "../components/FlowStepper";
-import { indentApi } from "../api";
+import {
+  INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
+  isIndentModuleQuery, isIndentUnavailableError, useIndentAccountCacheIsolation,
+  useIndentAccountScope,
+} from "../api";
+import type { Indent } from "../types";
 
 function Detail({ label, value }: { label: string; value: ReactNode }) {
   return (
@@ -18,32 +23,85 @@ function Detail({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
+function InlineSpinner() {
+  return <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />;
+}
+
 export function IndentDetailPage() {
   const { id } = useParams();
   const indentId = Number(id);
   const nav = useNavigate();
   const qc = useQueryClient();
+  const accountScope = useIndentAccountScope();
+  useIndentAccountCacheIsolation(accountScope);
   const [error, setError] = useState<string | null>(null);
 
-  const { data: indent, isLoading } = useQuery({
-    queryKey: ["indent", indentId],
+  const { data: indent, isLoading, error: loadError } = useQuery({
+    queryKey: indentKeys.detail(accountScope, indentId),
     queryFn: () => indentApi.get(indentId),
+    enabled: Number.isFinite(indentId),
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
+    refetchOnWindowFocus: false,
   });
 
-  const refresh = () => {
-    qc.invalidateQueries({ queryKey: ["indent", indentId] });
-    qc.invalidateQueries({ queryKey: ["indents"] });
+  const { data: journey } = useQuery({
+    queryKey: indentKeys.journey(accountScope, indentId),
+    queryFn: () => indentApi.journey(indentId),
+    enabled: Number.isFinite(indentId) && Boolean(indent),
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
+    refetchOnWindowFocus: false,
+  });
+
+  const prefetchJourney = useCallback(() => {
+    if (!Number.isFinite(indentId)) return;
+    qc.prefetchQuery({
+      queryKey: indentKeys.journey(accountScope, indentId),
+      queryFn: () => indentApi.journey(indentId),
+      staleTime: INDENT_QUERY_STALE_TIME,
+      gcTime: INDENT_QUERY_GC_TIME,
+    });
+  }, [accountScope, indentId, qc]);
+
+  const refreshAfterAction = (updated: Indent) => {
+    setError(null);
+    qc.setQueryData(indentKeys.detail(accountScope, indentId), updated);
+    qc.invalidateQueries({
+      predicate: (query) => isIndentModuleQuery(query) && query.queryKey[3] !== "journey",
+    });
+    qc.invalidateQueries({ queryKey: indentKeys.journey(accountScope, indentId), refetchType: "none" });
   };
   const onErr = (e: Error) => setError(e.message);
 
-  const submit = useMutation({ mutationFn: () => indentApi.submit(indentId), onSuccess: refresh, onError: onErr });
-  const approve = useMutation({ mutationFn: () => indentApi.approve(indentId, ""), onSuccess: refresh, onError: onErr });
-  const reject = useMutation({ mutationFn: () => indentApi.reject(indentId, ""), onSuccess: refresh, onError: onErr });
+  const submit = useMutation({ mutationFn: () => indentApi.submit(indentId), onSuccess: refreshAfterAction, onError: onErr });
+  const approve = useMutation({ mutationFn: () => indentApi.approve(indentId, ""), onSuccess: refreshAfterAction, onError: onErr });
+  const reject = useMutation({ mutationFn: () => indentApi.reject(indentId, ""), onSuccess: refreshAfterAction, onError: onErr });
+
+  const unavailable = isIndentUnavailableError(loadError);
+  useEffect(() => {
+    if (unavailable) {
+      qc.removeQueries({ queryKey: indentKeys.detail(accountScope, indentId) });
+      qc.removeQueries({ queryKey: indentKeys.journey(accountScope, indentId) });
+    }
+  }, [accountScope, indentId, qc, unavailable]);
+
+  if (unavailable) {
+    return (
+      <div className="space-y-4 rounded-xl border border-line bg-content1 p-5">
+        <p className="text-sm font-semibold text-body">This indent is not available to your current account</p>
+        <Button variant="secondary" onClick={() => nav("/indents")}>
+          <ArrowLeft className="h-4 w-4" /> Back to All requests
+        </Button>
+      </div>
+    );
+  }
 
   if (isLoading || !indent) return <Skeleton className="h-40 rounded-2xl" />;
 
-  const isDraft = indent.status === "DRAFT";
   const isPending = indent.status === "PENDING_APPROVAL";
+  const showActions = indent.can_submit || indent.can_approve || indent.can_reject;
+  const actionPending = submit.isPending || approve.isPending || reject.isPending;
 
   return (
     <>
@@ -53,9 +111,31 @@ export function IndentDetailPage() {
 
       <PageHeader eyebrow="Indent" title={indent.indent_no} actions={<StatusPill status={indent.status} />} />
 
-      <Card className="mb-5">
-        <CardBody className="p-5"><FlowStepper status={indent.status} /></CardBody>
-      </Card>
+      <button
+        type="button"
+        aria-label={`View complete approval journey for ${indent.indent_no}`}
+        onClick={() => nav(`/indents/${indent.id}/journey`)}
+        onPointerEnter={prefetchJourney}
+        onPointerDown={prefetchJourney}
+        onFocus={prefetchJourney}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            nav(`/indents/${indent.id}/journey`);
+          }
+        }}
+        className="group mb-5 block w-full cursor-pointer rounded-2xl text-left outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
+      >
+        <Card className="transition-colors duration-150 group-hover:border-brand/40 group-hover:bg-content2 motion-reduce:transition-none">
+          <CardBody className="p-5">
+            <FlowStepper status={indent.status} journey={journey} />
+            <div className="mt-4 flex min-h-11 items-center justify-between gap-3 border-t border-line pt-3 text-sm font-semibold text-brand">
+              <span>View complete approval journey</span>
+              <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+            </div>
+          </CardBody>
+        </Card>
+      </button>
 
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -100,27 +180,25 @@ export function IndentDetailPage() {
 
       {error && <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>}
 
-      {(isDraft || isPending) && (
+      {showActions && (
         <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
-          {isDraft && (
-            <Can do="indent.submit">
-              <Button className="flex-1 md:flex-none" disabled={submit.isPending} onClick={() => submit.mutate()}>
-                <Send className="h-4 w-4" /> Submit for approval
-              </Button>
-            </Can>
+          {indent.can_submit && (
+            <Button className="flex-1 md:flex-none" disabled={actionPending} onClick={() => !actionPending && submit.mutate()}>
+              {submit.isPending ? <InlineSpinner /> : <Send className="h-4 w-4" />} {submit.isPending ? "Submitting..." : "Submit for approval"}
+            </Button>
           )}
-          {isPending && (
+          {(indent.can_reject || indent.can_approve) && (
             <>
-              <Can do="indent.reject">
-                <Button variant="danger" className="flex-1 md:flex-none" disabled={reject.isPending} onClick={() => reject.mutate()}>
-                  <X className="h-4 w-4" /> Reject
+              {indent.can_reject && (
+                <Button variant="danger" className="flex-1 md:flex-none" disabled={actionPending} onClick={() => !actionPending && reject.mutate()}>
+                  {reject.isPending ? <InlineSpinner /> : <X className="h-4 w-4" />} {reject.isPending ? "Rejecting..." : "Reject"}
                 </Button>
-              </Can>
-              <Can do="indent.approve">
-                <Button className="flex-1 md:flex-none" disabled={approve.isPending} onClick={() => approve.mutate()}>
-                  <Check className="h-4 w-4" /> Approve
+              )}
+              {indent.can_approve && (
+                <Button className="flex-1 md:flex-none" disabled={actionPending} onClick={() => !actionPending && approve.mutate()}>
+                  {approve.isPending ? <InlineSpinner /> : <Check className="h-4 w-4" />} {approve.isPending ? "Approving..." : "Approve"}
                 </Button>
-              </Can>
+              )}
             </>
           )}
         </div>

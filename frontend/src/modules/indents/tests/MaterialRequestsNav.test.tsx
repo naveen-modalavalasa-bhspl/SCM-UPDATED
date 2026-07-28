@@ -10,12 +10,23 @@ describe("MaterialRequestsNav", () => {
         <MaterialRequestsNav />
       </MemoryRouter>,
     );
-    expect(screen.getByRole("navigation", { name: "Material Requests" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Indent" })).toBeInTheDocument();
     for (const label of [
-      "Overview", "All requests", "Status board", "Acknowledgments",
-      "Activity ledger", "Notifications",
+      "Overview", "All requests", "Board", "Acknowledgments",
+      "Activity ledger", "Alert & Notification",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+  });
+
+  it("keeps the existing route paths behind the renamed labels", () => {
+    render(
+      <MemoryRouter>
+        <MaterialRequestsNav />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("link", { name: "Board" })).toHaveAttribute("href", "/indents/board");
+    expect(screen.getByRole("link", { name: "Alert & Notification" })).toHaveAttribute("href", "/indents/notifications");
   });
 });

@@ -1,22 +1,53 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2 } from "lucide-react";
-import { Card, PageHeader } from "@/shared/components";
-import { indentApi } from "../api";
+import { Card } from "@/shared/components";
+import { indentApi, indentKeys, useIndentAccountCacheIsolation, useIndentAccountScope } from "../api";
+import type { PendingApproval } from "../types";
+import { IndentModuleHeader } from "../components/IndentModuleHeader";
+import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
 
-export function IndentApprovalsPage() {
+export function filterPendingApprovals(approvals: PendingApproval[], search: string) {
+  const term = search.trim().toLocaleLowerCase();
+  const indentApprovals = approvals.filter((approval) => approval.doc_type === "INDENT");
+  if (!term) return indentApprovals;
+
+  return indentApprovals.filter((approval) =>
+    [
+      approval.doc_no,
+      approval.summary,
+      approval.requested_by_name,
+      String(approval.doc_id),
+    ]
+      .filter(Boolean)
+      .some((value) => String(value).toLocaleLowerCase().includes(term))
+  );
+}
+
+function IndentApprovalsContent() {
   const nav = useNavigate();
+  const accountScope = useIndentAccountScope();
+  useIndentAccountCacheIsolation(accountScope);
+  const { search } = useIndentFilters();
   const { data = [], isLoading } = useQuery({
-    queryKey: ["pending-approvals"],
+    queryKey: indentKeys.pendingApprovals(accountScope),
     queryFn: indentApi.pendingApprovals,
   });
+  const filtered = filterPendingApprovals(data, search);
 
   return (
     <>
-      <PageHeader eyebrow="Approvals" title="Waiting for me" />
+      <IndentModuleHeader
+        title="Waiting for me"
+        showCreate={false}
+        showRequiredBy={false}
+        showDate={false}
+        showStatus={false}
+        showPriority={false}
+      />
       <Card className="divide-y divide-line">
-        {isLoading && <p className="p-5 text-sm text-muted">Loading approvals…</p>}
-        {data.map((approval) => (
+        {isLoading && <p className="p-5 text-sm text-muted">Loading approvals...</p>}
+        {filtered.map((approval) => (
           <button
             key={approval.instance_id}
             onClick={() => {
@@ -42,12 +73,20 @@ export function IndentApprovalsPage() {
             </span>
           </button>
         ))}
-        {!isLoading && data.length === 0 && (
+        {!isLoading && filtered.length === 0 && (
           <p className="p-8 text-center text-sm text-muted">
             Nothing is waiting for your approval in this position.
           </p>
         )}
       </Card>
     </>
+  );
+}
+
+export function IndentApprovalsPage() {
+  return (
+    <IndentFilterProvider>
+      <IndentApprovalsContent />
+    </IndentFilterProvider>
   );
 }

@@ -1,19 +1,23 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Bell } from "lucide-react";
-import { Card, PageHeader, StatusPill } from "@/shared/components";
-import { indentApi } from "../api";
+import { Card, StatusPill } from "@/shared/components";
+import { indentApi, indentKeys, useIndentAccountCacheIsolation, useIndentAccountScope } from "../api";
+import { IndentModuleHeader } from "../components/IndentModuleHeader";
+import { formatIndentDateTime } from "../dateTime";
 
-export function IndentNotificationsPage() {
+function IndentNotificationsContent() {
   const nav = useNavigate();
+  const accountScope = useIndentAccountScope();
+  useIndentAccountCacheIsolation(accountScope);
   const { data, isLoading } = useQuery({
-    queryKey: ["indent-notifications"],
+    queryKey: indentKeys.notifications(accountScope),
     queryFn: () => indentApi.notifications({ size: 100 }),
   });
 
   return (
     <>
-      <PageHeader eyebrow="Material Requests" title="Notifications" />
+      <IndentModuleHeader title="Alert & Notification" showCreate={false} showFilters={false} />
       <Card className="divide-y divide-line">
         {isLoading && <p className="p-5 text-sm text-muted">Loading notifications…</p>}
         {data?.items.map((note) => (
@@ -30,7 +34,7 @@ export function IndentNotificationsPage() {
               </span>
               <span className="mt-1 block text-sm text-body">{note.message}</span>
               <span className="mt-1 block text-xs text-muted">
-                {new Date(note.created_at).toLocaleString()}
+                {formatIndentDateTime(note.created_at)}
               </span>
             </span>
           </button>
@@ -41,4 +45,8 @@ export function IndentNotificationsPage() {
       </Card>
     </>
   );
+}
+
+export function IndentNotificationsPage() {
+  return <IndentNotificationsContent />;
 }

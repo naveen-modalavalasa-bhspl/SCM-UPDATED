@@ -44,6 +44,7 @@ class Indent(Base):
     # approval summary (denormalised from wf_ so list screens need no join)
     current_approver_name = Column(String(200), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
+    is_bookmarked = Column(String(3), nullable=False, default="NO")
 
     created_at = created_at_col()
     updated_at = updated_at_col()

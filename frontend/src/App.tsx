@@ -15,6 +15,7 @@ import { IndentAcknowledgmentsPage } from "@/modules/indents/pages/Acknowledgmen
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
 import { IndentApprovalsPage } from "@/modules/indents/pages/ApprovalsPage";
+import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
 // sub-pages, so these paths hand the whole subtree to it.
@@ -64,6 +65,7 @@ function AppRoutes() {
         <Route path="indents/reports" element={<IndentReportsPage />} />
         <Route path="indents/notifications" element={<IndentNotificationsPage />} />
         <Route path="indents/new" element={<IndentFormPage />} />
+        <Route path="indents/:id/journey" element={<IndentJourneyPage />} />
         <Route path="indents/:id" element={<IndentDetailPage />} />
         <Route path="approvals" element={<IndentApprovalsPage />} />
         <Route path="pos" element={<POListPage />} />
