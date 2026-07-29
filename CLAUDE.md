@@ -115,6 +115,17 @@ Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock
    Configuration must never strand a document: a missing workflow, a stage that
    resolves to nobody, and a missing `sys_doc_series` row all fall back
    (`platform/workflow/fallback.py`, `shared/numbering.py`) and log loudly.
+   Who approves is configured per project per document type as a **ladder**
+   (`platform/workflow/ladder.py`, Settings > Approvals Config). A ladder rung is a
+   RANK — `hcm_positions.role_id`, HCM's org role — not a position and not a person.
+   The approver is found at submit time by climbing the raiser's own
+   `parent_position_id` chain and keeping the ancestors whose rank is switched on, so
+   a five-region project routes each request to its own Regional Manager. The result
+   is frozen onto `wf_instances.resolved_chain`, so editing a ladder never moves a
+   document already in approval. No ladder for a project → the company-wide one → the
+   old fallback. Not `level_id` (COO and SPH share a band) and not
+   `hcm_positions.project_id` (empty in the live mirror — the project is on the
+   employee).
 9. Every state change: load → validate current status → change → write audit
    row → commit. Never delete a `wf_actions` row.
 10. Async everywhere. `hcm_*` tables are READ-ONLY — written only by

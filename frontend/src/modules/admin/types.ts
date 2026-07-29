@@ -191,3 +191,47 @@ export interface NotificationRule {
   template?: string | null;
   is_active: boolean;
 }
+
+// ---------------- Approval ladders (Settings > Approvals Config) ----------------
+
+/** A rung names a RANK (hcm_positions.role_id — COO, SPH, REGIONAL MANAGER…), never
+ *  a person and never a position row. The approver is found at submit time by
+ *  climbing the raiser's own reporting line. */
+export interface LadderRung {
+  sequence: number;
+  name: string;
+  position_role_id: number;
+  is_enabled: boolean;
+  holders: { id: number; name: string; code?: string | null }[];
+  /** Nobody in this project holds a position at this rank any more. */
+  is_dead?: boolean;
+  /** HCM added this rank after the ladder was saved; offered switched off. */
+  is_new_rank?: boolean;
+  conditions: WorkflowCondition[];
+}
+
+export interface Ladder {
+  workflow_id: number | null;
+  version: number;
+  project_id: number | null;
+  doc_type: string;
+  module: string;
+  /** No ladder saved yet — these rungs are an unsaved draft from the project's ranks. */
+  is_new: boolean;
+  rungs: LadderRung[];
+  /** Documents mid-approval that will finish on the version now live. */
+  in_flight: number;
+}
+
+export interface LadderOptions {
+  projects: { id: number; name: string }[];
+  doc_types: { code: string; label: string; module: string }[];
+  module_order: string[];
+}
+
+export interface LadderPreview {
+  from: { position_id: number; position_name: string } | null;
+  chain: { role_name: string; position_name: string; approver_names: string[] }[];
+  self_approved?: boolean;
+  note?: string;
+}

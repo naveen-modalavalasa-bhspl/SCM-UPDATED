@@ -70,3 +70,30 @@ class WorkflowIn(BaseModel):
     doc_type: str
     is_active: bool = True
     stages: list[WorkflowStageIn] = Field(default_factory=list)
+
+
+# ---------------- approval ladders (Settings > Approvals Config) ----------------
+
+class LadderRungIn(BaseModel):
+    """One rung: a position LEVEL, on or off. Never a person, never a position."""
+    position_role_id: int
+    name: str
+    is_enabled: bool = True
+    conditions: list[WorkflowConditionIn] = Field(default_factory=list)
+
+
+class LadderIn(BaseModel):
+    project_id: int | None = None
+    doc_type: str
+    rungs: list[LadderRungIn] = Field(default_factory=list)
+
+
+class LadderCopyIn(BaseModel):
+    """Copy a saved ladder onto other projects, matched by level.
+
+    Levels are global while positions are per-project, so this is the only portable
+    key. A level the target project does not use is simply dropped.
+    """
+    from_project_id: int | None = None
+    doc_type: str
+    to_project_ids: list[int] = Field(min_length=1)

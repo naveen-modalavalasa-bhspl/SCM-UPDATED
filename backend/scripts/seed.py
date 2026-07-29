@@ -156,19 +156,23 @@ PAGE_TREE = [
     ("admin_settings", "/admin/settings", "Company Settings", "settings",
      P.ADMIN_SETTINGS_MANAGE, 92, "grp_settings"),
     ("admin_rules", "/admin/rules", "Rules Engine", "git-branch",
-     P.ADMIN_RULES_MANAGE, 95, "grp_settings"),
+     P.ADMIN_RULES_MANAGE, 96, "grp_settings"),
     ("admin_workflows", "/admin/workflows", "Approval Workflows", "route",
      P.ADMIN_WORKFLOW_MANAGE, 94, "grp_settings"),
+    # The per-project approval ladder: which position LEVELS approve, for one project
+    # and one document type. See platform/workflow/ladder.py.
+    ("admin_approvals_config", "/admin/approvals-config", "Approvals Config",
+     "list-ordered", P.ADMIN_WORKFLOW_MANAGE, 95, "grp_settings"),
     ("admin_policies", "/admin/policies", "Approval & Automation", "sparkles",
      P.ADMIN_WORKFLOW_MANAGE, 93, "grp_settings"),
     ("admin_numbering", "/admin/numbering", "Document Numbering", "hash",
-     P.ADMIN_NUMBERING_MANAGE, 96, "grp_settings"),
+     P.ADMIN_NUMBERING_MANAGE, 97, "grp_settings"),
     ("admin_notifications", "/admin/notifications", "Notifications", "bell",
-     P.ADMIN_NOTIFICATIONS_MANAGE, 97, "grp_settings"),
+     P.ADMIN_NOTIFICATIONS_MANAGE, 98, "grp_settings"),
     ("admin_audit", "/admin/audit", "Audit Log", "scroll-text",
-     P.ADMIN_AUDIT_VIEW, 98, "grp_settings"),
-    ("admin_fallback", "/admin/fallback-log", "Fallback Log", "shield",
      P.ADMIN_AUDIT_VIEW, 99, "grp_settings"),
+    ("admin_fallback", "/admin/fallback-log", "Fallback Log", "shield",
+     P.ADMIN_AUDIT_VIEW, 100, "grp_settings"),
 ]
 
 

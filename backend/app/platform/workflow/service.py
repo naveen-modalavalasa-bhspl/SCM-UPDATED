@@ -437,9 +437,12 @@ async def save_workflow(
         raise NotFoundError("Workflow not found")
 
     if data.is_active:
+        # Company-wide definitions only. Project ladders (Settings > Approvals Config)
+        # are scoped to a project and must not be retired by a save on this screen.
         active = list((await db.execute(
             select(Workflow).where(
                 Workflow.doc_type == data.doc_type,
+                Workflow.project_id.is_(None),
                 Workflow.is_active.is_(True),
             )
         )).scalars().all())
