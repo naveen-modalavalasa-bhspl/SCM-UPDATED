@@ -1,213 +1,132 @@
-// @ts-nocheck
-import React, { useState, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import {
-  Button, Select, Space, Progress, Tag, Popconfirm, Tooltip, App
-} from 'antd';
-import {
-  EyeOutlined, PlayCircleOutlined, PlusOutlined
-} from '@ant-design/icons';
-import PageHeader from '../components/PageHeader';
-import DataTable from '../components/DataTable';
-import StatusTag from '../components/StatusTag';
-import api from '../config/api';
-import {
-  formatDateTime, getErrorMessage
-} from '../utils/helpers';
+import { useNavigate } from "react-router-dom";
+import { Chip } from "@heroui/react";
+import { StatusPill, type Column } from "@/shared/components";
+import { DocumentList } from "../components/DocumentList";
+import { listPutaways } from "../api";
+import { fmtQty, humanise, normaliseStatus } from "../format";
+import type { Putaway as PutawayTask } from "../types";
 
-const PUTAWAY_STATUSES = [
-  { label: 'Pending', value: 'pending' },
-  { label: 'In Progress', value: 'in_progress' },
-  { label: 'Completed', value: 'completed' },
-  { label: 'Cancelled', value: 'cancelled' },
+/**
+ * The putaway queue — received stock that is on the floor but not yet in a bin.
+ *
+ * One row per received line (`whs_warehouse_items`), not per GRN: putting away is
+ * done a pallet at a time, and a task that covers eight lines cannot be half done.
+ *
+ * The suggested bin is shown next to the actual one so the difference is visible at
+ * a glance — a queue where everyone overrides the suggestion is telling you the
+ * suggestion rule is wrong.
+ */
+
+const STATUSES = [
+  { value: "pending", label: "Pending" },
+  { value: "in_progress", label: "In progress" },
+  { value: "completed", label: "Completed" },
+  { value: "skipped", label: "Skipped" },
+  { value: "cancelled", label: "Cancelled" },
 ];
 
-const Putaway = () => {
-  const { message: antMessage } = App.useApp();
-  const navigate = useNavigate();
-  const [refreshKey, setRefreshKey] = useState(0);
+export default function Putaway() {
+  const nav = useNavigate();
 
-  // Filters
-  const [filterStatus, setFilterStatus] = useState(undefined);
-  const [filterWarehouse, setFilterWarehouse] = useState(undefined);
-  const [warehouses, setWarehouses] = useState([]);
-
-  // --- Load Warehouses ---
-  const loadWarehouses = useCallback(async () => {
-    try {
-      const res = await api.get('/masters/warehouses', { params: { page_size: 200 } });
-      const data = res.data;
-      const items = data.items || data.data || data || [];
-      setWarehouses(items.map((w) => ({ label: w.name || w.warehouse_name, value: w.id })));
-    } catch {
-      // silent
-    }
-  }, []);
-
-  // --- Fetch Putaways ---
-  const fetchPutaways = useCallback(
-    async (params) => {
-      const qp = { ...params };
-      if (filterStatus) qp.status = filterStatus;
-      if (filterWarehouse) qp.warehouse_id = filterWarehouse;
-      return await api.get('/warehouse/putaways', { params: qp });
-    },
-    [filterStatus, filterWarehouse]
-  );
-
-  // --- Main Table Columns ---
-  const columns = [
+  const columns: Column<PutawayTask>[] = [
     {
-      title: 'Putaway Number',
-      dataIndex: 'putaway_number',
-      key: 'putaway_number',
-      width: 160,
-      sorter: true,
-      fixed: 'left',
-      render: (text, record) => <a onClick={() => navigate(`/warehouse/putaway/${record.id}`)}>{text}</a>,
-    },
-    {
-      title: 'GRN Reference',
-      dataIndex: 'grn_number',
-      key: 'grn_number',
-      width: 150,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Warehouse',
-      dataIndex: 'warehouse_name',
-      key: 'warehouse',
-      width: 140,
-      ellipsis: true,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Putaway Type',
-      dataIndex: 'putaway_type',
-      key: 'putaway_type',
-      width: 130,
-      render: (v) => {
-        const typeMap = { system_directed: 'System Directed', manual: 'Manual' };
-        return <Tag color={v === 'system_directed' ? 'blue' : 'orange'}>{typeMap[v] || v || '-'}</Tag>;
-      },
-    },
-    {
-      title: 'Assigned To',
-      dataIndex: 'assigned_to_name',
-      key: 'assigned_to',
-      width: 140,
-      render: (v, r) => v || r.assigned_to || '-',
-    },
-    {
-      title: 'Status',
-      dataIndex: 'status',
-      key: 'status',
-      width: 120,
-      render: (s) => <StatusTag status={s} />,
-    },
-    {
-      title: 'Progress',
-      key: 'progress',
-      width: 120,
-      render: (_, record) => {
-        const total = record.total_items || 0;
-        const done = record.completed_items || 0;
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        return <Progress percent={pct} size="small" format={() => `${done}/${total}`} />;
-      },
-    },
-    {
-      title: 'Started At',
-      dataIndex: 'started_at',
-      key: 'started_at',
-      width: 140,
-      sorter: true,
-      render: (v) => v ? formatDateTime(v) : '-',
-    },
-    {
-      title: 'Completed At',
-      dataIndex: 'completed_at',
-      key: 'completed_at',
-      width: 140,
-      sorter: true,
-      render: (v) => v ? formatDateTime(v) : '-',
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 120,
-      fixed: 'right',
-      render: (_, record) => (
-        <Space size="small">
-          <Tooltip title="View / Execute Putaway">
-            <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => navigate(`/warehouse/putaway/${record.id}`)} />
-          </Tooltip>
-          {(record.status === 'draft' || record.status === 'pending') && (
-            <Tooltip title="Start Putaway">
-              <Popconfirm title="Start this putaway?" onConfirm={async () => {
-                try {
-                  await api.put(`/warehouse/putaways/${record.id}/start`);
-                  antMessage.success('Putaway started');
-                  setRefreshKey((k) => k + 1);
-                } catch (err) { antMessage.error(getErrorMessage(err)); }
-              }}>
-                <Button type="link" size="small" icon={<PlayCircleOutlined />} style={{ color: '#eb2f96' }} />
-              </Popconfirm>
-            </Tooltip>
-          )}
-        </Space>
+      key: "no",
+      header: "Task",
+      render: (r) => (
+        <div>
+          <div className="font-mono text-xs font-semibold text-ink">{r.putaway_no}</div>
+          <div className="text-[11px] text-muted">{r.grn_no ?? "—"}</div>
+        </div>
       ),
     },
+    {
+      key: "item",
+      header: "Item",
+      render: (r) => (
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs text-ink">{r.item_code ?? "—"}</div>
+          <div className="truncate text-xs text-muted">
+            {r.item_name ?? "—"}
+            {r.batch_no ? ` · ${r.batch_no}` : ""}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "qty",
+      header: "Qty",
+      className: "text-right",
+      render: (r) => (
+        <span className="tabular text-sm text-ink">
+          {fmtQty(r.qty)} {r.uom_code ?? ""}
+        </span>
+      ),
+    },
+    {
+      key: "bin",
+      header: "Bin",
+      render: (r) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Chip size="sm" variant="flat" color={r.actual_bin_code ? "success" : "default"}>
+            {r.actual_bin_code ?? r.suggested_bin_code ?? "unassigned"}
+          </Chip>
+          {r.actual_bin_code && r.suggested_bin_code && r.actual_bin_code !== r.suggested_bin_code && (
+            <span className="text-[11px] text-warn">overridden</span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "type",
+      header: "Directed",
+      hideOnNarrow: true,
+      render: (r) => <span className="text-sm text-muted">{humanise(r.putaway_type)}</span>,
+    },
+    {
+      key: "assignee",
+      header: "Assigned",
+      hideOnNarrow: true,
+      render: (r) => r.assigned_to_name ?? "—",
+    },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={normaliseStatus(r.status)} /> },
   ];
 
-  // --- Filter Toolbar ---
-  const toolbar = (
-    <Space style={{ marginLeft: 12 }} wrap>
-      <Select
-        placeholder="Status"
-        allowClear
-        style={{ width: 140 }}
-        value={filterStatus}
-        onChange={(v) => { setFilterStatus(v); setRefreshKey((k) => k + 1); }}
-        options={PUTAWAY_STATUSES}
-      />
-      <Select
-        placeholder="Warehouse"
-        allowClear
-        showSearch
-        optionFilterProp="label"
-        style={{ width: 160 }}
-        value={filterWarehouse}
-        onChange={(v) => { setFilterWarehouse(v); setRefreshKey((k) => k + 1); }}
-        options={warehouses}
-        onOpenChange={(open) => { if (open && warehouses.length === 0) loadWarehouses(); }}
-      />
-    </Space>
-  );
-
   return (
-    <div>
-      <PageHeader title="Putaway" subtitle="Manage putaway operations for received goods">
-        <Space>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/warehouse/putaway/new')}>
-            Create Putaway
-          </Button>
-        </Space>
-      </PageHeader>
-
-      <DataTable
-        key={refreshKey}
-        columns={columns}
-        fetchFunction={fetchPutaways}
-        rowKey="id"
-        searchPlaceholder="Search by putaway number, GRN..."
-        exportFileName="putaway_list"
-        toolbar={toolbar}
-        scroll={{ x: 1500 }}
-      />
-    </div>
+    <DocumentList<PutawayTask>
+      title="Putaway"
+      queryKey="wh-putaways"
+      fetch={listPutaways}
+      columns={columns}
+      keyOf={(r) => r.id}
+      searchIn={(r) => [r.putaway_no, r.grn_no, r.item_code, r.item_name, r.batch_no, r.suggested_bin_code]}
+      searchPlaceholder="Search task, GRN, item or bin…"
+      statuses={STATUSES}
+      onRowClick={(r) => nav(String(r.id))}
+      empty="Nothing waiting to be put away."
+      kpis={(rows) => [
+        { label: "Pending", value: rows.filter((r) => r.status === "pending").length, tone: "text-warn" },
+        { label: "In progress", value: rows.filter((r) => r.status === "in_progress").length },
+        {
+          label: "Qty to place",
+          value: fmtQty(
+            rows.filter((r) => r.status !== "completed" && r.status !== "cancelled")
+              .reduce((s, r) => s + Number(r.qty ?? 0), 0),
+          ),
+        },
+        { label: "Skipped", value: rows.filter((r) => r.status === "skipped").length, tone: "text-bad" },
+      ]}
+      renderCard={(r) => (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono text-xs font-semibold text-ink">{r.putaway_no}</span>
+            <StatusPill status={normaliseStatus(r.status)} />
+          </div>
+          <div className="truncate text-sm text-body">{r.item_name ?? r.item_code ?? "—"}</div>
+          <div className="text-[11px] text-muted">
+            {fmtQty(r.qty)} {r.uom_code ?? ""} → {r.actual_bin_code ?? r.suggested_bin_code ?? "unassigned"}
+          </div>
+        </div>
+      )}
+    />
   );
-};
-
-export default Putaway;
-
+}

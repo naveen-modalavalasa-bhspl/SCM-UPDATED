@@ -1,0 +1,898 @@
+/**
+ * Warehouse module types.
+ *
+ * Field names mirror the backend response, which in turn mirrors the frozen tables
+ * (`inb_*`, `out_*`, `whs_*`, `pro_returns`). Nothing is renamed on the way in — a
+ * screen that reads `total_accepted_qty` reads the column of that name, so a wrong
+ * number can be traced to a row without a translation layer in between.
+ *
+ * Transaction rows carry their snapshot columns (`item_code`, `item_name`,
+ * `uom_code`, every `*_name`), so a list screen renders from one payload and never
+ * fans out to fetch a vendor or an item.
+ */
+
+/** The paginated envelope every list endpoint returns. */
+export interface Page<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface ListParams {
+  page?: number;
+  size?: number;
+  search?: string;
+  status?: string;
+  warehouse_id?: number;
+  date_from?: string;
+  date_to?: string;
+}
+
+/* ---------------------------------------------------------------- statuses -- */
+
+export type ReceiptStatus =
+  | "DRAFT" | "GATE_ENTRY" | "SUBMITTED" | "PENDING_QC" | "QC_PASSED" | "QC_FAILED"
+  | "PARTIALLY_RECEIVED" | "RECEIVED" | "COMPLETED" | "CANCELLED";
+
+export type InspectionStatus = "DRAFT" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
+export type InspectionResult = "PENDING" | "PASSED" | "FAILED" | "PARTIAL";
+
+export type PutawayStatus =
+  | "draft" | "pending" | "in_progress" | "completed" | "cancelled" | "skipped";
+
+export type PickingStatus =
+  | "DRAFT" | "RELEASED" | "IN_PROGRESS" | "PICKED" | "COMPLETED" | "CANCELLED";
+
+export type IssueStatus =
+  | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "ISSUED"
+  | "ACKNOWLEDGED" | "PARTIALLY_RETURNED" | "RETURNED" | "CANCELLED";
+
+export type DispatchStatus =
+  | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "PACKED" | "DISPATCHED"
+  | "IN_TRANSIT" | "DELIVERED" | "ACKNOWLEDGED" | "CANCELLED";
+
+export type ReturnStatus =
+  | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "DISPATCHED"
+  | "COMPLETED" | "CANCELLED";
+
+/* --------------------------------------------------------------- warehouse -- */
+
+/** `whs_warehouses`. */
+export interface Warehouse {
+  id: number;
+  code: string;
+  name: string;
+  facility_id?: number | null;
+  facility_name?: string | null;
+  office_id?: number | null;
+  office_name?: string | null;
+  warehouse_type: string;
+  address?: string | null;
+  incharge_id?: number | null;
+  incharge_name?: string | null;
+  /** When false the warehouse stocks in bulk and every `bin_id` stays 0. */
+  is_bin_managed: boolean;
+  is_active: boolean;
+  created_at?: string;
+}
+
+export interface WarehouseWrite {
+  code: string;
+  name: string;
+  facility_id?: number | null;
+  office_id?: number | null;
+  warehouse_type: string;
+  address?: string | null;
+  incharge_id?: number | null;
+  is_bin_managed: boolean;
+  is_active: boolean;
+}
+
+/** `whs_bins` — zone, rack and shelf are all this table at different `level`s. */
+export interface Bin {
+  id: number;
+  warehouse_id: number;
+  code: string;
+  name?: string | null;
+  parent_id?: number | null;
+  bin_type: string;
+  /** Denormalised ancestry, e.g. `A/A-1/A-1-03`. */
+  path?: string | null;
+  level: number;
+  capacity_qty?: number | null;
+  is_pickable: boolean;
+  is_active: boolean;
+  /** Present only on the tree endpoint. */
+  children?: Bin[];
+  /** Filled by the tree endpoint so a zone can show how full it is. */
+  occupied_qty?: number | null;
+}
+
+export interface BinWrite {
+  warehouse_id: number;
+  code: string;
+  name?: string | null;
+  parent_id?: number | null;
+  bin_type: string;
+  capacity_qty?: number | null;
+  is_pickable: boolean;
+  is_active: boolean;
+}
+
+/** `whs_locations` — the physical/3D layer, separate from the logical bin tree. */
+export interface WarehouseLocation {
+  id: number;
+  warehouse_id: number;
+  parent_location_id?: number | null;
+  storage_type?: string | null;
+  storage_type_id?: number | null;
+  code: string;
+  name?: string | null;
+  barcode?: string | null;
+  capacity_weight?: number | null;
+  capacity_volume?: number | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  pos_x?: number | null;
+  pos_y?: number | null;
+  pos_z?: number | null;
+  temperature_controlled: boolean;
+  target_temperature_celsius?: number | null;
+  min_temperature_celsius?: number | null;
+  max_temperature_celsius?: number | null;
+  is_active: boolean;
+}
+
+export interface StorageType {
+  id: number;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
+}
+
+/* ------------------------------------------------------------------ inward -- */
+
+/** `inb_receipts`. `receipt_type` separates a gate entry from a purchase GRN. */
+export interface Receipt {
+  id: number;
+  grn_no: string;
+  receipt_type: string;
+  grn_date: string;
+  po_id?: number | null;
+  po_no?: string | null;
+  transfer_id?: number | null;
+  transfer_no?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  vendor_gstin?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
+  invoice_no?: string | null;
+  invoice_date?: string | null;
+  invoice_amount?: number | null;
+  eway_bill_no?: string | null;
+  vehicle_no?: string | null;
+  transporter_name?: string | null;
+  lr_no?: string | null;
+  gate_entry_no?: string | null;
+  gate_entry_at?: string | null;
+  status: ReceiptStatus;
+  total_items: number;
+  total_received_qty: number;
+  total_accepted_qty: number;
+  total_rejected_qty: number;
+  total_value: number;
+  is_stock_posted: boolean;
+  posted_at?: string | null;
+  received_by_id?: number | null;
+  received_by_name?: string | null;
+  remarks?: string | null;
+  created_by_id?: number | null;
+  created_by_name?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  /** Detail responses only. */
+  items?: ReceiptItem[];
+}
+
+/** `inb_receipt_items`. */
+export interface ReceiptItem {
+  id: number;
+  receipt_id: number;
+  line_no: number;
+  po_item_id?: number | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  ordered_qty: number;
+  received_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  short_qty: number;
+  rate?: number | null;
+  amount?: number | null;
+  batch_id: number;
+  batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+  bin_id: number;
+  bin_code?: string | null;
+  qc_status: string;
+  rejection_reason?: string | null;
+  remarks?: string | null;
+  serial_numbers?: string[] | null;
+}
+
+export interface ReceiptItemWrite {
+  id?: number;
+  po_item_id?: number | null;
+  indent_id?: number | null;
+  item_id: number;
+  ordered_qty?: number;
+  received_qty: number;
+  accepted_qty?: number;
+  rejected_qty?: number;
+  rate?: number | null;
+  batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+  bin_id?: number | null;
+  rejection_reason?: string | null;
+  remarks?: string | null;
+  serial_numbers?: string[] | null;
+}
+
+export interface ReceiptWrite {
+  receipt_type: string;
+  grn_date: string;
+  po_id?: number | null;
+  vendor_id?: number | null;
+  warehouse_id: number;
+  project_id?: number | null;
+  invoice_no?: string | null;
+  invoice_date?: string | null;
+  invoice_amount?: number | null;
+  eway_bill_no?: string | null;
+  vehicle_no?: string | null;
+  transporter_name?: string | null;
+  lr_no?: string | null;
+  gate_entry_no?: string | null;
+  remarks?: string | null;
+  items: ReceiptItemWrite[];
+}
+
+/** `inb_inspections`. */
+export interface Inspection {
+  id: number;
+  inspection_no: string;
+  inspection_date: string;
+  receipt_id?: number | null;
+  grn_no?: string | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  inspection_type: string;
+  status: InspectionStatus;
+  total_items: number;
+  passed_items: number;
+  failed_items: number;
+  inspector_id?: number | null;
+  inspector_name?: string | null;
+  remarks?: string | null;
+  created_at?: string;
+  items?: InspectionItem[];
+}
+
+/** A single measured parameter on an inspection line, stored in the `parameters` JSON. */
+export interface InspectionParameter {
+  name: string;
+  expected?: string | null;
+  observed?: string | null;
+  result?: "PASS" | "FAIL" | null;
+}
+
+/** `inb_inspection_items`. */
+export interface InspectionItem {
+  id: number;
+  inspection_id: number;
+  receipt_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  inspected_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  parameters?: InspectionParameter[] | null;
+  result: InspectionResult;
+  defect_type?: string | null;
+  remarks?: string | null;
+  serial_numbers?: string[] | null;
+}
+
+export interface InspectionItemWrite {
+  id?: number;
+  receipt_item_id?: number | null;
+  item_id: number;
+  batch_no?: string | null;
+  inspected_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  parameters?: InspectionParameter[] | null;
+  result: InspectionResult;
+  defect_type?: string | null;
+  remarks?: string | null;
+}
+
+export interface InspectionWrite {
+  inspection_date: string;
+  receipt_id?: number | null;
+  warehouse_id?: number | null;
+  inspection_type: string;
+  inspector_id?: number | null;
+  remarks?: string | null;
+  items: InspectionItemWrite[];
+}
+
+/** `whs_warehouse_items` — one putaway task per received line. */
+export interface Putaway {
+  id: number;
+  putaway_no: string;
+  grn_id?: number | null;
+  grn_no?: string | null;
+  grn_item_id?: number | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_id?: number | null;
+  uom_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  qty: number;
+  suggested_bin_id?: number | null;
+  suggested_bin_code?: string | null;
+  actual_bin_id?: number | null;
+  actual_bin_code?: string | null;
+  putaway_type: "system_directed" | "manual";
+  status: PutawayStatus;
+  assigned_to?: number | null;
+  assigned_to_name?: string | null;
+  scanned_by?: number | null;
+  scanned_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  remarks?: string | null;
+  created_at?: string;
+}
+
+export interface PutawayConfirm {
+  actual_bin_id: number;
+  qty?: number;
+  remarks?: string | null;
+}
+
+/* ----------------------------------------------------------------- outward -- */
+
+/** `out_picking`. */
+export interface Picking {
+  id: number;
+  pick_no: string;
+  pick_date: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  ref_type?: string | null;
+  ref_id?: number | null;
+  ref_no?: string | null;
+  strategy?: string | null;
+  status: PickingStatus;
+  total_lines: number;
+  picked_lines: number;
+  assigned_to_id?: number | null;
+  assigned_to_name?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at?: string;
+  items?: PickingItem[];
+}
+
+/** `out_picking_items`. */
+export interface PickingItem {
+  id: number;
+  picking_id: number;
+  line_no: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  bin_id?: number | null;
+  bin_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  required_qty: number;
+  picked_qty: number;
+  status: string;
+  picked_by_id?: number | null;
+  picked_at?: string | null;
+}
+
+export interface PickingWrite {
+  pick_date: string;
+  warehouse_id: number;
+  ref_type?: string | null;
+  ref_id?: number | null;
+  strategy?: string | null;
+  assigned_to_id?: number | null;
+  items: { item_id: number; bin_id?: number | null; batch_id?: number | null; required_qty: number }[];
+}
+
+/** `out_issues`. `direction` is `OUT` for an issue and `IN` for a return against one. */
+export interface Issue {
+  id: number;
+  issue_no: string;
+  issue_type: string;
+  issue_date: string;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  picking_id?: number | null;
+  pick_no?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  department_id?: number | null;
+  department_name?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
+  vehicle_id?: number | null;
+  vehicle_number?: string | null;
+  issued_to_id?: number | null;
+  issued_to_name?: string | null;
+  direction: "OUT" | "IN";
+  original_issue_id?: number | null;
+  original_issue_no?: string | null;
+  status: IssueStatus;
+  total_items: number;
+  total_qty: number;
+  total_value: number;
+  is_stock_posted: boolean;
+  posted_at?: string | null;
+  current_approver_name?: string | null;
+  approved_by_name?: string | null;
+  approved_at?: string | null;
+  acknowledged_by_name?: string | null;
+  acknowledged_at?: string | null;
+  issued_by_id?: number | null;
+  issued_by_name?: string | null;
+  remarks?: string | null;
+  created_by_id?: number | null;
+  created_by_name?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  items?: IssueItem[];
+}
+
+/** `out_issue_items`. */
+export interface IssueItem {
+  id: number;
+  issue_id: number;
+  line_no: number;
+  indent_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  bin_id?: number | null;
+  bin_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  requested_qty: number;
+  issued_qty: number;
+  returned_qty: number;
+  rate?: number | null;
+  amount?: number | null;
+  remarks?: string | null;
+}
+
+export interface IssueItemWrite {
+  id?: number;
+  indent_item_id?: number | null;
+  item_id: number;
+  bin_id?: number | null;
+  batch_id?: number | null;
+  requested_qty: number;
+  issued_qty?: number;
+  rate?: number | null;
+  remarks?: string | null;
+}
+
+export interface IssueWrite {
+  issue_type: string;
+  issue_date: string;
+  indent_id?: number | null;
+  picking_id?: number | null;
+  warehouse_id: number;
+  department_id?: number | null;
+  project_id?: number | null;
+  vehicle_id?: number | null;
+  issued_to_id?: number | null;
+  direction?: "OUT" | "IN";
+  original_issue_id?: number | null;
+  remarks?: string | null;
+  items: IssueItemWrite[];
+}
+
+/** `out_dispatches`. */
+export interface Dispatch {
+  id: number;
+  dispatch_no: string;
+  dispatch_type: string;
+  dispatch_date: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  to_warehouse_id?: number | null;
+  to_warehouse_name?: string | null;
+  customer_id?: number | null;
+  customer_name?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
+  delivery_address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  ref_type?: string | null;
+  ref_id?: number | null;
+  ref_no?: string | null;
+  transport_mode?: string | null;
+  carrier_id?: number | null;
+  carrier_name?: string | null;
+  vehicle_id?: number | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  lr_no?: string | null;
+  eway_bill_no?: string | null;
+  freight_amount?: number | null;
+  gate_pass_no?: string | null;
+  gate_out_at?: string | null;
+  security_by_name?: string | null;
+  status: DispatchStatus;
+  total_items: number;
+  total_qty: number;
+  total_packages: number;
+  total_weight_kg: number;
+  total_value: number;
+  expected_delivery?: string | null;
+  delivered_at?: string | null;
+  acknowledged_by_name?: string | null;
+  acknowledged_at?: string | null;
+  pod_url?: string | null;
+  current_approver_name?: string | null;
+  approved_by_name?: string | null;
+  approved_at?: string | null;
+  remarks?: string | null;
+  created_by_id?: number | null;
+  created_by_name?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  items?: DispatchItem[];
+  packages?: DispatchPackage[];
+  events?: DispatchEvent[];
+}
+
+/** `out_dispatch_items`. */
+export interface DispatchItem {
+  id: number;
+  dispatch_id: number;
+  line_no: number;
+  package_id?: number | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  serial_no?: string | null;
+  quantity: number;
+  delivered_qty: number;
+  rate?: number | null;
+  amount?: number | null;
+  remarks?: string | null;
+}
+
+/** `out_dispatch_packages` — the labelling unit. */
+export interface DispatchPackage {
+  id: number;
+  dispatch_id: number;
+  package_no: string;
+  package_type?: string | null;
+  barcode?: string | null;
+  weight_kg?: number | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  is_fragile: boolean;
+  is_temp_controlled: boolean;
+  status: string;
+  packed_by_name?: string | null;
+  packed_at?: string | null;
+}
+
+/** `out_dispatch_events` — the custody/cold-chain trail. */
+export interface DispatchEvent {
+  id: number;
+  dispatch_id: number;
+  event_type: string;
+  event_at: string;
+  location_name?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  temperature_c?: number | null;
+  humidity_percent?: number | null;
+  is_breach: boolean;
+  notes?: string | null;
+  recorded_by_id?: number | null;
+  recorded_by_name?: string | null;
+}
+
+export interface DispatchItemWrite {
+  id?: number;
+  package_id?: number | null;
+  indent_id?: number | null;
+  item_id: number;
+  batch_id?: number | null;
+  serial_no?: string | null;
+  quantity: number;
+  rate?: number | null;
+  remarks?: string | null;
+}
+
+export interface DispatchWrite {
+  dispatch_type: string;
+  dispatch_date: string;
+  warehouse_id: number;
+  to_warehouse_id?: number | null;
+  customer_id?: number | null;
+  vendor_id?: number | null;
+  project_id?: number | null;
+  delivery_address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  ref_type?: string | null;
+  ref_id?: number | null;
+  transport_mode?: string | null;
+  carrier_id?: number | null;
+  vehicle_id?: number | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  lr_no?: string | null;
+  eway_bill_no?: string | null;
+  freight_amount?: number | null;
+  expected_delivery?: string | null;
+  remarks?: string | null;
+  items: DispatchItemWrite[];
+}
+
+export interface PackageWrite {
+  package_type?: string | null;
+  weight_kg?: number | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  is_fragile?: boolean;
+  is_temp_controlled?: boolean;
+  item_ids?: number[];
+}
+
+export interface DispatchEventWrite {
+  event_type: string;
+  location_name?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  temperature_c?: number | null;
+  humidity_percent?: number | null;
+  notes?: string | null;
+}
+
+export interface AcknowledgeWrite {
+  acknowledged_by_name?: string | null;
+  pod_url?: string | null;
+  remarks?: string | null;
+  lines?: { id: number; delivered_qty: number }[];
+}
+
+/* ------------------------------------------------------- purchase returns -- */
+
+/** `pro_returns`. */
+export interface PurchaseReturn {
+  id: number;
+  return_no: string;
+  return_date: string;
+  po_id?: number | null;
+  po_no?: string | null;
+  grn_id?: number | null;
+  grn_no?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  reason?: string | null;
+  status: ReturnStatus;
+  total_items: number;
+  total_qty: number;
+  total_value: number;
+  credit_note_no?: string | null;
+  created_by_id?: number | null;
+  created_by_name?: string | null;
+  created_at?: string;
+  items?: PurchaseReturnItem[];
+}
+
+/** `pro_return_items`. */
+export interface PurchaseReturnItem {
+  id: number;
+  return_id: number;
+  line_no: number;
+  po_item_id?: number | null;
+  grn_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  quantity: number;
+  rate?: number | null;
+  amount?: number | null;
+  reason?: string | null;
+}
+
+export interface PurchaseReturnItemWrite {
+  id?: number;
+  po_item_id?: number | null;
+  grn_item_id?: number | null;
+  item_id: number;
+  batch_id?: number | null;
+  quantity: number;
+  rate?: number | null;
+  reason?: string | null;
+}
+
+export interface PurchaseReturnWrite {
+  return_date: string;
+  po_id?: number | null;
+  grn_id?: number | null;
+  vendor_id?: number | null;
+  warehouse_id?: number | null;
+  reason?: string | null;
+  items: PurchaseReturnItemWrite[];
+}
+
+/* ------------------------------------------------------- serials & batches -- */
+
+/** `whs_serial_numbers`. The asset/consumable code is generated during putaway. */
+export interface SerialNumber {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  serial_number: string;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  bin_id?: number | null;
+  bin_code?: string | null;
+  asset_code?: string | null;
+  consumable_code?: string | null;
+  status: "available" | "issued" | "consumed" | "returned" | "maintenance" | "scrapped";
+  remarks?: string | null;
+  is_active: boolean;
+}
+
+/** `stk_batches`. */
+export interface Batch {
+  id: number;
+  batch_no: string;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+  received_date?: string | null;
+  grn_id?: number | null;
+  grn_no?: string | null;
+  initial_qty: number;
+  rate?: number | null;
+  status: string;
+  recall_reason?: string | null;
+}
+
+/* ------------------------------------------------------------- supporting -- */
+
+/** `sys_attachments`. */
+export interface Attachment {
+  id: number;
+  entity_type: string;
+  entity_id: number;
+  file_name: string;
+  file_path: string;
+  file_size?: number | null;
+  mime_type?: string | null;
+  doc_category?: string | null;
+  uploaded_by_id?: number | null;
+  uploaded_by_name?: string | null;
+  created_at?: string;
+}
+
+/** `sys_notifications`. */
+export interface Notification {
+  id: number;
+  employee_id: number;
+  title: string;
+  body?: string | null;
+  entity_type?: string | null;
+  entity_id?: number | null;
+  deep_link?: string | null;
+  is_read: boolean;
+  created_at?: string;
+}
+
+/** The dashboard payload — computed server side so the screen makes one call. */
+export interface WarehouseDashboard {
+  pending_gate_entries: number;
+  pending_grn: number;
+  pending_inspections: number;
+  pending_putaways: number;
+  open_picklists: number;
+  pending_issues: number;
+  in_transit_dispatches: number;
+  open_returns: number;
+  stock_value: number;
+  bin_utilisation_percent: number;
+  recent: { id: number; doc_no: string; doc_type: string; status: string; created_at?: string | null }[];
+  inward_trend: { date: string; received: number; accepted: number; rejected: number }[];
+}
+
+/** Lookup rows the forms need. Read-only, served by the module's `/options` routes. */
+export interface Option {
+  id: number;
+  code?: string | null;
+  name: string;
+}
+
+export interface ItemOption extends Option {
+  uom_code?: string | null;
+  is_batch_tracked?: boolean;
+  is_serial_tracked?: boolean;
+  is_asset?: boolean;
+}
+
+/** An open PO line the GRN screen pulls in when a PO is chosen. */
+export interface PoLineOption {
+  po_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  ordered_qty: number;
+  received_qty: number;
+  pending_qty: number;
+  rate?: number | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+}

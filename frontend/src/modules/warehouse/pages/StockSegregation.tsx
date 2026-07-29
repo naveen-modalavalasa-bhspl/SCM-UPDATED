@@ -1,452 +1,296 @@
-// @ts-nocheck
-import React, { useState, useCallback, useEffect } from 'react';
-import {
-  Button, Drawer, Space, message, Row, Col, Table, Card, Descriptions,
-  Divider, Typography, Tooltip, Tag, Badge, Progress, Alert, Input, InputNumber, Select,
-  Popconfirm, Empty,
-} from 'antd';
-import {
-  EyeOutlined, CheckOutlined, EnvironmentOutlined,
-  AimOutlined, InboxOutlined, ReloadOutlined,
-} from '@ant-design/icons';
-import PageHeader from '../components/PageHeader';
-import DataTable from '../components/DataTable';
-import StatusTag from '../components/StatusTag';
-import api from '../config/api';
-import { formatNumber, formatDateTime, getErrorMessage } from '../utils/helpers';
-
-const { Text } = Typography;
-
-const SEGREGATABLE_STATUSES = [
-  { label: 'Pending', value: 'pending' },
-  { label: 'In Progress', value: 'in_progress' },
-];
-
-const ITEM_STATUSES = {
-  pending: { color: '#fa8c16', label: 'Pending Bin' },
-  in_progress: { color: '#eb2f96', label: 'In Progress' },
-  done: { color: '#52c41a', label: 'Segregated' },
-  skipped: { color: '#8c8c8c', label: 'Skipped' },
-};
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Chip } from "@heroui/react";
+import { Card, PageHeader, ResponsiveList, StatCard, StatusPill, SubNav, type Column } from "@/shared/components";
+import { ErrorBanner } from "../components/Feedback";
+import { FilterBar, FilterSelect } from "../components/FilterBar";
+import { LabelSheet, type LabelSpec } from "../components/LabelPrint";
+import { listBatches, listSerials } from "../api";
+import { daysUntil, fmtDate, fmtQty, normaliseStatus } from "../format";
+import type { Batch, SerialNumber } from "../types";
 
 /**
- * StockSegregation
- * --------------------------------------------------------------
- * Post-putaway step: assigns received stock to specific bins
- * within a warehouse. Wraps the existing PutawayOrder data model
- * but focuses on the per-line "confirm with bin" action.
+ * Stock segregation — which individual units and batches you are holding, and which
+ * of them you should stop selling.
  *
- * Backend contract (from Team A audit):
- *   PUT /warehouse/putaway/{putaway_id}/items/{item_id}/confirm
- *   body: { actual_bin_id: int, status: "done" }
+ * Two views over the same question. Batches are what expires; serials are what is
+ * individually tracked, and carry the asset or consumable code generated during
+ * putaway. Both are read-only here: neither is created by hand, and the screen that
+ * let you type a serial in was how duplicates got into `whs_serial_numbers`.
  *
- * Lists pending putaway orders (i.e. those still awaiting bin
- * assignment), drills into items, and lets the user enter a bin
- * code per line, then confirms.
+ * Expiry is bucketed rather than shown as a raw date, because "expires in 12 days"
+ * is a decision and "2026-08-10" is arithmetic homework.
  */
-const StockSegregation = () => {
-  // List filters
-  const [filterStatus, setFilterStatus] = useState('pending');
-  const [filterWarehouse, setFilterWarehouse] = useState(undefined);
-  const [warehouses, setWarehouses] = useState([]);
-  const [refreshKey, setRefreshKey] = useState(0);
 
-  // Drawer state
-  const [viewDrawerOpen, setViewDrawerOpen] = useState(false);
-  const [viewLoading, setViewLoading] = useState(false);
-  const [viewData, setViewData] = useState(null);
-  const [items, setItems] = useState([]);
-  const [confirmingKey, setConfirmingKey] = useState(null);
+const TABS = [
+  { key: "batches", label: "Batches" },
+  { key: "serials", label: "Serial numbers" },
+];
 
-  // ---------------- Warehouses lookup ----------------
-  const loadWarehouses = useCallback(async () => {
-    try {
-      const res = await api.get('/masters/warehouses', { params: { page_size: 200 } });
-      const data = res.data;
-      const list = data.items || data.data || data || [];
-      setWarehouses(
-        list.map((w) => ({ label: w.name || w.warehouse_name, value: w.id }))
+const EXPIRY_BUCKETS = [
+  { value: "expired", label: "Expired" },
+  { value: "30", label: "Within 30 days" },
+  { value: "90", label: "Within 90 days" },
+];
+
+const SERIAL_STATUSES = [
+  { value: "available", label: "Available" },
+  { value: "issued", label: "Issued" },
+  { value: "consumed", label: "Consumed" },
+  { value: "returned", label: "Returned" },
+  { value: "maintenance", label: "Maintenance" },
+  { value: "scrapped", label: "Scrapped" },
+];
+
+function expiryTone(days: number | null) {
+  if (days === null) return { label: "No expiry", color: "default" as const };
+  if (days < 0) return { label: `Expired ${-days}d ago`, color: "danger" as const };
+  if (days <= 30) return { label: `${days}d left`, color: "danger" as const };
+  if (days <= 90) return { label: `${days}d left`, color: "warning" as const };
+  return { label: `${days}d left`, color: "success" as const };
+}
+
+export default function StockSegregation() {
+  const [tab, setTab] = useState("batches");
+  const [search, setSearch] = useState("");
+  const [bucket, setBucket] = useState("");
+  const [serialStatus, setSerialStatus] = useState("");
+  const [printing, setPrinting] = useState(false);
+
+  const batches = useQuery({
+    queryKey: ["wh-batches"],
+    queryFn: () => listBatches({ size: 300 }),
+    enabled: tab === "batches",
+  });
+
+  const serials = useQuery({
+    queryKey: ["wh-serials", serialStatus],
+    queryFn: () => listSerials({ size: 300, status: serialStatus || undefined }),
+    enabled: tab === "serials",
+  });
+
+  const batchRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return (batches.data?.items ?? []).filter((b) => {
+      const days = daysUntil(b.expiry_date);
+      if (bucket === "expired" && !(days !== null && days < 0)) return false;
+      if (bucket === "30" && !(days !== null && days >= 0 && days <= 30)) return false;
+      if (bucket === "90" && !(days !== null && days >= 0 && days <= 90)) return false;
+      if (!q) return true;
+      return [b.batch_no, b.item_code, b.item_name, b.vendor_name, b.grn_no].some((v) =>
+        (v ?? "").toLowerCase().includes(q),
       );
-    } catch {
-      // silent
-    }
-  }, []);
+    });
+  }, [batches.data, search, bucket]);
 
-  useEffect(() => {
-    loadWarehouses();
-  }, [loadWarehouses]);
-
-  // ---------------- List fetch ----------------
-  const fetchPutaways = useCallback(
-    async (params) => {
-      const qp = { ...params };
-      if (filterStatus) qp.status = filterStatus;
-      if (filterWarehouse) qp.warehouse_id = filterWarehouse;
-      return await api.get('/warehouse/putaways', { params: qp });
-    },
-    [filterStatus, filterWarehouse]
-  );
-
-  // ---------------- Drawer / detail ----------------
-  const handleView = async (record) => {
-    setViewLoading(true);
-    setViewDrawerOpen(true);
-    try {
-      const res = await api.get(`/warehouse/putaways/${record.id}`);
-      const data = res.data;
-      setViewData(data);
-      const rows = (data.items || []).map((it, idx) => ({
-        key: it.id || `r-${idx}`,
-        id: it.id,
-        item_id: it.item_id,
-        item_name: it.item_name || '',
-        item_code: it.item_code || '',
-        qty: it.qty || it.quantity || 0,
-        uom_name: it.uom_name || it.uom || '',
-        batch_number: it.batch_number || '',
-        suggested_bin: it.suggested_bin || '',
-        suggested_bin_id: it.suggested_bin_id || null,
-        actual_bin_input: it.actual_bin || it.suggested_bin || '',
-        actual_bin_id: it.actual_bin_id || it.suggested_bin_id || null,
-        status: it.status || 'pending',
-      }));
-      setItems(rows);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-      setViewDrawerOpen(false);
-    } finally {
-      setViewLoading(false);
-    }
-  };
-
-  const closeDrawer = () => {
-    setViewDrawerOpen(false);
-    setViewData(null);
-    setItems([]);
-    setConfirmingKey(null);
-  };
-
-  // ---------------- Per-line bin edit + confirm ----------------
-  const updateRow = (key, field, value) => {
-    setItems((prev) =>
-      prev.map((r) => (r.key === key ? { ...r, [field]: value } : r))
-    );
-  };
-
-  const handleConfirm = async (row) => {
-    if (!viewData) return;
-
-    const binVal = String(row.actual_bin_input || row.actual_bin_id || '').trim();
-    if (!binVal) {
-      message.error('Enter a bin code or name before confirming');
-      return;
-    }
-
-    setConfirmingKey(row.key);
-    try {
-      await api.put(
-        `/warehouse/putaway/${viewData.id}/items/${row.id}/confirm`,
-        { actual_bin_id: binVal, status: 'done' }
+  const serialRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return (serials.data?.items ?? []).filter((s) => {
+      if (!q) return true;
+      return [s.serial_number, s.item_code, s.item_name, s.asset_code, s.consumable_code, s.bin_code].some(
+        (v) => (v ?? "").toLowerCase().includes(q),
       );
-      message.success(`Segregated ${row.item_name || row.item_code} to bin "${binVal}"`);
-      // optimistic update
-      setItems((prev) =>
-        prev.map((r) =>
-          r.key === row.key
-            ? { ...r, status: 'done', actual_bin_input: binVal, actual_bin_id: binVal }
-            : r
-        )
-      );
-      setRefreshKey((k) => k + 1);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    } finally {
-      setConfirmingKey(null);
-    }
-  };
+    });
+  }, [serials.data, search]);
 
-  // ---------------- Progress ----------------
-  const progressPct = (() => {
-    if (!items.length) return 0;
-    const done = items.filter((r) => r.status === 'done' || r.status === 'skipped').length;
-    return Math.round((done / items.length) * 100);
-  })();
-
-  // ---------------- Item table columns ----------------
-  const itemColumns = [
-    { title: '#', width: 40, render: (_, __, i) => i + 1 },
+  const batchColumns: Column<Batch>[] = [
     {
-      title: 'Item', dataIndex: 'item_name', width: 220, ellipsis: true,
-      render: (v, r) => (
-        <Tooltip title={`${r.item_code || ''} - ${v}`}>
-          <Text ellipsis style={{ maxWidth: 200 }}>{v || r.item_code || `#${r.item_id}`}</Text>
-        </Tooltip>
+      key: "batch",
+      header: "Batch",
+      render: (b) => (
+        <div>
+          <div className="font-mono text-xs font-semibold text-ink">{b.batch_no}</div>
+          <div className="text-[11px] text-muted">{b.grn_no ?? "—"}</div>
+        </div>
       ),
     },
     {
-      title: 'Qty', dataIndex: 'qty', width: 90, align: 'right',
-      render: (v, r) => (
-        <Text strong>
-          {formatNumber(v)} {r.uom_name && <Text type="secondary" style={{ fontSize: 12 }}>{r.uom_name}</Text>}
-        </Text>
+      key: "item",
+      header: "Item",
+      render: (b) => (
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs text-ink">{b.item_code ?? "—"}</div>
+          <div className="truncate text-xs text-muted">{b.item_name ?? "—"}</div>
+        </div>
       ),
     },
+    { key: "vendor", header: "Vendor", hideOnNarrow: true, render: (b) => b.vendor_name ?? "—" },
     {
-      title: 'Batch', dataIndex: 'batch_number', width: 110,
-      render: (v) => v || '-',
+      key: "qty",
+      header: "Received",
+      className: "text-right",
+      render: (b) => <span className="tabular text-sm text-ink">{fmtQty(b.initial_qty)}</span>,
     },
     {
-      title: 'Suggested Bin', dataIndex: 'suggested_bin', width: 140,
-      render: (v, r) => v ? (
-        <Tag icon={<AimOutlined />} color="blue">{v}</Tag>
-      ) : r.suggested_bin_id ? (
-        <Tag color="blue">#{r.suggested_bin_id}</Tag>
-      ) : (
-        <Text type="secondary">-</Text>
-      ),
-    },
-    {
-      title: 'Bin / Location',
-      width: 220,
-      render: (_, r) => {
-        if (r.status === 'done') {
-          return (
-            <Tag icon={<EnvironmentOutlined />} color="green">
-              Bin: {r.actual_bin_input || r.actual_bin_id || r.suggested_bin || r.suggested_bin_id}
-            </Tag>
-          );
-        }
-        if (r.status === 'skipped') {
-          return <Tag color="default">Skipped</Tag>;
-        }
+      key: "expiry",
+      header: "Expiry",
+      render: (b) => {
+        const tone = expiryTone(daysUntil(b.expiry_date));
         return (
-          <Input
-            placeholder="Bin code"
-            size="small"
-            style={{ width: '100%' }}
-            value={r.actual_bin_input || ''}
-            onChange={(e) => {
-              const v = e.target.value;
-              updateRow(r.key, 'actual_bin_input', v);
-              updateRow(r.key, 'actual_bin_id', v);
-            }}
-            onPressEnter={() => handleConfirm(r)}
-          />
+          <div>
+            <div className="text-sm text-ink">{fmtDate(b.expiry_date)}</div>
+            <Chip size="sm" variant="flat" color={tone.color}>{tone.label}</Chip>
+          </div>
         );
       },
     },
-    {
-      title: 'Status', dataIndex: 'status', width: 130,
-      render: (v) => {
-        const cfg = ITEM_STATUSES[v] || ITEM_STATUSES.pending;
-        return (
-          <Tag style={{ color: '#fff', backgroundColor: cfg.color, borderColor: cfg.color }}>
-            {cfg.label}
-          </Tag>
-        );
-      },
-    },
-    {
-      title: 'Action', width: 130, fixed: 'right',
-      render: (_, r) => {
-        if (r.status === 'done') {
-          return <Tag color="success" icon={<CheckOutlined />}>Done</Tag>;
-        }
-        if (r.status === 'skipped') {
-          return <Tag color="default">Skipped</Tag>;
-        }
-        return (
-          <Popconfirm
-            title="Assign this stock to the bin?"
-            description={`Confirm putaway of ${r.item_name || 'item'} to bin "${r.actual_bin_input || r.actual_bin_id || '?'}"`}
-            onConfirm={() => handleConfirm(r)}
-            okText="Confirm"
-          >
-            <Button
-              type="primary"
-              size="small"
-              icon={<CheckOutlined />}
-              loading={confirmingKey === r.key}
-              ghost
-            >
-              Confirm Bin
-            </Button>
-          </Popconfirm>
-        );
-      },
-    },
+    { key: "status", header: "Status", render: (b) => <StatusPill status={normaliseStatus(b.status)} /> },
   ];
 
-  // ---------------- List columns ----------------
-  const columns = [
+  const serialColumns: Column<SerialNumber>[] = [
     {
-      title: 'Putaway #', dataIndex: 'putaway_number', width: 160, fixed: 'left',
-      render: (text, record) => <a onClick={() => handleView(record)}>{text}</a>,
-    },
-    { title: 'GRN', dataIndex: 'grn_number', width: 150, render: (v) => v || '-' },
-    { title: 'Warehouse', dataIndex: 'warehouse_name', width: 160, ellipsis: true, render: (v) => v || '-' },
-    {
-      title: 'Status', dataIndex: 'status', width: 130,
-      render: (s) => <StatusTag status={s} />,
-    },
-    {
-      title: 'Progress', width: 140,
-      render: (_, r) => {
-        const total = r.total_items || 0;
-        const done = r.completed_items || 0;
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        return <Progress percent={pct} size="small" format={() => `${done}/${total}`} />;
-      },
-    },
-    {
-      title: 'Created', dataIndex: 'created_at', width: 150,
-      render: (v) => v ? formatDateTime(v) : '-',
-    },
-    {
-      title: 'Action', width: 130, fixed: 'right',
-      render: (_, record) => (
-        <Tooltip title="Open segregation panel">
-          <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => handleView(record)}>
-            Segregate
-          </Button>
-        </Tooltip>
+      key: "serial",
+      header: "Serial",
+      render: (s) => (
+        <div>
+          <div className="font-mono text-xs font-semibold text-ink">{s.serial_number}</div>
+          <div className="text-[11px] text-muted">{s.asset_code ?? s.consumable_code ?? "—"}</div>
+        </div>
       ),
     },
+    {
+      key: "item",
+      header: "Item",
+      render: (s) => (
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs text-ink">{s.item_code ?? "—"}</div>
+          <div className="truncate text-xs text-muted">{s.item_name ?? "—"}</div>
+        </div>
+      ),
+    },
+    { key: "batch", header: "Batch", hideOnNarrow: true, render: (s) => s.batch_no ?? "—" },
+    {
+      key: "where",
+      header: "Where",
+      render: (s) => (
+        <div className="min-w-0">
+          <div className="truncate text-sm text-ink">{s.warehouse_name ?? "—"}</div>
+          <div className="truncate text-[11px] text-muted">{s.bin_code ?? "bulk"}</div>
+        </div>
+      ),
+    },
+    { key: "status", header: "Status", render: (s) => <StatusPill status={normaliseStatus(s.status)} /> },
   ];
 
-  const toolbar = (
-    <Space style={{ marginLeft: 12 }} wrap>
-      <Select
-        placeholder="Status"
-        allowClear
-        style={{ width: 150 }}
-        value={filterStatus}
-        onChange={(v) => { setFilterStatus(v); setRefreshKey((k) => k + 1); }}
-        options={SEGREGATABLE_STATUSES}
-      />
-      <Select
-        placeholder="Warehouse"
-        allowClear
-        showSearch
-        optionFilterProp="label"
-        style={{ width: 180 }}
-        value={filterWarehouse}
-        onChange={(v) => { setFilterWarehouse(v); setRefreshKey((k) => k + 1); }}
-        options={warehouses}
-      />
-      <Button
-        icon={<ReloadOutlined />}
-        onClick={() => setRefreshKey((k) => k + 1)}
-      >
-        Refresh
-      </Button>
-    </Space>
-  );
+  const labels: LabelSpec[] = serialRows.slice(0, 200).map((s) => ({
+    code: s.serial_number,
+    title: s.asset_code ?? s.consumable_code ?? s.serial_number,
+    subtitle: s.item_name ?? s.item_code ?? "",
+    kind: "qr",
+    meta: [
+      { label: "Serial", value: s.serial_number },
+      { label: "Batch", value: s.batch_no ?? "—" },
+      { label: "Bin", value: s.bin_code ?? "bulk" },
+    ],
+  }));
+
+  const expiring = (batches.data?.items ?? []).filter((b) => {
+    const d = daysUntil(b.expiry_date);
+    return d !== null && d >= 0 && d <= 90;
+  }).length;
+  const expired = (batches.data?.items ?? []).filter((b) => (daysUntil(b.expiry_date) ?? 1) < 0).length;
 
   return (
     <div>
-      <PageHeader
-        title="Stock Segregation"
-        subtitle="Assign received goods to specific bins / locations within the warehouse"
-      />
+      <PageHeader eyebrow="Warehouse" title="Stock segregation" />
 
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="What is this?"
-        description={
-          <span>
-            After putaway is created, each received line must be segregated into a
-            specific <b>bin</b>. Open a putaway, enter a bin id (or code) for each
-            pending line, then click <b>Confirm Bin</b> to commit it to stock.
-          </span>
-        }
-      />
+      <SubNav label="Stock segregation" items={TABS} value={tab} onChange={setTab} />
 
-      <DataTable
-        key={refreshKey}
-        columns={columns}
-        fetchFunction={fetchPutaways}
-        rowKey="id"
-        searchPlaceholder="Search by putaway number or GRN..."
-        exportFileName="stock_segregation"
-        toolbar={toolbar}
-        scroll={{ x: 1200 }}
-      />
+      {tab === "batches" ? (
+        <>
+          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <StatCard label="Batches held" value={batches.data?.items.length ?? 0} />
+            <StatCard label="Expiring in 90 days" value={expiring} tone="text-warn" />
+            <StatCard label="Expired" value={expired} tone="text-bad" />
+            <StatCard
+              label="Quantity"
+              value={fmtQty((batches.data?.items ?? []).reduce((s, b) => s + Number(b.initial_qty ?? 0), 0))}
+            />
+          </div>
 
-      <Drawer
-        title={viewData ? `Segregate: ${viewData.putaway_number}` : 'Stock Segregation'}
-        width={1050}
-        open={viewDrawerOpen}
-        onClose={closeDrawer}
-        destroyOnHidden
-        loading={viewLoading}
-        extra={
-          <Space>
-            <Button onClick={closeDrawer}>Close</Button>
-          </Space>
-        }
-      >
-        {viewData && (
-          <>
-            <Descriptions bordered size="small" column={3} style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="Putaway">{viewData.putaway_number}</Descriptions.Item>
-              <Descriptions.Item label="GRN">{viewData.grn_number || '-'}</Descriptions.Item>
-              <Descriptions.Item label="Warehouse">{viewData.warehouse_name || '-'}</Descriptions.Item>
-              <Descriptions.Item label="Status"><StatusTag status={viewData.status} /></Descriptions.Item>
-              <Descriptions.Item label="Assigned To">{viewData.assigned_to_name || '-'}</Descriptions.Item>
-              <Descriptions.Item label="Created">
-                {viewData.created_at ? formatDateTime(viewData.created_at) : '-'}
-              </Descriptions.Item>
-            </Descriptions>
+          <FilterBar
+            search={search}
+            onSearch={setSearch}
+            placeholder="Search batch, item, vendor or GRN…"
+            onReset={() => { setSearch(""); setBucket(""); }}
+          >
+            <FilterSelect label="Expiry" allLabel="Any expiry" value={bucket} onChange={setBucket}
+                          options={EXPIRY_BUCKETS} />
+          </FilterBar>
 
-            <Card size="small" style={{ marginBottom: 16 }}>
-              <Row align="middle" gutter={16}>
-                <Col span={4}><Text strong>Progress</Text></Col>
-                <Col span={14}>
-                  <Progress
-                    percent={progressPct}
-                    status={progressPct === 100 ? 'success' : 'active'}
-                    strokeColor={{ '0%': '#eb2f96', '100%': '#52c41a' }}
-                  />
-                </Col>
-                <Col span={6} style={{ textAlign: 'right' }}>
-                  <Space>
-                    <Badge status="success" text={`Done: ${items.filter((i) => i.status === 'done').length}`} />
-                    <Badge status="processing" text={`Pending: ${items.filter((i) => i.status === 'pending' || i.status === 'in_progress').length}`} />
-                  </Space>
-                </Col>
-              </Row>
+          <ErrorBanner error={batches.error} />
+
+          <ResponsiveList
+            data={batchRows}
+            columns={batchColumns}
+            keyOf={(b) => b.id}
+            loading={batches.isLoading}
+            empty="No batches match these filters."
+            renderCard={(b) => {
+              const tone = expiryTone(daysUntil(b.expiry_date));
+              return (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs font-semibold text-ink">{b.batch_no}</span>
+                    <Chip size="sm" variant="flat" color={tone.color}>{tone.label}</Chip>
+                  </div>
+                  <div className="truncate text-sm text-body">{b.item_name ?? b.item_code ?? "—"}</div>
+                  <div className="text-[11px] text-muted">
+                    {fmtQty(b.initial_qty)} · {b.vendor_name ?? "—"} · {fmtDate(b.expiry_date)}
+                  </div>
+                </div>
+              );
+            }}
+          />
+        </>
+      ) : (
+        <>
+          <FilterBar
+            search={search}
+            onSearch={setSearch}
+            placeholder="Search serial, asset code, item or bin…"
+            onReset={() => { setSearch(""); setSerialStatus(""); }}
+          >
+            <FilterSelect label="Status" value={serialStatus} onChange={setSerialStatus}
+                          options={SERIAL_STATUSES} />
+            <button
+              type="button"
+              onClick={() => setPrinting((p) => !p)}
+              className="min-h-11 rounded-lg border border-line px-3 text-sm font-semibold text-body hover:bg-content2"
+            >
+              {printing ? "Hide labels" : "Print labels"}
+            </button>
+          </FilterBar>
+
+          <ErrorBanner error={serials.error} />
+
+          {printing && (
+            <Card className="mb-4 p-4">
+              <LabelSheet labels={labels} title="serial labels" emptyHint="Nothing to label." />
             </Card>
+          )}
 
-            <Divider orientation="left">
-              <Space>
-                <InboxOutlined />
-                Lines to Segregate
-                <Badge count={items.length} style={{ backgroundColor: '#eb2f96' }} />
-              </Space>
-            </Divider>
-
-            {items.length === 0 ? (
-              <Empty description="No items on this putaway" />
-            ) : (
-              <Table
-                dataSource={items}
-                columns={itemColumns}
-                rowKey="key"
-                pagination={false}
-                size="small"
-                scroll={{ x: 1100 }}
-                rowClassName={(r) => (r.status === 'done' ? 'row-done' : '')}
-              />
+          <ResponsiveList
+            data={serialRows}
+            columns={serialColumns}
+            keyOf={(s) => s.id}
+            loading={serials.isLoading}
+            empty="No serial numbers match these filters."
+            renderCard={(s) => (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-xs font-semibold text-ink">{s.serial_number}</span>
+                  <StatusPill status={normaliseStatus(s.status)} />
+                </div>
+                <div className="truncate text-sm text-body">{s.item_name ?? s.item_code ?? "—"}</div>
+                <div className="text-[11px] text-muted">
+                  {s.warehouse_name ?? "—"} · {s.bin_code ?? "bulk"} · {s.asset_code ?? s.consumable_code ?? "—"}
+                </div>
+              </div>
             )}
-          </>
-        )}
-      </Drawer>
+          />
+        </>
+      )}
     </div>
   );
-};
-
-export default StockSegregation;
-
+}

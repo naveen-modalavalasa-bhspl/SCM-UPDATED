@@ -1,326 +1,134 @@
-// @ts-nocheck
-import React, { useState, useEffect, useCallback } from 'react';
-import {
-  Button, Select, Space, Popconfirm, message, Tag, Typography, Tooltip, DatePicker
-} from 'antd';
-import {
-  PlusOutlined, EyeOutlined, DeleteOutlined,
-  ExperimentOutlined, CheckOutlined, CloseCircleOutlined
-} from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
-import PageHeader from '../components/PageHeader';
-import DataTable from '../components/DataTable';
-import StatusTag from '../components/StatusTag';
-import api from '../config/api';
-import {
-  formatDate, formatCurrency, formatNumber, getErrorMessage, formatDateForAPI
-} from '../utils/helpers';
-import { DATE_FORMAT } from '../utils/constants';
+import { useNavigate } from "react-router-dom";
+import { Chip } from "@heroui/react";
+import { StatusPill, type Column } from "@/shared/components";
+import { DocumentList } from "../components/DocumentList";
+import { listReceipts } from "../api";
+import { fmtDate, fmtMoneyShort, fmtQty } from "../format";
+import type { Receipt } from "../types";
 
-const { Text } = Typography;
+/**
+ * Goods receipt notes — what was actually counted off the vehicle.
+ *
+ * The rejected column is always shown, never hidden behind a filter: a receipt with
+ * rejections is the one someone has to act on, and burying it made short and damaged
+ * deliveries sit unnoticed until the vendor chased the credit note.
+ *
+ * `is_stock_posted` is surfaced as its own chip because it is the difference between
+ * a document that exists and stock that exists. A completed GRN with nothing posted
+ * means the putaway never ran.
+ */
 
-const GRN_STATUSES = [
-  { label: 'Draft', value: 'draft' },
-  { label: 'Pending QI', value: 'pending_qi' },
-  { label: 'QI In Progress', value: 'qi_in_progress' },
-  { label: 'Completed', value: 'completed' },
-  { label: 'Cancelled', value: 'cancelled' },
+const STATUSES = [
+  { value: "DRAFT", label: "Draft" },
+  { value: "SUBMITTED", label: "Submitted" },
+  { value: "PENDING_QC", label: "Awaiting QC" },
+  { value: "QC_PASSED", label: "QC passed" },
+  { value: "QC_FAILED", label: "QC failed" },
+  { value: "PARTIALLY_RECEIVED", label: "Partially received" },
+  { value: "COMPLETED", label: "Completed" },
+  { value: "CANCELLED", label: "Cancelled" },
 ];
 
-const GRN = () => {
-  const navigate = useNavigate();
-  const [refreshKey, setRefreshKey] = useState(0);
+export default function GRN() {
+  const nav = useNavigate();
 
-  // Filters
-  const [filterStatus, setFilterStatus] = useState(undefined);
-  const [filterVendor, setFilterVendor] = useState(undefined);
-  const [filterWarehouse, setFilterWarehouse] = useState(undefined);
-  const [filterDateRange, setFilterDateRange] = useState(null);
-
-  // Lookups
-  const [vendors, setVendors] = useState([]);
-  const [warehouses, setWarehouses] = useState([]);
-
-  const loadLookups = useCallback(async () => {
-    try {
-      const [vendorRes, whRes] = await Promise.allSettled([
-        api.get('/masters/vendors', { params: { page_size: 200, status: 'active' } }),
-        api.get('/masters/warehouses', { params: { page_size: 200 } }),
-      ]);
-      if (vendorRes.status === 'fulfilled') {
-        const d = vendorRes.value.data;
-        const items = d.items || d.data || d || [];
-        setVendors(items.map((v) => ({
-          label: `[${v.vendor_code}] ${v.name}`,
-          value: v.id,
-        })));
-      }
-      if (whRes.status === 'fulfilled') {
-        const w = whRes.value.data;
-        setWarehouses(
-          (w.items || w.data || w || []).map((i) => ({
-            label: i.name || i.warehouse_name,
-            value: i.id,
-          }))
-        );
-      }
-    } catch { /* silent */ }
-  }, []);
-
-  useEffect(() => {
-    loadLookups();
-  }, [loadLookups]);
-
-  const fetchGRNs = useCallback(
-    async (params) => {
-      const qp = { ...params };
-      if (filterStatus) qp.status = filterStatus;
-      if (filterVendor) qp.vendor_id = filterVendor;
-      if (filterWarehouse) qp.warehouse_id = filterWarehouse;
-      if (filterDateRange && filterDateRange[0]) {
-        qp.date_from = formatDateForAPI(filterDateRange[0]);
-        qp.date_to = formatDateForAPI(filterDateRange[1]);
-      }
-      return await api.get('/warehouse/grn', { params: qp });
-    },
-    [filterStatus, filterVendor, filterWarehouse, filterDateRange]
-  );
-
-  const handleAdd = () => {
-    navigate('/warehouse/grn/new');
-  };
-
-  const handleView = (record) => {
-    navigate(`/warehouse/grn/${record.id}`);
-  };
-
-  const handleSubmitForQI = async (id) => {
-    try {
-      await api.put(`/warehouse/grn/${id}/submit-qi`);
-      message.success('GRN submitted for Quality Inspection');
-      setRefreshKey((k) => k + 1);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
-
-  const handleComplete = async (id) => {
-    try {
-      await api.put(`/warehouse/grn/${id}/complete`);
-      message.success('GRN completed');
-      setRefreshKey((k) => k + 1);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
-
-  const handleDelete = async (id) => {
-    try {
-      await api.delete(`/warehouse/grn/${id}`);
-      message.success('GRN deleted');
-      setRefreshKey((k) => k + 1);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
-
-  const columns = [
+  const columns: Column<Receipt>[] = [
     {
-      title: 'GRN Number',
-      dataIndex: 'grn_number',
-      key: 'grn_number',
-      width: 150,
-      sorter: true,
-      fixed: 'left',
-      render: (text, record) => (
-        <a onClick={() => handleView(record)}>{text}</a>
+      key: "no",
+      header: "GRN",
+      render: (r) => (
+        <div>
+          <div className="font-mono text-xs font-semibold text-ink">{r.grn_no}</div>
+          <div className="text-[11px] text-muted">{fmtDate(r.grn_date)}</div>
+        </div>
       ),
     },
     {
-      title: 'Vendor',
-      dataIndex: 'vendor_name',
-      key: 'vendor',
-      width: 180,
-      ellipsis: true,
-      render: (v, r) => v || r.vendor || '-',
-    },
-    {
-      title: 'PO Reference',
-      dataIndex: 'po_number',
-      key: 'po_number',
-      width: 140,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Inward Reference',
-      dataIndex: 'inward_number',
-      key: 'inward_number',
-      width: 140,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Warehouse',
-      dataIndex: 'warehouse_name',
-      key: 'warehouse',
-      width: 140,
-      ellipsis: true,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'GRN Date',
-      dataIndex: 'grn_date',
-      key: 'grn_date',
-      width: 150,
-      sorter: true,
-      render: (v) => v ? formatDate(v) : '-',
-    },
-    {
-      title: 'Supplier Invoice',
-      dataIndex: 'supplier_invoice',
-      key: 'supplier_invoice',
-      width: 140,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Receipt Type',
-      dataIndex: 'receipt_type',
-      key: 'receipt_type',
-      width: 110,
-      render: (v) => {
-        const typeMap = { inward_based: 'Inward Based', po_based: 'PO Based', direct: 'Direct', return: 'Return', transfer: 'Transfer' };
-        return <Tag>{typeMap[v] || v || '-'}</Tag>;
-      },
-    },
-    {
-      title: 'Total Qty',
-      dataIndex: 'total_qty',
-      key: 'total_qty',
-      width: 90,
-      align: 'right',
-      render: (v) => formatNumber(v),
-    },
-    {
-      title: 'Accepted',
-      dataIndex: 'accepted_qty',
-      key: 'accepted_qty',
-      width: 90,
-      align: 'right',
-      render: (v) => <Text style={{ color: '#52c41a' }}>{formatNumber(v)}</Text>,
-    },
-    {
-      title: 'Rejected',
-      dataIndex: 'rejected_qty',
-      key: 'rejected_qty',
-      width: 90,
-      align: 'right',
-      render: (v) => <Text style={{ color: v > 0 ? '#f5222d' : undefined }}>{formatNumber(v)}</Text>,
-    },
-    {
-      title: 'Status',
-      dataIndex: 'status',
-      key: 'status',
-      width: 130,
-      render: (s) => <StatusTag status={s} />,
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 200,
-      fixed: 'right',
-      render: (_, record) => (
-        <Space size="small">
-          <Tooltip title="View Detail">
-            <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => handleView(record)} />
-          </Tooltip>
-          {record.status === 'draft' && (
-            <>
-              <Tooltip title="Edit">
-                <Button type="link" size="small" icon={<EditOutlined />} onClick={() => navigate(`/warehouse/grn/${record.id}?edit=true`)} />
-              </Tooltip>
-              <Tooltip title="Submit for QI">
-                <Popconfirm title="Submit this GRN for Quality Inspection?" onConfirm={() => handleSubmitForQI(record.id)}>
-                  <Button type="link" size="small" icon={<ExperimentOutlined />} style={{ color: '#722ed1' }} />
-                </Popconfirm>
-              </Tooltip>
-              <Popconfirm title="Delete this GRN?" onConfirm={() => handleDelete(record.id)} okButtonProps={{ danger: true }}>
-                <Button type="link" size="small" danger icon={<DeleteOutlined />} />
-              </Popconfirm>
-            </>
-          )}
-          {(record.status === 'pending_qi' || record.status === 'qi_in_progress') && (
-            <Tooltip title="Complete GRN">
-              <Popconfirm title="Mark this GRN as completed?" onConfirm={() => handleComplete(record.id)}>
-                <Button type="link" size="small" icon={<CheckOutlined />} style={{ color: '#52c41a' }} />
-              </Popconfirm>
-            </Tooltip>
-          )}
-        </Space>
+      key: "source",
+      header: "Against",
+      render: (r) => (
+        <div className="min-w-0">
+          <div className="truncate text-sm text-ink">{r.vendor_name ?? r.transfer_no ?? "—"}</div>
+          <div className="truncate font-mono text-[11px] text-muted">{r.po_no ?? r.transfer_no ?? "No PO"}</div>
+        </div>
       ),
     },
+    {
+      key: "qty",
+      header: "Received",
+      className: "text-right",
+      render: (r) => <span className="tabular text-sm text-ink">{fmtQty(r.total_received_qty)}</span>,
+    },
+    {
+      key: "rejected",
+      header: "Rejected",
+      className: "text-right",
+      render: (r) => (
+        <span className={`tabular text-sm ${Number(r.total_rejected_qty) > 0 ? "font-semibold text-bad" : "text-muted"}`}>
+          {fmtQty(r.total_rejected_qty)}
+        </span>
+      ),
+    },
+    {
+      key: "value",
+      header: "Value",
+      className: "text-right",
+      hideOnNarrow: true,
+      render: (r) => <span className="tabular text-sm text-ink">₹ {fmtMoneyShort(r.total_value)}</span>,
+    },
+    {
+      key: "posted",
+      header: "Stock",
+      render: (r) => (
+        <Chip size="sm" variant="flat" color={r.is_stock_posted ? "success" : "default"}>
+          {r.is_stock_posted ? "Posted" : "Not posted"}
+        </Chip>
+      ),
+    },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
   ];
 
-  const toolbar = (
-    <Space style={{ marginLeft: 12 }} wrap>
-      <Select
-        placeholder="Status"
-        allowClear
-        style={{ width: 150 }}
-        value={filterStatus}
-        onChange={(v) => { setFilterStatus(v); setRefreshKey((k) => k + 1); }}
-        options={GRN_STATUSES}
-      />
-      <Select
-        placeholder="Vendor"
-        allowClear
-        showSearch
-        filterOption={(input, option) => (option?.label ?? '').toLowerCase().includes(input.toLowerCase())}
-        style={{ width: 180 }}
-        value={filterVendor}
-        onChange={(v) => { setFilterVendor(v); setRefreshKey((k) => k + 1); }}
-        options={vendors}
-      />
-      <Select
-        placeholder="Warehouse"
-        allowClear
-        showSearch
-        filterOption={(input, option) => (option?.label ?? '').toLowerCase().includes(input.toLowerCase())}
-        style={{ width: 160 }}
-        value={filterWarehouse}
-        onChange={(v) => { setFilterWarehouse(v); setRefreshKey((k) => k + 1); }}
-        options={warehouses}
-      />
-      <DatePicker.RangePicker
-        value={filterDateRange}
-        onChange={(dates) => { setFilterDateRange(dates); setRefreshKey((k) => k + 1); }}
-        format={DATE_FORMAT}
-        style={{ width: 240 }}
-        placeholder={['From Date', 'To Date']}
-      />
-    </Space>
-  );
-
   return (
-    <div>
-      <PageHeader title="Goods Receipt Note" subtitle="Track and manage received goods">
-        <Space>
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
-            Create GRN
-          </Button>
-        </Space>
-      </PageHeader>
-
-      <DataTable
-        key={refreshKey}
-        columns={columns}
-        fetchFunction={fetchGRNs}
-        rowKey="id"
-        searchPlaceholder="Search by GRN number or vendor..."
-        exportFileName="grns"
-        toolbar={toolbar}
-        scroll={{ x: 1500 }}
-      />
-    </div>
+    <DocumentList<Receipt>
+      title="Goods receipt notes"
+      queryKey="wh-receipts"
+      fetch={(p) => listReceipts({ ...p, receipt_type: "PURCHASE" })}
+      extraParams={{ receipt_type: "PURCHASE" }}
+      columns={columns}
+      keyOf={(r) => r.id}
+      searchIn={(r) => [r.grn_no, r.po_no, r.vendor_name, r.invoice_no, r.warehouse_name]}
+      searchPlaceholder="Search GRN, PO, vendor or invoice…"
+      statuses={STATUSES}
+      createTo="new"
+      createLabel="New GRN"
+      createPermission="grn.create"
+      onRowClick={(r) => nav(String(r.id))}
+      empty="No receipts match these filters."
+      kpis={(rows) => [
+        { label: "Awaiting QC", value: rows.filter((r) => r.status === "PENDING_QC").length, tone: "text-warn" },
+        { label: "Not posted", value: rows.filter((r) => !r.is_stock_posted && r.status !== "CANCELLED").length },
+        {
+          label: "Rejected qty",
+          value: fmtQty(rows.reduce((s, r) => s + Number(r.total_rejected_qty ?? 0), 0)),
+          tone: "text-bad",
+        },
+        { label: "Value", value: `₹ ${fmtMoneyShort(rows.reduce((s, r) => s + Number(r.total_value ?? 0), 0))}` },
+      ]}
+      renderCard={(r) => (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono text-xs font-semibold text-ink">{r.grn_no}</span>
+            <StatusPill status={r.status} />
+          </div>
+          <div className="truncate text-sm text-body">{r.vendor_name ?? "—"}</div>
+          <div className="truncate text-[11px] text-muted">
+            {r.po_no ?? "no PO"} · {fmtQty(r.total_received_qty)} received
+            {Number(r.total_rejected_qty) > 0 && (
+              <span className="font-semibold text-bad"> · {fmtQty(r.total_rejected_qty)} rejected</span>
+            )}
+          </div>
+        </div>
+      )}
+    />
   );
-};
-
-export default GRN;
+}
