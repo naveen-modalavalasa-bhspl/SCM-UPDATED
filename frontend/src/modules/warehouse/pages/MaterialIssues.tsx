@@ -1,318 +1,143 @@
-// @ts-nocheck
-import React, { useState, useCallback, useEffect } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
-import {
-  Button, Select, Space, Popconfirm, message, Input, Tooltip
-} from 'antd';
-import {
-  PlusOutlined, EditOutlined, DeleteOutlined, EyeOutlined,
-  SendOutlined
-} from '@ant-design/icons';
-import PageHeader from '../components/PageHeader';
-import DataTable from '../components/DataTable';
-import StatusTag from '../components/StatusTag';
-import api from '../config/api';
-import {
-  formatDate, getErrorMessage, downloadExcel
-} from '../utils/helpers';
+import { useNavigate } from "react-router-dom";
+import { Chip } from "@heroui/react";
+import { StatusPill, type Column } from "@/shared/components";
+import { DocumentList } from "../components/DocumentList";
+import { listIssues } from "../api";
+import { fmtDate, fmtMoneyShort, fmtQty } from "../format";
+import type { Issue } from "../types";
 
-const MI_STATUSES = [
-  { label: 'Draft', value: 'draft' },
-  { label: 'Issued', value: 'issued' },
-  { label: 'Dispatched', value: 'dispatched' },
-  { label: 'Acknowledged', value: 'acknowledged' },
-  { label: 'Completed', value: 'completed' },
-  { label: 'Cancelled', value: 'cancelled' },
+/**
+ * Material issues — stock leaving the store for a department, project or vehicle.
+ *
+ * `direction` distinguishes an issue from a return of one: both are `out_issues`
+ * rows, and pairing them in one table is what lets a return point at the issue it
+ * reverses (`original_issue_id`) instead of floating free.
+ *
+ * The approver column is filled from `current_approver_name` on the row — a snapshot
+ * written when the workflow moved, so the list does not have to ask the workflow
+ * engine who is holding each of two hundred documents.
+ */
+
+const STATUSES = [
+  { value: "DRAFT", label: "Draft" },
+  { value: "PENDING_APPROVAL", label: "In approval" },
+  { value: "APPROVED", label: "Approved" },
+  { value: "REJECTED", label: "Rejected" },
+  { value: "ISSUED", label: "Issued" },
+  { value: "ACKNOWLEDGED", label: "Acknowledged" },
+  { value: "CANCELLED", label: "Cancelled" },
 ];
 
-const MaterialIssues = () => {
-  const [searchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const [refreshKey, setRefreshKey] = useState(0);
+export default function MaterialIssues({
+  direction = "OUT",
+  title = "Material issues",
+}: {
+  direction?: "OUT" | "IN";
+  title?: string;
+}) {
+  const nav = useNavigate();
 
-  // Filters
-  const [filterStatus, setFilterStatus] = useState(undefined);
-  const [filterWarehouse, setFilterWarehouse] = useState(undefined);
-  const [filterDepartment, setFilterDepartment] = useState(undefined);
-
-  const [warehouses, setWarehouses] = useState([]);
-
-  // --- Lookups ---
-  const loadLookups = useCallback(async () => {
-    try {
-      const whRes = await api.get('/masters/warehouses', { params: { page_size: 200, exclude_virtual: true } });
-      const w = whRes.data;
-      setWarehouses(
-        (w.items || w.data || w || []).map((i) => ({
-          label: i.name || i.warehouse_name,
-          value: i.id,
-        }))
-      );
-    } catch (err) {
-      console.error('Error loading lookups:', err);
-    }
-  }, []);
-
-  // Handle redirect if deep-linked from Indents page with indent_id
-  useEffect(() => {
-    const indentId = searchParams.get('indent_id');
-    if (indentId) {
-      navigate(`/warehouse/material-issues/new?indent_id=${indentId}`, { replace: true });
-    }
-  }, [searchParams, navigate]);
-
-  useEffect(() => {
-    loadLookups();
-  }, [loadLookups]);
-
-  // --- Fetch ---
-  const fetchRecords = useCallback(
-    async (params) => {
-      const qp = { ...params };
-      if (filterStatus) qp.status = filterStatus;
-      if (filterWarehouse) qp.warehouse_id = filterWarehouse;
-      if (filterDepartment) qp.department = filterDepartment;
-      return await api.get('/warehouse/material-issues', { params: qp });
-    },
-    [filterStatus, filterWarehouse, filterDepartment]
-  );
-
-  // --- Actions ---
-  const handleIssue = async (id) => {
-    try {
-      await api.post(`/warehouse/material-issues/${id}/issue`);
-      message.success('Material issued successfully, stock reserved');
-      setRefreshKey((k) => k + 1);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
-
-  const handleDelete = async (id) => {
-    try {
-      await api.delete(`/warehouse/material-issues/${id}`);
-      message.success('Material Issue deleted');
-      setRefreshKey((k) => k + 1);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
-
-  // --- Main Table Columns ---
-  const columns = [
+  const columns: Column<Issue>[] = [
     {
-      title: 'Issue Number',
-      dataIndex: 'issue_number',
-      key: 'issue_number',
-      width: 160,
-      sorter: true,
-      fixed: 'left',
-      render: (text, record) => (
-        <a onClick={() => navigate(`/warehouse/material-issues/${record.id}`)}>{text}</a>
+      key: "no",
+      header: "Issue",
+      render: (r) => (
+        <div>
+          <div className="font-mono text-xs font-semibold text-ink">{r.issue_no}</div>
+          <div className="text-[11px] text-muted">{fmtDate(r.issue_date)}</div>
+        </div>
       ),
     },
     {
-      title: 'Source Warehouse',
-      dataIndex: 'warehouse_name',
-      key: 'warehouse',
-      width: 150,
-      ellipsis: true,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Destination Warehouse',
-      dataIndex: 'destination_warehouse_name',
-      key: 'destination_warehouse',
-      width: 160,
-      ellipsis: true,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Department',
-      dataIndex: 'department',
-      key: 'department',
-      width: 140,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Issue Date',
-      dataIndex: 'issue_date',
-      key: 'issue_date',
-      width: 120,
-      sorter: true,
-      render: (v) => formatDate(v),
-    },
-    {
-      title: 'Issued To',
-      dataIndex: 'issued_to_name',
-      key: 'issued_to',
-      width: 150,
-      ellipsis: true,
-      render: (v, r) => v || r.issued_to || '-',
-    },
-    {
-      title: 'Status',
-      dataIndex: 'status',
-      key: 'status',
-      width: 130,
-      render: (s) => <StatusTag status={s} />,
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 180,
-      fixed: 'right',
-      render: (_, record) => (
-        <Space size="small">
-          <Tooltip title="View Detail">
-            <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => navigate(`/warehouse/material-issues/${record.id}`)} />
-          </Tooltip>
-          {record.status === 'draft' && (
-            <>
-              <Tooltip title="Edit">
-                <Button type="link" size="small" icon={<EditOutlined />} onClick={() => navigate(`/warehouse/material-issues/${record.id}?edit=true`)} />
-              </Tooltip>
-              <Tooltip title="Issue Material (Reserve)">
-                <Popconfirm
-                  title="Issue this material? Stock will be reserved."
-                  onConfirm={() => handleIssue(record.id)}
-                >
-                  <Button type="link" size="small" icon={<SendOutlined />} style={{ color: '#eb2f96' }} />
-                </Popconfirm>
-              </Tooltip>
-              <Popconfirm title="Delete this Material Issue?" onConfirm={() => handleDelete(record.id)} okButtonProps={{ danger: true }}>
-                <Button type="link" size="small" danger icon={<DeleteOutlined />} />
-              </Popconfirm>
-            </>
-          )}
-        </Space>
+      key: "to",
+      header: "Issued to",
+      render: (r) => (
+        <div className="min-w-0">
+          <div className="truncate text-sm text-ink">{r.issued_to_name ?? r.department_name ?? "—"}</div>
+          <div className="truncate text-[11px] text-muted">
+            {[r.project_name, r.vehicle_number].filter(Boolean).join(" · ") || r.indent_no || "—"}
+          </div>
+        </div>
       ),
     },
+    { key: "warehouse", header: "From", hideOnNarrow: true, render: (r) => r.warehouse_name ?? "—" },
+    {
+      key: "qty",
+      header: "Qty",
+      className: "text-right",
+      render: (r) => (
+        <div>
+          <div className="tabular text-sm text-ink">{fmtQty(r.total_qty)}</div>
+          <div className="text-[11px] text-muted">{r.total_items} lines</div>
+        </div>
+      ),
+    },
+    {
+      key: "value",
+      header: "Value",
+      className: "text-right",
+      hideOnNarrow: true,
+      render: (r) => <span className="tabular text-sm text-ink">₹ {fmtMoneyShort(r.total_value)}</span>,
+    },
+    {
+      key: "posted",
+      header: "Stock",
+      render: (r) => (
+        <Chip size="sm" variant="flat" color={r.is_stock_posted ? "success" : "default"}>
+          {r.is_stock_posted ? "Posted" : "Not posted"}
+        </Chip>
+      ),
+    },
+    {
+      key: "approver",
+      header: "With",
+      hideOnNarrow: true,
+      render: (r) => (
+        <span className="text-sm text-muted">
+          {r.status === "PENDING_APPROVAL" ? r.current_approver_name ?? "unassigned" : r.approved_by_name ?? "—"}
+        </span>
+      ),
+    },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
   ];
 
-  // --- Filter Toolbar ---
-  const toolbar = (
-    <Space style={{ marginLeft: 12 }} wrap>
-      <Select
-        placeholder="Status"
-        allowClear
-        style={{ width: 150 }}
-        value={filterStatus}
-        onChange={(v) => { setFilterStatus(v); setRefreshKey((k) => k + 1); }}
-        options={MI_STATUSES}
-      />
-      <Select
-        placeholder="Warehouse"
-        allowClear
-        showSearch
-        optionFilterProp="label"
-        style={{ width: 160 }}
-        value={filterWarehouse}
-        onChange={(v) => { setFilterWarehouse(v); setRefreshKey((k) => k + 1); }}
-        options={warehouses}
-        onOpenChange={(open) => { if (open && warehouses.length === 0) loadLookups(); }}
-      />
-      <Input
-        placeholder="Department"
-        allowClear
-        style={{ width: 150 }}
-        value={filterDepartment}
-        onChange={(e) => { setFilterDepartment(e.target.value || undefined); }}
-        onPressEnter={() => setRefreshKey((k) => k + 1)}
-      />
-    </Space>
-  );
-
-  const handleCustomExport = (data) => {
-    const exportRows = [];
-    data.forEach(row => {
-      const items = row.items || [];
-      if (items.length === 0) {
-        exportRows.push({
-          'Issue Number': row.issue_number || '-',
-          'Issue Date': row.issue_date ? new Date(row.issue_date).toLocaleDateString() : '-',
-          'Source Warehouse': row.warehouse_name || '-',
-          'Destination Warehouse': row.destination_warehouse_name || '-',
-          'Vehicle Code': row.vehicle_code || '-',
-          'Vehicle Number': row.vehicle_number || '-',
-          'Item Name': '-',
-          'Item Code': '-',
-          'Item Type': '-',
-          'Qty Issued': '-',
-          'Serial / Asset No': '-',
-          'Department': row.department || '-',
-          'Issued To': row.issued_to_name || row.issued_to || '-',
-          'Status': row.status || '-',
-        });
-      } else {
-        items.forEach(item => {
-          const serials = item.serial_numbers || [];
-          if (serials.length === 0) {
-            exportRows.push({
-              'Issue Number': row.issue_number || '-',
-              'Issue Date': row.issue_date ? new Date(row.issue_date).toLocaleDateString() : '-',
-              'Source Warehouse': row.warehouse_name || '-',
-              'Destination Warehouse': row.destination_warehouse_name || '-',
-              'Vehicle Code': row.vehicle_code || '-',
-              'Vehicle Number': row.vehicle_number || '-',
-              'Item Name': item.item_name || '-',
-              'Item Code': item.item_code || '-',
-              'Item Type': item.item_type || '-',
-              'Qty Issued': item.qty ?? '-',
-              'Serial / Asset No': '-',
-              'Department': row.department || '-',
-              'Issued To': row.issued_to_name || row.issued_to || '-',
-              'Status': row.status || '-',
-            });
-          } else {
-            serials.forEach((serial, idx) => {
-              exportRows.push({
-                'Issue Number': row.issue_number || '-',
-                'Issue Date': row.issue_date ? new Date(row.issue_date).toLocaleDateString() : '-',
-                'Source Warehouse': row.warehouse_name || '-',
-                'Destination Warehouse': row.destination_warehouse_name || '-',
-                'Vehicle Code': row.vehicle_code || '-',
-                'Vehicle Number': row.vehicle_number || '-',
-                'Item Name': item.item_name || '-',
-                'Item Code': item.item_code || '-',
-                'Item Type': item.item_type || '-',
-                'Qty Issued': idx === 0 ? (item.qty ?? '-') : '',
-                'Serial / Asset No': serial || '-',
-                'Department': row.department || '-',
-                'Issued To': row.issued_to_name || row.issued_to || '-',
-                'Status': row.status || '-',
-              });
-            });
-          }
-        });
-      }
-    });
-    downloadExcel(exportRows, 'material_issues_list', 'Material Issues Log');
-  };
-
   return (
-    <div>
-      <PageHeader title="Material Issues" subtitle="Manage material issues from warehouse">
-        <Space>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/warehouse/material-issues/new')}>
-            Create Issue
-          </Button>
-        </Space>
-      </PageHeader>
-
-      <DataTable
-        key={refreshKey}
-        columns={columns}
-        fetchFunction={fetchRecords}
-        rowKey="id"
-        searchPlaceholder="Search by issue number, department..."
-        exportFileName="material_issues_list"
-        toolbar={toolbar}
-        scroll={{ x: 1200 }}
-        customExport={handleCustomExport}
-      />
-    </div>
+    <DocumentList<Issue>
+      title={title}
+      queryKey={`wh-issues-${direction}`}
+      fetch={(p) => listIssues({ ...p, direction })}
+      extraParams={{ direction }}
+      columns={columns}
+      keyOf={(r) => r.id}
+      searchIn={(r) => [r.issue_no, r.indent_no, r.issued_to_name, r.department_name, r.project_name, r.vehicle_number]}
+      searchPlaceholder="Search issue, indent, person or project…"
+      statuses={STATUSES}
+      createTo="new"
+      createLabel={direction === "OUT" ? "New issue" : "New return"}
+      createPermission="issue.create"
+      onRowClick={(r) => nav(String(r.id))}
+      empty="No issues match these filters."
+      kpis={(rows) => [
+        { label: "In approval", value: rows.filter((r) => r.status === "PENDING_APPROVAL").length, tone: "text-warn" },
+        { label: "Approved, not issued", value: rows.filter((r) => r.status === "APPROVED").length },
+        { label: "Qty issued", value: fmtQty(rows.filter((r) => r.is_stock_posted).reduce((s, r) => s + Number(r.total_qty ?? 0), 0)) },
+        {
+          label: "Awaiting acknowledgement",
+          value: rows.filter((r) => r.status === "ISSUED").length,
+        },
+      ]}
+      renderCard={(r) => (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono text-xs font-semibold text-ink">{r.issue_no}</span>
+            <StatusPill status={r.status} />
+          </div>
+          <div className="truncate text-sm text-body">{r.issued_to_name ?? r.department_name ?? "—"}</div>
+          <div className="text-[11px] text-muted">
+            {fmtQty(r.total_qty)} across {r.total_items} lines · {fmtDate(r.issue_date)}
+          </div>
+        </div>
+      )}
+    />
   );
-};
-
-export default MaterialIssues;
+}

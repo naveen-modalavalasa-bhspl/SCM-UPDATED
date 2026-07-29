@@ -1,241 +1,118 @@
-// @ts-nocheck
-import React, { useState, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import {
-  Button, Select, Space, DatePicker, Popconfirm, message, Tooltip, Tag
-} from 'antd';
-import {
-  PlusOutlined, EyeOutlined, CheckOutlined, CloseCircleOutlined
-} from '@ant-design/icons';
-import PageHeader from '../components/PageHeader';
-import DataTable from '../components/DataTable';
-import StatusTag from '../components/StatusTag';
-import api from '../config/api';
-import useAuthStore from '../store/authStore';
-import {
-  formatDate, getErrorMessage, formatDateForAPI
-} from '../utils/helpers';
-import { DATE_FORMAT } from '../utils/constants';
+import { useNavigate } from "react-router-dom";
+import { Chip } from "@heroui/react";
+import { StatusPill, type Column } from "@/shared/components";
+import { DocumentList } from "../components/DocumentList";
+import { listInspections } from "../api";
+import { fmtDate, percent } from "../format";
+import type { Inspection } from "../types";
 
-const QI_STATUSES = [
-  { label: 'Draft', value: 'draft' },
-  { label: 'In Progress', value: 'in_progress' },
-  { label: 'Completed', value: 'completed' },
-  { label: 'Cancelled', value: 'cancelled' },
+/**
+ * Quality inspections.
+ *
+ * `inspection_type` separates incoming QC (against a receipt) from outgoing QC
+ * (before a dispatch leaves), so this one list serves both and the caller passes
+ * which. The pass rate is shown per document because a 90%-pass inspection and a
+ * 10%-pass inspection are entirely different conversations with the vendor.
+ */
+
+const STATUSES = [
+  { value: "DRAFT", label: "Draft" },
+  { value: "IN_PROGRESS", label: "In progress" },
+  { value: "COMPLETED", label: "Completed" },
+  { value: "CANCELLED", label: "Cancelled" },
 ];
 
-const RESULT_FILTER_OPTIONS = [
-  { label: 'Pass', value: 'pass' },
-  { label: 'Fail', value: 'fail' },
-  { label: 'Partial', value: 'partial' },
-];
+export default function QualityInspection({
+  type = "INCOMING",
+  title = "Quality inspection",
+}: {
+  type?: "INCOMING" | "OUTGOING";
+  title?: string;
+}) {
+  const nav = useNavigate();
 
-const resultColors = {
-  accepted: '#52c41a',
-  pass: '#52c41a',
-  rejected: '#f5222d',
-  fail: '#f5222d',
-  hold: '#fa8c16',
-  partial: '#fa8c16',
-};
-
-const QualityInspection = () => {
-  const hasKey = useAuthStore((s) => s.hasKey);
-  const canRunQI = hasKey('warehouse-quality-inspection');
-  const navigate = useNavigate();
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  // Filters
-  const [filterResult, setFilterResult] = useState(undefined);
-  const [filterStatus, setFilterStatus] = useState(undefined);
-  const [filterDateRange, setFilterDateRange] = useState(null);
-
-  // --- Fetch QIs ---
-  const fetchQIs = useCallback(
-    async (params) => {
-      const qp = { ...params };
-      if (filterResult) qp.overall_result = filterResult;
-      if (filterStatus) qp.status = filterStatus;
-      if (filterDateRange && filterDateRange[0]) {
-        qp.date_from = formatDateForAPI(filterDateRange[0]);
-        qp.date_to = formatDateForAPI(filterDateRange[1]);
-      }
-      return await api.get('/warehouse/quality-inspections', { params: qp });
-    },
-    [filterResult, filterStatus, filterDateRange]
-  );
-
-  // --- Actions ---
-  const handleCompleteQI = async (id) => {
-    try {
-      await api.put(`/warehouse/quality-inspections/${id}/complete`);
-      message.success('Quality Inspection completed. Redirecting to Putaway...', 2);
-      setRefreshKey((k) => k + 1);
-      setTimeout(() => navigate('/warehouse/putaway'), 1200);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
-
-  const handleCancelQI = async (id) => {
-    try {
-      await api.put(`/warehouse/quality-inspections/${id}/cancel`);
-      message.success('Quality Inspection cancelled');
-      setRefreshKey((k) => k + 1);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
-
-  // --- Main Table Columns ---
-  const columns = [
+  const columns: Column<Inspection>[] = [
     {
-      title: 'QI Number',
-      dataIndex: 'qi_number',
-      key: 'qi_number',
-      width: 150,
-      sorter: true,
-      fixed: 'left',
-      render: (text, record) => <a onClick={() => navigate(`/warehouse/quality-inspection/${record.id}`)}>{text}</a>,
-    },
-    {
-      title: 'GRN Reference',
-      dataIndex: 'grn_number',
-      key: 'grn_number',
-      width: 150,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Inspection Date',
-      dataIndex: 'inspection_date',
-      key: 'inspection_date',
-      width: 120,
-      sorter: true,
-      render: (v) => formatDate(v),
-    },
-    {
-      title: 'Inspection Type',
-      dataIndex: 'inspection_type',
-      key: 'inspection_type',
-      width: 140,
-      render: (v) => {
-        const typeMap = { full: 'Full', sample: 'Sample', visual: 'Visual', measurement: 'Measurement' };
-        return <Tag>{typeMap[v] || v || '-'}</Tag>;
-      },
-    },
-    {
-      title: 'Overall Result',
-      dataIndex: 'overall_result',
-      key: 'overall_result',
-      width: 120,
-      render: (v) => {
-        if (!v) return <Tag color="default">Pending</Tag>;
-        const color = resultColors[v] || '#8c8c8c';
-        const label = v === 'pass' ? 'Pass' : v === 'fail' ? 'Fail' : 'Partial';
-        return <Tag style={{ color: '#fff', backgroundColor: color, borderColor: color }}>{label}</Tag>;
-      },
-    },
-    {
-      title: 'Inspected By',
-      dataIndex: 'inspected_by_name',
-      key: 'inspected_by',
-      width: 140,
-      render: (v, r) => v || r.inspected_by || '-',
-    },
-    {
-      title: 'Status',
-      dataIndex: 'status',
-      key: 'status',
-      width: 120,
-      render: (s) => <StatusTag status={s} />,
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 160,
-      fixed: 'right',
-      render: (_, record) => (
-        <Space size="small">
-          <Tooltip title="View Detail">
-            <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => navigate(`/warehouse/quality-inspection/${record.id}`)} />
-          </Tooltip>
-          {canRunQI && (record.status === 'draft' || record.status === 'in_progress') && (
-            <Tooltip title="Complete Inspection">
-              <Popconfirm
-                title="Complete this Quality Inspection? This will trigger putaway generation for accepted items."
-                onConfirm={() => handleCompleteQI(record.id)}
-              >
-                <Button type="link" size="small" icon={<CheckOutlined />} style={{ color: '#52c41a' }} />
-              </Popconfirm>
-            </Tooltip>
-          )}
-          {canRunQI && record.status === 'draft' && (
-            <Tooltip title="Cancel">
-              <Popconfirm title="Cancel this Quality Inspection?" onConfirm={() => handleCancelQI(record.id)} okButtonProps={{ danger: true }}>
-                <Button type="link" size="small" danger icon={<CloseCircleOutlined />} />
-              </Popconfirm>
-            </Tooltip>
-          )}
-        </Space>
+      key: "no",
+      header: "Inspection",
+      render: (r) => (
+        <div>
+          <div className="font-mono text-xs font-semibold text-ink">{r.inspection_no}</div>
+          <div className="text-[11px] text-muted">{fmtDate(r.inspection_date)}</div>
+        </div>
       ),
     },
+    {
+      key: "against",
+      header: "Against",
+      render: (r) => (
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs text-ink">{r.grn_no ?? "—"}</div>
+          <div className="truncate text-[11px] text-muted">{r.vendor_name ?? "—"}</div>
+        </div>
+      ),
+    },
+    { key: "warehouse", header: "Warehouse", hideOnNarrow: true, render: (r) => r.warehouse_name ?? "—" },
+    {
+      key: "result",
+      header: "Result",
+      render: (r) => {
+        const rate = percent(r.passed_items, r.total_items);
+        return (
+          <div className="flex items-center gap-2">
+            <Chip size="sm" variant="flat" color={r.failed_items > 0 ? "danger" : "success"}>
+              {r.passed_items}/{r.total_items} passed
+            </Chip>
+            <span className={`text-xs tabular ${rate < 100 ? "text-bad" : "text-ok"}`}>{rate}%</span>
+          </div>
+        );
+      },
+    },
+    { key: "inspector", header: "Inspector", hideOnNarrow: true, render: (r) => r.inspector_name ?? "—" },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
   ];
 
-  // --- Filter Toolbar ---
-  const toolbar = (
-    <Space style={{ marginLeft: 12 }} wrap>
-      <Select
-        placeholder="Result"
-        allowClear
-        style={{ width: 120 }}
-        value={filterResult}
-        onChange={(v) => { setFilterResult(v); setRefreshKey((k) => k + 1); }}
-        options={RESULT_FILTER_OPTIONS}
-      />
-      <Select
-        placeholder="Status"
-        allowClear
-        style={{ width: 140 }}
-        value={filterStatus}
-        onChange={(v) => { setFilterStatus(v); setRefreshKey((k) => k + 1); }}
-        options={QI_STATUSES}
-      />
-      <DatePicker.RangePicker
-        value={filterDateRange}
-        onChange={(dates) => { setFilterDateRange(dates); setRefreshKey((k) => k + 1); }}
-        format={DATE_FORMAT}
-        style={{ width: 240 }}
-        placeholder={['From Date', 'To Date']}
-      />
-    </Space>
-  );
-
   return (
-    <div>
-      <PageHeader title="Quality Inspection" subtitle="Manage inbound quality inspections">
-        <Space>
-          {canRunQI && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/warehouse/quality-inspection/new')}>
-              Create QI
-            </Button>
-          )}
-        </Space>
-      </PageHeader>
-
-      <DataTable
-        key={refreshKey}
-        columns={columns}
-        fetchFunction={fetchQIs}
-        rowKey="id"
-        searchPlaceholder="Search by QI number, GRN number..."
-        exportFileName="quality_inspections"
-        toolbar={toolbar}
-        scroll={{ x: 1200 }}
-      />
-    </div>
+    <DocumentList<Inspection>
+      title={title}
+      queryKey={`wh-inspections-${type}`}
+      fetch={(p) => listInspections({ ...p, ...({ inspection_type: type } as object) })}
+      extraParams={{ inspection_type: type }}
+      columns={columns}
+      keyOf={(r) => r.id}
+      searchIn={(r) => [r.inspection_no, r.grn_no, r.vendor_name, r.inspector_name]}
+      searchPlaceholder="Search inspection, GRN or vendor…"
+      statuses={STATUSES}
+      createTo="new"
+      createLabel="New inspection"
+      createPermission="grn.qc"
+      onRowClick={(r) => nav(String(r.id))}
+      empty="No inspections match these filters."
+      kpis={(rows) => [
+        { label: "In progress", value: rows.filter((r) => r.status === "IN_PROGRESS").length, tone: "text-warn" },
+        { label: "Completed", value: rows.filter((r) => r.status === "COMPLETED").length },
+        { label: "Failed lines", value: rows.reduce((s, r) => s + r.failed_items, 0), tone: "text-bad" },
+        {
+          label: "Pass rate",
+          value: `${percent(
+            rows.reduce((s, r) => s + r.passed_items, 0),
+            rows.reduce((s, r) => s + r.total_items, 0),
+          )}%`,
+        },
+      ]}
+      renderCard={(r) => (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono text-xs font-semibold text-ink">{r.inspection_no}</span>
+            <StatusPill status={r.status} />
+          </div>
+          <div className="truncate text-sm text-body">{r.grn_no ?? "—"} · {r.vendor_name ?? "—"}</div>
+          <div className="text-[11px] text-muted">
+            {r.passed_items}/{r.total_items} passed
+            {r.failed_items > 0 && <span className="font-semibold text-bad"> · {r.failed_items} failed</span>}
+          </div>
+        </div>
+      )}
+    />
   );
-};
-
-export default QualityInspection;
-
-
+}

@@ -1,780 +1,497 @@
-// @ts-nocheck
-import React, { useState, useEffect, useCallback } from 'react';
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Chip } from "@heroui/react";
+import { ArrowLeft, Plus, Trash2 } from "lucide-react";
+import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import { ConfirmModal, ErrorBanner } from "../components/Feedback";
+import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
+import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { Lookup } from "../components/Lookup";
+import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import {
-  Button, Form, Input, InputNumber, Select, Space, DatePicker,
-  message, Row, Col, Table, Card, Descriptions, Divider,
-  Typography, Tooltip, Tag, Spin, Popconfirm, Alert, Badge,
-} from 'antd';
-import {
-  ArrowLeftOutlined, SaveOutlined, CheckOutlined,
-  CloseCircleOutlined, EditOutlined, ExperimentOutlined,
-  WarningOutlined,
-} from '@ant-design/icons';
-import dayjs from 'dayjs';
-import { useParams, useNavigate } from 'react-router-dom';
-import PageHeader from '../components/PageHeader';
-import StatusTag from '../components/StatusTag';
-import api from '../config/api';
-import {
-  formatDate, formatNumber, getErrorMessage, formatDateForAPI,
-  formatDateTime,
-} from '../utils/helpers';
-import { DATE_FORMAT } from '../utils/constants';
+  completeInspection, createInspection, employeeOptions, getInspection, getReceipt, grnOptions,
+  updateInspection, warehouseOptions,
+} from "../api";
+import { fmtQty, num, percent, today } from "../format";
+import type { Inspection, InspectionItemWrite, InspectionParameter, InspectionWrite } from "../types";
 
-const { TextArea } = Input;
-const { Text } = Typography;
+/**
+ * Inspect a receipt line by line.
+ *
+ * Picking the GRN pulls its lines in with their received quantities — an inspection
+ * typed from scratch is how quantities came to disagree with the receipt they were
+ * supposedly inspecting.
+ *
+ * `result` is derived from the split, not chosen: all accepted is a pass, all
+ * rejected is a fail, anything between is partial. A per-line parameter table
+ * (`parameters` JSON) records what was actually measured, because "failed" without a
+ * reading is not something a vendor can be held to.
+ */
 
-const INSPECTION_TYPES = [
-  { label: 'Full Inspection', value: 'full' },
-  { label: 'Sample Inspection', value: 'sample' },
-  { label: 'Visual Inspection', value: 'visual' },
-  { label: 'Measurement Based', value: 'measurement' },
+const RESULTS = [
+  { value: "PENDING", label: "Pending" },
+  { value: "PASSED", label: "Passed" },
+  { value: "FAILED", label: "Failed" },
+  { value: "PARTIAL", label: "Partial" },
 ];
 
-const QI_RESULT_OPTIONS = [
-  { label: 'Accepted', value: 'accepted' },
-  { label: 'Rejected', value: 'rejected' },
-  { label: 'Hold', value: 'hold' },
-];
-
-const OVERALL_RESULT_OPTIONS = [
-  { label: 'Pass', value: 'pass' },
-  { label: 'Fail', value: 'fail' },
-  { label: 'Partial', value: 'partial' },
-];
-
-const resultColors = {
-  accepted: '#52c41a',
-  pass: '#52c41a',
-  rejected: '#f5222d',
-  fail: '#f5222d',
-  hold: '#fa8c16',
-  partial: '#fa8c16',
+const deriveResult = (inspected: number, accepted: number): InspectionItemWrite["result"] => {
+  if (inspected <= 0) return "PENDING";
+  if (accepted >= inspected) return "PASSED";
+  if (accepted <= 0) return "FAILED";
+  return "PARTIAL";
 };
 
-const QI_STATUS_FLOW = ['draft', 'in_progress', 'completed'];
-
-const QualityInspectionForm = () => {
+export default function QualityInspectionForm({
+  type = "INCOMING",
+}: {
+  type?: "INCOMING" | "OUTGOING";
+}) {
   const { id } = useParams();
-  const navigate = useNavigate();
-  const isNew = !id || id === 'new';
+  const nav = useNavigate();
+  const qc = useQueryClient();
+  const editing = !!id && id !== "new";
 
-  const [form] = Form.useForm();
-  const [loading, setLoading] = useState(!isNew);
-  const [submitting, setSubmitting] = useState(false);
-  const [qi, setQi] = useState(null);
-  const [editMode, setEditMode] = useState(isNew);
+  const [form, setForm] = useState<InspectionWrite>({
+    inspection_date: today(),
+    receipt_id: null,
+    warehouse_id: null,
+    inspection_type: type,
+    inspector_id: null,
+    remarks: "",
+    items: [],
+  });
+  const [confirming, setConfirming] = useState(false);
+  const [paramsFor, setParamsFor] = useState<number | null>(null);
 
-  // Items
-  const [qiItems, setQiItems] = useState([]);
+  const { data: doc, isLoading } = useQuery({
+    queryKey: ["wh-inspection", id],
+    queryFn: () => getInspection(Number(id)),
+    enabled: editing,
+  });
 
-  // Lookups
-  const [grnOptions, setGrnOptions] = useState([]);
-  const [selectedGRN, setSelectedGRN] = useState(null);
-  const [loadingGRN, setLoadingGRN] = useState(false);
-
-  // Overall result (auto-calculated)
-  const [overallResult, setOverallResult] = useState(null);
-
-  // --- Load GRN options ---
-  const loadGRNOptions = useCallback(async (search = '') => {
-    try {
-      // Bug fix BUG_0062/0082: include both pending_qi and qi_in_progress AND
-      // include draft so newly-created GRNs (which haven't been transitioned)
-      // also show up. Otherwise users create a GRN, walk to QI, and find nothing.
-      const res = await api.get('/warehouse/grn', {
-        params: { page_size: 100, search, status: 'draft,pending_qi,qi_in_progress' },
-      });
-      const data = res.data;
-      const items = data.items || data.data || data || [];
-      setGrnOptions(
-        items.map((grn) => ({
-          label: `${grn.grn_number} - ${grn.vendor_name || 'Unknown Vendor'} (${formatDate(grn.grn_date)})`,
-          value: grn.id,
-          grn,
-        }))
-      );
-      if (items.length === 0) {
-        message.info('No GRNs awaiting inspection. Create a GRN first.');
-      }
-    } catch (e) {
-      message.error('Failed to load GRNs. ' + (e?.response?.data?.detail || e?.message || ''));
-    }
-  }, []);
-
-  // --- Init ---
   useEffect(() => {
-    if (!isNew) {
-      fetchQI();
-    } else {
-      loadGRNOptions();
-      form.setFieldsValue({
-        inspection_date: dayjs(),
-        inspection_type: 'full',
-      });
-    }
-  }, [id]);
-
-  // --- Fetch existing QI ---
-  const fetchQI = async () => {
-    setLoading(true);
-    try {
-      const res = await api.get(`/warehouse/quality-inspections/${id}`);
-      const data = res.data;
-      setQi(data);
-      setOverallResult(data.overall_result || null);
-      form.setFieldsValue({
-        ...data,
-        inspection_date: data.inspection_date ? dayjs(data.inspection_date) : null,
-      });
-      if (data.grn_id) {
-        setSelectedGRN({
-          grn_number: data.grn_number || '',
-          vendor_name: data.vendor_name || '',
-          grn_date: data.grn_date || '',
-        });
-      }
-      const items = (data.items || []).map((item, idx) => ({
-        key: item.id || Date.now() + idx,
-        grn_item_id: item.grn_item_id,
-        item_id: item.item_id,
-        item_name: item.item_name || '',
-        item_code: item.item_code || '',
-        batch_number: item.batch_number || '',
-        received_qty: item.received_qty || 0,
-        inspected_qty: item.inspected_qty || 0,
-        accepted_qty: item.accepted_qty || 0,
-        rejected_qty: item.rejected_qty || 0,
-        hold_qty: item.hold_qty || 0,
-        result: item.result || 'accepted',
-        rejection_reason: item.rejection_reason || '',
-        remarks: item.remarks || '',
-      }));
-      setQiItems(items);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-      navigate('/warehouse/quality-inspection');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // --- GRN Selection ---
-  const handleGRNSelect = async (grnId) => {
-    if (!grnId) {
-      setSelectedGRN(null);
-      setQiItems([]);
-      setOverallResult(null);
-      return;
-    }
-    setLoadingGRN(true);
-    try {
-      const res = await api.get(`/warehouse/grn/${grnId}`);
-      const grnData = res.data;
-      setSelectedGRN(grnData);
-
-      const items = (grnData.items || []).map((item, idx) => ({
-        key: item.id || Date.now() + idx,
-        grn_item_id: item.id,
-        item_id: item.item_id,
-        item_name: item.item_name || '',
-        item_code: item.item_code || '',
-        batch_number: item.batch_number || '',
-        received_qty: item.received_qty || 0,
-        inspected_qty: item.received_qty || 0,
-        accepted_qty: item.accepted_qty || 0,
-        rejected_qty: item.rejected_qty || 0,
-        hold_qty: (item.received_qty || 0) - (item.accepted_qty || 0) - (item.rejected_qty || 0),
-        result: 'accepted',
-        rejection_reason: '',
-        remarks: '',
-      }));
-      setQiItems(items);
-      calculateOverallResult(items);
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    } finally {
-      setLoadingGRN(false);
-    }
-  };
-
-  // --- Item Updates ---
-  const updateQiItem = (key, field, value) => {
-    setQiItems((prev) => {
-      const updated = prev.map((item) => {
-        if (item.key !== key) return item;
-        const newItem = { ...item, [field]: value };
-
-        // Auto-calculate accepted = inspected - rejected - hold
-        if (field === 'inspected_qty' || field === 'rejected_qty' || field === 'hold_qty') {
-          const inspected = field === 'inspected_qty' ? (value || 0) : (newItem.inspected_qty || 0);
-          const rejected = field === 'rejected_qty' ? (value || 0) : (newItem.rejected_qty || 0);
-          const hold = field === 'hold_qty' ? (value || 0) : (newItem.hold_qty || 0);
-          newItem.accepted_qty = Math.max(0, inspected - rejected - hold);
-        }
-
-        // Auto-set result based on quantities
-        if (field === 'rejected_qty' || field === 'hold_qty' || field === 'inspected_qty') {
-          if (newItem.rejected_qty > 0 && newItem.accepted_qty === 0) {
-            newItem.result = 'rejected';
-          } else if (newItem.hold_qty > 0) {
-            newItem.result = 'hold';
-          } else {
-            newItem.result = 'accepted';
-          }
-        }
-
-        return newItem;
-      });
-      calculateOverallResult(updated);
-      return updated;
+    if (!doc) return;
+    setForm({
+      inspection_date: doc.inspection_date,
+      receipt_id: doc.receipt_id ?? null,
+      warehouse_id: doc.warehouse_id ?? null,
+      inspection_type: doc.inspection_type,
+      inspector_id: doc.inspector_id ?? null,
+      remarks: doc.remarks ?? "",
+      items: (doc.items ?? []).map((l) => ({
+        id: l.id,
+        receipt_item_id: l.receipt_item_id,
+        item_id: l.item_id,
+        batch_no: l.batch_no,
+        inspected_qty: num(l.inspected_qty),
+        accepted_qty: num(l.accepted_qty),
+        rejected_qty: num(l.rejected_qty),
+        parameters: l.parameters ?? [],
+        result: l.result,
+        defect_type: l.defect_type,
+        remarks: l.remarks,
+      })),
     });
-  };
+  }, [doc]);
 
-  const calculateOverallResult = (items) => {
-    if (!items || items.length === 0) {
-      setOverallResult(null);
-      return;
-    }
-    const allAccepted = items.every((i) => i.result === 'accepted');
-    const allRejected = items.every((i) => i.result === 'rejected');
-
-    if (allAccepted) {
-      setOverallResult('pass');
-    } else if (allRejected) {
-      setOverallResult('fail');
-    } else {
-      setOverallResult('partial');
-    }
-  };
-
-  // --- Submit ---
-  const handleSubmit = async (submitAction = 'draft') => {
-    try {
-      const values = await form.validateFields();
-      if (qiItems.length === 0) {
-        message.error('No items to inspect. Please select a GRN.');
-        return;
-      }
-      setSubmitting(true);
-
-      let status = 'draft';
-      if (submitAction === 'start') status = 'in_progress';
-      if (submitAction === 'complete') status = 'completed';
-
-      const payload = {
-        grn_id: values.grn_id,
-        inspection_type: values.inspection_type,
-        inspection_date: formatDateForAPI(values.inspection_date),
-        overall_result: overallResult,
-        status,
-        remarks: values.remarks || '',
-        items: qiItems.map((item) => ({
-          grn_item_id: item.grn_item_id,
-          item_id: item.item_id,
-          inspected_qty: item.inspected_qty,
-          accepted_qty: item.accepted_qty,
-          rejected_qty: item.rejected_qty,
-          hold_qty: item.hold_qty || 0,
-          result: item.result,
-          rejection_reason: item.rejection_reason || '',
-          remarks: item.remarks || '',
+  /** Pulling the receipt in seeds the lines from what was actually received. */
+  const pullReceipt = useMutation({
+    mutationFn: (receiptId: number) => getReceipt(receiptId),
+    onSuccess: (receipt) =>
+      setForm((f) => ({
+        ...f,
+        warehouse_id: receipt.warehouse_id,
+        items: (receipt.items ?? []).map((l) => ({
+          receipt_item_id: l.id,
+          item_id: l.item_id,
+          batch_no: l.batch_no,
+          inspected_qty: num(l.received_qty),
+          accepted_qty: num(l.received_qty),
+          rejected_qty: 0,
+          parameters: [],
+          result: "PASSED" as const,
+          defect_type: null,
+          remarks: null,
         })),
-      };
+      })),
+  });
 
-      if (isNew) {
-        const res = await api.post('/warehouse/quality-inspections', payload);
-        message.success('Quality Inspection created successfully');
-        if (submitAction === 'complete') {
-          message.info('Putaway will be auto-generated for accepted items.');
-        }
-        const newId = res.data.id || res.data.data?.id;
-        if (newId) {
-          navigate(`/warehouse/quality-inspection/${newId}`);
-        } else {
-          navigate('/warehouse/quality-inspection');
-        }
-      } else {
-        await api.put(`/warehouse/quality-inspections/${id}`, payload);
-        message.success('Quality Inspection updated');
-        if (submitAction === 'complete') {
-          message.info('Putaway will be auto-generated for accepted items.');
-        }
-        setEditMode(false);
-        fetchQI();
-      }
-    } catch (err) {
-      if (err.errorFields) return;
-      message.error(getErrorMessage(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const savedLine = (i: number) => doc?.items?.[i];
 
-  // --- Actions on existing QI ---
-  const handleCompleteQI = async () => {
-    try {
-      await api.put(`/warehouse/quality-inspections/${id}/complete`);
-      message.success('Quality Inspection completed. Putaway will be generated.');
-      fetchQI();
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
+  const set = <K extends keyof InspectionWrite>(key: K, value: InspectionWrite[K]) =>
+    setForm((f) => ({ ...f, [key]: value }));
 
-  const handleCancelQI = async () => {
-    try {
-      await api.put(`/warehouse/quality-inspections/${id}/cancel`);
-      message.success('Quality Inspection cancelled');
-      fetchQI();
-    } catch (err) {
-      message.error(getErrorMessage(err));
-    }
-  };
+  const patchLine = (index: number, patch: Partial<InspectionItemWrite>) =>
+    setForm((f) => ({
+      ...f,
+      items: f.items.map((l, i) => {
+        if (i !== index) return l;
+        const next = { ...l, ...patch };
+        const inspected = num(next.inspected_qty);
+        const accepted = Math.min(num(next.accepted_qty), inspected);
+        return {
+          ...next,
+          accepted_qty: accepted,
+          rejected_qty: Math.max(inspected - accepted, 0),
+          // An explicitly chosen result wins; otherwise it follows the split.
+          result: patch.result ?? deriveResult(inspected, accepted),
+        };
+      }),
+    }));
 
-  // --- Overall result display ---
-  const getOverallResultDisplay = () => {
-    if (!overallResult) return null;
-    const config = {
-      pass: { color: '#52c41a', label: 'PASS - All items accepted', icon: <CheckOutlined /> },
-      fail: { color: '#f5222d', label: 'FAIL - All items rejected', icon: <CloseCircleOutlined /> },
-      partial: { color: '#fa8c16', label: 'PARTIAL - Mixed results', icon: <WarningOutlined /> },
-    };
-    const c = config[overallResult];
-    return (
-      <Alert
-        message={<Text strong style={{ color: c.color }}>{c.label}</Text>}
-        type={overallResult === 'pass' ? 'success' : overallResult === 'fail' ? 'error' : 'warning'}
-        showIcon
-        icon={c.icon}
-        style={{ marginBottom: 16 }}
-      />
-    );
-  };
+  const totals = useMemo(
+    () => ({
+      lines: form.items.length,
+      passed: form.items.filter((l) => l.result === "PASSED").length,
+      failed: form.items.filter((l) => l.result === "FAILED").length,
+      inspected: form.items.reduce((s, l) => s + num(l.inspected_qty), 0),
+      rejected: form.items.reduce((s, l) => s + num(l.rejected_qty), 0),
+    }),
+    [form.items],
+  );
 
-  // --- Loading state ---
-  if (loading) {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'center', padding: 100 }}>
-        <Spin size="large" />
-      </div>
-    );
-  }
+  const locked = !!doc && doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS";
 
-  // ============================
-  // VIEW MODE (existing QI)
-  // ============================
-  if (!isNew && qi && !editMode) {
-    const qiItemsList = qi.items || [];
-    const statusIdx = QI_STATUS_FLOW.indexOf(qi.status);
+  const save = useMutation({
+    mutationFn: () => (editing ? updateInspection(Number(id), form) : createInspection(form)),
+    onSuccess: (saved: Inspection) => {
+      qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
+      qc.invalidateQueries({ queryKey: ["wh-inspection", String(saved.id)] });
+      if (!editing) nav(`../${saved.id}`, { replace: true });
+    },
+  });
 
-    return (
-      <div>
-        <PageHeader title={qi.qi_number || `QI #${id}`} subtitle="Quality Inspection Detail">
-          <Space>
-            {(qi.status === 'draft' || qi.status === 'in_progress') && (
-              <>
-                <Button icon={<EditOutlined />} onClick={() => { setEditMode(true); loadGRNOptions(); }}>
-                  Edit
-                </Button>
-                <Popconfirm
-                  title="Complete this QI? Putaway will be auto-generated for accepted items."
-                  onConfirm={handleCompleteQI}
-                >
-                  <Button type="primary" icon={<CheckOutlined />}>Complete &amp; Generate Putaway</Button>
-                </Popconfirm>
-              </>
-            )}
-            {qi.status === 'draft' && (
-              <Popconfirm title="Cancel this Quality Inspection?" onConfirm={handleCancelQI} okButtonProps={{ danger: true }}>
-                <Button danger icon={<CloseCircleOutlined />}>Cancel</Button>
-              </Popconfirm>
-            )}
-            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/warehouse/quality-inspection')}>Back</Button>
-          </Space>
-        </PageHeader>
+  const complete = useMutation({
+    mutationFn: () => completeInspection(Number(id)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["wh-inspection", id] });
+      qc.invalidateQueries({ queryKey: ["wh-receipts"] });
+      setConfirming(false);
+    },
+  });
 
-        {/* Status Flow */}
-        <Card style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {QI_STATUS_FLOW.map((s, idx) => {
-              const isCurrent = s === qi.status;
-              const isPast = idx < statusIdx;
-              return (
-                <Tag
-                  key={s}
-                  color={qi.status === 'cancelled' ? 'default' : isCurrent ? 'blue' : isPast ? 'green' : 'default'}
-                  style={{ padding: '4px 12px', fontSize: 13 }}
-                >
-                  {s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}
-                </Tag>
-              );
-            })}
-            {qi.status === 'cancelled' && (
-              <Tag color="red" style={{ padding: '4px 12px', fontSize: 13 }}>Cancelled</Tag>
-            )}
+  const columns: LineColumn<InspectionItemWrite>[] = [
+    {
+      key: "item",
+      header: "Item",
+      render: (l, i) => {
+        const saved = savedLine(i);
+        return (
+          <div className="min-w-0">
+            <div className="truncate font-mono text-xs font-semibold text-ink">
+              {saved?.item_code ?? `Item ${l.item_id}`}
+            </div>
+            <div className="truncate text-xs text-muted">
+              {saved?.item_name ?? "—"}
+              {l.batch_no ? ` · batch ${l.batch_no}` : ""}
+            </div>
           </div>
-        </Card>
-
-        <Card style={{ marginBottom: 16 }}>
-          <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 3 }}>
-            <Descriptions.Item label="QI Number"><Text strong>{qi.qi_number}</Text></Descriptions.Item>
-            <Descriptions.Item label="Status"><StatusTag status={qi.status} /></Descriptions.Item>
-            <Descriptions.Item label="Overall Result">
-              {qi.overall_result ? (
-                <Tag
-                  style={{
-                    color: '#fff',
-                    backgroundColor: resultColors[qi.overall_result] || '#8c8c8c',
-                    borderColor: resultColors[qi.overall_result] || '#8c8c8c',
-                  }}
-                >
-                  {qi.overall_result.toUpperCase()}
-                </Tag>
-              ) : '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="GRN Reference">{qi.grn_number || '-'}</Descriptions.Item>
-            <Descriptions.Item label="Inspection Date">{formatDate(qi.inspection_date)}</Descriptions.Item>
-            <Descriptions.Item label="Inspection Type">
-              <Tag>{qi.inspection_type || '-'}</Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="Inspected By">{qi.inspected_by_name || '-'}</Descriptions.Item>
-            <Descriptions.Item label="Created At">{formatDateTime(qi.created_at)}</Descriptions.Item>
-            <Descriptions.Item label="Completed At">{qi.completed_at ? formatDateTime(qi.completed_at) : '-'}</Descriptions.Item>
-            <Descriptions.Item label="Remarks" span={3}>{qi.remarks || '-'}</Descriptions.Item>
-          </Descriptions>
-        </Card>
-
-        <Card>
-          <Divider orientation="left">
-            <Space>
-              <ExperimentOutlined />
-              Inspection Items
-              <Badge count={qiItemsList.length} style={{ backgroundColor: '#eb2f96' }} />
-            </Space>
-          </Divider>
-          <Table
-            dataSource={qiItemsList}
-            rowKey={(r) => r.id || r.item_id}
-            size="small"
-            pagination={false}
-            scroll={{ x: 'max-content' }}
-            columns={[
-              { title: '#', width: 40, render: (_, __, idx) => idx + 1 },
-              { title: 'Item Name', dataIndex: 'item_name', width: 200, ellipsis: true },
-              { title: 'Batch', dataIndex: 'batch_number', width: 90, render: (v) => v || '-' },
-              { title: 'Inspected', dataIndex: 'inspected_qty', width: 100, align: 'right', render: (v) => formatNumber(v) },
-              {
-                title: 'Accepted', dataIndex: 'accepted_qty', width: 100, align: 'right',
-                render: (v) => <Text style={{ color: '#52c41a', fontWeight: 600 }}>{formatNumber(v)}</Text>,
-              },
-              {
-                title: 'Rejected', dataIndex: 'rejected_qty', width: 100, align: 'right',
-                render: (v) => <Text style={{ color: v > 0 ? '#f5222d' : undefined, fontWeight: v > 0 ? 600 : 400 }}>{formatNumber(v)}</Text>,
-              },
-              {
-                title: 'Hold', dataIndex: 'hold_qty', width: 80, align: 'right',
-                render: (v) => <Text style={{ color: v > 0 ? '#fa8c16' : undefined, fontWeight: v > 0 ? 600 : 400 }}>{formatNumber(v)}</Text>,
-              },
-              {
-                title: 'Result', dataIndex: 'result', width: 110,
-                render: (v) => {
-                  const color = resultColors[v] || '#8c8c8c';
-                  const label = v ? v.charAt(0).toUpperCase() + v.slice(1) : '-';
-                  return <Tag style={{ color: '#fff', backgroundColor: color, borderColor: color }}>{label}</Tag>;
-                },
-              },
-              { title: 'Rejection Reason', dataIndex: 'rejection_reason', width: 180, render: (v) => v || '-' },
-              { title: 'Remarks', dataIndex: 'remarks', width: 150, render: (v) => v || '-' },
-            ]}
-            summary={() => {
-              const totalInspected = qiItemsList.reduce((s, i) => s + (i.inspected_qty || 0), 0);
-              const totalAccepted = qiItemsList.reduce((s, i) => s + (i.accepted_qty || 0), 0);
-              const totalRejected = qiItemsList.reduce((s, i) => s + (i.rejected_qty || 0), 0);
-              const totalHold = qiItemsList.reduce((s, i) => s + (i.hold_qty || 0), 0);
-              return (
-                <Table.Summary>
-                  <Table.Summary.Row>
-                    <Table.Summary.Cell colSpan={3} align="right"><Text strong>Totals:</Text></Table.Summary.Cell>
-                    <Table.Summary.Cell align="right"><Text strong>{formatNumber(totalInspected)}</Text></Table.Summary.Cell>
-                    <Table.Summary.Cell align="right"><Text strong style={{ color: '#52c41a' }}>{formatNumber(totalAccepted)}</Text></Table.Summary.Cell>
-                    <Table.Summary.Cell align="right"><Text strong style={{ color: '#f5222d' }}>{formatNumber(totalRejected)}</Text></Table.Summary.Cell>
-                    <Table.Summary.Cell align="right"><Text strong style={{ color: '#fa8c16' }}>{formatNumber(totalHold)}</Text></Table.Summary.Cell>
-                    <Table.Summary.Cell colSpan={3} />
-                  </Table.Summary.Row>
-                </Table.Summary>
-              );
-            }}
-          />
-        </Card>
-      </div>
-    );
-  }
-
-  // ============================
-  // CREATE / EDIT MODE
-  // ============================
-  const qiItemColumns = [
-    { title: '#', width: 35, render: (_, __, idx) => idx + 1 },
-    {
-      title: 'Item', dataIndex: 'item_name', width: 180, ellipsis: true,
-      render: (v, r) => (
-        <Tooltip title={`${r.item_code || ''} - ${v}`}>
-          <Text ellipsis style={{ maxWidth: 160 }}>{v}</Text>
-        </Tooltip>
-      ),
+        );
+      },
     },
     {
-      title: 'Batch', dataIndex: 'batch_number', width: 90,
-      render: (v) => v || '-',
-    },
-    {
-      title: 'Received', dataIndex: 'received_qty', width: 80, align: 'center',
-      render: (v) => <Text type="secondary">{formatNumber(v)}</Text>,
-    },
-    {
-      title: 'Inspected', dataIndex: 'inspected_qty', width: 95,
-      render: (val, record) => (
-        <InputNumber
-          min={0}
-          max={record.received_qty}
-          value={val}
-          onChange={(v) => updateQiItem(record.key, 'inspected_qty', v || 0)}
-          style={{ width: '100%' }}
-          size="small"
+      key: "inspected",
+      header: "Inspected",
+      numeric: true,
+      width: "w-28",
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Inspected quantity, line ${i + 1}`}
+          value={l.inspected_qty}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { inspected_qty: v })}
         />
       ),
     },
     {
-      title: 'Accepted', dataIndex: 'accepted_qty', width: 85, align: 'center',
-      render: (v) => <Text style={{ color: '#52c41a', fontWeight: 600 }}>{formatNumber(v)}</Text>,
-    },
-    {
-      title: 'Rejected', dataIndex: 'rejected_qty', width: 90,
-      render: (val, record) => (
-        <InputNumber
-          min={0}
-          max={record.inspected_qty}
-          value={val}
-          onChange={(v) => updateQiItem(record.key, 'rejected_qty', v || 0)}
-          style={{ width: '100%' }}
-          size="small"
-          status={val > 0 ? 'error' : undefined}
+      key: "accepted",
+      header: "Accepted",
+      numeric: true,
+      width: "w-28",
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Accepted quantity, line ${i + 1}`}
+          value={l.accepted_qty}
+          max={num(l.inspected_qty)}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { accepted_qty: v })}
         />
       ),
     },
     {
-      title: 'Hold', dataIndex: 'hold_qty', width: 80,
-      render: (val, record) => (
-        <InputNumber
-          min={0}
-          max={(record.inspected_qty || 0) - (record.rejected_qty || 0)}
-          value={val}
-          onChange={(v) => updateQiItem(record.key, 'hold_qty', v || 0)}
-          style={{ width: '100%' }}
-          size="small"
-          status={val > 0 ? 'warning' : undefined}
-        />
+      key: "rejected",
+      header: "Rejected",
+      numeric: true,
+      width: "w-24",
+      render: (l) => (
+        <span className={`tabular ${num(l.rejected_qty) > 0 ? "font-semibold text-bad" : "text-muted"}`}>
+          {fmtQty(l.rejected_qty)}
+        </span>
       ),
     },
     {
-      title: 'Result', dataIndex: 'result', width: 120,
-      render: (val, record) => (
+      key: "result",
+      header: "Result",
+      width: "w-36",
+      render: (l, i) => (
         <Select
-          value={val}
-          onChange={(v) => updateQiItem(record.key, 'result', v)}
-          options={QI_RESULT_OPTIONS}
-          size="small"
-          style={{ width: '100%' }}
+          value={l.result}
+          onChange={(v) => patchLine(i, { result: v as InspectionItemWrite["result"] })}
+          options={RESULTS}
+          isDisabled={locked}
+          ariaLabel={`Result, line ${i + 1}`}
         />
       ),
     },
     {
-      title: 'Rejection Reason', dataIndex: 'rejection_reason', width: 160,
-      render: (val, record) => (
-        <Input
-          value={val}
-          onChange={(e) => updateQiItem(record.key, 'rejection_reason', e.target.value)}
-          size="small"
-          placeholder={record.result === 'rejected' ? 'Reason required...' : 'Optional'}
-          disabled={record.result === 'accepted'}
+      key: "defect",
+      header: "Defect",
+      width: "w-36",
+      hideOnNarrow: true,
+      render: (l, i) => (
+        <TextInput
+          ariaLabel={`Defect, line ${i + 1}`}
+          value={l.defect_type}
+          disabled={locked || num(l.rejected_qty) === 0}
+          placeholder={num(l.rejected_qty) > 0 ? "Required" : "—"}
+          onChange={(v) => patchLine(i, { defect_type: v })}
         />
       ),
     },
     {
-      title: 'Remarks', dataIndex: 'remarks', width: 140,
-      render: (val, record) => (
-        <Input
-          value={val}
-          onChange={(e) => updateQiItem(record.key, 'remarks', e.target.value)}
-          size="small"
-          placeholder="Remarks"
-        />
+      key: "params",
+      header: "Readings",
+      width: "w-28",
+      hideOnNarrow: true,
+      render: (l, i) => (
+        <Button variant="ghost" onClick={() => setParamsFor(i)}>
+          {l.parameters?.length ? `${l.parameters.length}` : "Add"}
+        </Button>
       ),
     },
   ];
 
+  if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
+
+  const params = paramsFor === null ? [] : form.items[paramsFor]?.parameters ?? [];
+  const setParams = (rows: InspectionParameter[]) =>
+    paramsFor !== null && patchLine(paramsFor, { parameters: rows });
+
   return (
     <div>
       <PageHeader
-        title={isNew ? 'Create Quality Inspection' : `Edit ${qi?.qi_number || ''}`}
-        subtitle={isNew ? 'Create a new quality inspection' : 'Edit quality inspection'}
-      >
-        <Space>
-          <Button onClick={() => navigate('/warehouse/quality-inspection')} icon={<ArrowLeftOutlined />}>Back</Button>
-          {!isNew && <Button onClick={() => setEditMode(false)}>Cancel Edit</Button>}
-        </Space>
-      </PageHeader>
-
-      <Card>
-        <Form form={form} layout="vertical">
-          <Row gutter={16}>
-            <Col xs={24} sm={10}>
-              <Form.Item name="grn_id" label="Select GRN" rules={[{ required: true, message: 'Please select a GRN' }]}>
-                <Select
-                  options={grnOptions}
-                  placeholder="Search and select GRN..."
-                  showSearch
-                  optionFilterProp="label"
-                  allowClear
-                  onChange={handleGRNSelect}
-                  onSearch={(v) => loadGRNOptions(v)}
-                  loading={loadingGRN}
-                  disabled={!isNew && !!qi?.grn_id}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} sm={6}>
-              <Form.Item name="inspection_date" label="Inspection Date" rules={[{ required: true, message: 'Required' }]}>
-                <DatePicker style={{ width: '100%' }} format={DATE_FORMAT} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} sm={8}>
-              <Form.Item name="inspection_type" label="Inspection Type" rules={[{ required: true, message: 'Required' }]}>
-                <Select options={INSPECTION_TYPES} placeholder="Select type" />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          {/* GRN Summary */}
-          {selectedGRN && (
-            <Card size="small" style={{ background: '#f9f9f9', marginBottom: 16 }}>
-              <Descriptions size="small" column={{ xs: 1, sm: 4 }}>
-                <Descriptions.Item label="GRN Number">{selectedGRN.grn_number || '-'}</Descriptions.Item>
-                <Descriptions.Item label="Vendor">{selectedGRN.vendor_name || '-'}</Descriptions.Item>
-                <Descriptions.Item label="GRN Date">{formatDate(selectedGRN.grn_date)}</Descriptions.Item>
-                <Descriptions.Item label="Total Qty">{formatNumber(selectedGRN.total_qty)}</Descriptions.Item>
-              </Descriptions>
-            </Card>
-          )}
-
-          <Form.Item name="remarks" label="Remarks">
-            <TextArea rows={2} placeholder="General inspection remarks..." />
-          </Form.Item>
-        </Form>
-
-        {/* Overall Result */}
-        {getOverallResultDisplay()}
-
-        {/* Items Table */}
-        {qiItems.length > 0 && (
+        eyebrow="Warehouse"
+        title={editing ? `Inspection ${doc?.inspection_no ?? ""}` : "New inspection"}
+        actions={
           <>
-            <Divider orientation="left">
-              <Space>
-                <ExperimentOutlined />
-                Inspection Items
-                <Badge count={qiItems.length} style={{ backgroundColor: '#eb2f96' }} />
-              </Space>
-            </Divider>
-            <Table
-              dataSource={qiItems}
-              columns={qiItemColumns}
-              rowKey="key"
-              pagination={false}
-              size="small"
-              scroll={{ x: 1400 }}
-              loading={loadingGRN}
-            />
-
-            {/* Summary Stats */}
-            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
-              <div style={{ width: 380 }}>
-                <Row style={{ padding: '6px 0', borderBottom: '1px solid #f0f0f0' }}>
-                  <Col span={14}><Text>Total Inspected:</Text></Col>
-                  <Col span={10} style={{ textAlign: 'right' }}>
-                    <Text strong>{formatNumber(qiItems.reduce((s, i) => s + (i.inspected_qty || 0), 0))}</Text>
-                  </Col>
-                </Row>
-                <Row style={{ padding: '6px 0', borderBottom: '1px solid #f0f0f0' }}>
-                  <Col span={14}><Text>Total Accepted:</Text></Col>
-                  <Col span={10} style={{ textAlign: 'right' }}>
-                    <Text style={{ color: '#52c41a', fontWeight: 600 }}>
-                      {formatNumber(qiItems.reduce((s, i) => s + (i.accepted_qty || 0), 0))}
-                    </Text>
-                  </Col>
-                </Row>
-                <Row style={{ padding: '6px 0', borderBottom: '1px solid #f0f0f0' }}>
-                  <Col span={14}><Text>Total Rejected:</Text></Col>
-                  <Col span={10} style={{ textAlign: 'right' }}>
-                    <Text style={{ color: '#f5222d', fontWeight: 600 }}>
-                      {formatNumber(qiItems.reduce((s, i) => s + (i.rejected_qty || 0), 0))}
-                    </Text>
-                  </Col>
-                </Row>
-                <Row style={{ padding: '6px 0', borderBottom: '1px solid #f0f0f0' }}>
-                  <Col span={14}><Text>Total On Hold:</Text></Col>
-                  <Col span={10} style={{ textAlign: 'right' }}>
-                    <Text style={{ color: '#fa8c16', fontWeight: 600 }}>
-                      {formatNumber(qiItems.reduce((s, i) => s + (i.hold_qty || 0), 0))}
-                    </Text>
-                  </Col>
-                </Row>
-                <Row style={{ padding: '8px 0', background: '#fafafa', borderRadius: 4, marginTop: 4 }}>
-                  <Col span={14}><Text strong style={{ fontSize: 15 }}>Overall Result:</Text></Col>
-                  <Col span={10} style={{ textAlign: 'right' }}>
-                    {overallResult ? (
-                      <Tag
-                        style={{
-                          color: '#fff',
-                          backgroundColor: resultColors[overallResult] || '#8c8c8c',
-                          borderColor: resultColors[overallResult] || '#8c8c8c',
-                          fontSize: 14,
-                          padding: '2px 12px',
-                        }}
-                      >
-                        {overallResult.toUpperCase()}
-                      </Tag>
-                    ) : (
-                      <Text type="secondary">-</Text>
-                    )}
-                  </Col>
-                </Row>
-              </div>
-            </div>
+            <Button variant="ghost" onClick={() => nav("..")}>
+              <ArrowLeft className="h-4 w-4" /> Back
+            </Button>
+            {!locked && (
+              <Can do="grn.qc">
+                <Button variant="subtle" onClick={() => save.mutate()} disabled={save.isPending}>
+                  {save.isPending ? "Saving…" : "Save"}
+                </Button>
+              </Can>
+            )}
+            {editing && !locked && (
+              <Can do="grn.qc">
+                <Button onClick={() => setConfirming(true)} disabled={form.items.length === 0}>
+                  Complete inspection
+                </Button>
+              </Can>
+            )}
           </>
-        )}
+        }
+      />
 
-        <Divider />
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <Button onClick={() => navigate('/warehouse/quality-inspection')}>Cancel</Button>
-          <Button icon={<SaveOutlined />} onClick={() => handleSubmit('draft')} loading={submitting}>
-            Save as Draft
-          </Button>
-          <Button onClick={() => handleSubmit('start')} loading={submitting}>
-            Start Inspection
-          </Button>
-          <Button
-            type="primary"
-            icon={<CheckOutlined />}
-            onClick={() => handleSubmit('complete')}
-            loading={submitting}
-          >
-            Complete &amp; Generate Putaway
-          </Button>
+      <ErrorBanner error={save.error ?? pullReceipt.error} />
+
+      {doc && (
+        <MetaCard title="Document">
+          <MetaRow label="Number" value={<span className="font-mono">{doc.inspection_no}</span>} />
+          <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
+          <MetaRow label="Type" value={doc.inspection_type} />
+          <MetaRow
+            label="Pass rate"
+            value={<span className="tabular">{percent(doc.passed_items, doc.total_items)}%</span>}
+          />
+        </MetaCard>
+      )}
+
+      <Section title="Inspection">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="Date">
+            <Input
+              type="date"
+              value={form.inspection_date}
+              disabled={locked}
+              onChange={(e) => set("inspection_date", e.target.value)}
+            />
+          </Field>
+          <Field label="Against GRN" hint="Pulls the received lines in.">
+            <Lookup
+              name="receipts"
+              load={grnOptions}
+              value={form.receipt_id ?? ""}
+              isDisabled={locked}
+              onChange={(v) => {
+                set("receipt_id", v === "" ? null : v);
+                if (v !== "") pullReceipt.mutate(v);
+              }}
+              placeholder="GRN"
+            />
+          </Field>
+          <Field label="Warehouse">
+            <Lookup
+              name="warehouses"
+              load={warehouseOptions}
+              value={form.warehouse_id ?? ""}
+              isDisabled={locked}
+              onChange={(v) => set("warehouse_id", v === "" ? null : v)}
+              placeholder="Warehouse"
+            />
+          </Field>
+          <Field label="Inspector">
+            <Lookup
+              name="employees"
+              load={employeeOptions}
+              value={form.inspector_id ?? ""}
+              isDisabled={locked}
+              onChange={(v) => set("inspector_id", v === "" ? null : v)}
+              placeholder="Inspector"
+            />
+          </Field>
         </div>
-      </Card>
+      </Section>
+
+      <Section title="Lines" hint="Result follows the accepted/rejected split unless you override it.">
+        <LinesEditor
+          rows={form.items}
+          columns={columns}
+          keyOf={(_, i) => i}
+          onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
+          rowTone={(l) => (l.result === "FAILED" ? "bg-bad-bg/40" : undefined)}
+          empty="Pick a GRN above to pull its lines in."
+          footer={
+            <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
+              <span className="text-muted">{totals.lines} lines</span>
+              <span className="text-ok">Passed <b className="tabular">{totals.passed}</b></span>
+              <span className={totals.failed > 0 ? "text-bad" : "text-muted"}>
+                Failed <b className="tabular">{totals.failed}</b>
+              </span>
+              <span className="text-ink">Inspected <b className="tabular">{fmtQty(totals.inspected)}</b></span>
+              <span className={totals.rejected > 0 ? "text-bad" : "text-muted"}>
+                Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
+              </span>
+            </div>
+          }
+        />
+      </Section>
+
+      {paramsFor !== null && (
+        <Section
+          title={`Readings — line ${paramsFor + 1}`}
+          hint="What was measured, and what it should have been."
+          actions={
+            <>
+              <Button
+                variant="subtle"
+                onClick={() => setParams([...params, { name: "", expected: "", observed: "", result: "PASS" }])}
+                disabled={locked}
+              >
+                <Plus className="h-4 w-4" /> Add reading
+              </Button>
+              <Button variant="ghost" onClick={() => setParamsFor(null)}>Close</Button>
+            </>
+          }
+        >
+          {params.length === 0 ? (
+            <p className="text-sm text-muted">No readings recorded for this line.</p>
+          ) : (
+            <div className="space-y-2">
+              {params.map((p, i) => (
+                <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_1fr_130px_44px]">
+                  <Input
+                    value={p.name}
+                    placeholder="Parameter"
+                    disabled={locked}
+                    onChange={(e) =>
+                      setParams(params.map((r, x) => (x === i ? { ...r, name: e.target.value } : r)))
+                    }
+                  />
+                  <Input
+                    value={p.expected ?? ""}
+                    placeholder="Expected"
+                    disabled={locked}
+                    onChange={(e) =>
+                      setParams(params.map((r, x) => (x === i ? { ...r, expected: e.target.value } : r)))
+                    }
+                  />
+                  <Input
+                    value={p.observed ?? ""}
+                    placeholder="Observed"
+                    disabled={locked}
+                    onChange={(e) =>
+                      setParams(params.map((r, x) => (x === i ? { ...r, observed: e.target.value } : r)))
+                    }
+                  />
+                  <Select
+                    value={p.result ?? "PASS"}
+                    onChange={(v) =>
+                      setParams(params.map((r, x) => (x === i ? { ...r, result: v as "PASS" | "FAIL" } : r)))
+                    }
+                    options={[{ value: "PASS", label: "Pass" }, { value: "FAIL", label: "Fail" }]}
+                    isDisabled={locked}
+                    ariaLabel={`Reading ${i + 1} result`}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove reading ${i + 1}`}
+                    disabled={locked}
+                    onClick={() => setParams(params.filter((_, x) => x !== i))}
+                    className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-muted hover:text-bad"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Section>
+      )}
+
+      <Section title="Remarks">
+        <Input value={form.remarks ?? ""} disabled={locked} onChange={(e) => set("remarks", e.target.value)} />
+      </Section>
+
+      <Section title="Evidence" hint="Test certificates, photographs of the defect.">
+        <AttachmentsPanel entityType="INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
+      </Section>
+
+      <ConfirmModal
+        isOpen={confirming}
+        title="Complete this inspection?"
+        message={
+          <>
+            The result is written back onto the GRN lines: {totals.passed} pass, {totals.failed} fail,{" "}
+            <b>{fmtQty(totals.rejected)}</b> rejected. The inspection can no longer be edited.
+            {totals.failed > 0 && (
+              <Chip size="sm" variant="flat" color="danger" className="ml-2">
+                Failed lines will block the receipt from posting in full
+              </Chip>
+            )}
+          </>
+        }
+        confirmLabel="Complete"
+        danger={totals.failed > 0}
+        busy={complete.isPending}
+        error={complete.error}
+        onConfirm={() => complete.mutate()}
+        onClose={() => setConfirming(false)}
+      />
     </div>
   );
-};
-
-export default QualityInspectionForm;
+}

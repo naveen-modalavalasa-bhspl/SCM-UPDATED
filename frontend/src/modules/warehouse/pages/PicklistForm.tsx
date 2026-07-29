@@ -1,370 +1,395 @@
-// @ts-nocheck
-import React, { useState, useCallback, useEffect } from 'react';
+import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Chip, Progress } from "@heroui/react";
+import { ArrowLeft, Check } from "lucide-react";
+import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import { ConfirmModal, ErrorBanner } from "../components/Feedback";
+import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
+import { LinesEditor, QtyInput, type LineColumn } from "../components/LinesEditor";
+import { Lookup } from "../components/Lookup";
 import {
-  Button, Form, Input, InputNumber, Select, Space, Row, Col, Table, Card,
-  Divider, Typography, Badge, message
-} from 'antd';
-import {
-  ArrowLeftOutlined, SaveOutlined, PlusOutlined,
-  MinusCircleOutlined, InboxOutlined, SendOutlined
-} from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
-import PageHeader from '../components/PageHeader';
-import ItemSelector from '../components/ItemSelector';
-import api from '../config/api';
-import { getErrorMessage } from '../utils/helpers';
+  binOptions, completePicking, createPicking, employeeOptions, getPicking, indentOptions, itemOptions,
+  pickLine, releasePicking, warehouseOptions,
+} from "../api";
+import { fmtQty, humanise, num, percent, today } from "../format";
+import type { Picking, PickingItem, PickingWrite } from "../types";
 
-const { Text } = Typography;
+/**
+ * A picklist: build it, release it, then pick it line by line.
+ *
+ * The screen is two different things depending on state, so it renders as two. A
+ * draft is a form — pick the reference and the lines. A released picklist is a work
+ * list: each line has a picked quantity and a confirm button, and each confirmation
+ * is its own request so a picker who loses signal halfway has not lost the first
+ * half of the trolley.
+ */
 
-const PICK_STRATEGIES = [
-  { label: 'FIFO', value: 'fifo' },
-  { label: 'FEFO', value: 'fefo' },
-  { label: 'LIFO', value: 'lifo' },
-  { label: 'Manual', value: 'manual' },
+const STRATEGIES = [
+  { value: "FEFO", label: "FEFO — first expiring, first out" },
+  { value: "FIFO", label: "FIFO — first in, first out" },
+  { value: "MANUAL", label: "Manual" },
 ];
 
-const PicklistForm = () => {
-  const navigate = useNavigate();
-  const [form] = Form.useForm();
-  const [submitting, setSubmitting] = useState(false);
+const REF_TYPES = [
+  { value: "INDENT", label: "Indent" },
+  { value: "ISSUE", label: "Material issue" },
+  { value: "DISPATCH", label: "Dispatch" },
+];
 
-  // Form selections and lookups
-  const [pickItems, setPickItems] = useState([]);
-  const [warehouses, setWarehouses] = useState([]);
-  const [doOptions, setDoOptions] = useState([]);
-  const [waveOptions, setWaveOptions] = useState([]);
-  const [uomOptions, setUomOptions] = useState([]);
-  const [userOptions, setUserOptions] = useState([]);
+export default function PicklistForm() {
+  const { id } = useParams();
+  const nav = useNavigate();
+  const qc = useQueryClient();
+  const editing = !!id && id !== "new";
 
-  // --- Lookups ---
-  const loadLookups = useCallback(async () => {
-    try {
-      const [whRes, uomRes, userRes, doRes, waveRes] = await Promise.allSettled([
-        api.get('/masters/warehouses', { params: { page_size: 200 } }),
-        api.get('/masters/uom', { params: { page_size: 200 } }),
-        api.get('/users/lookup', { params: { page_size: 200 } }),
-        api.get('/outbound/delivery-orders', { params: { page_size: 100 } }),
-        api.get('/outbound/wave-plans', { params: { page_size: 100 } }),
-      ]);
-      if (whRes.status === 'fulfilled') {
-        const w = whRes.value.data;
-        setWarehouses(
-          (w.items || w.data || w || []).map((i) => ({
-            label: i.name || i.warehouse_name,
-            value: i.id,
-          }))
-        );
-      }
-      if (uomRes.status === 'fulfilled') {
-        const u = uomRes.value.data;
-        setUomOptions(
-          (u.items || u.data || u || []).map((i) => ({
-            label: i.code || i.name,
-            value: i.id,
-          }))
-        );
-      }
-      if (userRes.status === 'fulfilled') {
-        const us = userRes.value.data;
-        setUserOptions(
-          (us.items || us.data || us || []).map((i) => ({
-            label: i.full_name || i.username || `${i.first_name || ''} ${i.last_name || ''}`.trim(),
-            value: i.id,
-          }))
-        );
-      }
-      if (doRes.status === 'fulfilled') {
-        const d = doRes.value.data;
-        setDoOptions(
-          (d.items || d.data || d || []).map((i) => ({
-            label: i.do_number || `DO-${i.id}`,
-            value: i.id,
-          }))
-        );
-      }
-      if (waveRes.status === 'fulfilled') {
-        const w = waveRes.value.data;
-        setWaveOptions(
-          (w.items || w.data || w || []).map((i) => ({
-            label: i.wave_number || `WAVE-${i.id}`,
-            value: i.id,
-          }))
-        );
-      }
-    } catch {
-      // silent
-    }
-  }, []);
+  const [form, setForm] = useState<PickingWrite>({
+    pick_date: today(),
+    warehouse_id: 0,
+    ref_type: "INDENT",
+    ref_id: null,
+    strategy: "FEFO",
+    assigned_to_id: null,
+    items: [],
+  });
+  const [picked, setPicked] = useState<Record<number, number>>({});
+  const [confirming, setConfirming] = useState(false);
+
+  const { data: doc, isLoading } = useQuery({
+    queryKey: ["wh-picking", id],
+    queryFn: () => getPicking(Number(id)),
+    enabled: editing,
+  });
 
   useEffect(() => {
-    loadLookups();
-    // Initialize with strategy FIFO
-    form.setFieldsValue({ pick_strategy: 'fifo' });
-  }, [loadLookups, form]);
+    if (!doc) return;
+    setPicked(Object.fromEntries((doc.items ?? []).map((l) => [l.id, num(l.picked_qty) || num(l.required_qty)])));
+  }, [doc]);
 
-  const addPickItem = () => {
-    setPickItems((prev) => [
-      ...prev,
+  const set = <K extends keyof PickingWrite>(key: K, value: PickingWrite[K]) =>
+    setForm((f) => ({ ...f, [key]: value }));
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["wh-picking", id] });
+    qc.invalidateQueries({ queryKey: ["wh-pickings"] });
+  };
+
+  const create = useMutation({
+    mutationFn: () => createPicking(form),
+    onSuccess: (saved: Picking) => {
+      qc.invalidateQueries({ queryKey: ["wh-pickings"] });
+      nav(`../${saved.id}`, { replace: true });
+    },
+  });
+
+  const release = useMutation({ mutationFn: () => releasePicking(Number(id)), onSuccess: invalidate });
+
+  const pick = useMutation({
+    mutationFn: (line: PickingItem) =>
+      pickLine(Number(id), line.id, picked[line.id] ?? num(line.required_qty), line.bin_id ?? undefined),
+    onSuccess: invalidate,
+  });
+
+  const complete = useMutation({
+    mutationFn: () => completePicking(Number(id)),
+    onSuccess: () => {
+      invalidate();
+      setConfirming(false);
+      nav("..");
+    },
+  });
+
+  /* ------------------------------------------------------------ draft form -- */
+
+  if (!editing) {
+    const draftColumns: LineColumn<PickingWrite["items"][number]>[] = [
       {
-        key: Date.now() + Math.random(),
-        item_id: null,
-        item_name: '',
-        item_code: '',
-        batch_id: null,
-        from_bin_id: null,
-        qty_to_pick: 1,
-        uom_id: null,
+        key: "item",
+        header: "Item",
+        render: (l, i) => (
+          <Lookup
+            name="items"
+            load={itemOptions}
+            value={l.item_id || ""}
+            onChange={(v) =>
+              set("items", form.items.map((r, x) => (x === i ? { ...r, item_id: v === "" ? 0 : v } : r)))
+            }
+            placeholder="Pick an item"
+          />
+        ),
       },
-    ]);
-  };
+      {
+        key: "bin",
+        header: "Bin",
+        width: "w-44",
+        render: (l, i) => (
+          <Lookup
+            name={`bins-${form.warehouse_id}`}
+            load={(s) => binOptions(form.warehouse_id, s)}
+            value={l.bin_id ?? ""}
+            isDisabled={!form.warehouse_id}
+            onChange={(v) =>
+              set("items", form.items.map((r, x) => (x === i ? { ...r, bin_id: v === "" ? null : v } : r)))
+            }
+            placeholder="Any bin"
+          />
+        ),
+      },
+      {
+        key: "qty",
+        header: "Required",
+        numeric: true,
+        width: "w-28",
+        render: (l, i) => (
+          <QtyInput
+            ariaLabel={`Required quantity, line ${i + 1}`}
+            value={l.required_qty}
+            onChange={(v) =>
+              set("items", form.items.map((r, x) => (x === i ? { ...r, required_qty: v } : r)))
+            }
+          />
+        ),
+      },
+    ];
 
-  const removePickItem = (key) => {
-    setPickItems((prev) => prev.filter((i) => i.key !== key));
-  };
-
-  const updatePickItem = (key, patch) => {
-    setPickItems((prev) => prev.map((i) => (i.key === key ? { ...i, ...patch } : i)));
-  };
-
-  const handleSubmit = async () => {
-    try {
-      const values = await form.validateFields();
-      if (!pickItems.length) {
-        message.error('Add at least one item to pick');
-        return;
-      }
-      const invalid = pickItems.find(
-        (i) => !i.item_id || !i.from_bin_id || !i.qty_to_pick || !i.uom_id
-      );
-      if (invalid) {
-        message.error('Each item needs: item, from-bin, qty, UoM');
-        return;
-      }
-      setSubmitting(true);
-      const payload = {
-        warehouse_id: values.warehouse_id,
-        pick_strategy: values.pick_strategy || 'fifo',
-        wave_id: values.wave_id || null,
-        do_id: values.do_id || null,
-        assigned_to: values.assigned_to || null,
-        items: pickItems.map((i) => ({
-          item_id: i.item_id,
-          batch_id: i.batch_id || null,
-          from_bin_id: i.from_bin_id,
-          qty_to_pick: Number(i.qty_to_pick),
-          uom_id: i.uom_id,
-        })),
-      };
-      const res = await api.post('/outbound/picking-orders', payload);
-      message.success(`Pick list ${res.data?.pick_number || ''} generated`);
-      navigate('/warehouse/picklist');
-    } catch (err) {
-      if (err?.errorFields) return;
-      message.error(getErrorMessage(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const createItemColumns = [
-    { title: '#', width: 40, render: (_, __, idx) => idx + 1 },
-    {
-      title: 'Item',
-      width: 260,
-      render: (_, row) => (
-        <ItemSelector
-          value={row.item_id}
-          onChange={(val, opt) =>
-            updatePickItem(row.key, {
-              item_id: val,
-              item_name: opt?.label || opt?.name || '',
-              item_code: opt?.code || '',
-              uom_id: opt?.default_uom_id || row.uom_id,
-            })
+    return (
+      <div>
+        <PageHeader
+          eyebrow="Warehouse"
+          title="New picklist"
+          actions={
+            <>
+              <Button variant="ghost" onClick={() => nav("..")}>
+                <ArrowLeft className="h-4 w-4" /> Back
+              </Button>
+              <Can do="issue.create">
+                <Button
+                  onClick={() => create.mutate()}
+                  disabled={create.isPending || !form.warehouse_id || form.items.length === 0}
+                >
+                  {create.isPending ? "Creating…" : "Create picklist"}
+                </Button>
+              </Can>
+            </>
           }
-          style={{ width: '100%' }}
+        />
+
+        <ErrorBanner error={create.error} />
+
+        <Section title="Picklist">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Date">
+              <Input type="date" value={form.pick_date} onChange={(e) => set("pick_date", e.target.value)} />
+            </Field>
+            <Field label="Warehouse">
+              <Lookup
+                name="warehouses"
+                load={warehouseOptions}
+                value={form.warehouse_id || ""}
+                onChange={(v) => set("warehouse_id", v === "" ? 0 : v)}
+                placeholder="Pick from"
+              />
+            </Field>
+            <Field label="For">
+              <Select
+                value={form.ref_type ?? "INDENT"}
+                onChange={(v) => set("ref_type", v)}
+                options={REF_TYPES}
+                ariaLabel="Reference type"
+              />
+            </Field>
+            <Field label="Reference">
+              <Lookup
+                name="indents"
+                load={indentOptions}
+                value={form.ref_id ?? ""}
+                onChange={(v) => set("ref_id", v === "" ? null : v)}
+                placeholder="Document"
+              />
+            </Field>
+            <Field label="Strategy" hint="FEFO is the default — expiring stock leaves first.">
+              <Select
+                value={form.strategy ?? "FEFO"}
+                onChange={(v) => set("strategy", v)}
+                options={STRATEGIES}
+                ariaLabel="Picking strategy"
+              />
+            </Field>
+            <Field label="Picker">
+              <Lookup
+                name="employees"
+                load={employeeOptions}
+                value={form.assigned_to_id ?? ""}
+                onChange={(v) => set("assigned_to_id", v === "" ? null : v)}
+                placeholder="Assign to"
+              />
+            </Field>
+          </div>
+        </Section>
+
+        <Section title="Lines" hint="Leave the bin blank to let the strategy choose it.">
+          <LinesEditor
+            rows={form.items}
+            columns={draftColumns}
+            keyOf={(_, i) => i}
+            onAdd={() => set("items", [...form.items, { item_id: 0, bin_id: null, batch_id: null, required_qty: 0 }])}
+            onRemove={(i) => set("items", form.items.filter((_, x) => x !== i))}
+            empty="Add the lines to pick."
+          />
+        </Section>
+      </div>
+    );
+  }
+
+  /* -------------------------------------------------------- released work -- */
+
+  if (isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
+  if (!doc) return <div className="py-16 text-center text-muted">Picklist not found.</div>;
+
+  const lines = doc.items ?? [];
+  const progress = percent(doc.picked_lines, doc.total_lines);
+  const working = ["RELEASED", "IN_PROGRESS"].includes(doc.status);
+
+  const workColumns: LineColumn<PickingItem>[] = [
+    {
+      key: "item",
+      header: "Item",
+      render: (l) => (
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs font-semibold text-ink">{l.item_code ?? "—"}</div>
+          <div className="truncate text-xs text-muted">{l.item_name ?? "—"}</div>
+        </div>
+      ),
+    },
+    {
+      key: "bin",
+      header: "From bin",
+      render: (l) => (
+        <div className="min-w-0">
+          <Chip size="sm" variant="flat">{l.bin_code ?? "any"}</Chip>
+          {l.batch_no && <div className="mt-0.5 truncate text-[11px] text-muted">batch {l.batch_no}</div>}
+        </div>
+      ),
+    },
+    {
+      key: "required",
+      header: "Required",
+      numeric: true,
+      width: "w-24",
+      render: (l) => (
+        <span className="tabular text-sm text-ink">{fmtQty(l.required_qty)} {l.uom_code ?? ""}</span>
+      ),
+    },
+    {
+      key: "picked",
+      header: "Picked",
+      numeric: true,
+      width: "w-28",
+      render: (l) => (
+        <QtyInput
+          ariaLabel={`Picked quantity for ${l.item_code ?? l.item_id}`}
+          value={picked[l.id] ?? num(l.picked_qty)}
+          max={num(l.required_qty)}
+          disabled={!working || l.status === "PICKED"}
+          onChange={(v) => setPicked((p) => ({ ...p, [l.id]: v }))}
         />
       ),
     },
     {
-      title: 'Batch ID',
-      width: 110,
-      render: (_, row) => (
-        <InputNumber
-          value={row.batch_id}
-          onChange={(v) => updatePickItem(row.key, { batch_id: v })}
-          placeholder="optional"
-          style={{ width: '100%' }}
-        />
-      ),
-    },
-    {
-      title: 'From Bin ID',
-      width: 120,
-      render: (_, row) => (
-        <InputNumber
-          value={row.from_bin_id}
-          onChange={(v) => updatePickItem(row.key, { from_bin_id: v })}
-          placeholder="bin id"
-          style={{ width: '100%' }}
-        />
-      ),
-    },
-    {
-      title: 'Qty',
-      width: 100,
-      render: (_, row) => (
-        <InputNumber
-          min={0.0001}
-          value={row.qty_to_pick}
-          onChange={(v) => updatePickItem(row.key, { qty_to_pick: v })}
-          style={{ width: '100%' }}
-        />
-      ),
-    },
-    {
-      title: 'UoM',
-      width: 130,
-      render: (_, row) => (
-        <Select
-          options={uomOptions}
-          value={row.uom_id}
-          onChange={(v) => updatePickItem(row.key, { uom_id: v })}
-          showSearch
-          optionFilterProp="label"
-          placeholder="UoM"
-          style={{ width: '100%' }}
-        />
-      ),
-    },
-    {
-      title: '',
-      width: 50,
-      render: (_, row) => (
-        <Button
-          type="text"
-          danger
-          icon={<MinusCircleOutlined />}
-          onClick={() => removePickItem(row.key)}
-        />
-      ),
+      key: "confirm",
+      header: "",
+      width: "w-32",
+      render: (l) =>
+        l.status === "PICKED" ? (
+          <Chip size="sm" variant="flat" color="success" startContent={<Check className="h-3 w-3" />}>
+            Picked
+          </Chip>
+        ) : (
+          <Can do="issue.issue">
+            <Button
+              variant="subtle"
+              onClick={() => pick.mutate(l)}
+              disabled={!working || pick.isPending}
+            >
+              Confirm
+            </Button>
+          </Can>
+        ),
     },
   ];
 
   return (
     <div>
-      <PageHeader 
-        title="Generate Pick List" 
-        subtitle="Configure picking settings and specify items to retrieve"
-      >
-        <Space>
-          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/warehouse/picklist')}>
-            Back
-          </Button>
-          <Button
-            type="primary"
-            icon={<SendOutlined />}
-            onClick={handleSubmit}
-            loading={submitting}
-          >
-            Generate
-          </Button>
-        </Space>
-      </PageHeader>
-
-      <Card variant="borderless" style={{ marginBottom: 16 }}>
-        <Form form={form} layout="vertical">
-          <Row gutter={16}>
-            <Col span={8}>
-              <Form.Item
-                name="warehouse_id"
-                label="Warehouse"
-                rules={[{ required: true, message: 'Required' }]}
-              >
-                <Select
-                  options={warehouses}
-                  placeholder="Select warehouse"
-                  showSearch
-                  optionFilterProp="label"
-                />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item
-                name="pick_strategy"
-                label="Pick Strategy"
-                rules={[{ required: true, message: 'Required' }]}
-              >
-                <Select options={PICK_STRATEGIES} placeholder="Strategy" />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="assigned_to" label="Assign To (Picker)">
-                <Select
-                  options={userOptions}
-                  placeholder="Select picker"
-                  showSearch
-                  optionFilterProp="label"
-                  allowClear
-                />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="do_id" label="Delivery Order (optional)">
-                <Select
-                  options={doOptions}
-                  placeholder="Select DO"
-                  showSearch
-                  optionFilterProp="label"
-                  allowClear
-                />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="wave_id" label="Wave Plan (optional)">
-                <Select
-                  options={waveOptions}
-                  placeholder="Select Wave"
-                  showSearch
-                  optionFilterProp="label"
-                  allowClear
-                />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Divider orientation="left">
-            <Space>
-              <InboxOutlined />
-              Items to Pick
-              <Badge count={pickItems.length} style={{ backgroundColor: '#eb2f96' }} />
-            </Space>
-          </Divider>
-
-          <Card size="small" style={{ marginBottom: 12 }}>
-            <Button
-              type="dashed"
-              onClick={addPickItem}
-              block
-              icon={<PlusOutlined />}
-            >
-              Add Item
+      <PageHeader
+        eyebrow="Warehouse"
+        title={`Picklist ${doc.pick_no}`}
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => nav("..")}>
+              <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-          </Card>
+            {doc.status === "DRAFT" && (
+              <Can do="issue.create">
+                <Button onClick={() => release.mutate()} disabled={release.isPending}>Release</Button>
+              </Can>
+            )}
+            {working && (
+              <Can do="issue.issue">
+                <Button onClick={() => setConfirming(true)} disabled={doc.picked_lines === 0}>
+                  Complete picking
+                </Button>
+              </Can>
+            )}
+          </>
+        }
+      />
 
-          <Table
-            dataSource={pickItems}
-            columns={createItemColumns}
-            rowKey="key"
-            pagination={false}
-            size="small"
-            scroll={{ x: 900 }}
-            locale={{ emptyText: 'No items added yet — click "Add Item"' }}
-          />
-        </Form>
-      </Card>
+      <ErrorBanner error={release.error ?? pick.error} />
+
+      <MetaCard title="Picklist">
+        <MetaRow label="Number" value={<span className="font-mono">{doc.pick_no}</span>} />
+        <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
+        <MetaRow label="For" value={`${humanise(doc.ref_type)} ${doc.ref_no ?? ""}`.trim()} />
+        <MetaRow label="Warehouse" value={doc.warehouse_name} />
+        <MetaRow label="Strategy" value={humanise(doc.strategy)} />
+        <MetaRow label="Picker" value={doc.assigned_to_name} />
+        <MetaRow
+          label="Progress"
+          value={
+            <span className="block">
+              <Progress
+                size="sm"
+                value={progress}
+                aria-label={`${progress}% picked`}
+                color={progress === 100 ? "success" : "primary"}
+                className="mb-1 max-w-[160px]"
+              />
+              <span className="text-[11px] text-muted tabular">{doc.picked_lines}/{doc.total_lines}</span>
+            </span>
+          }
+        />
+      </MetaCard>
+
+      <Section title="Lines">
+        <LinesEditor
+          rows={lines}
+          columns={workColumns}
+          keyOf={(l) => l.id}
+          rowTone={(l) => (l.status === "PICKED" ? "bg-ok-bg/30" : undefined)}
+          empty="This picklist has no lines."
+        />
+      </Section>
+
+      <ConfirmModal
+        isOpen={confirming}
+        title="Complete picking?"
+        message={`${doc.picked_lines} of ${doc.total_lines} lines are picked. Completing hands the picklist on; unpicked lines stay short.`}
+        confirmLabel="Complete"
+        busy={complete.isPending}
+        error={complete.error}
+        onConfirm={() => complete.mutate()}
+        onClose={() => setConfirming(false)}
+      />
     </div>
   );
-};
-
-export default PicklistForm;
+}

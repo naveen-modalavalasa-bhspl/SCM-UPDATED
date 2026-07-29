@@ -1,947 +1,562 @@
-// @ts-nocheck
-import React, { useState, useEffect, useCallback } from 'react';
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Thermometer } from "lucide-react";
+import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import { ConfirmModal, ErrorBanner } from "../components/Feedback";
+import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
+import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { Lookup } from "../components/Lookup";
+import { AttachmentsPanel } from "../components/AttachmentsPanel";
+import { Timeline, toTimeline } from "../components/Timeline";
 import {
-  Button, Form, Input, InputNumber, Select, Space, DatePicker,
-  message, Row, Col, Table, Card, Divider, Typography, Tag, Spin, Popconfirm, Tooltip, Radio, Image,
-  Steps, Modal
-} from 'antd';
-import {
-  PlusOutlined, ArrowLeftOutlined, SaveOutlined, MinusCircleOutlined,
-  CheckOutlined, EditOutlined, DeleteOutlined, BarcodeOutlined
-} from '@ant-design/icons';
-import dayjs from 'dayjs';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import PageHeader from '../components/PageHeader';
-import ItemSelector from '../components/ItemSelector';
-import SerialNumbersModal from '../components/SerialNumbersModal';
-import api from '../config/api';
-import { formatDate, getErrorMessage, formatDateForAPI, formatNumber } from '../utils/helpers';
-import { DATE_FORMAT } from '../utils/constants';
+  addDispatchEvent, cancelDispatch, carrierOptions, createDispatch, dispatchGateOut, getDispatch,
+  indentOptions, itemOptions, projectOptions, submitDispatch, updateDispatch, vehicleOptions,
+  vendorOptions, warehouseOptions,
+} from "../api";
+import { fmtMoney, fmtQty, num, today } from "../format";
+import type { Dispatch, DispatchItemWrite, DispatchWrite } from "../types";
 
-const { TextArea } = Input;
-const { Text } = Typography;
+/**
+ * Build a consignment, get it approved, and send it out of the gate.
+ *
+ * Packing and labelling deliberately live on the Outward labelling screen, not here:
+ * this form is the commercial document (what, to whom, on which vehicle), and
+ * packing is a physical job done later by someone else at a bench.
+ *
+ * The cold-chain event box is on this screen because a temperature reading has to be
+ * recordable the moment it is taken, including after the consignment has left.
+ */
 
-const DispatchForm = () => {
+const TYPES = [
+  { value: "TRANSFER", label: "Stock transfer" },
+  { value: "CUSTOMER", label: "To a customer" },
+  { value: "VENDOR_RETURN", label: "Vendor return" },
+  { value: "PROJECT", label: "To a project site" },
+];
+
+const MODES = [
+  { value: "ROAD", label: "Road" },
+  { value: "RAIL", label: "Rail" },
+  { value: "AIR", label: "Air" },
+  { value: "SEA", label: "Sea" },
+  { value: "COURIER", label: "Courier" },
+];
+
+const EVENTS = [
+  { value: "PICKED_UP", label: "Picked up" },
+  { value: "IN_TRANSIT", label: "In transit" },
+  { value: "TEMPERATURE_CHECK", label: "Temperature check" },
+  { value: "DELAYED", label: "Delayed" },
+  { value: "DELIVERED", label: "Delivered" },
+];
+
+const emptyLine = (): DispatchItemWrite => ({
+  item_id: 0,
+  batch_id: null,
+  serial_no: null,
+  quantity: 0,
+  rate: null,
+  remarks: null,
+});
+
+export default function DispatchForm() {
   const { id } = useParams();
-  const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const queryIssueId = searchParams.get('issue_id');
-  const isNew = !id || id === 'new';
-  const [form] = Form.useForm();
+  const nav = useNavigate();
+  const qc = useQueryClient();
+  const editing = !!id && id !== "new";
 
-  const [loading, setLoading] = useState(!isNew);
-  const [submitting, setSubmitting] = useState(false);
-  const [editMode, setEditMode] = useState(isNew);
-  const [dispatchData, setDispatchData] = useState(null);
+  const [form, setForm] = useState<DispatchWrite>({
+    dispatch_type: "TRANSFER",
+    dispatch_date: today(),
+    warehouse_id: 0,
+    to_warehouse_id: null,
+    customer_id: null,
+    vendor_id: null,
+    project_id: null,
+    delivery_address: "",
+    contact_person: "",
+    contact_phone: "",
+    ref_type: "INDENT",
+    ref_id: null,
+    transport_mode: "ROAD",
+    carrier_id: null,
+    vehicle_id: null,
+    driver_name: "",
+    driver_phone: "",
+    lr_no: "",
+    eway_bill_no: "",
+    freight_amount: null,
+    expected_delivery: null,
+    remarks: "",
+    items: [],
+  });
+  const [confirming, setConfirming] = useState<"submit" | "gate" | "cancel" | null>(null);
+  const [gatePass, setGatePass] = useState("");
+  const [reason, setReason] = useState("");
+  const [event, setEvent] = useState({ event_type: "IN_TRANSIT", location_name: "", temperature_c: "", notes: "" });
 
-  // Lookups
-  const [indents, setIndents] = useState([]);
-  const [materialIssues, setMaterialIssues] = useState([]);
-  const [uoms, setUoms] = useState([]);
-
-  // Reference items
-  const [selectedIndentItems, setSelectedIndentItems] = useState([]);
-  const [selectedIssueItems, setSelectedIssueItems] = useState([]);
-  const [selectedIndent, setSelectedIndent] = useState(null);
-  const [selectedIssue, setSelectedIssue] = useState(null);
-  const [loadingIndent, setLoadingIndent] = useState(false);
-  const [loadingIssue, setLoadingIssue] = useState(false);
-
-  const [warehouses, setWarehouses] = useState([]);
-  const [usersLookup, setUsersLookup] = useState([]);
-
-  const destinationType = Form.useWatch('destination_type', form) || 'USER';
-  const dispatchType = Form.useWatch('dispatch_type', form) || 'THIRD_PARTY';
-  const dispatchMode = Form.useWatch('dispatch_mode', form) || 'direct';
-  const destinationWarehouseId = Form.useWatch('destination_warehouse_id', form);
-  const destinationUserId = Form.useWatch('destination_user_id', form);
-
-  const [custodyChain, setCustodyChain] = useState([]);
-  const [loadingChain, setLoadingChain] = useState(false);
-  const [custodyModalOpen, setCustodyModalOpen] = useState(false);
-  const [custodySubmitting, setCustodySubmitting] = useState(false);
-  const [custodyForm] = Form.useForm();
-
-  const fetchSavedCustodyChain = useCallback(async () => {
-    if (isNew) return;
-    setLoadingChain(true);
-    try {
-      const res = await api.get(`/warehouse/dispatch/${id}/custody-chain`);
-      setCustodyChain(res.data || []);
-    } catch (err) {
-      console.error('Failed to fetch custody chain', err);
-    } finally {
-      setLoadingChain(false);
-    }
-  }, [id, isNew]);
+  const { data: doc, isLoading } = useQuery({
+    queryKey: ["wh-dispatch", id],
+    queryFn: () => getDispatch(Number(id)),
+    enabled: editing,
+  });
 
   useEffect(() => {
-    if (!isNew) return;
-    
-    const fetchPreview = async () => {
-      const projectId = selectedIndent?.project_id;
-      if (!projectId || dispatchMode !== 'multi-level') {
-        setCustodyChain([]);
-        return;
-      }
-      
-      const params = { project_id: projectId };
-      if (destinationType === 'WAREHOUSE' && destinationWarehouseId) {
-        params.destination_warehouse_id = destinationWarehouseId;
-      } else if (destinationType === 'USER' && destinationUserId) {
-        params.destination_user_id = destinationUserId;
-      } else {
-        setCustodyChain([]);
-        return;
-      }
+    if (!doc) return;
+    setForm({
+      dispatch_type: doc.dispatch_type,
+      dispatch_date: doc.dispatch_date,
+      warehouse_id: doc.warehouse_id,
+      to_warehouse_id: doc.to_warehouse_id ?? null,
+      customer_id: doc.customer_id ?? null,
+      vendor_id: doc.vendor_id ?? null,
+      project_id: doc.project_id ?? null,
+      delivery_address: doc.delivery_address ?? "",
+      contact_person: doc.contact_person ?? "",
+      contact_phone: doc.contact_phone ?? "",
+      ref_type: doc.ref_type ?? "INDENT",
+      ref_id: doc.ref_id ?? null,
+      transport_mode: doc.transport_mode ?? "ROAD",
+      carrier_id: doc.carrier_id ?? null,
+      vehicle_id: doc.vehicle_id ?? null,
+      driver_name: doc.driver_name ?? "",
+      driver_phone: doc.driver_phone ?? "",
+      lr_no: doc.lr_no ?? "",
+      eway_bill_no: doc.eway_bill_no ?? "",
+      freight_amount: doc.freight_amount ?? null,
+      expected_delivery: doc.expected_delivery ?? null,
+      remarks: doc.remarks ?? "",
+      items: (doc.items ?? []).map((l) => ({
+        id: l.id,
+        package_id: l.package_id,
+        indent_id: l.indent_id,
+        item_id: l.item_id,
+        batch_id: l.batch_id,
+        serial_no: l.serial_no,
+        quantity: num(l.quantity),
+        rate: l.rate,
+        remarks: l.remarks,
+      })),
+    });
+  }, [doc]);
 
-      setLoadingChain(true);
-      try {
-        const res = await api.get('/warehouse/dispatch/custody-chain-preview', { params });
-        setCustodyChain(res.data || []);
-      } catch (err) {
-        console.error('Failed to preview custody chain', err);
-        setCustodyChain([]);
-      } finally {
-        setLoadingChain(false);
-      }
-    };
+  const savedLine = (i: number) => doc?.items?.[i];
 
-    fetchPreview();
-  }, [isNew, selectedIndent, destinationType, destinationWarehouseId, destinationUserId, dispatchMode]);
+  const set = <K extends keyof DispatchWrite>(key: K, value: DispatchWrite[K]) =>
+    setForm((f) => ({ ...f, [key]: value }));
 
-  const loadLookups = useCallback(async () => {
-    try {
-      // For dispatch: fetch approved indents (not restricted to available_for_issue)
-      // because a dispatched MI may reference a fully-issued indent that is no longer
-      // 'available for issue' but must still appear in the dropdown.
-      const [indentRes, issueRes, uomRes, warehouseRes, userRes] = await Promise.allSettled([
-        api.get('/indents', { params: { page_size: 100, status: 'approved' } }),
-        api.get('/warehouse/material-issues', { params: { page_size: 100, status: 'issued' } }),
-        api.get('/masters/uom', { params: { page_size: 100 } }),
-        api.get('/masters/warehouses', { params: { page_size: 200 } }),
-        api.get('/users/lookup', { params: { page_size: 200 } }),
-      ]);
+  const patchLine = (index: number, patch: Partial<DispatchItemWrite>) =>
+    setForm((f) => ({ ...f, items: f.items.map((l, i) => (i === index ? { ...l, ...patch } : l)) }));
 
-      if (indentRes.status === 'fulfilled') {
-        const data = indentRes.value.data;
-        const items = data.items || data.data || data || [];
-        setIndents(items.map(i => ({ label: i.indent_number, value: i.id })));
-      }
-      if (issueRes.status === 'fulfilled') {
-        const data = issueRes.value.data;
-        // Backend already filters by status='issued'; map to options.
-        // Include indent_number in the label so users can see which indent the MI was raised against.
-        const items = data.items || data.data || data || [];
-        setMaterialIssues(items.map(i => ({
-          label: i.indent_number
-            ? `${i.issue_number} · Indent: ${i.indent_number}`
-            : i.issue_number,
-          value: i.id,
-        })));
-      }
-      if (uomRes.status === 'fulfilled') {
-        const data = uomRes.value.data;
-        const items = data.items || data.data || data || [];
-        setUoms(items.map(i => ({ label: i.name, value: i.name })));
-      }
-      if (warehouseRes.status === 'fulfilled') {
-        const data = warehouseRes.value.data;
-        const items = data.items || data.data || data || [];
-        setWarehouses(items.map(w => ({ label: w.name, value: w.id })));
-      }
-      if (userRes.status === 'fulfilled') {
-        const data = userRes.value.data;
-        const items = data.items || data.data || data || [];
-        setUsersLookup(items.map(u => ({ label: `${u.first_name} ${u.last_name || ''}`.trim(), value: u.id })));
-      }
-    } catch (err) {
-      console.error('Failed to load lookups', err);
-    }
-  }, []);
+  const totals = useMemo(
+    () => ({
+      lines: form.items.length,
+      qty: form.items.reduce((s, l) => s + num(l.quantity), 0),
+      value: form.items.reduce((s, l) => s + num(l.quantity) * num(l.rate), 0),
+    }),
+    [form.items],
+  );
 
-  const handleIndentSelect = async (indentId) => {
-    if (!indentId) { setSelectedIndentItems([]); setSelectedIndent(null); return; }
-    setLoadingIndent(true);
-    try {
-      const res = await api.get(`/indents/${indentId}`);
-      setSelectedIndent(res.data);
-      setSelectedIndentItems((res.data.items || []).map(item => ({
-        ...item,
-        dispatched_quantity: 0,
-        serial_numbers: [],
-        key: item.id || Math.random()
-      })));
-    } catch (err) {
-      message.error('Failed to load indent items');
-    } finally {
-      setLoadingIndent(false);
-    }
+  const locked = !!doc && doc.status !== "DRAFT";
+
+  const save = useMutation({
+    mutationFn: () => (editing ? updateDispatch(Number(id), form) : createDispatch(form)),
+    onSuccess: (saved: Dispatch) => {
+      qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
+      qc.invalidateQueries({ queryKey: ["wh-dispatch", String(saved.id)] });
+      if (!editing) nav(`../${saved.id}`, { replace: true });
+    },
+  });
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
+    qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
   };
 
-  const handleIssueSelect = async (issueId) => {
-    if (!issueId) {
-      setSelectedIssueItems([]);
-      setSelectedIssue(null);
-      form.setFieldValue('indent_id_ref', undefined);
-      setSelectedIndentItems([]);
-      setSelectedIndent(null);
-      return;
-    }
-    setLoadingIssue(true);
-    try {
-      const res = await api.get(`/warehouse/material-issues/${issueId}`);
-      const issueData = res.data;
-      setSelectedIssue(issueData);
-      // Inject the MI option with indent label into the dropdown so label renders correctly
-      const miLabel = issueData.indent_number
-        ? `${issueData.issue_number} · Indent: ${issueData.indent_number}`
-        : issueData.issue_number;
-      setMaterialIssues(prev =>
-        prev.some(i => i.value === issueData.id)
-          ? prev.map(i => i.value === issueData.id ? { ...i, label: miLabel } : i)
-          : [...prev, { label: miLabel, value: issueData.id }]
-      );
-      setSelectedIssueItems((issueData.items || []).map(item => ({
-        ...item,
-        dispatched_quantity: item.qty || 0,
-        serial_numbers: item.serial_numbers || [],
-        key: item.id || Math.random()
-      })));
+  const act = useMutation({
+    mutationFn: (what: "submit" | "gate" | "cancel") => {
+      const numId = Number(id);
+      if (what === "submit") return submitDispatch(numId);
+      if (what === "gate") return dispatchGateOut(numId, gatePass || undefined);
+      return cancelDispatch(numId, reason || undefined);
+    },
+    onSuccess: () => {
+      invalidate();
+      setConfirming(null);
+    },
+  });
 
-      if (issueData.indent_id) {
-        // Fetch the linked indent details so we can show its info card and items
-        setLoadingIndent(true);
-        try {
-          const indentRes = await api.get(`/indents/${issueData.indent_id}`);
-          const indentData = indentRes.data;
-          setSelectedIndent(indentData);
-          setSelectedIndentItems((indentData.items || []).map(item => ({
-            ...item,
-            dispatched_quantity: 0,
-            serial_numbers: [],
-            key: item.id || Math.random()
-          })));
-          // Ensure the indent option is present in the dropdown so the label renders
-          const indentOption = { label: indentData.indent_number, value: indentData.id };
-          setIndents(prev =>
-            prev.some(i => i.value === indentData.id) ? prev : [...prev, indentOption]
+  const logEvent = useMutation({
+    mutationFn: () =>
+      addDispatchEvent(Number(id), {
+        event_type: event.event_type,
+        location_name: event.location_name || null,
+        temperature_c: event.temperature_c === "" ? null : Number(event.temperature_c),
+        notes: event.notes || null,
+      }),
+    onSuccess: () => {
+      invalidate();
+      setEvent({ event_type: "IN_TRANSIT", location_name: "", temperature_c: "", notes: "" });
+    },
+  });
+
+  const columns: LineColumn<DispatchItemWrite>[] = [
+    {
+      key: "item",
+      header: "Item",
+      render: (l, i) => {
+        const saved = savedLine(i);
+        if (saved) {
+          return (
+            <div className="min-w-0">
+              <div className="truncate font-mono text-xs font-semibold text-ink">{saved.item_code ?? "—"}</div>
+              <div className="truncate text-xs text-muted">{saved.item_name ?? "—"}</div>
+            </div>
           );
-          // Set the form value AFTER the option is injected so Ant Design can resolve the label
-          form.setFieldValue('indent_id_ref', indentData.id);
-        } catch (indentErr) {
-          console.error('Failed to load linked indent details', indentErr);
-          form.setFieldValue('indent_id_ref', issueData.indent_id);
-        } finally {
-          setLoadingIndent(false);
         }
-      } else {
-        form.setFieldValue('indent_id_ref', undefined);
-        setSelectedIndentItems([]);
-        setSelectedIndent(null);
-      }
-    } catch (err) {
-      console.error('Failed to load material issue details', err);
-      message.error('Failed to load material issue items');
-    } finally {
-      setLoadingIssue(false);
-    }
-  };
+        return (
+          <Lookup
+            name="items"
+            load={itemOptions}
+            value={l.item_id || ""}
+            onChange={(v) => patchLine(i, { item_id: v === "" ? 0 : v })}
+            placeholder="Pick an item"
+          />
+        );
+      },
+    },
+    {
+      key: "qty",
+      header: "Quantity",
+      numeric: true,
+      width: "w-28",
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Quantity, line ${i + 1}`}
+          value={l.quantity}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { quantity: v })}
+        />
+      ),
+    },
+    {
+      key: "delivered",
+      header: "Delivered",
+      numeric: true,
+      width: "w-24",
+      hideOnNarrow: true,
+      render: (_l, i) => (
+        <span className="tabular text-muted">{fmtQty(savedLine(i)?.delivered_qty ?? 0)}</span>
+      ),
+    },
+    {
+      key: "serial",
+      header: "Serial",
+      width: "w-36",
+      hideOnNarrow: true,
+      render: (l, i) => (
+        <TextInput
+          ariaLabel={`Serial, line ${i + 1}`}
+          value={l.serial_no}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { serial_no: v })}
+        />
+      ),
+    },
+    {
+      key: "rate",
+      header: "Rate",
+      numeric: true,
+      width: "w-24",
+      hideOnNarrow: true,
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Rate, line ${i + 1}`}
+          value={l.rate ?? 0}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { rate: v })}
+        />
+      ),
+    },
+    {
+      key: "package",
+      header: "Package",
+      width: "w-28",
+      hideOnNarrow: true,
+      render: (_l, i) => {
+        const pkg = doc?.packages?.find((p) => p.id === savedLine(i)?.package_id);
+        return <span className="text-xs text-muted">{pkg?.package_no ?? "unpacked"}</span>;
+      },
+    },
+  ];
 
-
-  const fetchDispatch = async () => {
-    setLoading(true);
-    try {
-      const res = await api.get(`/warehouse/dispatch/${id}`);
-      const data = res.data;
-      setDispatchData(data);
-      form.setFieldsValue({
-        ...data,
-        dispatch_mode: data.dispatch_mode || 'direct',
-        dispatch_date: data.dispatch_date ? dayjs(data.dispatch_date) : null,
-        expected_delivery_date: data.expected_delivery_date ? dayjs(data.expected_delivery_date) : null,
-      });
-      if (data.dispatch_mode === 'multi-level') {
-        fetchSavedCustodyChain();
-      }
-      if (data.items && data.items.length > 0) {
-        const firstItem = data.items[0];
-        if (firstItem.indent_id) {
-          const indentRes = await api.get(`/indents/${firstItem.indent_id}`);
-          const indentData = indentRes.data;
-          setSelectedIndent(indentData);
-          setSelectedIndentItems((indentData.items || []).map(item => {
-            const matched = data.items.find(di => di.material_id === item.item_id);
-            return {
-              ...item,
-              dispatched_quantity: matched ? matched.dispatched_quantity : 0,
-              serial_numbers: matched ? (matched.serial_numbers || []) : [],
-              key: item.id || Math.random()
-            };
-          }));
-          // Ensure the indent option exists in the dropdown so the label renders correctly
-          setIndents(prev =>
-            prev.some(i => i.value === indentData.id)
-              ? prev
-              : [...prev, { label: indentData.indent_number, value: indentData.id }]
-          );
-          form.setFieldValue('indent_id_ref', indentData.id);
-        }
-        if (firstItem.material_issue_id) {
-          const issueRes = await api.get(`/warehouse/material-issues/${firstItem.material_issue_id}`);
-          const issueData = issueRes.data;
-          setSelectedIssue(issueData);
-          setSelectedIssueItems((issueData.items || []).map(item => {
-            const matched = data.items.find(di => di.material_id === item.item_id);
-            return {
-              ...item,
-              dispatched_quantity: matched ? matched.dispatched_quantity : (item.qty || 0),
-              serial_numbers: matched ? (matched.serial_numbers || []) : (item.serial_numbers || []),
-              key: item.id || Math.random()
-            };
-          }));
-          // Ensure the material issue option exists in the dropdown so the label renders
-          setMaterialIssues(prev =>
-            prev.some(i => i.value === issueData.id)
-              ? prev
-              : [...prev, { label: issueData.issue_number, value: issueData.id }]
-          );
-          form.setFieldValue('issue_id_ref', issueData.id);
-        }
-      }
-    } catch (err) {
-      message.error(getErrorMessage(err));
-      navigate('/logistics/dispatch-orders');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadLookups();
-    if (!isNew) {
-      fetchDispatch();
-    } else {
-      form.setFieldsValue({
-        dispatch_date: dayjs(),
-        status: 'Draft',
-        destination_type: 'USER',
-        dispatch_type: 'THIRD_PARTY',
-        dispatch_mode: 'direct',
-        issue_id_ref: queryIssueId ? Number(queryIssueId) : undefined,
-      });
-      if (queryIssueId) handleIssueSelect(Number(queryIssueId));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, queryIssueId]);
-
-  useEffect(() => {
-    if (selectedIndent && !indents.some(i => i.value === selectedIndent.id)) {
-      setIndents(prev => [...prev, { label: selectedIndent.indent_number, value: selectedIndent.id }]);
-    }
-  }, [selectedIndent, indents]);
-
-  useEffect(() => {
-    if (selectedIssue && !materialIssues.some(i => i.value === selectedIssue.id)) {
-      setMaterialIssues(prev => [...prev, { label: selectedIssue.issue_number, value: selectedIssue.id }]);
-    }
-  }, [selectedIssue, materialIssues]);
-
-  const handleSubmit = async () => {
-    try {
-      const values = await form.validateFields();
-
-      const indentDispatchItems = selectedIndentItems
-        .filter(item => item.dispatched_quantity > 0)
-        .map(item => ({
-          material_id: item.item_id,
-          indent_id: values.indent_id_ref,
-          material_issue_id: null,
-          requested_quantity: item.requested_qty || 0,
-          approved_quantity: item.approved_qty || 0,
-          dispatched_quantity: item.dispatched_quantity,
-          uom: item.uom_name || item.uom || '',
-          request_date: item.required_date
-            ? formatDateForAPI(item.required_date)
-            : formatDateForAPI(values.dispatch_date || dayjs()),
-          serial_numbers: item.serial_numbers && item.serial_numbers.length > 0
-            ? item.serial_numbers : null,
-        }));
-
-      const issueDispatchItems = selectedIssueItems
-        .filter(item => item.dispatched_quantity > 0)
-        .map(item => ({
-          material_id: item.item_id,
-          indent_id: item.indent_id || values.indent_id_ref,
-          material_issue_id: values.issue_id_ref,
-          requested_quantity: item.requested_qty || 0,
-          approved_quantity: item.qty || 0,
-          dispatched_quantity: item.dispatched_quantity,
-          uom: item.uom_name || item.uom || '',
-          request_date: formatDateForAPI(values.dispatch_date || dayjs()),
-          serial_numbers: item.serial_numbers && item.serial_numbers.length > 0
-            ? item.serial_numbers : null,
-        }));
-
-      const finalItems = [...indentDispatchItems, ...issueDispatchItems];
-      if (finalItems.length === 0) {
-        message.error('Please enter dispatched quantity for at least one item');
-        return;
-      }
-
-      setSubmitting(true);
-      const payload = {
-        ...values,
-        dispatch_date: formatDateForAPI(values.dispatch_date),
-        expected_delivery_date: values.expected_delivery_date
-          ? formatDateForAPI(values.expected_delivery_date) : undefined,
-        items: finalItems,
-      };
-
-      if (isNew) {
-        await api.post('/warehouse/dispatch', payload);
-        message.success('Dispatch created successfully');
-      } else {
-        await api.put(`/warehouse/dispatch/${id}`, payload);
-        message.success('Dispatch updated successfully');
-      }
-      navigate('/logistics/dispatch-orders');
-    } catch (err) {
-      if (err.errorFields) return;
-      message.error(getErrorMessage(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  if (loading) {
-    return <div style={{ textAlign: 'center', padding: '50px' }}><Spin size="large" /></div>;
-  }
+  if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
   return (
-    <div className="page-container">
-      <PageHeader title={isNew ? 'New Dispatch' : `Dispatch ${id}`}>
-        <Space>
-          <Button key="back" onClick={() => navigate('/logistics/dispatch-orders')} icon={<ArrowLeftOutlined />}>
-            Back
-          </Button>
-          {editMode && (
-            <Button key="save" type="primary" icon={<SaveOutlined />} loading={submitting} onClick={handleSubmit}>
-              Save Dispatch
+    <div>
+      <PageHeader
+        eyebrow="Warehouse"
+        title={editing ? `Dispatch ${doc?.dispatch_no ?? ""}` : "New dispatch"}
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => nav("..")}>
+              <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-          )}
-          {!editMode && form.getFieldValue('status') === 'Draft' && (
-            <Button key="edit" type="primary" icon={<EditOutlined />} onClick={() => setEditMode(true)}>
-              Edit
-            </Button>
-          )}
-        </Space>
-      </PageHeader>
-
-      <Row gutter={[16, 16]}>
-        {/* Dispatch Mode Card at top */}
-        <Col span={24}>
-          <Card
-            size="small"
-            style={{
-              marginBottom: 0,
-              borderRadius: '12px',
-              border: dispatchMode === 'multi-level' ? '1.5px solid #f59e0b' : '1px solid #cbd5e1',
-              background: dispatchMode === 'multi-level' ? '#fffbeb' : '#ffffff',
-            }}
-          >
-            <Row align="middle" gutter={16}>
-              <Col flex="auto">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <Tag
-                    color={dispatchMode === 'multi-level' ? 'gold' : 'blue'}
-                    style={{ border: 'none', fontWeight: 700, borderRadius: '4px', margin: 0 }}
-                  >
-                    {dispatchMode === 'multi-level' ? 'MULTI-LEVEL' : 'DIRECT'}
-                  </Tag>
-                  <span style={{ fontSize: '13px', color: '#334155', fontWeight: 500 }}>
-                    {dispatchMode === 'multi-level'
-                      ? 'Shipment will route through intermediate custody positions per project workflow configuration.'
-                      : 'Shipment will be dispatched directly to the destination without intermediate custody stops.'}
-                  </span>
-                </div>
-              </Col>
-              <Col>
-                <Form.Item name="dispatch_mode" style={{ margin: 0 }} rules={[{ required: true, message: 'Please select dispatch mode' }]}>
-                  <Radio.Group buttonStyle="solid" disabled={!editMode}>
-                    <Radio.Button value="direct">Direct Dispatch</Radio.Button>
-                    <Radio.Button value="multi-level">Multi-Level Dispatch</Radio.Button>
-                  </Radio.Group>
-                </Form.Item>
-              </Col>
-            </Row>
-          </Card>
-        </Col>
-
-        {dispatchData && dispatchData.delivery_acknowledged && (
-          <Col span={24}>
-            <Card 
-              title={<span style={{ color: '#0f172a', fontWeight: 800 }}>Proof of Delivery (POD) / Receipt Acknowledgement Details</span>}
-              size="small"
-              style={{ borderRadius: '12px', border: '1px solid #cbd5e1', boxShadow: '0 4px 12px rgba(0,0,0,0.03)', background: '#f8fafc' }}
-            >
-              <Row gutter={[24, 16]}>
-                <Col xs={24} md={8}>
-                  <Text type="secondary" style={{ display: 'block', fontSize: '11px', textTransform: 'uppercase' }}>Receiver Name</Text>
-                  <strong style={{ color: '#0f172a', fontSize: '14px' }}>{dispatchData.delivery_acknowledged_by_name || '—'}</strong>
-                </Col>
-                <Col xs={24} md={8}>
-                  <Text type="secondary" style={{ display: 'block', fontSize: '11px', textTransform: 'uppercase' }}>Designation / Department</Text>
-                  <strong style={{ color: '#0f172a', fontSize: '14px' }}>
-                    {dispatchData.delivery_acknowledged_by_designation || '—'} 
-                    {dispatchData.delivery_acknowledged_by_department ? ` (${dispatchData.delivery_acknowledged_by_department})` : ''}
-                  </strong>
-                </Col>
-                <Col xs={24} md={8}>
-                  <Text type="secondary" style={{ display: 'block', fontSize: '11px', textTransform: 'uppercase' }}>Contact / Phone</Text>
-                  <strong style={{ color: '#0f172a', fontSize: '14px' }}>{dispatchData.delivery_acknowledged_by_phone || '—'}</strong>
-                </Col>
-                <Col xs={24} md={8}>
-                  <Text type="secondary" style={{ display: 'block', fontSize: '11px', textTransform: 'uppercase' }}>Acknowledgement Date</Text>
-                  <strong style={{ color: '#0f172a', fontSize: '14px' }}>{formatDate(dispatchData.delivery_acknowledged_at)}</strong>
-                </Col>
-                <Col xs={24} md={8}>
-                  <Text type="secondary" style={{ display: 'block', fontSize: '11px', textTransform: 'uppercase' }}>Goods Condition</Text>
-                  <div>
-                    <Tag color={dispatchData.goods_condition_on_delivery === 'GOOD' ? 'green' : 'orange'} style={{ fontWeight: 'bold' }}>
-                      {dispatchData.goods_condition_on_delivery || 'GOOD'}
-                    </Tag>
-                  </div>
-                </Col>
-                <Col xs={24} md={8}>
-                  <Text type="secondary" style={{ display: 'block', fontSize: '11px', textTransform: 'uppercase' }}>Remarks / Discrepancy</Text>
-                  <strong style={{ color: '#0f172a', fontSize: '13px' }}>{dispatchData.delivery_remarks || '—'}</strong>
-                </Col>
-                
-                <Col xs={24} md={12}>
-                  <Text type="secondary" style={{ display: 'block', fontSize: '11px', textTransform: 'uppercase', marginBottom: '10px', fontWeight: 700, letterSpacing: '0.5px' }}>📝 Receiver Signature / Stamp</Text>
-                  {dispatchData.receiver_signature_url ? (
-                    <div style={{ background: 'linear-gradient(135deg,#f0fdf4,#dcfce7)', padding: '16px', borderRadius: '12px', border: '2px solid #86efac' }}>
-                      <span style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#166534', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>✓ Uploaded — Click image to zoom full screen</span>
-                      <Image.PreviewGroup>
-                        <Image
-                          src={dispatchData.receiver_signature_url}
-                          alt="Receiver Signature"
-                          style={{ width: '100%', maxHeight: '280px', objectFit: 'contain', borderRadius: '8px', border: '2px solid #86efac', background: '#fff', display: 'block' }}
-                          preview={{ mask: <span style={{ fontSize: '13px', fontWeight: 600 }}>🔍 Click to Zoom</span> }}
-                        />
-                      </Image.PreviewGroup>
-                    </div>
-                  ) : (
-                    <div style={{ background: '#fafafa', padding: '20px', borderRadius: '10px', border: '1.5px dashed #cbd5e1', textAlign: 'center' }}>
-                      <Text type="secondary" style={{ fontSize: '13px' }}>No signature image uploaded yet</Text>
-                    </div>
-                  )}
-                </Col>
-
-                <Col xs={24} md={12}>
-                  <Text type="secondary" style={{ display: 'block', fontSize: '11px', textTransform: 'uppercase', marginBottom: '10px', fontWeight: 700, letterSpacing: '0.5px' }}>📦 Delivery Photos (Evidence)</Text>
-                  {dispatchData.delivery_photo_urls && dispatchData.delivery_photo_urls.photo ? (
-                    <div style={{ background: 'linear-gradient(135deg,#f0f9ff,#e0f2fe)', padding: '16px', borderRadius: '12px', border: '2px solid #7dd3fc' }}>
-                      <span style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#075985', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>✓ Evidence Photo — Click to zoom</span>
-                      <Image.PreviewGroup>
-                        <Image
-                          src={dispatchData.delivery_photo_urls.photo}
-                          alt="Delivery Evidence"
-                          style={{ width: '100%', maxHeight: '280px', objectFit: 'contain', borderRadius: '8px', border: '2px solid #7dd3fc', background: '#fff', display: 'block' }}
-                          preview={{ mask: <span style={{ fontSize: '13px', fontWeight: 600 }}>🔍 Click to Zoom</span> }}
-                        />
-                      </Image.PreviewGroup>
-                      {dispatchData.delivery_photo_urls.review && (
-                        <div style={{ marginTop: '10px', padding: '10px 14px', background: 'rgba(7,89,133,0.07)', borderRadius: '8px', borderLeft: '3px solid #0891b2' }}>
-                          <Text style={{ fontSize: '12px', color: '#075985', fontStyle: 'italic', display: 'block' }}>
-                            💬 Condition Assessment: {dispatchData.delivery_photo_urls.review}
-                          </Text>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div style={{ background: '#fafafa', padding: '20px', borderRadius: '10px', border: '1.5px dashed #cbd5e1', textAlign: 'center' }}>
-                      <Text type="secondary" style={{ fontSize: '13px' }}>No delivery photos uploaded</Text>
-                    </div>
-                  )}
-                </Col>
-              </Row>
-            </Card>
-          </Col>
-        )}
-        {/* Left Side: Indent Reference */}
-        <Col xs={24} lg={12}>
-          <Card title="Indent Reference" size="small">
-            <Form form={form} layout="vertical">
-              <Form.Item name="indent_id_ref" label="Indent">
-                <Select
-                  showSearch
-                  placeholder="Select an Indent"
-                  options={indents}
-                  onChange={handleIndentSelect}
-                  allowClear
-                  disabled={!editMode}
-                />
-              </Form.Item>
-            </Form>
-            {selectedIndent && (
-              <div style={{
-                background: '#fafafa', padding: '10px 14px',
-                borderRadius: '6px', marginBottom: '14px', border: '1px solid #f0f0f0'
-              }}>
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>Req. Warehouse</Text>
-                    <Text strong style={{ fontSize: '13px' }}>{selectedIndent.warehouse_name || '—'}</Text>
-                  </Col>
-                  <Col span={12}>
-                    <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>Req. User</Text>
-                    <Text strong style={{ fontSize: '13px' }}>{selectedIndent.raised_by_name || '—'}</Text>
-                  </Col>
-                </Row>
-              </div>
+            {!locked && (
+              <Can do="issue.create">
+                <Button variant="subtle" onClick={() => save.mutate()} disabled={save.isPending}>
+                  {save.isPending ? "Saving…" : "Save"}
+                </Button>
+              </Can>
             )}
-            <Table
-              dataSource={selectedIndentItems}
-              size="small"
-              pagination={false}
-              loading={loadingIndent}
-              scroll={{ y: 300 }}
-              columns={[
-                { title: 'Material', render: (_, r) => r.item_name || r.item?.name },
-                { title: 'Req. Qty', dataIndex: 'requested_qty', width: 90 },
-                { title: 'Req. Date', dataIndex: 'required_date', render: d => formatDate(d), width: 100 },
-              ]}
+            {editing && doc?.status === "DRAFT" && (
+              <Can do="issue.create">
+                <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
+              </Can>
+            )}
+            {editing && ["APPROVED", "PACKED"].includes(doc?.status ?? "") && (
+              <Can do="issue.issue">
+                <Button onClick={() => setConfirming("gate")}>Gate out</Button>
+              </Can>
+            )}
+            {editing && doc && !["CANCELLED", "ACKNOWLEDGED", "DELIVERED"].includes(doc.status) && (
+              <Can do="issue.create">
+                <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
+              </Can>
+            )}
+          </>
+        }
+      />
+
+      <ErrorBanner error={save.error} />
+
+      {doc && (
+        <MetaCard title="Consignment">
+          <MetaRow label="Number" value={<span className="font-mono">{doc.dispatch_no}</span>} />
+          <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
+          <MetaRow label="Gate pass" value={<span className="font-mono">{doc.gate_pass_no ?? "—"}</span>} />
+          <MetaRow label="Packages" value={doc.total_packages} />
+          <MetaRow label="Weight" value={`${fmtQty(doc.total_weight_kg)} kg`} />
+          <MetaRow label="Approved by" value={doc.approved_by_name} />
+          <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name} />
+          <MetaRow
+            label="POD"
+            value={
+              doc.pod_url ? (
+                <a href={doc.pod_url} target="_blank" rel="noreferrer" className="text-brand hover:underline">
+                  View
+                </a>
+              ) : "—"
+            }
+          />
+        </MetaCard>
+      )}
+
+      <Section title="Destination">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="Date">
+            <Input type="date" value={form.dispatch_date} disabled={locked}
+                   onChange={(e) => set("dispatch_date", e.target.value)} />
+          </Field>
+          <Field label="Type">
+            <Select value={form.dispatch_type} onChange={(v) => set("dispatch_type", v)} options={TYPES}
+                    isDisabled={locked} ariaLabel="Dispatch type" />
+          </Field>
+          <Field label="From warehouse">
+            <Lookup name="warehouses" load={warehouseOptions} value={form.warehouse_id || ""} isDisabled={locked}
+                    onChange={(v) => set("warehouse_id", v === "" ? 0 : v)} placeholder="Origin" />
+          </Field>
+          <Field label="To warehouse">
+            <Lookup name="warehouses" load={warehouseOptions} value={form.to_warehouse_id ?? ""} isDisabled={locked}
+                    onChange={(v) => set("to_warehouse_id", v === "" ? null : v)} placeholder="Destination site" />
+          </Field>
+          <Field label="Vendor">
+            <Lookup name="vendors" load={vendorOptions} value={form.vendor_id ?? ""} isDisabled={locked}
+                    onChange={(v) => set("vendor_id", v === "" ? null : v)} placeholder="Vendor" />
+          </Field>
+          <Field label="Project">
+            <Lookup name="projects" load={projectOptions} value={form.project_id ?? ""} isDisabled={locked}
+                    onChange={(v) => set("project_id", v === "" ? null : v)} placeholder="Project" />
+          </Field>
+          <Field label="Against indent">
+            <Lookup name="indents" load={indentOptions} value={form.ref_id ?? ""} isDisabled={locked}
+                    onChange={(v) => set("ref_id", v === "" ? null : v)} placeholder="Reference" />
+          </Field>
+          <Field label="Expected delivery">
+            <Input type="date" value={form.expected_delivery ?? ""} disabled={locked}
+                   onChange={(e) => set("expected_delivery", e.target.value || null)} />
+          </Field>
+          <div className="sm:col-span-2">
+            <Field label="Delivery address">
+              <Input value={form.delivery_address ?? ""} disabled={locked}
+                     onChange={(e) => set("delivery_address", e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Contact person">
+            <Input value={form.contact_person ?? ""} disabled={locked}
+                   onChange={(e) => set("contact_person", e.target.value)} />
+          </Field>
+          <Field label="Contact phone">
+            <Input value={form.contact_phone ?? ""} disabled={locked}
+                   onChange={(e) => set("contact_phone", e.target.value)} />
+          </Field>
+        </div>
+      </Section>
+
+      <Section title="Transport">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="Mode">
+            <Select value={form.transport_mode ?? "ROAD"} onChange={(v) => set("transport_mode", v)}
+                    options={MODES} isDisabled={locked} ariaLabel="Transport mode" />
+          </Field>
+          <Field label="Carrier">
+            <Lookup name="carriers" load={carrierOptions} value={form.carrier_id ?? ""} isDisabled={locked}
+                    onChange={(v) => set("carrier_id", v === "" ? null : v)} placeholder="Carrier" />
+          </Field>
+          <Field label="Vehicle">
+            <Lookup name="vehicles" load={vehicleOptions} value={form.vehicle_id ?? ""} isDisabled={locked}
+                    onChange={(v) => set("vehicle_id", v === "" ? null : v)} placeholder="Vehicle" />
+          </Field>
+          <Field label="Driver">
+            <Input value={form.driver_name ?? ""} disabled={locked}
+                   onChange={(e) => set("driver_name", e.target.value)} />
+          </Field>
+          <Field label="Driver phone">
+            <Input value={form.driver_phone ?? ""} disabled={locked}
+                   onChange={(e) => set("driver_phone", e.target.value)} />
+          </Field>
+          <Field label="LR no">
+            <Input value={form.lr_no ?? ""} disabled={locked} onChange={(e) => set("lr_no", e.target.value)} />
+          </Field>
+          <Field label="E-way bill">
+            <Input value={form.eway_bill_no ?? ""} disabled={locked}
+                   onChange={(e) => set("eway_bill_no", e.target.value)} />
+          </Field>
+          <Field label="Freight">
+            <Input
+              type="number"
+              value={form.freight_amount == null ? "" : String(form.freight_amount)}
+              disabled={locked}
+              onChange={(e) => set("freight_amount", e.target.value === "" ? null : Number(e.target.value))}
             />
-          </Card>
-        </Col>
+          </Field>
+        </div>
+      </Section>
 
-        {/* Right Side: Material Issue Reference */}
-        <Col xs={24} lg={12}>
-          <Card title="Material Issue Reference" size="small">
-            <Form form={form} layout="vertical">
-              <Form.Item name="issue_id_ref" label="Material Issue">
-                <Select
-                  showSearch
-                  placeholder="Select a Material Issue"
-                  options={materialIssues}
-                  onChange={handleIssueSelect}
-                  allowClear
-                  disabled={!editMode}
-                />
-              </Form.Item>
-            </Form>
-            {selectedIssue && (
-              <div style={{
-                background: '#fafafa', padding: '10px 14px',
-                borderRadius: '6px', marginBottom: '14px', border: '1px solid #f0f0f0'
-              }}>
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>Dispatch Warehouse</Text>
-                    <Text strong style={{ fontSize: '13px' }}>{selectedIssue.destination_warehouse_name || '—'}</Text>
-                  </Col>
-                  <Col span={12}>
-                    <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>Issued To</Text>
-                    <Text strong style={{ fontSize: '13px' }}>{selectedIssue.issued_to_name || selectedIssue.issued_to || '—'}</Text>
-                  </Col>
-                </Row>
-                <Row gutter={16} style={{ marginTop: 8 }}>
-                  <Col span={24}>
-                    <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>Indent Reference</Text>
-                    {selectedIssue.indent_number ? (
-                      <Text strong style={{ fontSize: '13px', color: '#1677ff' }}>
-                        {selectedIssue.indent_number}
-                      </Text>
-                    ) : (
-                      <Text type="secondary" style={{ fontSize: '13px' }}>No indent linked to this issue</Text>
-                    )}
-                  </Col>
-                </Row>
-              </div>
-            )}
-            <Table
-              dataSource={selectedIssueItems}
-              size="small"
-              pagination={false}
-              loading={loadingIssue}
-              scroll={{ y: 300, x: 520 }}
-              columns={[
-                { title: 'Material', render: (_, r) => r.item_name || r.item?.name, ellipsis: true },
-                { title: 'Appr. Qty', dataIndex: 'qty', width: 80, render: val => formatNumber(val) },
-                { title: 'Disp. Qty', dataIndex: 'dispatched_quantity', width: 80, render: val => formatNumber(val) },
-                { title: 'Batch', dataIndex: 'batch_number', width: 90 },
-                {
-                  title: 'Serial Nos',
-                  dataIndex: 'serial_numbers',
-                  width: 150,
-                  render: (serials, record) => (
-                    <SerialNumbersModal
-                      value={serials || []}
-                      itemName={record.item_name || record.item?.name}
-                      itemCode={record.item_code}
-                      quantity={Math.round(Number(record.dispatched_quantity || record.qty || 0))}
-                      hasSerial={record.has_serial || (serials && serials.length > 0)}
-                      size="small"
-                      readOnly
-                    />
-                  ),
-                },
-              ]}
-            />
-            {selectedIssueItems.some(i => i.serial_numbers && i.serial_numbers.length > 0) && (
-              <div style={{
-                marginTop: 8, padding: '6px 10px',
-                background: '#e6f7ff', border: '1px solid #91d5ff',
-                borderRadius: 4, fontSize: 12, color: '#0050b3',
-                display: 'flex', alignItems: 'center', gap: 6,
-              }}>
-                <BarcodeOutlined />
-                Serial numbers from the Material Issue will be automatically carried over to this dispatch.
-              </div>
-            )}
-          </Card>
-        </Col>
-
-        {/* Footer: Dispatch Details */}
-        <Col span={24}>
-          <Card size="small">
-            <Form form={form} layout="horizontal">
-              <Row gutter={24}>
-                <Col span={12} style={{ marginBottom: '16px' }}>
-                  <Form.Item name="dispatch_type" label="Shipment Type / Method" rules={[{ required: true }]}>
-                    <Radio.Group buttonStyle="solid" disabled={!editMode}>
-                      <Radio.Button value="THIRD_PARTY">Third Party Freight</Radio.Button>
-                      <Radio.Button value="OWN_VEHICLE">Own Fleet Vehicle</Radio.Button>
-                      <Radio.Button value="COURIER">Courier / AWB</Radio.Button>
-                      <Radio.Button value="IN_PERSON">In-Person Handover</Radio.Button>
-                    </Radio.Group>
-                  </Form.Item>
-                </Col>
-
-                <Col span={8}>
-                  <Form.Item name="dispatch_date" label="Dispatch Date" rules={[{ required: true }]}>
-                    <DatePicker style={{ width: '100%' }} format={DATE_FORMAT} disabled={!editMode} />
-                  </Form.Item>
-                </Col>
-                {dispatchType !== 'THIRD_PARTY' && (
-                  <Col span={8}>
-                    <Form.Item name="expected_delivery_date" label="Expected Delivery Date" rules={[{ required: true, message: 'Please select expected delivery date' }]}>
-                      <DatePicker style={{ width: '100%' }} format={DATE_FORMAT} disabled={!editMode} />
-                    </Form.Item>
-                  </Col>
-                )}
-                <Col span={8}>
-                  <Form.Item name="status" label="Status" rules={[{ required: true }]}>
-                    <Select disabled={!editMode}>
-                      <Select.Option value="Draft">Draft</Select.Option>
-                      <Select.Option value="Dispatched">Dispatched</Select.Option>
-                      <Select.Option value="Delivered">Delivered</Select.Option>
-                      <Select.Option value="Cancelled">Cancelled</Select.Option>
-                    </Select>
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="destination_type" label="Destination Recipient Type" rules={[{ required: true }]}>
-                    <Select disabled={!editMode}>
-                      <Select.Option value="WAREHOUSE">Warehouse Transfer</Select.Option>
-                      <Select.Option value="USER">Field User / Employee</Select.Option>
-                      <Select.Option value="BRANCH">Internal Branch Office</Select.Option>
-                      <Select.Option value="DEALER">Dealer / Distributor</Select.Option>
-                    </Select>
-                  </Form.Item>
-                </Col>
-                {destinationType === 'WAREHOUSE' && (
-                  <Col span={8}>
-                    <Form.Item name="destination_warehouse_id" label="Destination Warehouse" rules={[{ required: true, message: 'Please select destination warehouse' }]}>
-                      <Select
-                        placeholder="Choose recipient warehouse"
-                        options={warehouses}
-                        disabled={!editMode}
-                        showSearch
-                        filterOption={(input, option) => (option?.label ?? '').toLowerCase().includes(input.toLowerCase())}
-                      />
-                    </Form.Item>
-                  </Col>
-                )}
-                {destinationType === 'USER' && (
-                  <Col span={8}>
-                    <Form.Item name="destination_user_id" label="Destination SCM Field User" rules={[{ required: true, message: 'Please select recipient user' }]}>
-                      <Select
-                        placeholder="Choose recipient SCM user"
-                        options={usersLookup}
-                        disabled={!editMode}
-                        showSearch
-                        filterOption={(input, option) => (option?.label ?? '').toLowerCase().includes(input.toLowerCase())}
-                      />
-                    </Form.Item>
-                  </Col>
-                )}
-                <Col span={24}>
-                  <Form.Item name="remarks" label="Remarks">
-                    <TextArea rows={2} disabled={!editMode} placeholder="Enter delivery instructions or gate pass references..." />
-                  </Form.Item>
-                </Col>
-
-                {dispatchMode === 'multi-level' && (
-                  <Col span={24} style={{ marginTop: '16px' }}>
-                    <Card 
-                      title={<span style={{ fontWeight: 600 }}>Custody Handover Chain</span>}
-                      size="small"
-                      loading={loadingChain}
-                      style={{ background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}
-                    >
-                      {custodyChain.length === 0 ? (
-                        <div style={{ color: '#8c8c8c', padding: '16px', textAlign: 'center' }}>
-                          No custody chain defined for this project/destination.
-                        </div>
-                      ) : (
-                        <div style={{ padding: '16px 8px' }}>
-                          <Steps
-                            direction="vertical"
-                            current={custodyChain.findIndex(c => c.status === 'pending')}
-                            items={custodyChain.map((step, idx) => {
-                              let status = 'wait';
-                              let color = '#8c8c8c';
-                              
-                              if (step.status === 'acknowledged') {
-                                status = 'finish';
-                                color = '#16a34a';
-                              } else if (step.status === 'pending') {
-                                const firstPending = custodyChain.find(c => c.status === 'pending');
-                                if (firstPending && firstPending.sequence === step.sequence) {
-                                  status = 'process';
-                                  color = '#1d4ed8';
-                                } else {
-                                  status = 'wait';
-                                  color = '#6b7280';
-                                }
-                              } else if (step.status === 'skipped') {
-                                status = 'wait';
-                              }
-
-                              return {
-                                title: <span style={{ fontWeight: 600, color: color }}>{step.role_name || step.position_name}</span>,
-                                description: (
-                                  <div style={{ marginTop: 4 }}>
-                                    <div style={{ fontWeight: 500, color: '#1e293b' }}>{step.employee_name}</div>
-                                    {step.status === 'acknowledged' && (
-                                      <div style={{ fontSize: '12px', color: '#64748b', marginTop: 4, background: '#fff', padding: '8px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                                        <div><strong>Seal Intact:</strong> {step.seal_intact ? 'Yes' : 'No'}</div>
-                                        <div><strong>Condition:</strong> <Tag color={step.packaging_condition === 'INTACT' ? 'green' : 'orange'}>{step.packaging_condition}</Tag></div>
-                                        <div><strong>Discrepancy:</strong> {step.discrepancy_reported ? <Tag color="red">Yes</Tag> : 'No'}</div>
-                                        {step.remarks && <div><strong>Remarks:</strong> {step.remarks}</div>}
-                                        <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: 4 }}>
-                                          Received by {step.acknowledged_by_name} on {formatDate(step.acknowledged_at)}
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                ),
-                                status: status,
-                              };
-                            })}
-                          />
-                        </div>
-                      )}
-                    </Card>
-                  </Col>
-                )}
-
-                {custodyChain.find(step => step.can_acknowledge) && !isNew && (
-                  <Col span={24} style={{ marginTop: '16px' }}>
-                    <div style={{
-                      background: 'linear-gradient(135deg, #eff6ff, #dbeafe)',
-                      border: '1px solid #bfdbfe',
-                      borderRadius: '12px',
-                      padding: '16px',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
-                    }}>
-                      <div>
-                        <h4 style={{ margin: 0, color: '#1e3a8a', fontWeight: 600, fontSize: '15px' }}>
-                          Pending Custody Acknowledgement
-                        </h4>
-                        <p style={{ margin: '4px 0 0 0', color: '#1e40af', fontSize: '13px' }}>
-                          You occupy the active position/role <strong>{custodyChain.find(step => step.can_acknowledge)?.role_name}</strong> ({custodyChain.find(step => step.can_acknowledge)?.employee_name}) required to acknowledge custody receipt for this step.
-                        </p>
-                      </div>
-                      <Button 
-                        type="primary" 
-                        icon={<CheckOutlined />} 
-                        onClick={() => setCustodyModalOpen(true)}
-                        style={{ background: '#1d4ed8', borderColor: '#1d4ed8', height: '40px', borderRadius: '8px', fontWeight: 600 }}
-                      >
-                        Acknowledge Custody
-                      </Button>
-                    </div>
-                  </Col>
-                )}
-              </Row>
-            </Form>
-          </Card>
-        </Col>
-      </Row>
-
-      <Modal
-        title="Acknowledge Custody Handover"
-        open={custodyModalOpen}
-        onCancel={() => {
-          setCustodyModalOpen(false);
-          custodyForm.resetFields();
-        }}
-        onOk={async () => {
-          try {
-            const values = await custodyForm.validateFields();
-            setCustodySubmitting(true);
-            await api.post(`/warehouse/dispatch/${id}/acknowledge-custody`, values);
-            message.success('Custody acknowledged successfully');
-            setCustodyModalOpen(false);
-            custodyForm.resetFields();
-            fetchDispatch();
-            fetchSavedCustodyChain();
-          } catch (err) {
-            message.error(getErrorMessage(err));
-          } finally {
-            setCustodySubmitting(false);
+      <Section title="Lines">
+        <LinesEditor
+          rows={form.items}
+          columns={columns}
+          keyOf={(_, i) => i}
+          onAdd={locked ? undefined : () => set("items", [...form.items, emptyLine()])}
+          onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
+          empty="Add what is going on the vehicle."
+          footer={
+            <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
+              <span className="text-muted">{totals.lines} lines</span>
+              <span className="text-ink">Qty <b className="tabular">{fmtQty(totals.qty)}</b></span>
+              <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
+            </div>
           }
-        }}
-        confirmLoading={custodySubmitting}
-        okText="Acknowledge Receipt"
+        />
+      </Section>
+
+      {doc && (
+        <Section
+          title="Custody trail"
+          hint="Every scan, stop and temperature reading, in order."
+          actions={
+            <Can do="issue.issue">
+              <Button variant="subtle" onClick={() => logEvent.mutate()} disabled={logEvent.isPending}>
+                {logEvent.isPending ? "Recording…" : "Record event"}
+              </Button>
+            </Can>
+          }
+        >
+          <ErrorBanner error={logEvent.error} />
+
+          <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Event">
+              <Select
+                value={event.event_type}
+                onChange={(v) => setEvent((e) => ({ ...e, event_type: v }))}
+                options={EVENTS}
+                ariaLabel="Event type"
+              />
+            </Field>
+            <Field label="Location">
+              <Input value={event.location_name}
+                     onChange={(e) => setEvent((v) => ({ ...v, location_name: e.target.value }))} />
+            </Field>
+            <Field label="Temperature (°C)">
+              <Input type="number" value={event.temperature_c}
+                     onChange={(e) => setEvent((v) => ({ ...v, temperature_c: e.target.value }))} />
+            </Field>
+            <Field label="Notes">
+              <Input value={event.notes} onChange={(e) => setEvent((v) => ({ ...v, notes: e.target.value }))} />
+            </Field>
+          </div>
+
+          {doc.events?.some((e) => e.is_breach) && (
+            <div className="mb-4 flex items-center gap-2 rounded-lg border border-bad/30 bg-bad-bg px-3 py-2 text-sm text-bad">
+              <Thermometer className="h-4 w-4" /> This consignment has a recorded temperature breach.
+            </div>
+          )}
+
+          <Timeline entries={toTimeline(doc.events)} empty="No events recorded for this consignment." />
+        </Section>
+      )}
+
+      <Section title="Documents" hint="LR copy, e-way bill, proof of delivery.">
+        <AttachmentsPanel entityType="DISPATCH" entityId={doc?.id} category="DISPATCH" />
+      </Section>
+
+      <ConfirmModal
+        isOpen={confirming === "submit"}
+        title="Submit for approval?"
+        message="The consignment goes to the approval chain and can no longer be edited."
+        confirmLabel="Submit"
+        busy={act.isPending}
+        error={act.error}
+        onConfirm={() => act.mutate("submit")}
+        onClose={() => setConfirming(null)}
+      />
+
+      <ConfirmModal
+        isOpen={confirming === "gate"}
+        title="Send it out of the gate?"
+        message="The consignment is marked dispatched and security records the gate pass."
+        confirmLabel="Gate out"
+        busy={act.isPending}
+        error={act.error}
+        onConfirm={() => act.mutate("gate")}
+        onClose={() => setConfirming(null)}
       >
-        <Form form={custodyForm} layout="vertical" initialValues={{ seal_intact: true, packaging_condition: 'INTACT', discrepancy_reported: false }}>
-          <Form.Item name="seal_intact" label="Is Transit Seal Intact?" valuePropName="checked" rules={[{ required: true }]}>
-            <Radio.Group>
-              <Radio value={true}>Yes</Radio>
-              <Radio value={false}>No</Radio>
-            </Radio.Group>
-          </Form.Item>
-          
-          <Form.Item name="packaging_condition" label="Packaging Condition" rules={[{ required: true }]}>
-            <Radio.Group>
-              <Radio value="INTACT">Intact</Radio>
-              <Radio value="DAMAGED">Damaged</Radio>
-              <Radio value="TAMPERED">Tampered</Radio>
-            </Radio.Group>
-          </Form.Item>
+        <div className="mt-3">
+          <Field label="Gate pass no">
+            <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
+          </Field>
+        </div>
+      </ConfirmModal>
 
-          <Form.Item name="discrepancy_reported" label="Discrepancy Reported?" valuePropName="checked" rules={[{ required: true }]}>
-            <Radio.Group>
-              <Radio value={true}>Yes</Radio>
-              <Radio value={false}>No</Radio>
-            </Radio.Group>
-          </Form.Item>
-
-          <Form.Item name="remarks" label="Remarks / Verification Details">
-            <TextArea rows={3} placeholder="Provide any details about vehicle inspection, cargo condition, etc." />
-          </Form.Item>
-        </Form>
-      </Modal>
+      <ConfirmModal
+        isOpen={confirming === "cancel"}
+        title="Cancel this dispatch?"
+        message="The consignment stops here."
+        confirmLabel="Cancel dispatch"
+        danger
+        busy={act.isPending}
+        error={act.error}
+        onConfirm={() => act.mutate("cancel")}
+        onClose={() => setConfirming(null)}
+      >
+        <div className="mt-3">
+          <Field label="Reason">
+            <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+          </Field>
+        </div>
+      </ConfirmModal>
     </div>
   );
-};
-
-export default DispatchForm;
+}
