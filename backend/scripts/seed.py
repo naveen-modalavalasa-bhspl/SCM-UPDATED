@@ -1,9 +1,22 @@
-"""Idempotent seed. Safe to run repeatedly:  python -m scripts.seed
+"""Idempotent seed for a LOCAL development database:  python -m scripts.seed
 
 Seeds: all permissions, 5 roles, menu pages, a position tree, 4 departments,
 one stock facility, 8 UOMs, 20 items, 5 vendors, 6 users (one per role), and one
 active approval workflow per doc type (INDENT/PO/GRN/ISSUE) incl. an amount-
 conditional Plant Head stage on PO.
+
+NOT SAFE FOR A SHARED OR PRODUCTION DATABASE, and it now refuses to run against one.
+Two things bit us on 2026-07-29:
+
+  * It writes demo users, demo credentials and mock `hcm_*` rows over real data.
+  * `seed_pages` used to DELETE every `rbac_pages` row missing from its own
+    PAGE_TREE. Run from a branch behind the database and it silently removed the
+    newer screens — that is how Settings lost Company Settings, Approval Workflows,
+    Approvals Config and Approval & Automation, along with 16 others.
+
+So: the seed only runs against a loopback database unless `--allow-remote` is passed,
+and it never deletes a page unless `--prune` is passed. To add or repair menu rows on
+a live server use `scripts.provision_pages`, which upserts and never deletes.
 
 NOTE: it also inserts mock hcm_* rows (employees, positions, assignments,
 departments, facility, office). Normally only app/platform/hcm/sync.py writes hcm_*,
@@ -11,8 +24,11 @@ but HCM's facilities/position-assignments feeds are empty, so the demo needs
 bootstrap identity/org data. Real HCM data comes in via the sync job.
 """
 import asyncio
+import secrets
+import sys
 
 from sqlalchemy import select
+from sqlalchemy.engine import make_url
 
 from app.core.database import Base, SessionLocal, engine, settings
 from app.core.security import hash_password
@@ -29,8 +45,6 @@ from app.platform.workflow.models import Stage, StageCondition, Workflow
 from app.shared.enums import ApprovalMode, ApproverType, ConditionOperator, DocType, UserRole as RoleCode
 from app.shared.models.base import utcnow
 from app.shared.models.master import HsnCode, Item, ItemCategory, Uom, Vendor
-
-PASSWORD = "Bavya@123"
 
 # fixed hcm ids for the demo bootstrap
 POS_PLANT_HEAD, POS_PROC_HEAD, POS_STORE_MGR, POS_DEPT_HEAD = 9001, 9002, 9003, 9004
@@ -50,10 +64,21 @@ ROLE_PERMS = {
                                  P.STOCK_VIEW],
     # Store keeps the warehouse/bin master: they are the people who know the physical
     # layout, and the Warehouse module needs somebody able to create bins on day one.
+    # Store runs the floor, so it gets the whole warehouse cycle. The two decisions
+    # that cost money — approving a dispatch and approving a purchase return — stay
+    # off this list; those belong to a role that sits above the store.
     RoleCode.STORE.value: [P.GRN_VIEW, P.GRN_CREATE, P.GRN_QC, P.STOCK_VIEW,
                            P.STOCK_ADJUST, P.STOCK_RESERVE, P.STOCK_TRANSFER,
                            P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_ISSUE,
-                           P.MASTER_LOCATION_MANAGE],
+                           P.MASTER_LOCATION_MANAGE,
+                           P.RECEIPT_VIEW, P.RECEIPT_CREATE, P.RECEIPT_POST,
+                           P.INSPECTION_VIEW, P.INSPECTION_EXECUTE,
+                           P.PUTAWAY_VIEW, P.PUTAWAY_EXECUTE,
+                           P.PICKING_VIEW, P.PICKING_PICK,
+                           P.DISPATCH_VIEW, P.DISPATCH_CREATE, P.DISPATCH_GATE_OUT,
+                           P.DISPATCH_ACKNOWLEDGE,
+                           P.RETURN_VIEW, P.RETURN_CREATE,
+                           P.WAREHOUSE_REPORT_VIEW],
 }
 
 # username -> (employee_id, full name, role code, department_id, position_id)
@@ -93,23 +118,33 @@ PAGE_TREE = [
     # rail, bookmark it, or be denied access to it individually. These live here and
     # not in AppLayout because the rail is built from rbac_pages — a hardcoded branch
     # is invisible to page-access control.
+    # Ordered the way the floor works: goods in (inward -> receipt -> QC -> put-away),
+    # then goods out (picklist -> issue -> dispatch), then returns.
     ("grp_warehouse", "/warehouse", "Warehouse", "truck", P.STOCK_VIEW, 40, None),
     ("wh_dashboard", "/warehouse", "Dashboard", "layout-dashboard",
      P.STOCK_VIEW, 41, "grp_warehouse"),
     ("wh_inward", "/warehouse/material-inward", "Material Inward", "truck",
-     P.GRN_VIEW, 42, "grp_warehouse"),
+     P.RECEIPT_VIEW, 42, "grp_warehouse"),
     ("wh_grn", "/warehouse/grn", "Goods Receipt", "file-text",
-     P.GRN_VIEW, 43, "grp_warehouse"),
+     P.RECEIPT_VIEW, 43, "grp_warehouse"),
     ("wh_qc", "/warehouse/quality-inspection", "Quality Inspection", "check-circle",
-     P.GRN_QC, 44, "grp_warehouse"),
+     P.INSPECTION_VIEW, 44, "grp_warehouse"),
     ("wh_putaway", "/warehouse/putaway", "Put-away", "package",
-     P.STOCK_ADJUST, 45, "grp_warehouse"),
-    ("wh_returns", "/warehouse/purchase-returns", "Purchase Returns", "rotate-ccw",
-     P.GRN_VIEW, 46, "grp_warehouse"),
+     P.PUTAWAY_VIEW, 45, "grp_warehouse"),
+    ("wh_picklist", "/warehouse/picklist", "Picklists", "list-checks",
+     P.PICKING_VIEW, 46, "grp_warehouse"),
     ("wh_issues", "/warehouse/material-issues", "Material Issues", "send",
      P.ISSUE_VIEW, 47, "grp_warehouse"),
+    ("wh_dispatch", "/warehouse/dispatch", "Dispatch", "truck",
+     P.DISPATCH_VIEW, 48, "grp_warehouse"),
+    ("wh_returns", "/warehouse/purchase-returns", "Purchase Returns", "rotate-ccw",
+     P.RETURN_VIEW, 49, "grp_warehouse"),
+    ("wh_notifications", "/warehouse/notifications", "Notifications", "bell",
+     P.STOCK_VIEW, 50, "grp_warehouse"),
+    ("wh_reports", "/warehouse/reports", "Reports", "bar-chart",
+     P.WAREHOUSE_REPORT_VIEW, 51, "grp_warehouse"),
     ("wh_masters", "/warehouse/masters", "Warehouse Masters", "settings",
-     P.MASTER_LOCATION_MANAGE, 48, "grp_warehouse"),
+     P.MASTER_LOCATION_MANAGE, 52, "grp_warehouse"),
 
     ("grp_inventory", "/inventory", "Inventory", "package",
      P.STOCK_VIEW, 50, None),
@@ -139,7 +174,7 @@ PAGE_TREE = [
     ("inv_reservations", "/inventory/reservations", "Reservations", "lock",
      P.STOCK_RESERVE, 62, "grp_inventory"),
     ("inv_valuation", "/inventory/valuation", "Valuation & Ageing", "indian-rupee",
-     P.STOCK_VIEW, 63, "grp_inventory"),
+     P.STOCK_VALUATION_VIEW, 63, "grp_inventory"),
     ("inv_labels", "/inventory/labels", "Labels & Printing", "printer",
      P.STOCK_VIEW, 64, "grp_inventory"),
 
@@ -156,19 +191,23 @@ PAGE_TREE = [
     ("admin_settings", "/admin/settings", "Company Settings", "settings",
      P.ADMIN_SETTINGS_MANAGE, 92, "grp_settings"),
     ("admin_rules", "/admin/rules", "Rules Engine", "git-branch",
-     P.ADMIN_RULES_MANAGE, 95, "grp_settings"),
+     P.ADMIN_RULES_MANAGE, 96, "grp_settings"),
     ("admin_workflows", "/admin/workflows", "Approval Workflows", "route",
      P.ADMIN_WORKFLOW_MANAGE, 94, "grp_settings"),
+    # The per-project approval ladder: which position LEVELS approve, for one project
+    # and one document type. See platform/workflow/ladder.py.
+    ("admin_approvals_config", "/admin/approvals-config", "Approvals Config",
+     "list-ordered", P.ADMIN_WORKFLOW_MANAGE, 95, "grp_settings"),
     ("admin_policies", "/admin/policies", "Approval & Automation", "sparkles",
      P.ADMIN_WORKFLOW_MANAGE, 93, "grp_settings"),
     ("admin_numbering", "/admin/numbering", "Document Numbering", "hash",
-     P.ADMIN_NUMBERING_MANAGE, 96, "grp_settings"),
+     P.ADMIN_NUMBERING_MANAGE, 97, "grp_settings"),
     ("admin_notifications", "/admin/notifications", "Notifications", "bell",
-     P.ADMIN_NOTIFICATIONS_MANAGE, 97, "grp_settings"),
+     P.ADMIN_NOTIFICATIONS_MANAGE, 98, "grp_settings"),
     ("admin_audit", "/admin/audit", "Audit Log", "scroll-text",
-     P.ADMIN_AUDIT_VIEW, 98, "grp_settings"),
-    ("admin_fallback", "/admin/fallback-log", "Fallback Log", "shield",
      P.ADMIN_AUDIT_VIEW, 99, "grp_settings"),
+    ("admin_fallback", "/admin/fallback-log", "Fallback Log", "shield",
+     P.ADMIN_AUDIT_VIEW, 100, "grp_settings"),
 ]
 
 
@@ -202,7 +241,13 @@ async def seed_roles(db):
     return roles
 
 
-async def seed_pages(db):
+async def seed_pages(db, *, prune: bool = False):
+    """Upsert every page in PAGE_TREE. Deletes nothing unless `prune` is asked for.
+
+    Pruning is opt-in because the delete is only correct when PAGE_TREE is newer than
+    the database. When it is older — anyone running the seed from a branch behind main —
+    the same delete removes live screens, which is exactly what happened on 2026-07-29.
+    """
     # upsert every page (update fields if it already exists), then wire parents
     code_to_id = {}
     for code, path, name, icon, perm, order, _parent in PAGE_TREE:
@@ -225,12 +270,22 @@ async def seed_pages(db):
         page.parent_id = code_to_id[parent] if parent else None
     await db.flush()
 
-    # prune pages no longer in the tree (e.g. the old flat menu)
+    # Prune pages no longer in the tree (e.g. the old flat menu). Opt-in: see above.
     valid = {c for c, *_ in PAGE_TREE}
     stale = (await db.execute(select(Page).where(Page.code.notin_(valid)))).scalars().all()
+    if not stale:
+        return
+    if not prune:
+        print("  %d page(s) in the database are not in PAGE_TREE and were LEFT ALONE: %s"
+              % (len(stale), ", ".join(sorted(p.code for p in stale))))
+        print("  If they really are dead, re-run with --prune. If they are newer than "
+              "this branch, pull first — do not prune.")
+        return
     for p in stale:
         await db.delete(p)
     await db.flush()
+    print("  pruned %d page(s): %s"
+          % (len(stale), ", ".join(sorted(p.code for p in stale))))
 
 
 async def seed_org(db):
@@ -271,16 +326,22 @@ async def seed_users(db, roles):
             "email": f"{username}@bhspl.in", "department_id": dept_id,
             "office_id": OFFICE_ID,
             "is_active": True, "synced_at": utcnow()}, id=emp_id)
-        await get_or_create(db, UserCredential, defaults={
-            "password_hash": hash_password(PASSWORD),
-            "must_change": False}, employee_id=emp_id)
+        credential = await db.get(UserCredential, emp_id)
+        temporary_password = None
+        if credential is None:
+            temporary_password = secrets.token_urlsafe(12)
+            db.add(UserCredential(
+                employee_id=emp_id,
+                password_hash=hash_password(temporary_password),
+                must_change=True,
+            ))
         await get_or_create(db, UserRole, employee_id=emp_id, role_id=roles[role_code].id)
         if position_id:
             await get_or_create(db, HcmPositionAssignment, defaults={
                 "employee_id": emp_id, "position_id": position_id,
                 "department_id": dept_id, "is_active": True, "synced_at": utcnow()},
                 id=position_id)  # 1:1 with the position for the demo
-        created.append((username, role_code, name))
+        created.append((username, role_code, name, temporary_password))
     return created
 
 
@@ -422,7 +483,38 @@ async def seed_workflows(db, roles):
     ])
 
 
-async def seed():
+# A database reached over the network is somebody else's. Loopback is the only place
+# where "wipe it and put the demo back" is a reasonable default. Deliberately a shape
+# check, not a list of our servers: no host belongs in source (project rule 13), and a
+# blocklist would miss the next one.
+LOOPBACK_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
+
+
+def _refuse_remote(allow_remote: bool) -> None:
+    url = make_url(settings.DATABASE_URL)
+    host = (url.host or "").lower()
+    if host in LOOPBACK_HOSTS or allow_remote:
+        return
+    raise SystemExit(
+        f"\nRefusing to seed: {url.database!r} on {host} is not a local database.\n\n"
+        "This script writes demo users, demo passwords and mock hcm_* rows, and it is\n"
+        "meant for a development machine. On 2026-07-29 a run against the shared server\n"
+        "deleted 20 live menu pages.\n\n"
+        "  To add or repair menu rows on a real server:\n"
+        "      python -m scripts.provision_pages\n"
+        "  To add the warehouse permissions and menu:\n"
+        "      python -m scripts.provision_warehouse\n\n"
+        "  If you genuinely mean to seed this database, say so explicitly:\n"
+        "      python -m scripts.seed --allow-remote\n")
+
+
+async def seed(*, allow_remote: bool = False, prune: bool = False):
+    if not settings.ALLOW_DEMO_DATA:
+        raise SystemExit(
+            "Demo seed blocked. Set ALLOW_DEMO_DATA=true only in a development environment."
+        )
+    _refuse_remote(allow_remote)
+
     if settings.DATABASE_URL.startswith("sqlite"):
         async with engine.begin() as conn:      # dev convenience; prod uses Alembic
             await conn.run_sync(Base.metadata.create_all)
@@ -430,7 +522,7 @@ async def seed():
     async with SessionLocal() as db:
         await seed_permissions(db)
         roles = await seed_roles(db)
-        await seed_pages(db)
+        await seed_pages(db, prune=prune)
         await seed_org(db)
         users = await seed_users(db, roles)
         uom_rows = await seed_masters(db)
@@ -439,11 +531,16 @@ async def seed():
         await seed_workflows(db, roles)
         await db.commit()
 
-    print("\n  Seed complete. Logins (password for all: %s):\n" % PASSWORD)
-    print("  %-14s %-14s %s" % ("USERNAME", "ROLE", "NAME"))
-    print("  " + "-" * 46)
-    for username, role_code, name in users:
-        print("  %-14s %-14s %s" % (username, role_code, name))
+    print("\n  Seed complete. New accounts use unique one-time passwords.\n")
+    print("  %-14s %-14s %-28s %s" % (
+        "USERNAME", "ROLE", "TEMP PASSWORD", "NAME",
+    ))
+    print("  " + "-" * 78)
+    for username, role_code, name, temporary_password in users:
+        password = temporary_password or "(existing credential unchanged)"
+        print("  %-14s %-14s %-28s %s" % (
+            username, role_code, password, name,
+        ))
     print()
 
 
@@ -558,4 +655,5 @@ async def seed_lookup_masters(db, uom_rows=None):
 
 
 if __name__ == "__main__":
-    asyncio.run(seed())
+    asyncio.run(seed(allow_remote="--allow-remote" in sys.argv,
+                     prune="--prune" in sys.argv))

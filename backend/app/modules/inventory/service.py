@@ -9,7 +9,7 @@ from decimal import Decimal
 from sqlalchemy import func, select, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation, availability
 from app.modules.inventory.models import (
@@ -18,12 +18,15 @@ from app.modules.inventory.models import (
     StockTransferOrderItem, CycleCount, CycleCountItem, Reservation,
 )
 from app.platform.hcm.models import HcmFacility
+from app.platform.rbac import permissions as perms
+from app.platform.rbac.models import Role, UserRole
+from app.platform.rbac.service import get_user_permissions
 from app.platform.rules import evaluator as rules
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.shared.enums import (
     AuditAction, DocType, IndentStatus, InstanceStatus, MRStatus, Priority, RefType,
-    StockDirection,
+    StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
@@ -33,6 +36,66 @@ from app.shared.numbering import next_number
 
 def _d(value) -> Decimal:
     return Decimal(str(value))
+
+
+async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
+    """Warehouses visible to this login; None means the admin/global scope."""
+    if user is None:
+        return None
+    is_admin = (await db.execute(
+        select(Role.id)
+        .join(UserRole, UserRole.role_id == Role.id)
+        .where(
+            UserRole.employee_id == user.id,
+            Role.code == RoleCode.ADMIN.value,
+            Role.is_active.is_(True),
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if is_admin is not None:
+        return None
+    user_permissions = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    if perms.ADMIN_SETTINGS_MANAGE in user_permissions:
+        return None
+
+    office_id = getattr(user, "office_id", None)
+    conditions = [Warehouse.incharge_id == user.id]
+    if office_id is not None:
+        conditions.extend((
+            Warehouse.office_id == office_id,
+            HcmFacility.office_id == office_id,
+        ))
+    return set((await db.execute(
+        select(Warehouse.id)
+        .outerjoin(HcmFacility, HcmFacility.id == Warehouse.facility_id)
+        .where(Warehouse.is_active.is_(True), or_(*conditions))
+    )).scalars().all())
+
+
+async def _scoped_warehouse_ids(
+    db: AsyncSession, user, warehouse_id: int | None = None,
+) -> set[int] | None:
+    allowed = await _warehouse_ids_for_user(db, user)
+    if allowed is not None and warehouse_id is not None and warehouse_id not in allowed:
+        raise PermissionError_("Warehouse is outside your assigned office")
+    if warehouse_id is not None:
+        return {warehouse_id}
+    return allowed
+
+
+async def _can_view_valuation(db: AsyncSession, user) -> bool:
+    if user is None:
+        return True
+    user_permissions = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    return perms.STOCK_VALUATION_VIEW in user_permissions
+
+
+def _apply_warehouse_scope(stmt, column, warehouse_ids: set[int] | None):
+    return stmt if warehouse_ids is None else stmt.where(column.in_(warehouse_ids))
 
 
 # ---------------- stock: the single mutation point ----------------
@@ -131,6 +194,77 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     return stock
 
 
+async def move_stock_out(
+    db: AsyncSession,
+    item_id: int,
+    qty,
+    *,
+    ref_type: str,
+    ref_id: int,
+    ref_no: str,
+    user,
+    warehouse_id: int,
+    project_id: int = NO_PROJECT,
+    bin_id: int | None = None,
+    batch_id: int | None = None,
+) -> None:
+    """Issue stock across matching balance rows using move_stock() for every slice.
+
+    A document that does not specify a bin means "pick from available stock", not
+    "bulk bin 0". This matters after put-away, when valid stock no longer sits in the
+    bulk balance.
+    """
+    wanted = _d(qty)
+    if wanted <= 0:
+        raise ValidationError("Stock movement quantity must be positive")
+
+    stmt = select(Stock).where(
+        Stock.item_id == item_id,
+        Stock.warehouse_id == warehouse_id,
+        Stock.project_id == (project_id or NO_PROJECT),
+        Stock.available_qty > 0,
+    )
+    if bin_id is not None:
+        stmt = stmt.where(Stock.bin_id == (bin_id or NO_BIN))
+    if batch_id is not None:
+        stmt = stmt.where(Stock.batch_id == (batch_id or NO_BATCH))
+    rows = list((await db.execute(
+        stmt.order_by(
+            Stock.expiry_date.is_(None),
+            Stock.expiry_date.asc(),
+            Stock.bin_id,
+            Stock.id,
+        ).with_for_update()
+    )).scalars().all())
+
+    available = sum((row.available_qty or Decimal("0") for row in rows), Decimal("0"))
+    if available < wanted:
+        raise ValidationError(
+            f"Insufficient stock for this movement: {available} available, {wanted} required"
+        )
+
+    remaining = wanted
+    for row in rows:
+        if remaining <= 0:
+            break
+        take = min(remaining, row.available_qty or Decimal("0"))
+        await move_stock(
+            db,
+            item_id=item_id,
+            qty=take,
+            direction=StockDirection.OUT.value,
+            ref_type=ref_type,
+            ref_id=ref_id,
+            ref_no=ref_no,
+            user=user,
+            warehouse_id=warehouse_id,
+            bin_id=row.bin_id,
+            batch_id=row.batch_id,
+            project_id=row.project_id,
+        )
+        remaining -= take
+
+
 async def transfer_stock(db: AsyncSession, item_id: int, qty, user,
                          from_warehouse_id: int, to_warehouse_id: int,
                          from_project_id: int = NO_PROJECT,
@@ -162,18 +296,17 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
                      bin_id: int | None = None, search: str | None = None,
                      category_id: int | None = None, batch_no: str | None = None,
                      include_zero: bool = False, expiring_in_days: int | None = None,
-                     below_reorder: bool = False) -> dict:
+                     below_reorder: bool = False, user=None) -> dict:
     """The stock balance grid.
 
     Every filter the screen offers is applied here. They used to live in the frontend
     query object and were dropped before the request went out, so typing in the search
     box changed nothing — the list has to be filtered where the rows are.
     """
-    stmt = select(Stock)
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    stmt = _apply_warehouse_scope(select(Stock), Stock.warehouse_id, warehouse_ids)
     if item_id is not None:
         stmt = stmt.where(Stock.item_id == item_id)
-    if warehouse_id is not None:
-        stmt = stmt.where(Stock.warehouse_id == warehouse_id)
     if project_id is not None:
         stmt = stmt.where(Stock.project_id == project_id)
     if bin_id is not None:
@@ -206,8 +339,8 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
 
     page = await paginate(db, stmt.order_by(Stock.item_name), params)
 
-    # category and reorder level live on mst_items, not stk_balance. One lookup per
-    # page fills them; costing comes off the balance row's own valuation columns.
+    # Category and reorder level live on mst_items, not stk_balance. One lookup per
+    # page fills the non-financial display fields.
     ids = {row.item_id for row in page["items"]}
     if ids:
         cols = (await db.execute(
@@ -231,13 +364,14 @@ async def list_movements(db: AsyncSession, params: PageParams,
                          item_id: int | None = None, warehouse_id: int | None = None,
                          direction: str | None = None, ref_type: str | None = None,
                          search: str | None = None, date_from: date | None = None,
-                         date_to: date | None = None) -> dict:
+                         date_to: date | None = None, user=None) -> dict:
     """The stock ledger. Same story as list_stock — the filters have to run here."""
-    stmt = select(StockMovement)
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    stmt = _apply_warehouse_scope(
+        select(StockMovement), StockMovement.warehouse_id, warehouse_ids,
+    )
     if item_id is not None:
         stmt = stmt.where(StockMovement.item_id == item_id)
-    if warehouse_id is not None:
-        stmt = stmt.where(StockMovement.warehouse_id == warehouse_id)
     if direction:
         stmt = stmt.where(StockMovement.direction == direction)
     if ref_type:
@@ -557,8 +691,10 @@ async def get_adjustment(db: AsyncSession, adjustment_id: int) -> StockAdjustmen
 
 async def get_stock_replenishment(db: AsyncSession, warehouse_id: int | None = None,
                                   category_id: int | None = None,
-                                  criticality: str | None = None) -> list[dict]:
+                                  criticality: str | None = None, user=None) -> list[dict]:
     """Items where total available quantity is below reorder level."""
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    can_view_valuation = await _can_view_valuation(db, user)
     stmt = select(Item).where(Item.is_active.is_(True), Item.reorder_level.isnot(None), Item.reorder_level > 0)
     if category_id:
         stmt = stmt.where(Item.category_id == category_id)
@@ -567,9 +703,12 @@ async def get_stock_replenishment(db: AsyncSession, warehouse_id: int | None = N
     results = []
 
     for item in items:
-        stock_stmt = select(func.coalesce(func.sum(Stock.available_qty), 0)).where(Stock.item_id == item.id)
-        if warehouse_id:
-            stock_stmt = stock_stmt.where(Stock.warehouse_id == warehouse_id)
+        stock_stmt = select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
+            Stock.item_id == item.id,
+        )
+        stock_stmt = _apply_warehouse_scope(
+            stock_stmt, Stock.warehouse_id, warehouse_ids,
+        )
 
         avail_qty = float((await db.execute(stock_stmt)).scalar() or 0)
         reorder_lvl = float(item.reorder_level or 0)
@@ -597,7 +736,10 @@ async def get_stock_replenishment(db: AsyncSession, warehouse_id: int | None = N
                 "min_order_qty": min_order,
                 "suggested_order_qty": suggested,
                 "lead_time_days": getattr(item, "lead_time_days", 7),
-                "last_purchase_price": float(item.last_purchase_price or item.std_cost or 0),
+                "last_purchase_price": (
+                    float(getattr(item, "purchase_price", 0) or 0)
+                    if can_view_valuation else None
+                ),
                 "criticality": criticality or "HIGH",
             })
 
@@ -650,16 +792,19 @@ async def release_reservation_by_id(db: AsyncSession, reservation_id: int) -> di
 # ---------------- Live Availability ----------------
 
 async def get_item_availability(db: AsyncSession, item_id: int, project_id: int | None = NO_PROJECT,
-                                warehouse_id: int | None = None) -> dict:
+                                warehouse_id: int | None = None, user=None) -> dict:
     item = await db.get(Item, item_id)
     if not item:
         raise NotFoundError(f"Item {item_id} not found")
 
-    stmt = select(Stock).where(Stock.item_id == item_id)
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    stmt = _apply_warehouse_scope(
+        select(Stock).where(Stock.item_id == item_id),
+        Stock.warehouse_id,
+        warehouse_ids,
+    )
     if project_id is not None:
         stmt = stmt.where(Stock.project_id == project_id)
-    if warehouse_id is not None:
-        stmt = stmt.where(Stock.warehouse_id == warehouse_id)
 
     stocks = list((await db.execute(stmt)).scalars().all())
 
@@ -702,10 +847,15 @@ async def get_item_availability(db: AsyncSession, item_id: int, project_id: int 
 
 # ---------------- Ageing & Valuation ----------------
 
-async def get_stock_ageing(db: AsyncSession, warehouse_id: int | None = None) -> dict:
-    stmt = select(Stock).where(Stock.available_qty > 0)
-    if warehouse_id:
-        stmt = stmt.where(Stock.warehouse_id == warehouse_id)
+async def get_stock_ageing(
+    db: AsyncSession, warehouse_id: int | None = None, user=None,
+) -> dict:
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    stmt = _apply_warehouse_scope(
+        select(Stock).where(Stock.available_qty > 0),
+        Stock.warehouse_id,
+        warehouse_ids,
+    )
 
     stocks = list((await db.execute(stmt)).scalars().all())
     now_dt = utcnow()
@@ -771,11 +921,18 @@ async def get_stock_ageing(db: AsyncSession, warehouse_id: int | None = None) ->
     }
 
 
-async def get_stock_valuation(db: AsyncSession, warehouse_id: int | None = None) -> dict:
+async def get_stock_valuation(
+    db: AsyncSession, warehouse_id: int | None = None, user=None,
+) -> dict:
     """Moving average cost per item per warehouse based on items/stock."""
-    stmt = select(Stock).where(Stock.total_qty > 0)
-    if warehouse_id:
-        stmt = stmt.where(Stock.warehouse_id == warehouse_id)
+    if not await _can_view_valuation(db, user):
+        raise PermissionError_("Missing permission: stock.valuation.view")
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    stmt = _apply_warehouse_scope(
+        select(Stock).where(Stock.total_qty > 0),
+        Stock.warehouse_id,
+        warehouse_ids,
+    )
 
     stocks = list((await db.execute(stmt)).scalars().all())
     val_rows = []
@@ -808,9 +965,13 @@ async def get_stock_valuation(db: AsyncSession, warehouse_id: int | None = None)
     }
 
 
-async def get_near_expiry_alerts(db: AsyncSession, days: int = 90) -> list[dict]:
+async def get_near_expiry_alerts(
+    db: AsyncSession, days: int = 90, user=None,
+) -> list[dict]:
+    warehouse_ids = await _scoped_warehouse_ids(db, user)
     cutoff = utcnow().date() + timedelta(days=days)
     stmt = select(Stock).where(Stock.expiry_date.isnot(None), Stock.expiry_date <= cutoff, Stock.available_qty > 0)
+    stmt = _apply_warehouse_scope(stmt, Stock.warehouse_id, warehouse_ids)
     stocks = list((await db.execute(stmt.order_by(Stock.expiry_date.asc()))).scalars().all())
 
     today_d = utcnow().date()
@@ -904,22 +1065,28 @@ async def approve_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder
 
 
 async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:
+    """Take transfer stock out of the source when it physically leaves."""
     sto = await get_sto(db, sto_id)
     if sto.status != "APPROVED":
         raise ValidationError(f"STO is in status {sto.status}, cannot dispatch")
 
-    sto.status = "DISPATCHED"
-    sto.dispatched_at = utcnow()
     for sto_item in sto.items:
         sto_item.dispatched_qty = sto_item.requested_qty
+        await move_stock_out(
+            db, item_id=sto_item.item_id, qty=sto_item.dispatched_qty,
+            ref_type="STO", ref_id=sto.id, ref_no=sto.sto_no, user=user,
+            warehouse_id=sto.from_warehouse_id, project_id=sto.from_project_id,
+        )
 
+    sto.status = "DISPATCHED"
+    sto.dispatched_at = utcnow()
     await db.commit()
     await db.refresh(sto)
     return sto
 
 
 async def receive_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:
-    """Receiving STO physically moves stock via move_stock()."""
+    """Credit the destination when the dispatched transfer is received."""
     sto = await get_sto(db, sto_id)
     if sto.status != "DISPATCHED":
         raise ValidationError(f"STO is in status {sto.status}, cannot receive")
@@ -927,12 +1094,6 @@ async def receive_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder
     for sto_item in sto.items:
         qty = sto_item.dispatched_qty or sto_item.requested_qty
         sto_item.received_qty = qty
-        # OUT from source, IN to destination
-        await move_stock(
-            db, item_id=sto_item.item_id, qty=qty, direction=StockDirection.OUT.value,
-            ref_type="STO", ref_id=sto.id, ref_no=sto.sto_no, user=user,
-            warehouse_id=sto.from_warehouse_id, project_id=sto.from_project_id,
-        )
         await move_stock(
             db, item_id=sto_item.item_id, qty=qty, direction=StockDirection.IN.value,
             ref_type="STO", ref_id=sto.id, ref_no=sto.sto_no, user=user,
@@ -1063,23 +1224,40 @@ async def post_cycle_count(db: AsyncSession, cc_id: int, user) -> CycleCount:
 
 # ---------------- Overview KPIs ----------------
 
-async def get_overview_kpis(db: AsyncSession) -> dict:
-    val = await get_stock_valuation(db)
-    tot_val = val["total_portfolio_value"]
+async def get_overview_kpis(db: AsyncSession, user=None) -> dict:
+    warehouse_ids = await _scoped_warehouse_ids(db, user)
+    can_view_valuation = await _can_view_valuation(db, user)
+    tot_val = None
+    if can_view_valuation:
+        val = await get_stock_valuation(db, user=user)
+        tot_val = val["total_portfolio_value"]
 
-    reorder = await get_stock_replenishment(db)
+    reorder = await get_stock_replenishment(db, user=user)
     items_below_reorder = len(reorder)
 
-    exp30 = len(await get_near_expiry_alerts(db, 30))
-    exp60 = len(await get_near_expiry_alerts(db, 60))
-    exp90 = len(await get_near_expiry_alerts(db, 90))
+    exp30 = len(await get_near_expiry_alerts(db, 30, user=user))
+    exp60 = len(await get_near_expiry_alerts(db, 60, user=user))
+    exp90 = len(await get_near_expiry_alerts(db, 90, user=user))
 
-    tot_avail = float((await db.execute(select(func.coalesce(func.sum(Stock.available_qty), 0)))).scalar() or 0)
-    tot_res = float((await db.execute(select(func.coalesce(func.sum(Stock.reserved_qty), 0)))).scalar() or 0)
+    available_stmt = _apply_warehouse_scope(
+        select(func.coalesce(func.sum(Stock.available_qty), 0)),
+        Stock.warehouse_id,
+        warehouse_ids,
+    )
+    reserved_stmt = _apply_warehouse_scope(
+        select(func.coalesce(func.sum(Stock.reserved_qty), 0)),
+        Stock.warehouse_id,
+        warehouse_ids,
+    )
+    tot_avail = float((await db.execute(available_stmt)).scalar() or 0)
+    tot_res = float((await db.execute(reserved_stmt)).scalar() or 0)
 
     # Dead stock: available > 0 and last_movement_at < today - 60 days
     cutoff_date = utcnow() - timedelta(days=60)
     dead_stmt = select(func.count(Stock.id)).where(Stock.available_qty > 0, or_(Stock.last_movement_at.is_(None), Stock.last_movement_at < cutoff_date))
+    dead_stmt = _apply_warehouse_scope(
+        dead_stmt, Stock.warehouse_id, warehouse_ids,
+    )
     dead_count = int((await db.execute(dead_stmt)).scalar() or 0)
 
     return {

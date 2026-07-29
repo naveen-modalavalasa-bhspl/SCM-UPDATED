@@ -2,15 +2,12 @@
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import PermissionError_
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.exceptions import AuthenticationError
+from app.core.security import create_access_token, verify_password
 from app.platform.hcm.models import HcmEmployee
 from app.platform.rbac import service as rbac_service
 from app.platform.settings.models import UserCredential
 from app.shared.models.base import utcnow
-
-DEFAULT_EMPLOYEE_PASSWORD = "Bavya@123"
-
 
 async def authenticate(db: AsyncSession, username: str, password: str) -> tuple[HcmEmployee, str]:
     employee_id = int(username) if username.strip().isdigit() else None
@@ -24,18 +21,11 @@ async def authenticate(db: AsyncSession, username: str, password: str) -> tuple[
         )
     )).scalars().first()
     if not employee or not employee.is_active:
-        raise PermissionError_("Invalid credentials")
+        raise AuthenticationError("Invalid credentials")
 
     cred = await db.get(UserCredential, employee.id)
-    if cred is None and password == DEFAULT_EMPLOYEE_PASSWORD:
-        cred = UserCredential(
-            employee_id=employee.id,
-            password_hash=hash_password(DEFAULT_EMPLOYEE_PASSWORD),
-            must_change=False,
-        )
-        db.add(cred)
-    elif not cred or not verify_password(password, cred.password_hash):
-        raise PermissionError_("Invalid credentials")
+    if not cred or not verify_password(password, cred.password_hash):
+        raise AuthenticationError("Invalid credentials")
 
     cred.last_login_at = utcnow()
     await db.commit()

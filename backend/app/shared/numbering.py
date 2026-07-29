@@ -69,7 +69,13 @@ def current_period(policy: str | None, now: datetime | None = None) -> str | Non
 # Prefixes for the series auto-created when none is configured. Anything not listed
 # falls back to the first three letters of the doc type.
 _DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
-                     "issue": "ISS", "gatepass": "GP"}
+                     "issue": "ISS", "gatepass": "GP",
+                     # Warehouse. Named here because the three-letter fallback reads
+                     # badly for the two-word types ("WH_" for WH_ISSUE, "PUR" for
+                     # PURCHASE_RETURN, which collides with how people say "PO").
+                     "receipt": "REC", "gate_entry": "GE", "inspection": "QC",
+                     "putaway": "PUT", "picking": "PICK", "wh_issue": "WHI",
+                     "dispatch": "DSP", "purchase_return": "PRET"}
 
 
 def default_prefix(doc_type: str) -> str:

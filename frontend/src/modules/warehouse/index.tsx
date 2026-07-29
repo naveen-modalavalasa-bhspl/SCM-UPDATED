@@ -1,92 +1,101 @@
-// @ts-nocheck
-import { Route, Routes, Navigate } from "react-router-dom";
-import AcknowledgeDelivery from "./pages/AcknowledgeDelivery";
-import FloorPlan from "./pages/FloorPlan";
-import FloorPlan3D from "./pages/FloorPlan3D";
-import GRN from "./pages/GRN";
-import GRNForm from "./pages/GRNForm";
+import { Navigate, Route, Routes } from "react-router-dom";
+import TransactionsLayout from "./pages/TransactionsLayout";
+import WarehouseDashboard from "./pages/WarehouseDashboard";
 import MaterialInward from "./pages/MaterialInward";
-import MaterialInwardForm from "./pages/MaterialInwardForm";
-import MaterialIssueForm from "./pages/MaterialIssueForm";
-import MaterialIssues from "./pages/MaterialIssues";
-import OutwardLabelling from "./pages/OutwardLabelling";
-import PurchaseReturnForm from "./pages/PurchaseReturnForm";
-import PurchaseReturns from "./pages/PurchaseReturns";
-import Putaway from "./pages/Putaway";
-import PutawayForm from "./pages/PutawayForm";
-import QCOutward from "./pages/QCOutward";
-import QCOutwardForm from "./pages/QCOutwardForm";
+import GRN from "./pages/GRN";
+import ReceiptForm from "./pages/ReceiptForm";
 import QualityInspection from "./pages/QualityInspection";
 import QualityInspectionForm from "./pages/QualityInspectionForm";
+import Putaway from "./pages/Putaway";
+import PutawayForm from "./pages/PutawayForm";
+import Picklist from "./pages/Picklist";
+import PicklistForm from "./pages/PicklistForm";
+import MaterialIssues from "./pages/MaterialIssues";
+import MaterialIssueForm from "./pages/MaterialIssueForm";
+import Dispatch from "./pages/Dispatch";
+import DispatchForm from "./pages/DispatchForm";
+import PurchaseReturns from "./pages/PurchaseReturns";
+import PurchaseReturnForm from "./pages/PurchaseReturnForm";
+import OutwardLabelling from "./pages/OutwardLabelling";
+import AcknowledgeDelivery from "./pages/AcknowledgeDelivery";
 import StockSegregation from "./pages/StockSegregation";
-import TemplateMaterialIssueList from "./pages/TemplateMaterialIssueList";
-import WarehouseDashboard from "./pages/WarehouseDashboard";
 import WarehouseNotifications from "./pages/WarehouseNotifications";
 import WarehouseReports from "./pages/WarehouseReports";
+import MastersLayout from "./pages/masters/MastersLayout";
 import Warehouses from "./pages/masters/Warehouses";
 import WarehouseForm from "./pages/masters/WarehouseForm";
 import WarehouseDetail from "./pages/masters/WarehouseDetail";
-import TransactionsLayout from "./pages/TransactionsLayout";
-import MastersLayout from "./pages/MastersLayout";
+import FloorPlan from "./pages/masters/FloorPlan";
 
+/**
+ * The warehouse module's own router.
+ *
+ * `App.tsx` mounts this at `/warehouse/*` (and at `/grn`, `/stock` and `/issues` for
+ * links that predate the module), so every screen below is reachable without the
+ * app-level router knowing any of them exist — adding a screen is a change to this
+ * file plus a row in `PAGE_TREE`, and nothing shared moves.
+ *
+ * Gate entry and GRN are one form with a different `receipt_type`, and outward QC is
+ * the inspection screen with a different `inspection_type`. Passing the discriminator
+ * as a prop keeps one implementation of each rather than a near-copy that drifts.
+ */
 export function WarehouseModule() {
   return (
     <Routes>
-      {/* Overview Dashboard */}
       <Route index element={<WarehouseDashboard />} />
       <Route path="dashboard" element={<WarehouseDashboard />} />
-      <Route path="masters" element={<MastersLayout />} />
 
-      {/* Transactions Sub-tab layout */}
       <Route path="transactions" element={<TransactionsLayout />}>
         <Route index element={<Navigate to="material-inward" replace />} />
-        
-        {/* Material Inward / Gate Entry */}
+
         <Route path="material-inward" element={<MaterialInward />} />
-        <Route path="material-inward/new" element={<MaterialInwardForm />} />
-        <Route path="material-inward/:id" element={<MaterialInwardForm />} />
+        <Route path="material-inward/new" element={<ReceiptForm mode="GATE_ENTRY" />} />
+        <Route path="material-inward/:id" element={<ReceiptForm mode="GATE_ENTRY" />} />
 
-        {/* Goods Receipt Note (GRN) */}
         <Route path="grn" element={<GRN />} />
-        <Route path="grn/new" element={<GRNForm />} />
-        <Route path="grn/:id" element={<GRNForm />} />
+        <Route path="grn/new" element={<ReceiptForm mode="PURCHASE" />} />
+        <Route path="grn/:id" element={<ReceiptForm mode="PURCHASE" />} />
 
-        {/* Quality Inspection */}
         <Route path="quality-inspection" element={<QualityInspection />} />
         <Route path="quality-inspection/new" element={<QualityInspectionForm />} />
         <Route path="quality-inspection/:id" element={<QualityInspectionForm />} />
 
-        {/* Stock Putaway */}
         <Route path="putaway" element={<Putaway />} />
-        <Route path="putaway/new" element={<PutawayForm />} />
         <Route path="putaway/:id" element={<PutawayForm />} />
 
-        {/* Purchase Returns */}
-        <Route path="purchase-returns" element={<PurchaseReturns />} />
-        <Route path="purchase-returns/new" element={<PurchaseReturnForm />} />
-        <Route path="purchase-returns/:id" element={<PurchaseReturnForm />} />
+        <Route path="picklist" element={<Picklist />} />
+        <Route path="picklist/new" element={<PicklistForm />} />
+        <Route path="picklist/:id" element={<PicklistForm />} />
 
-        {/* Material Issues */}
         <Route path="material-issues" element={<MaterialIssues />} />
         <Route path="material-issues/new" element={<MaterialIssueForm />} />
         <Route path="material-issues/:id" element={<MaterialIssueForm />} />
+
+        <Route path="dispatch" element={<Dispatch />} />
+        <Route path="dispatch/new" element={<DispatchForm />} />
+        <Route path="dispatch/:id" element={<DispatchForm />} />
+
+        <Route path="purchase-returns" element={<PurchaseReturns />} />
+        <Route path="purchase-returns/new" element={<PurchaseReturnForm />} />
+        <Route path="purchase-returns/:id" element={<PurchaseReturnForm />} />
       </Route>
 
-      {/* Legacy root-level routes (to prevent standard actions/links from breaking) */}
+      {/* Standalone screens — not part of the document chain. */}
+      {/* The RBAC page tree still links to these root-level module URLs. Keep them
+       * so menu clicks and existing bookmarks resolve inside this module. */}
       <Route path="material-inward" element={<MaterialInward />} />
-      <Route path="material-inward/new" element={<MaterialInwardForm />} />
-      <Route path="material-inward/:id" element={<MaterialInwardForm />} />
+      <Route path="material-inward/new" element={<ReceiptForm mode="GATE_ENTRY" />} />
+      <Route path="material-inward/:id" element={<ReceiptForm mode="GATE_ENTRY" />} />
 
       <Route path="grn" element={<GRN />} />
-      <Route path="grn/new" element={<GRNForm />} />
-      <Route path="grn/:id" element={<GRNForm />} />
+      <Route path="grn/new" element={<ReceiptForm mode="PURCHASE" />} />
+      <Route path="grn/:id" element={<ReceiptForm mode="PURCHASE" />} />
 
       <Route path="quality-inspection" element={<QualityInspection />} />
       <Route path="quality-inspection/new" element={<QualityInspectionForm />} />
       <Route path="quality-inspection/:id" element={<QualityInspectionForm />} />
 
       <Route path="putaway" element={<Putaway />} />
-      <Route path="putaway/new" element={<PutawayForm />} />
       <Route path="putaway/:id" element={<PutawayForm />} />
 
       <Route path="purchase-returns" element={<PurchaseReturns />} />
@@ -97,22 +106,31 @@ export function WarehouseModule() {
       <Route path="material-issues/new" element={<MaterialIssueForm />} />
       <Route path="material-issues/:id" element={<MaterialIssueForm />} />
 
-      {/* Other Warehouse Sub-pages */}
-      <Route path="floor-plan" element={<FloorPlan />} />
-      <Route path="floor-plan-3d" element={<FloorPlan3D />} />
-      <Route path="notifications" element={<WarehouseNotifications />} />
-      <Route path="reports" element={<WarehouseReports />} />
+      <Route path="outward-labelling" element={<OutwardLabelling />} />
       <Route path="acknowledge-delivery" element={<AcknowledgeDelivery />} />
       <Route path="stock-segregation" element={<StockSegregation />} />
-      <Route path="template-material-issues" element={<TemplateMaterialIssueList />} />
-      <Route path="outward-labelling" element={<OutwardLabelling />} />
+      <Route path="notifications" element={<WarehouseNotifications />} />
+      <Route path="reports" element={<WarehouseReports />} />
 
-      {/* Master Data */}
-      <Route path="masters/warehouses" element={<Warehouses />} />
-      <Route path="masters/warehouses/new" element={<WarehouseForm />} />
-      <Route path="masters/warehouses/:id" element={<WarehouseDetail />} />
-      <Route path="masters/warehouses/:id/edit" element={<WarehouseForm />} />
+      {/* Outward QC — the same screen, inspecting before a consignment leaves. */}
+      <Route path="qc-outward" element={<QualityInspection type="OUTGOING" title="Outward QC" />} />
+      <Route path="qc-outward/new" element={<QualityInspectionForm type="OUTGOING" />} />
+      <Route path="qc-outward/:id" element={<QualityInspectionForm type="OUTGOING" />} />
+
+      <Route path="masters" element={<MastersLayout />}>
+        <Route index element={<Navigate to="warehouses" replace />} />
+        <Route path="warehouses" element={<Warehouses />} />
+        <Route path="warehouses/new" element={<WarehouseForm />} />
+        <Route path="warehouses/:id" element={<WarehouseDetail />} />
+        <Route path="warehouses/:id/edit" element={<WarehouseForm />} />
+        <Route path="floor-plan" element={<FloorPlan />} />
+      </Route>
+
+      {/* App.tsx also mounts this module at /grn, /stock and /issues for links that
+       * predate it; anything unmatched lands on the overview rather than a blank page. */}
+      <Route path="*" element={<Navigate to="/warehouse" replace />} />
     </Routes>
   );
 }
+
 export default WarehouseModule;

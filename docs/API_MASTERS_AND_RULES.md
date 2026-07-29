@@ -27,7 +27,7 @@ Writing needs the master's own permission.
 | `/api/vendors` | `master.vendor.manage` | |
 | `/api/departments` | — | read-only HCM mirror |
 | `/api/facilities` | — | read-only HCM mirror |
-| `/api/admin/roles` | — | read-only role list |
+| `/api/admin/roles` | `admin.roles.manage` | read-only role list |
 
 Each of the first eight supports the same four verbs:
 
@@ -235,7 +235,7 @@ GET  /api/rules/executions?event_code=&doc_id=                      // history
 | `DELETE /api/admin/users/{id}/access` | `admin.users.manage` | revoke and end live sessions |
 | `PUT /api/admin/users/{id}/roles` | `admin.users.manage` | replace that employee's roles |
 | `GET/POST/PUT/DELETE /api/admin/groups` | `admin.groups.manage` | user groups |
-| `GET /api/admin/groups/{id}/members` | — | resolved membership |
+| `GET /api/admin/groups/{id}/members` | `admin.groups.manage` | resolved membership |
 | `GET/POST/PUT/DELETE /api/admin/doc-series` | `admin.numbering.manage` | numbering |
 | `GET /api/admin/audit?entity=&action=` | `admin.audit.view` | audit log |
 | `GET/POST/PUT/DELETE /api/admin/notifications` | `admin.notifications.manage` | who gets told |

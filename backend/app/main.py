@@ -4,10 +4,15 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
-from app.core.exceptions import AppException, app_exception_handler
+from app.core.exceptions import (
+    AppException, app_exception_handler, http_exception_handler,
+    request_validation_exception_handler,
+)
 
 log = logging.getLogger("app")
 
@@ -43,6 +48,8 @@ app.add_middleware(
 )
 
 app.add_exception_handler(AppException, app_exception_handler)
+app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 
 
 @app.get("/health", tags=["health"])
@@ -68,6 +75,7 @@ def _include_routers() -> None:
         "app.modules.procurement.router",
         "app.modules.inventory.router",
         "app.modules.logistics.router",
+        "app.modules.warehouse.router",
         "app.shared.masters.router",
     ]
     for path in router_paths:

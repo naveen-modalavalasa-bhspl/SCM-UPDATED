@@ -32,8 +32,6 @@ class StockRow(BaseModel):
     reserved_qty: float
     transit_qty: float = 0
     total_qty: float
-    valuation_rate: float = 0
-    stock_value: float = 0
     last_movement_at: datetime | None = None
     updated_at: datetime | None = None
     # Not stk_balance columns — filled from mst_items by service.list_stock so the
@@ -480,7 +478,7 @@ class CycleCountOut(CycleCountListRow):
 # ---------------- Overview KPI Schema ----------------
 
 class StockOverviewKPIs(BaseModel):
-    total_stock_value: float
+    total_stock_value: float | None = None
     items_below_reorder: int
     near_expiry_30_days: int
     near_expiry_60_days: int

@@ -1,4 +1,4 @@
-"""Provision employee portal access and the reporting-manager indent workflow.
+"""Provision employee portal pages and the reporting-manager indent workflow.
 
 This is intentionally data-only: it updates rows in the frozen schema and never
 creates or alters database objects.
@@ -11,11 +11,8 @@ import asyncio
 from sqlalchemy import select
 
 from app.core.database import SessionLocal, engine
-from app.core.security import hash_password
-from app.platform.auth.service import DEFAULT_EMPLOYEE_PASSWORD
-from app.platform.hcm.models import HcmEmployee
 from app.platform.rbac.models import Page
-from app.platform.settings.models import DocSeries, UserCredential
+from app.platform.settings.models import DocSeries
 from app.platform.workflow.models import Stage, Workflow
 from app.shared.enums import ApprovalMode, ApproverType, DocType
 from app.shared.numbering import _fiscal_year
@@ -34,28 +31,7 @@ PAGE_NAMES = {
 
 
 async def provision() -> dict:
-    password_hash = hash_password(DEFAULT_EMPLOYEE_PASSWORD)
     async with SessionLocal() as db:
-        employees = (await db.execute(
-            select(HcmEmployee).where(HcmEmployee.is_active.is_(True))
-        )).scalars().all()
-        created = updated = 0
-        for employee in employees:
-            credential = await db.get(UserCredential, employee.id)
-            if credential is None:
-                db.add(UserCredential(
-                    employee_id=employee.id,
-                    password_hash=password_hash,
-                    must_change=False,
-                ))
-                created += 1
-            else:
-                credential.password_hash = password_hash
-                credential.must_change = False
-                credential.failed_attempts = 0
-                credential.locked_until = None
-                updated += 1
-
         pages = (await db.execute(
             select(Page).where(Page.code.in_(PAGE_NAMES))
         )).scalars().all()
@@ -114,9 +90,6 @@ async def provision() -> dict:
             db.add(series)
         await db.commit()
         return {
-            "active_employees": len(employees),
-            "credentials_created": created,
-            "credentials_reset": updated,
             "pages_renamed": len(pages),
             "workflow_id": workflow.id,
             "number_series_id": series.id,

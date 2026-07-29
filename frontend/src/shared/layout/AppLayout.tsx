@@ -104,8 +104,13 @@ export function AppLayout() {
         {positionSelector()}
       </aside>
 
-      {/* Main column */}
-      <div className="flex min-h-full flex-1 flex-col md:pl-[236px]">
+      {/* Main column.
+          `min-w-0` is load-bearing: a flex item defaults to `min-width: auto`, which
+          means it refuses to shrink below its widest child. A module with enough tabs
+          (Warehouse has twelve) then stretched this column past the viewport and took
+          the page content with it, and the `overflow-x-auto` on the tab strip below
+          never engaged because the strip was never the thing overflowing. */}
+      <div className="flex min-h-full min-w-0 flex-1 flex-col md:pl-[236px]">
         <header className="sticky top-0 z-20 border-b border-line bg-content1/80 backdrop-blur">
           <div className="flex items-center justify-between px-4 py-3 md:px-8">
             <div className="md:hidden">
@@ -128,14 +133,23 @@ export function AppLayout() {
             </div>
           )}
           {tabs.length > 0 && activeRoot?.code !== "grp_indents" && (
-            <div className="overflow-x-auto px-2 md:px-6">
+            <div className="min-w-0 px-2 md:px-6">
               <Tabs
                 aria-label="Module sections"
                 variant="underlined"
                 color="primary"
                 selectedKey={best?.child.path ?? tabs[0].path}
                 onSelectionChange={(k) => nav(String(k))}
-                classNames={{ tabList: "gap-4", cursor: "bg-brand", tab: "px-1 h-11" }}
+                classNames={{
+                  // HeroUI tabs are `w-full` by default. In a horizontal navigation
+                  // strip that makes every item viewport-wide and pushes all but the
+                  // first one off-screen. Keep the base constrained to the header,
+                  // let the list own overflow, and size each tab to its label.
+                  base: "block w-full min-w-0",
+                  tabList: "w-full justify-start gap-4 overflow-x-auto",
+                  cursor: "bg-brand",
+                  tab: "h-11 w-auto min-w-max shrink-0 px-1",
+                }}
               >
                 {tabs.map((c) => (
                   <Tab

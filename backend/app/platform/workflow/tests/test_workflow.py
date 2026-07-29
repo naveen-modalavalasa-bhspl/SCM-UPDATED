@@ -248,6 +248,33 @@ async def test_delegation_rejects_a_circular_route(db):
         ), second)
 
 
+async def test_delegation_options_are_limited_to_the_callers_org_branch(db):
+    manager = await _emp(db, 831, "Manager", position_id=2000)
+    child = await _emp(db, 832, "Child", position_id=2001)
+    await _emp(db, 833, "Unrelated", position_id=3000)
+    db.add_all([
+        HcmPosition(id=2000, name="Manager", synced_at=utcnow()),
+        HcmPosition(
+            id=2001, name="Child", parent_position_id=2000,
+            synced_at=utcnow(),
+        ),
+        HcmPosition(id=3000, name="Other branch", synced_at=utcnow()),
+    ])
+    await db.flush()
+    manager.active_position_id = 2000
+
+    options = await service.delegation_options(db, manager)
+
+    assert options == [{"id": child.id, "name": child.full_name}]
+
+
+async def test_delegation_options_are_empty_without_an_assigned_position(db):
+    employee = await _emp(db, 834, "No Position")
+    await _emp(db, 835, "Directory Entry")
+
+    assert await service.delegation_options(db, employee) == []
+
+
 async def test_single_reporting_manager_stage_climbs_to_final_top_pair(db):
     requester = await _emp(db, 50, "Pilot", position_id=1000)
     oe = await _emp(db, 51, "OE", position_id=1001)

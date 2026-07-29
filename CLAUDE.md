@@ -19,6 +19,7 @@ py -3.11 -m venv .venv
 copy .env.example .env          # set DATABASE_URL=mysql+aiomysql://root:<pw>@127.0.0.1:3306/scm_erp
 # create the schema once (MySQL must be running):  CREATE DATABASE scm_erp;
 .venv/Scripts/python -m alembic upgrade head
+$env:ALLOW_DEMO_DATA="true"       # development only; demo seeds are blocked otherwise
 .venv/Scripts/python -m scripts.seed
 # --reload-dir app: without it the reloader also watches .venv, so a pip install
 # triggers a several-hundred-file reload that can wedge the server.
@@ -36,8 +37,8 @@ npm install
 npm run dev      # http://localhost:5173  (proxies /api -> :8000)
 npm run build
 ```
-**Demo logins** (password `password123`): `requester`, `approver`, `procurement`,
-`store`, `planthead`, `admin`.
+**Demo logins**: `requester`, `approver`, `procurement`, `store`, `planthead`,
+`admin`. The seed prints a unique one-time password for each newly created account.
 
 ---
 
@@ -115,6 +116,17 @@ Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock
    Configuration must never strand a document: a missing workflow, a stage that
    resolves to nobody, and a missing `sys_doc_series` row all fall back
    (`platform/workflow/fallback.py`, `shared/numbering.py`) and log loudly.
+   Who approves is configured per project per document type as a **ladder**
+   (`platform/workflow/ladder.py`, Settings > Approvals Config). A ladder rung is a
+   RANK — `hcm_positions.role_id`, HCM's org role — not a position and not a person.
+   The approver is found at submit time by climbing the raiser's own
+   `parent_position_id` chain and keeping the ancestors whose rank is switched on, so
+   a five-region project routes each request to its own Regional Manager. The result
+   is frozen onto `wf_instances.resolved_chain`, so editing a ladder never moves a
+   document already in approval. No ladder for a project → the company-wide one → the
+   old fallback. Not `level_id` (COO and SPH share a band) and not
+   `hcm_positions.project_id` (empty in the live mirror — the project is on the
+   employee).
 9. Every state change: load → validate current status → change → write audit
    row → commit. Never delete a `wf_actions` row.
 10. Async everywhere. `hcm_*` tables are READ-ONLY — written only by

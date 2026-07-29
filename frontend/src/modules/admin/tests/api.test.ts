@@ -13,8 +13,8 @@ describe("admin api", () => {
 
   it("exposes every admin area the module has screens for", () => {
     expect(Object.keys(adminApi).sort()).toEqual([
-      "audit", "docSeries", "getSchedule", "notifications", "rules",
-      "setSchedule", "syncEntity", "syncLog", "syncNow", "syncStatus",
+      "audit", "docSeries", "getSchedule", "ladders", "notifications", "rules",
+      "setSchedule", "syncEntity", "syncLog", "syncNow", "syncStatus", "workflows",
     ]);
   });
 });

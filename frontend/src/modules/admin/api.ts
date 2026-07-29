@@ -1,10 +1,18 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  AuditRow, Conflict, DocSeries,
+  AuditRow, Conflict, DocSeries, Ladder, LadderOptions, LadderPreview, LadderRung,
   NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult, SyncResult,
   SyncStatus, WorkflowDefinition, WorkflowOptions,
 } from "./types";
+
+/** What the server needs to save or preview a ladder — the toggles, nothing else. */
+const rungPayload = (rungs: LadderRung[]) => rungs.map((rung) => ({
+  position_role_id: rung.position_role_id,
+  name: rung.name,
+  is_enabled: rung.is_enabled,
+  conditions: rung.conditions,
+}));
 
 type ListParams = { search?: string; page?: number; size?: number };
 const page = <T>(url: string, params: Record<string, unknown> = {}) =>
@@ -73,6 +81,31 @@ export const adminApi = {
       api.put<WorkflowDefinition>(`/api/workflow/definitions/${id}`, body).then((r) => r.data),
     deactivate: (id: number) =>
       api.delete(`/api/workflow/definitions/${id}`).then((r) => r.data),
+  },
+  // ---- Approvals Config: one ladder per project per document ----
+  ladders: {
+    options: () =>
+      api.get<LadderOptions>("/api/workflow/ladders/options").then((r) => r.data),
+    get: (projectId: number | null, docType: string) =>
+      api.get<Ladder>("/api/workflow/ladders", {
+        params: { doc_type: docType, ...(projectId != null ? { project_id: projectId } : {}) },
+      }).then((r) => r.data),
+    // Runs against the toggles currently on screen, saved or not, so the admin sees
+    // the outcome of a change before committing to it.
+    preview: (projectId: number | null, docType: string, rungs: LadderRung[],
+              fromRoleId: number | null) =>
+      api.post<LadderPreview>("/api/workflow/ladders/preview", {
+        project_id: projectId, doc_type: docType, rungs: rungPayload(rungs),
+      }, { params: fromRoleId != null ? { from_role_id: fromRoleId } : {} })
+        .then((r) => r.data),
+    save: (projectId: number | null, docType: string, rungs: LadderRung[]) =>
+      api.post<Ladder>("/api/workflow/ladders", {
+        project_id: projectId, doc_type: docType, rungs: rungPayload(rungs),
+      }).then((r) => r.data),
+    copy: (fromProjectId: number | null, docType: string, toProjectIds: number[]) =>
+      api.post<{ copied_to: number[] }>("/api/workflow/ladders/copy", {
+        from_project_id: fromProjectId, doc_type: docType, to_project_ids: toProjectIds,
+      }).then((r) => r.data),
   },
   docSeries: {
     list: () => all<DocSeries>("/api/admin/doc-series"),

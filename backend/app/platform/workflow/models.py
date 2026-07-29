@@ -6,7 +6,7 @@ column (the engine re-evaluates conditions from context passed by the module); p
 approvals are materialised in `wf_pending`.
 """
 from sqlalchemy import (
-    BigInteger, Boolean, Column, Date, DateTime, Integer, Numeric, String, Text,
+    JSON, BigInteger, Boolean, Column, Date, DateTime, Integer, Numeric, String, Text,
 )
 
 from app.core.database import Base
@@ -19,6 +19,11 @@ class Workflow(Base):
     code = Column(String(50), nullable=False, index=True)
     name = Column(String(200), nullable=False)
     doc_type = Column(String(30), nullable=False, index=True)
+    # A ladder is scoped to one project; NULL means the company-wide default, used by
+    # any project that has no ladder of its own. See workflow/ladder.py.
+    project_id = Column(BigInteger, index=True, nullable=True)
+    project_name = Column(String(200), nullable=True)
+    module = Column(String(30), nullable=True)
     version = Column(Integer, nullable=False, default=1)
     is_active = Column(Boolean, nullable=False, default=True)
     effective_from = Column(Date, nullable=True)
@@ -35,6 +40,12 @@ class Stage(Base):
     name = Column(String(200), nullable=False)
     approver_type = Column(String(30), nullable=False)
     position_id = Column(BigInteger, index=True, nullable=True)
+    # A stage carrying position_role_id is a LADDER RUNG: it names a rank
+    # (hcm_positions.role_id — COO, SPH, REGIONAL MANAGER…), not a person and not a
+    # position row, and the engine finds the holder by walking up the raiser's own
+    # reporting line. Stages without it behave exactly as before.
+    position_role_id = Column(BigInteger, index=True, nullable=True)
+    is_enabled = Column(Boolean, nullable=False, default=True)
     role_id = Column(BigInteger, nullable=True)
     employee_id = Column(BigInteger, nullable=True)
     approval_mode = Column(String(20), nullable=False, default="ANY_ONE")
@@ -60,6 +71,11 @@ class Instance(Base):
     doc_id = Column(BigInteger, nullable=False)
     doc_no = Column(String(50), nullable=True)
     workflow_id = Column(BigInteger, index=True, nullable=False)
+    project_id = Column(BigInteger, index=True, nullable=True)
+    # The ladder resolved to real positions at submit time and frozen here, so editing
+    # a ladder can never move a document that is already in approval. A list of
+    # {sequence, position_id, position_name, level_id, level_name}.
+    resolved_chain = Column(JSON, nullable=True)
     current_sequence = Column(Integer, nullable=False, default=0)
     current_stage_name = Column(String(200), nullable=True)
     status = Column(String(20), nullable=False, default="IN_PROGRESS", index=True)

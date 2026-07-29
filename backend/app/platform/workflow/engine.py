@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm import service as hcm_service
-from app.platform.workflow import fallback, resolver
+from app.platform.workflow import fallback, ladder, resolver
 from app.platform.workflow.conditions import stage_applies
 from app.platform.workflow.models import (
     Action, Instance, Pending, Stage, StageCondition, Workflow,
@@ -42,8 +42,13 @@ async def _active_workflow(db: AsyncSession, doc_type: str) -> tuple[Workflow, b
     being submitted — see platform/workflow/fallback.py.
     """
     wf = (await db.execute(
-        select(Workflow).where(Workflow.doc_type == doc_type, Workflow.is_active.is_(True))
-        .order_by(Workflow.id.desc())
+        select(Workflow).where(
+            Workflow.doc_type == doc_type,
+            # Project ladders are chosen by start(); this is the company-wide path, so
+            # one project's ladder can never end up approving another's document.
+            Workflow.project_id.is_(None),
+            Workflow.is_active.is_(True),
+        ).order_by(Workflow.id.desc())
     )).scalars().first()
     if wf is None:
         return await fallback.ensure_workflow(db, doc_type), True
@@ -251,9 +256,177 @@ async def _materialize_pending(
     return approvers
 
 
+# ---------------- ladder path ----------------
+#
+# A ladder is a per-project list of position LEVELS (workflow/ladder.py). It resolves
+# to real positions ONCE, at submit, and the result is frozen onto the instance, so
+# editing a ladder can never move a document already in approval. Everything below only
+# runs for instances that carry a resolved_chain; every other workflow takes the
+# original path untouched.
+
+SELF_APPROVED_COMMENT = "Top of the approval ladder — self-approved"
+
+
+def _link(instance: Instance) -> dict | None:
+    """The chain entry the document is currently sitting on."""
+    chain = instance.resolved_chain or []
+    index = (instance.current_sequence or 1) - 1
+    return chain[index] if 0 <= index < len(chain) else None
+
+
+async def _ladder_approvers(db: AsyncSession, instance: Instance, link: dict) -> list:
+    """The rung's holders, plus anyone they have delegated to."""
+    employees = [e for e in [
+        await hcm_service.get_employee(db, employee_id)
+        for employee_id in link.get("approver_ids", [])
+    ] if e is not None and e.is_active]
+    return await resolver._expand_delegations(db, employees, instance.doc_type)
+
+
+async def _open_ladder_link(db: AsyncSession, instance: Instance, link: dict,
+                            context: dict) -> list:
+    instance.current_sequence = link["sequence"]
+    instance.current_stage_name = link["role_name"]
+    approvers = await _ladder_approvers(db, instance, link)
+    if not approvers:
+        # resolve_chain already dropped empty rungs, so reaching here means the holders
+        # left between submit and now. Same rule as everywhere else: never strand the
+        # document — hand it to the reporting line.
+        approvers, reason = await fallback.resolve(
+            db, instance.started_by_id, context.get("requester_position_id"))
+        await fallback.record(db, instance, f"{fallback.REASON_EMPTY_STAGE}/{reason}",
+                              approvers, link["role_name"])
+    await _materialize_specific_pending(db, instance, approvers, context)
+    return approvers
+
+
+async def _finish_ladder(db: AsyncSession, instance: Instance) -> None:
+    instance.status = InstanceStatus.APPROVED.value
+    instance.completed_at = utcnow()
+    instance.current_stage_name = None
+    await _clear_pending(db, instance.id)
+
+
+async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dict,
+                        user, project_id: int | None,
+                        requester_position_id: int | None) -> Instance:
+    chain = await ladder.resolve_chain(
+        db, stages, requester_position_id, user.id, context)
+
+    instance = Instance(
+        doc_type=doc_type, doc_id=doc_id, workflow_id=wf.id,
+        project_id=project_id, resolved_chain=chain,
+        doc_no=context.get("doc_no"),
+        started_by_id=user.id, started_by_name=user.full_name,
+        status=InstanceStatus.IN_PROGRESS.value,
+    )
+    db.add(instance)
+    await db.flush()
+
+    db.add(Action(
+        instance_id=instance.id, stage_sequence=0, stage_name="Submitted",
+        actor_id=user.id, actor_name=user.full_name,
+        actor_position=context.get("requester_position_name"),
+        action=ApprovalAction.SUBMITTED.value,
+    ))
+    await db.flush()
+
+    if not chain:
+        # Nobody above the raiser on this ladder: he IS the top. Recorded as a real
+        # approval by him rather than a silent auto-approve, so the trail reads true.
+        db.add(Action(
+            instance_id=instance.id, stage_sequence=0,
+            stage_name=ladder.DOC_TYPE_LABEL.get(doc_type, doc_type),
+            actor_id=user.id, actor_name=user.full_name,
+            actor_position=context.get("requester_position_name"),
+            action=ApprovalAction.APPROVED.value, comments=SELF_APPROVED_COMMENT,
+        ))
+        instance.status = InstanceStatus.APPROVED.value
+        instance.completed_at = utcnow()
+        await db.flush()
+        return instance
+
+    await _open_ladder_link(db, instance, chain[0], context)
+    await db.flush()
+    return instance
+
+
+async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
+                      context: dict) -> Instance:
+    chain = instance.resolved_chain or []
+    link = _link(instance)
+    if link is None:
+        raise ValidationError("Approval stage not found")
+
+    pending = (await db.execute(
+        select(Pending).where(
+            Pending.instance_id == instance.id,
+            Pending.stage_sequence == instance.current_sequence,
+        )
+    )).scalars().all()
+    if user.id not in {row.approver_id for row in pending}:
+        raise PermissionError_("You are not a valid approver for the current stage")
+
+    # Someone holding two posts must act under the one the ladder picked. A delegate
+    # never holds it, so the check applies only to the rung's own holders.
+    active_position_id = getattr(user, "active_position_id", None)
+    if user.id in link.get("approver_ids", []) and active_position_id != link["position_id"]:
+        raise PermissionError_("Switch to the approval position before acting")
+
+    active_position = await hcm_service.get_position(
+        db, active_position_id) if active_position_id else None
+    db.add(Action(
+        instance_id=instance.id, stage_sequence=instance.current_sequence,
+        stage_name=link["role_name"],
+        actor_id=user.id, actor_name=user.full_name,
+        actor_position=active_position.name if active_position else None,
+        action=action, comments=comments,
+    ))
+    await db.flush()
+
+    if action == ApprovalAction.REJECTED.value:
+        instance.status = InstanceStatus.REJECTED.value
+        instance.completed_at = utcnow()
+        await _clear_pending(db, instance.id)
+        await db.flush()
+        return instance
+
+    await _clear_pending(db, instance.id)
+
+    if action == ApprovalAction.RETURNED.value:
+        target = chain[instance.current_sequence - 2] if instance.current_sequence > 1 else link
+        await _open_ladder_link(db, instance, target, context)
+        await db.flush()
+        return instance
+
+    # APPROVED — one holder per rung is enough (ANY_ONE), so move on.
+    nxt = [c for c in chain if c["sequence"] > instance.current_sequence]
+    if nxt:
+        await _open_ladder_link(db, instance, nxt[0], context)
+    else:
+        await _finish_ladder(db, instance)
+    await db.flush()
+    return instance
+
+
 # ---------------- public API (the only five) ----------------
 
 async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance:
+    context = context or {}
+    requester_position_id = (context.get("requester_position_id")
+                             or getattr(user, "active_position_id", None))
+    # The post the raiser is acting under decides the project where HCM fills that in;
+    # today it does not, so this falls through to the raiser's own project.
+    project_id, _project_name = await ladder.project_for(db, requester_position_id, user)
+    # No position means no reporting line to climb, and an empty climb reads as "top of
+    # the ladder, self-approve". That would hand anyone without a post their own
+    # approval, so they take the old path and land on the fallback's admin safety net.
+    found = (await ladder.find_ladder(db, project_id, doc_type)
+             if requester_position_id is not None else None)
+    if found is not None:
+        return await _start_ladder(db, found[0], found[1], doc_type, doc_id, context,
+                                   user, project_id, requester_position_id)
+
     wf, used_fallback = await _active_workflow(db, doc_type)
     applicable = await _applicable_stages(db, wf.id, context)
 
@@ -295,6 +468,8 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
 
     action = _normalize_action(action)
     context = context or {}
+    if instance.resolved_chain:
+        return await _act_ladder(db, instance, action, user, comments, context)
     stage = await _get_stage(db, instance.workflow_id, instance.current_sequence)
     pending = (await db.execute(
         select(Pending).where(

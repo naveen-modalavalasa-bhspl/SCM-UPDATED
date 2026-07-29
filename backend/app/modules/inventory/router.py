@@ -34,7 +34,8 @@ async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
                      user=Depends(require_permission(perms.STOCK_VIEW))):
     return await service.list_stock(db, params, item_id, warehouse_id, project_id,
                                     bin_id, search, category_id, batch_no,
-                                    include_zero, expiring_in_days, below_reorder)
+                                    include_zero, expiring_in_days, below_reorder,
+                                    user=user)
 
 
 @stock_router.get("/movements", response_model=Page[MovementRow])
@@ -45,7 +46,7 @@ async def movements(params: PageParams = Depends(), item_id: int | None = None,
                     db: AsyncSession = Depends(get_db),
                     user=Depends(require_permission(perms.STOCK_VIEW))):
     return await service.list_movements(db, params, item_id, warehouse_id, direction,
-                                        ref_type, search, date_from, date_to)
+                                        ref_type, search, date_from, date_to, user=user)
 
 
 @stock_router.post("/transfer", status_code=204)
@@ -95,38 +96,43 @@ async def reject_adjustment(id: int, db: AsyncSession = Depends(get_db),
 async def replenishment(warehouse_id: int | None = None, category_id: int | None = None,
                         criticality: str | None = None, db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_stock_replenishment(db, warehouse_id, category_id, criticality)
+    return await service.get_stock_replenishment(
+        db, warehouse_id, category_id, criticality, user=user,
+    )
 
 
 @stock_router.get("/ageing", response_model=AgeingSummaryOut)
 async def stock_ageing(warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_stock_ageing(db, warehouse_id)
+    return await service.get_stock_ageing(db, warehouse_id, user=user)
 
 
 @stock_router.get("/valuation", response_model=ValuationSummaryOut)
 async def stock_valuation(warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_stock_valuation(db, warehouse_id)
+                         user=Depends(require_permission(
+                             perms.STOCK_VALUATION_VIEW))):
+    return await service.get_stock_valuation(db, warehouse_id, user=user)
 
 
 @stock_router.get("/near-expiry-alerts", response_model=list[NearExpiryAlertRow])
 async def near_expiry_alerts(days: int = 90, db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_near_expiry_alerts(db, days)
+    return await service.get_near_expiry_alerts(db, days, user=user)
 
 
 @stock_router.get("/overview-kpis", response_model=StockOverviewKPIs)
 async def overview_kpis(db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_overview_kpis(db)
+    return await service.get_overview_kpis(db, user=user)
 
 
 @stock_router.get("/{item_id}/availability", response_model=ItemAvailabilityOut)
 async def item_availability(item_id: int, project_id: int | None = 0,
                             warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_item_availability(db, item_id, project_id, warehouse_id)
+    return await service.get_item_availability(
+        db, item_id, project_id, warehouse_id, user=user,
+    )
 
 
 # STO Endpoints

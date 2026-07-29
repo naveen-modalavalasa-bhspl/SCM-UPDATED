@@ -17,20 +17,40 @@ async def test_login_and_me_returns_permissions(client, make_user, login):
 async def test_bad_password_rejected(client, make_user):
     await make_user(employee_id=1, username="alice", password="secret")
     r = await client.post("/api/auth/login", data={"username": "alice", "password": "wrong"})
-    assert r.status_code == 403
+    assert r.status_code == 401
 
 
-async def test_employee_id_login_and_position_switch(client, db):
-    from app.core.security import decode_token
-    from app.platform.hcm.models import (
-        HcmEmployee, HcmPosition, HcmPositionAssignment,
-    )
+async def test_active_employee_without_explicit_access_cannot_use_a_default_password(
+    client, db,
+):
+    from app.platform.hcm.models import HcmEmployee
+    from app.platform.settings.models import UserCredential
     from app.shared.models.base import utcnow
 
     db.add(HcmEmployee(
-        id=77, full_name="Multi Position", emp_code="EMP-77",
+        id=76, full_name="No SCM Access", emp_code="NO-ACCESS",
         is_active=True, synced_at=utcnow(),
     ))
+    await db.commit()
+
+    response = await client.post(
+        "/api/auth/login",
+        data={"username": "NO-ACCESS", "password": "Bavya@123"},
+    )
+
+    assert response.status_code == 401
+    assert await db.get(UserCredential, 76) is None
+
+
+async def test_employee_id_login_and_position_switch(client, db, make_user):
+    from app.core.security import decode_token
+    from app.platform.hcm.models import HcmPosition, HcmPositionAssignment
+    from app.shared.models.base import utcnow
+
+    await make_user(
+        employee_id=77, username="EMP-77", password="position-secret",
+        full_name="Multi Position",
+    )
     db.add_all([
         HcmPosition(id=701, name="Position A", is_active=True, synced_at=utcnow()),
         HcmPosition(id=702, name="Position B", is_active=True, synced_at=utcnow()),
@@ -46,7 +66,7 @@ async def test_employee_id_login_and_position_switch(client, db):
     await db.commit()
 
     login = await client.post(
-        "/api/auth/login", data={"username": "77", "password": "Bavya@123"},
+        "/api/auth/login", data={"username": "77", "password": "position-secret"},
     )
     assert login.status_code == 200
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
@@ -61,20 +81,22 @@ async def test_employee_id_login_and_position_switch(client, db):
     assert decode_token(switched.json()["access_token"])["position_id"] == 702
 
 
-async def test_selected_position_supplies_hcm_role_and_permissions(client, db):
+async def test_selected_position_supplies_hcm_role_and_permissions(
+    client, db, make_user,
+):
     from sqlalchemy import select
 
     from app.platform.hcm.models import (
-        HcmEmployee, HcmPosition, HcmPositionAssignment,
+        HcmPosition, HcmPositionAssignment,
     )
     from app.platform.rbac.models import Permission, Role, RolePermission
     from app.platform.rbac.service import sync_hcm_roles
     from app.shared.models.base import utcnow
 
-    db.add(HcmEmployee(
-        id=78, full_name="Role Switcher", emp_code="EMP-78",
-        is_active=True, synced_at=utcnow(),
-    ))
+    await make_user(
+        employee_id=78, username="EMP-78", password="role-secret",
+        full_name="Role Switcher",
+    )
     db.add_all([
         HcmPosition(id=711, name="Field Position", role_id=91,
                     role_name="Field Staff", is_active=True, synced_at=utcnow()),
@@ -103,7 +125,7 @@ async def test_selected_position_supplies_hcm_role_and_permissions(client, db):
     await db.commit()
 
     login = await client.post(
-        "/api/auth/login", data={"username": "78", "password": "Bavya@123"},
+        "/api/auth/login", data={"username": "78", "password": "role-secret"},
     )
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
     me = (await client.get("/api/auth/me", headers=headers)).json()
@@ -213,6 +235,96 @@ async def test_require_permission_allows_with_code(client, make_user, login):
 async def test_unauthenticated_is_401(client):
     r = await client.get("/api/auth/me")
     assert r.status_code == 401
+
+
+async def test_invalid_and_expired_tokens_are_401(client):
+    from datetime import datetime, timedelta, timezone
+
+    from jose import jwt
+
+    from app.core.config import settings
+
+    malformed = await client.get(
+        "/api/auth/me", headers={"Authorization": "Bearer xx.yy.zz"},
+    )
+    assert malformed.status_code == 401
+    assert malformed.json() == {
+        "success": False, "error": "Invalid or expired token",
+    }
+
+    now = datetime.now(timezone.utc)
+    expired_token = jwt.encode(
+        {"sub": "1", "iat": now - timedelta(minutes=2),
+         "exp": now - timedelta(minutes=1)},
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+    expired = await client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {expired_token}"},
+    )
+    assert expired.status_code == 401
+    assert expired.json()["error"] == "Invalid or expired token"
+
+
+async def test_framework_errors_use_the_app_error_envelope(client):
+    validation = await client.post("/api/auth/login", json={})
+    assert validation.status_code == 422
+    assert validation.json()["success"] is False
+    assert isinstance(validation.json()["error"], str)
+    assert "username" in validation.json()["error"]
+
+    missing = await client.get("/api/definitely-not-a-route")
+    assert missing.status_code == 404
+    assert missing.json() == {"success": False, "error": "Not Found"}
+
+
+async def test_admin_reads_require_their_admin_permissions(
+    client, make_user, login,
+):
+    await make_user(
+        employee_id=90, username="plain-reader", password="pw",
+        permissions=["indent.view"],
+    )
+    headers = await login("plain-reader", "pw")
+    paths = [
+        "/api/admin/groups",
+        "/api/admin/groups/1/members",
+        "/api/admin/roles",
+        "/api/admin/hcm-roles",
+        "/api/admin/doc-series",
+        "/api/admin/notifications",
+    ]
+    for path in paths:
+        response = await client.get(path, headers=headers)
+        assert response.status_code == 403, path
+
+
+async def test_hidden_menu_parent_does_not_promote_visible_child(
+    client, db, make_user, login,
+):
+    from app.platform.rbac.models import Page
+
+    await make_user(
+        employee_id=91, username="menu-user", password="pw",
+        permissions=["child.view"],
+    )
+    parent = Page(
+        code="hidden_parent", path="/hidden", name="Hidden",
+        required_permission="parent.view", is_active=True, sort_order=1,
+    )
+    db.add(parent)
+    await db.flush()
+    db.add(Page(
+        code="visible_child", path="/hidden/child", name="Child",
+        required_permission="child.view", parent_id=parent.id,
+        is_active=True, sort_order=2,
+    ))
+    await db.commit()
+
+    headers = await login("menu-user", "pw")
+    menu = (await client.get("/api/auth/me", headers=headers)).json()["menu"]
+    assert "visible_child" not in {item["code"] for item in menu}
 
 
 # ---- RBAC user directory: role filter + pagination ---- #

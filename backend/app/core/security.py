@@ -5,7 +5,7 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 from app.core.config import settings
-from app.core.exceptions import PermissionError_
+from app.core.exceptions import AuthenticationError
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -34,4 +34,4 @@ def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
     except JWTError:
-        raise PermissionError_("Invalid or expired token")
+        raise AuthenticationError("Invalid or expired token")

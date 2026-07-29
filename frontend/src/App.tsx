@@ -28,6 +28,7 @@ import { UsersPage } from "@/modules/rbac/pages/UsersPage";
 import { GroupsPage } from "@/modules/rbac/pages/GroupsPage";
 import { RulesPage } from "@/modules/admin/pages/RulesPage";
 import { WorkflowsPage } from "@/modules/admin/pages/WorkflowsPage";
+import { ApprovalConfigPage } from "@/modules/admin/pages/ApprovalConfigPage";
 import { PoliciesPage } from "@/modules/admin/pages/PoliciesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { NumberingPage } from "@/modules/admin/pages/NumberingPage";
@@ -114,6 +115,7 @@ function AppRoutes() {
         <Route path="rbac/groups" element={<GroupsPage />} />
         <Route path="admin/rules" element={<RulesPage />} />
         <Route path="admin/workflows" element={<WorkflowsPage />} />
+        <Route path="admin/approvals-config" element={<ApprovalConfigPage />} />
         <Route path="admin/policies" element={<PoliciesPage />} />
         <Route path="admin/audit" element={<AuditPage />} />
         <Route path="admin/numbering" element={<NumberingPage />} />

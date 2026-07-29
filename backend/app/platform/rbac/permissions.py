@@ -43,6 +43,8 @@ GRN_QC = "grn.qc"
 STOCK_VIEW = "stock.view"
 STOCK_ADJUST = "stock.adjust"
 STOCK_RESERVE = "stock.reserve"
+# Valuation exposes purchase cost, so it is separate from plain stock visibility.
+STOCK_VALUATION_VIEW = "stock.valuation.view"
 STOCK_TRANSFER = "stock.transfer"
 ALLOCATION_VIEW = "allocation.view"
 ALLOCATION_CREATE = "allocation.create"
@@ -57,6 +59,29 @@ MR_REJECT = "mr.reject"
 ISSUE_VIEW = "issue.view"
 ISSUE_CREATE = "issue.create"
 ISSUE_ISSUE = "issue.issue"
+
+# --- Warehouse ---
+# The warehouse module runs the physical dock-to-stock cycle: receipt -> inspection
+# -> putaway, and picking -> issue -> dispatch -> return. GRN_* above stays for the
+# older logistics GRN screens; these guard the warehouse endpoints.
+RECEIPT_VIEW = "receipt.view"
+RECEIPT_CREATE = "receipt.create"
+RECEIPT_POST = "receipt.post"
+INSPECTION_VIEW = "inspection.view"
+INSPECTION_EXECUTE = "inspection.execute"
+PUTAWAY_VIEW = "putaway.view"
+PUTAWAY_EXECUTE = "putaway.execute"
+PICKING_VIEW = "picking.view"
+PICKING_PICK = "picking.pick"
+DISPATCH_VIEW = "dispatch.view"
+DISPATCH_CREATE = "dispatch.create"
+DISPATCH_APPROVE = "dispatch.approve"
+DISPATCH_GATE_OUT = "dispatch.gate_out"
+DISPATCH_ACKNOWLEDGE = "dispatch.acknowledge"
+RETURN_VIEW = "return.view"
+RETURN_CREATE = "return.create"
+RETURN_APPROVE = "return.approve"
+WAREHOUSE_REPORT_VIEW = "warehouse.report.view"
 
 # --- Masters ---
 MASTER_ITEM_MANAGE = "master.item.manage"
@@ -109,6 +134,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_VIEW, "inventory", "stock", "view", "View stock"),
     Perm(STOCK_ADJUST, "inventory", "stock", "adjust", "Adjust stock"),
     Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
+    Perm(STOCK_VALUATION_VIEW, "inventory", "stock_valuation", "view",
+         "View stock valuation and cost"),
     Perm(STOCK_TRANSFER, "inventory", "stock", "transfer",
          "Transfer stock between warehouses"),
     Perm(ALLOCATION_VIEW, "inventory", "allocation", "view", "View stock allocations"),
@@ -126,6 +153,27 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(ISSUE_VIEW, "logistics", "issue", "view", "View issues"),
     Perm(ISSUE_CREATE, "logistics", "issue", "create", "Create issues"),
     Perm(ISSUE_ISSUE, "logistics", "issue", "issue", "Issue stock to a department"),
+    Perm(RECEIPT_VIEW, "warehouse", "receipt", "view", "View goods receipts"),
+    Perm(RECEIPT_CREATE, "warehouse", "receipt", "create", "Create goods receipts"),
+    Perm(RECEIPT_POST, "warehouse", "receipt", "post", "Post a goods receipt"),
+    Perm(INSPECTION_VIEW, "warehouse", "inspection", "view", "View quality inspections"),
+    Perm(INSPECTION_EXECUTE, "warehouse", "inspection", "execute",
+         "Record a quality inspection result"),
+    Perm(PUTAWAY_VIEW, "warehouse", "putaway", "view", "View put-away tasks"),
+    Perm(PUTAWAY_EXECUTE, "warehouse", "putaway", "execute", "Put stock away into bins"),
+    Perm(PICKING_VIEW, "warehouse", "picking", "view", "View picklists"),
+    Perm(PICKING_PICK, "warehouse", "picking", "pick", "Pick stock against a picklist"),
+    Perm(DISPATCH_VIEW, "warehouse", "dispatch", "view", "View dispatches"),
+    Perm(DISPATCH_CREATE, "warehouse", "dispatch", "create", "Create dispatches"),
+    Perm(DISPATCH_APPROVE, "warehouse", "dispatch", "approve", "Approve a dispatch"),
+    Perm(DISPATCH_GATE_OUT, "warehouse", "dispatch", "gate_out",
+         "Gate a dispatch out of the plant"),
+    Perm(DISPATCH_ACKNOWLEDGE, "warehouse", "dispatch", "acknowledge",
+         "Acknowledge delivery of a dispatch"),
+    Perm(RETURN_VIEW, "warehouse", "return", "view", "View purchase returns"),
+    Perm(RETURN_CREATE, "warehouse", "return", "create", "Create purchase returns"),
+    Perm(RETURN_APPROVE, "warehouse", "return", "approve", "Approve a purchase return"),
+    Perm(WAREHOUSE_REPORT_VIEW, "warehouse", "report", "view", "View warehouse reports"),
     Perm(MASTER_ITEM_MANAGE, "masters", "item", "manage", "Manage items"),
     Perm(MASTER_VENDOR_MANAGE, "masters", "vendor", "manage", "Manage vendors"),
     Perm(MASTER_CATEGORY_MANAGE, "masters", "category", "manage", "Manage item categories"),
