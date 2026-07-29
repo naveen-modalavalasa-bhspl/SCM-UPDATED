@@ -18,7 +18,7 @@ def test_all_tables_registered():
         "mst_attributes", "mst_attribute_mappings",
         "mst_price_lists", "mst_price_list_items",
         "mst_boms", "mst_bom_items", "mst_item_specs",
-        "whs_warehouses", "whs_bins",
+        "whs_warehouses", "whs_warehouse_locations",
         "hcm_employees", "hcm_positions", "hcm_position_assignments", "sys_hcm_sync_log",
         "rbac_permissions", "rbac_roles", "rbac_user_roles", "rbac_pages",
         "rbac_user_groups", "rbac_user_group_members",

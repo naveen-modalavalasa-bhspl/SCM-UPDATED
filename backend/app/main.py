@@ -57,6 +57,23 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/health/ready", tags=["health"])
+async def readiness():
+    """Deployment readiness: the process is useful only when MySQL answers."""
+    from fastapi import HTTPException
+    from sqlalchemy import text
+
+    from app.core.database import engine
+
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        log.warning("Readiness check failed: %s", exc)
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+    return {"status": "ready"}
+
+
 def _include_routers() -> None:
     """Register routers that exist. Wrapped so the skeleton boots before the
     later stages add their modules."""

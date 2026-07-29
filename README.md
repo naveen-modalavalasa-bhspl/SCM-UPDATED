@@ -359,8 +359,10 @@ ind_ pro_ lgs_ whs_`. A module only creates tables with its own prefix.
    build deviates from the docs. Read this before writing code.
 2. **[docs/04_SCM_BUSINESS_FLOW.md](docs/04_SCM_BUSINESS_FLOW.md)** — the business
    owner's end-to-end flow; the authority on what the system must do.
-3. **[docs/DB_SCHEMA.md](docs/DB_SCHEMA.md)** — the tables.
-4. **[docs/API_MASTERS_AND_RULES.md](docs/API_MASTERS_AND_RULES.md)** — the masters
+3. **[docs/08_DEPLOYMENT.md](docs/08_DEPLOYMENT.md)** — production Docker
+   deployment, health checks, upgrades, and backup guidance.
+4. **[docs/DB_SCHEMA.md](docs/DB_SCHEMA.md)** — the tables.
+5. **[docs/API_MASTERS_AND_RULES.md](docs/API_MASTERS_AND_RULES.md)** — the masters
    API and the rules engine.
 
 Doc precedence when they conflict: **04 > 03 > 02 > 01**.
