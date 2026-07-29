@@ -50,7 +50,7 @@ describe("inventory api", () => {
       ]),
     );
 
-    const [row] = await inventoryApi.getStockBalances();
+    const { items: [row] } = await inventoryApi.getStockBalances();
 
     // physical is what is on the shelf, reserved or not
     expect(row.physical_qty).toBe(100);
@@ -79,7 +79,7 @@ describe("inventory api", () => {
       ]),
     );
 
-    const [row] = await inventoryApi.getStockLedger();
+    const { items: [row] } = await inventoryApi.getStockLedger();
 
     expect(row.out_qty).toBe(15);
     expect(row.in_qty).toBe(0);
@@ -112,8 +112,9 @@ describe("inventory api", () => {
     await expect(inventoryApi.getStockBalances()).rejects.toThrow("Network down");
   });
 
-  it("refuses the operations that have no backend yet, rather than faking them", async () => {
-    await expect(inventoryApi.getReplenishments()).rejects.toThrow(/not configured yet/);
-    await expect(inventoryApi.adjustStock({} as never)).rejects.toThrow(/not available yet/);
+  it("fetches replenishments from the API", async () => {
+    mockGet.mockResolvedValueOnce({ data: [] });
+    await inventoryApi.getReplenishments();
+    expect(mockGet).toHaveBeenCalledWith("/api/stock/replenishment", expect.anything());
   });
 });

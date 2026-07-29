@@ -73,6 +73,7 @@ MASTER_ATTRIBUTE_MANAGE = "master.attribute.manage"
 MASTER_PRICE_MANAGE = "master.price.manage"
 MASTER_BOM_MANAGE = "master.bom.manage"
 MASTER_SPEC_MANAGE = "master.spec.manage"
+MASTER_HSN_MANAGE = "master.hsn.manage"
 
 # --- Admin ---
 ADMIN_ROLES_MANAGE = "admin.roles.manage"
@@ -83,6 +84,7 @@ ADMIN_RULES_MANAGE = "admin.rules.manage"
 ADMIN_NUMBERING_MANAGE = "admin.numbering.manage"
 ADMIN_AUDIT_VIEW = "admin.audit.view"
 ADMIN_NOTIFICATIONS_MANAGE = "admin.notifications.manage"
+ADMIN_SETTINGS_MANAGE = "admin.settings.manage"
 
 
 ALL_PERMISSIONS: list[Perm] = [
@@ -140,6 +142,7 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(MASTER_PRICE_MANAGE, "masters", "price", "manage", "Manage price lists"),
     Perm(MASTER_BOM_MANAGE, "masters", "bom", "manage", "Manage bills of material"),
     Perm(MASTER_SPEC_MANAGE, "masters", "spec", "manage", "Manage item specifications"),
+    Perm(MASTER_HSN_MANAGE, "masters", "hsn", "manage", "Manage HSN codes and tax rates"),
     Perm(ADMIN_ROLES_MANAGE, "admin", "roles", "manage", "Manage roles & permissions"),
     Perm(ADMIN_WORKFLOW_MANAGE, "admin", "workflow", "manage", "Manage approval workflows"),
     Perm(ADMIN_USERS_MANAGE, "admin", "users", "manage", "Manage users & HCM sync"),
@@ -150,6 +153,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(ADMIN_AUDIT_VIEW, "admin", "audit", "view", "View the audit log"),
     Perm(ADMIN_NOTIFICATIONS_MANAGE, "admin", "notifications", "manage",
          "Manage notification settings"),
+    Perm(ADMIN_SETTINGS_MANAGE, "admin", "settings", "manage",
+         "Manage system settings"),
 ]
 
 ALL_CODES: list[str] = [p.code for p in ALL_PERMISSIONS]

@@ -17,9 +17,17 @@ if _is_sqlite:
 else:
     engine = create_async_engine(
         settings.DATABASE_URL,
-        pool_size=20,        # for 1k+ concurrent users
-        max_overflow=10,
+        # The shared MySQL caps out at max_connections=151 and every developer
+        # points their own uvicorn at it. At 20+10 a handful of running servers
+        # exhausts the server and every query dies with "Too many connections"
+        # (error 1040) — which surfaces as blank screens, not as an error.
+        # 5+5 keeps one server well inside its share; raise it only on a box
+        # that owns its database.
+        pool_size=5,
+        max_overflow=5,
         pool_pre_ping=True,
+        pool_recycle=1800,   # drop connections before the server's wait_timeout does
+        pool_timeout=30,
         echo=False,
     )
 

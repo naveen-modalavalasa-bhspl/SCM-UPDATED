@@ -8,6 +8,7 @@ setting a document's status belongs to the module that owns the document (rule 2
 """
 from dataclasses import dataclass
 from datetime import date
+import logging
 from typing import Any
 
 from sqlalchemy import select
@@ -17,6 +18,9 @@ from app.platform.rules.models import (
     Rule, RuleAction, RuleCondition, RuleExecution,
 )
 from app.platform.workflow.conditions import matches
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -126,6 +130,34 @@ async def fire(db: AsyncSession, event_code: str, context: dict,
         ))
         await db.flush()
     return collected
+
+
+async def safe_fire(
+    db: AsyncSession,
+    event_code: str,
+    context: dict,
+    doc_type: str | None = None,
+    doc_id: int | None = None,
+) -> list[Action]:
+    """Fire rules as an optional overlay, never as the business-flow floor.
+
+    A bad administrator-entered condition/action must not roll back an indent or an
+    allocation. The savepoint removes any partial execution row and the owning module
+    continues with its code-level default. Database unavailability still surfaces when
+    the caller later persists its own document; this is configuration resilience, not
+    an attempt to hide infrastructure failure.
+    """
+    try:
+        async with db.begin_nested():
+            return await fire(
+                db, event_code, context, doc_type=doc_type, doc_id=doc_id,
+            )
+    except Exception:
+        logger.exception(
+            "Rules engine failed for %s %s/%s; using code-level fallback",
+            event_code, doc_type, doc_id,
+        )
+        return []
 
 
 def _jsonable(context: dict) -> dict:

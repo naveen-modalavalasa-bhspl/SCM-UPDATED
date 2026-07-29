@@ -4,7 +4,12 @@ import {
   Button as HButton, Chip, Dropdown, DropdownItem, DropdownMenu, DropdownSection, DropdownTrigger,
 } from "@heroui/react";
 import { useIndentFilters, type DatePreset } from "../context/IndentFilterContext";
-import { INDENT_PRIORITY_OPTIONS, INDENT_STATUS_GROUPS, INDENT_STATUS_OPTIONS } from "../constants";
+import {
+  INDENT_PRIORITY_OPTIONS,
+  INDENT_STATUS,
+  INDENT_STATUS_GROUPS,
+  INDENT_STATUS_OPTIONS,
+} from "../constants";
 
 type FilterMode = "indents" | "acknowledgments" | "activity";
 
@@ -23,18 +28,36 @@ interface IndentFilterBarProps {
 type ActiveMenu = "status" | "priority" | "date" | "transaction" | "movement" | null;
 
 const TRANSACTION_OPTIONS = [
-  { value: "RAISED", label: "Request raised" },
-  { value: "SUBMITTED", label: "Submitted" },
-  { value: "APPROVED", label: "Approved" },
-  { value: "REJECTED", label: "Rejected" },
-  { value: "RETURNED", label: "Returned" },
-  { value: "ACKNOWLEDGED", label: "Acknowledged" },
+  { value: "REQUEST_CREATED", label: "Request created" },
+  { value: "REQUEST_SUBMITTED", label: "Request submitted" },
+  { value: "APPROVAL_COMPLETED", label: "Approval completed" },
+  { value: "REQUEST_REJECTED", label: "Request rejected" },
+  { value: "REQUEST_RETURNED", label: "Request returned" },
+  {
+    value: "APPROVAL_ROUTED_AUTOMATICALLY",
+    label: "Approval routed automatically",
+  },
+  { value: "STOCK_ALLOCATED", label: "Stock allocated" },
+  {
+    value: "PROCUREMENT_REQUEST_CREATED",
+    label: "Procurement request created",
+  },
+  { value: "BOOKMARK_ADDED", label: "Bookmark added" },
+  { value: "BOOKMARK_REMOVED", label: "Bookmark removed" },
 ];
 
 const MOVEMENT_OPTIONS = [
   { value: "OUTWARD", label: "Outward" },
   { value: "INWARD", label: "Inward" },
 ];
+
+const ACKNOWLEDGMENT_STATUS_GROUPS = [{
+  label: "Fulfilment",
+  options: [
+    { value: INDENT_STATUS.ALLOCATED, label: "Fulfilled" },
+    { value: INDENT_STATUS.PARTIALLY_FULFILLED, label: "Partially Fulfilled" },
+  ],
+}];
 
 const DATE_PRESETS: { key: DatePreset; label: string }[] = [
   { key: "all", label: "All time" },
@@ -61,7 +84,7 @@ export function IndentFilterBar({
   showStatus = true,
   showPriority = true,
   showTransaction = mode === "activity",
-  showMovement = mode === "activity",
+  showMovement = false,
   showItem = mode === "activity",
   searchPlaceholder = "Search indents...",
 }: IndentFilterBarProps) {
@@ -101,8 +124,15 @@ export function IndentFilterBar({
   const hasRequiredByFilter = Boolean(requiredByFrom) || Boolean(requiredByTo);
   const hasAnyDateFilter = hasDateFilter || hasRequiredByFilter;
   const hasMoreFilters = Boolean(showTransaction || showMovement || showItem);
-  const activeMoreFilterCount = (transactionType ? 1 : 0) + (direction ? 1 : 0) + (itemId ? 1 : 0);
+  const activeMoreFilterCount = (
+    (showTransaction && transactionType ? 1 : 0)
+    + (showMovement && direction ? 1 : 0)
+    + (showItem && itemId ? 1 : 0)
+  );
   const dateLabel = primaryDateLabel(mode);
+  const statusGroups = mode === "acknowledgments"
+    ? ACKNOWLEDGMENT_STATUS_GROUPS
+    : INDENT_STATUS_GROUPS;
 
   useEffect(() => {
     setLocalSearch(search);
@@ -317,7 +347,7 @@ export function IndentFilterBar({
               </HButton>
             </DropdownTrigger>
             <DropdownMenu aria-label="Status filters">
-              {INDENT_STATUS_GROUPS.map((group) => (
+              {statusGroups.map((group) => (
                 <DropdownSection key={group.label} title={group.label}>
                   {group.options.map((option) => {
                     const selected = selectedStatuses.includes(option.value);
@@ -461,7 +491,7 @@ export function IndentFilterBar({
           {selectedStatuses.length > 0 && <Chip size="sm" variant="flat" onClose={() => setSelectedStatuses([])}>Status: {joinLabel(selectedStatuses, INDENT_STATUS_OPTIONS)}</Chip>}
           {selectedPriorities.length > 0 && <Chip size="sm" variant="flat" onClose={() => selectedPriorities.forEach(togglePriority)}>Priority: {joinLabel(selectedPriorities, INDENT_PRIORITY_OPTIONS)}</Chip>}
           {transactionType && <Chip size="sm" variant="flat" onClose={() => setTransactionType("")}>Transaction: {joinLabel([transactionType], TRANSACTION_OPTIONS)}</Chip>}
-          {direction && <Chip size="sm" variant="flat" onClose={() => setDirection("")}>Movement: {joinLabel([direction], MOVEMENT_OPTIONS)}</Chip>}
+          {showMovement && direction && <Chip size="sm" variant="flat" onClose={() => setDirection("")}>Movement: {joinLabel([direction], MOVEMENT_OPTIONS)}</Chip>}
           {itemId && <Chip size="sm" variant="flat" onClose={() => setItemId("")}>Item: {itemId}</Chip>}
         </div>
       )}

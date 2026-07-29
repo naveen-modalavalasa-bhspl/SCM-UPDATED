@@ -2,7 +2,8 @@ import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
   AccessSummary, AdminUserRow, FeatureAccessMatrix, GrantResult, GroupMember,
-  PageAccessMatrix, UserGroup,
+  OrgTree, PageAccessMatrix, PermissionDef, PermissionHolders, Region,
+  Reporting, RoleWithPermissions, SetPermissionsResult, UserGroup, ViewAs,
 } from "./types";
 
 type ListParams = { search?: string; page?: number; size?: number };
@@ -13,8 +14,10 @@ const all = <T>(url: string) =>
 
 export const rbacApi = {
   users: {
-    list: (params: ListParams & { with_access?: boolean }) =>
-      page<AdminUserRow>("/api/admin/users", params),
+    // Served by the RBAC module (supports role_id filtering + pagination); the
+    // grant/revoke/reset/setRoles actions below stay on the admin endpoints.
+    list: (params: ListParams & { with_access?: boolean; role_id?: number }) =>
+      page<AdminUserRow>("/api/rbac/users", params),
     summary: () =>
       api.get<AccessSummary>("/api/admin/users/summary").then((response) => response.data),
     grant: (body: { employee_id: number; role_ids: number[]; password?: string | null }) =>
@@ -29,18 +32,21 @@ export const rbacApi = {
         .then((response) => response.data),
   },
   groups: {
-    list: (params: ListParams = {}) => page<UserGroup>("/api/admin/groups", params),
+    // RBAC-owned endpoints. A LOCATION sub-group's location_id is an hcm_offices id
+    // (a district/region), picked from regions() below.
+    list: (params: ListParams = {}) => page<UserGroup>("/api/rbac/groups", params),
     create: (body: Partial<UserGroup>) =>
-      api.post<UserGroup>("/api/admin/groups", body).then((response) => response.data),
+      api.post<UserGroup>("/api/rbac/groups", body).then((response) => response.data),
     update: (id: number, body: Partial<UserGroup>) =>
-      api.put<UserGroup>(`/api/admin/groups/${id}`, body).then((response) => response.data),
+      api.put<UserGroup>(`/api/rbac/groups/${id}`, body).then((response) => response.data),
     deactivate: (id: number) =>
-      api.delete(`/api/admin/groups/${id}`).then((response) => response.data),
-    members: (id: number) => all<GroupMember>(`/api/admin/groups/${id}/members`),
+      api.delete(`/api/rbac/groups/${id}`).then((response) => response.data),
+    members: (id: number) => all<GroupMember>(`/api/rbac/groups/${id}/members`),
     addMember: (id: number, employeeId: number) =>
-      api.post(`/api/admin/groups/${id}/members/${employeeId}`).then((response) => response.data),
+      api.post(`/api/rbac/groups/${id}/members/${employeeId}`).then((response) => response.data),
     removeMember: (id: number, employeeId: number) =>
-      api.delete(`/api/admin/groups/${id}/members/${employeeId}`).then((response) => response.data),
+      api.delete(`/api/rbac/groups/${id}/members/${employeeId}`).then((response) => response.data),
+    regions: () => all<Region>("/api/rbac/regions"),
   },
   roles: () => all<{
     id: number;
@@ -50,6 +56,32 @@ export const rbacApi = {
     source: "HCM" | "SCM";
     assignable: boolean;
   }>("/api/admin/roles"),
+
+  reporting: (employeeId: number) =>
+    api.get<Reporting>(`/api/rbac/users/${employeeId}/reporting`).then((r) => r.data),
+  orgTree: () => api.get<OrgTree>("/api/rbac/org-tree").then((r) => r.data),
+  viewAs: (employeeId: number) =>
+    api.get<ViewAs>(`/api/rbac/users/${employeeId}/view-as`).then((r) => r.data),
+  permissionHolders: (code: string) =>
+    api.get<PermissionHolders>(`/api/rbac/permissions/${code}/holders`)
+      .then((r) => r.data),
+
+  // ---- Role lifecycle + permission matrix (RBAC-owned endpoints) ----
+  matrix: {
+    permissions: () => all<PermissionDef>("/api/rbac/permissions"),
+    roles: () => all<RoleWithPermissions>("/api/rbac/roles"),
+    setPermissions: (roleId: number, codes: string[]) =>
+      api.put<SetPermissionsResult>(`/api/rbac/roles/${roleId}/permissions`,
+        { permission_codes: codes }).then((r) => r.data),
+    createRole: (body: { code: string; name: string; description?: string | null }) =>
+      api.post(`/api/rbac/roles`, body).then((r) => r.data),
+    updateRole: (roleId: number, body: { code: string; name: string }) =>
+      api.put(`/api/rbac/roles/${roleId}`, body).then((r) => r.data),
+    deleteRole: (roleId: number) =>
+      api.delete(`/api/rbac/roles/${roleId}`).then((r) => r.data),
+    cloneRole: (roleId: number, body: { code: string; name: string }) =>
+      api.post(`/api/rbac/roles/${roleId}/clone`, body).then((r) => r.data),
+  },
   hcmRoles: () =>
     all<{ id: number; name: string; positions: number }>("/api/admin/hcm-roles"),
   pageAccess: () =>

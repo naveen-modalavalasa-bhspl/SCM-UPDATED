@@ -3,23 +3,24 @@ import { mastersApi } from "../api";
 
 /** Masters that go through the backend's MasterDef factory: same four verbs each. */
 const CRUD_MASTERS = [
-  "items", "categories", "vendors", "warehouses", "bins", "projects",
-  "brands", "manufacturers", "generalNames", "dosageForms",
+  "items", "categories", "vendors", "warehouses", "bins",
+  "brands", "manufacturers", "generalNames", "dosageForms", "hsnCodes",
   "brandManufacturers", "itemClasses", "itemSubClasses",
   "packaging", "features", "attributes",
-  "attributeMappings", "priceLists", "priceListItems", "boms", "bomItems",
+  "specs", "categoryTags", "itemGroups", "itemComponents", "itemPackaging",
+  "boms", "bomItems",
 ] as const;
 
 describe("masters api", () => {
   it("covers every master the Masters screen shows a tab for", () => {
     expect(Object.keys(mastersApi).sort()).toEqual([
-      "attributeMappings", "attributes", "bins", "bomItems", "boms",
-      "brandManufacturers", "brands", "categories", "departments",
-      "dosageForms", "facilities", "features", "generalNames",
-      "itemClasses", "itemSpecs", "itemSubClasses", "items", "manufacturers",
-      "packaging", "priceListItems",
-      "priceLists", "projects", "uom", "uomConversions", "vendors",
-      "warehouses",
+      "attributes", "bins", "bomItems", "boms",
+      "brandManufacturers", "brands", "categories", "categoryTags", "departments",
+      "dosageForms", "facilities", "features", "generalNames", "hsnCodes",
+      "itemClasses", "itemComponents", "itemGroups", "itemPackaging",
+      "itemSpecs", "itemSubClasses", "items", "manufacturers",
+      "packaging", "projects", "specs", "uom", "uomConversions", "userGroups",
+      "vendors", "warehouses",
     ]);
   });
 
@@ -45,6 +46,29 @@ describe("masters api", () => {
     expect(typeof mastersApi.facilities).toBe("function");
   });
 
+  it("projects are read-only: HCM owns them", () => {
+    // The backend registers no write routes for projects, so offering create or
+    // update here would only produce a 404 the user cannot act on.
+    expect(Object.keys(mastersApi.projects)).toEqual(["list"]);
+  });
+
+  it("uom offers the suggestion catalogue as well as plain CRUD", () => {
+    expect(typeof mastersApi.uom.suggestions).toBe("function");
+    expect(typeof mastersApi.uom.createSuggested).toBe("function");
+  });
+
+  it("an item's packing ladder can be read back with its running totals", () => {
+    // The totals are multiplied up on the server, never stored, so they cannot
+    // drift from the rungs they come from.
+    expect(typeof mastersApi.itemPackaging.breakdown).toBe("function");
+  });
+
+  it("attributes, specs and features tag to a category through one client", () => {
+    // Three tabs became one: all three answer the same two questions.
+    expect(typeof mastersApi.categoryTags.list).toBe("function");
+    expect("attributeMappings" in mastersApi).toBe(false);
+  });
+
   it("uom conversions cannot be deactivated: the live table has no is_active", () => {
     expect("deactivate" in mastersApi.uomConversions).toBe(true);
     // The route exists and returns a clear 400; what matters is that the UI does not
@@ -54,5 +78,9 @@ describe("masters api", () => {
   it("item specs are read and saved per item, not created", () => {
     // mst_item_specs is keyed by item_id, so there is no create or deactivate.
     expect(Object.keys(mastersApi.itemSpecs).sort()).toEqual(["get", "save"]);
+  });
+
+  it("resolves an entered HSN code through the item-entry endpoint", () => {
+    expect(typeof mastersApi.hsnCodes.resolve).toBe("function");
   });
 });

@@ -3,7 +3,7 @@ import type { Paginated } from "@/shared/types";
 import type {
   AuditRow, Conflict, DocSeries,
   NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult, SyncResult,
-  SyncStatus,
+  SyncStatus, WorkflowDefinition, WorkflowOptions,
 } from "./types";
 
 type ListParams = { search?: string; page?: number; size?: number };
@@ -57,6 +57,22 @@ export const adminApi = {
       api.put<NotificationRule>(`/api/admin/notifications/${id}`, body).then((r) => r.data),
     remove: (id: number) =>
       api.delete(`/api/admin/notifications/${id}`).then((r) => r.data),
+  },
+
+  workflows: {
+    list: () =>
+      api.get<{ items: WorkflowDefinition[]; total: number }>("/api/workflow/definitions")
+        .then((r) => r.data),
+    get: (id: number) =>
+      api.get<WorkflowDefinition>(`/api/workflow/definitions/${id}`).then((r) => r.data),
+    options: () =>
+      api.get<WorkflowOptions>("/api/workflow/definitions/options").then((r) => r.data),
+    create: (body: Partial<WorkflowDefinition>) =>
+      api.post<WorkflowDefinition>("/api/workflow/definitions", body).then((r) => r.data),
+    update: (id: number, body: Partial<WorkflowDefinition>) =>
+      api.put<WorkflowDefinition>(`/api/workflow/definitions/${id}`, body).then((r) => r.data),
+    deactivate: (id: number) =>
+      api.delete(`/api/workflow/definitions/${id}`).then((r) => r.data),
   },
   docSeries: {
     list: () => all<DocSeries>("/api/admin/doc-series"),

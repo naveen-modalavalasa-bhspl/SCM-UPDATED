@@ -69,6 +69,17 @@ class StockDirection(str, Enum):
     OUT = "OUT"
 
 
+class AdjustmentReason(str, Enum):
+    DAMAGE = "DAMAGE"
+    SHORTAGE = "SHORTAGE"
+    EXCESS = "EXCESS"
+    CYCLE_COUNT = "CYCLE_COUNT"
+    EXPIRY = "EXPIRY"
+    QUALITY_REJECTION = "QUALITY_REJECTION"
+    OPENING_BALANCE = "OPENING_BALANCE"
+    OTHER = "OTHER"
+
+
 class UserRole(str, Enum):
     """Seed role CODES. Roles are data in rbac_roles; there is no user.role column."""
     ADMIN = "ADMIN"
@@ -249,6 +260,29 @@ class FulfillmentTarget(str, Enum):
     PROCUREMENT = "PROCUREMENT"
 
 
+class UomClass(str, Enum):
+    """mst_uom.uom_class. What a unit measures.
+
+    Required on every UOM, because a conversion between units of different classes is
+    meaningless: litres never become kilograms. It is also what lets the item form
+    offer only the units that fit the measurement being taken.
+
+    PACKAGING is the odd one out — a box is not an SI dimension — but a packaging
+    chain counts trays and boxes the same way a recipe counts litres, and giving them
+    a class of their own keeps them out of the physical unit lists.
+    """
+    COUNT = "COUNT"
+    LENGTH = "LENGTH"
+    AREA = "AREA"
+    VOLUME = "VOLUME"
+    WEIGHT = "WEIGHT"
+    TEMPERATURE = "TEMPERATURE"
+    TIME = "TIME"
+    PRESSURE = "PRESSURE"
+    ENERGY = "ENERGY"
+    PACKAGING = "PACKAGING"
+
+
 class AttributeDataType(str, Enum):
     """What kind of value an attribute holds. Drives the input the UI shows and how
     the value is validated before it is stored."""
@@ -261,9 +295,30 @@ class AttributeDataType(str, Enum):
 
 class AttributeTarget(str, Enum):
     """What an attribute mapping attaches to. A mapping says "items of this kind need
-    this attribute"; the per-item VALUE lives in mst_item_specs.specifications."""
+    this attribute"; the per-item VALUE lives in mst_item_specs.specifications.
+
+    Superseded by CategoryTagType: tagging is now always to a category, and one
+    table covers attributes, specs and features. Kept only because the live
+    mst_attribute_mappings table still carries the column.
+    """
     CATEGORY = "CATEGORY"
     ITEM_CLASS = "ITEM_CLASS"
+
+
+class CategoryTagType(str, Enum):
+    """What a category tag attaches to that category.
+
+    Three kinds of thing hang off a category and all three answer the same two
+    questions — which one, and is it required — so they share one table rather than
+    three near-identical ones.
+
+    ATTRIBUTE is a selectable trait: colour, size, grade. It has a value list.
+    SPEC is a measurement: voltage 240 V, pressure 10 bar. It carries a UOM.
+    FEATURE is a yes/no trait: fragile, hazardous. It has no value at all.
+    """
+    ATTRIBUTE = "ATTRIBUTE"
+    SPEC = "SPEC"
+    FEATURE = "FEATURE"
 
 
 class PriceType(str, Enum):

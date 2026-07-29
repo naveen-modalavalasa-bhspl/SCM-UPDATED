@@ -8,17 +8,21 @@ from enum import Enum
 
 from app.shared.enums import (
     AllocationStatus, ApprovalAction, AuditAction, DocType, IndentItemStatus,
-    IndentStatus, InstanceStatus, Priority, RuleActionType,
+    IndentStatus, InstanceStatus, MRStatus, Priority, RuleActionType,
 )
 
 
 class IndentActivityType(str, Enum):
-    RAISED = "RAISED"
-    SUBMITTED = "SUBMITTED"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    RETURNED = "RETURNED"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
+    REQUEST_CREATED = "REQUEST_CREATED"
+    REQUEST_SUBMITTED = "REQUEST_SUBMITTED"
+    APPROVAL_COMPLETED = "APPROVAL_COMPLETED"
+    REQUEST_REJECTED = "REQUEST_REJECTED"
+    REQUEST_RETURNED = "REQUEST_RETURNED"
+    APPROVAL_ROUTED_AUTOMATICALLY = "APPROVAL_ROUTED_AUTOMATICALLY"
+    STOCK_ALLOCATED = "STOCK_ALLOCATED"
+    PROCUREMENT_REQUEST_CREATED = "PROCUREMENT_REQUEST_CREATED"
+    BOOKMARK_ADDED = "BOOKMARK_ADDED"
+    BOOKMARK_REMOVED = "BOOKMARK_REMOVED"
 
 
 class MaterialDirection(str, Enum):
@@ -36,6 +40,7 @@ __all__ = [
     "IndentStatus",
     "InstanceStatus",
     "MaterialDirection",
+    "MRStatus",
     "Priority",
     "RuleActionType",
 ]

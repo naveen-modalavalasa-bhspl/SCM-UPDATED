@@ -414,14 +414,20 @@ async def current_approvers(db, doc_type: str, doc_id: int) -> list:
 
 async def pending_for_user(db, user) -> list[dict]:
     rows = (await db.execute(
-        select(Pending).where(Pending.approver_id == user.id)
+        select(Pending, Instance)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(Pending.approver_id == user.id)
         .order_by(Pending.created_at.desc())
-    )).scalars().all()
+    )).all()
     return [{
-        "instance_id": row.instance_id, "doc_type": row.doc_type,
-        "doc_id": row.doc_id, "stage_sequence": row.stage_sequence,
-        "doc_no": row.doc_no, "summary": row.doc_summary,
-        "requested_by_name": row.requested_by_name,
+        "instance_id": row.Pending.instance_id, "doc_type": row.Pending.doc_type,
+        "doc_id": row.Pending.doc_id, "stage_sequence": row.Pending.stage_sequence,
+        "doc_no": row.Pending.doc_no, "summary": row.Pending.doc_summary,
+        "requested_by_name": row.Pending.requested_by_name,
+        "amount": float(row.Pending.amount) if row.Pending.amount is not None else None,
+        "waiting_since": row.Pending.created_at.isoformat() if row.Pending.created_at else None,
+        "due_at": row.Pending.due_at.isoformat() if row.Pending.due_at else None,
+        "current_stage_name": row.Instance.current_stage_name,
     } for row in rows]
 
 

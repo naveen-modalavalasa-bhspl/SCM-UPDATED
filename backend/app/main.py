@@ -58,7 +58,9 @@ def _include_routers() -> None:
     router_paths = [
         "app.platform.auth.router",
         "app.platform.hcm.router",
+        "app.platform.settings.router",
         "app.platform.rbac.router",
+        "app.platform.home.router",
         "app.platform.workflow.router",
         "app.platform.rules.router",
         "app.platform.admin.router",

@@ -9,6 +9,12 @@ describe("admin api", () => {
     }
   });
 
+  it("exposes versioned workflow definitions and builder options", () => {
+    for (const fn of ["list", "get", "options", "create", "update", "deactivate"]) {
+      expect(typeof adminApi.workflows[fn as keyof typeof adminApi.workflows]).toBe("function");
+    }
+  });
+
   it("keeps the existing HCM sync surface intact", () => {
     for (const fn of ["syncNow", "syncStatus", "syncEntity", "syncLog",
                       "getSchedule", "setSchedule"]) {

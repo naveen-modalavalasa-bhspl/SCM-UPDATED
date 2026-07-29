@@ -1,6 +1,8 @@
 export interface MasterItem {
   id: number;
+  /** L1L2L3-GEN-BRAND-MFR-0001. Assigned once at create, never regenerated. */
   code: string;
+  serial_no?: number | null;
   name: string;
   short_name?: string | null;
   uom_id?: number | null;
@@ -23,29 +25,19 @@ export interface MasterItem {
   item_sub_class_code?: string | null;
   item_sub_class_name?: string | null;
   item_type?: string | null;
+  hsn_id?: number | null;
   hsn_code?: string | null;
+  /** Asset or consumable. The code itself is generated at putaway, in warehouse. */
+  is_asset: boolean;
   description?: string | null;
   has_components: boolean;
   barcode_type?: string | null;
   barcode_value?: string | null;
-  tax_percent?: number | null;
-  cgst_rate: number;
-  sgst_rate: number;
-  igst_rate: number;
   is_batch_tracked?: boolean;
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   has_expiry: boolean;
   requires_qi: boolean;
-  shelf_life_days: number;
-  safety_stock: number;
-  reorder_level: number;
-  reorder_qty: number;
-  lead_time_days: number;
-  min_order_qty: number;
-  max_order_qty: number;
-  purchase_price: number;
-  selling_price: number;
-  mrp: number;
   dosage_form_id?: number | null;
   dosage_form_code?: string | null;
   dosage_form_name?: string | null;
@@ -106,12 +98,25 @@ export interface MasterVendor {
   is_active: boolean;
 }
 
+export type UomClass =
+  | "COUNT" | "LENGTH" | "AREA" | "VOLUME" | "WEIGHT"
+  | "TEMPERATURE" | "TIME" | "PRESSURE" | "ENERGY" | "PACKAGING";
+
 export interface MasterUom {
   id: number;
   code: string;
   name: string;
-  uom_class?: string | null;
+  /** What the unit measures. Required: a conversion across classes is meaningless,
+   *  and the item form offers only the units of the class being measured. */
+  uom_class: UomClass;
   is_active: boolean;
+}
+
+/** A standard unit the backend knows about, and whether it has been created yet. */
+export interface UomSuggestion {
+  code: string;
+  name: string;
+  exists: boolean;
 }
 
 /**
@@ -125,7 +130,7 @@ export interface MasterUomConversion {
   factor: number;
 }
 
-export type WarehouseType = "MAIN" | "TRANSIT" | "QUARANTINE" | "SCRAP";
+export type WarehouseType = "MAIN" | "LIP" | "MDP" | "TRANSIT" | "QUARANTINE" | "SCRAP";
 export type BinType = "ZONE" | "RACK" | "SHELF" | "STORAGE" | "STAGING";
 
 /** whs_warehouses — the location master. Soft-linked to an HCM facility. */
@@ -187,8 +192,11 @@ export interface MasterBrand {
   id: number;
   code: string;
   name: string;
-  manufacturer?: string | null;
   description?: string | null;
+  /** A brand is routinely made by several plants, so its manufacturers are edited
+   *  on the brand itself rather than on a mapping screen of their own. */
+  manufacturer_ids: number[];
+  manufacturer_names: string[];
   is_active: boolean;
 }
 
@@ -197,23 +205,62 @@ export interface MasterItemClass {
   code: string;
   name: string;
   description?: string | null;
-  /** Assets, not consumed when issued. */
-  is_capitalised: boolean;
   is_active: boolean;
 }
 
+/** A kind of container: Tray, Box, Container. Deliberately says nothing about how
+ *  much it holds — a tray of milk and a tray of vials differ, so the quantity is a
+ *  property of the item's chain in MasterItemPackaging. */
 export interface MasterPackaging {
   id: number;
   code: string;
   name: string;
+  is_active: boolean;
+}
+
+/** One rung of an item's packing ladder: 10 litres in a tray, 10 trays in a box. */
+export interface MasterItemPackaging {
+  id: number;
+  item_id: number;
+  level: number;
+  package_id: number;
+  package_name?: string | null;
+  quantity: number;
   uom_id?: number | null;
   uom_code?: string | null;
-  qty_per_pack?: number | null;
-  length_cm?: number | null;
-  width_cm?: number | null;
-  height_cm?: number | null;
-  weight_kg?: number | null;
-  is_returnable: boolean;
+  is_active: boolean;
+}
+
+/** The ladder with its running totals, multiplied up on the server. */
+export interface PackagingBreakdown {
+  level: number;
+  package_id: number;
+  package_name?: string | null;
+  quantity: number;
+  uom_code?: string | null;
+  /** One current container expressed as counts of every container below it. */
+  package_breakup: Array<{
+    package_id: number;
+    package_name?: string | null;
+    quantity: number;
+  }>;
+  /** What one of this package holds, in the item's own unit. */
+  base_quantity: number;
+  base_uom_code?: string | null;
+}
+
+/** One component of a kit. A real item, so the contents can be issued. */
+export interface MasterItemComponent {
+  id: number;
+  item_id: number;
+  line_no: number;
+  component_item_id: number;
+  component_code?: string | null;
+  component_name?: string | null;
+  quantity: number;
+  uom_id?: number | null;
+  uom_code?: string | null;
+  remarks?: string | null;
   is_active: boolean;
 }
 
@@ -228,87 +275,88 @@ export interface MasterFeature {
 
 export type AttributeDataType = "TEXT" | "NUMBER" | "BOOLEAN" | "DATE" | "LIST";
 
+/** A selectable trait: colour, size, grade. Contrast MasterSpec, a measurement. */
 export interface MasterAttribute {
   id: number;
   code: string;
   name: string;
   data_type: AttributeDataType;
-  unit?: string | null;
+  uom_id?: number | null;
+  uom_code?: string | null;
   /** Only used when data_type is LIST. */
   allowed_values: string[];
   description?: string | null;
   is_active: boolean;
 }
 
-export type AttributeTarget = "CATEGORY" | "ITEM_CLASS";
-
-/** Says which attributes items of a kind must carry. The values live on the spec. */
-export interface MasterAttributeMapping {
-  id: number;
-  attribute_id: number;
-  attribute_code?: string | null;
-  attribute_name?: string | null;
-  target_type: AttributeTarget;
-  target_id: number;
-  target_name?: string | null;
-  is_required: boolean;
-  sort_order: number;
-  is_active: boolean;
-}
-
-export type PriceType = "PURCHASE" | "SALE" | "TRANSFER";
-
-export interface MasterPriceList {
+/** A technical measurement: operating voltage in volts. Always carries a UOM. */
+export interface MasterSpec {
   id: number;
   code: string;
   name: string;
-  price_type: PriceType;
-  currency: string;
-  vendor_id?: number | null;
-  vendor_name?: string | null;
-  project_id?: number | null;
-  project_name?: string | null;
-  valid_from?: string | null;
-  valid_to?: string | null;
+  uom_id?: number | null;
+  uom_code?: string | null;
   description?: string | null;
   is_active: boolean;
 }
 
-export interface MasterPriceListItem {
+export type CategoryTagType = "ATTRIBUTE" | "SPEC" | "FEATURE";
+
+/** What a category expects its items to carry. One table for all three kinds:
+ *  they differ in meaning but not in what a tag records. */
+export interface MasterCategoryTag {
   id: number;
-  price_list_id: number;
-  item_id: number;
-  item_code?: string | null;
-  item_name?: string | null;
-  uom_id?: number | null;
-  uom_code?: string | null;
-  rate: number;
-  /** Slab pricing: this rate applies from this quantity upwards. */
-  min_qty: number;
-  discount_percent: number;
+  category_id: number;
+  category_name?: string | null;
+  tag_type: CategoryTagType;
+  tag_id: number;
+  tag_code?: string | null;
+  tag_name?: string | null;
+  /** Specs only — the unit the item form should label the input with. */
+  tag_uom_code?: string | null;
+  is_required: boolean;
   is_active: boolean;
 }
 
-export type BomType = "GENERAL" | "KIT" | "ASSEMBLY" | "VEHICLE";
+/** An item made available to a user group. Groups are defined by role or position,
+ *  so this decides who may request the item. */
+export interface MasterItemGroup {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  group_id: number;
+  group_name?: string | null;
+  is_active: boolean;
+}
 
+/**
+ * An HSN/SAC code and its GST rates. Tax belongs to the classification, not the
+ * item: hundreds of items share one HSN, and a rate change is a notification rather
+ * than an item edit. Documents read the rate from here at PO/GRN time.
+ */
+export interface MasterHsnCode {
+  id: number;
+  code: string;
+  description?: string | null;
+  cgst_rate: number;
+  sgst_rate: number;
+  igst_rate: number;
+  cess_rate: number;
+  effective_from?: string | null;
+  is_active: boolean;
+}
+
+/** A named, reusable set of items on a project — the standard kit a requester
+ *  picks instead of typing the same twelve lines every time. */
 export interface MasterBom {
   id: number;
   code: string;
   name: string;
-  bom_type: BomType;
-  parent_item_id?: number | null;
-  parent_item_code?: string | null;
-  parent_item_name?: string | null;
-  output_qty: number;
   project_id?: number | null;
   project_name?: string | null;
-  department_id?: number | null;
-  department_name?: string | null;
   description?: string | null;
   total_items: number;
-  is_default: boolean;
-  effective_from?: string | null;
-  effective_to?: string | null;
   is_active: boolean;
 }
 
@@ -323,9 +371,6 @@ export interface MasterBomItem {
   uom_id?: number | null;
   uom_code?: string | null;
   quantity: number;
-  scrap_percent: number;
-  child_bom_id?: number | null;
-  is_optional: boolean;
   remarks?: string | null;
 }
 

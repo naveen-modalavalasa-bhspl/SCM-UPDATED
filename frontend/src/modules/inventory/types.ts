@@ -56,18 +56,26 @@ export interface StockBalanceItem {
   is_batch_tracked?: boolean;
   asset_code?: string;
   consumable_code?: string;
-  serial_numbers?: string[];
+  /** stk_balance.serial_number — one serial per lot row, null until goods-in records it. */
+  serial_number?: string;
+  barcode_value?: string;
+  transit_qty?: number;
+  project_name?: string;
+  bin_code?: string;
+  batch_id?: number;
+  last_movement_at?: string;
 }
 
+/** Mirrors the query params GET /api/stock actually accepts. */
 export interface StockBalanceFilter {
   warehouse_id?: number | string;
   item_id?: number | string;
-  category?: string;
+  category_id?: number | string;
   search?: string;
-  show_zero_stock?: boolean;
-  low_stock_only?: boolean;
-  expiring_soon?: boolean;
-  group_by?: string;
+  batch_no?: string;
+  include_zero?: boolean;
+  below_reorder?: boolean;
+  expiring_in_days?: number;
   page?: number;
   size?: number;
 }
@@ -108,10 +116,12 @@ export interface StockLedgerItem {
   created_by?: string;
 }
 
+/** Mirrors the query params GET /api/stock/movements actually accepts. */
 export interface StockLedgerFilter {
   item_id?: number | string;
   warehouse_id?: number | string;
-  transaction_type?: string;
+  direction?: string;
+  ref_type?: string;
   date_from?: string;
   date_to?: string;
   search?: string;
@@ -181,7 +191,7 @@ export interface StockTransferRow {
   source_warehouse_name: string;
   destination_warehouse_id: number;
   destination_warehouse_name: string;
-  status: "DRAFT" | "PENDING_APPROVAL" | "IN_TRANSIT" | "RECEIVED" | "CANCELLED" | "REJECTED";
+  status: "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "DISPATCHED" | "IN_TRANSIT" | "RECEIVED" | "CANCELLED" | "REJECTED";
   total_items: number;
   total_qty: number;
   total_value: number;
@@ -216,10 +226,21 @@ export interface StockRow {
   expiry_date?: string | null;
   project_id: number;
   project_name?: string | null;
+  serial_number?: string | null;
+  asset_code?: string | null;
+  consumable_code?: string | null;
   available_qty: number;
   reserved_qty: number;
+  transit_qty?: number;
   total_qty: number;
+  valuation_rate?: number;
+  stock_value?: number;
+  last_movement_at?: string | null;
   updated_at?: string | null;
+  // filled from mst_items by the backend, not stk_balance columns
+  category_name?: string | null;
+  reorder_level?: number;
+  barcode_value?: string | null;
 }
 
 /** Exactly what GET /api/stock/movements returns -- the live stk_ledger columns. */
@@ -329,3 +350,244 @@ export interface AllocationListRow {
   approved_at: string | null;
   created_at: string;
 }
+
+export interface AllocationItem {
+  id: number;
+  indent_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  requested_qty: number;
+  quantity: number;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  remarks?: string | null;
+}
+
+export interface Allocation extends AllocationListRow {
+  remarks?: string | null;
+  items: AllocationItem[];
+}
+
+export interface WorkflowPending {
+  instance_id: number;
+  doc_type: string;
+  doc_id: number;
+  doc_no?: string | null;
+  summary?: string | null;
+  requested_by_name?: string | null;
+  created_at?: string | null;
+}
+
+export interface StockOverviewKPIs {
+  total_stock_value: number;
+  items_below_reorder: number;
+  near_expiry_30_days: number;
+  near_expiry_60_days: number;
+  near_expiry_90_days: number;
+  total_reserved_qty: number;
+  total_available_qty: number;
+  dead_stock_count: number;
+}
+
+export interface ReservationRow {
+  id: number;
+  stock_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  bin_id: number;
+  batch_id: number;
+  project_id: number;
+  quantity: number;
+  ref_type: string;
+  ref_id: number;
+  ref_no?: string | null;
+  ref_line_id?: number | null;
+  status: string;
+  created_by_name?: string | null;
+  created_at: string;
+  released_at?: string | null;
+}
+
+export interface BatchAvailabilityRow {
+  stock_id: number;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  bin_id: number;
+  bin_code?: string | null;
+  batch_id: number;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  project_id: number;
+  available_qty: number;
+  reserved_qty: number;
+}
+
+export interface ItemAvailabilityOut {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  total_available_qty: number;
+  total_reserved_qty: number;
+  total_transit_qty: number;
+  pick_strategy: string;
+  batches: BatchAvailabilityRow[];
+}
+
+export interface AgeingRow {
+  stock_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  quantity: number;
+  days_in_stock: number;
+  age_bucket: string;
+  days_to_expiry?: number | null;
+  expiry_bucket?: string | null;
+}
+
+export interface AgeingSummaryOut {
+  items: AgeingRow[];
+  bucket_0_30_qty: number;
+  bucket_31_60_qty: number;
+  bucket_61_90_qty: number;
+  bucket_90_plus_qty: number;
+}
+
+export interface ValuationRow {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  total_qty: number;
+  moving_avg_cost: number;
+  total_stock_value: number;
+}
+
+export interface ValuationSummaryOut {
+  items: ValuationRow[];
+  total_portfolio_value: number;
+}
+
+export interface NearExpiryAlertRow {
+  stock_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  batch_no?: string | null;
+  expiry_date: string;
+  days_to_expiry: number;
+  quantity: number;
+}
+
+export interface STOItemIn {
+  item_id: number;
+  requested_qty: number;
+  remarks?: string;
+}
+
+export interface STOIn {
+  from_warehouse_id: number;
+  to_warehouse_id: number;
+  from_project_id?: number;
+  to_project_id?: number;
+  remarks?: string;
+  items: STOItemIn[];
+}
+
+export interface STOItemOut {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  requested_qty: number;
+  dispatched_qty: number;
+  received_qty: number;
+  remarks?: string | null;
+}
+
+export interface STOListRow {
+  id: number;
+  sto_no: string;
+  from_warehouse_id: number;
+  from_warehouse_name?: string | null;
+  to_warehouse_id: number;
+  to_warehouse_name?: string | null;
+  status: string;
+  requested_by_name?: string | null;
+  approved_by_name?: string | null;
+  created_at: string;
+}
+
+export interface STOOut extends STOListRow {
+  remarks?: string | null;
+  approved_at?: string | null;
+  dispatched_at?: string | null;
+  received_at?: string | null;
+  items: STOItemOut[];
+}
+
+export interface CycleCountIn {
+  warehouse_id: number;
+  count_date: string;
+  remarks?: string;
+  item_ids?: number[];
+}
+
+export interface CycleCountItemUpdateIn {
+  id: number;
+  counted_qty: number;
+  remarks?: string;
+}
+
+export interface CycleCountUpdateIn {
+  remarks?: string;
+  items: CycleCountItemUpdateIn[];
+}
+
+export interface CycleCountItemOut {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  bin_id: number;
+  batch_id: number;
+  snapshot_qty: number;
+  counted_qty?: number | null;
+  variance_qty?: number | null;
+  remarks?: string | null;
+}
+
+export interface CycleCountListRow {
+  id: number;
+  count_no: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  count_date: string;
+  status: string;
+  planned_by_name?: string | null;
+  posted_by_name?: string | null;
+  created_at: string;
+}
+
+export interface CycleCountOut extends CycleCountListRow {
+  remarks?: string | null;
+  posted_at?: string | null;
+  items: CycleCountItemOut[];
+}
+

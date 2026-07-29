@@ -1,0 +1,59 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+vi.mock("@/shared/api/client", () => ({
+  api: { get: vi.fn(), post: vi.fn() },
+}));
+
+import { api } from "@/shared/api/client";
+import { FulfillmentQueuePage } from "../pages/FulfillmentQueuePage";
+
+const mockGet = api.get as unknown as ReturnType<typeof vi.fn>;
+
+const INDENT = {
+  id: 8,
+  indent_no: "IND/2026-27/00008",
+  requested_by_name: "Ravi Requester",
+  department_name: "Mechanical",
+  priority: "NORMAL",
+  status: "AWAITING_ALLOCATION",
+  total_items: 1,
+  created_at: "2026-07-20T09:00:00Z",
+};
+
+beforeEach(() => {
+  mockGet.mockReset();
+  mockGet.mockImplementation((_url: string, cfg: any) =>
+    Promise.resolve({
+      data:
+        cfg?.params?.status === "AWAITING_ALLOCATION"
+          ? { items: [INDENT], total: 1, page: 1, size: 100 }
+          : { items: [], total: 0, page: 1, size: 100 },
+    }),
+  );
+});
+
+describe("FulfillmentQueuePage", () => {
+  it("opens the allocation screen for the row, not the home page", async () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={["/inventory/fulfillment"]}>
+          <Routes>
+            <Route path="/inventory/fulfillment" element={<FulfillmentQueuePage />} />
+            <Route path="/inventory/allocate/:indentId" element={<div>ALLOCATION SCREEN</div>} />
+            <Route path="/" element={<div>HOME</div>} />
+            <Route path="*" element={<div>HOME</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getAllByText("IND/2026-27/00008").length).toBeGreaterThan(0), { timeout: 4000 });
+    fireEvent.click(screen.getAllByText("IND/2026-27/00008")[0]);
+
+    await waitFor(() => expect(screen.getByText("ALLOCATION SCREEN")).toBeInTheDocument());
+    expect(screen.queryByText("HOME")).not.toBeInTheDocument();
+  });
+});

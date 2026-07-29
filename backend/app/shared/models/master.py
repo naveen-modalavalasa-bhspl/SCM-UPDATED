@@ -3,6 +3,7 @@ from sqlalchemy import (
     JSON, Boolean, Column, Date, ForeignKey, Index, Integer, Numeric, String,
     Text, UniqueConstraint,
 )
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 from app.shared.models.base import (
@@ -20,6 +21,26 @@ class Uom(Base):
     code = Column(String(20), unique=True, nullable=False)
     name = Column(String(100), nullable=False)
     uom_class = Column(String(30), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class HsnCode(Base):
+    """An HSN/SAC code and the GST rates that go with it.
+
+    Tax is a property of the classification, not of the item: hundreds of items share
+    one HSN, and a rate change is a government notification, not an item edit. So the
+    rates live here and documents read them at PO/GRN time rather than copying them
+    onto mst_items, where a change would mean rewriting every affected row.
+    """
+    __tablename__ = "mst_hsn_codes"
+    id = pk()
+    code = Column(String(20), unique=True, nullable=False)
+    description = Column(String(300), nullable=True)
+    cgst_rate = Column(Numeric(6, 3), nullable=False, default=0)
+    sgst_rate = Column(Numeric(6, 3), nullable=False, default=0)
+    igst_rate = Column(Numeric(6, 3), nullable=False, default=0)
+    cess_rate = Column(Numeric(6, 3), nullable=False, default=0)
+    effective_from = Column(Date, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
 
@@ -96,7 +117,14 @@ class Item(Base):
     uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
     uom_code = Column(String(20), nullable=True)          # snapshot
     item_type = Column(String(30), nullable=True)
-    hsn_code = Column(String(20), nullable=True)
+    hsn_code = Column(String(20), nullable=True)          # snapshot of mst_hsn_codes.code
+    hsn_id = Column(ForeignKey("mst_hsn_codes.id"), index=True, nullable=True)
+    # Assets are not consumed on issue. The asset or consumable code itself is
+    # generated during putaway in the warehouse module, never here.
+    is_asset = Column(Boolean, nullable=False, default=False)
+    # The 4-digit tail of `code`, counted per L1L2L3-GEN-BRAND-MFR prefix. Stored so
+    # the serial can be read without re-parsing the code string.
+    serial_no = Column(Integer, nullable=True)
     description = Column(Text, nullable=True)
     has_components = Column(Boolean, nullable=False, default=False)
     barcode_type = Column(String(20), nullable=True)
@@ -107,6 +135,7 @@ class Item(Base):
     igst_rate = Column(Numeric(6, 3), nullable=False, default=0)
     is_batch_tracked = Column(Boolean, nullable=False, default=False)
     is_serial_tracked = Column(Boolean, nullable=False, default=False)
+    is_imei_tracked = Column(Boolean, nullable=False, default=False)
     has_expiry = Column(Boolean, nullable=False, default=False)
     requires_qi = Column(Boolean, nullable=False, default=False)
     shelf_life_days = Column(Integer, nullable=False, default=0)
@@ -185,6 +214,11 @@ class UomConversion(Base):
     to_uom_id = Column(ForeignKey("mst_uom.id", ondelete="CASCADE"), index=True,
                        nullable=False)
     factor = Column(Numeric(16, 6), nullable=False)
+    # The table has no code snapshot columns, but a caller reading "BOX -> PCS" should
+    # not have to fetch two more masters to render one row. Loaded eagerly (selectin)
+    # because a lazy load on an async session raises rather than emitting SQL.
+    from_uom = relationship("Uom", foreign_keys=[from_uom_id], lazy="selectin")
+    to_uom = relationship("Uom", foreign_keys=[to_uom_id], lazy="selectin")
 
 
 class Brand(Base):
@@ -194,9 +228,20 @@ class Brand(Base):
     id = pk()
     code = Column(String(50), unique=True, nullable=False)
     name = Column(String(200), nullable=False)
+    # Superseded by the mst_brand_manufacturers rows below, which let one brand carry
+    # several manufacturers. Left mapped only because the live table still has it.
     manufacturer = Column(String(200), nullable=True)
     description = Column(String(300), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
+    # Eager (selectin): a lazy load on an async session raises rather than emitting
+    # SQL, and the brand list has to render its manufacturers without a second query.
+    # save-update only, never a delete cascade: an unticked manufacturer is
+    # deactivated, because items already reference the pair and deleting the row
+    # would erase the evidence that the pair was once legal.
+    manufacturers = relationship(
+        "BrandManufacturer", lazy="selectin", cascade="save-update, merge",
+        primaryjoin="Brand.id == BrandManufacturer.brand_id",
+    )
 
 
 class BrandManufacturer(Base):
@@ -245,11 +290,13 @@ class ItemSubClass(Base):
 
 
 class Packaging(Base):
-    """How an item is packed for handling: box of 12, carton of 6 boxes.
+    """A reusable container type: Packet, Box, Tanker.
 
-    qty_per_pack is expressed in `uom_id`, so a "Box" holding 12 PCS stores
-    qty_per_pack=12 with the PCS uom. That keeps it consistent with
-    mst_uom_conversions rather than inventing a second conversion rule.
+    This master deliberately carries no capacity or physical specification. How much
+    it holds belongs to each item's own chain in mst_item_packaging.
+
+    Legacy capacity, dimension, weight and returnable columns remain mapped because
+    the live table has them, but the API no longer reads or writes them.
     """
     __tablename__ = "mst_packaging"
     id = pk()
@@ -264,6 +311,116 @@ class Packaging(Base):
     weight_kg = Column(Numeric(10, 3), nullable=True)
     is_returnable = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+
+
+class ItemPackaging(Base):
+    """One rung of an item's packing ladder.
+
+    Level 1 is the smallest pack and its quantity is in the item's own UOM — a tray
+    holds 10 litres. Every level above counts the level below it: level 2 is 10
+    trays, level 3 is 10 boxes. Only the rung is stored; the running totals (100
+    litres, 1000 litres) are multiplied up on read, so a stored total can never
+    disagree with its own parts.
+    """
+    __tablename__ = "mst_item_packaging"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    level = Column(Integer, nullable=False, default=1)
+    package_id = Column(ForeignKey("mst_packaging.id"), index=True, nullable=False)
+    package_name = Column(String(200), nullable=True)     # snapshot
+    quantity = Column(Numeric(16, 3), nullable=False, default=1)
+    uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
+    uom_code = Column(String(20), nullable=True)          # snapshot
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("item_id", "level", name="uq_item_packaging_level"),
+    )
+
+
+class ItemComponent(Base):
+    """One component of a kit. A first-aid kit is an item; its bandages and swabs
+    are these rows.
+
+    The component is a real item rather than typed text, so the contents can be
+    issued and stock-checked instead of only printed.
+    """
+    __tablename__ = "mst_item_components"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    line_no = Column(Integer, nullable=False, default=1)
+    component_item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    component_code = Column(String(50), nullable=True)    # snapshot
+    component_name = Column(String(300), nullable=True)   # snapshot
+    quantity = Column(Numeric(16, 3), nullable=False, default=1)
+    uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
+    uom_code = Column(String(20), nullable=True)          # snapshot
+    remarks = Column(String(500), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class Spec(Base):
+    """A technical measurement an item can be given: "Operating voltage", in volts.
+
+    Distinct from an Attribute, which is a selectable trait with a value list. A spec
+    always measures something, so its UOM is the point of it.
+    """
+    __tablename__ = "mst_specs"
+    id = pk()
+    code = Column(String(50), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
+    uom_code = Column(String(20), nullable=True)          # snapshot
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class CategoryTag(Base):
+    """What a category expects its items to carry: attributes, specs and features.
+
+    One table for all three. They differ in what they mean but not in what a tag
+    records — which category, which thing, and whether it is required — so three
+    tables would have been the same three columns written out three times.
+    """
+    __tablename__ = "mst_category_tags"
+    id = pk()
+    category_id = Column(ForeignKey("mst_item_categories.id", ondelete="CASCADE"),
+                         index=True, nullable=False)
+    category_name = Column(String(200), nullable=True)    # snapshot
+    tag_type = Column(String(20), nullable=False)         # CategoryTagType
+    # Soft reference: the target table depends on tag_type, so it cannot be a FK.
+    tag_id = Column(BigIntPortable, index=True, nullable=False)
+    tag_code = Column(String(50), nullable=True)          # snapshot
+    tag_name = Column(String(200), nullable=True)         # snapshot
+    tag_uom_code = Column(String(20), nullable=True)      # snapshot, specs only
+    is_required = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("category_id", "tag_type", "tag_id",
+                         name="uq_category_tag"),
+    )
+
+
+class ItemGroup(Base):
+    """An item made available to a user group.
+
+    Groups are defined by role or position in rbac_user_groups, so tagging an item
+    to one decides who may request it. `group_id` is a soft FK: shared must not
+    depend on platform, which is where rbac_ lives (rule 5).
+    """
+    __tablename__ = "mst_item_groups"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    item_code = Column(String(50), nullable=True)         # snapshot
+    item_name = Column(String(300), nullable=True)        # snapshot
+    group_id = soft_fk()
+    group_name = Column(String(200), nullable=True)       # snapshot
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("item_id", "group_id", name="uq_item_group"),
+    )
 
 
 class Feature(Base):
@@ -294,7 +451,11 @@ class Attribute(Base):
     code = Column(String(50), unique=True, nullable=False)
     name = Column(String(200), nullable=False)
     data_type = Column(String(20), nullable=False, default="TEXT")   # AttributeDataType
-    unit = Column(String(30), nullable=True)          # "volts", "mm", "kg"
+    # Free text until now, which meant "kg", "Kg" and "kilogram" all appeared. The
+    # unit is a real UOM row; `unit` survives only because the live table has it.
+    unit = Column(String(30), nullable=True)
+    uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
+    uom_code = Column(String(20), nullable=True)       # snapshot
     # Only meaningful for data_type LIST: the values the UI offers.
     allowed_values = Column(JSON, nullable=True)
     description = Column(String(300), nullable=True)

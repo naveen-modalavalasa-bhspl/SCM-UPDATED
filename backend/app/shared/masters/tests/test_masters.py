@@ -6,15 +6,18 @@ from app.core.exceptions import ValidationError
 from app.platform.rbac import permissions as perms
 from app.shared.masters.defs import ItemIn, apply_item, build_item_code
 from app.shared.models.master import (
-    Brand, BrandManufacturer, GeneralName, Item, ItemCategory, ItemClass,
-    Manufacturer, Uom,
+    Brand, BrandManufacturer, GeneralName, HsnCode, Item, ItemCategory, ItemClass,
+    Manufacturer, Project, Uom,
 )
 from app.shared.enums import BinType, WarehouseType
 
 MANAGE_ALL = [perms.MASTER_ITEM_MANAGE, perms.MASTER_CATEGORY_MANAGE,
               perms.MASTER_UOM_MANAGE, perms.MASTER_LOCATION_MANAGE,
               perms.MASTER_VENDOR_MANAGE, perms.MASTER_PROJECT_MANAGE,
-              perms.MASTER_BRAND_MANAGE, perms.MASTER_CLASS_MANAGE]
+              perms.MASTER_BRAND_MANAGE, perms.MASTER_CLASS_MANAGE,
+              perms.MASTER_HSN_MANAGE, perms.MASTER_PACKAGING_MANAGE,
+              perms.MASTER_BOM_MANAGE, perms.MASTER_ATTRIBUTE_MANAGE,
+              perms.MASTER_SPEC_MANAGE, perms.MASTER_FEATURE_MANAGE]
 
 
 @pytest.fixture
@@ -33,13 +36,34 @@ async def viewer(client, make_user, login):
 
 # ------------------------------- items ------------------------------- #
 def test_generated_item_code_contains_all_identity_parts():
-    assert build_item_code("101010", "slide", "lab", "acme") == \
-        "101010-SLIDE-LAB-ACME"
+    assert build_item_code("101010", "slide", "lab", "acme", 1) == \
+        "101010-SLIDE-LAB-ACME-0001"
+
+
+def test_generated_item_code_accepts_hyphenated_master_codes():
+    assert build_item_code("161010", "GN-003", "DOLO650", "RAMESHLABS", 1) == \
+        "161010-GN-003-DOLO650-RAMESHLABS-0001"
+
+
+@pytest.mark.parametrize("code", ["-GN003", "GN003-", "GN--003", "GN 003", "GN_003"])
+def test_generated_item_code_rejects_malformed_master_codes(code):
+    with pytest.raises(ValidationError, match="internal hyphens"):
+        build_item_code("161010", code, "DOLO650", "RAMESHLABS", 1)
 
 
 def test_generated_item_code_rejects_an_incomplete_category_path():
     with pytest.raises(ValidationError, match="six-digit"):
-        build_item_code("1010", "SLIDE", "LAB", "ACME")
+        build_item_code("1010", "SLIDE", "LAB", "ACME", 1)
+
+
+def test_generated_item_code_pads_the_serial_to_four_digits():
+    assert build_item_code("101010", "PARACET", "DOLO", "DOLO", 42) == \
+        "101010-PARACET-DOLO-DOLO-0042"
+
+
+def test_a_prefix_runs_out_after_9999_items():
+    with pytest.raises(ValidationError, match="9999"):
+        build_item_code("101010", "SLIDE", "LAB", "ACME", 10000)
 
 
 async def item_payload(client, admin, *, name="Bolt"):
@@ -58,25 +82,38 @@ async def item_payload(client, admin, *, name="Bolt"):
     general = (await client.post("/api/general-names",
                                  json={"code": "GEN", "name": "General"},
                                  headers=admin)).json()
-    brand = (await client.post("/api/brands",
-                               json={"code": "BR", "name": "Brand"},
-                               headers=admin)).json()
     manufacturer = (await client.post("/api/manufacturers",
                                       json={"code": "MFR", "name": "Maker"},
                                       headers=admin)).json()
-    await client.post("/api/brand-manufacturers", json={
-        "brand_id": brand["id"], "manufacturer_id": manufacturer["id"],
-    }, headers=admin)
+    # The brand carries its manufacturers, so no second call to a mapping screen.
+    brand = (await client.post("/api/brands",
+                               json={"code": "BR", "name": "Brand",
+                                     "manufacturer_ids": [manufacturer["id"]]},
+                               headers=admin)).json()
     item_class = (await client.post("/api/item-classes",
                                     json={"code": "CON", "name": "Consumable"},
                                     headers=admin)).json()
-    uom = (await client.post("/api/uom", json={"code": "PCS", "name": "Pieces"},
+    uom = (await client.post("/api/uom", json={"code": "PCS", "name": "Pieces", "uom_class": "COUNT"},
+                             headers=admin)).json()
+    hsn = (await client.post("/api/hsn-codes",
+                             json={"code": "73181500", "cgst_rate": 9,
+                                   "sgst_rate": 9, "igst_rate": 18},
                              headers=admin)).json()
     return {
         "name": name, "category_id": l3["id"], "general_name_id": general["id"],
         "brand_id": brand["id"], "manufacturer_id": manufacturer["id"],
         "item_class_id": item_class["id"], "uom_id": uom["id"],
+        "hsn_id": hsn["id"],
     }
+
+
+async def test_identity_masters_accept_internal_hyphens(client, admin):
+    general = await client.post("/api/general-names", json={
+        "code": "GN-003", "name": "Absorbent Cotton"}, headers=admin)
+    manufacturer = await client.post("/api/manufacturers", json={
+        "code": "LABS-01", "name": "Labs 01"}, headers=admin)
+    assert general.status_code == 200, general.text
+    assert manufacturer.status_code == 200, manufacturer.text
 
 
 async def test_item_code_uses_category_general_brand_and_manufacturer(db):
@@ -88,8 +125,9 @@ async def test_item_code_uses_category_general_brand_and_manufacturer(db):
     brand = Brand(code="LAB", name="Lab Brand", is_active=True)
     manufacturer = Manufacturer(code="ACME", name="Acme Medical", is_active=True)
     item_class = ItemClass(code="CON", name="Consumable", is_active=True)
-    uom = Uom(code="PK", name="Pack", is_active=True)
-    db.add_all([category, general, brand, manufacturer, item_class, uom])
+    uom = Uom(code="PK", name="Pack", uom_class="PACKAGING", is_active=True)
+    hsn = HsnCode(code="90118000", is_active=True)
+    db.add_all([category, general, brand, manufacturer, item_class, uom, hsn])
     await db.flush()
     db.add(BrandManufacturer(
         brand_id=brand.id, manufacturer_id=manufacturer.id, is_active=True,
@@ -101,11 +139,13 @@ async def test_item_code_uses_category_general_brand_and_manufacturer(db):
         name="Microscope Slides", category_id=category.id,
         general_name_id=general.id, brand_id=brand.id,
         manufacturer_id=manufacturer.id, item_class_id=item_class.id,
-        uom_id=uom.id,
+        uom_id=uom.id, hsn_id=hsn.id,
     ))
-    assert item.code == "101010-SLIDE-LAB-ACME"
+    assert item.code == "101010-SLIDE-LAB-ACME-0001"
+    assert item.serial_no == 1
     assert item.manufacturer_name == "Acme Medical"
     assert item.brand_name == "Lab Brand"
+    assert item.hsn_code == "90118000"
 
 
 async def test_item_rejects_manufacturer_not_mapped_to_brand(db):
@@ -116,14 +156,15 @@ async def test_item_rejects_manufacturer_not_mapped_to_brand(db):
     brand = Brand(code="LAB", name="Lab Brand", is_active=True)
     manufacturer = Manufacturer(code="OTHER", name="Other", is_active=True)
     item_class = ItemClass(code="CON", name="Consumable", is_active=True)
-    uom = Uom(code="PK", name="Pack", is_active=True)
-    db.add_all([category, general, brand, manufacturer, item_class, uom])
+    uom = Uom(code="PK", name="Pack", uom_class="PACKAGING", is_active=True)
+    hsn = HsnCode(code="90118000", is_active=True)
+    db.add_all([category, general, brand, manufacturer, item_class, uom, hsn])
     await db.flush()
     with pytest.raises(ValidationError, match="not mapped"):
         await apply_item(db, Item(), ItemIn(
             name="Slides", category_id=category.id, general_name_id=general.id,
             brand_id=brand.id, manufacturer_id=manufacturer.id,
-            item_class_id=item_class.id, uom_id=uom.id,
+            item_class_id=item_class.id, uom_id=uom.id, hsn_id=hsn.id,
         ))
 
 
@@ -135,7 +176,7 @@ async def test_create_item_snapshots_uom_and_category(client, admin):
     # Snapshots let the item list render without joining two masters.
     assert body["uom_code"] == "PCS"
     assert body["category_name"] == "Level 3"
-    assert body["code"] == "000000-GEN-BR-MFR"
+    assert body["code"] == "000000-GEN-BR-MFR-0001"
 
 
 async def test_item_list_is_paginated_and_searchable(client, admin):
@@ -168,7 +209,7 @@ async def test_deactivate_hides_item_from_the_default_list(client, admin):
 async def test_write_requires_the_manage_permission(client, viewer):
     r = await client.post("/api/items", json={
         "name": "X", "category_id": 1, "general_name_id": 1, "brand_id": 1,
-        "manufacturer_id": 1, "item_class_id": 1, "uom_id": 1,
+        "manufacturer_id": 1, "item_class_id": 1, "uom_id": 1, "hsn_id": 1,
     }, headers=viewer)
     assert r.status_code == 403
 
@@ -185,7 +226,7 @@ async def test_unauthenticated_read_is_rejected(client):
 async def test_update_missing_row_is_404(client, admin):
     r = await client.put("/api/items/9999", json={
         "name": "A", "category_id": 1, "general_name_id": 1, "brand_id": 1,
-        "manufacturer_id": 1, "item_class_id": 1, "uom_id": 1,
+        "manufacturer_id": 1, "item_class_id": 1, "uom_id": 1, "hsn_id": 1,
     }, headers=admin)
     assert r.status_code == 404
 
@@ -209,7 +250,172 @@ async def test_category_cannot_be_its_own_parent(client, admin):
     r = await client.put(f"/api/item-categories/{cat['id']}",
                          json={"code": "S", "name": "Self", "parent_id": cat["id"]},
                          headers=admin)
-    assert r.status_code == 400
+    assert r.status_code == 422
+
+
+async def test_two_level_1_categories_cannot_share_a_name(client, admin):
+    await client.post("/api/item-categories",
+                      json={"code": "F1", "name": "Furniture"}, headers=admin)
+    r = await client.post("/api/item-categories",
+                          json={"code": "F2", "name": "Furniture"}, headers=admin)
+    assert r.status_code == 422
+    assert "already exists" in r.json()["error"]
+
+
+async def test_a_level_1_name_may_reappear_as_a_level_2(client, admin):
+    """Furniture is a Level 1 in its own right and a Level 2 under Office Supplies.
+    The rule is one name per parent, not one name per level."""
+    office = (await client.post("/api/item-categories",
+                                json={"code": "OFF", "name": "Office Supplies"},
+                                headers=admin)).json()
+    await client.post("/api/item-categories",
+                      json={"code": "FUR", "name": "Furniture"}, headers=admin)
+    r = await client.post("/api/item-categories",
+                          json={"code": "OFUR", "name": "Furniture",
+                                "parent_id": office["id"]}, headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["level"] == 2
+
+
+async def test_two_children_of_one_parent_cannot_share_a_name(client, admin):
+    parent = (await client.post("/api/item-categories",
+                                json={"code": "P", "name": "Parent"},
+                                headers=admin)).json()
+    await client.post("/api/item-categories",
+                      json={"code": "C1", "name": "Chairs", "parent_id": parent["id"]},
+                      headers=admin)
+    r = await client.post("/api/item-categories",
+                          json={"code": "C2", "name": "Chairs",
+                                "parent_id": parent["id"]}, headers=admin)
+    assert r.status_code == 422
+
+
+async def test_renaming_a_category_does_not_clash_with_itself(client, admin):
+    cat = (await client.post("/api/item-categories",
+                             json={"code": "K", "name": "Kitchen"},
+                             headers=admin)).json()
+    r = await client.put(f"/api/item-categories/{cat['id']}",
+                         json={"code": "K", "name": "Kitchen"}, headers=admin)
+    assert r.status_code == 200, r.text
+
+
+# ---------------------------- item classes ---------------------------- #
+async def test_item_class_name_is_unique_case_insensitively(client, admin):
+    await client.post("/api/item-classes", json={"code": "CON", "name": "Consumable"},
+                      headers=admin)
+    r = await client.post("/api/item-classes",
+                          json={"code": "CON2", "name": "consumable"}, headers=admin)
+    assert r.status_code == 422
+
+
+async def test_item_class_no_longer_reports_an_asset_flag(client, admin):
+    """Asset-ness moved to the item: one class holds both a laptop and a mouse."""
+    body = (await client.post("/api/item-classes",
+                              json={"code": "IT", "name": "IT Equipment"},
+                              headers=admin)).json()
+    assert "is_capitalised" not in body
+
+
+# ------------------------------ brands ------------------------------ #
+async def test_a_brand_carries_many_manufacturers(client, admin):
+    first = (await client.post("/api/manufacturers",
+                               json={"code": "M1", "name": "Plant One"},
+                               headers=admin)).json()
+    second = (await client.post("/api/manufacturers",
+                                json={"code": "M2", "name": "Plant Two"},
+                                headers=admin)).json()
+    body = (await client.post("/api/brands", json={
+        "code": "DOLO", "name": "Dolo",
+        "manufacturer_ids": [first["id"], second["id"]]}, headers=admin)).json()
+    assert set(body["manufacturer_ids"]) == {first["id"], second["id"]}
+    assert set(body["manufacturer_names"]) == {"Plant One", "Plant Two"}
+
+
+async def test_removing_a_manufacturer_deactivates_the_link(client, admin):
+    """Deactivated, never deleted: items already carry the pair, and the row is what
+    proves it was once a legal combination."""
+    first = (await client.post("/api/manufacturers",
+                               json={"code": "M1", "name": "Plant One"},
+                               headers=admin)).json()
+    second = (await client.post("/api/manufacturers",
+                                json={"code": "M2", "name": "Plant Two"},
+                                headers=admin)).json()
+    brand = (await client.post("/api/brands", json={
+        "code": "DOLO", "name": "Dolo",
+        "manufacturer_ids": [first["id"], second["id"]]}, headers=admin)).json()
+
+    updated = (await client.put(f"/api/brands/{brand['id']}", json={
+        "code": "DOLO", "name": "Dolo",
+        "manufacturer_ids": [first["id"]]}, headers=admin)).json()
+    assert updated["manufacturer_ids"] == [first["id"]]
+
+    links = (await client.get(f"/api/brand-manufacturers?brand_id={brand['id']}",
+                              headers=admin)).json()["items"]
+    assert {l["manufacturer_id"]: l["is_active"] for l in links} == {
+        first["id"]: True, second["id"]: False,
+    }
+
+
+async def test_brand_name_is_unique(client, admin):
+    await client.post("/api/brands", json={"code": "B1", "name": "Dolo"},
+                      headers=admin)
+    r = await client.post("/api/brands", json={"code": "B2", "name": "DOLO"},
+                          headers=admin)
+    assert r.status_code == 422
+
+
+async def test_brand_rejects_a_manufacturer_that_does_not_exist(client, admin):
+    r = await client.post("/api/brands", json={
+        "code": "B1", "name": "Ghost", "manufacturer_ids": [9999]}, headers=admin)
+    assert r.status_code == 422
+
+
+# ------------------------------- HSN -------------------------------- #
+async def test_create_hsn_code(client, admin):
+    r = await client.post("/api/hsn-codes", json={
+        "code": "30049099", "description": "Medicaments",
+        "cgst_rate": 6, "sgst_rate": 6, "igst_rate": 12}, headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["igst_rate"] == 12.0
+
+
+async def test_hsn_rejects_cgst_plus_sgst_that_disagrees_with_igst(client, admin):
+    """The two GST routes must charge the same total, or the same sale would be
+    taxed differently depending on where the buyer is."""
+    r = await client.post("/api/hsn-codes", json={
+        "code": "30049099", "cgst_rate": 6, "sgst_rate": 6, "igst_rate": 18},
+        headers=admin)
+    assert r.status_code == 422
+
+
+async def test_hsn_code_must_be_digits(client, admin):
+    r = await client.post("/api/hsn-codes", json={"code": "ABCD"}, headers=admin)
+    assert r.status_code == 422
+
+
+async def test_hsn_code_must_be_exactly_eight_digits(client, admin):
+    for code in ("1006301", "100630100"):
+        r = await client.post("/api/hsn-codes", json={"code": code}, headers=admin)
+        assert r.status_code == 422
+
+
+async def test_item_entry_can_register_a_provisional_hsn(client, admin):
+    created = await client.post("/api/hsn-codes/resolve",
+                                json={"code": "10063010"}, headers=admin)
+    assert created.status_code == 200, created.text
+    assert created.json()["code"] == "10063010"
+    assert created.json()["igst_rate"] == 0
+
+    # Resolving the same code again selects the existing master row.
+    resolved = await client.post("/api/hsn-codes/resolve",
+                                 json={"code": "10063010"}, headers=admin)
+    assert resolved.json()["id"] == created.json()["id"]
+
+
+async def test_hsn_code_is_unique(client, admin):
+    await client.post("/api/hsn-codes", json={"code": "30049099"}, headers=admin)
+    r = await client.post("/api/hsn-codes", json={"code": "30049099"}, headers=admin)
+    assert r.status_code == 422
 
 
 # ------------------------ warehouses and bins ------------------------ #
@@ -228,7 +434,7 @@ async def test_create_warehouse(client, admin):
 async def test_invalid_warehouse_type_is_rejected(client, admin):
     r = await client.post("/api/warehouses", json={
         "code": "X", "name": "X", "warehouse_type": "MOON"}, headers=admin)
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_bin_path_and_level_derive_from_the_parent(client, admin):
@@ -248,7 +454,7 @@ async def test_invalid_bin_type_is_rejected(client, admin):
     wh = await warehouse(client, admin)
     r = await client.post("/api/bins", json={
         "warehouse_id": wh["id"], "code": "X", "bin_type": "CUPBOARD"}, headers=admin)
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_bin_parent_must_be_in_the_same_warehouse(client, admin):
@@ -261,7 +467,7 @@ async def test_bin_parent_must_be_in_the_same_warehouse(client, admin):
     r = await client.post("/api/bins", json={
         "warehouse_id": second["id"], "code": "B", "bin_type": BinType.RACK.value,
         "parent_id": zone["id"]}, headers=admin)
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_bin_loop_is_rejected(client, admin):
@@ -277,30 +483,525 @@ async def test_bin_loop_is_rejected(client, admin):
     r = await client.put(f"/api/bins/{a['id']}", json={
         "warehouse_id": wh["id"], "code": "A", "bin_type": BinType.ZONE.value,
         "parent_id": b["id"]}, headers=admin)
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 # ----------------------------- projects ----------------------------- #
-async def test_create_project(client, admin):
-    r = await client.post("/api/projects",
-                          json={"code": "PRJ-01", "name": "Metro Line 3"},
-                          headers=admin)
+async def test_projects_can_be_read(client, admin, db):
+    db.add(Project(code="PRJ-01", name="Metro Line 3", is_active=True))
+    await db.commit()
+    page = (await client.get("/api/projects", headers=admin)).json()
+    assert [p["code"] for p in page["items"]] == ["PRJ-01"]
+
+
+async def test_projects_cannot_be_written_locally(client, admin):
+    """HCM owns projects. The write routes must not exist — hiding the button is
+    not enough, because the next sync would silently overwrite a local edit."""
+    # 405 on the collection: the path exists but only answers GET. 404 on a row:
+    # /api/projects/{id} was never registered at all, so there is nothing to answer.
+    created = await client.post("/api/projects",
+                                json={"code": "PRJ-02", "name": "Local"},
+                                headers=admin)
+    assert created.status_code == 405
+    assert (await client.put("/api/projects/1", json={"code": "X", "name": "X"},
+                             headers=admin)).status_code == 404
+    assert (await client.delete("/api/projects/1", headers=admin)).status_code == 404
+
+
+# ---------------------------- item identity ---------------------------- #
+async def test_a_second_item_on_the_same_prefix_gets_the_next_serial(client, admin):
+    """Dolo 650 and Dolo 500 share every part of the code but the serial."""
+    payload = await item_payload(client, admin, name="Bolt M8")
+    first = (await client.post("/api/items", json=payload, headers=admin)).json()
+    second = (await client.post(
+        "/api/items", json={**payload, "name": "Bolt M10"}, headers=admin)).json()
+    assert first["code"].endswith("-0001")
+    assert second["code"].endswith("-0002")
+    assert (first["serial_no"], second["serial_no"]) == (1, 2)
+
+
+async def test_editing_an_item_never_renumbers_it(client, admin):
+    """The code is on stock rows, ledger entries and documents. Re-deriving it on
+    an edit would silently point them all somewhere else."""
+    payload = await item_payload(client, admin, name="Bolt")
+    item = (await client.post("/api/items", json=payload, headers=admin)).json()
+    updated = (await client.put(f"/api/items/{item['id']}",
+                                json={**payload, "name": "Bolt renamed"},
+                                headers=admin)).json()
+    assert updated["code"] == item["code"]
+    assert updated["name"] == "Bolt renamed"
+
+
+async def test_an_item_cannot_be_saved_without_an_hsn(client, admin):
+    payload = await item_payload(client, admin)
+    payload.pop("hsn_id")
+    r = await client.post("/api/items", json=payload, headers=admin)
+    assert r.status_code == 422
+
+
+async def test_item_records_the_asset_choice_but_generates_no_code(client, admin):
+    """Asset and consumable codes are generated during putaway in the warehouse
+    module, so the item master records only the choice."""
+    payload = await item_payload(client, admin)
+    body = (await client.post("/api/items", json={**payload, "is_asset": True},
+                              headers=admin)).json()
+    assert body["is_asset"] is True
+    assert body["code"].endswith("-0001")
+
+
+async def test_item_can_be_imei_tracked(client, admin):
+    payload = await item_payload(client, admin)
+    body = (await client.post("/api/items",
+                              json={**payload, "is_imei_tracked": True},
+                              headers=admin)).json()
+    assert body["is_imei_tracked"] is True
+
+
+async def test_pricing_and_stock_limits_are_no_longer_part_of_an_item(client, admin):
+    """Tax comes from the HSN row and reorder levels are a warehouse decision, so
+    neither is typed here or reported back."""
+    body = (await client.post("/api/items", json=await item_payload(client, admin),
+                              headers=admin)).json()
+    for gone in ("purchase_price", "selling_price", "mrp", "cgst_rate",
+                 "sgst_rate", "igst_rate", "tax_percent", "safety_stock",
+                 "reorder_level", "reorder_qty", "shelf_life_days"):
+        assert gone not in body
+
+
+# ------------------------------- specs ------------------------------- #
+@pytest.fixture
+async def tagger(client, make_user, login):
+    """Someone who maintains what an item can be described by, but not items."""
+    await make_user(employee_id=7, username="tagger", password="pw",
+                    permissions=[perms.MASTER_SPEC_MANAGE, perms.MASTER_UOM_MANAGE,
+                                 perms.MASTER_ATTRIBUTE_MANAGE,
+                                 perms.MASTER_CATEGORY_MANAGE,
+                                 perms.MASTER_FEATURE_MANAGE])
+    return await login("tagger", "pw")
+
+
+async def test_a_spec_carries_a_real_uom(client, tagger):
+    uom = (await client.post("/api/uom", json={"code": "V", "name": "Volt",
+                                               "uom_class": "ENERGY"},
+                             headers=tagger)).json()
+    body = (await client.post("/api/specs", json={
+        "code": "OP_VOLTAGE", "name": "Operating voltage", "uom_id": uom["id"]},
+        headers=tagger)).json()
+    assert body["uom_code"] == "V"
+
+
+async def test_spec_name_is_unique(client, tagger):
+    await client.post("/api/specs", json={"code": "W", "name": "Weight"},
+                      headers=tagger)
+    r = await client.post("/api/specs", json={"code": "W2", "name": "weight"},
+                          headers=tagger)
+    assert r.status_code == 422
+
+
+async def test_an_attribute_takes_a_uom_row_not_free_text(client, tagger):
+    uom = (await client.post("/api/uom", json={"code": "MM", "name": "Millimetre",
+                                               "uom_class": "LENGTH"},
+                             headers=tagger)).json()
+    body = (await client.post("/api/attributes", json={
+        "code": "CLEARANCE", "name": "Clearance", "data_type": "NUMBER",
+        "uom_id": uom["id"]}, headers=tagger)).json()
+    assert body["uom_code"] == "MM"
+    assert "unit" not in body
+
+
+# -------------------------- category tagging -------------------------- #
+async def test_one_screen_tags_attributes_specs_and_features(client, tagger):
+    """All three answer the same two questions of a category, so they share a
+    table instead of needing three near-identical ones."""
+    category = (await client.post("/api/item-categories",
+                                  json={"code": "ELEC", "name": "Electrical"},
+                                  headers=tagger)).json()
+    attribute = (await client.post("/api/attributes", json={
+        "code": "MATERIAL", "name": "Material", "data_type": "LIST",
+        "allowed_values": ["Steel", "Copper"]}, headers=tagger)).json()
+    uom = (await client.post("/api/uom", json={"code": "V", "name": "Volt",
+                                               "uom_class": "ENERGY"},
+                             headers=tagger)).json()
+    spec = (await client.post("/api/specs", json={
+        "code": "VOLTAGE", "name": "Voltage", "uom_id": uom["id"]},
+        headers=tagger)).json()
+    feature = (await client.post("/api/features", json={
+        "code": "FRAGILE", "name": "Fragile"}, headers=tagger)).json()
+
+    for tag_type, target, required in (("ATTRIBUTE", attribute, False),
+                                       ("SPEC", spec, True),
+                                       ("FEATURE", feature, False)):
+        r = await client.post("/api/category-tags", json={
+            "category_id": category["id"], "tag_type": tag_type,
+            "tag_id": target["id"], "is_required": required}, headers=tagger)
+        assert r.status_code == 200, r.text
+
+    rows = (await client.get(f"/api/category-tags?category_id={category['id']}",
+                             headers=tagger)).json()["items"]
+    assert {r["tag_type"] for r in rows} == {"ATTRIBUTE", "SPEC", "FEATURE"}
+    # A spec's unit rides along so the item form can label the input.
+    voltage = next(r for r in rows if r["tag_type"] == "SPEC")
+    assert (voltage["tag_uom_code"], voltage["is_required"]) == ("V", True)
+
+
+async def test_the_same_thing_cannot_be_tagged_to_a_category_twice(client, tagger):
+    category = (await client.post("/api/item-categories",
+                                  json={"code": "C", "name": "Cables"},
+                                  headers=tagger)).json()
+    feature = (await client.post("/api/features", json={
+        "code": "FRAGILE", "name": "Fragile"}, headers=tagger)).json()
+    body = {"category_id": category["id"], "tag_type": "FEATURE",
+            "tag_id": feature["id"]}
+    assert (await client.post("/api/category-tags", json=body,
+                              headers=tagger)).status_code == 200
+    assert (await client.post("/api/category-tags", json=body,
+                              headers=tagger)).status_code == 422
+
+
+async def test_an_unknown_tag_type_is_rejected(client, tagger):
+    category = (await client.post("/api/item-categories",
+                                  json={"code": "C", "name": "Cables"},
+                                  headers=tagger)).json()
+    r = await client.post("/api/category-tags", json={
+        "category_id": category["id"], "tag_type": "COLOUR", "tag_id": 1},
+        headers=tagger)
+    assert r.status_code == 422
+
+
+# ------------------------- packaging ladder -------------------------- #
+async def test_packaging_master_is_only_a_container_type(client, admin):
+    body = (await client.post("/api/packaging", json={
+        "code": "PACKET", "name": "Packet"}, headers=admin)).json()
+    assert set(body) == {"id", "code", "name", "is_active"}
+
+
+async def test_packaging_breakdown_multiplies_up_the_ladder(client, admin, db):
+    """10 litres in a tray, 10 trays in a box, 10 boxes in a container."""
+    item = (await client.post("/api/items", json=await item_payload(client, admin),
+                              headers=admin)).json()
+    packages = {}
+    for code, name in (("TRAY", "Tray"), ("BOX", "Box"), ("CONT", "Container")):
+        packages[code] = (await client.post("/api/packaging",
+                                            json={"code": code, "name": name},
+                                            headers=admin)).json()
+    for level, code in enumerate(("TRAY", "BOX", "CONT"), start=1):
+        r = await client.post("/api/item-packaging", json={
+            "item_id": item["id"], "level": level,
+            "package_id": packages[code]["id"], "quantity": 10}, headers=admin)
+        assert r.status_code == 200, r.text
+
+    rows = (await client.get(f"/api/items/{item['id']}/packaging-breakdown",
+                             headers=admin)).json()["items"]
+    assert [r["base_quantity"] for r in rows] == [10.0, 100.0, 1000.0]
+    assert [r["package_name"] for r in rows] == ["Tray", "Box", "Container"]
+    assert [[part["package_name"] for part in r["package_breakup"]]
+            for r in rows] == [
+        ["Tray"],
+        ["Box", "Tray"],
+        ["Container", "Box", "Tray"],
+    ]
+    assert [[part["quantity"] for part in r["package_breakup"]]
+            for r in rows] == [[1.0], [1.0, 10.0], [1.0, 10.0, 100.0]]
+    # Level 1 is measured in the item's own unit, which is what the totals are in.
+    assert rows[0]["base_uom_code"] == "PCS"
+
+
+async def test_milk_packaging_shows_each_container_and_end_product(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(
+        client, admin, name="Milk"), headers=admin)).json()
+    packages = {}
+    for code, name in (("PACKET", "Packet"), ("BOX", "Box"), ("TANKER", "Tanker")):
+        packages[code] = (await client.post(
+            "/api/packaging", json={"code": code, "name": name},
+            headers=admin)).json()
+
+    for level, code, quantity in (
+        (1, "PACKET", 1), (2, "BOX", 10), (3, "TANKER", 10),
+    ):
+        r = await client.post("/api/item-packaging", json={
+            "item_id": item["id"], "level": level,
+            "package_id": packages[code]["id"], "quantity": quantity,
+        }, headers=admin)
+        assert r.status_code == 200, r.text
+
+    rows = (await client.get(
+        f"/api/items/{item['id']}/packaging-breakdown",
+        headers=admin)).json()["items"]
+    assert [row["base_quantity"] for row in rows] == [1.0, 10.0, 100.0]
+    assert rows[-1]["package_breakup"] == [
+        {"package_id": packages["TANKER"]["id"],
+         "package_name": "Tanker", "quantity": 1.0},
+        {"package_id": packages["BOX"]["id"],
+         "package_name": "Box", "quantity": 10.0},
+        {"package_id": packages["PACKET"]["id"],
+         "package_name": "Packet", "quantity": 100.0},
+    ]
+
+
+async def test_level_one_can_be_a_tanker_holding_100_base_units(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(
+        client, admin, name="Bulk milk"), headers=admin)).json()
+    tanker = (await client.post(
+        "/api/packaging", json={"code": "TANKER", "name": "Tanker"},
+        headers=admin)).json()
+    r = await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1,
+        "package_id": tanker["id"], "quantity": 100,
+    }, headers=admin)
     assert r.status_code == 200, r.text
-    assert r.json()["code"] == "PRJ-01"
+
+    row = (await client.get(
+        f"/api/items/{item['id']}/packaging-breakdown",
+        headers=admin)).json()["items"][0]
+    assert row["package_name"] == "Tanker"
+    assert row["base_quantity"] == 100.0
 
 
-async def test_project_end_date_cannot_precede_start(client, admin):
-    r = await client.post("/api/projects", json={
-        "code": "PRJ-02", "name": "Bad", "start_date": "2026-12-01",
-        "end_date": "2026-01-01"}, headers=admin)
-    assert r.status_code == 400
+async def test_upper_packaging_levels_require_whole_container_counts(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(
+        client, admin), headers=admin)).json()
+    packet = (await client.post(
+        "/api/packaging", json={"code": "PACKET", "name": "Packet"},
+        headers=admin)).json()
+    box = (await client.post(
+        "/api/packaging", json={"code": "BOX", "name": "Box"},
+        headers=admin)).json()
+    await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1,
+        "package_id": packet["id"], "quantity": 1,
+    }, headers=admin)
+    r = await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 2,
+        "package_id": box["id"], "quantity": 1.5,
+    }, headers=admin)
+    assert r.status_code == 422
+    assert "whole number" in r.json()["error"]
+
+
+async def test_only_the_highest_packaging_level_can_be_removed(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(
+        client, admin), headers=admin)).json()
+    packet = (await client.post(
+        "/api/packaging", json={"code": "PACKET", "name": "Packet"},
+        headers=admin)).json()
+    box = (await client.post(
+        "/api/packaging", json={"code": "BOX", "name": "Box"},
+        headers=admin)).json()
+    first = (await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1,
+        "package_id": packet["id"], "quantity": 1,
+    }, headers=admin)).json()
+    second = (await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 2,
+        "package_id": box["id"], "quantity": 10,
+    }, headers=admin)).json()
+
+    blocked = await client.delete(
+        f"/api/item-packaging/{first['id']}", headers=admin)
+    assert blocked.status_code == 422
+    assert "highest" in blocked.json()["error"]
+    assert (await client.delete(
+        f"/api/item-packaging/{second['id']}", headers=admin)).status_code == 200
+    rows = (await client.get(
+        f"/api/item-packaging?item_id={item['id']}", headers=admin)).json()["items"]
+    assert [row["level"] for row in rows] == [1]
+
+
+async def test_a_packaging_level_cannot_skip_the_one_below_it(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(client, admin),
+                              headers=admin)).json()
+    box = (await client.post("/api/packaging", json={"code": "BOX", "name": "Box"},
+                             headers=admin)).json()
+    r = await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 2, "package_id": box["id"],
+        "quantity": 10}, headers=admin)
+    assert r.status_code == 422
+    assert "level 1" in r.json()["error"]
+
+
+async def test_one_level_per_item(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(client, admin),
+                              headers=admin)).json()
+    tray = (await client.post("/api/packaging", json={"code": "TRAY", "name": "Tray"},
+                              headers=admin)).json()
+    body = {"item_id": item["id"], "level": 1, "package_id": tray["id"],
+            "quantity": 10}
+    assert (await client.post("/api/item-packaging", json=body,
+                              headers=admin)).status_code == 200
+    assert (await client.post("/api/item-packaging", json=body,
+                              headers=admin)).status_code == 422
+
+
+async def test_a_package_no_longer_carries_a_quantity(client, admin):
+    """A tray of milk and a tray of vials hold different amounts, so the quantity
+    belongs to the item's chain, not to the tray."""
+    body = (await client.post("/api/packaging",
+                              json={"code": "TRAY", "name": "Tray"},
+                              headers=admin)).json()
+    assert "qty_per_pack" not in body
+    assert "uom_id" not in body
+
+
+# --------------------------- kit components --------------------------- #
+async def test_a_kit_lists_its_components(client, admin):
+    payload = await item_payload(client, admin, name="First Aid Kit")
+    kit = (await client.post("/api/items",
+                             json={**payload, "has_components": True},
+                             headers=admin)).json()
+    bandage = (await client.post("/api/items",
+                                 json={**payload, "name": "Bandage"},
+                                 headers=admin)).json()
+
+    r = await client.post("/api/item-components", json={
+        "item_id": kit["id"], "component_item_id": bandage["id"],
+        "quantity": 5, "remarks": "Sterile only"}, headers=admin)
+    assert r.status_code == 200, r.text
+    line = r.json()
+    # The UOM follows the component unless it is overridden.
+    assert (line["component_name"], line["quantity"], line["uom_code"]) == \
+        ("Bandage", 5.0, "PCS")
+
+
+async def test_a_kit_cannot_contain_itself(client, admin):
+    kit = (await client.post("/api/items", json=await item_payload(client, admin),
+                             headers=admin)).json()
+    r = await client.post("/api/item-components", json={
+        "item_id": kit["id"], "component_item_id": kit["id"], "quantity": 1},
+        headers=admin)
+    assert r.status_code == 422
+
+
+async def test_components_require_the_item_to_be_saved_as_a_kit(client, admin):
+    payload = await item_payload(client, admin, name="Plain item")
+    item = (await client.post("/api/items", json=payload, headers=admin)).json()
+    component = (await client.post(
+        "/api/items", json={**payload, "name": "Component"}, headers=admin)).json()
+
+    r = await client.post("/api/item-components", json={
+        "item_id": item["id"], "component_item_id": component["id"],
+        "quantity": 1}, headers=admin)
+    assert r.status_code == 422
+    assert "Has Components" in r.json()["error"]
+
+
+async def test_removed_kit_components_are_hidden(client, admin):
+    payload = await item_payload(client, admin, name="Kit")
+    kit = (await client.post(
+        "/api/items", json={**payload, "has_components": True},
+        headers=admin)).json()
+    component = (await client.post(
+        "/api/items", json={**payload, "name": "Component"}, headers=admin)).json()
+    line = (await client.post("/api/item-components", json={
+        "item_id": kit["id"], "component_item_id": component["id"],
+        "quantity": 1}, headers=admin)).json()
+
+    assert (await client.delete(
+        f"/api/item-components/{line['id']}", headers=admin)).status_code == 200
+    rows = (await client.get(
+        f"/api/item-components?item_id={kit['id']}", headers=admin)).json()["items"]
+    assert rows == []
+
+
+# ------------------------------ BOM ---------------------------------- #
+async def test_a_bom_is_a_named_set_of_items_on_a_project(client, admin, db):
+    project = Project(code="PRJ-01", name="Metro Line 3", is_active=True)
+    db.add(project)
+    await db.commit()
+    item = (await client.post("/api/items", json=await item_payload(client, admin),
+                              headers=admin)).json()
+
+    bom = (await client.post("/api/boms", json={
+        "code": "STARTER", "name": "Site starter kit",
+        "project_id": project.id}, headers=admin)).json()
+    assert bom["project_name"] == "Metro Line 3"
+    # No parent item, output quantity or assembly type: this is a request template.
+    for gone in ("parent_item_id", "output_qty", "bom_type", "effective_from"):
+        assert gone not in bom
+
+    line = (await client.post("/api/bom-items", json={
+        "bom_id": bom["id"], "item_id": item["id"], "quantity": 3,
+        "remarks": "One per bay"}, headers=admin)).json()
+    assert (line["item_name"], line["quantity"], line["uom_code"]) == \
+        ("Bolt", 3.0, "PCS")
+
+
+# ------------------------------- UOM -------------------------------- #
+async def test_uom_requires_a_measurement_class(client, admin):
+    """An unclassified unit would vanish from every class-filtered dropdown, which
+    is a data loss nobody would notice until an item could not be saved."""
+    r = await client.post("/api/uom", json={"code": "XX", "name": "Mystery"},
+                          headers=admin)
+    assert r.status_code == 422
+
+
+async def test_uom_rejects_an_unknown_class(client, admin):
+    r = await client.post("/api/uom",
+                          json={"code": "XX", "name": "Mystery",
+                                "uom_class": "LUMINOSITY"}, headers=admin)
+    assert r.status_code == 422
+
+
+async def test_the_same_name_may_exist_in_two_classes(client, admin):
+    """A weight Ton and a refrigeration Ton are different units sharing a word."""
+    a = await client.post("/api/uom", json={"code": "TON", "name": "Ton",
+                                            "uom_class": "WEIGHT"}, headers=admin)
+    b = await client.post("/api/uom", json={"code": "TR", "name": "Ton",
+                                            "uom_class": "ENERGY"}, headers=admin)
+    assert (a.status_code, b.status_code) == (200, 200), b.text
+
+
+async def test_one_name_cannot_repeat_inside_a_class(client, admin):
+    await client.post("/api/uom", json={"code": "LTR", "name": "Litre",
+                                        "uom_class": "VOLUME"}, headers=admin)
+    r = await client.post("/api/uom", json={"code": "L", "name": "litre",
+                                            "uom_class": "VOLUME"}, headers=admin)
+    assert r.status_code == 422
+
+
+async def test_uom_list_can_be_filtered_by_class(client, admin):
+    await client.post("/api/uom", json={"code": "CEL", "name": "Celsius",
+                                        "uom_class": "TEMPERATURE"}, headers=admin)
+    await client.post("/api/uom", json={"code": "KG", "name": "Kilogram",
+                                        "uom_class": "WEIGHT"}, headers=admin)
+    rows = (await client.get("/api/uom?uom_class=TEMPERATURE",
+                             headers=admin)).json()["items"]
+    assert [u["code"] for u in rows] == ["CEL"]
+
+
+async def test_temperature_suggests_its_standard_units(client, admin):
+    body = (await client.get("/api/uom/suggestions?uom_class=TEMPERATURE",
+                             headers=admin)).json()
+    assert [u["name"] for u in body["items"]] == ["Celsius", "Fahrenheit", "Kelvin"]
+    assert all(u["exists"] is False for u in body["items"])
+
+
+async def test_creating_suggested_units_is_repeatable(client, admin):
+    """Ticking the same list twice must not fail — the second run has nothing to do
+    rather than a duplicate to reject."""
+    first = (await client.post("/api/uom/suggestions", json={
+        "uom_class": "TEMPERATURE", "codes": ["CEL", "FAH"]}, headers=admin)).json()
+    assert first["created"] == ["CEL", "FAH"]
+
+    second = (await client.post("/api/uom/suggestions", json={
+        "uom_class": "TEMPERATURE", "codes": ["CEL", "FAH"]}, headers=admin)).json()
+    assert (second["created"], second["skipped"]) == ([], ["CEL", "FAH"])
+
+    listed = (await client.get("/api/uom/suggestions?uom_class=TEMPERATURE",
+                               headers=admin)).json()["items"]
+    assert [u["exists"] for u in listed] == [True, True, False]
+
+
+async def test_a_unit_outside_the_catalogue_is_rejected(client, admin):
+    r = await client.post("/api/uom/suggestions", json={
+        "uom_class": "TEMPERATURE", "codes": ["RANKINE"]}, headers=admin)
+    assert r.status_code == 422
 
 
 # -------------------------- UOM conversions -------------------------- #
 async def test_uom_conversion_snapshots_both_codes(client, admin):
-    box = (await client.post("/api/uom", json={"code": "BOX", "name": "Box"},
+    box = (await client.post("/api/uom", json={"code": "BOX", "name": "Box", "uom_class": "PACKAGING"},
                              headers=admin)).json()
-    pcs = (await client.post("/api/uom", json={"code": "PCS", "name": "Pieces"},
+    pcs = (await client.post("/api/uom", json={"code": "PCS", "name": "Pieces", "uom_class": "COUNT"},
                              headers=admin)).json()
 
     r = await client.post("/api/uom-conversions", json={
@@ -313,18 +1014,18 @@ async def test_uom_conversion_snapshots_both_codes(client, admin):
 
 
 async def test_uom_cannot_convert_to_itself(client, admin):
-    pcs = (await client.post("/api/uom", json={"code": "PCS", "name": "Pieces"},
+    pcs = (await client.post("/api/uom", json={"code": "PCS", "name": "Pieces", "uom_class": "COUNT"},
                              headers=admin)).json()
     r = await client.post("/api/uom-conversions", json={
         "from_uom_id": pcs["id"], "to_uom_id": pcs["id"], "factor": 1}, headers=admin)
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 async def test_conversion_factor_must_be_positive(client, admin):
-    a = (await client.post("/api/uom", json={"code": "A", "name": "A"},
+    a = (await client.post("/api/uom", json={"code": "A", "name": "A", "uom_class": "COUNT"},
                            headers=admin)).json()
-    b = (await client.post("/api/uom", json={"code": "B", "name": "B"},
+    b = (await client.post("/api/uom", json={"code": "B", "name": "B", "uom_class": "COUNT"},
                            headers=admin)).json()
     r = await client.post("/api/uom-conversions", json={
         "from_uom_id": a["id"], "to_uom_id": b["id"], "factor": 0}, headers=admin)
-    assert r.status_code == 400
+    assert r.status_code == 422

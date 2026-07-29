@@ -92,7 +92,7 @@ function IndentDashboardContent() {
             <button
               type="button"
               onClick={handleViewAll}
-              className="shrink-0 rounded text-sm font-semibold text-brand transition-colors hover:text-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
+              className="shrink-0 cursor-pointer rounded text-sm font-semibold text-brand transition-colors hover:text-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
             >
               View all
             </button>

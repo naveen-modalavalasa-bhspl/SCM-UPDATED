@@ -15,6 +15,9 @@ import { IndentAcknowledgmentsPage } from "@/modules/indents/pages/Acknowledgmen
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
 import { IndentApprovalsPage } from "@/modules/indents/pages/ApprovalsPage";
+import { MyDecisionsPage } from "@/modules/indents/pages/MyDecisionsPage";
+import { TeamQueuePage } from "@/modules/indents/pages/TeamQueuePage";
+import { DelegationsPage } from "@/modules/indents/pages/DelegationsPage";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
@@ -24,6 +27,8 @@ import { AdminPage } from "@/modules/admin/pages/AdminPage";
 import { UsersPage } from "@/modules/rbac/pages/UsersPage";
 import { GroupsPage } from "@/modules/rbac/pages/GroupsPage";
 import { RulesPage } from "@/modules/admin/pages/RulesPage";
+import { WorkflowsPage } from "@/modules/admin/pages/WorkflowsPage";
+import { PoliciesPage } from "@/modules/admin/pages/PoliciesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { NumberingPage } from "@/modules/admin/pages/NumberingPage";
 import { NotificationsPage } from "@/modules/admin/pages/NotificationsPage";
@@ -34,19 +39,30 @@ import { StockBalanceView } from "@/modules/inventory/components/StockBalanceVie
 import { StockLedgerView } from "@/modules/inventory/components/StockLedgerView";
 import { StockReplenishmentView } from "@/modules/inventory/components/StockReplenishmentView";
 import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
+import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
+import { CycleCountsView } from "@/modules/inventory/components/CycleCountsView";
+import { ReservationsView } from "@/modules/inventory/components/ReservationsView";
+import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
 import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
 import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
+import { AllocationApprovalsPage } from "@/modules/inventory/pages/AllocationApprovalsPage";
 import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialRequestDetailPage";
 import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
+import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
+import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
 });
 
 function FullScreen({ children }: { children: ReactNode }) {
-  return <div className="grid min-h-full place-items-center text-muted">{children}</div>;
+  return (
+    <div className="flex h-screen w-screen items-center justify-center font-sans text-lg text-ink">
+      {children}
+    </div>
+  );
 }
 
 function AppRoutes() {
@@ -68,6 +84,9 @@ function AppRoutes() {
         <Route path="indents/:id/journey" element={<IndentJourneyPage />} />
         <Route path="indents/:id" element={<IndentDetailPage />} />
         <Route path="approvals" element={<IndentApprovalsPage />} />
+        <Route path="approvals/decisions" element={<MyDecisionsPage />} />
+        <Route path="approvals/team-queue" element={<TeamQueuePage />} />
+        <Route path="approvals/delegations" element={<DelegationsPage />} />
         <Route path="pos" element={<POListPage />} />
         <Route path="grn/*" element={<WarehouseModule />} />
         <Route path="stock/*" element={<WarehouseModule />} />
@@ -78,15 +97,24 @@ function AppRoutes() {
         <Route path="inventory/ledger" element={<StockLedgerView />} />
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
         <Route path="inventory/transfers" element={<StockTransferView />} />
+        <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
+        <Route path="inventory/cycle-counts" element={<CycleCountsView />} />
+        <Route path="inventory/reservations" element={<ReservationsView />} />
+        <Route path="inventory/valuation" element={<StockValuationView />} />
         <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
+        <Route path="inventory/allocation-approvals" element={<AllocationApprovalsPage />} />
         <Route path="inventory/demand" element={<ItemDemandPage />} />
+        <Route path="inventory/labels" element={<LabelsPage />} />
         <Route path="inventory/material-requests/:id" element={<MaterialRequestDetailPage />} />
         <Route path="admin" element={<AdminPage />} />
+        <Route path="admin/settings" element={<SettingsPage />} />
         <Route path="rbac/access" element={<UsersPage />} />
         <Route path="rbac/groups" element={<GroupsPage />} />
         <Route path="admin/rules" element={<RulesPage />} />
+        <Route path="admin/workflows" element={<WorkflowsPage />} />
+        <Route path="admin/policies" element={<PoliciesPage />} />
         <Route path="admin/audit" element={<AuditPage />} />
         <Route path="admin/numbering" element={<NumberingPage />} />
         <Route path="admin/notifications" element={<NotificationsPage />} />
