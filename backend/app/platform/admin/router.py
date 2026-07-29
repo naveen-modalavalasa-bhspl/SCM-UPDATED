@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_permission
+from app.core.dependencies import require_permission
 from app.core.pagination import PageParams
 from app.platform.admin import groups, notifications, numbering, users
 from app.platform.admin.schemas import (
@@ -64,7 +64,8 @@ async def set_roles(employee_id: int, data: SetRolesIn,
 # ----------------------------- groups ----------------------------- #
 @router.get("/groups")
 async def list_groups(params: PageParams = Depends(), search: str | None = None,
-                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.ADMIN_GROUPS_MANAGE))):
     return await groups.list_groups(db, params, search)
 
 
@@ -89,7 +90,7 @@ async def deactivate_group(group_id: int, db: AsyncSession = Depends(get_db),
 
 @router.get("/groups/{group_id}/members")
 async def list_members(group_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(get_current_user)):
+                       user=Depends(require_permission(perms.ADMIN_GROUPS_MANAGE))):
     return await groups.list_members(db, group_id)
 
 
@@ -108,20 +109,22 @@ async def remove_member(group_id: int, employee_id: int,
 
 
 @router.get("/roles")
-async def list_roles(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+async def list_roles(db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.ADMIN_ROLES_MANAGE))):
     return await groups.list_roles(db)
 
 
 @router.get("/hcm-roles")
 async def list_hcm_roles(db: AsyncSession = Depends(get_db),
-                         user=Depends(get_current_user)):
+                         user=Depends(require_permission(perms.ADMIN_GROUPS_MANAGE))):
     """HCM's org roles, derived from hcm_positions. Not SCM permission roles."""
     return await groups.list_hcm_roles(db)
 
 
 # ------------------------ document numbering ------------------------ #
 @router.get("/doc-series")
-async def list_series(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+async def list_series(db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.ADMIN_NUMBERING_MANAGE))):
     return await numbering.list_series(db)
 
 
@@ -148,7 +151,8 @@ async def deactivate_series(series_id: int, db: AsyncSession = Depends(get_db),
 @router.get("/notifications")
 async def list_notification_rules(event_code: str | None = None,
                                   db: AsyncSession = Depends(get_db),
-                                  user=Depends(get_current_user)):
+                                  user=Depends(require_permission(
+                                      perms.ADMIN_NOTIFICATIONS_MANAGE))):
     return await notifications.list_rules(db, event_code)
 
 

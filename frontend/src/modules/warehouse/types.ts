@@ -89,17 +89,22 @@ export interface WarehouseWrite {
   is_active: boolean;
 }
 
-/** `whs_bins` — zone, rack and shelf are all this table at different `level`s. */
+/**
+ * A row of `whs_warehouse_locations`. Block, lane, rack, shelf and bin are all this
+ * one table at different depths — there is no separate bins table. Only `BIN` and
+ * `COLD_STORAGE_BIN` rows hold stock, which is what `is_pickable` reports.
+ */
 export interface Bin {
   id: number;
   warehouse_id: number;
   code: string;
   name?: string | null;
   parent_id?: number | null;
-  bin_type: string;
-  /** Denormalised ancestry, e.g. `A/A-1/A-1-03`. */
+  bin_type?: string | null;
+  /** Ancestry, e.g. `block A/flr-1/rack-1`. Derived by the tree endpoint. */
   path?: string | null;
-  level: number;
+  /** Depth in the tree, 1 at the root. Derived by the tree endpoint. */
+  level?: number | null;
   capacity_qty?: number | null;
   is_pickable: boolean;
   is_active: boolean;
@@ -116,7 +121,6 @@ export interface BinWrite {
   parent_id?: number | null;
   bin_type: string;
   capacity_qty?: number | null;
-  is_pickable: boolean;
   is_active: boolean;
 }
 
@@ -129,16 +133,15 @@ export interface WarehouseLocation {
   storage_type_id?: number | null;
   code: string;
   name?: string | null;
+  description?: string | null;
   barcode?: string | null;
+  floor_level?: string | null;
+  shelf_level?: string | null;
   capacity_weight?: number | null;
   capacity_volume?: number | null;
-  length_cm?: number | null;
-  width_cm?: number | null;
   height_cm?: number | null;
-  pos_x?: number | null;
-  pos_y?: number | null;
-  pos_z?: number | null;
   temperature_controlled: boolean;
+  humidity_percentage?: number | null;
   target_temperature_celsius?: number | null;
   min_temperature_celsius?: number | null;
   max_temperature_celsius?: number | null;

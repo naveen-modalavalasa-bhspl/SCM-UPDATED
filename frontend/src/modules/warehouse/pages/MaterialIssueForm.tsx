@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
@@ -10,8 +10,10 @@ import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, type TimelineEntry } from "../components/Timeline";
 import {
-  acknowledgeIssue, binOptions, cancelIssue, createIssue, departmentOptions, employeeOptions, getIssue,
-  indentOptions, itemOptions, postIssue, projectOptions, submitIssue, updateIssue, vehicleOptions,
+  acknowledgeIssue, approveIssue, binOptions, cancelIssue, createIssue, departmentOptions,
+  employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
+  itemOptions, postIssue, projectOptions,
+  rejectIssue, submitIssue, updateIssue, vehicleOptions,
   warehouseOptions,
 } from "../api";
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
@@ -51,9 +53,11 @@ const emptyLine = (): IssueItemWrite => ({
 
 export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "OUT" | "IN" }) {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
   const nav = useNavigate();
   const qc = useQueryClient();
   const editing = !!id && id !== "new";
+  const pickingSourceId = Number(searchParams.get("picking_id") || 0);
 
   const [form, setForm] = useState<IssueWrite>({
     issue_type: "DEPARTMENT",
@@ -71,13 +75,21 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     items: [],
   });
   const [touched, setTouched] = useState(false);
-  const [confirming, setConfirming] = useState<"submit" | "post" | "ack" | "cancel" | null>(null);
+  const [confirming, setConfirming] = useState<
+    "submit" | "approve" | "reject" | "post" | "ack" | "cancel" | null
+  >(null);
   const [reason, setReason] = useState("");
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-issue", id],
     queryFn: () => getIssue(Number(id)),
     enabled: editing,
+  });
+
+  const pickingSource = useQuery({
+    queryKey: ["wh-picking-issue-source", pickingSourceId],
+    queryFn: () => getPickingIssueSource(pickingSourceId),
+    enabled: !editing && direction === "OUT" && pickingSourceId > 0,
   });
 
   useEffect(() => {
@@ -108,6 +120,20 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       })),
     });
   }, [doc]);
+
+  useEffect(() => {
+    if (!pickingSource.data) return;
+    const source = pickingSource.data;
+    setForm((current) => ({
+      ...current,
+      picking_id: source.picking_id,
+      warehouse_id: source.warehouse_id,
+      indent_id: source.indent_id ?? null,
+      department_id: source.department_id ?? null,
+      project_id: source.project_id ?? null,
+      items: source.items,
+    }));
+  }, [pickingSource.data]);
 
   const savedLine = (i: number) => doc?.items?.[i];
 
@@ -142,10 +168,25 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     },
   });
 
+  const pullIndent = useMutation({
+    mutationFn: (indentId: number) => getIndentIssueSource(indentId, form.warehouse_id),
+    onSuccess: (source) => {
+      setForm((current) => ({
+        ...current,
+        indent_id: source.indent_id,
+        department_id: source.department_id ?? current.department_id,
+        project_id: source.project_id ?? current.project_id,
+        items: source.items,
+      }));
+    },
+  });
+
   const act = useMutation({
-    mutationFn: (what: "submit" | "post" | "ack" | "cancel") => {
+    mutationFn: (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
       const numId = Number(id);
       if (what === "submit") return submitIssue(numId);
+      if (what === "approve") return approveIssue(numId, reason);
+      if (what === "reject") return rejectIssue(numId, reason);
       if (what === "post") return postIssue(numId);
       if (what === "ack") return acknowledgeIssue(numId, reason || undefined);
       return cancelIssue(numId, reason || undefined);
@@ -328,6 +369,12 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
               </Can>
             )}
+            {editing && doc?.status === "PENDING_APPROVAL" && (
+              <Can do="issue.issue">
+                <Button variant="subtle" onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
+              </Can>
+            )}
             {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted && (
               <Can do="issue.issue">
                 <Button onClick={() => setConfirming("post")}>Issue from stock</Button>
@@ -347,7 +394,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         }
       />
 
-      <ErrorBanner error={save.error} />
+      <ErrorBanner error={save.error ?? pullIndent.error ?? pickingSource.error} />
       {touched && !form.warehouse_id && <ErrorBanner error="Pick the issuing warehouse." />}
       {touched && form.items.length === 0 && <ErrorBanner error="Add at least one line." />}
 
@@ -382,9 +429,15 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                     isDisabled={locked} onChange={(v) => set("warehouse_id", v === "" ? 0 : v)}
                     placeholder="Warehouse" />
           </Field>
-          <Field label="Against indent">
-            <Lookup name="indents" load={indentOptions} value={form.indent_id ?? ""} isDisabled={locked}
-                    onChange={(v) => set("indent_id", v === "" ? null : v)} placeholder="Indent" />
+          <Field label="Against indent" hint="Loads the approved stock reservation.">
+            <Lookup name={`indents-${form.warehouse_id}`}
+                    load={(search) => indentOptions(search, form.warehouse_id || undefined)}
+                    value={form.indent_id ?? ""} isDisabled={locked || !form.warehouse_id}
+                    onChange={(v) => {
+                      const indentId = v === "" ? null : v;
+                      set("indent_id", indentId);
+                      if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
+                    }} placeholder={form.warehouse_id ? "Indent" : "Pick warehouse first"} />
           </Field>
           <Field label="Department">
             <Lookup name="departments" load={departmentOptions} value={form.department_id ?? ""}
@@ -451,6 +504,24 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         onConfirm={() => act.mutate("submit")}
         onClose={() => setConfirming(null)}
       />
+
+      <ConfirmModal
+        isOpen={confirming === "approve" || confirming === "reject"}
+        title={confirming === "approve" ? "Approve this issue?" : "Reject this issue?"}
+        message="This records your decision in the shared approval history."
+        confirmLabel={confirming === "approve" ? "Approve" : "Reject"}
+        danger={confirming === "reject"}
+        busy={act.isPending}
+        error={act.error}
+        onConfirm={() => act.mutate(confirming === "approve" ? "approve" : "reject")}
+        onClose={() => setConfirming(null)}
+      >
+        <div className="mt-3">
+          <Field label="Comments">
+            <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+          </Field>
+        </div>
+      </ConfirmModal>
 
       <ConfirmModal
         isOpen={confirming === "post"}

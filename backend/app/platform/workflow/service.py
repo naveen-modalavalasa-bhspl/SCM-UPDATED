@@ -154,10 +154,20 @@ async def list_delegations(db: AsyncSession, user, scope: str = "mine") -> list[
 
 
 async def delegation_options(db: AsyncSession, user) -> list[dict]:
-    """A minimal, non-sensitive active-employee picker for personal delegation."""
+    """Active employees inside the caller's own reporting branch.
+
+    Delegation is personal, but the picker must not double as a company-wide staff
+    directory. A caller without an assigned position has no org branch to delegate
+    into and therefore gets no options.
+    """
+    employee_ids = await _team_employee_ids(db, user)
+    if not employee_ids:
+        return []
     rows = list((await db.execute(
         select(HcmEmployee).where(
-            HcmEmployee.is_active.is_(True), HcmEmployee.id != user.id,
+            HcmEmployee.is_active.is_(True),
+            HcmEmployee.id.in_(employee_ids),
+            HcmEmployee.id != user.id,
         ).order_by(HcmEmployee.full_name)
     )).scalars().all())
     return [{"id": row.id, "name": row.full_name} for row in rows]
@@ -534,6 +544,9 @@ async def _require_action_permission(db: AsyncSession, doc_type: str, user) -> N
         DocType.PO.value: perms.PO_APPROVE,
         DocType.GRN.value: perms.GRN_QC,
         DocType.ISSUE.value: perms.ISSUE_ISSUE,
+        DocType.WH_ISSUE.value: perms.ISSUE_ISSUE,
+        DocType.DISPATCH.value: perms.DISPATCH_APPROVE,
+        DocType.PURCHASE_RETURN.value: perms.RETURN_APPROVE,
     }[doc_type]
     permissions = await get_user_permissions(
         db, user, getattr(user, "active_position_id", None),

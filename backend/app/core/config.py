@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+    # Demo seeds create mock HCM identities and local credentials. Production must
+    # opt in explicitly rather than accepting demo access by accident.
+    ALLOW_DEMO_DATA: bool = False
 
     # --- CORS (comma-separated) ---
     CORS_ORIGINS: str = "http://localhost:5173"

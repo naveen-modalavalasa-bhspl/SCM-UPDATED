@@ -98,6 +98,9 @@ class DocType(str, Enum):
     PO = "PO"
     GRN = "GRN"
     ISSUE = "ISSUE"
+    WH_ISSUE = "WH_ISSUE"
+    DISPATCH = "DISPATCH"
+    PURCHASE_RETURN = "PURCHASE_RETURN"
 
 
 class InstanceStatus(str, Enum):
@@ -169,18 +172,28 @@ class WarehouseType(str, Enum):
 
 
 class BinType(str, Enum):
-    """whs_bins.bin_type. Bins nest through parent_id, so the whole
-    Warehouse → Floor → Line → Rack → Bin → Lot hierarchy of flow doc §1 is this one
-    table at different levels rather than six tables. COLD_ROOM marks temperature-
-    controlled storage."""
+    """`whs_warehouse_locations.storage_type`. Locations nest through
+    `parent_location_id`, so the whole Block → Floor → Lane → Rack → Shelf → Bin
+    hierarchy of flow doc §1 is one table at different levels rather than six tables,
+    and there is no separate bins table.
+
+    Only BIN and COLD_STORAGE_BIN hold stock (`shared/models/warehouse.BIN_TYPES`);
+    the rest are the structure you walk past to reach one. BLOCK, LANE, REFRIGERATOR
+    and COLD_STORAGE_BIN are here because the live data uses them — a type the
+    database contains but the enum rejects makes those rows uneditable.
+    """
+    BLOCK = "BLOCK"
     FLOOR = "FLOOR"
     LINE = "LINE"
+    LANE = "LANE"
     ZONE = "ZONE"
     RACK = "RACK"
     SHELF = "SHELF"
     BIN = "BIN"
     LOT = "LOT"
     COLD_ROOM = "COLD_ROOM"
+    COLD_STORAGE_BIN = "COLD_STORAGE_BIN"
+    REFRIGERATOR = "REFRIGERATOR"
     STORAGE = "STORAGE"
     STAGING = "STAGING"
 

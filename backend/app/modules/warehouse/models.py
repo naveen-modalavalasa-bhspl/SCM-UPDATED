@@ -715,44 +715,18 @@ class SerialNumber(Base):
     updated_at = updated_at_col()
 
 
-class WarehouseLocation(Base):
-    """`whs_locations` — the physical layer behind the floor plan. Read-only here:
-    coordinates are surveyed, not typed into an ERP screen."""
-    __tablename__ = "whs_locations"
-
-    id = pk()
-    warehouse_id = Column(BigInteger, index=True, nullable=False)
-    parent_location_id = Column(BigInteger, nullable=True)
-    storage_type = Column(String(50), nullable=True)
-    storage_type_id = Column(BigInteger, nullable=True)
-    code = Column(String(50), nullable=False)
-    name = Column(String(200), nullable=True)
-    barcode = Column(String(100), nullable=True)
-
-    capacity_weight = Column(QTY, nullable=True)
-    capacity_volume = Column(QTY, nullable=True)
-    max_weight_capacity = Column(QTY, nullable=True)
-    length_cm = Column(Numeric(10, 2), nullable=True)
-    width_cm = Column(Numeric(10, 2), nullable=True)
-    height_cm = Column(Numeric(10, 2), nullable=True)
-    aisle_width_meters = Column(Numeric(10, 2), nullable=True)
-    pos_x = Column(Numeric(10, 2), nullable=True)
-    pos_y = Column(Numeric(10, 2), nullable=True)
-    pos_z = Column(Numeric(10, 2), nullable=True)
-
-    temperature_controlled = Column(Boolean, nullable=False, default=False)
-    target_temperature_celsius = Column(Numeric(5, 2), nullable=True)
-    min_temperature_celsius = Column(Numeric(5, 2), nullable=True)
-    max_temperature_celsius = Column(Numeric(5, 2), nullable=True)
-
-    is_active = Column(Boolean, nullable=False, default=True)
-    created_at = created_at_col()
-    updated_at = updated_at_col()
+# A location and a bin are the same row in the same table (`whs_warehouse_locations`);
+# only one mapper may own it, and that mapper lives in shared because the masters
+# screens need it too. Imported here so `m.WarehouseLocation` still reads naturally in
+# this module. See `app/shared/models/warehouse.py` for why there is no `whs_bins`.
+from app.shared.models.warehouse import BIN_TYPES, Bin, WarehouseLocation  # noqa: E402,F401
 
 
 class StorageType(Base):
-    """`whs_storage_types`."""
-    __tablename__ = "whs_storage_types"
+    """`whs_warehouse_storage_types` — the DB team's table, the one with rows in it.
+    A `whs_storage_types` also exists on the server but is an empty duplicate; do not
+    point anything at it."""
+    __tablename__ = "whs_warehouse_storage_types"
 
     id = pk()
     name = Column(String(50), nullable=False)

@@ -143,10 +143,13 @@ Builds ~85 tables in `scm_erp`. Re-runnable; does nothing if already at head.
 ### 4.4 Seed demo data
 
 ```powershell
+$env:ALLOW_DEMO_DATA="true"
 .venv/Scripts/python -m scripts.seed
 ```
 
-Idempotent — safe to run again any time. It creates:
+Demo seeding is blocked unless `ALLOW_DEMO_DATA=true`. It is idempotent and prints a
+different one-time password for each newly created demo login. Store those values when
+the seed first runs; reruns never reset an existing credential. It creates:
 
 - all permissions, 5 roles, and the menu tree (`rbac_pages`)
 - 6 demo users with logins, and mock `hcm_*` org data (positions, departments,
@@ -196,7 +199,7 @@ instead. Never hardcode a host in source.
 
 ## 6. Log in
 
-Demo accounts, all with password **`Bavya@123`**:
+The demo seed creates these accounts with unique one-time passwords printed once:
 
 | Username | Role | Can do |
 |---|---|---|
@@ -210,9 +213,8 @@ Demo accounts, all with password **`Bavya@123`**:
 The username field accepts the employee code (`admin`), the email, or the numeric
 employee id. Identity lives in `hcm_employees` — there is no `users` table.
 
-> Note: `scripts/seed_foundation.py` is a **different, older** seed for the
-> canonical `scm_rebuild` schema and uses password `password123`. For a fresh
-> local database, use `scripts.seed` as in step 4.4.
+> `scripts/seed_foundation.py` is an older seed for the canonical `scm_rebuild`
+> schema. It has the same explicit demo-data guard and unique-password behavior.
 
 ---
 
@@ -320,7 +322,7 @@ For demos and mobile testing:
 | Server reloads forever after `pip install` | You omitted `--reload-dir app`, so uvicorn is watching `.venv`. |
 | `Port 5173 is already in use` | Vite uses `strictPort` deliberately. Stop the other dev server; don't let it drift to another port, the CORS list names 5173. |
 | Frontend loads but every call is 401/404 | Backend isn't running on :8000, or `VITE_API_URL` is set when it should be empty. |
-| Login rejected for a demo user | Password is `Bavya@123`, not `password123`. Re-run `python -m scripts.seed`. |
+| Login rejected for a demo user | Use the one-time password printed when that account was first seeded. Reseeding deliberately does not reset existing credentials; use the admin reset-password action if needed. |
 
 ---
 

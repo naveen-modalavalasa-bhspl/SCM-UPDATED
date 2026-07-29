@@ -819,8 +819,10 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
     db.add(item)
     await db.commit()
 
-    await make_user(employee_id=2, username="req", password="pw",
-                    permissions=["indent.view", "indent.create"])
+    await make_user(
+        employee_id=2, username="req", password="pw",
+        permissions=["indent.view", "indent.create", "indent.submit"],
+    )
     headers = await login("req", "pw")
 
     r = await client.post("/api/indents",
@@ -829,10 +831,15 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "DRAFT"
     assert r.json()["indent_no"].startswith("IND/")
+    assert r.json()["can_submit"] is True
 
     lst = await client.get("/api/indents", headers=headers)
     assert lst.status_code == 200
     assert lst.json()["total"] >= 1
+
+    dashboard_api = await client.get("/api/indents/dashboard", headers=headers)
+    assert dashboard_api.status_code == 404
+    assert dashboard_api.json() == {"success": False, "error": "Not Found"}
 
 
 async def test_indent_stats_counts(db):

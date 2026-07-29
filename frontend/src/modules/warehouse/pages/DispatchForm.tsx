@@ -10,8 +10,9 @@ import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, toTimeline } from "../components/Timeline";
 import {
-  addDispatchEvent, cancelDispatch, carrierOptions, createDispatch, dispatchGateOut, getDispatch,
-  indentOptions, itemOptions, projectOptions, submitDispatch, updateDispatch, vehicleOptions,
+  addDispatchEvent, approveDispatch, cancelDispatch, carrierOptions, createDispatch,
+  dispatchGateOut, getDispatch, getIssueDispatchSource, issueOptions, itemOptions,
+  projectOptions, rejectDispatch, submitDispatch, updateDispatch, vehicleOptions,
   vendorOptions, warehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
@@ -77,7 +78,7 @@ export default function DispatchForm() {
     delivery_address: "",
     contact_person: "",
     contact_phone: "",
-    ref_type: "INDENT",
+    ref_type: null,
     ref_id: null,
     transport_mode: "ROAD",
     carrier_id: null,
@@ -91,7 +92,9 @@ export default function DispatchForm() {
     remarks: "",
     items: [],
   });
-  const [confirming, setConfirming] = useState<"submit" | "gate" | "cancel" | null>(null);
+  const [confirming, setConfirming] = useState<
+    "submit" | "approve" | "reject" | "gate" | "cancel" | null
+  >(null);
   const [gatePass, setGatePass] = useState("");
   const [reason, setReason] = useState("");
   const [event, setEvent] = useState({ event_type: "IN_TRANSIT", location_name: "", temperature_c: "", notes: "" });
@@ -115,7 +118,7 @@ export default function DispatchForm() {
       delivery_address: doc.delivery_address ?? "",
       contact_person: doc.contact_person ?? "",
       contact_phone: doc.contact_phone ?? "",
-      ref_type: doc.ref_type ?? "INDENT",
+      ref_type: doc.ref_type ?? null,
       ref_id: doc.ref_id ?? null,
       transport_mode: doc.transport_mode ?? "ROAD",
       carrier_id: doc.carrier_id ?? null,
@@ -169,15 +172,31 @@ export default function DispatchForm() {
     },
   });
 
+  const pullIssue = useMutation({
+    mutationFn: (issueId: number) => getIssueDispatchSource(issueId),
+    onSuccess: (source) => {
+      setForm((current) => ({
+        ...current,
+        warehouse_id: source.warehouse_id,
+        project_id: source.project_id ?? current.project_id,
+        ref_type: "WH_ISSUE",
+        ref_id: source.issue_id,
+        items: source.items,
+      }));
+    },
+  });
+
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
     qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
   };
 
   const act = useMutation({
-    mutationFn: (what: "submit" | "gate" | "cancel") => {
+    mutationFn: (what: "submit" | "approve" | "reject" | "gate" | "cancel") => {
       const numId = Number(id);
       if (what === "submit") return submitDispatch(numId);
+      if (what === "approve") return approveDispatch(numId, reason);
+      if (what === "reject") return rejectDispatch(numId, reason);
       if (what === "gate") return dispatchGateOut(numId, gatePass || undefined);
       return cancelDispatch(numId, reason || undefined);
     },
@@ -304,24 +323,30 @@ export default function DispatchForm() {
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {!locked && (
-              <Can do="issue.create">
+              <Can do="dispatch.create">
                 <Button variant="subtle" onClick={() => save.mutate()} disabled={save.isPending}>
                   {save.isPending ? "Saving…" : "Save"}
                 </Button>
               </Can>
             )}
             {editing && doc?.status === "DRAFT" && (
-              <Can do="issue.create">
+              <Can do="dispatch.create">
                 <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
               </Can>
             )}
+            {editing && doc?.status === "PENDING_APPROVAL" && (
+              <Can do="dispatch.approve">
+                <Button variant="subtle" onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
+              </Can>
+            )}
             {editing && ["APPROVED", "PACKED"].includes(doc?.status ?? "") && (
-              <Can do="issue.issue">
+              <Can do="dispatch.gate_out">
                 <Button onClick={() => setConfirming("gate")}>Gate out</Button>
               </Can>
             )}
             {editing && doc && !["CANCELLED", "ACKNOWLEDGED", "DELIVERED"].includes(doc.status) && (
-              <Can do="issue.create">
+              <Can do="dispatch.approve">
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
             )}
@@ -329,7 +354,7 @@ export default function DispatchForm() {
         }
       />
 
-      <ErrorBanner error={save.error} />
+      <ErrorBanner error={save.error ?? pullIssue.error} />
 
       {doc && (
         <MetaCard title="Consignment">
@@ -379,9 +404,17 @@ export default function DispatchForm() {
             <Lookup name="projects" load={projectOptions} value={form.project_id ?? ""} isDisabled={locked}
                     onChange={(v) => set("project_id", v === "" ? null : v)} placeholder="Project" />
           </Field>
-          <Field label="Against indent">
-            <Lookup name="indents" load={indentOptions} value={form.ref_id ?? ""} isDisabled={locked}
-                    onChange={(v) => set("ref_id", v === "" ? null : v)} placeholder="Reference" />
+          <Field label="Against posted issue" hint="Optional; avoids moving stock twice.">
+            <Lookup name="posted-issues" load={issueOptions} value={form.ref_id ?? ""} isDisabled={locked}
+                    onChange={(v) => {
+                      const issueId = v === "" ? null : v;
+                      setForm((current) => ({
+                        ...current,
+                        ref_type: issueId ? "WH_ISSUE" : null,
+                        ref_id: issueId,
+                      }));
+                      if (issueId) pullIssue.mutate(issueId);
+                    }} placeholder="Material issue" />
           </Field>
           <Field label="Expected delivery">
             <Input type="date" value={form.expected_delivery ?? ""} disabled={locked}
@@ -467,7 +500,7 @@ export default function DispatchForm() {
           title="Custody trail"
           hint="Every scan, stop and temperature reading, in order."
           actions={
-            <Can do="issue.issue">
+            <Can do="dispatch.view">
               <Button variant="subtle" onClick={() => logEvent.mutate()} disabled={logEvent.isPending}>
                 {logEvent.isPending ? "Recording…" : "Record event"}
               </Button>
@@ -522,6 +555,24 @@ export default function DispatchForm() {
         onConfirm={() => act.mutate("submit")}
         onClose={() => setConfirming(null)}
       />
+
+      <ConfirmModal
+        isOpen={confirming === "approve" || confirming === "reject"}
+        title={confirming === "approve" ? "Approve this dispatch?" : "Reject this dispatch?"}
+        message="This records your decision in the shared approval history."
+        confirmLabel={confirming === "approve" ? "Approve" : "Reject"}
+        danger={confirming === "reject"}
+        busy={act.isPending}
+        error={act.error}
+        onConfirm={() => act.mutate(confirming === "approve" ? "approve" : "reject")}
+        onClose={() => setConfirming(null)}
+      >
+        <div className="mt-3">
+          <Field label="Comments">
+            <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+          </Field>
+        </div>
+      </ConfirmModal>
 
       <ConfirmModal
         isOpen={confirming === "gate"}

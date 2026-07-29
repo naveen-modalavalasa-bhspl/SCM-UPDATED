@@ -381,7 +381,7 @@ export interface WorkflowPending {
 }
 
 export interface StockOverviewKPIs {
-  total_stock_value: number;
+  total_stock_value: number | null;
   items_below_reorder: number;
   near_expiry_30_days: number;
   near_expiry_60_days: number;

@@ -24,7 +24,8 @@ from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
-from app.modules.inventory.service import move_stock
+from app.modules.inventory import allocation as stock_allocation
+from app.modules.inventory.service import move_stock, move_stock_out
 from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse.enums import (
@@ -35,7 +36,10 @@ from app.modules.warehouse.enums import (
 )
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
-from app.shared.enums import AuditAction, StockDirection
+from app.shared.enums import (
+    AuditAction, InstanceStatus, POStatus, ReservationStatus,
+    RefType as InventoryRefType, StockDirection,
+)
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
@@ -181,31 +185,46 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
 async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
     """The whole tree in one query, nested in Python.
 
-    `whs_bins` nests through `parent_id` with no depth limit, so a recursive query
-    per level would be one round trip per rack. A warehouse has hundreds of bins, not
-    millions — fetching them flat and threading them here is one query either way.
+    `whs_warehouse_locations` nests through `parent_id` with no depth limit, so a
+    recursive query per level would be one round trip per rack. A warehouse has hundreds
+    of locations, not millions — fetching them flat and threading them here is one query
+    either way.
+
+    Depth and ancestry are computed from the parent links rather than read from stored
+    `level`/`path` columns, so they cannot disagree with the tree they describe.
     """
-    await _get(db, Warehouse, warehouse_id, "Warehouse")
+    wh = await _get(db, Warehouse, warehouse_id, "Warehouse")
+    # A bulk warehouse stocks at warehouse level, so there is no tree to walk.
+    if not wh.is_bin_managed:
+        return []
     rows = (await db.execute(
-        select(Bin).where(Bin.warehouse_id == warehouse_id).order_by(Bin.level, Bin.code)
+        select(Bin).where(Bin.warehouse_id == warehouse_id).order_by(Bin.code)
     )).scalars().all()
 
     nodes: dict[int, dict] = {}
     for b in rows:
         nodes[b.id] = {
             "id": b.id, "warehouse_id": b.warehouse_id, "code": b.code, "name": b.name,
-            "parent_id": b.parent_id, "bin_type": b.bin_type, "path": b.path,
-            "level": b.level, "capacity_qty": b.capacity_qty,
+            "parent_id": b.parent_id, "bin_type": b.bin_type, "path": None,
+            "level": None, "capacity_qty": b.capacity_qty,
             "is_pickable": b.is_pickable, "is_active": b.is_active,
             "occupied_qty": None, "children": [],
         }
 
+    def describe(node: dict, depth: int, prefix: str) -> None:
+        node["level"] = depth
+        node["path"] = f"{prefix}/{node['code']}" if prefix else node["code"]
+        for child in node["children"]:
+            describe(child, depth + 1, node["path"])
+
     roots: list[dict] = []
     for node in nodes.values():
         parent = nodes.get(node["parent_id"]) if node["parent_id"] else None
-        # A bin whose parent is missing (or points outside this warehouse) is shown at
-        # the root rather than dropped — invisible data is worse than misplaced data.
+        # A location whose parent is missing (or points outside this warehouse) is shown
+        # at the root rather than dropped — invisible data is worse than misplaced data.
         (parent["children"] if parent else roots).append(node)
+    for root in roots:
+        describe(root, 1, "")
     return roots
 
 
@@ -219,18 +238,16 @@ async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
     if clash:
         raise ValidationError(f"Bin {data.code} already exists in {wh.code}")
 
-    level, path = 1, data.code
     if data.parent_id:
         parent = await _get(db, Bin, data.parent_id, "Parent bin")
         if parent.warehouse_id != data.warehouse_id:
             raise ValidationError("A bin cannot sit under a parent in another warehouse")
-        level = (parent.level or 1) + 1
-        path = f"{parent.path or parent.code}/{data.code}"
 
-    row = Bin(**data.model_dump(), level=level, path=path)
+    row = Bin(**data.model_dump())
     db.add(row)
     await db.flush()
-    await write_audit(db, entity="whs_bins", entity_id=row.id, entity_no=row.code,
+    await write_audit(db, entity="whs_warehouse_locations", entity_id=row.id,
+                      entity_no=row.code,
                       action=AuditAction.CREATE, actor=user, after=data.model_dump(mode="json"))
     await db.commit()
     await db.refresh(row)
@@ -247,14 +264,12 @@ async def update_bin(db: AsyncSession, bin_id: int, data: s.BinWrite, user) -> B
     for field, value in data.model_dump().items():
         setattr(row, field, value)
     if data.parent_id:
-        parent = await _get(db, Bin, data.parent_id, "Parent bin")
-        row.level = (parent.level or 1) + 1
-        row.path = f"{parent.path or parent.code}/{row.code}"
-    else:
-        row.level, row.path = 1, row.code
+        # Validates the parent exists; depth is derived when the tree is built.
+        await _get(db, Bin, data.parent_id, "Parent bin")
 
     await db.flush()
-    await write_audit(db, entity="whs_bins", entity_id=row.id, entity_no=row.code,
+    await write_audit(db, entity="whs_warehouse_locations", entity_id=row.id,
+                      entity_no=row.code,
                       action=AuditAction.UPDATE, actor=user,
                       before={k: str(v) for k, v in before.items()},
                       after=data.model_dump(mode="json"))
@@ -378,7 +393,14 @@ async def list_receipts(db: AsyncSession, params: PageParams, *, receipt_type: s
                         date_to: date | None = None) -> dict:
     stmt = select(m.Receipt)
     if receipt_type:
-        stmt = stmt.where(m.Receipt.receipt_type == receipt_type)
+        # Older imports called ordinary purchase receipts "direct". Keep them visible
+        # as GRNs while the data-hardening migration normalises existing rows.
+        receipt_types = (
+            (ReceiptType.PURCHASE.value, "direct")
+            if receipt_type == ReceiptType.PURCHASE.value
+            else (receipt_type,)
+        )
+        stmt = stmt.where(m.Receipt.receipt_type.in_(receipt_types))
     if status:
         stmt = stmt.where(m.Receipt.status == status)
     if warehouse_id:
@@ -516,8 +538,7 @@ async def complete_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt
     """
     receipt = await get_receipt(db, receipt_id)
     _guard(receipt.status,
-           {ReceiptStatus.PENDING_QC.value, ReceiptStatus.QC_PASSED.value,
-            ReceiptStatus.SUBMITTED.value, ReceiptStatus.PARTIALLY_RECEIVED.value},
+           {ReceiptStatus.QC_PASSED.value, ReceiptStatus.PARTIALLY_RECEIVED.value},
            "post", "receipt")
     if receipt.is_stock_posted:
         raise ValidationError(f"{receipt.grn_no} has already been posted to stock")
@@ -546,6 +567,7 @@ async def complete_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt
     receipt.is_stock_posted = True
     receipt.posted_at = utcnow()
     receipt.status = ReceiptStatus.COMPLETED.value
+    await _sync_po_receipt_status(db, receipt.po_id)
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -554,6 +576,46 @@ async def complete_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt
                              "total_accepted_qty": str(receipt.total_accepted_qty)})
     await db.commit()
     return await get_receipt(db, receipt_id)
+
+
+async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
+    """Reflect posted warehouse receipts back onto the purchase order."""
+    if not po_id:
+        return
+
+    from app.modules.procurement.models import POItem, PurchaseOrder
+
+    po = await db.get(PurchaseOrder, po_id)
+    if po is None:
+        return
+    lines = (await db.execute(
+        select(POItem).where(POItem.po_id == po_id)
+    )).scalars().all()
+    if not lines:
+        return
+
+    received_rows = (await db.execute(
+        select(
+            m.ReceiptItem.po_item_id,
+            func.coalesce(func.sum(m.ReceiptItem.received_qty), 0),
+        )
+        .join(m.Receipt, m.Receipt.id == m.ReceiptItem.receipt_id)
+        .where(
+            m.Receipt.po_id == po_id,
+            m.Receipt.is_stock_posted.is_(True),
+            m.Receipt.status != ReceiptStatus.CANCELLED.value,
+        )
+        .group_by(m.ReceiptItem.po_item_id)
+    )).all()
+    received = {line_id: _d(qty) for line_id, qty in received_rows}
+    complete = all(
+        received.get(line.id, ZERO)
+        >= _d(getattr(line, "quantity", None) or getattr(line, "qty", None))
+        for line in lines
+    )
+    po.status = (
+        POStatus.RECEIVED.value if complete else POStatus.PARTIALLY_RECEIVED.value
+    )
 
 
 async def cancel_receipt(db: AsyncSession, receipt_id: int, reason: str | None,
@@ -685,8 +747,8 @@ async def _suggest_bin(db: AsyncSession, warehouse_id: int, item_id: int) -> Bin
     return (await db.execute(
         select(Bin).where(
             Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True),
-            Bin.is_pickable.is_(True))
-        .order_by(Bin.level.desc(), Bin.code).limit(1)
+            Bin.bin_type.in_(m.BIN_TYPES))
+        .order_by(Bin.code).limit(1)
     )).scalar_one_or_none()
 
 
@@ -934,8 +996,14 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
             rate = _d(line.rate)
             line.amount = (line.accepted_qty * rate) if rate else None
         _receipt_totals(receipt)
-        receipt.status = (ReceiptStatus.QC_FAILED if inspection.failed_items
-                          else ReceiptStatus.QC_PASSED).value
+        accepted = _d(receipt.total_accepted_qty)
+        rejected = _d(receipt.total_rejected_qty)
+        if accepted > ZERO and rejected > ZERO:
+            receipt.status = ReceiptStatus.PARTIALLY_RECEIVED.value
+        elif accepted > ZERO:
+            receipt.status = ReceiptStatus.QC_PASSED.value
+        else:
+            receipt.status = ReceiptStatus.QC_FAILED.value
 
     inspection.status = InspectionStatus.COMPLETED.value
 
@@ -1054,6 +1122,10 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
         raise ValidationError(f"Bin {target.code} is not in this warehouse")
     if not target.is_active:
         raise ValidationError(f"Bin {target.code} is inactive")
+    if target.bin_type not in m.BIN_TYPES:
+        raise ValidationError(
+            f"{target.code} is a {target.bin_type.lower()}, not a stock-holding bin"
+        )
 
     qty = _d(data.qty) if data.qty is not None else _d(task.qty)
     if qty <= ZERO:
@@ -1062,15 +1134,19 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
         raise ValidationError(
             f"This task is for {task.qty}; {qty} is more than was received.")
 
+    receipt = await db.get(m.Receipt, task.grn_id) if task.grn_id else None
+    project_id = (receipt.project_id if receipt else None) or 0
     ref_no = task.putaway_no or f"PUT-{task.id}"
     await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.OUT.value,
                      ref_type=WarehouseDocType.PUTAWAY.value, ref_id=task.id, ref_no=ref_no,
                      user=user, warehouse_id=task.warehouse_id,
-                     bin_id=m.NO_BIN, batch_id=task.batch_id or m.NO_BATCH)
+                     bin_id=m.NO_BIN, batch_id=task.batch_id or m.NO_BATCH,
+                     project_id=project_id)
     await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
                      ref_type=WarehouseDocType.PUTAWAY.value, ref_id=task.id, ref_no=ref_no,
                      user=user, warehouse_id=task.warehouse_id,
-                     bin_id=target.id, batch_id=task.batch_id or m.NO_BATCH)
+                     bin_id=target.id, batch_id=task.batch_id or m.NO_BATCH,
+                     project_id=project_id)
 
     await _place_serials(db, task, target)
 
@@ -1164,7 +1240,7 @@ async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list
         others = (await db.execute(
             select(Bin).where(
                 Bin.warehouse_id == task.warehouse_id, Bin.is_active.is_(True),
-                Bin.is_pickable.is_(True), Bin.id.notin_(held_ids or [0]))
+                Bin.bin_type.in_(m.BIN_TYPES), Bin.id.notin_(held_ids or [0]))
             .order_by(Bin.code).limit(remaining)
         )).scalars().all()
     return [*preferred, *others]
@@ -1192,12 +1268,35 @@ async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
     wh = await _warehouse(db, data.warehouse_id)
     if not data.items:
         raise ValidationError("A picklist with no lines gives the picker nothing to do")
+    if data.ref_type == "INDENT" and not data.ref_id:
+        raise ValidationError("An indent picklist needs an indent reference")
+
+    if data.ref_type == "INDENT" and data.ref_id:
+        requested_by_item: dict[int, Decimal] = {}
+        for line in data.items:
+            requested_by_item[line.item_id] = (
+                requested_by_item.get(line.item_id, ZERO) + _d(line.required_qty)
+            )
+        for item_id, required in requested_by_item.items():
+            held = await stock_allocation.reserved_quantity(
+                db,
+                InventoryRefType.RESERVATION.value,
+                data.ref_id,
+                item_id=item_id,
+                warehouse_id=wh.id,
+            )
+            if required > held:
+                raise ValidationError(
+                    f"Item {item_id}: picklist asks for {required}, but only {held} "
+                    "is reserved for this indent in the warehouse."
+                )
 
     picking = m.Picking(
         pick_no=await next_number(db, WarehouseDocType.PICKING.value),
         pick_date=data.pick_date,
         warehouse_id=wh.id, warehouse_name=wh.name,
         ref_type=data.ref_type, ref_id=data.ref_id,
+        ref_no=await _warehouse_reference_no(db, data.ref_type, data.ref_id),
         strategy=data.strategy.value,
         status=PickingStatus.DRAFT.value,
         assigned_to_id=data.assigned_to_id,
@@ -1208,13 +1307,22 @@ async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
 
     for index, line in enumerate(data.items, start=1):
         item = await _item_snapshot(db, line.item_id)
+        required = _d(line.required_qty)
+        if required <= ZERO:
+            raise ValidationError(f"Line {index}: required quantity must be positive")
+        if line.bin_id:
+            source_bin = await _get(db, Bin, line.bin_id, "Bin")
+            if source_bin.warehouse_id != wh.id:
+                raise ValidationError(
+                    f"Line {index}: bin {source_bin.code} is not in {wh.name}"
+                )
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
         picking.items.append(m.PickingItem(
             line_no=index, item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=item.uom_code,
             bin_id=line.bin_id, bin_code=await _bin_code(db, line.bin_id),
             batch_id=line.batch_id, batch_no=batch.batch_no if batch else None,
-            required_qty=_d(line.required_qty), picked_qty=ZERO,
+            required_qty=required, picked_qty=ZERO,
             status=PickLineStatus.PENDING.value,
         ))
     await db.flush()
@@ -1224,6 +1332,24 @@ async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
                       after={"status": picking.status, "lines": picking.total_lines})
     await db.commit()
     return await get_picking(db, picking.id)
+
+
+async def _warehouse_reference_no(
+    db: AsyncSession, ref_type: str | None, ref_id: int | None,
+) -> str | None:
+    if not ref_type or not ref_id:
+        return None
+    if ref_type == "INDENT":
+        from app.modules.indents.models import Indent
+        row = await db.get(Indent, ref_id)
+        return row.indent_no if row else None
+    if ref_type == "ISSUE":
+        row = await db.get(m.MaterialIssue, ref_id)
+        return row.issue_no if row else None
+    if ref_type == "DISPATCH":
+        row = await db.get(m.Dispatch, ref_id)
+        return row.dispatch_no if row else None
+    return None
 
 
 async def release_picking(db: AsyncSession, picking_id: int, user) -> m.Picking:
@@ -1270,8 +1396,13 @@ async def pick_line(db: AsyncSession, picking_id: int, line_id: int, data: s.Pic
     line.picked_by_id = getattr(user, "id", None)
     line.picked_at = utcnow()
     if data.bin_id:
-        line.bin_id = data.bin_id
-        line.bin_code = await _bin_code(db, data.bin_id)
+        source_bin = await _get(db, Bin, data.bin_id, "Bin")
+        if source_bin.warehouse_id != picking.warehouse_id:
+            raise ValidationError(
+                f"Bin {source_bin.code} is not in {picking.warehouse_name}"
+            )
+        line.bin_id = source_bin.id
+        line.bin_code = source_bin.code
 
     picking.picked_lines = sum(
         1 for l in picking.items
@@ -1377,16 +1508,47 @@ async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     if not data.items:
         raise ValidationError("An issue with no lines has nothing to issue")
 
-    original = await db.get(m.MaterialIssue, data.original_issue_id) if data.original_issue_id else None
+    original = await get_issue(db, data.original_issue_id) if data.original_issue_id else None
     if data.direction == IssueDirection.IN and original is None:
         raise ValidationError("A return has to point at the issue it reverses")
+    if original and (
+        original.direction != IssueDirection.OUT.value or not original.is_stock_posted
+    ):
+        raise ValidationError("Materials can only return against a posted outward issue")
+    from app.modules.indents.models import Indent
+    indent = await db.get(Indent, data.indent_id) if data.indent_id else None
+    picking = await get_picking(db, data.picking_id) if data.picking_id else None
+    if data.picking_id and picking is None:
+        raise NotFoundError(f"Picklist {data.picking_id} not found")
+    if picking:
+        if picking.warehouse_id != wh.id:
+            raise ValidationError(
+                f"{picking.pick_no} belongs to {picking.warehouse_name}, not {wh.name}"
+            )
+        _guard(
+            picking.status,
+            {PickingStatus.PICKED.value, PickingStatus.COMPLETED.value},
+            "raise an issue from", "picklist",
+        )
+        existing = await db.scalar(
+            select(m.MaterialIssue.id).where(
+                m.MaterialIssue.picking_id == picking.id,
+                m.MaterialIssue.status != IssueStatus.CANCELLED.value,
+            ).limit(1)
+        )
+        if existing is not None:
+            raise ValidationError(
+                f"{picking.pick_no} already has material issue {existing}"
+            )
 
     issue = m.MaterialIssue(
         issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value),
         issue_type=data.issue_type.value,
         issue_date=data.issue_date,
         indent_id=data.indent_id,
+        indent_no=indent.indent_no if indent else None,
         picking_id=data.picking_id,
+        pick_no=picking.pick_no if picking else None,
         warehouse_id=wh.id, warehouse_name=wh.name,
         department_id=data.department_id,
         project_id=data.project_id,
@@ -1403,6 +1565,10 @@ async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     await db.flush()
 
     await _apply_issue_lines(db, issue, data.items)
+    if original:
+        _validate_issue_return(issue, original)
+    if picking:
+        _validate_picking_issue(issue, picking)
     await db.flush()
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
@@ -1421,7 +1587,15 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
     issue.issue_type = data.issue_type.value
     issue.issue_date = data.issue_date
     issue.indent_id = data.indent_id
+    if data.indent_id:
+        from app.modules.indents.models import Indent
+        indent = await db.get(Indent, data.indent_id)
+        issue.indent_no = indent.indent_no if indent else None
+    else:
+        issue.indent_no = None
     issue.picking_id = data.picking_id
+    picking = await get_picking(db, data.picking_id) if data.picking_id else None
+    issue.pick_no = picking.pick_no if picking else None
     issue.warehouse_id = wh.id
     issue.warehouse_name = wh.name
     issue.department_id = data.department_id
@@ -1431,6 +1605,11 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
     issue.remarks = data.remarks
 
     await _apply_issue_lines(db, issue, data.items)
+    if issue.direction == IssueDirection.IN.value and issue.original_issue_id:
+        original = await get_issue(db, issue.original_issue_id)
+        _validate_issue_return(issue, original)
+    if picking:
+        _validate_picking_issue(issue, picking)
     await db.flush()
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
@@ -1459,16 +1638,82 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
         "department_id": issue.department_id,
         "project_id": issue.project_id,
     }
-    await engine.start(db, WarehouseDocType.WH_ISSUE.value, issue.id, context, user)
-    approvers = await engine.current_approvers(db, WarehouseDocType.WH_ISSUE.value, issue.id)
-    issue.current_approver_name = _approver_label(approvers)
-    issue.status = IssueStatus.PENDING_APPROVAL.value
+    context.update({
+        "doc_no": issue.issue_no,
+        "doc_summary": f"Material issue {issue.issue_no}",
+        "requester_position_id": getattr(user, "active_position_id", None),
+    })
+    instance = await engine.start(
+        db, WarehouseDocType.WH_ISSUE.value, issue.id, context, user
+    )
+    if instance.status == InstanceStatus.APPROVED.value:
+        issue.status = IssueStatus.APPROVED.value
+        issue.approved_by_name = _name(user)
+        issue.approved_at = utcnow()
+        issue.current_approver_name = None
+    else:
+        approvers = await engine.current_approvers(
+            db, WarehouseDocType.WH_ISSUE.value, issue.id
+        )
+        issue.current_approver_name = _approver_label(approvers)
+        issue.status = IssueStatus.PENDING_APPROVAL.value
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": IssueStatus.DRAFT.value},
                       after={"status": issue.status,
                              "current_approver": issue.current_approver_name})
+    await db.commit()
+    return await get_issue(db, issue_id)
+
+
+async def act_on_issue(
+    db: AsyncSession, issue_id: int, action: str, comments: str, user,
+) -> m.MaterialIssue:
+    """Apply an approval decision and keep the warehouse document in sync."""
+    issue = await get_issue(db, issue_id)
+    _guard(
+        issue.status, {IssueStatus.PENDING_APPROVAL.value},
+        action.lower(), "issue",
+    )
+    before = issue.status
+    instance = await engine.act(
+        db,
+        WarehouseDocType.WH_ISSUE.value,
+        issue.id,
+        action,
+        user,
+        comments,
+        context={
+            "doc_no": issue.issue_no,
+            "doc_summary": f"Material issue {issue.issue_no}",
+            "warehouse_id": issue.warehouse_id,
+            "department_id": issue.department_id,
+            "project_id": issue.project_id,
+            "total_value": float(_d(issue.total_value)),
+        },
+    )
+    if instance.status == InstanceStatus.APPROVED.value:
+        issue.status = IssueStatus.APPROVED.value
+        issue.approved_by_name = _name(user)
+        issue.approved_at = utcnow()
+        issue.current_approver_name = None
+    elif instance.status == InstanceStatus.REJECTED.value:
+        issue.status = IssueStatus.REJECTED.value
+        issue.current_approver_name = None
+    else:
+        issue.current_approver_name = _approver_label(
+            await engine.current_approvers(
+                db, WarehouseDocType.WH_ISSUE.value, issue.id
+            )
+        )
+
+    await write_audit(
+        db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before},
+        after={"status": issue.status, "comments": comments},
+    )
     await db.commit()
     return await get_issue(db, issue_id)
 
@@ -1500,15 +1745,83 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
         qty = _d(line.issued_qty)
         if qty <= ZERO:
             continue
-        await move_stock(
-            db, item_id=line.item_id, qty=qty, direction=direction,
-            ref_type=WarehouseDocType.WH_ISSUE.value, ref_id=issue.id, ref_no=issue.issue_no,
-            user=user, warehouse_id=issue.warehouse_id,
-            bin_id=line.bin_id or m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
-            project_id=issue.project_id or 0,
-        )
+
+        # An approved allocation reserves concrete stock rows. Consume and issue those
+        # exact rows so the hold disappears with the goods, including its bin, batch
+        # and project dimensions. Legacy/manual issues with no reservation retain the
+        # explicit line location path below.
+        if outward and issue.indent_id:
+            held = await stock_allocation.reserved_quantity(
+                db,
+                InventoryRefType.RESERVATION.value,
+                issue.indent_id,
+                ref_line_id=line.indent_item_id,
+                item_id=line.item_id,
+            )
+            if held > ZERO:
+                held_here = await stock_allocation.reserved_quantity(
+                    db,
+                    InventoryRefType.RESERVATION.value,
+                    issue.indent_id,
+                    ref_line_id=line.indent_item_id,
+                    item_id=line.item_id,
+                    warehouse_id=issue.warehouse_id,
+                )
+                if qty > held:
+                    raise ValidationError(
+                        f"{line.item_code or line.item_id}: only {held} is allocated "
+                        f"against this indent; cannot issue {qty}."
+                    )
+                if held_here < qty:
+                    raise ValidationError(
+                        f"{line.item_code or line.item_id}: {qty} is allocated, but only "
+                        f"{held_here} is reserved in {issue.warehouse_name or 'this warehouse'}."
+                    )
+
+                slices = await stock_allocation.consume_for_issue(
+                    db,
+                    InventoryRefType.RESERVATION.value,
+                    issue.indent_id,
+                    quantity=qty,
+                    ref_line_id=line.indent_item_id,
+                    item_id=line.item_id,
+                    warehouse_id=issue.warehouse_id,
+                )
+                for stock in slices:
+                    await move_stock(
+                        db, item_id=line.item_id, qty=stock.quantity,
+                        direction=StockDirection.OUT.value,
+                        ref_type=WarehouseDocType.WH_ISSUE.value,
+                        ref_id=issue.id, ref_no=issue.issue_no, user=user,
+                        warehouse_id=stock.warehouse_id,
+                        bin_id=stock.bin_id, batch_id=stock.batch_id,
+                        project_id=stock.project_id,
+                    )
+                continue
+
+        if outward:
+            await move_stock_out(
+                db, item_id=line.item_id, qty=qty,
+                ref_type=WarehouseDocType.WH_ISSUE.value,
+                ref_id=issue.id, ref_no=issue.issue_no, user=user,
+                warehouse_id=issue.warehouse_id,
+                bin_id=line.bin_id, batch_id=line.batch_id,
+                project_id=issue.project_id or 0,
+            )
+        else:
+            await move_stock(
+                db, item_id=line.item_id, qty=qty, direction=direction,
+                ref_type=WarehouseDocType.WH_ISSUE.value,
+                ref_id=issue.id, ref_no=issue.issue_no,
+                user=user, warehouse_id=issue.warehouse_id,
+                bin_id=line.bin_id or m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
+                project_id=issue.project_id or 0,
+            )
 
     await _mark_serials(db, issue, outward)
+    if not outward and issue.original_issue_id:
+        original = await get_issue(db, issue.original_issue_id)
+        _apply_issue_return(issue, original)
 
     issue.is_stock_posted = True
     issue.posted_at = utcnow()
@@ -1523,6 +1836,70 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                              "total_qty": str(issue.total_qty)})
     await db.commit()
     return await get_issue(db, issue_id)
+
+
+def _validate_issue_return(issue: m.MaterialIssue, original: m.MaterialIssue) -> None:
+    """Cap an inbound return at what remains outstanding on the original issue."""
+    if issue.warehouse_id != original.warehouse_id:
+        raise ValidationError(
+            f"Return the material to {original.warehouse_name or 'the issuing warehouse'}"
+        )
+    outstanding: dict[int, Decimal] = {}
+    for line in original.items:
+        outstanding[line.item_id] = (
+            outstanding.get(line.item_id, ZERO)
+            + _d(line.issued_qty)
+            - _d(line.returned_qty)
+        )
+    returning: dict[int, Decimal] = {}
+    for line in issue.items:
+        returning[line.item_id] = returning.get(line.item_id, ZERO) + _d(line.issued_qty)
+    for item_id, qty in returning.items():
+        allowed = outstanding.get(item_id, ZERO)
+        if qty > allowed:
+            raise ValidationError(
+                f"Item {item_id}: only {allowed} remains returnable against "
+                f"{original.issue_no}; cannot return {qty}."
+            )
+
+
+def _validate_picking_issue(issue: m.MaterialIssue, picking: m.Picking) -> None:
+    picked: dict[tuple[int, int, int], Decimal] = {}
+    for line in picking.items:
+        key = (line.item_id, line.bin_id or 0, line.batch_id or 0)
+        picked[key] = picked.get(key, ZERO) + _d(line.picked_qty)
+    issuing: dict[tuple[int, int, int], Decimal] = {}
+    for line in issue.items:
+        key = (line.item_id, line.bin_id or 0, line.batch_id or 0)
+        issuing[key] = issuing.get(key, ZERO) + _d(line.issued_qty)
+    for key, qty in issuing.items():
+        if qty > picked.get(key, ZERO):
+            raise ValidationError(
+                f"Item {key[0]}: issue quantity {qty} exceeds the {picked.get(key, ZERO)} "
+                f"picked on {picking.pick_no}."
+            )
+
+
+def _apply_issue_return(issue: m.MaterialIssue, original: m.MaterialIssue) -> None:
+    """Apply posted inbound quantities to the original issue's accountability."""
+    for returned in issue.items:
+        remaining = _d(returned.issued_qty)
+        for original_line in original.items:
+            if original_line.item_id != returned.item_id or remaining <= ZERO:
+                continue
+            open_qty = _d(original_line.issued_qty) - _d(original_line.returned_qty)
+            take = min(open_qty, remaining)
+            original_line.returned_qty = _d(original_line.returned_qty) + take
+            remaining -= take
+
+    fully_returned = all(
+        _d(line.returned_qty) >= _d(line.issued_qty) for line in original.items
+    )
+    original.status = (
+        IssueStatus.RETURNED.value
+        if fully_returned
+        else IssueStatus.PARTIALLY_RETURNED.value
+    )
 
 
 async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool) -> None:
@@ -1600,6 +1977,21 @@ def _dispatch_totals(dispatch: m.Dispatch) -> None:
     dispatch.total_weight_kg = sum((_d(p.weight_kg) for p in dispatch.packages), ZERO)
 
 
+def _validate_issue_dispatch(dispatch: m.Dispatch, issue: m.MaterialIssue) -> None:
+    issued: dict[int, Decimal] = {}
+    for line in issue.items:
+        issued[line.item_id] = issued.get(line.item_id, ZERO) + _d(line.issued_qty)
+    dispatched: dict[int, Decimal] = {}
+    for line in dispatch.items:
+        dispatched[line.item_id] = dispatched.get(line.item_id, ZERO) + _d(line.quantity)
+    for item_id, qty in dispatched.items():
+        if qty > issued.get(item_id, ZERO):
+            raise ValidationError(
+                f"Item {item_id}: dispatch quantity {qty} exceeds the "
+                f"{issued.get(item_id, ZERO)} posted on {issue.issue_no}."
+            )
+
+
 async def _apply_dispatch_lines(db: AsyncSession, dispatch: m.Dispatch,
                                 lines: list[s.DispatchItemWrite]) -> None:
     dispatch.items.clear()
@@ -1657,6 +2049,26 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         raise ValidationError("A transfer cannot have the same origin and destination")
 
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
+    ref_issue = None
+    if (data.ref_type or "").upper() in {"ISSUE", "WH_ISSUE"}:
+        if not data.ref_id:
+            raise ValidationError("An issue-linked dispatch needs an issue reference")
+        ref_issue = await get_issue(db, data.ref_id)
+        if not ref_issue.is_stock_posted:
+            raise ValidationError(f"{ref_issue.issue_no} has not posted stock yet")
+        if ref_issue.warehouse_id != wh.id:
+            raise ValidationError(f"{ref_issue.issue_no} belongs to another warehouse")
+        existing = await db.scalar(
+            select(m.Dispatch.id).where(
+                m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+                m.Dispatch.ref_id == ref_issue.id,
+                m.Dispatch.status != DispatchStatus.CANCELLED.value,
+            ).limit(1)
+        )
+        if existing is not None:
+            raise ValidationError(
+                f"{ref_issue.issue_no} already has dispatch {existing}"
+            )
 
     dispatch = m.Dispatch(
         dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value),
@@ -1671,6 +2083,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         delivery_address=data.delivery_address,
         contact_person=data.contact_person, contact_phone=data.contact_phone,
         ref_type=data.ref_type, ref_id=data.ref_id,
+        ref_no=ref_issue.issue_no if ref_issue else None,
         transport_mode=data.transport_mode,
         carrier_id=data.carrier_id, vehicle_id=data.vehicle_id,
         driver_name=data.driver_name, driver_phone=data.driver_phone,
@@ -1685,6 +2098,8 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
     await db.flush()
 
     await _apply_dispatch_lines(db, dispatch, data.items)
+    if ref_issue:
+        _validate_issue_dispatch(dispatch, ref_issue)
     await db.flush()
 
     await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
@@ -1717,6 +2132,14 @@ async def update_dispatch(db: AsyncSession, dispatch_id: int, data: s.DispatchWr
     dispatch.contact_phone = data.contact_phone
     dispatch.ref_type = data.ref_type
     dispatch.ref_id = data.ref_id
+    ref_issue = None
+    if (data.ref_type or "").upper() in {"ISSUE", "WH_ISSUE"} and data.ref_id:
+        ref_issue = await get_issue(db, data.ref_id)
+        if not ref_issue.is_stock_posted:
+            raise ValidationError(f"{ref_issue.issue_no} has not posted stock yet")
+        if ref_issue.warehouse_id != wh.id:
+            raise ValidationError(f"{ref_issue.issue_no} belongs to another warehouse")
+    dispatch.ref_no = ref_issue.issue_no if ref_issue else None
     dispatch.transport_mode = data.transport_mode
     dispatch.carrier_id = data.carrier_id
     dispatch.vehicle_id = data.vehicle_id
@@ -1729,6 +2152,8 @@ async def update_dispatch(db: AsyncSession, dispatch_id: int, data: s.DispatchWr
     dispatch.remarks = data.remarks
 
     await _apply_dispatch_lines(db, dispatch, data.items)
+    if ref_issue:
+        _validate_issue_dispatch(dispatch, ref_issue)
     await db.flush()
 
     await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
@@ -1747,15 +2172,79 @@ async def submit_dispatch(db: AsyncSession, dispatch_id: int, user) -> m.Dispatc
         "total_value": float(_d(dispatch.total_value)),
         "dispatch_type": dispatch.dispatch_type,
     }
-    await engine.start(db, WarehouseDocType.DISPATCH.value, dispatch.id, context, user)
-    approvers = await engine.current_approvers(db, WarehouseDocType.DISPATCH.value, dispatch.id)
-    dispatch.current_approver_name = _approver_label(approvers)
-    dispatch.status = DispatchStatus.PENDING_APPROVAL.value
+    context.update({
+        "doc_no": dispatch.dispatch_no,
+        "doc_summary": f"Dispatch {dispatch.dispatch_no}",
+        "requester_position_id": getattr(user, "active_position_id", None),
+    })
+    instance = await engine.start(
+        db, WarehouseDocType.DISPATCH.value, dispatch.id, context, user
+    )
+    if instance.status == InstanceStatus.APPROVED.value:
+        dispatch.status = DispatchStatus.APPROVED.value
+        dispatch.approved_by_name = _name(user)
+        dispatch.approved_at = utcnow()
+        dispatch.current_approver_name = None
+    else:
+        approvers = await engine.current_approvers(
+            db, WarehouseDocType.DISPATCH.value, dispatch.id
+        )
+        dispatch.current_approver_name = _approver_label(approvers)
+        dispatch.status = DispatchStatus.PENDING_APPROVAL.value
 
     await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
                       entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE, actor=user,
                       before={"status": DispatchStatus.DRAFT.value},
                       after={"status": dispatch.status})
+    await db.commit()
+    return await get_dispatch(db, dispatch_id)
+
+
+async def act_on_dispatch(
+    db: AsyncSession, dispatch_id: int, action: str, comments: str, user,
+) -> m.Dispatch:
+    dispatch = await get_dispatch(db, dispatch_id)
+    _guard(
+        dispatch.status, {DispatchStatus.PENDING_APPROVAL.value},
+        action.lower(), "dispatch",
+    )
+    before = dispatch.status
+    instance = await engine.act(
+        db,
+        WarehouseDocType.DISPATCH.value,
+        dispatch.id,
+        action,
+        user,
+        comments,
+        context={
+            "doc_no": dispatch.dispatch_no,
+            "doc_summary": f"Dispatch {dispatch.dispatch_no}",
+            "warehouse_id": dispatch.warehouse_id,
+            "dispatch_type": dispatch.dispatch_type,
+            "total_value": float(_d(dispatch.total_value)),
+        },
+    )
+    if instance.status == InstanceStatus.APPROVED.value:
+        dispatch.status = DispatchStatus.APPROVED.value
+        dispatch.approved_by_name = _name(user)
+        dispatch.approved_at = utcnow()
+        dispatch.current_approver_name = None
+    elif instance.status == InstanceStatus.REJECTED.value:
+        dispatch.status = DispatchStatus.REJECTED.value
+        dispatch.current_approver_name = None
+    else:
+        dispatch.current_approver_name = _approver_label(
+            await engine.current_approvers(
+                db, WarehouseDocType.DISPATCH.value, dispatch.id
+            )
+        )
+
+    await write_audit(
+        db, entity="out_dispatches", entity_id=dispatch.id,
+        entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE, actor=user,
+        before={"status": before},
+        after={"status": dispatch.status, "comments": comments},
+    )
     await db.commit()
     return await get_dispatch(db, dispatch_id)
 
@@ -1849,18 +2338,48 @@ async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
     _guard(dispatch.status, {DispatchStatus.APPROVED.value, DispatchStatus.PACKED.value},
            "gate out", "dispatch")
 
-    for line in dispatch.items:
-        qty = _d(line.quantity)
-        if qty <= ZERO:
-            continue
-        await move_stock(
-            db, item_id=line.item_id, qty=qty, direction=StockDirection.OUT.value,
-            ref_type=WarehouseDocType.DISPATCH.value, ref_id=dispatch.id,
-            ref_no=dispatch.dispatch_no, user=user,
-            warehouse_id=dispatch.warehouse_id,
-            bin_id=m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
-            project_id=dispatch.project_id or 0,
-        )
+    already_issued = False
+    if (dispatch.ref_type or "").upper() in {"ISSUE", "WH_ISSUE"} and dispatch.ref_id:
+        issue = await get_issue(db, dispatch.ref_id)
+        if not issue.is_stock_posted:
+            raise ValidationError(
+                f"{issue.issue_no} has not posted stock yet; dispatch cannot gate out"
+            )
+        if issue.warehouse_id != dispatch.warehouse_id:
+            raise ValidationError(
+                f"{issue.issue_no} belongs to a different warehouse"
+            )
+        issued_by_item: dict[int, Decimal] = {}
+        for line in issue.items:
+            issued_by_item[line.item_id] = (
+                issued_by_item.get(line.item_id, ZERO) + _d(line.issued_qty)
+            )
+        dispatched_by_item: dict[int, Decimal] = {}
+        for line in dispatch.items:
+            dispatched_by_item[line.item_id] = (
+                dispatched_by_item.get(line.item_id, ZERO) + _d(line.quantity)
+            )
+        for item_id, qty in dispatched_by_item.items():
+            if qty > issued_by_item.get(item_id, ZERO):
+                raise ValidationError(
+                    f"Item {item_id}: dispatch quantity {qty} exceeds the "
+                    f"{issued_by_item.get(item_id, ZERO)} posted on {issue.issue_no}."
+                )
+        already_issued = True
+
+    if not already_issued:
+        for line in dispatch.items:
+            qty = _d(line.quantity)
+            if qty <= ZERO:
+                continue
+            await move_stock_out(
+                db, item_id=line.item_id, qty=qty,
+                ref_type=WarehouseDocType.DISPATCH.value, ref_id=dispatch.id,
+                ref_no=dispatch.dispatch_no, user=user,
+                warehouse_id=dispatch.warehouse_id,
+                batch_id=line.batch_id,
+                project_id=dispatch.project_id or 0,
+            )
 
     dispatch.gate_pass_no = gate_pass_no or f"GP/{dispatch.dispatch_no}"
     dispatch.gate_out_at = utcnow()
@@ -1986,6 +2505,26 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
 
     short = sum((_d(l.quantity) - _d(l.delivered_qty) for l in dispatch.items), ZERO)
 
+    # A transfer is one physical journey: gate-out removed it from the source, and
+    # acknowledgement is the destination receipt. Credit only what actually arrived;
+    # shortages remain visible on the dispatch instead of becoming phantom stock.
+    if dispatch.dispatch_type == DispatchType.TRANSFER.value:
+        if not dispatch.to_warehouse_id:
+            raise ValidationError("A transfer dispatch has no destination warehouse")
+        for line in dispatch.items:
+            delivered = _d(line.delivered_qty)
+            if delivered <= ZERO:
+                continue
+            await move_stock(
+                db, item_id=line.item_id, qty=delivered,
+                direction=StockDirection.IN.value,
+                ref_type=WarehouseDocType.DISPATCH.value, ref_id=dispatch.id,
+                ref_no=dispatch.dispatch_no, user=user,
+                warehouse_id=dispatch.to_warehouse_id,
+                bin_id=m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
+                project_id=dispatch.project_id or 0,
+            )
+
     dispatch.acknowledged_by_name = data.acknowledged_by_name or _name(user)
     dispatch.acknowledged_at = utcnow()
     dispatch.delivered_at = dispatch.delivered_at or utcnow()
@@ -2045,6 +2584,27 @@ async def _apply_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
     if doc.grn_id:
         receipt = await _load(db, m.Receipt, doc.grn_id, "Receipt", m.Receipt.items)
         caps = {l.id: _d(l.rejected_qty) for l in receipt.items}
+        already_rows = (await db.execute(
+            select(
+                m.PurchaseReturnItem.grn_item_id,
+                func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0),
+            )
+            .join(
+                m.PurchaseReturn,
+                m.PurchaseReturn.id == m.PurchaseReturnItem.return_id,
+            )
+            .where(
+                m.PurchaseReturn.grn_id == doc.grn_id,
+                m.PurchaseReturn.id != doc.id,
+                m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                m.PurchaseReturnItem.grn_item_id.isnot(None),
+            )
+            .group_by(m.PurchaseReturnItem.grn_item_id)
+        )).all()
+        for grn_item_id, returned in already_rows:
+            caps[grn_item_id] = max(
+                caps.get(grn_item_id, ZERO) - _d(returned), ZERO
+            )
 
     doc.items.clear()
     await db.flush()
@@ -2058,7 +2618,8 @@ async def _apply_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
         cap = caps.get(line.grn_item_id) if line.grn_item_id else None
         if cap is not None and qty > cap:
             raise ValidationError(
-                f"{item.code}: the GRN rejected {cap}; {qty} cannot be returned against it.")
+                f"{item.code}: only {cap} rejected quantity remains returnable; "
+                f"{qty} cannot be returned against it.")
 
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
         rate = _d(line.rate)
@@ -2156,8 +2717,19 @@ async def submit_return(db: AsyncSession, return_id: int, user) -> m.PurchaseRet
 
     context = {"warehouse_id": doc.warehouse_id, "total_value": float(_d(doc.total_value)),
                "vendor_id": doc.vendor_id}
-    await engine.start(db, WarehouseDocType.PURCHASE_RETURN.value, doc.id, context, user)
-    doc.status = ReturnStatus.PENDING_APPROVAL.value
+    context.update({
+        "doc_no": doc.return_no,
+        "doc_summary": f"Purchase return {doc.return_no}",
+        "requester_position_id": getattr(user, "active_position_id", None),
+    })
+    instance = await engine.start(
+        db, WarehouseDocType.PURCHASE_RETURN.value, doc.id, context, user
+    )
+    doc.status = (
+        ReturnStatus.APPROVED.value
+        if instance.status == InstanceStatus.APPROVED.value
+        else ReturnStatus.PENDING_APPROVAL.value
+    )
 
     await write_audit(db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -2167,28 +2739,76 @@ async def submit_return(db: AsyncSession, return_id: int, user) -> m.PurchaseRet
     return await get_return(db, return_id)
 
 
+async def act_on_return(
+    db: AsyncSession, return_id: int, action: str, comments: str, user,
+) -> m.PurchaseReturn:
+    doc = await get_return(db, return_id)
+    _guard(
+        doc.status, {ReturnStatus.PENDING_APPROVAL.value},
+        action.lower(), "return",
+    )
+    before = doc.status
+    instance = await engine.act(
+        db,
+        WarehouseDocType.PURCHASE_RETURN.value,
+        doc.id,
+        action,
+        user,
+        comments,
+        context={
+            "doc_no": doc.return_no,
+            "doc_summary": f"Purchase return {doc.return_no}",
+            "warehouse_id": doc.warehouse_id,
+            "vendor_id": doc.vendor_id,
+            "total_value": float(_d(doc.total_value)),
+        },
+    )
+    if instance.status == InstanceStatus.APPROVED.value:
+        doc.status = ReturnStatus.APPROVED.value
+    elif instance.status == InstanceStatus.REJECTED.value:
+        doc.status = ReturnStatus.REJECTED.value
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before},
+        after={"status": doc.status, "comments": comments},
+    )
+    await db.commit()
+    return await get_return(db, return_id)
+
+
 async def complete_return(db: AsyncSession, return_id: int, credit_note_no: str | None,
                           user) -> m.PurchaseReturn:
-    """Takes the returned quantity back out of stock.
+    """Closes the physical vendor return.
 
-    Separate from the credit note on purpose: the goods leave when they leave and the
-    vendor's paperwork arrives when it arrives, so a return can be complete with the
-    credit note still outstanding — which is exactly what the list screen flags.
+    QC-rejected quantities never entered available inventory, so sending those back
+    must not subtract them a second time. A manual/posted-stock return line still
+    moves OUT through move_stock().
     """
     doc = await get_return(db, return_id)
     _guard(doc.status, {ReturnStatus.APPROVED.value, ReturnStatus.DISPATCHED.value},
            "complete", "return")
 
+    rejected_line_ids: set[int] = set()
+    if doc.grn_id:
+        receipt = await _load(db, m.Receipt, doc.grn_id, "Receipt", m.Receipt.items)
+        rejected_line_ids = {
+            line.id for line in receipt.items if _d(line.rejected_qty) > ZERO
+        }
+
     for line in doc.items:
         qty = _d(line.quantity)
         if qty <= ZERO:
             continue
-        await move_stock(
-            db, item_id=line.item_id, qty=qty, direction=StockDirection.OUT.value,
+        if line.grn_item_id in rejected_line_ids:
+            continue
+        await move_stock_out(
+            db, item_id=line.item_id, qty=qty,
             ref_type=WarehouseDocType.PURCHASE_RETURN.value, ref_id=doc.id,
             ref_no=doc.return_no, user=user,
             warehouse_id=doc.warehouse_id,
-            bin_id=m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
+            batch_id=line.batch_id,
         )
 
     doc.credit_note_no = credit_note_no or doc.credit_note_no
@@ -2283,7 +2903,13 @@ async def list_batches(db: AsyncSession, params: PageParams, *, item_id: int | N
         stmt = stmt.where(or_(
             m.Batch.batch_no.ilike(like), m.Batch.item_code.ilike(like),
             m.Batch.item_name.ilike(like), m.Batch.grn_no.ilike(like)))
-    return await paginate(db, stmt.order_by(m.Batch.expiry_date.asc().nulls_last()), params)
+    # MySQL has no `NULLS LAST` syntax. Sorting by the null predicate first is
+    # portable and puts dated batches before undated ones.
+    return await paginate(
+        db,
+        stmt.order_by(m.Batch.expiry_date.is_(None), m.Batch.expiry_date.asc()),
+        params,
+    )
 
 
 async def scan(db: AsyncSession, code: str) -> s.ScanResult:
@@ -2662,17 +3288,37 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
 
     if key == "bin-utilisation":
         from app.modules.inventory.models import Stock
-        stmt = select(Bin).where(Bin.is_active.is_(True))
+        # Only real bins hold stock, so only real bins have a utilisation. A lane or a
+        # rack appearing at 0% would read as an empty bin rather than as scaffolding.
+        stmt = select(Bin).where(Bin.is_active.is_(True), Bin.bin_type.in_(m.BIN_TYPES))
         if warehouse_id:
             stmt = stmt.where(Bin.warehouse_id == warehouse_id)
         bins = (await db.execute(stmt.order_by(Bin.code))).scalars().all()
+
+        # Ancestry for the Path column. One extra query for the whole tree beats walking
+        # up from each bin, and the path is derived rather than stored so it cannot rot.
+        ancestry = {
+            r.id: (r.code, r.parent_id)
+            for r in (await db.execute(select(Bin))).scalars().all()
+        }
+
+        def full_path(bin_id: int) -> str:
+            parts, seen = [], set()
+            current = bin_id
+            while current in ancestry and current not in seen:
+                seen.add(current)                 # a cycle in the data must not hang us
+                code, parent = ancestry[current]
+                parts.append(code)
+                current = parent
+            return "/".join(reversed(parts))
+
         rows = []
         for b in bins:
             held = _d(await db.scalar(
                 select(func.coalesce(func.sum(Stock.total_qty), 0)).where(Stock.bin_id == b.id)))
             capacity = _d(b.capacity_qty)
             rows.append({
-                "code": b.code, "name": b.name, "path": b.path,
+                "code": b.code, "name": b.name, "path": full_path(b.id),
                 "capacity_qty": float(capacity), "occupied_qty": float(held),
                 "utilisation": float(round(held * 100 / capacity, 2)) if capacity else 0.0,
                 "is_pickable": "Yes" if b.is_pickable else "No",
@@ -2744,12 +3390,15 @@ async def warehouse_options(db: AsyncSession) -> list[dict]:
 
 async def bin_options(db: AsyncSession, warehouse_id: int,
                       search: str | None = None) -> list[dict]:
-    stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True))
+    # A picker chooses somewhere to put stock, so offer bins and not the lanes and
+    # racks they hang from.
+    stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True),
+                             Bin.bin_type.in_(m.BIN_TYPES))
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(Bin.code.ilike(like), Bin.name.ilike(like)))
     rows = (await db.execute(stmt.order_by(Bin.code).limit(LOOKUP_LIMIT))).scalars().all()
-    return [{"id": r.id, "code": r.code, "name": r.name or r.path or r.code} for r in rows]
+    return [{"id": r.id, "code": r.code, "name": r.name or r.code} for r in rows]
 
 
 async def po_options(db: AsyncSession, search: str | None = None) -> list[dict]:
@@ -2772,14 +3421,223 @@ async def receipt_options(db: AsyncSession, search: str | None = None) -> list[d
     return [{"id": r.id, "code": r.grn_no, "name": r.vendor_name or r.grn_no} for r in rows]
 
 
-async def indent_options(db: AsyncSession, search: str | None = None) -> list[dict]:
+async def indent_options(
+    db: AsyncSession, search: str | None = None, warehouse_id: int | None = None,
+) -> list[dict]:
     from app.modules.indents.models import Indent
-    stmt = select(Indent)
+    from app.modules.inventory.models import Reservation
+
+    stmt = (
+        select(Indent)
+        .join(Reservation, Reservation.ref_id == Indent.id)
+        .where(
+            Reservation.ref_type == InventoryRefType.RESERVATION.value,
+            Reservation.status == ReservationStatus.ACTIVE.value,
+        )
+        .distinct()
+    )
+    if warehouse_id is not None:
+        stmt = stmt.where(Reservation.warehouse_id == warehouse_id)
     if search:
         stmt = stmt.where(Indent.indent_no.ilike(f"%{search}%"))
     rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": r.indent_no,
              "name": getattr(r, "department_name", None) or r.indent_no} for r in rows]
+
+
+async def indent_issue_source(
+    db: AsyncSession, indent_id: int, warehouse_id: int,
+) -> dict:
+    """The approved reservation handoff used to seed a warehouse issue."""
+    from app.modules.indents.models import Indent
+    from app.modules.inventory.models import Reservation
+
+    indent = await _get(db, Indent, indent_id, "Indent")
+    rows = (await db.execute(
+        select(
+            Reservation.ref_line_id,
+            Reservation.item_id,
+            Reservation.bin_id,
+            Reservation.batch_id,
+            Reservation.project_id,
+            func.sum(Reservation.quantity),
+        )
+        .where(
+            Reservation.ref_type == InventoryRefType.RESERVATION.value,
+            Reservation.ref_id == indent_id,
+            Reservation.warehouse_id == warehouse_id,
+            Reservation.status == ReservationStatus.ACTIVE.value,
+        )
+        .group_by(
+            Reservation.ref_line_id,
+            Reservation.item_id,
+            Reservation.bin_id,
+            Reservation.batch_id,
+            Reservation.project_id,
+        )
+        .order_by(Reservation.ref_line_id, Reservation.item_id)
+    )).all()
+    if not rows:
+        raise ValidationError(
+            f"{indent.indent_no} has no active reservation in this warehouse"
+        )
+
+    projects = {row.project_id for row in rows}
+    if len(projects) > 1:
+        raise ValidationError(
+            f"{indent.indent_no} reserves more than one project in this warehouse; "
+            "raise a separate issue for each project."
+        )
+
+    return {
+        "indent_id": indent.id,
+        "indent_no": indent.indent_no,
+        "warehouse_id": warehouse_id,
+        "department_id": getattr(indent, "department_id", None),
+        "project_id": next(iter(projects), 0) or None,
+        "items": [
+            {
+                "indent_item_id": row.ref_line_id,
+                "item_id": row.item_id,
+                "bin_id": row.bin_id or None,
+                "batch_id": row.batch_id or None,
+                "requested_qty": _d(row[5]),
+                "issued_qty": _d(row[5]),
+            }
+            for row in rows
+        ],
+    }
+
+
+async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
+    """Turn a completed physical pick into the material-issue draft that posts it."""
+    from app.modules.indents.models import Indent
+    from app.modules.inventory.models import Reservation
+
+    picking = await get_picking(db, picking_id)
+    _guard(
+        picking.status,
+        {PickingStatus.PICKED.value, PickingStatus.COMPLETED.value},
+        "create an issue from", "picklist",
+    )
+    indent_id = picking.ref_id if picking.ref_type == "INDENT" else None
+    indent = await db.get(Indent, indent_id) if indent_id else None
+
+    reservations = []
+    if indent_id:
+        reservations = list((await db.execute(
+            select(Reservation).where(
+                Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                Reservation.ref_id == indent_id,
+                Reservation.warehouse_id == picking.warehouse_id,
+                Reservation.status == ReservationStatus.ACTIVE.value,
+            ).order_by(Reservation.id)
+        )).scalars().all())
+
+    projects = {row.project_id for row in reservations}
+    if len(projects) > 1:
+        raise ValidationError(
+            f"{picking.pick_no} contains stock for more than one project"
+        )
+
+    items = []
+    for line in picking.items:
+        qty = _d(line.picked_qty)
+        if qty <= ZERO:
+            continue
+        reservation = next(
+            (
+                row for row in reservations
+                if row.item_id == line.item_id
+                and (not line.bin_id or row.bin_id == line.bin_id)
+                and (not line.batch_id or row.batch_id == line.batch_id)
+            ),
+            None,
+        )
+        items.append({
+            "indent_item_id": reservation.ref_line_id if reservation else None,
+            "item_id": line.item_id,
+            "bin_id": line.bin_id,
+            "batch_id": line.batch_id,
+            "requested_qty": _d(line.required_qty),
+            "issued_qty": qty,
+        })
+    if not items:
+        raise ValidationError(f"{picking.pick_no} has no picked quantity to issue")
+
+    return {
+        "picking_id": picking.id,
+        "warehouse_id": picking.warehouse_id,
+        "indent_id": indent_id,
+        "department_id": getattr(indent, "department_id", None) if indent else None,
+        "project_id": next(iter(projects), 0) or None,
+        "items": items,
+    }
+
+
+async def issue_options(db: AsyncSession, search: str | None = None) -> list[dict]:
+    """Posted outward issues that have not already become a dispatch."""
+    used = set((await db.execute(
+        select(m.Dispatch.ref_id).where(
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+            m.Dispatch.ref_id.isnot(None),
+            m.Dispatch.status != DispatchStatus.CANCELLED.value,
+        )
+    )).scalars().all())
+    stmt = select(m.MaterialIssue).where(
+        m.MaterialIssue.direction == IssueDirection.OUT.value,
+        m.MaterialIssue.is_stock_posted.is_(True),
+    )
+    if used:
+        stmt = stmt.where(m.MaterialIssue.id.notin_(used))
+    if search:
+        stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
+    rows = (await db.execute(
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+    )).scalars().all()
+    return [
+        {
+            "id": row.id,
+            "code": row.issue_no,
+            "name": row.issued_to_name or row.department_name or row.issue_no,
+        }
+        for row in rows
+    ]
+
+
+async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
+    issue = await get_issue(db, issue_id)
+    if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
+        raise ValidationError("Only a posted outward issue can become a dispatch")
+    existing = await db.scalar(
+        select(m.Dispatch.id).where(
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+            m.Dispatch.ref_id == issue.id,
+            m.Dispatch.status != DispatchStatus.CANCELLED.value,
+        ).limit(1)
+    )
+    if existing is not None:
+        raise ValidationError(
+            f"{issue.issue_no} already has dispatch {existing}"
+        )
+    return {
+        "issue_id": issue.id,
+        "issue_no": issue.issue_no,
+        "warehouse_id": issue.warehouse_id,
+        "project_id": issue.project_id,
+        "items": [
+            {
+                "indent_id": issue.indent_id,
+                "item_id": line.item_id,
+                "batch_id": line.batch_id,
+                "quantity": _d(line.issued_qty),
+                "rate": line.rate,
+                "remarks": line.remarks,
+            }
+            for line in issue.items
+            if _d(line.issued_qty) > ZERO
+        ],
+    }
 
 
 async def employee_options(db: AsyncSession, search: str | None = None) -> list[dict]:

@@ -62,9 +62,10 @@ class BinRead(_Read):
     code: str
     name: str | None = None
     parent_id: int | None = None
-    bin_type: str
+    bin_type: str | None = None
+    # Derived when the tree is built, not stored — see service.bin_tree.
     path: str | None = None
-    level: int
+    level: int | None = None
     capacity_qty: Decimal | None = None
     is_pickable: bool
     is_active: bool
@@ -77,9 +78,9 @@ class BinWrite(BaseModel):
     code: str = Field(min_length=1, max_length=50)
     name: str | None = None
     parent_id: int | None = None
-    bin_type: str = "STORAGE"
+    # A location's kind: BIN and COLD_STORAGE_BIN hold stock, the rest are structure.
+    bin_type: str = "BIN"
     capacity_qty: Decimal | None = None
-    is_pickable: bool = True
     is_active: bool = True
 
 
@@ -91,16 +92,15 @@ class LocationRead(_Read):
     storage_type_id: int | None = None
     code: str
     name: str | None = None
+    description: str | None = None
     barcode: str | None = None
+    floor_level: str | None = None
+    shelf_level: str | None = None
     capacity_weight: Decimal | None = None
     capacity_volume: Decimal | None = None
-    length_cm: Decimal | None = None
-    width_cm: Decimal | None = None
     height_cm: Decimal | None = None
-    pos_x: Decimal | None = None
-    pos_y: Decimal | None = None
-    pos_z: Decimal | None = None
     temperature_controlled: bool
+    humidity_percentage: Decimal | None = None
     target_temperature_celsius: Decimal | None = None
     min_temperature_celsius: Decimal | None = None
     max_temperature_celsius: Decimal | None = None
@@ -893,9 +893,39 @@ class ItemOption(Option):
     uom_code: str | None = None
 
 
+class IndentIssueSource(BaseModel):
+    indent_id: int
+    indent_no: str
+    warehouse_id: int
+    department_id: int | None = None
+    project_id: int | None = None
+    items: list[IssueItemWrite] = []
+
+
+class PickingIssueSource(BaseModel):
+    picking_id: int
+    warehouse_id: int
+    indent_id: int | None = None
+    department_id: int | None = None
+    project_id: int | None = None
+    items: list[IssueItemWrite] = []
+
+
+class IssueDispatchSource(BaseModel):
+    issue_id: int
+    issue_no: str
+    warehouse_id: int
+    project_id: int | None = None
+    items: list[DispatchItemWrite] = []
+
+
 class ReasonIn(BaseModel):
     """The body every cancel/skip endpoint takes."""
     reason: str | None = None
+
+
+class ApprovalIn(BaseModel):
+    comments: str = ""
 
 
 class GatePassIn(BaseModel):

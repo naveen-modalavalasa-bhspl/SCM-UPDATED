@@ -9,8 +9,9 @@ import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import {
-  cancelReturn, completeReturn, createReturn, getReceipt, getReturn, grnOptions, itemOptions,
-  submitReturn, updateReturn, vendorOptions, warehouseOptions,
+  approveReturn, cancelReturn, completeReturn, createReturn, getReceipt, getReturn,
+  grnOptions, itemOptions, rejectReturn, submitReturn, updateReturn, vendorOptions,
+  warehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import type { PurchaseReturn, PurchaseReturnItemWrite, PurchaseReturnWrite } from "../types";
@@ -53,7 +54,9 @@ export default function PurchaseReturnForm() {
   });
   /** Rejected quantity per pulled-in line, so a line cannot over-return. */
   const [caps, setCaps] = useState<Record<number, number>>({});
-  const [confirming, setConfirming] = useState<"submit" | "complete" | "cancel" | null>(null);
+  const [confirming, setConfirming] = useState<
+    "submit" | "approve" | "reject" | "complete" | "cancel" | null
+  >(null);
   const [creditNote, setCreditNote] = useState("");
   const [reason, setReason] = useState("");
 
@@ -139,9 +142,11 @@ export default function PurchaseReturnForm() {
   });
 
   const act = useMutation({
-    mutationFn: (what: "submit" | "complete" | "cancel") => {
+    mutationFn: (what: "submit" | "approve" | "reject" | "complete" | "cancel") => {
       const numId = Number(id);
       if (what === "submit") return submitReturn(numId);
+      if (what === "approve") return approveReturn(numId, reason);
+      if (what === "reject") return rejectReturn(numId, reason);
       if (what === "complete") return completeReturn(numId, creditNote || undefined);
       return cancelReturn(numId, reason || undefined);
     },
@@ -255,24 +260,30 @@ export default function PurchaseReturnForm() {
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {!locked && (
-              <Can do="grn.create">
+              <Can do="return.create">
                 <Button variant="subtle" onClick={() => save.mutate()} disabled={save.isPending}>
                   {save.isPending ? "Saving…" : "Save"}
                 </Button>
               </Can>
             )}
             {editing && doc?.status === "DRAFT" && (
-              <Can do="grn.create">
+              <Can do="return.create">
                 <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
               </Can>
             )}
+            {editing && doc?.status === "PENDING_APPROVAL" && (
+              <Can do="return.approve">
+                <Button variant="subtle" onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
+              </Can>
+            )}
             {editing && ["APPROVED", "DISPATCHED"].includes(doc?.status ?? "") && (
-              <Can do="grn.create">
+              <Can do="return.approve">
                 <Button onClick={() => setConfirming("complete")}>Complete return</Button>
               </Can>
             )}
             {editing && doc && !["CANCELLED", "COMPLETED"].includes(doc.status) && (
-              <Can do="grn.create">
+              <Can do="return.create">
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
             )}
@@ -361,9 +372,27 @@ export default function PurchaseReturnForm() {
       />
 
       <ConfirmModal
+        isOpen={confirming === "approve" || confirming === "reject"}
+        title={confirming === "approve" ? "Approve this return?" : "Reject this return?"}
+        message="This records your decision in the shared approval history."
+        confirmLabel={confirming === "approve" ? "Approve" : "Reject"}
+        danger={confirming === "reject"}
+        busy={act.isPending}
+        error={act.error}
+        onConfirm={() => act.mutate(confirming === "approve" ? "approve" : "reject")}
+        onClose={() => setConfirming(null)}
+      >
+        <div className="mt-3">
+          <Field label="Comments">
+            <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+          </Field>
+        </div>
+      </ConfirmModal>
+
+      <ConfirmModal
         isOpen={confirming === "complete"}
         title="Complete this return?"
-        message={`${fmtQty(totals.qty)} is taken back out of stock. This writes stock movements and cannot be undone.`}
+        message={`${fmtQty(totals.qty)} is handed back to the vendor. QC-rejected goods were never available stock; any posted-stock lines are moved out now.`}
         confirmLabel="Complete return"
         danger
         busy={act.isPending}

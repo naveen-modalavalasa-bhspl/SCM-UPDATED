@@ -369,7 +369,24 @@ async def get_user_menu(db: AsyncSession, permissions: set[str]) -> list[dict]:
         select(Page).where(Page.is_active.is_(True)).order_by(Page.sort_order)
     )).scalars().all()
 
-    visible = [p for p in rows if not p.required_permission or p.required_permission in permissions]
+    visible_ids = {
+        page.id for page in rows
+        if not page.required_permission or page.required_permission in permissions
+    }
+    # A child is meaningful only inside its visible parent. Repeatedly remove pages
+    # whose parent is absent so a hidden group can never leak one of its children into
+    # the top-level rail, including for deeper-than-one-level trees.
+    while True:
+        orphan_ids = {
+            page.id for page in rows
+            if page.id in visible_ids
+            and page.parent_id is not None
+            and page.parent_id not in visible_ids
+        }
+        if not orphan_ids:
+            break
+        visible_ids -= orphan_ids
+    visible = [page for page in rows if page.id in visible_ids]
 
     def node(p: Page) -> dict:
         return {"code": p.code, "path": p.path, "name": p.name, "icon": p.icon,

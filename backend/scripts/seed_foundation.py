@@ -4,17 +4,18 @@ Seeds: permissions, 5 roles + role_permissions, the grouped menu (rbac_pages),
 6 demo employees (hcm_employees) with local credentials (sys_local_credentials) and
 role assignments. Enough to log in and load /api/auth/me.
 
-Run:  python -m scripts.seed_foundation
-Login with the employee code (e.g. 'admin') and password 'password123'.
+Run:  ALLOW_DEMO_DATA=true python -m scripts.seed_foundation
 
 NOTE: seeds demo rows into hcm_employees (normally sync-owned) because the app needs
 identities to log in before a real HCM sync. Demo ids are 900001+ to avoid clashing
 with real HCM ids.
 """
 import asyncio
+import secrets
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.security import hash_password
 from app.platform.hcm.models import HcmEmployee
@@ -23,8 +24,6 @@ from app.platform.rbac.models import Page, Permission, Role, RolePermission, Use
 from app.platform.settings.models import UserCredential
 from app.shared.enums import UserRole as RoleCode
 from app.shared.models.base import utcnow
-
-PASSWORD = "password123"
 
 ROLE_PERMS = {
     RoleCode.ADMIN.value: P.ALL_CODES,
@@ -56,6 +55,11 @@ async def _get(db, model, **filt):
 
 
 async def seed():
+    if not settings.ALLOW_DEMO_DATA:
+        raise SystemExit(
+            "Demo seed blocked. Set ALLOW_DEMO_DATA=true only in a development environment."
+        )
+    created_passwords = {}
     async with SessionLocal() as db:
         # permissions
         perm_by_code = {}
@@ -118,17 +122,26 @@ async def seed():
             await db.flush()
             cred = await db.get(UserCredential, emp_id)
             if not cred:
-                db.add(UserCredential(employee_id=emp_id, password_hash=hash_password(PASSWORD)))
+                temporary_password = secrets.token_urlsafe(12)
+                created_passwords[emp_code] = temporary_password
+                db.add(UserCredential(
+                    employee_id=emp_id,
+                    password_hash=hash_password(temporary_password),
+                    must_change=True,
+                ))
             if not await _get(db, UserRole, employee_id=emp_id, role_id=role_by_code[role_code]):
                 db.add(UserRole(employee_id=emp_id, role_id=role_by_code[role_code]))
 
         await db.commit()
 
-    print(f"\n  Foundation seeded into scm_rebuild. Password for all: {PASSWORD}\n")
-    print("  %-14s %-14s %s" % ("LOGIN (emp_code)", "ROLE", "NAME"))
-    print("  " + "-" * 48)
+    print("\n  Foundation seeded into scm_rebuild. New accounts use unique one-time passwords.\n")
+    print("  %-14s %-14s %-28s %s" % (
+        "LOGIN", "ROLE", "TEMP PASSWORD", "NAME",
+    ))
+    print("  " + "-" * 78)
     for emp_code, _id, name, role in USERS:
-        print("  %-14s %-14s %s" % (emp_code, role, name))
+        password = created_passwords.get(emp_code, "(existing credential unchanged)")
+        print("  %-14s %-14s %-28s %s" % (emp_code, role, password, name))
     print()
 
 

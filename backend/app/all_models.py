@@ -19,6 +19,7 @@ for _mod in (
     "app.modules.inventory.models",
     "app.modules.procurement.models",
     "app.modules.logistics.models",
+    "app.modules.warehouse.models",
 ):
     try:
         __import__(_mod)

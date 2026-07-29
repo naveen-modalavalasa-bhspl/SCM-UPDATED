@@ -19,6 +19,7 @@ py -3.11 -m venv .venv
 copy .env.example .env          # set DATABASE_URL=mysql+aiomysql://root:<pw>@127.0.0.1:3306/scm_erp
 # create the schema once (MySQL must be running):  CREATE DATABASE scm_erp;
 .venv/Scripts/python -m alembic upgrade head
+$env:ALLOW_DEMO_DATA="true"       # development only; demo seeds are blocked otherwise
 .venv/Scripts/python -m scripts.seed
 # --reload-dir app: without it the reloader also watches .venv, so a pip install
 # triggers a several-hundred-file reload that can wedge the server.
@@ -36,8 +37,8 @@ npm install
 npm run dev      # http://localhost:5173  (proxies /api -> :8000)
 npm run build
 ```
-**Demo logins** (password `password123`): `requester`, `approver`, `procurement`,
-`store`, `planthead`, `admin`.
+**Demo logins**: `requester`, `approver`, `procurement`, `store`, `planthead`,
+`admin`. The seed prints a unique one-time password for each newly created account.
 
 ---
 

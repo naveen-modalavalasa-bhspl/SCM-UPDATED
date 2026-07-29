@@ -8,6 +8,8 @@ mirrors.
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.dialects import mysql
 
 from app.core.exceptions import ValidationError
 from app.modules.warehouse import service
@@ -15,7 +17,7 @@ from app.modules.warehouse.enums import (
     InspectionResult, IssueStatus, PutawayStatus, PutawayType, ReceiptStatus, SerialStatus,
 )
 from app.modules.warehouse.models import (
-    Dispatch,
+    Batch, Dispatch,
     DispatchPackage,
     MaterialIssue,
     MaterialIssueLine,
@@ -147,3 +149,10 @@ def test_report_column_helper_marks_numeric_columns():
     assert service._col("qty", "Quantity", True) == {
         "key": "qty", "header": "Quantity", "numeric": True}
     assert service._col("code", "Code")["numeric"] is False
+
+
+def test_batch_expiry_order_is_valid_mysql():
+    stmt = select(Batch).order_by(Batch.expiry_date.is_(None), Batch.expiry_date.asc())
+    sql = str(stmt.compile(dialect=mysql.dialect()))
+    assert "NULLS LAST" not in sql
+    assert "stk_batches.expiry_date IS NULL" in sql

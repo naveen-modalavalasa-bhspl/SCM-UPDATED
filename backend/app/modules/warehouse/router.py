@@ -27,6 +27,7 @@ from app.modules.warehouse.enums import (
     RECEIPT_CREATE, RECEIPT_POST, RECEIPT_VIEW, RETURN_APPROVE, RETURN_CREATE, RETURN_VIEW,
     STOCK_VIEW, WAREHOUSE_REPORT_VIEW,
 )
+from app.shared.enums import ApprovalAction
 
 router = APIRouter(prefix="/api/warehouse", tags=["warehouse"])
 
@@ -326,6 +327,24 @@ async def submit_issue(issue_id: int, db: AsyncSession = Depends(get_db),
     return await service.submit_issue(db, issue_id, user)
 
 
+@router.post("/issues/{issue_id}/approve", response_model=s.IssueDetail)
+async def approve_issue(issue_id: int, body: s.ApprovalIn,
+                        db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(ISSUE_POST))):
+    return await service.act_on_issue(
+        db, issue_id, ApprovalAction.APPROVED.value, body.comments, user
+    )
+
+
+@router.post("/issues/{issue_id}/reject", response_model=s.IssueDetail)
+async def reject_issue(issue_id: int, body: s.ApprovalIn,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(ISSUE_POST))):
+    return await service.act_on_issue(
+        db, issue_id, ApprovalAction.REJECTED.value, body.comments, user
+    )
+
+
 @router.post("/issues/{issue_id}/issue", response_model=s.IssueDetail)
 async def post_issue(issue_id: int, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(ISSUE_POST))):
@@ -381,6 +400,24 @@ async def update_dispatch(dispatch_id: int, data: s.DispatchWrite,
 async def submit_dispatch(dispatch_id: int, db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(DISPATCH_CREATE))):
     return await service.submit_dispatch(db, dispatch_id, user)
+
+
+@router.post("/dispatches/{dispatch_id}/approve", response_model=s.DispatchDetail)
+async def approve_dispatch(dispatch_id: int, body: s.ApprovalIn,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(DISPATCH_APPROVE))):
+    return await service.act_on_dispatch(
+        db, dispatch_id, ApprovalAction.APPROVED.value, body.comments, user
+    )
+
+
+@router.post("/dispatches/{dispatch_id}/reject", response_model=s.DispatchDetail)
+async def reject_dispatch(dispatch_id: int, body: s.ApprovalIn,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(DISPATCH_APPROVE))):
+    return await service.act_on_dispatch(
+        db, dispatch_id, ApprovalAction.REJECTED.value, body.comments, user
+    )
 
 
 @router.post("/dispatches/{dispatch_id}/packages", response_model=s.DispatchDetail)
@@ -467,6 +504,24 @@ async def update_return(return_id: int, data: s.ReturnWrite,
 async def submit_return(return_id: int, db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(RETURN_CREATE))):
     return await service.submit_return(db, return_id, user)
+
+
+@router.post("/returns/{return_id}/approve", response_model=s.ReturnDetail)
+async def approve_return(return_id: int, body: s.ApprovalIn,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(RETURN_APPROVE))):
+    return await service.act_on_return(
+        db, return_id, ApprovalAction.APPROVED.value, body.comments, user
+    )
+
+
+@router.post("/returns/{return_id}/reject", response_model=s.ReturnDetail)
+async def reject_return(return_id: int, body: s.ApprovalIn,
+                        db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(RETURN_APPROVE))):
+    return await service.act_on_return(
+        db, return_id, ApprovalAction.REJECTED.value, body.comments, user
+    )
 
 
 @router.post("/returns/{return_id}/complete", response_model=s.ReturnDetail)
@@ -621,9 +676,37 @@ async def receipt_options(search: str | None = None, db: AsyncSession = Depends(
 
 
 @router.get("/options/indents", response_model=list[s.Option])
-async def indent_options(search: str | None = None, db: AsyncSession = Depends(get_db),
+async def indent_options(search: str | None = None, warehouse_id: int | None = None,
+                         db: AsyncSession = Depends(get_db),
                          _=Depends(require_permission(ISSUE_VIEW))):
-    return await service.indent_options(db, search)
+    return await service.indent_options(db, search, warehouse_id)
+
+
+@router.get("/options/indent-issue-source", response_model=s.IndentIssueSource)
+async def indent_issue_source(indent_id: int = Query(...), warehouse_id: int = Query(...),
+                              db: AsyncSession = Depends(get_db),
+                              _=Depends(require_permission(ISSUE_CREATE))):
+    return await service.indent_issue_source(db, indent_id, warehouse_id)
+
+
+@router.get("/options/picking-issue-source", response_model=s.PickingIssueSource)
+async def picking_issue_source(picking_id: int = Query(...),
+                               db: AsyncSession = Depends(get_db),
+                               _=Depends(require_permission(ISSUE_CREATE))):
+    return await service.picking_issue_source(db, picking_id)
+
+
+@router.get("/options/issues", response_model=list[s.Option])
+async def issue_options(search: str | None = None, db: AsyncSession = Depends(get_db),
+                        _=Depends(require_permission(DISPATCH_CREATE))):
+    return await service.issue_options(db, search)
+
+
+@router.get("/options/issue-dispatch-source", response_model=s.IssueDispatchSource)
+async def issue_dispatch_source(issue_id: int = Query(...),
+                                db: AsyncSession = Depends(get_db),
+                                _=Depends(require_permission(DISPATCH_CREATE))):
+    return await service.issue_dispatch_source(db, issue_id)
 
 
 @router.get("/options/employees", response_model=list[s.Option])

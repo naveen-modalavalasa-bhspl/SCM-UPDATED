@@ -9,8 +9,8 @@ import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
 import {
-  binOptions, completePicking, createPicking, employeeOptions, getPicking, indentOptions, itemOptions,
-  pickLine, releasePicking, warehouseOptions,
+  binOptions, completePicking, createPicking, employeeOptions, getIndentIssueSource,
+  getPicking, indentOptions, itemOptions, pickLine, releasePicking, warehouseOptions,
 } from "../api";
 import { fmtQty, humanise, num, percent, today } from "../format";
 import type { Picking, PickingItem, PickingWrite } from "../types";
@@ -33,8 +33,6 @@ const STRATEGIES = [
 
 const REF_TYPES = [
   { value: "INDENT", label: "Indent" },
-  { value: "ISSUE", label: "Material issue" },
-  { value: "DISPATCH", label: "Dispatch" },
 ];
 
 export default function PicklistForm() {
@@ -82,6 +80,22 @@ export default function PicklistForm() {
     },
   });
 
+  const pullIndent = useMutation({
+    mutationFn: (indentId: number) => getIndentIssueSource(indentId, form.warehouse_id),
+    onSuccess: (source) => {
+      setForm((current) => ({
+        ...current,
+        ref_id: source.indent_id,
+        items: source.items.map((line) => ({
+          item_id: line.item_id,
+          bin_id: line.bin_id,
+          batch_id: line.batch_id,
+          required_qty: line.issued_qty ?? line.requested_qty,
+        })),
+      }));
+    },
+  });
+
   const release = useMutation({ mutationFn: () => releasePicking(Number(id)), onSuccess: invalidate });
 
   const pick = useMutation({
@@ -95,7 +109,7 @@ export default function PicklistForm() {
     onSuccess: () => {
       invalidate();
       setConfirming(false);
-      nav("..");
+      nav(`/warehouse/transactions/material-issues/new?picking_id=${id}`);
     },
   });
 
@@ -174,7 +188,7 @@ export default function PicklistForm() {
           }
         />
 
-        <ErrorBanner error={create.error} />
+        <ErrorBanner error={create.error ?? pullIndent.error} />
 
         <Section title="Picklist">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -200,11 +214,16 @@ export default function PicklistForm() {
             </Field>
             <Field label="Reference">
               <Lookup
-                name="indents"
-                load={indentOptions}
+                name={`indents-${form.warehouse_id}`}
+                load={(search) => indentOptions(search, form.warehouse_id || undefined)}
                 value={form.ref_id ?? ""}
-                onChange={(v) => set("ref_id", v === "" ? null : v)}
-                placeholder="Document"
+                isDisabled={!form.warehouse_id || form.ref_type !== "INDENT"}
+                onChange={(v) => {
+                  const indentId = v === "" ? null : v;
+                  set("ref_id", indentId);
+                  if (indentId && form.ref_type === "INDENT") pullIndent.mutate(indentId);
+                }}
+                placeholder={form.warehouse_id ? "Document" : "Pick warehouse first"}
               />
             </Field>
             <Field label="Strategy" hint="FEFO is the default — expiring stock leaves first.">
@@ -305,7 +324,7 @@ export default function PicklistForm() {
             Picked
           </Chip>
         ) : (
-          <Can do="issue.issue">
+          <Can do="picking.pick">
             <Button
               variant="subtle"
               onClick={() => pick.mutate(l)}
@@ -334,7 +353,7 @@ export default function PicklistForm() {
               </Can>
             )}
             {working && (
-              <Can do="issue.issue">
+              <Can do="picking.pick">
                 <Button onClick={() => setConfirming(true)} disabled={doc.picked_lines === 0}>
                   Complete picking
                 </Button>

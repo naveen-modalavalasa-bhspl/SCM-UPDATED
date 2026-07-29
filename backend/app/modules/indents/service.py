@@ -162,8 +162,7 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         after={"status": indent.status, "total_items": indent.total_items},
     )
     await db.commit()
-    await db.refresh(indent)
-    return indent
+    return await get_indent(db, indent.id, user)
 
 
 def _values(values) -> list[str]:

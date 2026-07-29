@@ -476,22 +476,20 @@ class BinIn(BaseModel):
     code: str
     name: str | None = None
     parent_id: int | None = None
-    bin_type: str = "STORAGE"
+    bin_type: str = "BIN"
     capacity_qty: float | None = None
-    is_pickable: bool = True
     is_active: bool = True
 
 
 def bin_out(b: Bin) -> dict:
     return {"id": b.id, "warehouse_id": b.warehouse_id, "code": b.code, "name": b.name,
-            "parent_id": b.parent_id, "bin_type": b.bin_type, "path": b.path,
-            "level": b.level,
+            "parent_id": b.parent_id, "bin_type": b.bin_type,
             "capacity_qty": float(b.capacity_qty) if b.capacity_qty is not None else None,
             "is_pickable": b.is_pickable, "is_active": b.is_active}
 
 
 async def apply_bin(db: AsyncSession, b: Bin, data: BinIn) -> None:
-    """`path` and `level` are derived from the parent, never supplied, so the tree
+    """Depth and ancestry are derived when a tree is read, never stored, so the tree
     cannot be saved into a depth that disagrees with its own ancestry."""
     if data.bin_type not in {t.value for t in BinType}:
         raise ValidationError(
@@ -510,8 +508,6 @@ async def apply_bin(db: AsyncSession, b: Bin, data: BinIn) -> None:
 
     for key, value in data.model_dump().items():
         setattr(b, key, value)
-    b.level = (parent.level or 1) + 1 if parent else 1
-    b.path = f"{parent.path or parent.code}/{data.code}" if parent else data.code
 
 
 async def _reject_bin_cycle(db: AsyncSession, b: Bin, parent) -> None:

@@ -102,9 +102,9 @@ export default function WarehouseDetail() {
       code: "",
       name: "",
       parent_id: parent?.id ?? null,
-      bin_type: parent ? "STORAGE" : "ZONE",
+      // A location hanging off another is a bin by default; a top-level one is a block.
+      bin_type: parent ? "BIN" : "BLOCK",
       capacity_qty: null,
-      is_pickable: true,
       is_active: true,
     });
     setAdding(true);
@@ -118,9 +118,8 @@ export default function WarehouseDetail() {
       code: bin.code,
       name: bin.name ?? "",
       parent_id: bin.parent_id ?? null,
-      bin_type: bin.bin_type,
+      bin_type: bin.bin_type ?? "BIN",
       capacity_qty: bin.capacity_qty ?? null,
-      is_pickable: bin.is_pickable,
       is_active: bin.is_active,
     });
   };
@@ -245,14 +244,14 @@ export default function WarehouseDetail() {
                     }
                   />
                 </Field>
-                <label className="flex items-center gap-3">
-                  <Switch
-                    isSelected={draft.is_pickable}
-                    onValueChange={(v) => setDraft({ ...draft, is_pickable: v })}
-                    aria-label="Pickable"
-                  />
-                  <span className="text-sm text-body">Pickable — picking may take stock from here</span>
-                </label>
+                {/* Pickable is not a switch: stock lives in bins, so whether picking
+                    may take from here follows from the type above. A flag that could
+                    disagree with the type would just be a second, contradictory answer. */}
+                <p className="text-xs text-muted">
+                  {["BIN", "COLD_STORAGE_BIN"].includes(draft.bin_type)
+                    ? "Picking may take stock from here."
+                    : "Structure only — stock is held in the bins underneath this."}
+                </p>
                 <label className="flex items-center gap-3">
                   <Switch
                     isSelected={draft.is_active}

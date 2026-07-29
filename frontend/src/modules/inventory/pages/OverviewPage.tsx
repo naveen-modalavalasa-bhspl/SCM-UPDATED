@@ -2,12 +2,15 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { IndianRupee, TriangleAlert, CalendarClock, Lock, History } from "lucide-react";
 import { Button, Card, PageHeader, StatCard } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { getOverviewKPIs } from "../api";
 import type { StockOverviewKPIs } from "../types";
 
 const inr = (n: number) => `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
 
 export function InventoryOverviewPage() {
+  const { can } = useAuth();
+  const canViewValuation = can("stock.valuation.view");
   const { data: k, isLoading } = useQuery<StockOverviewKPIs>({
     queryKey: ["stock-overview-kpis"],
     queryFn: getOverviewKPIs,
@@ -24,7 +27,9 @@ export function InventoryOverviewPage() {
       ) : (
         <>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <StatCard label="Total Stock Value" value={inr(k?.total_stock_value ?? 0)} icon={<IndianRupee size={16} />} />
+            {canViewValuation && (
+              <StatCard label="Total Stock Value" value={inr(k?.total_stock_value ?? 0)} icon={<IndianRupee size={16} />} />
+            )}
             <StatCard
               label="Items Below Reorder"
               value={k?.items_below_reorder ?? 0}
@@ -61,7 +66,9 @@ export function InventoryOverviewPage() {
                 <Link to="/inventory/stock-balance"><Button>Stock Balance</Button></Link>
                 <Link to="/inventory/ledger"><Button variant="ghost">Stock Ledger</Button></Link>
                 <Link to="/inventory/replenishment"><Button variant="ghost">Replenishment</Button></Link>
-                <Link to="/inventory/valuation"><Button variant="ghost">Valuation</Button></Link>
+                {canViewValuation && (
+                  <Link to="/inventory/valuation"><Button variant="ghost">Valuation</Button></Link>
+                )}
               </div>
             </Card>
           </div>

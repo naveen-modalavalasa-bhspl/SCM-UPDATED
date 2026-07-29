@@ -198,6 +198,12 @@ export const updateIssue = (id: number, body: IssueWrite) => put<Issue>(`${BASE}
 /** Hands the document to the shared workflow engine. */
 export const submitIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/submit`);
 
+export const approveIssue = (id: number, comments = "") =>
+  post<Issue>(`${BASE}/issues/${id}/approve`, { comments });
+
+export const rejectIssue = (id: number, comments = "") =>
+  post<Issue>(`${BASE}/issues/${id}/reject`, { comments });
+
 /** Posts the movement — this is the point stock actually leaves the shelf. */
 export const postIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/issue`);
 
@@ -220,6 +226,12 @@ export const updateDispatch = (id: number, body: DispatchWrite) =>
   put<Dispatch>(`${BASE}/dispatches/${id}`, body);
 
 export const submitDispatch = (id: number) => post<Dispatch>(`${BASE}/dispatches/${id}/submit`);
+
+export const approveDispatch = (id: number, comments = "") =>
+  post<Dispatch>(`${BASE}/dispatches/${id}/approve`, { comments });
+
+export const rejectDispatch = (id: number, comments = "") =>
+  post<Dispatch>(`${BASE}/dispatches/${id}/reject`, { comments });
 
 export const dispatchGateOut = (id: number, gate_pass_no?: string) =>
   post<Dispatch>(`${BASE}/dispatches/${id}/gate-out`, { gate_pass_no });
@@ -256,7 +268,13 @@ export const updateReturn = (id: number, body: PurchaseReturnWrite) =>
 
 export const submitReturn = (id: number) => post<PurchaseReturn>(`${BASE}/returns/${id}/submit`);
 
-/** Takes the returned quantity back out of stock and closes the document. */
+export const approveReturn = (id: number, comments = "") =>
+  post<PurchaseReturn>(`${BASE}/returns/${id}/approve`, { comments });
+
+export const rejectReturn = (id: number, comments = "") =>
+  post<PurchaseReturn>(`${BASE}/returns/${id}/reject`, { comments });
+
+/** Closes the vendor return; posted-stock lines move out, QC rejects do not double-post. */
 export const completeReturn = (id: number, credit_note_no?: string) =>
   post<PurchaseReturn>(`${BASE}/returns/${id}/complete`, { credit_note_no });
 
@@ -349,7 +367,40 @@ export const poOptions = (search?: string) => get<Option[]>(`${BASE}/options/pur
 
 export const grnOptions = (search?: string) => get<Option[]>(`${BASE}/options/receipts`, { search });
 
-export const indentOptions = (search?: string) => get<Option[]>(`${BASE}/options/indents`, { search });
+export const indentOptions = (search?: string, warehouse_id?: number) =>
+  get<Option[]>(`${BASE}/options/indents`, { search, warehouse_id });
+
+export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
+  get<{
+    indent_id: number;
+    indent_no: string;
+    warehouse_id: number;
+    department_id?: number | null;
+    project_id?: number | null;
+    items: IssueWrite["items"];
+  }>(`${BASE}/options/indent-issue-source`, { indent_id, warehouse_id });
+
+export const getPickingIssueSource = (picking_id: number) =>
+  get<{
+    picking_id: number;
+    warehouse_id: number;
+    indent_id?: number | null;
+    department_id?: number | null;
+    project_id?: number | null;
+    items: IssueWrite["items"];
+  }>(`${BASE}/options/picking-issue-source`, { picking_id });
+
+export const issueOptions = (search?: string) =>
+  get<Option[]>(`${BASE}/options/issues`, { search });
+
+export const getIssueDispatchSource = (issue_id: number) =>
+  get<{
+    issue_id: number;
+    issue_no: string;
+    warehouse_id: number;
+    project_id?: number | null;
+    items: DispatchWrite["items"];
+  }>(`${BASE}/options/issue-dispatch-source`, { issue_id });
 
 export const employeeOptions = (search?: string) => get<Option[]>(`${BASE}/options/employees`, { search });
 

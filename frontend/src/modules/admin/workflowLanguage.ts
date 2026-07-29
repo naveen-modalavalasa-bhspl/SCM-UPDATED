@@ -3,6 +3,9 @@ import type { WorkflowDefinition, WorkflowOptions, WorkflowStage } from "./types
 export const DOC_LABEL: Record<string, string> = {
   INDENT: "Indent",
   ALLOCATION: "Inventory allocation",
+  WH_ISSUE: "Warehouse material issue",
+  DISPATCH: "Warehouse dispatch",
+  PURCHASE_RETURN: "Purchase return",
   MR: "Material request",
   PO: "Purchase order",
   GRN: "Goods receipt",

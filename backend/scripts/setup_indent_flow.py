@@ -30,6 +30,7 @@ from app.platform.rules.models import Rule, RuleAction, RuleCondition, RuleEvent
 from app.platform.workflow.models import Stage, Workflow
 from app.shared.enums import (
     ApprovalMode, ApproverType, DocType, FulfillmentTarget, RuleActionType,
+    UserRole as RoleCode,
 )
 
 WORKFLOW_CODE = "WF-INDENT-REPORTING-MANAGER"
@@ -128,14 +129,26 @@ async def setup_stages(db) -> None:
 
 
 async def setup_permissions(db) -> None:
-    """Give every role the indent permissions, so any employee can raise one."""
+    """Give every role requester access without turning REQUESTER into an approver."""
     requester_ids = await _permission_ids(db, REQUESTER_PERMS)
     approver_ids = await _permission_ids(db, APPROVER_PERMS)
     roles = (await db.execute(select(Role).where(Role.is_active.is_(True)))).scalars().all()
 
     total = 0
     for role in roles:
-        total += await _grant(db, role, requester_ids + approver_ids)
+        granted_ids = requester_ids
+        if role.code != RoleCode.REQUESTER.value:
+            granted_ids = requester_ids + approver_ids
+        total += await _grant(db, role, granted_ids)
+        if role.code == RoleCode.REQUESTER.value:
+            stale = list((await db.execute(
+                select(RolePermission).where(
+                    RolePermission.role_id == role.id,
+                    RolePermission.permission_id.in_(approver_ids),
+                )
+            )).scalars().all())
+            for row in stale:
+                await db.delete(row)
     print(f"  + {total} role-permission links added across {len(roles)} roles")
     await db.flush()
 
