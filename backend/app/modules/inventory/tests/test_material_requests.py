@@ -21,7 +21,7 @@ from app.modules.inventory import allocations
 from app.modules.inventory.models import (
     NO_BIN, NO_PROJECT, Allocation, MaterialRequest, Reservation, Stock,
 )
-from app.platform.hcm.models import HcmEmployee
+from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmPositionAssignment
 from app.platform.rbac.models import Role, UserRole
 from app.shared.enums import (
     AllocationStatus, ApprovalAction, MRStatus, RefType, UserRole as RoleCode,
@@ -137,6 +137,30 @@ async def test_creating_an_allocation_reserves_nothing_until_approved(db, actor)
     row = await _reload(db, stocked)
     assert row.available_qty == Decimal("60")
     assert row.reserved_qty == Decimal("0")
+
+
+async def test_allocation_fallback_routes_to_allocator_reporting_manager(db, actor):
+    stocked, _bare, main, _lip, _admin = await _world(db)
+    await _stock(db, stocked, main, 60)
+    db.add_all([
+        HcmPosition(id=701, name="Inventory Manager", is_active=True, synced_at=utcnow()),
+        HcmPosition(id=702, name="Inventory Executive", parent_position_id=701,
+                    is_active=True, synced_at=utcnow()),
+        HcmEmployee(id=703, full_name="Inventory Manager", emp_code="INV-MGR",
+                    is_active=True, synced_at=utcnow()),
+        HcmPositionAssignment(
+            id=704, employee_id=703, position_id=701, is_active=True,
+            is_primary=True, synced_at=utcnow(),
+        ),
+    ])
+    await db.flush()
+
+    alloc = await allocations.create(
+        db, 20, "IND-20", [_decision(1, stocked, 40, main, 100)], actor,
+        ctx={"requester_position_id": 702},
+    )
+
+    assert alloc.current_approver_name == "Inventory Manager"
 
 
 async def test_approving_reserves_exactly_what_was_decided(db, actor):

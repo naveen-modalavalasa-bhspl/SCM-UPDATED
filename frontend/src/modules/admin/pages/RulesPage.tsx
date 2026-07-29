@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch,
 } from "@heroui/react";
-import { AlertTriangle, Play, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, Play, Plus, ShieldCheck, Trash2, X } from "lucide-react";
 import {
   Button, Can, Field, Input, PageHeader, Select, type Column,
 } from "@/shared/components";
@@ -159,6 +159,18 @@ export function RulesPage() {
         rules for that moment are listed underneath.
       </p>
 
+      <div className="mb-4 flex items-start gap-3 rounded-xl border border-ok/25 bg-ok-bg px-4 py-3">
+        <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-ok" />
+        <div>
+          <div className="text-sm font-semibold text-ink">Rules customize a safe default</div>
+          <p className="mt-0.5 text-xs text-body">
+            If no rule matches, or a route is incomplete, an approved indent still
+            goes to Inventory for a human allocation decision. Rules may refine the
+            route; they cannot strand the document or skip that safety step.
+          </p>
+        </div>
+      </div>
+
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1 sm:max-w-sm">
           <Select
@@ -189,7 +201,7 @@ export function RulesPage() {
         keyOf={(r) => r.id}
         columns={columns}
         onRowClick={openEdit}
-        empty={`No rules yet for when ${EVENT_SENTENCE[activeEvent] ?? "this happens"}. Nothing happens automatically until you add one.`}
+        empty={`No custom rules yet for when ${EVENT_SENTENCE[activeEvent] ?? "this happens"}. The protected code-level default still applies.`}
         renderCard={(r) => (
           <div className="space-y-1">
             <div className="flex items-start justify-between gap-2">

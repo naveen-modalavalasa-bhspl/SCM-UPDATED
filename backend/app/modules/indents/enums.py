@@ -8,12 +8,16 @@ from enum import Enum
 
 from app.shared.enums import (
     AllocationStatus, ApprovalAction, AuditAction, DocType, IndentItemStatus,
-    IndentStatus, InstanceStatus, RuleActionType,
+    IndentStatus, InstanceStatus, MRStatus, Priority, RuleActionType,
 )
 
 
 class IndentActivityType(str, Enum):
     RAISED = "RAISED"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    RETURNED = "RETURNED"
     ACKNOWLEDGED = "ACKNOWLEDGED"
 
 
@@ -32,5 +36,7 @@ __all__ = [
     "IndentStatus",
     "InstanceStatus",
     "MaterialDirection",
+    "MRStatus",
+    "Priority",
     "RuleActionType",
 ]

@@ -40,6 +40,17 @@ def test_generated_item_code_contains_all_identity_parts():
         "101010-SLIDE-LAB-ACME-0001"
 
 
+def test_generated_item_code_accepts_hyphenated_master_codes():
+    assert build_item_code("161010", "GN-003", "DOLO650", "RAMESHLABS", 1) == \
+        "161010-GN-003-DOLO650-RAMESHLABS-0001"
+
+
+@pytest.mark.parametrize("code", ["-GN003", "GN003-", "GN--003", "GN 003", "GN_003"])
+def test_generated_item_code_rejects_malformed_master_codes(code):
+    with pytest.raises(ValidationError, match="internal hyphens"):
+        build_item_code("161010", code, "DOLO650", "RAMESHLABS", 1)
+
+
 def test_generated_item_code_rejects_an_incomplete_category_path():
     with pytest.raises(ValidationError, match="six-digit"):
         build_item_code("1010", "SLIDE", "LAB", "ACME", 1)
@@ -94,6 +105,15 @@ async def item_payload(client, admin, *, name="Bolt"):
         "item_class_id": item_class["id"], "uom_id": uom["id"],
         "hsn_id": hsn["id"],
     }
+
+
+async def test_identity_masters_accept_internal_hyphens(client, admin):
+    general = await client.post("/api/general-names", json={
+        "code": "GN-003", "name": "Absorbent Cotton"}, headers=admin)
+    manufacturer = await client.post("/api/manufacturers", json={
+        "code": "LABS-01", "name": "Labs 01"}, headers=admin)
+    assert general.status_code == 200, general.text
+    assert manufacturer.status_code == 200, manufacturer.text
 
 
 async def test_item_code_uses_category_general_brand_and_manufacturer(db):
@@ -373,6 +393,25 @@ async def test_hsn_code_must_be_digits(client, admin):
     assert r.status_code == 422
 
 
+async def test_hsn_code_must_be_exactly_eight_digits(client, admin):
+    for code in ("1006301", "100630100"):
+        r = await client.post("/api/hsn-codes", json={"code": code}, headers=admin)
+        assert r.status_code == 422
+
+
+async def test_item_entry_can_register_a_provisional_hsn(client, admin):
+    created = await client.post("/api/hsn-codes/resolve",
+                                json={"code": "10063010"}, headers=admin)
+    assert created.status_code == 200, created.text
+    assert created.json()["code"] == "10063010"
+    assert created.json()["igst_rate"] == 0
+
+    # Resolving the same code again selects the existing master row.
+    resolved = await client.post("/api/hsn-codes/resolve",
+                                 json={"code": "10063010"}, headers=admin)
+    assert resolved.json()["id"] == created.json()["id"]
+
+
 async def test_hsn_code_is_unique(client, admin):
     await client.post("/api/hsn-codes", json={"code": "30049099"}, headers=admin)
     r = await client.post("/api/hsn-codes", json={"code": "30049099"}, headers=admin)
@@ -630,6 +669,12 @@ async def test_an_unknown_tag_type_is_rejected(client, tagger):
 
 
 # ------------------------- packaging ladder -------------------------- #
+async def test_packaging_master_is_only_a_container_type(client, admin):
+    body = (await client.post("/api/packaging", json={
+        "code": "PACKET", "name": "Packet"}, headers=admin)).json()
+    assert set(body) == {"id", "code", "name", "is_active"}
+
+
 async def test_packaging_breakdown_multiplies_up_the_ladder(client, admin, db):
     """10 litres in a tray, 10 trays in a box, 10 boxes in a container."""
     item = (await client.post("/api/items", json=await item_payload(client, admin),
@@ -649,8 +694,117 @@ async def test_packaging_breakdown_multiplies_up_the_ladder(client, admin, db):
                              headers=admin)).json()["items"]
     assert [r["base_quantity"] for r in rows] == [10.0, 100.0, 1000.0]
     assert [r["package_name"] for r in rows] == ["Tray", "Box", "Container"]
+    assert [[part["package_name"] for part in r["package_breakup"]]
+            for r in rows] == [
+        ["Tray"],
+        ["Box", "Tray"],
+        ["Container", "Box", "Tray"],
+    ]
+    assert [[part["quantity"] for part in r["package_breakup"]]
+            for r in rows] == [[1.0], [1.0, 10.0], [1.0, 10.0, 100.0]]
     # Level 1 is measured in the item's own unit, which is what the totals are in.
     assert rows[0]["base_uom_code"] == "PCS"
+
+
+async def test_milk_packaging_shows_each_container_and_end_product(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(
+        client, admin, name="Milk"), headers=admin)).json()
+    packages = {}
+    for code, name in (("PACKET", "Packet"), ("BOX", "Box"), ("TANKER", "Tanker")):
+        packages[code] = (await client.post(
+            "/api/packaging", json={"code": code, "name": name},
+            headers=admin)).json()
+
+    for level, code, quantity in (
+        (1, "PACKET", 1), (2, "BOX", 10), (3, "TANKER", 10),
+    ):
+        r = await client.post("/api/item-packaging", json={
+            "item_id": item["id"], "level": level,
+            "package_id": packages[code]["id"], "quantity": quantity,
+        }, headers=admin)
+        assert r.status_code == 200, r.text
+
+    rows = (await client.get(
+        f"/api/items/{item['id']}/packaging-breakdown",
+        headers=admin)).json()["items"]
+    assert [row["base_quantity"] for row in rows] == [1.0, 10.0, 100.0]
+    assert rows[-1]["package_breakup"] == [
+        {"package_id": packages["TANKER"]["id"],
+         "package_name": "Tanker", "quantity": 1.0},
+        {"package_id": packages["BOX"]["id"],
+         "package_name": "Box", "quantity": 10.0},
+        {"package_id": packages["PACKET"]["id"],
+         "package_name": "Packet", "quantity": 100.0},
+    ]
+
+
+async def test_level_one_can_be_a_tanker_holding_100_base_units(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(
+        client, admin, name="Bulk milk"), headers=admin)).json()
+    tanker = (await client.post(
+        "/api/packaging", json={"code": "TANKER", "name": "Tanker"},
+        headers=admin)).json()
+    r = await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1,
+        "package_id": tanker["id"], "quantity": 100,
+    }, headers=admin)
+    assert r.status_code == 200, r.text
+
+    row = (await client.get(
+        f"/api/items/{item['id']}/packaging-breakdown",
+        headers=admin)).json()["items"][0]
+    assert row["package_name"] == "Tanker"
+    assert row["base_quantity"] == 100.0
+
+
+async def test_upper_packaging_levels_require_whole_container_counts(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(
+        client, admin), headers=admin)).json()
+    packet = (await client.post(
+        "/api/packaging", json={"code": "PACKET", "name": "Packet"},
+        headers=admin)).json()
+    box = (await client.post(
+        "/api/packaging", json={"code": "BOX", "name": "Box"},
+        headers=admin)).json()
+    await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1,
+        "package_id": packet["id"], "quantity": 1,
+    }, headers=admin)
+    r = await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 2,
+        "package_id": box["id"], "quantity": 1.5,
+    }, headers=admin)
+    assert r.status_code == 422
+    assert "whole number" in r.json()["error"]
+
+
+async def test_only_the_highest_packaging_level_can_be_removed(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(
+        client, admin), headers=admin)).json()
+    packet = (await client.post(
+        "/api/packaging", json={"code": "PACKET", "name": "Packet"},
+        headers=admin)).json()
+    box = (await client.post(
+        "/api/packaging", json={"code": "BOX", "name": "Box"},
+        headers=admin)).json()
+    first = (await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1,
+        "package_id": packet["id"], "quantity": 1,
+    }, headers=admin)).json()
+    second = (await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 2,
+        "package_id": box["id"], "quantity": 10,
+    }, headers=admin)).json()
+
+    blocked = await client.delete(
+        f"/api/item-packaging/{first['id']}", headers=admin)
+    assert blocked.status_code == 422
+    assert "highest" in blocked.json()["error"]
+    assert (await client.delete(
+        f"/api/item-packaging/{second['id']}", headers=admin)).status_code == 200
+    rows = (await client.get(
+        f"/api/item-packaging?item_id={item['id']}", headers=admin)).json()["items"]
+    assert [row["level"] for row in rows] == [1]
 
 
 async def test_a_packaging_level_cannot_skip_the_one_below_it(client, admin):
@@ -715,6 +869,37 @@ async def test_a_kit_cannot_contain_itself(client, admin):
         "item_id": kit["id"], "component_item_id": kit["id"], "quantity": 1},
         headers=admin)
     assert r.status_code == 422
+
+
+async def test_components_require_the_item_to_be_saved_as_a_kit(client, admin):
+    payload = await item_payload(client, admin, name="Plain item")
+    item = (await client.post("/api/items", json=payload, headers=admin)).json()
+    component = (await client.post(
+        "/api/items", json={**payload, "name": "Component"}, headers=admin)).json()
+
+    r = await client.post("/api/item-components", json={
+        "item_id": item["id"], "component_item_id": component["id"],
+        "quantity": 1}, headers=admin)
+    assert r.status_code == 422
+    assert "Has Components" in r.json()["error"]
+
+
+async def test_removed_kit_components_are_hidden(client, admin):
+    payload = await item_payload(client, admin, name="Kit")
+    kit = (await client.post(
+        "/api/items", json={**payload, "has_components": True},
+        headers=admin)).json()
+    component = (await client.post(
+        "/api/items", json={**payload, "name": "Component"}, headers=admin)).json()
+    line = (await client.post("/api/item-components", json={
+        "item_id": kit["id"], "component_item_id": component["id"],
+        "quantity": 1}, headers=admin)).json()
+
+    assert (await client.delete(
+        f"/api/item-components/{line['id']}", headers=admin)).status_code == 200
+    rows = (await client.get(
+        f"/api/item-components?item_id={kit['id']}", headers=admin)).json()["items"]
+    assert rows == []
 
 
 # ------------------------------ BOM ---------------------------------- #

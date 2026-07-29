@@ -4,7 +4,7 @@ import { Avatar, Select, SelectItem, Tab, Tabs } from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { MenuIcon } from "@/shared/layout/icons";
 import type { MenuItem } from "@/shared/types";
-import { MaterialRequestsNav } from "@/modules/indents/components/MaterialRequestsNav";
+import { IndentsNav } from "@/modules/indents/components/IndentsNav";
 
 const matches = (path: string, loc: string) =>
   loc === path || (path !== "/" && loc.startsWith(path));
@@ -124,7 +124,7 @@ export function AppLayout() {
           {/* Module options surface here as tabs */}
           {activeRoot?.code === "grp_indents" && (
             <div className="px-2 md:px-6">
-              <MaterialRequestsNav embedded />
+              <IndentsNav embedded />
             </div>
           )}
           {tabs.length > 0 && activeRoot?.code !== "grp_indents" && (

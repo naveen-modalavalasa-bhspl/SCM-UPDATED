@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ITEM_SECTIONS, ItemSectionTabs, itemCodePreview, manufacturersForBrand,
-  missingRequiredTags,
+  missingRequiredTags, packagingBreakupText,
 } from "../components/ItemMasterTab";
 import type { MasterCategoryTag } from "../types";
 
@@ -67,6 +67,15 @@ describe("what a category insists on", () => {
   it("ignores a required field that has been deactivated", () => {
     expect(missingRequiredTags([tag({ is_active: false })], {})).toEqual([]);
   });
+
+  it("requires a mandatory feature to be selected, not merely present", () => {
+    const feature = tag({
+      tag_type: "FEATURE", tag_code: "FRAGILE", tag_name: "Fragile",
+    });
+    expect(missingRequiredTags([feature], { FRAGILE: "" })).toEqual([feature]);
+    expect(missingRequiredTags([feature], { FRAGILE: "false" })).toEqual([feature]);
+    expect(missingRequiredTags([feature], { FRAGILE: "true" })).toEqual([]);
+  });
 });
 
 describe("item form sections", () => {
@@ -84,5 +93,39 @@ describe("item form sections", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Tracking" }));
     expect(onChange).toHaveBeenCalledWith("Tracking");
+  });
+});
+
+describe("item packaging breakup", () => {
+  it("shows every container level and the final item quantity", () => {
+    expect(packagingBreakupText({
+      level: 3,
+      package_id: 3,
+      package_name: "Tanker",
+      quantity: 10,
+      package_breakup: [
+        { package_id: 3, package_name: "Tanker", quantity: 1 },
+        { package_id: 2, package_name: "Box", quantity: 10 },
+        { package_id: 1, package_name: "Packet", quantity: 100 },
+      ],
+      base_quantity: 100,
+      base_uom_code: "L",
+    }, "L", "Milk")).toBe(
+      "1 Tanker = 10 Box = 100 Packet = 100 L of Milk",
+    );
+  });
+
+  it("supports a level-one tanker directly in the item's UOM", () => {
+    expect(packagingBreakupText({
+      level: 1,
+      package_id: 3,
+      package_name: "Tanker",
+      quantity: 100,
+      package_breakup: [
+        { package_id: 3, package_name: "Tanker", quantity: 1 },
+      ],
+      base_quantity: 100,
+      base_uom_code: "L",
+    }, "L", "Milk")).toBe("1 Tanker = 100 L of Milk");
   });
 });

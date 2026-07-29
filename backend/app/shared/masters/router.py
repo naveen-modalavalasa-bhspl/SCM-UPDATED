@@ -2,7 +2,7 @@
 written by hand here are the two HCM mirrors (read-only, rule 10) and item specs,
 whose primary key is item_id rather than a surrogate id."""
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,10 +11,12 @@ from app.core.dependencies import get_current_user, require_permission
 from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmDepartment, HcmFacility
 from app.platform.rbac import permissions as perms
-from app.shared.enums import UomClass
+from app.shared.enums import AuditAction, UomClass
 from app.shared.masters.crud import build_router
-from app.shared.masters.defs import MASTERS, UOM_SUGGESTIONS, packaging_breakdown
-from app.shared.models.master import Item, ItemSpec, Uom
+from app.shared.masters.defs import (
+    MASTERS, UOM_SUGGESTIONS, hsn_out, packaging_breakdown,
+)
+from app.shared.models.master import HsnCode, Item, ItemSpec, Uom
 
 router = build_router(MASTERS)
 
@@ -101,6 +103,48 @@ async def create_suggested_uoms(
 
 
 router.include_router(_uom)
+
+
+# --------------------------------------------------------------------------- #
+#  HSN resolve — item entry may register a provisional zero-rate classification
+# --------------------------------------------------------------------------- #
+_hsn = APIRouter(tags=["masters"])
+
+
+class HsnResolveIn(BaseModel):
+    code: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
+
+
+@_hsn.post("/api/hsn-codes/resolve")
+async def resolve_hsn_code(
+    data: HsnResolveIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.MASTER_ITEM_MANAGE)),
+):
+    """Return an existing HSN or create a zero-rate row for later tax maintenance.
+
+    Item maintainers may register the classification code, but only HSN maintainers
+    can subsequently edit GST rates through the normal HSN master endpoint.
+    """
+    existing = await db.scalar(select(HsnCode).where(HsnCode.code == data.code))
+    if existing is not None:
+        return hsn_out(existing)
+
+    row = HsnCode(code=data.code, cgst_rate=0, sgst_rate=0, igst_rate=0,
+                  cess_rate=0, is_active=True)
+    db.add(row)
+    await db.flush()
+
+    from app.platform.settings.service import write_audit
+
+    await write_audit(db, entity=HsnCode.__tablename__, entity_id=row.id,
+                      action=AuditAction.CREATE, actor=user, after=hsn_out(row))
+    await db.commit()
+    await db.refresh(row)
+    return hsn_out(row)
+
+
+router.include_router(_hsn)
 
 
 # --------------------------------------------------------------------------- #

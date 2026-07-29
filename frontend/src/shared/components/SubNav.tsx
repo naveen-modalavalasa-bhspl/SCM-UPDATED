@@ -7,7 +7,7 @@ import { NavLink } from "react-router-dom";
  * Three modules had grown three different versions of this — pills in Material
  * Requests, underlined HeroUI tabs in Warehouse, rounded bordered tabs in
  * Inventory — so moving between modules felt like moving between apps. This is the
- * one shared strip; the pill treatment is the one from Material Requests.
+ * one shared strip; the pill treatment is the one from Indents.
  *
  * It drives either routes or local state, because both patterns already exist:
  *
@@ -15,7 +15,7 @@ import { NavLink } from "react-router-dom";
  *                                       icon: Boxes }]}
  *           value={tab} onChange={setTab} />
  *
- *   <SubNav label="Material Requests"
+ *   <SubNav label="Indents"
  *           items={[{ key: "/indents", label: "All requests", icon: List, end: true }]} />
  */
 export interface SubNavItem {

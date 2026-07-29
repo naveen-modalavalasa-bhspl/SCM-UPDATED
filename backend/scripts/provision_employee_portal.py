@@ -23,7 +23,7 @@ from app.shared.models.base import utcnow
 
 
 PAGE_NAMES = {
-    "grp_indents": "Material Requests",
+    "grp_indents": "Indents",
     "ind_dashboard": "Overview",
     "ind_list": "All Requests",
     "ind_board": "Status Board",
@@ -75,7 +75,7 @@ async def provision() -> dict:
         if workflow is None:
             workflow = Workflow(
                 code="WF-INDENT-REPORTING-MANAGER",
-                name="Material Request Reporting Manager Approval",
+                name="Indent Reporting Manager Approval",
                 doc_type=DocType.INDENT.value,
                 version=max([row.version for row in workflows] or [0]) + 1,
                 effective_from=utcnow().date(),

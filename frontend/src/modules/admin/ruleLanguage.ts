@@ -12,6 +12,9 @@ import type { ActionType, Operator, RuleAction, RuleCondition } from "./types";
 export const EVENT_SENTENCE: Record<string, string> = {
   INDENT_SUBMITTED: "someone raises a request",
   INDENT_APPROVED: "a request finishes all its approvals",
+  ALLOCATION_APPROVED: "an Inventory Manager approves a stock allocation",
+  MR_RAISED: "a stock shortage creates a Material Request",
+  MR_APPROVED: "a Material Request is approved for Procurement",
   PO_SUBMITTED: "a purchase order is sent for approval",
   GRN_RECEIVED: "goods arrive at a warehouse",
   STOCK_BELOW_THRESHOLD: "an item runs low in stock",
@@ -20,6 +23,9 @@ export const EVENT_SENTENCE: Record<string, string> = {
 export const EVENT_TITLE: Record<string, string> = {
   INDENT_SUBMITTED: "Request raised",
   INDENT_APPROVED: "Request fully approved",
+  ALLOCATION_APPROVED: "Stock allocation approved",
+  MR_RAISED: "Material Request raised",
+  MR_APPROVED: "Material Request approved",
   PO_SUBMITTED: "Purchase order sent for approval",
   GRN_RECEIVED: "Goods received",
   STOCK_BELOW_THRESHOLD: "Stock running low",
@@ -47,6 +53,10 @@ export const FIELD_LABEL: Record<string, string> = {
   priority: "Urgency",
   accepted_quantity: "Quantity accepted",
   available_qty: "Quantity in stock",
+  given_qty: "Quantity allocated",
+  allocation_id: "Allocation",
+  mr_id: "Material Request",
+  status: "Resulting status",
   reorder_level: "Reorder level",
   item_code: "Item code",
 };

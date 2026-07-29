@@ -17,6 +17,12 @@ api.interceptors.response.use(
       localStorage.removeItem("token");
       if (!location.pathname.startsWith("/login")) location.href = "/login";
     }
+    if (!error.response) {
+      const path = error.config?.url ? ` (${error.config.url})` : "";
+      return Promise.reject(new Error(
+        `Cannot reach the API${path}. Check that the frontend proxy and backend are running.`,
+      ));
+    }
     const message =
       error.response?.data?.error ??
       error.response?.data?.detail ??

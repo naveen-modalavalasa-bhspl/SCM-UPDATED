@@ -146,6 +146,7 @@ export function Select({
   options,
   placeholder,
   label,
+  ariaLabel,
   isDisabled,
   className,
   isInvalid,
@@ -156,6 +157,7 @@ export function Select({
   options: SelectOption[];
   placeholder?: string;
   label?: string;
+  ariaLabel?: string;
   isDisabled?: boolean;
   className?: string;
   isInvalid?: boolean;
@@ -168,6 +170,7 @@ export function Select({
       variant="bordered"
       radius="md"
       label={label}
+      aria-label={ariaLabel ?? label ?? placeholder ?? "Select an option"}
       placeholder={placeholder ?? "Type to search…"}
       isDisabled={isDisabled}
       isInvalid={isInvalid}

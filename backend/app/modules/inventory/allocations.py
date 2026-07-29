@@ -21,6 +21,7 @@ from app.modules.inventory import allocation, availability
 from app.modules.inventory.models import (
     NO_PROJECT, Allocation, AllocationItem,
 )
+from app.platform.rules import evaluator as rules
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.shared.enums import (
@@ -204,7 +205,19 @@ async def act(db: AsyncSession, allocation_id: int, action: str, user,
         alloc.status = AllocationStatus.APPROVED.value
         alloc.approved_at = utcnow()
         alloc.current_approver_name = None
-        await apply_to_stock(db, alloc, user)
+        implied_indent_status = await apply_to_stock(db, alloc, user)
+        await rules.safe_fire(
+            db,
+            "ALLOCATION_APPROVED",
+            {
+                "allocation_id": alloc.id,
+                "indent_id": alloc.indent_id,
+                "given_qty": float(sum(_d(line.quantity) for line in alloc.items)),
+                "status": implied_indent_status,
+            },
+            doc_type=DocType.ALLOCATION.value,
+            doc_id=alloc.id,
+        )
     elif instance.status == InstanceStatus.REJECTED.value:
         alloc.status = AllocationStatus.REJECTED.value
         alloc.current_approver_name = None
@@ -259,7 +272,10 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user) -> str:
     if shortfalls:
         await service.create_mr_from_shortfall(
             db, alloc.indent_id, alloc.indent_no, shortfalls, user,
-            {"department_id": alloc.department_id})
+            {
+                "department_id": alloc.department_id,
+                "requester_position_id": getattr(user, "active_position_id", None),
+            })
 
     if given_total <= ZERO:
         return IndentStatus.PENDING_PROCUREMENT.value

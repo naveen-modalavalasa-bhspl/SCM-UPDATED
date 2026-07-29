@@ -15,6 +15,50 @@ from app.shared.enums import (
 )
 
 
+BUILTIN_EVENTS: dict[str, dict] = {
+    "INDENT_SUBMITTED": {
+        "name": "Indent submitted", "module": "indents",
+        "description": "A requester submitted an indent for approval.",
+        "context_schema": {
+            "indent_id": "number", "indent_no": "text", "quantity": "number",
+            "priority": "text", "department_id": "number", "project_id": "number",
+        },
+    },
+    "INDENT_APPROVED": {
+        "name": "Indent approved", "module": "indents",
+        "description": "The reporting-manager chain completed and Inventory takes over.",
+        "context_schema": {
+            "indent_id": "number", "total_qty": "number", "priority": "text",
+            "department_id": "number", "project_id": "number",
+        },
+    },
+    "ALLOCATION_APPROVED": {
+        "name": "Stock allocation approved", "module": "inventory",
+        "description": "The Inventory Manager approved how much stock to promise.",
+        "context_schema": {
+            "allocation_id": "number", "indent_id": "number",
+            "given_qty": "number", "status": "text",
+        },
+    },
+    "MR_RAISED": {
+        "name": "Material request raised", "module": "inventory",
+        "description": "An allocation shortage became a Material Request.",
+        "context_schema": {
+            "mr_id": "number", "indent_id": "number", "quantity": "number",
+            "department_id": "number",
+        },
+    },
+    "MR_APPROVED": {
+        "name": "Material request approved", "module": "inventory",
+        "description": "An approved shortage became ready for Procurement.",
+        "context_schema": {
+            "mr_id": "number", "indent_id": "number", "priority": "text",
+            "department_id": "number",
+        },
+    },
+}
+
+
 def rule_out(rule: Rule, conditions: list[RuleCondition] | None = None,
              actions: list[RuleAction] | None = None) -> dict:
     out = {
@@ -74,7 +118,14 @@ def _validate(data: RuleIn) -> None:
 
 
 async def _assert_event_exists(db: AsyncSession, event_code: str) -> None:
-    if await db.get(RuleEvent, event_code) is None:
+    if await db.get(RuleEvent, event_code) is not None:
+        return
+    builtin = BUILTIN_EVENTS.get(event_code)
+    if builtin is not None:
+        db.add(RuleEvent(code=event_code, is_active=True, **builtin))
+        await db.flush()
+        return
+    if builtin is None:
         raise ValidationError(
             f"Unknown event '{event_code}'. Register it in rule_events first.")
 
@@ -209,10 +260,18 @@ async def list_events(db: AsyncSession) -> dict:
     rows = (await db.execute(
         select(RuleEvent).where(RuleEvent.is_active.is_(True)).order_by(RuleEvent.code)
     )).scalars().all()
+    catalogue = {
+        code: {"code": code, **definition}
+        for code, definition in BUILTIN_EVENTS.items()
+    }
+    for event in rows:
+        catalogue[event.code] = {
+            "code": event.code, "name": event.name, "module": event.module,
+            "description": event.description,
+            "context_schema": event.context_schema or {},
+        }
     return {
-        "items": [{"code": e.code, "name": e.name, "module": e.module,
-                   "description": e.description,
-                   "context_schema": e.context_schema or {}} for e in rows],
+        "items": [catalogue[code] for code in sorted(catalogue)],
         "operators": [o.value for o in ConditionOperator],
         "logics": [l.value for l in ConditionLogic],
         "action_types": [a.value for a in RuleActionType],

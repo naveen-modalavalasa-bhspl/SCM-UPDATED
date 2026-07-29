@@ -12,6 +12,7 @@ from app.platform.hcm.models import HcmEmployee
 from app.shared.enums import GRNStatus, POStatus, StockDirection
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom, Vendor
+from app.shared.models.warehouse import Warehouse
 
 FACILITY = 801
 
@@ -63,7 +64,8 @@ async def test_qc_pass_increases_stock(db):
     # stk_balance has available_qty / reserved_qty / total_qty -- there is no
 # 'quantity' column. This assertion never ran while the suite was skipping.
     assert float(stock[0].available_qty) == 8
-    assert stock[0].facility_id == FACILITY
+    warehouse = await db.get(Warehouse, stock[0].warehouse_id)
+    assert warehouse.facility_id == FACILITY
 
 
 async def test_partial_receipt_keeps_po_partially_received(db):

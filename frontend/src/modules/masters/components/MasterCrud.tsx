@@ -27,6 +27,10 @@ export interface FormField {
   max?: number;
   /** Anything the rules above cannot express. Return a message, or null to pass. */
   validate?: (value: Values[string], all: Values) => string | null;
+  /** Lets one field update local state owned by the tab, e.g. dependent dropdowns. */
+  onChange?: (value: Values[string], all: Values) => void;
+  /** Clears dependent fields when this field changes. */
+  clearOnChange?: string[];
 }
 
 /** A multiselect holds an array; every other field holds a scalar. */
@@ -203,9 +207,18 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const canEdit = !p.readOnly;
   // Clearing the field's own error as it is edited keeps a stale message from
   // sitting under a value the user has already fixed.
-  const set = (k: string, v: Values[string]) => {
-    setValues((s) => ({ ...s, [k]: v }));
-    setFieldErrors((e) => (k in e ? { ...e, [k]: "" } : e));
+  const set = (f: FormField, v: Values[string]) => {
+    const k = f.key;
+    const nextValues = { ...values, [k]: v };
+    for (const dependent of f.clearOnChange ?? []) nextValues[dependent] = null;
+    setValues(nextValues);
+    f.onChange?.(v, nextValues);
+    setFieldErrors((e) => {
+      const next = { ...e };
+      delete next[k];
+      for (const dependent of f.clearOnChange ?? []) delete next[dependent];
+      return next;
+    });
   };
 
   const submit = () => {
@@ -277,7 +290,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                     return (
                       <div key={f.key} className="flex items-center justify-between py-1">
                         <span className="text-sm font-medium text-body">{f.label}</span>
-                        <Switch isSelected={Boolean(val)} onValueChange={(b) => set(f.key, b)}
+                        <Switch isSelected={Boolean(val)} onValueChange={(b) => set(f, b)}
                                 color="primary" size="sm" />
                       </div>
                     );
@@ -289,7 +302,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                           options={f.options ?? []}
                           value={Array.isArray(val) ? val : []}
                           isInvalid={Boolean(fieldError)}
-                          onChange={(next) => set(f.key, next)} />
+                          onChange={(next) => set(f, next)} />
                         {fieldError && (
                           <span className="mt-1 block text-xs text-bad">{fieldError}</span>
                         )}
@@ -305,7 +318,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                                 isInvalid={Boolean(fieldError)}
                                 errorMessage={fieldError}
                                 onChange={(next) => set(
-                                  f.key,
+                                  f,
                                   next === ""
                                     ? null
                                     : (f.options?.find(
@@ -324,7 +337,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                         maxLength={f.maxLength}
                         isInvalid={Boolean(fieldError)}
                         errorMessage={fieldError}
-                        onChange={(e) => set(f.key, e.target.value)}
+                        onChange={(e) => set(f, e.target.value)}
                       />
                     </Field>
                   );

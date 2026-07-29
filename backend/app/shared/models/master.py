@@ -290,15 +290,13 @@ class ItemSubClass(Base):
 
 
 class Packaging(Base):
-    """A kind of container: Tray, Box, Carton, Container.
+    """A reusable container type: Packet, Box, Tanker.
 
-    This is the package TYPE only — its shape, weight and whether it comes back. How
-    much of what it holds is not here: a tray of milk holds 10 litres and a tray of
-    vials holds 200, so the quantity belongs to the item's own chain in
-    mst_item_packaging, not to the tray.
+    This master deliberately carries no capacity or physical specification. How much
+    it holds belongs to each item's own chain in mst_item_packaging.
 
-    qty_per_pack and uom_id survive as columns because the live table has them, but
-    the API no longer reads or writes them.
+    Legacy capacity, dimension, weight and returnable columns remain mapped because
+    the live table has them, but the API no longer reads or writes them.
     """
     __tablename__ = "mst_packaging"
     id = pk()

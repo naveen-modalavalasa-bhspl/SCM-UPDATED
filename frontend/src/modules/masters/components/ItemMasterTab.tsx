@@ -12,14 +12,20 @@ import { useAuth } from "@/shared/auth/AuthContext";
 import { mastersApi } from "../api";
 import type {
   MasterBrandManufacturer, MasterCategoryTag, MasterItem, MasterItemComponent,
-  MasterItemPackaging, NamedMaster, UomClass,
+  MasterItemPackaging, NamedMaster, PackagingBreakdown, UomClass,
 } from "../types";
 
 export const ITEM_SECTIONS = [
-  "Basic", "Kit Components", "Attributes", "Specs", "Units", "Identification",
-  "Tracking", "Packaging", "Additional",
+  "Basic", "Kit Components", "Attributes", "Specs", "Features", "Units",
+  "Identification", "Tracking", "Packaging", "Additional",
 ] as const;
 type ItemSection = (typeof ITEM_SECTIONS)[number];
+
+type DraftComponent = {
+  component_item_id: number;
+  quantity: number;
+  remarks: string;
+};
 
 /** Pricing, tax rates, stock limits and shelf life are deliberately absent: tax
  *  comes from the HSN row, reorder levels are a warehouse decision, and expiry is
@@ -74,7 +80,12 @@ export function missingRequiredTags(
 ) {
   return tags
     .filter((tag) => tag.is_required && tag.is_active)
-    .filter((tag) => !String(values[tag.tag_code ?? ""] ?? "").trim());
+    .filter((tag) => {
+      const value = values[tag.tag_code ?? String(tag.tag_id)] ?? "";
+      return tag.tag_type === "FEATURE"
+        ? !["true", "yes", "1"].includes(String(value).toLowerCase())
+        : !String(value).trim();
+    });
 }
 
 export function ItemMasterTab() {
@@ -88,6 +99,8 @@ export function ItemMasterTab() {
   const [level1, setLevel1] = useState("");
   const [level2, setLevel2] = useState("");
   const [uomClass, setUomClass] = useState<UomClass | "">("");
+  const [hsnCode, setHsnCode] = useState("");
+  const [draftComponents, setDraftComponents] = useState<DraftComponent[]>([]);
   // Answers to whatever the category asks for, keyed by tag code. Saved into
   // mst_item_specs.specifications once the item itself exists.
   const [tagValues, setTagValues] = useState<Record<string, string>>({});
@@ -142,12 +155,25 @@ export function ItemMasterTab() {
     queryKey: ["masters", "dosage-forms"],
     queryFn: () => mastersApi.dosageForms.list({ size: 300 }).then((r) => r.items),
   });
-  // What the chosen Level 3 category expects of its items.
+  // Tags on a parent category apply to every child. The Level 3 category may
+  // override a repeated tag by defining it closer to the item.
   const categoryTags = useQuery({
-    queryKey: ["masters", "category-tags", form.category_id],
-    queryFn: () => mastersApi.categoryTags.list({
-      category_id: Number(form.category_id), size: 200,
-    }).then((r) => r.items),
+    queryKey: [
+      "masters", "category-tags-for-item", level1, level2, form.category_id,
+    ],
+    queryFn: async () => {
+      const categoryIds = [level1, level2, String(form.category_id)]
+        .filter(Boolean);
+      const pages = await Promise.all(categoryIds.map((categoryId) =>
+        mastersApi.categoryTags.list({
+          category_id: Number(categoryId), size: 200,
+        }).then((r) => r.items)));
+      const inherited = new Map<string, MasterCategoryTag>();
+      for (const page of pages) {
+        for (const tag of page) inherited.set(`${tag.tag_type}:${tag.tag_id}`, tag);
+      }
+      return Array.from(inherited.values());
+    },
     enabled: Boolean(form.category_id),
   });
   const savedSpec = useQuery({
@@ -161,12 +187,31 @@ export function ItemMasterTab() {
     if (savedSpec.data) {
       setTagValues(
         Object.fromEntries(Object.entries(savedSpec.data.specifications ?? {})
-          .map(([key, value]) => [key, value == null ? "" : String(value)])),
+          .map(([key, value]) => [
+            key,
+            value == null || value === false ? "" : String(value),
+          ])),
       );
     }
   }, [savedSpec.data]);
 
+  useEffect(() => {
+    if (!/^\d{8}$/.test(hsnCode)) return;
+    const match = hsn.data?.find((row) => row.code === hsnCode);
+    if (match) {
+      setForm((current) => String(current.hsn_id) === String(match.id)
+        ? current : { ...current, hsn_id: String(match.id) });
+    }
+  }, [hsn.data, hsnCode]);
+
   const cats = categories.data ?? [];
+  useEffect(() => {
+    if (!editing || !form.category_id || cats.length === 0) return;
+    const category = cats.find((row) => row.id === Number(form.category_id));
+    const parent2 = cats.find((row) => row.id === category?.parent_id);
+    setLevel1(String(parent2?.parent_id ?? ""));
+    setLevel2(String(parent2?.id ?? ""));
+  }, [categories.data, editing?.id, form.category_id]);
   const l1 = cats.filter((row) => row.level === 1);
   const l2 = cats.filter((row) => row.level === 2 && row.parent_id === Number(level1));
   const l3 = cats.filter((row) => row.level === 3 && row.parent_id === Number(level2));
@@ -189,6 +234,10 @@ export function ItemMasterTab() {
   const specTags = tags.filter((t) => t.tag_type === "SPEC" && t.is_active);
   const featureTags = tags.filter((t) => t.tag_type === "FEATURE" && t.is_active);
   const unanswered = missingRequiredTags(tags, tagValues);
+  const matchedHsn = (hsn.data ?? []).find((row) => row.code === hsnCode);
+  const hsnFormatError = hsnCode.length > 0 && !/^\d{8}$/.test(hsnCode)
+    ? "Enter exactly 8 digits, for example 10063010"
+    : null;
 
   // Units are offered by class, so a temperature item is never given kilograms.
   const uomRows = uoms.data ?? [];
@@ -207,18 +256,45 @@ export function ItemMasterTab() {
 
   const save = useMutation({
     mutationFn: async () => {
+      const resolvedHsn = matchedHsn ?? await mastersApi.hsnCodes.resolve(hsnCode);
+      const itemPayload = { ...payload, hsn_id: resolvedHsn.id };
       const saved = editing
-        ? await mastersApi.items.update(editing.id, payload)
-        : await mastersApi.items.create(payload);
-      // The answers live on the item's spec row, which is keyed by item_id and so
-      // can only be written once the item has one.
-      if (Object.keys(tagValues).length) {
+        ? await mastersApi.items.update(editing.id, itemPayload)
+        : await mastersApi.items.create(itemPayload);
+      let addedComponents = 0;
+      try {
+        // Saving even an empty object is intentional: changing category or
+        // deselecting every feature must clear values that no longer apply.
         await mastersApi.itemSpecs.save(saved.id, { specifications: tagValues });
+        if (form.has_components && draftComponents.length) {
+          const existing = await mastersApi.itemComponents.list({
+            item_id: saved.id, size: 200, include_inactive: true,
+          }).then((r) => r.items);
+          const firstLine = Math.max(0, ...existing.map((line) => line.line_no)) + 1;
+          for (const [index, component] of draftComponents.entries()) {
+            await mastersApi.itemComponents.create({
+              item_id: saved.id,
+              component_item_id: component.component_item_id,
+              line_no: firstLine + index,
+              quantity: component.quantity,
+              remarks: component.remarks || null,
+            });
+            addedComponents += 1;
+          }
+        }
+      } catch (reason) {
+        // The item now exists even if a dependent row failed. Keep the modal in
+        // edit mode so retrying cannot create a duplicate item.
+        setDraftComponents((current) => current.slice(addedComponents));
+        setEditing(saved);
+        throw reason;
       }
       return saved;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["masters", "items"] });
+      qc.invalidateQueries({ queryKey: ["masters", "hsn-codes-all"] });
+      setDraftComponents([]);
       setEditing(undefined);
     },
     onError: (reason: Error) => setError(reason.message),
@@ -230,7 +306,8 @@ export function ItemMasterTab() {
 
   const openNew = () => {
     setForm(empty); setEditing(null); setTab("Basic"); setLevel1(""); setLevel2("");
-    setUomClass(""); setTagValues({}); setError(null);
+    setUomClass(""); setHsnCode(""); setTagValues({}); setDraftComponents([]);
+    setError(null);
   };
   const openEdit = (row: MasterItem) => {
     const category = cats.find((cat) => cat.id === row.category_id);
@@ -244,15 +321,22 @@ export function ItemMasterTab() {
       item_sub_class_id: row.item_sub_class_id ?? "", uom_id: row.uom_id ?? "",
       hsn_id: row.hsn_id ?? "",
       dosage_form_id: row.dosage_form_id ?? "" } as Form);
-    setTagValues({}); setEditing(row); setTab("Basic"); setError(null);
+    setHsnCode(row.hsn_code ?? "");
+    setTagValues({}); setDraftComponents([]); setEditing(row); setTab("Basic");
+    setError(null);
   };
 
   // The Save button stays honest about why it is disabled rather than silently
   // refusing: identity, a unit, an HSN, and every field the category insists on.
-  const blocker = !preview ? "Complete the category, general name, brand and manufacturer"
+  const blocker = !form.category_id ? "Category is required"
+    : !form.general_name_id ? "General name is required"
+    : !form.brand_id ? "Brand is required"
+    : !form.manufacturer_id ? "Manufacturer is required"
+    : !preview ? "Complete the category, general name, brand and manufacturer"
     : !form.name.trim() ? "Give the item a name"
     : !form.uom_id ? "Pick a primary unit on the Units tab"
-    : !form.hsn_id ? "Pick an HSN code on the Identification tab"
+    : !hsnCode ? "Enter an HSN code on the Identification tab"
+    : hsnFormatError ? hsnFormatError
     : unanswered.length ? `Answer ${unanswered.map((t) => t.tag_name).join(", ")}`
     : null;
 
@@ -297,24 +381,31 @@ export function ItemMasterTab() {
             {error && <div className="rounded-lg bg-bad-bg p-3 text-sm text-bad">{error}</div>}
 
             {tab === "Basic" && <div className="grid gap-4 md:grid-cols-3">
-              <Field label="Category Level 1"><Select value={level1} options={opt(l1)}
-                onChange={(v) => { setLevel1(v); setLevel2(""); set("category_id", ""); }} /></Field>
-              <Field label="Category Level 2"><Select value={level2} options={opt(l2)}
-                onChange={(v) => { setLevel2(v); set("category_id", ""); }}
+              <Field label="Category Level 1 *"><Select value={level1} options={opt(l1)}
+                onChange={(v) => {
+                  setLevel1(v); setLevel2(""); set("category_id", "");
+                  setTagValues({});
+                }} /></Field>
+              <Field label="Category Level 2 *"><Select value={level2} options={opt(l2)}
+                onChange={(v) => {
+                  setLevel2(v); set("category_id", ""); setTagValues({});
+                }}
                 isDisabled={!level1} placeholder="Pick Level 1 first" /></Field>
-              <Field label="Category Level 3"><Select value={form.category_id} options={opt(l3)}
-                onChange={(v) => set("category_id", v)}
+              <Field label="Category Level 3 *"><Select value={form.category_id} options={opt(l3)}
+                onChange={(v) => {
+                  set("category_id", v); setTagValues({});
+                }}
                 isDisabled={!level2} placeholder="Pick Level 2 first" /></Field>
               {/* The six-digit path is what the item code is built from, so it is
                   worth showing before the code itself exists. */}
               <Field label="Category Path"><Input value={chosenCategory?.path ?? ""} disabled /></Field>
-              <Field label="General Name"><Select value={form.general_name_id}
+              <Field label="General Name *"><Select value={form.general_name_id}
                 options={opt(general.data ?? [])} onChange={(v) => set("general_name_id", v)} /></Field>
-              <Field label="Brand"><Select value={form.brand_id}
+              <Field label="Brand *"><Select value={form.brand_id}
                 options={opt(brands.data ?? [])} onChange={(v) => {
                   set("brand_id", v); set("manufacturer_id", "");
                 }} /></Field>
-              <Field label="Manufacturer"><Select value={form.manufacturer_id}
+              <Field label="Manufacturer *"><Select value={form.manufacturer_id}
                 options={opt(manufacturerRows)} onChange={(v) => set("manufacturer_id", v)}
                 isDisabled={!form.brand_id} placeholder="Select brand first" /></Field>
               <Field label="Item Class"><Select value={form.item_class_id}
@@ -334,7 +425,10 @@ export function ItemMasterTab() {
                 onChange={(v) => set("is_asset", v === "ASSET")} /></Field>
               <label className="flex items-center gap-2 pt-7 text-sm"><Switch size="sm"
                 isSelected={form.has_components}
-                onValueChange={(v) => set("has_components", v)} /> Has Components / Kit</label>
+                onValueChange={(v) => {
+                  set("has_components", v);
+                  if (!v) setDraftComponents([]);
+                }} /> Has Components / Kit</label>
               <Field label="Generated Item Code"
                      hint={editing ? "Fixed at creation — never renumbered" : "The 4-digit serial is assigned on save"}>
                 <Input value={preview} disabled /></Field>
@@ -349,14 +443,19 @@ export function ItemMasterTab() {
             {tab === "Kit Components" && (
               !form.has_components
                 ? <Empty>Turn on <b>Has Components / Kit</b> on the Basic tab to list what is inside this kit.</Empty>
-                : !editing
-                  ? <Empty>Save the item first — components are lines against it, so it needs to exist.</Empty>
+                : !editing || !editing.has_components || draftComponents.length > 0
+                  ? <DraftKitComponents itemId={editing?.id}
+                      values={draftComponents} onChange={setDraftComponents} />
                   : <KitComponents itemId={editing.id} />
             )}
 
             {tab === "Attributes" && (
               !form.category_id
                 ? <Empty>Pick a Level 3 category on the Basic tab. Its attributes appear here.</Empty>
+                : categoryTags.isLoading
+                  ? <Empty>Loading category attributes…</Empty>
+                  : categoryTags.error
+                    ? <Empty>Category attributes could not be loaded.</Empty>
                 : attributeTags.length === 0
                   ? <Empty>This category asks for no attributes. Add some under Category Tagging.</Empty>
                   : <TagFields tags={attributeTags} values={tagValues} onChange={setTagValues} />
@@ -365,26 +464,26 @@ export function ItemMasterTab() {
             {tab === "Specs" && (
               !form.category_id
                 ? <Empty>Pick a Level 3 category on the Basic tab. Its specs appear here.</Empty>
+                : categoryTags.isLoading
+                  ? <Empty>Loading category specs…</Empty>
+                  : categoryTags.error
+                    ? <Empty>Category specs could not be loaded.</Empty>
                 : specTags.length === 0
                   ? <Empty>This category asks for no specs. Add some under Category Tagging.</Empty>
-                  : <>
-                      <TagFields tags={specTags} values={tagValues} onChange={setTagValues} />
-                      {featureTags.length > 0 && (
-                        <div className="mt-5">
-                          <p className="mb-2 text-sm font-medium text-body">
-                            Features this category carries
-                          </p>
-                          <div className="flex flex-wrap gap-2">
-                            {featureTags.map((f) => (
-                              <span key={f.id}
-                                    className="rounded-full bg-content2 px-3 py-1 text-xs font-semibold text-body">
-                                {f.tag_name}{f.is_required ? " · required" : ""}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </>
+                  : <TagFields tags={specTags} values={tagValues} onChange={setTagValues} />
+            )}
+
+            {tab === "Features" && (
+              !form.category_id
+                ? <Empty>Pick a Level 3 category on the Basic tab. Its features appear here.</Empty>
+                : categoryTags.isLoading
+                  ? <Empty>Loading category features…</Empty>
+                  : categoryTags.error
+                    ? <Empty>Category features could not be loaded.</Empty>
+                : featureTags.length === 0
+                  ? <Empty>This category has no tagged features.</Empty>
+                  : <FeatureFields tags={featureTags} values={tagValues}
+                      onChange={setTagValues} />
             )}
 
             {tab === "Units" && <div className="grid gap-4 md:grid-cols-2">
@@ -403,13 +502,21 @@ export function ItemMasterTab() {
               {/* Mandatory. Tax is read from this row at PO and GRN time rather
                   than copied onto the item, so a rate change needs no item edit. */}
               <Field label="HSN Code"
-                     hint="Required. GST rates are read from the HSN master.">
-                <Select value={form.hsn_id}
-                        options={(hsn.data ?? []).map((h) => ({
-                          value: h.id,
-                          label: `${h.code}${h.description ? ` — ${h.description}` : ""}`,
-                        }))}
-                        onChange={(v) => set("hsn_id", v)} /></Field>
+                     hint={matchedHsn
+                       ? matchedHsn.description || "Found in the HSN master"
+                       : /^\d{8}$/.test(hsnCode)
+                         ? "New code: it will be added to the HSN master with zero GST rates"
+                         : "Required. Enter exactly 8 digits."}>
+                <Input value={hsnCode} inputMode="numeric" maxLength={8}
+                       isInvalid={Boolean(hsnFormatError)}
+                       errorMessage={hsnFormatError ?? undefined}
+                       placeholder="10063010"
+                       onChange={(e) => {
+                         const value = e.target.value;
+                         setHsnCode(value);
+                         const match = (hsn.data ?? []).find((row) => row.code === value);
+                         set("hsn_id", match ? String(match.id) : "");
+                       }} /></Field>
               <Field label="Barcode Type"><Select value={form.barcode_type}
                 options={[{value:"AUTO",label:"Auto Generate"},{value:"MANUAL",label:"Manual"}]}
                 onChange={(v) => set("barcode_type", v)} /></Field>
@@ -422,7 +529,8 @@ export function ItemMasterTab() {
             {tab === "Packaging" && (
               !editing
                 ? <Empty>Save the item first — the packing ladder is built against it.</Empty>
-                : <ItemPackagingLadder itemId={editing.id} baseUom={editing.uom_code} />
+                : <ItemPackagingLadder itemId={editing.id}
+                    itemName={editing.name} baseUom={editing.uom_code} />
             )}
 
             {tab === "Additional" && <div className="grid gap-4 md:grid-cols-2">
@@ -513,6 +621,124 @@ export function TagFields({ tags, values, onChange }: {
   );
 }
 
+/** Features are independent yes/no choices. Every tagged feature is available, and
+ *  several can be selected at the same time. */
+export function FeatureFields({ tags, values, onChange }: {
+  tags: MasterCategoryTag[];
+  values: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  return (
+    <div className="grid gap-3 md:grid-cols-2">
+      {tags.map((tag) => {
+        const code = tag.tag_code ?? String(tag.tag_id);
+        const selected = ["true", "yes", "1"]
+          .includes(String(values[code] ?? "").toLowerCase());
+        return (
+          <label key={tag.id}
+                 className="flex min-h-14 items-center justify-between gap-4 rounded-lg border border-line px-3 py-2 text-sm text-body">
+            <span>
+              {tag.tag_name}
+              {tag.is_required && <span className="text-bad"> *</span>}
+            </span>
+            <Switch size="sm" isSelected={selected}
+                    onValueChange={(value) =>
+                      onChange({ ...values, [code]: value ? "true" : "" })} />
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Components entered before the item exists. They are persisted immediately after
+ *  the item save, so turning on the kit flag is useful during initial creation. */
+function DraftKitComponents({ itemId, values, onChange }: {
+  itemId?: number;
+  values: DraftComponent[];
+  onChange: (next: DraftComponent[]) => void;
+}) {
+  const [componentId, setComponentId] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [remarks, setRemarks] = useState("");
+  const items = useQuery({
+    queryKey: ["masters", "items-all"],
+    queryFn: () => mastersApi.items.list({ size: 300 }).then((r) => r.items),
+  });
+  const selectedIds = new Set(values.map((line) => line.component_item_id));
+  const itemRows = items.data ?? [];
+  const add = () => {
+    const id = Number(componentId);
+    if (!id || Number(quantity) <= 0 || selectedIds.has(id)) return;
+    onChange([...values, {
+      component_item_id: id,
+      quantity: Number(quantity),
+      remarks,
+    }]);
+    setComponentId("");
+    setQuantity("1");
+    setRemarks("");
+  };
+  const columns: Column<DraftComponent>[] = [
+    { key: "name", header: "Component", render: (row) =>
+        itemRows.find((item) => item.id === row.component_item_id)?.name ?? "—" },
+    { key: "qty", header: "Quantity", render: (row) => row.quantity },
+    { key: "uom", header: "UOM", render: (row) =>
+        itemRows.find((item) => item.id === row.component_item_id)?.uom_code ?? "—" },
+    { key: "remarks", header: "Remarks", render: (row) => row.remarks || "—" },
+    { key: "act", header: "", render: (row) => (
+        <Button variant="ghost" className="text-bad"
+                onClick={() => onChange(values.filter(
+                  (line) => line.component_item_id !== row.component_item_id,
+                ))}>
+          Remove
+        </Button>
+      ) },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-[2fr_1fr_2fr_auto] md:items-end">
+        <Field label="Component item">
+          <Select value={componentId}
+                  options={itemRows
+                    .filter((item) => item.id !== itemId && !selectedIds.has(item.id))
+                    .map((item) => ({
+                      value: item.id, label: `${item.code} — ${item.name}`,
+                    }))}
+                  onChange={setComponentId} />
+        </Field>
+        <Field label="Quantity">
+          <Input type="number" min={0} value={quantity}
+                 onChange={(e) => setQuantity(e.target.value)} />
+        </Field>
+        <Field label="Remarks">
+          <Input value={remarks} onChange={(e) => setRemarks(e.target.value)} />
+        </Field>
+        <Button onClick={add}
+                disabled={!componentId || Number(quantity) <= 0}>
+          Add
+        </Button>
+      </div>
+      <ResponsiveList data={values} loading={items.isLoading}
+        keyOf={(row) => row.component_item_id} columns={columns}
+        empty="No components selected."
+        renderCard={(row) => {
+          const item = itemRows.find((candidate) =>
+            candidate.id === row.component_item_id);
+          return (
+            <div>
+              <div className="text-sm text-body">{item?.name ?? "—"}</div>
+              <div className="text-xs text-muted">
+                {row.quantity} {item?.uom_code ?? ""}
+              </div>
+            </div>
+          );
+        }} />
+    </div>
+  );
+}
+
 /** The kit's contents. Real items, so they can be issued and stock-checked. */
 function KitComponents({ itemId }: { itemId: number }) {
   const qc = useQueryClient();
@@ -533,7 +759,7 @@ function KitComponents({ itemId }: { itemId: number }) {
   const add = useMutation({
     mutationFn: () => mastersApi.itemComponents.create({
       item_id: itemId, component_item_id: Number(componentId),
-      line_no: (lines.data?.length ?? 0) + 1,
+      line_no: Math.max(0, ...(lines.data ?? []).map((line) => line.line_no)) + 1,
       quantity: Number(quantity), remarks: remarks || null,
     }),
     onSuccess: () => {
@@ -544,9 +770,15 @@ function KitComponents({ itemId }: { itemId: number }) {
   });
   const remove = useMutation({
     mutationFn: (id: number) => mastersApi.itemComponents.deactivate(id),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["masters", "item-components", itemId] }),
+    onSuccess: () => {
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["masters", "item-components", itemId] });
+    },
+    onError: (reason: Error) => setError(reason.message),
   });
+  const existingComponentIds = new Set(
+    (lines.data ?? []).map((line) => line.component_item_id),
+  );
 
   const columns: Column<MasterItemComponent>[] = [
     { key: "line", header: "#", render: (r) => r.line_no },
@@ -566,7 +798,8 @@ function KitComponents({ itemId }: { itemId: number }) {
         <Field label="Component item">
           <Select value={componentId}
                   options={(items.data ?? [])
-                    .filter((i) => i.id !== itemId)
+                    .filter((i) =>
+                      i.id !== itemId && !existingComponentIds.has(i.id))
                     .map((i) => ({ value: i.id, label: `${i.code} — ${i.name}` }))}
                   onChange={setComponentId} /></Field>
         <Field label="Quantity">
@@ -593,11 +826,23 @@ function KitComponents({ itemId }: { itemId: number }) {
   );
 }
 
-/** The packing ladder: 10 litres in a tray, 10 trays in a box, 10 boxes in a
- *  container. Only the rungs are entered; the running totals come back from the
- *  server, multiplied up, so they cannot disagree with the rungs. */
-function ItemPackagingLadder({ itemId, baseUom }: {
-  itemId: number; baseUom?: string | null;
+function amount(value: number) {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(3)));
+}
+
+export function packagingBreakupText(
+  row: PackagingBreakdown, baseUom?: string | null, itemName?: string,
+) {
+  const packages = row.package_breakup
+    .map((part) => `${amount(part.quantity)} ${part.package_name ?? "package"}`);
+  const product = `${amount(row.base_quantity)} ${row.base_uom_code ?? baseUom ?? "units"}`;
+  return `${packages.join(" = ")} = ${product}${itemName ? ` of ${itemName}` : ""}`;
+}
+
+/** An item's container ladder. Level 1 holds the item's UOM directly; each level
+ *  above contains a whole number of the package immediately below it. */
+function ItemPackagingLadder({ itemId, itemName, baseUom }: {
+  itemId: number; itemName: string; baseUom?: string | null;
 }) {
   const qc = useQueryClient();
   const [packageId, setPackageId] = useState("");
@@ -607,7 +852,8 @@ function ItemPackagingLadder({ itemId, baseUom }: {
   const rungs = useQuery({
     queryKey: ["masters", "item-packaging", itemId],
     queryFn: () => mastersApi.itemPackaging
-      .list({ item_id: itemId, size: 50 }).then((r) => r.items),
+      .list({ item_id: itemId, size: 50, include_inactive: true })
+      .then((r) => r.items),
   });
   const breakdown = useQuery({
     queryKey: ["masters", "packaging-breakdown", itemId],
@@ -618,13 +864,36 @@ function ItemPackagingLadder({ itemId, baseUom }: {
     queryFn: () => mastersApi.packaging.list({ size: 200 }).then((r) => r.items),
   });
 
-  const nextLevel = (rungs.data?.length ?? 0) + 1;
-  const below = breakdown.data?.[nextLevel - 2];
+  const activeRungs = (rungs.data ?? []).filter((rung) => rung.is_active);
+  const nextLevel = Math.max(0, ...activeRungs.map((rung) => rung.level)) + 1;
+  const below = breakdown.data?.find((row) => row.level === nextLevel - 1);
+  const inactiveAtNextLevel = (rungs.data ?? [])
+    .find((rung) => rung.level === nextLevel && !rung.is_active);
+  const selectedPackage = (packages.data ?? [])
+    .find((row) => row.id === Number(packageId));
+  const enteredQuantity = Number(quantity);
+  const quantityValid = enteredQuantity > 0
+    && (nextLevel === 1 || Number.isInteger(enteredQuantity));
+  const projectedBreakup = selectedPackage && quantityValid
+    ? [
+        { package_id: selectedPackage.id, package_name: selectedPackage.name,
+          quantity: 1 },
+        ...(below?.package_breakup ?? []).map((part) => ({
+          ...part, quantity: part.quantity * enteredQuantity,
+        })),
+      ]
+    : [];
+  const projectedBaseQuantity = enteredQuantity * (below?.base_quantity ?? 1);
   const add = useMutation({
-    mutationFn: () => mastersApi.itemPackaging.create({
-      item_id: itemId, level: nextLevel, package_id: Number(packageId),
-      quantity: Number(quantity),
-    }),
+    mutationFn: () => {
+      const payload = {
+        item_id: itemId, level: nextLevel, package_id: Number(packageId),
+        quantity: enteredQuantity, is_active: true,
+      };
+      return inactiveAtNextLevel
+        ? mastersApi.itemPackaging.update(inactiveAtNextLevel.id, payload)
+        : mastersApi.itemPackaging.create(payload);
+    },
     onSuccess: () => {
       setPackageId(""); setQuantity(""); setError(null);
       qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
@@ -635,58 +904,87 @@ function ItemPackagingLadder({ itemId, baseUom }: {
   const remove = useMutation({
     mutationFn: (id: number) => mastersApi.itemPackaging.deactivate(id),
     onSuccess: () => {
+      setError(null);
       qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
       qc.invalidateQueries({ queryKey: ["masters", "packaging-breakdown", itemId] });
     },
+    onError: (reason: Error) => setError(reason.message),
   });
+  const highestLevel = Math.max(0, ...activeRungs.map((rung) => rung.level));
 
   const columns: Column<MasterItemPackaging>[] = [
     { key: "level", header: "Level", render: (r) => r.level },
-    { key: "pkg", header: "Package", render: (r) => r.package_name ?? "—" },
-    { key: "holds", header: "Holds", render: (r) => {
+    { key: "breakup", header: "Packaging breakup", render: (r) => {
         const row = breakdown.data?.find((b) => b.level === r.level);
-        const inner = r.level === 1
-          ? `${r.quantity} ${baseUom ?? ""}`
-          : `${r.quantity} × ${breakdown.data?.find((b) => b.level === r.level - 1)?.package_name ?? "below"}`;
-        return row ? `${inner.trim()}  =  ${row.base_quantity} ${row.base_uom_code ?? ""}`.trim()
-                   : inner.trim();
+        return row ? packagingBreakupText(row, baseUom, itemName) : "Calculating…";
+      } },
+    { key: "end", header: "End product", hideOnNarrow: true, render: (r) => {
+        const row = breakdown.data?.find((b) => b.level === r.level);
+        return row
+          ? `${amount(row.base_quantity)} ${row.base_uom_code ?? baseUom ?? "units"}`
+          : "—";
       } },
     { key: "act", header: "", render: (r) => (
-        <Button variant="ghost" className="text-bad"
-                onClick={() => remove.mutate(r.id)}>Remove</Button>) },
+        r.level === highestLevel
+          ? <Button variant="ghost" className="text-bad"
+                    onClick={() => remove.mutate(r.id)}>Remove</Button>
+          : null) },
   ];
 
   return (
     <div className="space-y-4">
       {error && <div className="rounded-lg bg-bad-bg p-3 text-sm text-bad">{error}</div>}
       <p className="text-sm text-muted">
-        Build it from the smallest pack upwards. Level 1 is measured in the item's own
-        unit ({baseUom ?? "—"}); every level above counts the level below it.
+        Level 1 contains the product directly in {baseUom ?? "the item's UOM"}.
+        Each higher level contains a whole number of the container immediately below.
       </p>
       <div className="grid gap-3 md:grid-cols-[2fr_1fr_auto] md:items-end">
-        <Field label={`Level ${nextLevel} package`}>
+        <Field label={`Level ${nextLevel} container type`}>
           <Select value={packageId}
                   options={(packages.data ?? [])
+                    .filter((p) => p.is_active)
                     .map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))}
                   onChange={setPackageId} /></Field>
         <Field label={nextLevel === 1
-          ? `How many ${baseUom ?? "units"} it holds`
-          : `How many ${below?.package_name ?? "below"} it holds`}>
-          <Input type="number" min={0} value={quantity}
+          ? `End product quantity (${baseUom ?? "item UOM"})`
+          : `${below?.package_name ?? "Lower containers"} inside one`}>
+          <Input type="number" min={0} step={nextLevel === 1 ? "0.001" : "1"}
+                 value={quantity}
                  onChange={(e) => setQuantity(e.target.value)} /></Field>
         <Button onClick={() => add.mutate()}
-                disabled={!packageId || Number(quantity) <= 0 || add.isPending}>
+                disabled={!packageId || !quantityValid || add.isPending}>
           Add level {nextLevel}
         </Button>
       </div>
-      <ResponsiveList data={rungs.data ?? []} loading={rungs.isLoading}
+      {quantity && nextLevel > 1 && !Number.isInteger(enteredQuantity) && (
+        <div className="text-sm text-bad">
+          Enter a whole number of {below?.package_name ?? "lower containers"}.
+        </div>
+      )}
+      {projectedBreakup.length > 0 && (
+        <div className="rounded-lg bg-content2 px-3 py-2 text-sm text-body">
+          Preview: {packagingBreakupText({
+            level: nextLevel,
+            package_id: selectedPackage!.id,
+            package_name: selectedPackage!.name,
+            quantity: enteredQuantity,
+            package_breakup: projectedBreakup,
+            base_quantity: projectedBaseQuantity,
+            base_uom_code: baseUom,
+          }, baseUom, itemName)}
+        </div>
+      )}
+      <ResponsiveList data={activeRungs} loading={rungs.isLoading}
         keyOf={(r) => r.id} columns={columns}
         empty="No packaging levels yet."
         renderCard={(r) => (
           <div>
             <div className="text-sm text-body">Level {r.level} · {r.package_name}</div>
             <div className="text-xs text-muted">
-              {breakdown.data?.find((b) => b.level === r.level)?.base_quantity} {baseUom}
+              {(() => {
+                const row = breakdown.data?.find((b) => b.level === r.level);
+                return row ? packagingBreakupText(row, baseUom, itemName) : "Calculating…";
+              })()}
             </div>
           </div>
         )} />

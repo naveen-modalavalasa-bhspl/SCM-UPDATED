@@ -59,6 +59,9 @@ class MasterDef:
     # the request asks for it with ?mine=true. Declared data rather than a branch in
     # the handler, because only the item master has anything to narrow by.
     scope_to_user: Callable | None = None
+    # Optional guard for masters whose active rows form an ordered structure. Item
+    # packaging, for example, may remove only its highest level.
+    before_deactivate: Callable | None = None
 
 
 async def _write(db: AsyncSession, defn: MasterDef, commit: bool = False) -> None:
@@ -202,6 +205,8 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
             raise NotFoundError(f"{defn.name} not found")
         if not hasattr(row, "is_active"):
             raise ValidationError(f"{defn.name} cannot be deactivated")
+        if defn.before_deactivate is not None:
+            await defn.before_deactivate(db, row)
         row.is_active = False
         await db.flush()
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,

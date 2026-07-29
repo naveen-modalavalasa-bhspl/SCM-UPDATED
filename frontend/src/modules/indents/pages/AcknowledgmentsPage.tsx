@@ -1,53 +1,139 @@
+import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2 } from "lucide-react";
-import { Card, PageHeader } from "@/shared/components";
-import { indentApi } from "../api";
+import { CheckCircle2, XCircle } from "lucide-react";
+import { Card } from "@/shared/components";
+import { indentApi, indentKeys, useIndentAccountCacheIsolation, useIndentAccountScope } from "../api";
+import type { AcknowledgmentRow } from "../types";
+import { IndentModuleHeader } from "../components/IndentModuleHeader";
+import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
+import { formatIndentDateTime } from "../dateTime";
 
-function dateTime(value: string) {
-  return new Date(value).toLocaleString(undefined, {
-    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
-  });
+function actionLabel(row: AcknowledgmentRow) {
+  const action = row.action.replace(/_/g, " ").toLowerCase();
+  return row.stage_name ? `${action} at ${row.stage_name}` : action;
 }
 
-export function IndentAcknowledgmentsPage() {
+function isRejectedAction(row: AcknowledgmentRow) {
+  return row.action.toUpperCase() === "REJECTED";
+}
+
+function IndentAcknowledgmentsContent() {
   const nav = useNavigate();
-  const { data, isLoading } = useQuery({
-    queryKey: ["indent-acknowledgments"],
-    queryFn: () => indentApi.acknowledgments({ size: 100 }),
+  const accountScope = useIndentAccountScope();
+  useIndentAccountCacheIsolation(accountScope);
+  const size = 20;
+  const {
+    search,
+    startDate,
+    endDate,
+    requiredByFrom,
+    requiredByTo,
+    selectedStatuses,
+    selectedPriorities,
+    page,
+    setPage,
+  } = useIndentFilters();
+  const hasCompleteDateRange = Boolean(startDate && endDate);
+
+  const queryParams = useMemo(() => ({
+    page,
+    size,
+    search: search || undefined,
+    date_from: hasCompleteDateRange ? startDate : undefined,
+    date_to: hasCompleteDateRange ? endDate : undefined,
+    required_from: requiredByFrom || undefined,
+    required_to: requiredByTo || undefined,
+    status: selectedStatuses.length ? selectedStatuses : undefined,
+    priority: selectedPriorities.length ? selectedPriorities : undefined,
+  }), [endDate, hasCompleteDateRange, page, requiredByFrom, requiredByTo, search, selectedPriorities, selectedStatuses, size, startDate]);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: indentKeys.acknowledgments(accountScope, queryParams),
+    queryFn: () => indentApi.acknowledgments(queryParams),
+    placeholderData: (previousData) => previousData,
   });
+
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / size));
 
   return (
     <>
-      <PageHeader eyebrow="Material Requests" title="Acknowledgments" />
-      <Card className="divide-y divide-line">
-        {isLoading && <p className="p-5 text-sm text-muted">Loading acknowledgments…</p>}
-        {data?.items.map((row) => (
+      <IndentModuleHeader title="Acknowledgments" showCreate={false} filterMode="acknowledgments" />
+
+      {error && (
+        <p className="mb-4 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">
+          {error.message}
+        </p>
+      )}
+
+      <Card className="overflow-hidden rounded-2xl border border-line/70 bg-white shadow-sm">
+        {isLoading && <p className="p-5 text-sm text-muted">Loading acknowledgments...</p>}
+
+        {!isLoading && (data?.items ?? []).map((row) => {
+          const rejected = isRejectedAction(row);
+          return (
           <button
             key={row.id}
+            type="button"
             onClick={() => nav(`/indents/${row.indent_id}`)}
-            className="flex w-full gap-3 p-4 text-left hover:bg-content2"
+            className="flex w-full items-center gap-4 border-b border-line/70 px-5 py-4 text-left last:border-b-0 hover:bg-content2/70"
           >
-            <span className="mt-0.5 rounded-full bg-ok-bg p-2 text-ok">
-              <CheckCircle2 className="h-4 w-4" />
+            <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${
+              rejected ? "bg-bad-bg text-bad" : "bg-ok-bg text-ok"
+            }`}>
+              {rejected ? <XCircle className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
             </span>
             <span className="min-w-0 flex-1">
-              <span className="flex flex-wrap items-center justify-between gap-2">
-                <strong className="mono text-sm text-ink">{row.indent_no}</strong>
-                <span className="text-xs text-muted">{dateTime(row.acted_at)}</span>
+              <strong className="mono block truncate text-sm font-bold text-ink">{row.indent_no}</strong>
+              <span className="mt-1 block truncate text-sm text-body">
+                {row.actor_name ?? "Workflow user"} {" · "} {actionLabel(row)}
               </span>
-              <span className="mt-1 block text-sm text-body">
-                {row.actor_name ?? "Workflow user"} · {row.action.replace(/_/g, " ").toLowerCase()}
-                {row.stage_name ? ` at ${row.stage_name}` : ""}
-              </span>
-              {row.comments && <span className="mt-1 block text-xs text-muted">{row.comments}</span>}
             </span>
+            <time className="shrink-0 text-right text-xs tabular-nums text-muted" dateTime={row.acted_at}>
+              {formatIndentDateTime(row.acted_at)}
+            </time>
           </button>
-        ))}
+          );
+        })}
+
         {!isLoading && data?.items.length === 0 && (
-          <p className="p-8 text-center text-sm text-muted">No acknowledgments recorded yet.</p>
+          <p className="p-8 text-center text-sm text-muted">
+            {search ? `No acknowledgments found for “${search}”` : "No acknowledgments recorded yet."}
+          </p>
         )}
       </Card>
+
+      {data && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-muted">
+          <span>Page {page} of {totalPages} ({data.total} total)</span>
+          <span className="flex gap-2">
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage(page - 1)}
+              className="rounded-lg border border-line px-3 py-1.5 font-medium text-body disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() => setPage(page + 1)}
+              className="rounded-lg border border-line px-3 py-1.5 font-medium text-body disabled:opacity-40"
+            >
+              Next
+            </button>
+          </span>
+        </div>
+      )}
     </>
+  );
+}
+
+export function IndentAcknowledgmentsPage() {
+  return (
+    <IndentFilterProvider>
+      <IndentAcknowledgmentsContent />
+    </IndentFilterProvider>
   );
 }

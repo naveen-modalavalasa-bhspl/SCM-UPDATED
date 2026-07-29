@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
   AllocationDecision,
+  Allocation,
   AllocationListRow,
   AllocationProposal,
   CatalogItemOption,
@@ -16,6 +17,7 @@ import type {
   StockTransferCreate,
   VendorOption,
   WarehouseOption,
+  WorkflowPending,
 } from "./types";
 
 /**
@@ -208,6 +210,13 @@ export const listAllocations = (params?: { status?: string; indent_id?: number }
     .get<Page<AllocationListRow>>("/api/allocations", { params: { ...params, size: 100 } })
     .then((r) => r.data);
 
+export const getAllocation = (id: number) =>
+  api.get<Allocation>(`/api/allocations/${id}`).then((r) => r.data);
+
+export const getPendingInventoryApprovals = () =>
+  api.get<{ items: WorkflowPending[] }>("/api/workflow/pending")
+    .then((r) => r.data.items.filter((item) => item.doc_type === "ALLOCATION"));
+
 // ---- New Inventory Module Endpoints ----
 
 export const getOverviewKPIs = () =>
@@ -315,4 +324,3 @@ export const inventoryApi = {
   rejectStockAdjustment,
   getReplenishments,
 };
-

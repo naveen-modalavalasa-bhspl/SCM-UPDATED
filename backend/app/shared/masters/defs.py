@@ -65,10 +65,12 @@ def build_item_prefix(category_path: str, general_code: str, brand_code: str,
     if not re.fullmatch(r"\d{6}", category_path or ""):
         raise ValidationError("Select a Level 3 category with a six-digit category path")
     parts = [general_code, brand_code, manufacturer_code]
-    if any(not re.fullmatch(r"[A-Z0-9]+", (part or "").strip().upper())
+    if any(not re.fullmatch(
+        r"[A-Z0-9]+(?:-[A-Z0-9]+)*", (part or "").strip().upper())
            for part in parts):
         raise ValidationError(
-            "General name, brand and manufacturer codes must be letters and numbers only"
+            "General name, brand and manufacturer codes may contain letters, "
+            "numbers and internal hyphens only"
         )
     return "-".join([category_path, *(part.strip().upper() for part in parts)])
 
@@ -197,8 +199,21 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         if data.item_sub_class_id else None
     dosage = await db.get(DosageForm, data.dosage_form_id) \
         if data.dosage_form_id else None
-    if not all((uom, category, general, brand, manufacturer, item_class)):
-        raise ValidationError("Category, general name, brand, manufacturer, class and UOM are required")
+    missing = []
+    if category is None:
+        missing.append("category")
+    if general is None:
+        missing.append("general name")
+    if brand is None:
+        missing.append("brand")
+    if manufacturer is None:
+        missing.append("manufacturer")
+    if item_class is None:
+        missing.append("item class")
+    if uom is None:
+        missing.append("UOM")
+    if missing:
+        raise ValidationError(f"Missing required item fields: {', '.join(missing)}")
     if hsn is None:
         raise ValidationError("An HSN code is required")
     if category.level != 3:
@@ -569,7 +584,9 @@ def vendor_out(v: Vendor) -> dict:
 #  Item identity lookups
 # --------------------------------------------------------------------------- #
 class NamedCodeIn(BaseModel):
-    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
+    code: str = Field(
+        min_length=1, max_length=10,
+        pattern=r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
     name: str
     description: str | None = None
     is_active: bool = True
@@ -594,7 +611,9 @@ def named_code_apply(model: type, label: str):
 
 
 class BrandIn(BaseModel):
-    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
+    code: str = Field(
+        min_length=1, max_length=10,
+        pattern=r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
     name: str
     description: str | None = None
     # A brand's manufacturers, edited here rather than on a screen of their own. One
@@ -685,7 +704,9 @@ async def apply_brand_manufacturer(
 
 
 class ItemClassIn(BaseModel):
-    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
+    code: str = Field(
+        min_length=1, max_length=10,
+        pattern=r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
     name: str
     description: str | None = None
     is_active: bool = True
@@ -708,7 +729,9 @@ async def apply_item_class(db: AsyncSession, row: ItemClass, data: ItemClassIn) 
 
 class ItemSubClassIn(BaseModel):
     item_class_id: int
-    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9]+$")
+    code: str = Field(
+        min_length=1, max_length=10,
+        pattern=r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
     name: str
     description: str | None = None
     is_active: bool = True
@@ -734,18 +757,13 @@ async def apply_item_sub_class(
 
 
 class PackagingIn(BaseModel):
-    """A kind of container — Tray, Box, Container — and nothing about what it holds.
+    """A reusable container type — Packet, Box, Tanker.
 
-    qty_per_pack is gone: a tray of milk holds 10 litres and a tray of vials holds
-    200, so the quantity is a property of the item's chain, not of the tray.
+    Dimensions, weight, volume and capacity do not belong here. How much a container
+    holds is configured independently for each item and its own UOM.
     """
     code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9-]+$")
     name: str
-    length_cm: float | None = None
-    width_cm: float | None = None
-    height_cm: float | None = None
-    weight_kg: float | None = None
-    is_returnable: bool = False
     is_active: bool = True
 
 
@@ -755,17 +773,10 @@ def _num(value):
 
 def packaging_out(p: Packaging) -> dict:
     return {"id": p.id, "code": p.code, "name": p.name,
-            "length_cm": _num(p.length_cm), "width_cm": _num(p.width_cm),
-            "height_cm": _num(p.height_cm), "weight_kg": _num(p.weight_kg),
-            "is_returnable": p.is_returnable, "is_active": p.is_active}
+            "is_active": p.is_active}
 
 
 async def apply_packaging(db: AsyncSession, row: Packaging, data: PackagingIn) -> None:
-    for name in ("length_cm", "width_cm", "height_cm", "weight_kg"):
-        value = getattr(data, name)
-        if value is not None and value <= 0:
-            raise ValidationError(
-                f"{name.replace('_', ' ')} must be greater than zero")
     await require_unique(db, Packaging, "name", data.name, row, "A package named")
     await require_unique(db, Packaging, "code", data.code, row, "Package code")
     for key, value in data.model_dump().items():
@@ -944,7 +955,6 @@ class ItemPackagingIn(BaseModel):
     level: int
     package_id: int
     quantity: float
-    uom_id: int | None = None
     is_active: bool = True
 
 
@@ -970,16 +980,17 @@ async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
     package = await db.get(Packaging, data.package_id)
     if package is None:
         raise ValidationError("Package not found")
-    uom = await db.get(Uom, data.uom_id) if data.uom_id else None
-    if data.uom_id is not None and uom is None:
-        raise ValidationError("Unit of measure not found")
+    if data.level > 1 and not float(data.quantity).is_integer():
+        raise ValidationError(
+            "Levels above 1 must contain a whole number of the package below")
 
     # A ladder with a missing rung cannot be multiplied up, so a level may only be
     # added directly on top of one that already exists.
     if data.level > 1:
         below = await db.scalar(select(ItemPackaging.id).where(
             ItemPackaging.item_id == data.item_id,
-            ItemPackaging.level == data.level - 1))
+            ItemPackaging.level == data.level - 1,
+            ItemPackaging.is_active.is_(True)))
         if below is None:
             raise ValidationError(
                 f"Add level {data.level - 1} before level {data.level}")
@@ -987,10 +998,21 @@ async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
     for key, value in data.model_dump().items():
         setattr(row, key, value)
     row.package_name = package.name
-    # Level 1 measures the item itself; above that the unit is the package below.
-    row.uom_code = uom.code if uom else (item.uom_code if data.level == 1 else None)
-    if uom is None and data.level == 1:
-        row.uom_id = item.uom_id
+    # Every result is ultimately expressed in the item's own stocking UOM.
+    row.uom_id, row.uom_code = item.uom_id, item.uom_code
+
+
+async def validate_item_packaging_deactivate(
+    db: AsyncSession, row: ItemPackaging,
+) -> None:
+    higher = await db.scalar(select(ItemPackaging.id).where(
+        ItemPackaging.item_id == row.item_id,
+        ItemPackaging.level > row.level,
+        ItemPackaging.is_active.is_(True),
+    ))
+    if higher is not None:
+        raise ValidationError(
+            "Remove the highest packaging level first")
 
 
 async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
@@ -1009,12 +1031,26 @@ async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
     )).scalars().all()
 
     out, running = [], 1.0
-    for row in rows:
+    for index, row in enumerate(rows):
+        if row.level != index + 1:
+            raise ValidationError(
+                f"Packaging level {index + 1} is missing; rebuild the ladder in order")
         running *= float(row.quantity or 0)
+        package_breakup, package_count = [], 1.0
+        for lower_index in range(index, -1, -1):
+            lower = rows[lower_index]
+            package_breakup.append({
+                "package_id": lower.package_id,
+                "package_name": lower.package_name,
+                "quantity": _num(package_count),
+            })
+            if lower_index > 0:
+                package_count *= float(lower.quantity or 0)
         out.append({
             "level": row.level, "package_id": row.package_id,
             "package_name": row.package_name, "quantity": _num(row.quantity),
             "uom_code": row.uom_code,
+            "package_breakup": package_breakup,
             # What one of this package holds, expressed in the item's own unit.
             "base_quantity": running, "base_uom_code": item.uom_code,
         })
@@ -1052,6 +1088,9 @@ async def apply_item_component(db: AsyncSession, row: ItemComponent,
     kit = await db.get(Item, data.item_id)
     if kit is None:
         raise ValidationError("Item not found")
+    if not kit.has_components:
+        raise ValidationError(
+            "Turn on Has Components / Kit and save the item before adding components")
     component = await db.get(Item, data.component_item_id)
     if component is None:
         raise ValidationError("Component item not found")
@@ -1072,7 +1111,7 @@ async def apply_item_component(db: AsyncSession, row: ItemComponent,
 #  HSN codes — the tax classification
 # --------------------------------------------------------------------------- #
 class HsnIn(BaseModel):
-    code: str = Field(min_length=4, max_length=8, pattern=r"^\d+$")
+    code: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
     description: str | None = None
     cgst_rate: float = 0
     sgst_rate: float = 0
@@ -1306,13 +1345,16 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="item-packaging", name="Item packaging", model=ItemPackaging,
               schema=ItemPackagingIn, manage_perm=perms.MASTER_PACKAGING_MANAGE,
               serialize=item_packaging_out, order_col="level",
-              apply=apply_item_packaging, filters=("item_id",)),
+              apply=apply_item_packaging, filters=("item_id",),
+              default_active_only=True,
+              before_deactivate=validate_item_packaging_deactivate),
 
     MasterDef(path="item-components", name="Kit component", model=ItemComponent,
               schema=ItemComponentIn, manage_perm=perms.MASTER_ITEM_MANAGE,
               serialize=item_component_out,
               search_cols=("component_name", "component_code"), order_col="line_no",
-              apply=apply_item_component, filters=("item_id",)),
+              apply=apply_item_component, filters=("item_id",),
+              default_active_only=True),
 
     # ---- tax classification ----
     MasterDef(path="hsn-codes", name="HSN code", model=HsnCode, schema=HsnIn,

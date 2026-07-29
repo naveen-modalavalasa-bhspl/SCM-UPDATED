@@ -60,7 +60,12 @@ export const mastersApi = {
   categoryTags: crud<MasterCategoryTag>("/api/category-tags"),
   itemGroups: crud<MasterItemGroup>("/api/item-groups"),
   itemComponents: crud<MasterItemComponent>("/api/item-components"),
-  hsnCodes: crud<MasterHsnCode>("/api/hsn-codes"),
+  hsnCodes: {
+    ...crud<MasterHsnCode>("/api/hsn-codes"),
+    resolve: (code: string) =>
+      api.post<MasterHsnCode>("/api/hsn-codes/resolve", { code })
+        .then((r) => r.data),
+  },
   boms: crud<MasterBom>("/api/boms"),
   bomItems: crud<MasterBomItem>("/api/bom-items"),
 

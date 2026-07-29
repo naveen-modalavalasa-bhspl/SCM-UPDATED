@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Tab, Tabs } from "@heroui/react";
+import { Plus, Trash2 } from "lucide-react";
 import {
-  Button, Can, Card, Field, PageHeader, Select, type Column,
+  Button, Can, Card, Field, Input, PageHeader, Select, type Column,
 } from "@/shared/components";
 import { mastersApi } from "../api";
 import { MasterCrud, type Option } from "../components/MasterCrud";
@@ -29,11 +30,11 @@ const Code = ({ children }: { children: React.ReactNode }) => (
   <span className="mono font-semibold text-ink">{children}</span>
 );
 
-/** A short code, letters and digits only — it becomes part of every item code. */
+/** A short item-identity code. Imported masters use segments such as GN-003. */
 const CODE_RULE = {
   maxLength: 10,
-  pattern: /^[A-Za-z0-9]+$/,
-  patternMessage: "Use letters and numbers only, no spaces or symbols",
+  pattern: /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/,
+  patternMessage: "Use letters, numbers and internal hyphens only",
 } as const;
 
 const WAREHOUSE_TYPES: Option[] = ["MAIN", "LIP", "MDP", "TRANSIT", "QUARANTINE", "SCRAP"]
@@ -591,8 +592,8 @@ function HsnCodesTab() {
       fetchList={(search) => mastersApi.hsnCodes.list({ search, size: 300 }).then((p) => p.items)}
       fields={[
         { key: "code", label: "HSN / SAC code", required: true, maxLength: 8,
-          pattern: /^\d{4,8}$/,
-          patternMessage: "An HSN code is 4 to 8 digits" },
+          pattern: /^\d{8}$/,
+          patternMessage: "Enter exactly 8 digits, for example 10063010" },
         { key: "description", label: "Description", maxLength: 300 },
         { key: "cgst_rate", label: "CGST %", ...RATE_RULE },
         { key: "sgst_rate", label: "SGST %", ...RATE_RULE },
@@ -665,10 +666,9 @@ function PackagingTab() {
   return (
     <>
       <div className="mb-3 rounded-xl bg-content2 px-4 py-3 text-sm text-muted">
-        A package is a <strong className="text-body">kind of container</strong> — a
-        tray, a box, a shipping container. How much of an item one holds is set per
-        item, on that item's Packaging tab: a tray of milk and a tray of vials hold
-        very different amounts.
+        Maintain reusable <strong className="text-body">container types</strong> such
+        as Packet, Box and Tanker. Capacity is configured per item on its Packaging
+        tab because the same container type can hold different products and units.
       </div>
       <MasterCrud<MasterPackaging>
         title="Package" queryKey="packaging" searchable
@@ -676,12 +676,6 @@ function PackagingTab() {
         columns={[
           { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
           { key: "name", header: "Name", render: (r) => r.name },
-          { key: "size", header: "Size (cm)", hideOnNarrow: true, render: (r) =>
-              r.length_cm ? [r.length_cm, r.width_cm ?? "—", r.height_cm ?? "—"].join(" × ") : "—" },
-          { key: "kg", header: "Weight (kg)", hideOnNarrow: true,
-            render: (r) => r.weight_kg ?? "—" },
-          { key: "ret", header: "Returnable", hideOnNarrow: true,
-            render: (r) => (r.is_returnable ? "Yes" : "No") },
           { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
         ]}
         renderCard={(r) => (
@@ -690,9 +684,6 @@ function PackagingTab() {
               <Code>{r.code}</Code><Active on={r.is_active} />
             </div>
             <div className="text-sm text-body">{r.name}</div>
-            <div className="text-xs text-muted">
-              {r.is_returnable ? "Returnable" : "One-way"}
-            </div>
           </div>
         )}
         fetchList={(search) => mastersApi.packaging.list({ search, size: 200 }).then((p) => p.items)}
@@ -700,21 +691,11 @@ function PackagingTab() {
           { key: "code", label: "Code", required: true, maxLength: 50,
             pattern: /^[A-Za-z0-9-]+$/,
             patternMessage: "Use letters, numbers or a hyphen" },
-          { key: "name", label: "Name", required: true, maxLength: 200 },
-          { key: "length_cm", label: "Length (cm)", type: "number", min: 0 },
-          { key: "width_cm", label: "Width (cm)", type: "number", min: 0 },
-          { key: "height_cm", label: "Height (cm)", type: "number", min: 0 },
-          { key: "weight_kg", label: "Empty weight (kg)", type: "number", min: 0 },
-          { key: "is_returnable", label: "Returnable", type: "switch" },
+          { key: "name", label: "Container type", required: true, maxLength: 200 },
           { key: "is_active", label: "Active", type: "switch" },
         ]}
-        emptyForm={{ code: "", name: "", length_cm: null, width_cm: null,
-                     height_cm: null, weight_kg: null, is_returnable: false,
-                     is_active: true }}
-        toForm={(r) => ({ code: r.code, name: r.name, length_cm: r.length_cm ?? null,
-          width_cm: r.width_cm ?? null, height_cm: r.height_cm ?? null,
-          weight_kg: r.weight_kg ?? null, is_returnable: r.is_returnable,
-          is_active: r.is_active })}
+        emptyForm={{ code: "", name: "", is_active: true }}
+        toForm={(r) => ({ code: r.code, name: r.name, is_active: r.is_active })}
         onCreate={(v) => mastersApi.packaging.create(v as Partial<MasterPackaging>)}
         onUpdate={(id, v) => mastersApi.packaging.update(id, v as Partial<MasterPackaging>)}
         onDeactivate={mastersApi.packaging.deactivate}
@@ -920,13 +901,15 @@ function CategoryTaggingTab({ categories }: { categories: Option[] }) {
               { value: "ATTRIBUTE", label: "Attribute — a selectable trait" },
               { value: "SPEC", label: "Spec — a measurement with a unit" },
               { value: "FEATURE", label: "Feature — a yes/no trait" },
-            ] },
+            ],
+            clearOnChange: ["tag_id"],
+            onChange: (value) => setTagType((value || "ATTRIBUTE") as CategoryTagType) },
           { key: "tag_id", label: "Which one", type: "select", options: tagOpts,
             required: true },
           { key: "is_required", label: "Required on the item", type: "switch" },
           { key: "is_active", label: "Active", type: "switch" },
         ]}
-        emptyForm={{ category_id: null, tag_type: "ATTRIBUTE", tag_id: null,
+        emptyForm={{ category_id: null, tag_type: tagType, tag_id: null,
                      is_required: false, is_active: true }}
         toForm={(r) => {
           // Keeps the "which one" dropdown showing the right master when an
@@ -966,7 +949,7 @@ function ItemGroupsTab({ items }: { items: Option[] }) {
         sees the whole catalogue — nobody is ever left with an empty picker.
       </div>
       <MasterCrud<MasterItemGroup>
-        title="Item group" queryKey="item-groups" searchable
+        title="User group mapping" queryKey="item-groups" searchable
         managePerm="master.item.manage"
         columns={[
           { key: "group", header: "Group", render: (r) => r.group_name ?? r.group_id },
@@ -989,16 +972,28 @@ function ItemGroupsTab({ items }: { items: Option[] }) {
         fields={[
           { key: "group_id", label: "User group", type: "select", options: groupOpts,
             required: true },
-          { key: "item_id", label: "Item", type: "select", options: items,
+          { key: "item_ids", label: "Items", type: "multiselect", options: items,
             required: true },
           { key: "is_active", label: "Active", type: "switch" },
         ]}
-        emptyForm={{ group_id: null, item_id: null, is_active: true }}
-        toForm={(r) => ({ group_id: r.group_id, item_id: r.item_id,
+        emptyForm={{ group_id: null, item_ids: [], is_active: true }}
+        toForm={(r) => ({ group_id: r.group_id, item_ids: [r.item_id],
           is_active: r.is_active })}
-        onCreate={(v) => mastersApi.itemGroups.create(v as Partial<MasterItemGroup>)}
+        onCreate={async (v) => {
+          const itemIds = Array.isArray(v.item_ids) ? v.item_ids : [];
+          for (const itemId of itemIds) {
+            await mastersApi.itemGroups.create({
+              group_id: Number(v.group_id), item_id: Number(itemId),
+              is_active: Boolean(v.is_active),
+            });
+          }
+        }}
         onUpdate={(id, v) =>
-          mastersApi.itemGroups.update(id, v as Partial<MasterItemGroup>)}
+          mastersApi.itemGroups.update(id, {
+            group_id: Number(v.group_id),
+            item_id: Number(Array.isArray(v.item_ids) ? v.item_ids[0] : v.item_ids),
+            is_active: Boolean(v.is_active),
+          })}
         onDeactivate={mastersApi.itemGroups.deactivate}
       />
     </>
@@ -1006,6 +1001,7 @@ function ItemGroupsTab({ items }: { items: Option[] }) {
 }
 
 function BomsTab({ projects }: { projects: Option[] }) {
+  const qc = useQueryClient();
   return (
     <>
       <div className="mb-3 rounded-xl bg-content2 px-4 py-3 text-sm text-muted">
@@ -1049,8 +1045,16 @@ function BomsTab({ projects }: { projects: Option[] }) {
         toForm={(r) => ({ code: r.code, name: r.name,
           project_id: r.project_id ?? null, description: r.description ?? "",
           is_active: r.is_active })}
-        onCreate={(v) => mastersApi.boms.create(v as Partial<MasterBom>)}
-        onUpdate={(id, v) => mastersApi.boms.update(id, v as Partial<MasterBom>)}
+        onCreate={async (v) => {
+          const saved = await mastersApi.boms.create(v as Partial<MasterBom>);
+          qc.invalidateQueries({ queryKey: ["masters", "boms-all"] });
+          return saved;
+        }}
+        onUpdate={async (id, v) => {
+          const saved = await mastersApi.boms.update(id, v as Partial<MasterBom>);
+          qc.invalidateQueries({ queryKey: ["masters", "boms-all"] });
+          return saved;
+        }}
         onDeactivate={mastersApi.boms.deactivate}
       />
       <BomLines />
@@ -1061,7 +1065,12 @@ function BomsTab({ projects }: { projects: Option[] }) {
 /** The lines of one chosen BOM. Kept beside the header list rather than behind a
  *  row click, because building a kit means adding a dozen lines in a row. */
 function BomLines() {
+  const qc = useQueryClient();
   const [bomId, setBomId] = useState<string>("");
+  const [lines, setLines] = useState<Array<{ item_id: string | number | ""; quantity: number | ""; remarks: string }>>([
+    { item_id: "", quantity: 1, remarks: "" },
+  ]);
+  const [error, setError] = useState<string | null>(null);
   const boms = useQuery({
     queryKey: ["masters", "boms-all"],
     queryFn: () => mastersApi.boms.list({ size: 300 }).then((p) => p.items),
@@ -1070,25 +1079,173 @@ function BomLines() {
     queryKey: ["masters", "items-all"],
     queryFn: () => mastersApi.items.list({ size: 300 }).then((p) => p.items),
   });
+  const existingItems = useQuery({
+    queryKey: ["masters", "bom-items-" + bomId, ""],
+    queryFn: () => mastersApi.bomItems
+      .list({ bom_id: Number(bomId), size: 300 }).then((p) => p.items),
+    enabled: Boolean(bomId),
+  });
   const bomOpts: Option[] = (boms.data ?? [])
     .map((b) => ({ value: b.id, label: b.code + " — " + b.name }));
   const itemOpts: Option[] = (items.data ?? [])
     .map((i) => ({ value: i.id, label: i.code + " — " + i.name }));
+  const existingItemIds = new Set(
+    (existingItems.data ?? []).map((line) => String(line.item_id)),
+  );
+  const nextLineNo = Math.max(
+    0,
+    ...(existingItems.data ?? []).map((line) => line.line_no),
+  ) + 1;
+  const selectedItemIds = lines
+    .filter((line) => line.item_id !== "")
+    .map((line) => String(line.item_id));
+  const repeatedItemId = selectedItemIds.find(
+    (itemId, index) => selectedItemIds.indexOf(itemId) !== index,
+  );
+  const alreadyInTemplateId = selectedItemIds.find(
+    (itemId) => existingItemIds.has(itemId),
+  );
+  const batchError = repeatedItemId
+    ? "The same item cannot be added twice in one batch."
+    : alreadyInTemplateId
+      ? "That item is already in this template."
+      : null;
+  const validLines = lines.filter(
+    (line) => line.item_id !== "" && line.quantity !== "" && Number(line.quantity) > 0,
+  );
+  const addLines = useMutation({
+    mutationFn: async () => {
+      if (batchError) throw new Error(batchError);
+      if (validLines.length !== selectedItemIds.length) {
+        throw new Error("Quantity must be greater than zero for every selected item.");
+      }
+      for (const [index, line] of validLines.entries()) {
+        await mastersApi.bomItems.create({
+          bom_id: Number(bomId),
+          item_id: Number(line.item_id),
+          line_no: nextLineNo + index,
+          quantity: Number(line.quantity),
+          remarks: line.remarks || null,
+        });
+      }
+    },
+    onSuccess: () => {
+      setLines([{ item_id: "", quantity: 1, remarks: "" }]);
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["masters", "bom-items-" + bomId] });
+      qc.invalidateQueries({ queryKey: ["masters", "boms"] });
+      qc.invalidateQueries({ queryKey: ["masters", "boms-all"] });
+    },
+    onError: (reason: Error) => {
+      setError(reason.message);
+      // Earlier rows may already have been accepted before a later row failed.
+      // Refresh immediately so the next attempt continues from the real last line.
+      qc.invalidateQueries({ queryKey: ["masters", "bom-items-" + bomId] });
+    },
+  });
+  const setLine = (
+    index: number,
+    patch: Partial<{ item_id: string | number | ""; quantity: number | ""; remarks: string }>,
+  ) => {
+    setError(null);
+    setLines((current) =>
+      current.map((line, i) => (i === index ? { ...line, ...patch } : line)));
+  };
+  const selectBom = (value: string) => {
+    setBomId(value);
+    setLines([{ item_id: "", quantity: 1, remarks: "" }]);
+    setError(null);
+  };
 
   return (
     <div className="mt-8 border-t border-line pt-6">
       <div className="mb-4 max-w-sm">
         <Field label="Show the items in">
           <Select value={bomId} options={bomOpts} placeholder="Pick a BOM…"
-                  onChange={setBomId} />
+                  onChange={selectBom} />
         </Field>
       </div>
       {!bomId ? (
         <p className="text-sm text-muted">Pick a BOM to see and edit its items.</p>
       ) : (
+        <>
+        <Card className="mb-5 p-4">
+          <div className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
+            Add template items
+          </div>
+          <div className="space-y-3">
+            {lines.map((line, index) => {
+              const selected = (items.data ?? [])
+                .find((item) => String(item.id) === String(line.item_id));
+              const selectedInOtherRows = new Set(
+                lines
+                  .filter((_, otherIndex) => otherIndex !== index)
+                  .map((otherLine) => String(otherLine.item_id)),
+              );
+              const availableItemOpts = itemOpts.filter((option) => {
+                const optionId = String(option.value);
+                return optionId === String(line.item_id)
+                  || (!existingItemIds.has(optionId) && !selectedInOtherRows.has(optionId));
+              });
+              return (
+                <div key={index}
+                     className="grid gap-3 rounded-xl border border-line bg-content1 p-3 md:grid-cols-[1fr_120px_1fr_44px] md:items-end">
+                  <Field label={index === 0 ? "Item" : ""}>
+                    <Select value={line.item_id} options={availableItemOpts}
+                            placeholder="Type item code or name"
+                            onChange={(value) => setLine(index, { item_id: value })} />
+                  </Field>
+                  <Field label={index === 0 ? "Qty" : ""}>
+                    <Input type="number" min={0} step="0.001"
+                           value={String(line.quantity)}
+                           onChange={(e) => setLine(index, {
+                             quantity: e.target.value ? Number(e.target.value) : "",
+                           })} />
+                  </Field>
+                  <Field label={index === 0 ? "Remarks" : ""}>
+                    <Input value={line.remarks}
+                           placeholder={selected?.uom_code ? `UOM: ${selected.uom_code}` : "Optional"}
+                           onChange={(e) => setLine(index, { remarks: e.target.value })} />
+                  </Field>
+                  <button type="button"
+                          onClick={() => setLines((current) =>
+                            current.filter((_, i) => i !== index))}
+                          disabled={lines.length === 1}
+                          className="grid h-11 w-11 place-items-center rounded-lg text-muted hover:bg-bad-bg hover:text-bad disabled:opacity-30"
+                          aria-label="Remove line">
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+            <button type="button"
+                    onClick={() => setLines((current) => [
+                      ...current, { item_id: "", quantity: 1, remarks: "" },
+                    ])}
+                    className="inline-flex items-center gap-2 text-sm font-semibold text-brand">
+              <Plus className="h-4 w-4" /> Add line
+            </button>
+            <Can do="master.bom.manage">
+              <Button disabled={
+                        validLines.length === 0 || Boolean(batchError)
+                        || addLines.isPending || existingItems.isFetching
+                      }
+                      onClick={() => addLines.mutate()}>
+                {addLines.isPending ? "Adding..." : "Add items to template"}
+              </Button>
+            </Can>
+          </div>
+          {(batchError || error) && (
+            <div className="mt-3 rounded-lg bg-bad-bg px-3 py-2 text-sm text-bad">
+              {batchError || error}
+            </div>
+          )}
+        </Card>
         <MasterCrud<MasterBomItem>
-          key={bomId}
-          title="BOM item" queryKey={"bom-items-" + bomId}
+          key={`${bomId}-${nextLineNo}`}
+          title="Template item" queryKey={"bom-items-" + bomId}
           managePerm="master.bom.manage"
           columns={[
             { key: "line", header: "#", render: (r) => r.line_no },
@@ -1116,7 +1273,7 @@ function BomLines() {
               required: true },
             { key: "remarks", label: "Remarks", maxLength: 500 },
           ]}
-          emptyForm={{ item_id: null, line_no: 1, quantity: 1, remarks: "" }}
+          emptyForm={{ item_id: null, line_no: nextLineNo, quantity: 1, remarks: "" }}
           toForm={(r) => ({ item_id: r.item_id, line_no: r.line_no,
             quantity: r.quantity, remarks: r.remarks ?? "" })}
           onCreate={(v) => mastersApi.bomItems.create({
@@ -1124,6 +1281,7 @@ function BomLines() {
           onUpdate={(id, v) => mastersApi.bomItems.update(id, {
             ...(v as Partial<MasterBomItem>), bom_id: Number(bomId) })}
         />
+        </>
       )}
     </div>
   );

@@ -27,6 +27,7 @@ _ACTION_ALIASES = {
     "REJECT": ApprovalAction.REJECTED.value,
     "RETURN": ApprovalAction.RETURNED.value,
 }
+FINAL_REPORTING_STAGE_NAME = "Final authority"
 
 
 def _normalize_action(action: str) -> str:
@@ -121,6 +122,91 @@ async def _clear_pending(db: AsyncSession, instance_id: int) -> None:
     )).scalars().all()
     for row in rows:
         await db.delete(row)
+
+
+async def _is_reporting_chain_position(
+    db: AsyncSession, requester_position_id: int | None, active_position_id: int | None,
+) -> bool:
+    """True when active_position_id is above requester_position_id in HCM."""
+    if requester_position_id is None or active_position_id is None:
+        return False
+    position = await hcm_service.get_position(db, requester_position_id)
+    seen: set[int] = set()
+    while position and position.parent_position_id and position.id not in seen:
+        seen.add(position.id)
+        if position.parent_position_id == active_position_id:
+            return True
+        position = await hcm_service.get_position(db, position.parent_position_id)
+    return False
+
+
+async def _holders_for_positions(
+    db: AsyncSession, position_ids: list[int], requester_id: int | None,
+) -> list:
+    approvers = {}
+    for position_id in position_ids:
+        for holder in await hcm_service.get_position_holders(db, position_id):
+            if holder.id != requester_id and holder.is_active:
+                approvers[holder.id] = holder
+    return list(approvers.values())
+
+
+async def _next_reporting_ladder_approvers(
+    db: AsyncSession, instance: Instance, user, context: dict,
+) -> tuple[list, bool]:
+    """Resolve the next reporting manager, or the final top-pair ANY_ONE group.
+
+    This is an engine capability for one-stage REPORTING_MANAGER workflows: the
+    workflow row stays the same, but wf_pending advances up HCM's position tree after
+    each approval until the final authority pair is reached.
+    """
+    if instance.current_stage_name == FINAL_REPORTING_STAGE_NAME:
+        return [], False
+
+    active_position_id = getattr(user, "active_position_id", None)
+    active_position = (
+        await hcm_service.get_position(db, active_position_id)
+        if active_position_id is not None else None
+    )
+    if not active_position or not active_position.parent_position_id:
+        return [], False
+
+    next_position = await hcm_service.get_position(db, active_position.parent_position_id)
+    if not next_position:
+        return [], False
+
+    position_ids = [next_position.id]
+    is_final = False
+    if next_position.parent_position_id is None:
+        is_final = True
+    else:
+        top_position = await hcm_service.get_position(db, next_position.parent_position_id)
+        if top_position and top_position.parent_position_id is None:
+            position_ids.append(top_position.id)
+            is_final = True
+
+    return await _holders_for_positions(
+        db, position_ids, instance.started_by_id,
+    ), is_final
+
+
+async def _materialize_specific_pending(
+    db: AsyncSession, instance: Instance, approvers: list, context: dict,
+) -> None:
+    for approver in approvers:
+        db.add(Pending(
+            instance_id=instance.id,
+            stage_sequence=instance.current_sequence,
+            approver_id=approver.id,
+            doc_type=instance.doc_type,
+            doc_id=instance.doc_id,
+            doc_no=instance.doc_no,
+            doc_summary=context.get("doc_summary"),
+            requested_by_name=instance.started_by_name,
+            amount=context.get("amount"),
+            due_at=instance.due_at,
+        ))
+    await db.flush()
 
 
 async def _materialize_pending(
@@ -245,17 +331,17 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
         if active_position_id != stage.position_id:
             raise PermissionError_("Switch to the approval position before acting")
     elif stage.approver_type == ApproverType.REPORTING_MANAGER.value:
-        requester_position = await hcm_service.get_position(
-            db, context.get("requester_position_id"),
-        ) if context.get("requester_position_id") else None
-        if not requester_position or active_position_id != requester_position.parent_position_id:
+        if not await _is_reporting_chain_position(
+            db, context.get("requester_position_id"), active_position_id,
+        ):
             raise PermissionError_("Switch to the reporting-manager position before acting")
 
     active_position = await hcm_service.get_position(
         db, active_position_id,
     ) if active_position_id else None
     db.add(Action(
-        instance_id=instance.id, stage_sequence=stage.sequence, stage_name=stage.name,
+        instance_id=instance.id, stage_sequence=stage.sequence,
+        stage_name=instance.current_stage_name or stage.name,
         actor_id=user.id, actor_name=user.full_name,
         actor_position=active_position.name if active_position else None,
         action=action, comments=comments,
@@ -294,6 +380,19 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
             instance.current_sequence = nxt[0].sequence
             instance.current_stage_name = nxt[0].name
             await _materialize_pending(db, instance, nxt[0], context)
+        elif stage.approver_type == ApproverType.REPORTING_MANAGER.value:
+            approvers, is_final = await _next_reporting_ladder_approvers(
+                db, instance, user, context,
+            )
+            if approvers:
+                instance.current_stage_name = (
+                    FINAL_REPORTING_STAGE_NAME if is_final else stage.name
+                )
+                await _materialize_specific_pending(db, instance, approvers, context)
+            else:
+                instance.status = InstanceStatus.APPROVED.value
+                instance.completed_at = utcnow()
+                instance.current_stage_name = None
         else:
             instance.status = InstanceStatus.APPROVED.value
             instance.completed_at = utcnow()
@@ -315,14 +414,20 @@ async def current_approvers(db, doc_type: str, doc_id: int) -> list:
 
 async def pending_for_user(db, user) -> list[dict]:
     rows = (await db.execute(
-        select(Pending).where(Pending.approver_id == user.id)
+        select(Pending, Instance)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(Pending.approver_id == user.id)
         .order_by(Pending.created_at.desc())
-    )).scalars().all()
+    )).all()
     return [{
-        "instance_id": row.instance_id, "doc_type": row.doc_type,
-        "doc_id": row.doc_id, "stage_sequence": row.stage_sequence,
-        "doc_no": row.doc_no, "summary": row.doc_summary,
-        "requested_by_name": row.requested_by_name,
+        "instance_id": row.Pending.instance_id, "doc_type": row.Pending.doc_type,
+        "doc_id": row.Pending.doc_id, "stage_sequence": row.Pending.stage_sequence,
+        "doc_no": row.Pending.doc_no, "summary": row.Pending.doc_summary,
+        "requested_by_name": row.Pending.requested_by_name,
+        "amount": float(row.Pending.amount) if row.Pending.amount is not None else None,
+        "waiting_since": row.Pending.created_at.isoformat() if row.Pending.created_at else None,
+        "due_at": row.Pending.due_at.isoformat() if row.Pending.due_at else None,
+        "current_stage_name": row.Instance.current_stage_name,
     } for row in rows]
 
 

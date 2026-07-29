@@ -79,4 +79,8 @@ describe("masters api", () => {
     // mst_item_specs is keyed by item_id, so there is no create or deactivate.
     expect(Object.keys(mastersApi.itemSpecs).sort()).toEqual(["get", "save"]);
   });
+
+  it("resolves an entered HSN code through the item-entry endpoint", () => {
+    expect(typeof mastersApi.hsnCodes.resolve).toBe("function");
+  });
 });

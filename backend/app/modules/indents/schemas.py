@@ -1,6 +1,16 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
+
+
+def _utc_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")
 
 
 class IndentItemIn(BaseModel):
@@ -64,8 +74,16 @@ class IndentOut(BaseModel):
     remarks: str | None = None
     current_approver_name: str | None = None
     approved_at: datetime | None = None
+    is_bookmarked: str = "NO"
+    can_submit: bool = False
+    can_approve: bool = False
+    can_reject: bool = False
     created_at: datetime
     items: list[IndentItemOut] = []
+
+    @field_serializer("approved_at", "created_at", when_used="json")
+    def serialize_datetime(self, value: datetime | None):
+        return _utc_iso(value)
 
 
 class IndentListRow(BaseModel):
@@ -78,7 +96,12 @@ class IndentListRow(BaseModel):
     priority: str
     total_items: int
     current_approver_name: str | None = None
+    is_bookmarked: str = "NO"
     created_at: datetime
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_datetime(self, value: datetime):
+        return _utc_iso(value)
 
 
 class IndentStatsOut(BaseModel):
@@ -113,6 +136,10 @@ class ActivityRow(BaseModel):
     actor_name: str | None = None
     comments: str | None = None
 
+    @field_serializer("event_at", when_used="json")
+    def serialize_datetime(self, value: datetime):
+        return _utc_iso(value)
+
 
 class AcknowledgmentRow(BaseModel):
     id: int
@@ -124,6 +151,10 @@ class AcknowledgmentRow(BaseModel):
     comments: str | None = None
     acted_at: datetime
 
+    @field_serializer("acted_at", when_used="json")
+    def serialize_datetime(self, value: datetime):
+        return _utc_iso(value)
+
 
 class IndentNotificationRow(BaseModel):
     id: str
@@ -133,3 +164,57 @@ class IndentNotificationRow(BaseModel):
     message: str
     status: str
     created_at: datetime
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_datetime(self, value: datetime):
+        return _utc_iso(value)
+
+
+class IndentJourneyStage(BaseModel):
+    sequence: int
+    title: str
+    status: str
+    is_current: bool = False
+    approver_name: str | None = None
+    position_name: str | None = None
+    timestamp: datetime | None = None
+    comments: str | None = None
+    duration_seconds: int | None = None
+    stage_type: str
+
+    @field_serializer("timestamp", when_used="json")
+    def serialize_datetime(self, value: datetime | None):
+        return _utc_iso(value)
+
+
+class IndentJourneyHistoryEvent(BaseModel):
+    id: str
+    event_type: str
+    title: str
+    description: str | None = None
+    actor_name: str | None = None
+    position_name: str | None = None
+    timestamp: datetime
+    comments: str | None = None
+
+    @field_serializer("timestamp", when_used="json")
+    def serialize_datetime(self, value: datetime):
+        return _utc_iso(value)
+
+
+class IndentJourneyOut(BaseModel):
+    indent_id: int
+    indent_no: str
+    status: str
+    requested_by_name: str | None = None
+    requested_by_position: str | None = None
+    created_at: datetime
+    current_stage: str | None = None
+    current_stage_message: str
+    final_any_one_outcome: str | None = None
+    stages: list[IndentJourneyStage]
+    history: list[IndentJourneyHistoryEvent]
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_datetime(self, value: datetime):
+        return _utc_iso(value)

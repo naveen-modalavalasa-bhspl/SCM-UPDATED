@@ -7,10 +7,63 @@ from app.core.dependencies import get_current_user, require_permission
 from app.platform.rbac import permissions as perms
 from app.platform.workflow import engine, service
 from app.platform.workflow.schemas import (
-    DelegationIn, DelegationOut, WorkflowActionIn, WorkflowActionOut,
+    DelegationEndIn, DelegationIn, DelegationOut, WorkflowActionIn, WorkflowActionOut, WorkflowIn,
 )
 
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
+
+
+@router.get("/definitions")
+async def workflow_definitions(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await service.list_workflows(db)
+
+
+@router.get("/definitions/options")
+async def workflow_definition_options(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await service.workflow_options(db)
+
+
+@router.get("/definitions/{workflow_id}")
+async def workflow_definition(
+    workflow_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await service.get_workflow(db, workflow_id)
+
+
+@router.post("/definitions")
+async def create_workflow_definition(
+    body: WorkflowIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await service.save_workflow(db, body, user)
+
+
+@router.put("/definitions/{workflow_id}")
+async def update_workflow_definition(
+    workflow_id: int,
+    body: WorkflowIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await service.save_workflow(db, body, user, workflow_id)
+
+
+@router.delete("/definitions/{workflow_id}")
+async def deactivate_workflow_definition(
+    workflow_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await service.deactivate_workflow(db, workflow_id, user)
 
 
 @router.get("/pending")
@@ -23,7 +76,7 @@ async def doc_history(doc_type: str, doc_id: int,
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     actions = await engine.history(db, doc_type, doc_id)
     return {"items": [
-        {"stage_sequence": a.stage_sequence, "actor_id": a.actor_id,
+        {"stage_sequence": a.stage_sequence, "stage_name": a.stage_name, "actor_id": a.actor_id,
          "actor_name": a.actor_name, "actor_position": a.actor_position,
          "action": a.action, "comments": a.comments,
          "acted_at": a.acted_at.isoformat() if a.acted_at else None}
@@ -44,5 +97,33 @@ async def return_document(doc_type: str, doc_id: int,
 @router.post("/delegations", response_model=DelegationOut)
 async def create_delegation(body: DelegationIn,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE))):
+                            user=Depends(get_current_user)):
     return await service.delegate(db, body, user)
+
+
+@router.get("/delegations", response_model=list[DelegationOut])
+async def delegations(scope: str = "mine", db: AsyncSession = Depends(get_db),
+                      user=Depends(get_current_user)):
+    return await service.list_delegations(db, user, scope)
+
+
+@router.get("/delegation-options")
+async def delegation_options(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    return {"items": await service.delegation_options(db, user)}
+
+
+@router.post("/delegations/{delegation_id}/end", response_model=DelegationOut)
+async def end_delegation(delegation_id: int, body: DelegationEndIn = DelegationEndIn(),
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(get_current_user)):
+    return await service.end_delegation(db, delegation_id, user, body.reason)
+
+
+@router.get("/my-decisions")
+async def my_decisions(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    return {"items": await service.my_decisions(db, user)}
+
+
+@router.get("/team-queue")
+async def team_queue(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    return {"items": await service.team_queue(db, user)}

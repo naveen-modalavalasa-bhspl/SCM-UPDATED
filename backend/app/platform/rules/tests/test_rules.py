@@ -2,11 +2,20 @@
 import pytest
 
 from app.platform.rbac import permissions as perms
-from app.platform.rules import evaluator
+from app.platform.rules import evaluator, service
 from app.platform.rules.models import RuleEvent, RuleExecution
 from app.shared.enums import ConditionOperator, FulfillmentTarget, RuleActionType
 
 EVENT = "INDENT_SUBMITTED"
+
+
+async def test_builtin_flow_events_exist_without_seed_configuration(db):
+    body = await service.list_events(db)
+    codes = {item["code"] for item in body["items"]}
+    assert {
+        "INDENT_SUBMITTED", "INDENT_APPROVED", "ALLOCATION_APPROVED",
+        "MR_RAISED", "MR_APPROVED",
+    } <= codes
 
 
 @pytest.fixture
@@ -180,6 +189,21 @@ async def test_fire_serialises_a_decimal_context(client, admin, db):
     from sqlalchemy import select
     row = (await db.execute(select(RuleExecution))).scalars().first()
     assert row.context["quantity"] == "12.500"
+
+
+async def test_safe_fire_contains_a_broken_rule_overlay(db, monkeypatch):
+    async def broken_evaluate(*_args, **_kwargs):
+        raise ValueError("bad administrator-entered rule")
+
+    monkeypatch.setattr(evaluator, "evaluate", broken_evaluate)
+    assert await evaluator.safe_fire(
+        db, EVENT, {"quantity": 10}, doc_type="INDENT", doc_id=99,
+    ) == []
+    # The owning document transaction remains usable after the savepoint rollback.
+    db.add(RuleEvent(
+        code="AFTER_SAFE_FALLBACK", name="Still usable", is_active=True,
+    ))
+    await db.flush()
 
 
 async def test_simulate_does_not_record(client, admin, db):

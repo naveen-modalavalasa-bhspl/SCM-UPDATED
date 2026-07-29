@@ -351,6 +351,35 @@ export interface AllocationListRow {
   created_at: string;
 }
 
+export interface AllocationItem {
+  id: number;
+  indent_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  requested_qty: number;
+  quantity: number;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  remarks?: string | null;
+}
+
+export interface Allocation extends AllocationListRow {
+  remarks?: string | null;
+  items: AllocationItem[];
+}
+
+export interface WorkflowPending {
+  instance_id: number;
+  doc_type: string;
+  doc_id: number;
+  doc_no?: string | null;
+  summary?: string | null;
+  requested_by_name?: string | null;
+  created_at?: string | null;
+}
+
 export interface StockOverviewKPIs {
   total_stock_value: number;
   items_below_reorder: number;

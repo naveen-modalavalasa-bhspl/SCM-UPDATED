@@ -101,6 +101,70 @@ export interface SimulateResult {
   }[];
 }
 
+export type ApproverType =
+  | "REPORTING_MANAGER" | "DEPT_HEAD" | "POSITION" | "ROLE" | "SPECIFIC_USER";
+export type ApprovalMode = "ANY_ONE" | "ALL" | "MAJORITY";
+
+export interface WorkflowCondition {
+  id?: number;
+  field_name: string;
+  operator: Operator;
+  field_value: string;
+  logic: "AND" | "OR";
+}
+
+export interface WorkflowStage {
+  id?: number;
+  sequence: number;
+  name: string;
+  approver_type: ApproverType;
+  position_id?: number | null;
+  role_id?: number | null;
+  employee_id?: number | null;
+  approval_mode: ApprovalMode;
+  is_optional: boolean;
+  can_edit_document: boolean;
+  sla_hours?: number | null;
+  conditions: WorkflowCondition[];
+}
+
+export interface WorkflowDefinition {
+  id: number;
+  code: string;
+  name: string;
+  doc_type: string;
+  version: number;
+  is_active: boolean;
+  is_fallback: boolean;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  created_at: string;
+  stages: WorkflowStage[];
+}
+
+export interface WorkflowOption {
+  id: number;
+  name: string;
+}
+
+export interface DefaultFlowStep {
+  doc_type: string;
+  title: string;
+  steps: string[];
+  fallback: string;
+}
+
+export interface WorkflowOptions {
+  doc_types: string[];
+  approver_types: ApproverType[];
+  approval_modes: ApprovalMode[];
+  operators: Operator[];
+  positions: WorkflowOption[];
+  roles: WorkflowOption[];
+  employees: WorkflowOption[];
+  default_flow: DefaultFlowStep[];
+}
+
 export interface AuditRow {
   id: number;
   entity: string;

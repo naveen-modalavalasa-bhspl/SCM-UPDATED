@@ -215,11 +215,6 @@ export interface MasterPackaging {
   id: number;
   code: string;
   name: string;
-  length_cm?: number | null;
-  width_cm?: number | null;
-  height_cm?: number | null;
-  weight_kg?: number | null;
-  is_returnable: boolean;
   is_active: boolean;
 }
 
@@ -243,6 +238,12 @@ export interface PackagingBreakdown {
   package_name?: string | null;
   quantity: number;
   uom_code?: string | null;
+  /** One current container expressed as counts of every container below it. */
+  package_breakup: Array<{
+    package_id: number;
+    package_name?: string | null;
+    quantity: number;
+  }>;
   /** What one of this package holds, in the item's own unit. */
   base_quantity: number;
   base_uom_code?: string | null;

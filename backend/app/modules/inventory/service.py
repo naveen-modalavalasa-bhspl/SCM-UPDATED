@@ -18,6 +18,7 @@ from app.modules.inventory.models import (
     StockTransferOrderItem, CycleCount, CycleCountItem, Reservation,
 )
 from app.platform.hcm.models import HcmFacility
+from app.platform.rules import evaluator as rules
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.shared.enums import (
@@ -287,6 +288,18 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
         raise ValidationError("A material request needs at least one short line")
 
     ctx = ctx or {}
+    if indent_id is not None:
+        existing = (await db.execute(
+            select(MaterialRequest).where(
+                MaterialRequest.indent_id == indent_id,
+                MaterialRequest.status != MRStatus.REJECTED.value,
+            ).order_by(MaterialRequest.id)
+        )).scalars().first()
+        if existing is not None:
+            # Replaying an approval, or approving a second partial allocation, must
+            # not create two purchase demands for the same shortage.
+            return existing
+
     mr = MaterialRequest(
         mr_no=await next_number(db, "mr"),
         mr_date=utcnow().date(),
@@ -336,6 +349,18 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
         after={"status": mr.status, "indent_no": indent_no, "lines": len(shortfalls)},
         summary=f"Material request raised for {indent_no or 'manual entry'}",
     )
+    await rules.safe_fire(
+        db,
+        "MR_RAISED",
+        {
+            "mr_id": mr.id,
+            "indent_id": indent_id,
+            "quantity": float(sum(_d(s["quantity"]) for s in shortfalls)),
+            "department_id": mr.department_id,
+        },
+        doc_type=DocType.MR.value,
+        doc_id=mr.id,
+    )
     await db.flush()
     return mr
 
@@ -363,6 +388,18 @@ async def act_on_mr(db: AsyncSession, mr_id: int, action: str, user,
         mr.status = MRStatus.APPROVED.value
         mr.approved_at = utcnow()
         mr.current_approver_name = None
+        await rules.safe_fire(
+            db,
+            "MR_APPROVED",
+            {
+                "mr_id": mr.id,
+                "indent_id": mr.indent_id,
+                "priority": mr.priority,
+                "department_id": mr.department_id,
+            },
+            doc_type=DocType.MR.value,
+            doc_id=mr.id,
+        )
     elif instance.status == InstanceStatus.REJECTED.value:
         mr.status = MRStatus.REJECTED.value
         mr.current_approver_name = None

@@ -1,19 +1,70 @@
 """Indents module tests: creation rules, the DRAFT->PENDING->AWAITING_ALLOCATION flow through
 the engine, edit locking, and an API smoke test with permissions."""
 import pytest
+from datetime import date, datetime, timedelta
+from time import perf_counter
 
-from app.core.exceptions import ValidationError
+from sqlalchemy import event, select
+
+from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
+from app.core.security import hash_password
 from app.modules.indents import service
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
-from app.modules.indents.enums import ApprovalAction
+from app.modules.indents.enums import AllocationStatus, ApprovalAction, IndentItemStatus
+from app.modules.inventory.models import Allocation, AllocationItem
+from app.modules.inventory.schemas import AllocationIn
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
-from app.platform.workflow.models import Stage, Workflow
+from app.platform.rbac.models import Permission, Role, RolePermission, UserRole
+from app.platform.settings.models import UserCredential
+from app.platform.workflow.models import Action, Instance, Pending, Stage, Workflow
 from app.shared.enums import ApproverType, IndentStatus
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom
+
+
+async def _count_queries(db, fn):
+    bind = db.get_bind()
+    target = bind.sync_engine if hasattr(bind, "sync_engine") else bind
+    queries = 0
+
+    def before_cursor_execute(*_args):
+        nonlocal queries
+        queries += 1
+
+    event.listen(target, "before_cursor_execute", before_cursor_execute)
+    started = perf_counter()
+    try:
+        result = await fn()
+    finally:
+        elapsed_ms = (perf_counter() - started) * 1000
+        event.remove(target, "before_cursor_execute", before_cursor_execute)
+    return result, queries, elapsed_ms
+
+
+async def _grant_login(db, employee, username: str, permissions: list[str]):
+    employee.emp_code = username
+    db.add(UserCredential(employee_id=employee.id, password_hash=hash_password("pw")))
+    role = Role(code=f"R_{username}", name=username, is_active=True)
+    db.add(role)
+    await db.flush()
+    db.add(UserRole(employee_id=employee.id, role_id=role.id))
+    for code in permissions:
+        perm = (await db.execute(
+            select(Permission).where(Permission.code == code)
+        )).scalar_one_or_none()
+        if perm is None:
+            head, _, tail = code.partition(".")
+            perm = Permission(
+                code=code, module=head, resource=head,
+                action=tail or "view", description=code,
+            )
+            db.add(perm)
+            await db.flush()
+        db.add(RolePermission(role_id=role.id, permission_id=perm.id))
+    await db.commit()
 
 
 async def _world(db):
@@ -54,8 +105,341 @@ async def _world(db):
     return requester, approver, it1, it2
 
 
+async def _visibility_world(db):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    db.add(item)
+    db.add_all([
+        HcmOffice(id=701, name="Regional Office", is_active=True, synced_at=utcnow()),
+        HcmDepartment(id=501, name="Mechanical", synced_at=utcnow()),
+    ])
+    db.add_all([
+        HcmPosition(id=100, name="RM", department_id=501, office_id=701,
+                    project_id=900, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=110, name="DM", parent_position_id=100, department_id=501,
+                    office_id=701, project_id=900, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=120, name="OE-1", parent_position_id=110, department_id=501,
+                    office_id=701, project_id=900, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=130, name="OE-2", parent_position_id=110, department_id=501,
+                    office_id=701, project_id=900, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=121, name="TL-1", parent_position_id=120, department_id=501,
+                    office_id=701, project_id=900, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=122, name="Technician-1", parent_position_id=121,
+                    department_id=501, office_id=701, project_id=900,
+                    is_active=True, synced_at=utcnow()),
+        HcmPosition(id=131, name="Technician-2", parent_position_id=130,
+                    department_id=501, office_id=701, project_id=900,
+                    is_active=True, synced_at=utcnow()),
+        HcmPosition(id=123, name="Other Project Tech", parent_position_id=120,
+                    department_id=501, office_id=701, project_id=901,
+                    is_active=True, synced_at=utcnow()),
+    ])
+    employees = {
+        "rm": HcmEmployee(id=20, full_name="RM", emp_code="RM", department_id=501,
+                          office_id=701, project_id=900, is_active=True,
+                          synced_at=utcnow()),
+        "dm": HcmEmployee(id=21, full_name="DM", emp_code="DM", department_id=501,
+                          office_id=701, project_id=900, is_active=True,
+                          synced_at=utcnow()),
+        "oe1": HcmEmployee(id=22, full_name="OE One", emp_code="OE1",
+                           department_id=501, office_id=701, project_id=900,
+                           is_active=True, synced_at=utcnow()),
+        "oe2": HcmEmployee(id=23, full_name="OE Two", emp_code="OE2",
+                           department_id=501, office_id=701, project_id=900,
+                           is_active=True, synced_at=utcnow()),
+        "tech1": HcmEmployee(id=24, full_name="Tech One", emp_code="TECH1",
+                             department_id=501, office_id=701, project_id=900,
+                             is_active=True, synced_at=utcnow()),
+        "tech2": HcmEmployee(id=25, full_name="Tech Two", emp_code="TECH2",
+                             department_id=501, office_id=701, project_id=900,
+                             is_active=True, synced_at=utcnow()),
+        "other_project": HcmEmployee(id=26, full_name="Other Project",
+                                     emp_code="PTECH", department_id=501,
+                                     office_id=701, project_id=901,
+                                     is_active=True, synced_at=utcnow()),
+    }
+    db.add_all(employees.values())
+    assignments = [
+        ("rm", 100), ("dm", 110), ("oe1", 120), ("oe2", 130),
+        ("tech1", 122), ("tech2", 131), ("other_project", 123),
+    ]
+    db.add_all([
+        HcmPositionAssignment(
+            id=index, employee_id=employees[key].id, employee_name=employees[key].full_name,
+            position_id=position_id, department_id=501, office_id=701,
+            is_primary=True, is_active=True, synced_at=utcnow(),
+        )
+        for index, (key, position_id) in enumerate(assignments, start=1)
+    ])
+    wf = Workflow(code="WF-INDENT", name="Indent", doc_type="INDENT", is_active=True)
+    db.add(wf)
+    await db.flush()
+    db.add(Stage(workflow_id=wf.id, sequence=1, name="Reporting Manager",
+                 approver_type=ApproverType.REPORTING_MANAGER.value,
+                 approval_mode="ANY_ONE"))
+    await db.commit()
+
+    for key, position_id in assignments:
+        employees[key].active_position_id = position_id
+
+    indents = {
+        key: await service.create_indent(db, _create_data(item.id), employee)
+        for key, employee in employees.items()
+    }
+    return {**employees, "item": item, "indents": indents}
+
+
+async def _production_visibility_world(db):
+    uom = Uom(code="NOS-PROD", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item = Item(code="IT-PROD", name="Bolt", uom_id=uom.id, uom_code="NOS-PROD")
+    db.add(item)
+    db.add_all([
+        HcmOffice(id=1701, name="Branch One Office", is_active=True, synced_at=utcnow()),
+        HcmOffice(id=1702, name="Branch Two Office", is_active=True, synced_at=utcnow()),
+        HcmOffice(id=1710, name="Region One Office", is_active=True, synced_at=utcnow()),
+        HcmOffice(id=1711, name="District One Office", is_active=True, synced_at=utcnow()),
+        HcmOffice(id=1712, name="OE One Office", is_active=True, synced_at=utcnow()),
+        HcmOffice(id=1713, name="Pilot One Office", is_active=True, synced_at=utcnow()),
+        HcmDepartment(id=1501, name="Operations", synced_at=utcnow()),
+    ])
+    positions = {
+        "sph": HcmPosition(id=1900, name="STATE PROJECT HEAD-AP",
+                           department_id=1501, office_id=1701, project_id=19000,
+                           is_active=True, synced_at=utcnow()),
+        "coo": HcmPosition(id=1901, name="CHIEF OPERATING OFFICER-AP",
+                           department_id=1501, office_id=1701, project_id=19000,
+                           is_active=True, synced_at=utcnow()),
+        "rm1": HcmPosition(id=1910, name="REGIONAL MANAGER-AP-104",
+                           parent_position_id=1900, department_id=1501,
+                           office_id=1710, project_id=19000,
+                           is_active=True, synced_at=utcnow()),
+        "rm2": HcmPosition(id=1920, name="REGIONAL MANAGER-AP-205",
+                           parent_position_id=1900, department_id=1501,
+                           office_id=1702, project_id=29000,
+                           is_active=True, synced_at=utcnow()),
+        "dm1": HcmPosition(id=1911, name="DISTRICT MANAGER-AP-104-HINDUPUR",
+                           parent_position_id=1910, department_id=1501,
+                           office_id=1711, project_id=19000,
+                           is_active=True, synced_at=utcnow()),
+        "dm2": HcmPosition(id=1921, name="DISTRICT MANAGER-AP-205-ANANTAPUR",
+                           parent_position_id=1920, department_id=1501,
+                           office_id=1702, project_id=29000,
+                           is_active=True, synced_at=utcnow()),
+        "oe1": HcmPosition(id=1912, name="OPERATION EXECUTIVE-AP-104-MMU",
+                           parent_position_id=1911, department_id=1501,
+                           office_id=1712, project_id=19000,
+                           is_active=True, synced_at=utcnow()),
+        "oe2": HcmPosition(id=1922, name="OPERATIONS EXECUTIVE-AP-205-MMU",
+                           parent_position_id=1921, department_id=1501,
+                           office_id=1702, project_id=29000,
+                           is_active=True, synced_at=utcnow()),
+        "pilot1": HcmPosition(id=1913, name="PILOT-AP-104-MMU",
+                              parent_position_id=1912, department_id=1501,
+                              office_id=1713, project_id=19000,
+                              is_active=True, synced_at=utcnow()),
+        "driver1": HcmPosition(id=1914, name="DRIVER-AP-104-MMU",
+                               parent_position_id=1912, department_id=1501,
+                               office_id=1701, project_id=19000,
+                               is_active=True, synced_at=utcnow()),
+        "tl2": HcmPosition(id=1923, name="TL-AP-205-MMU",
+                           parent_position_id=1922, department_id=1501,
+                           office_id=1702, project_id=29000,
+                           is_active=True, synced_at=utcnow()),
+    }
+    db.add_all(positions.values())
+    employees = {
+        key: HcmEmployee(
+            id=1800 + index,
+            full_name=key.upper(),
+            emp_code=key.upper(),
+            department_id=1501,
+            office_id=position.office_id,
+            project_id=position.project_id,
+            is_active=True,
+            synced_at=utcnow(),
+        )
+        for index, (key, position) in enumerate(positions.items(), start=1)
+    }
+    db.add_all(employees.values())
+    db.add_all([
+        HcmPositionAssignment(
+            id=1800 + index,
+            employee_id=employees[key].id,
+            employee_name=employees[key].full_name,
+            position_id=position.id,
+            position_name=position.name,
+            department_id=1501,
+            office_id=position.office_id,
+            is_primary=True,
+            is_active=True,
+            synced_at=utcnow(),
+        )
+        for index, (key, position) in enumerate(positions.items(), start=1)
+    ])
+    wf = Workflow(code="WF-INDENT-PROD", name="Indent Prod", doc_type="INDENT", is_active=True)
+    db.add(wf)
+    await db.flush()
+    db.add(Stage(workflow_id=wf.id, sequence=1, name="Reporting Manager",
+                 approver_type=ApproverType.REPORTING_MANAGER.value,
+                 approval_mode="ANY_ONE"))
+    await db.commit()
+    for key, position in positions.items():
+        employees[key].active_position_id = position.id
+    indents = {
+        key: await service.create_indent(db, _create_data(item.id), employees[key])
+        for key in ("rm1", "rm2", "dm1", "dm2", "oe1", "oe2", "pilot1", "driver1", "tl2")
+    }
+    return {**employees, "item": item, "positions": positions, "indents": indents}
+
+
+async def _approval_ladder_world(db):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    db.add(item)
+    db.add(HcmOffice(id=801, name="Branch Office", is_active=True, synced_at=utcnow()))
+    db.add(HcmDepartment(id=601, name="Operations", synced_at=utcnow()))
+    db.add_all([
+        HcmPosition(id=1000, name="Pilot", parent_position_id=1001,
+                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1001, name="OE", parent_position_id=1002,
+                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1002, name="DM", parent_position_id=1003,
+                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1003, name="RM", parent_position_id=1004,
+                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1004, name="SPH", parent_position_id=1005,
+                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1005, name="COO", department_id=601, office_id=801,
+                    is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1006, name="Sibling OE", parent_position_id=1002,
+                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
+    ])
+    employees = {
+        "pilot": HcmEmployee(id=51, full_name="Pilot", emp_code="PILOT",
+                             department_id=601, office_id=801, is_active=True,
+                             synced_at=utcnow()),
+        "oe": HcmEmployee(id=52, full_name="OE", emp_code="OE",
+                          department_id=601, office_id=801, is_active=True,
+                          synced_at=utcnow()),
+        "dm": HcmEmployee(id=53, full_name="DM", emp_code="DM",
+                          department_id=601, office_id=801, is_active=True,
+                          synced_at=utcnow()),
+        "rm": HcmEmployee(id=54, full_name="RM", emp_code="RM",
+                          department_id=601, office_id=801, is_active=True,
+                          synced_at=utcnow()),
+        "sph": HcmEmployee(id=55, full_name="SPH", emp_code="SPH",
+                           department_id=601, office_id=801, is_active=True,
+                           synced_at=utcnow()),
+        "coo": HcmEmployee(id=56, full_name="COO", emp_code="COO",
+                           department_id=601, office_id=801, is_active=True,
+                           synced_at=utcnow()),
+        "sibling_oe": HcmEmployee(id=57, full_name="Sibling OE", emp_code="SIBOE",
+                                  department_id=601, office_id=801,
+                                  is_active=True, synced_at=utcnow()),
+    }
+    db.add_all(employees.values())
+    assignments = [
+        ("pilot", 1000), ("oe", 1001), ("dm", 1002), ("rm", 1003),
+        ("sph", 1004), ("coo", 1005), ("sibling_oe", 1006),
+    ]
+    db.add_all([
+        HcmPositionAssignment(
+            id=2000 + index, employee_id=employees[key].id,
+            employee_name=employees[key].full_name, position_id=position_id,
+            department_id=601, office_id=801, is_primary=True,
+            is_active=True, synced_at=utcnow(),
+        )
+        for index, (key, position_id) in enumerate(assignments, start=1)
+    ])
+    wf = Workflow(code="WF-INDENT", name="Indent", doc_type="INDENT", is_active=True)
+    db.add(wf)
+    await db.flush()
+    db.add(Stage(workflow_id=wf.id, sequence=1, name="Reporting Manager",
+                 approver_type=ApproverType.REPORTING_MANAGER.value,
+                 approval_mode="ANY_ONE"))
+    await db.commit()
+
+    for key, position_id in assignments:
+        employees[key].active_position_id = position_id
+    await _grant_login(db, employees["pilot"], "pilot", ["indent.view", "indent.submit"])
+    for key in ("oe", "dm", "rm", "sph", "coo", "sibling_oe"):
+        await _grant_login(
+            db, employees[key], key, ["indent.view", "indent.approve", "indent.reject"],
+        )
+
+    indent = await service.create_indent(db, _create_data(item.id), employees["pilot"])
+    return {**employees, "item": item, "indent": indent}
+
+
 def _create_data(item_id):
     return IndentCreate(items=[IndentItemIn(item_id=item_id, quantity=5)], remarks="test")
+
+
+async def _draft_chain_world(db, *, depth: int, id_base: int):
+    uom = Uom(code=f"NOS{id_base}", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item = Item(code=f"IT-{id_base}", name="Bolt", uom_id=uom.id, uom_code=uom.code)
+    requester = HcmEmployee(
+        id=id_base,
+        full_name=f"Requester {id_base}",
+        emp_code=f"REQ{id_base}",
+        is_active=True,
+        synced_at=utcnow(),
+    )
+    db.add_all([item, requester])
+    positions = [
+        HcmPosition(
+            id=id_base + index,
+            name=f"Position {index}",
+            parent_position_id=(id_base + index + 1) if index < depth else None,
+            is_active=True,
+            synced_at=utcnow(),
+        )
+        for index in range(depth + 1)
+    ]
+    db.add_all(positions)
+    employees = [
+        HcmEmployee(
+            id=id_base + 100 + index,
+            full_name=f"Holder {index}",
+            emp_code=f"H{id_base}{index}",
+            is_active=True,
+            synced_at=utcnow(),
+        )
+        for index in range(1, depth + 1)
+    ]
+    db.add_all(employees)
+    db.add(HcmPositionAssignment(
+        id=id_base,
+        employee_id=requester.id,
+        position_id=id_base,
+        is_primary=True,
+        is_active=True,
+        synced_at=utcnow(),
+    ))
+    db.add_all([
+        HcmPositionAssignment(
+            id=id_base + index,
+            employee_id=employees[index - 1].id,
+            employee_name=employees[index - 1].full_name,
+            position_id=id_base + index,
+            is_primary=True,
+            is_active=True,
+            synced_at=utcnow(),
+        )
+        for index in range(1, depth + 1)
+    ])
+    await db.commit()
+    requester.active_position_id = id_base
+    indent = await service.create_indent(db, _create_data(item.id), requester)
+    return requester, indent
 
 
 async def test_create_requires_items(db):
@@ -75,12 +459,52 @@ async def test_create_sets_snapshots_and_number(db):
     assert indent.office_name == "Regional Office"
     assert float(indent.total_qty) == 5
     assert indent.items[0].item_code == "IT-0001"        # item snapshot
+    assert indent.items[0].uom_code == it1.uom_code      # UOM snapshot
+
+
+async def test_create_rejects_past_required_date(db):
+    requester, _approver, it1, _ = await _world(db)
+
+    with pytest.raises(ValidationError, match="Required date cannot be earlier than today"):
+        await service.create_indent(
+            db,
+            IndentCreate(
+                items=[IndentItemIn(item_id=it1.id, quantity=5)],
+                required_date=date.today() - timedelta(days=1),
+            ),
+            requester,
+        )
+
+
+async def test_create_accepts_today_and_future_required_dates(db):
+    requester, _approver, it1, _ = await _world(db)
+    today = date.today()
+
+    today_indent = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=5)],
+            required_date=today,
+        ),
+        requester,
+    )
+    future_indent = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=5)],
+            required_date=today + timedelta(days=1),
+        ),
+        requester,
+    )
+
+    assert today_indent.required_date == today
+    assert future_indent.required_date == today + timedelta(days=1)
 
 
 async def test_cannot_approve_before_submit(db):
     requester, approver, it1, _ = await _world(db)
     indent = await service.create_indent(db, _create_data(it1.id), requester)
-    with pytest.raises(ValidationError):
+    with pytest.raises(NotFoundError):
         await service.act_on_indent(db, indent.id, ApprovalAction.APPROVED, "", approver)
 
 
@@ -100,6 +524,283 @@ async def test_submit_then_dept_head_approves(db):
     # state for an indent that has cleared its chain.
     assert result.status == IndentStatus.AWAITING_ALLOCATION.value
     assert result.approved_at is not None
+
+
+async def test_self_approval_is_rejected(db):
+    requester, _approver, it1, _ = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    await service.submit_indent(db, indent.id, requester)
+
+    with pytest.raises(ValidationError):
+        await service.act_on_indent(
+            db, indent.id, ApprovalAction.APPROVED, "self", requester,
+        )
+
+
+async def test_pilot_submit_routes_to_oe_current_approver(db):
+    world = await _approval_ladder_world(db)
+
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == world["indent"].id)
+    )).scalars().all()
+
+    assert submitted.status == IndentStatus.PENDING_APPROVAL.value
+    assert submitted.current_approver_name == "OE"
+    assert {row.approver_id for row in pending} == {world["oe"].id}
+
+
+async def test_reporting_manager_ladder_advances_oe_to_dm_to_rm_to_final_group(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+
+    after_oe = await service.act_on_indent(
+        db, world["indent"].id, ApprovalAction.APPROVED, "oe", world["oe"],
+    )
+    assert after_oe.status == IndentStatus.PENDING_APPROVAL.value
+    assert after_oe.current_approver_name == "DM"
+
+    after_dm = await service.act_on_indent(
+        db, world["indent"].id, ApprovalAction.APPROVED, "dm", world["dm"],
+    )
+    assert after_dm.status == IndentStatus.PENDING_APPROVAL.value
+    assert after_dm.current_approver_name == "RM"
+
+    after_rm = await service.act_on_indent(
+        db, world["indent"].id, ApprovalAction.APPROVED, "rm", world["rm"],
+    )
+    assert after_rm.status == IndentStatus.PENDING_APPROVAL.value
+    assert set(after_rm.current_approver_name.split(", ")) == {"SPH", "COO"}
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == world["indent"].id)
+    )).scalars().all()
+    assert {row.approver_id for row in pending} == {world["sph"].id, world["coo"].id}
+
+
+async def test_sph_final_approval_moves_to_allocation(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+    for key in ("oe", "dm", "rm"):
+        await service.act_on_indent(
+            db, world["indent"].id, ApprovalAction.APPROVED, key, world[key],
+        )
+
+    result = await service.act_on_indent(
+        db, world["indent"].id, ApprovalAction.APPROVED, "final", world["sph"],
+    )
+    instance = (await db.execute(
+        select(Instance).where(Instance.doc_type == "INDENT", Instance.doc_id == world["indent"].id)
+    )).scalar_one()
+
+    assert instance.status == "APPROVED"
+    assert result.status == IndentStatus.AWAITING_ALLOCATION.value
+
+
+async def test_coo_can_complete_final_any_one_first(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+    for key in ("oe", "dm", "rm"):
+        await service.act_on_indent(
+            db, world["indent"].id, ApprovalAction.APPROVED, key, world[key],
+        )
+
+    result = await service.act_on_indent(
+        db, world["indent"].id, ApprovalAction.APPROVED, "final", world["coo"],
+    )
+
+    assert result.status == IndentStatus.AWAITING_ALLOCATION.value
+
+
+async def test_journey_uses_requester_specific_stages_and_final_any_one(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+    for key in ("oe", "dm", "rm"):
+        await service.act_on_indent(
+            db, world["indent"].id, ApprovalAction.APPROVED, key, world[key],
+        )
+    await service.act_on_indent(
+        db, world["indent"].id, ApprovalAction.APPROVED, "final", world["sph"],
+    )
+
+    journey = await service.indent_journey(db, world["indent"].id, world["pilot"])
+
+    titles = [stage["title"] for stage in journey["stages"]]
+    assert titles[:5] == [
+        "Request Raised", "OE Review", "DM Review", "RM Review",
+        "Final Approval - SPH or COO",
+    ]
+    assert any(
+        stage["status"] == "NOT_REQUIRED" and stage["approver_name"] == "COO"
+        for stage in journey["stages"]
+    )
+    assert journey["final_any_one_outcome"] == "Approved by SPH"
+    assert any(event["event_type"] == "APPROVED" for event in journey["history"])
+
+
+async def test_journey_marks_only_active_pending_stage_current(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+
+    journey = await service.indent_journey(db, world["indent"].id, world["pilot"])
+    current_stages = [stage for stage in journey["stages"] if stage.get("is_current")]
+
+    assert len(current_stages) == 1
+    assert current_stages[0]["title"] == "OE Review"
+    assert all(
+        not stage.get("is_current")
+        for stage in journey["stages"]
+        if stage["title"] in {"DM Review", "RM Review", "Final Approval - SPH or COO"}
+    )
+
+
+async def test_final_any_one_journey_uses_successful_final_approver(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+    instance = (await db.execute(
+        select(Instance).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == world["indent"].id,
+        )
+    )).scalar_one()
+    db.add_all([
+        Action(
+            instance_id=instance.id,
+            stage_sequence=4,
+            stage_name="Final Approval",
+            actor_id=world["sph"].id,
+            actor_name="SPH",
+            actor_position="SPH",
+            action=ApprovalAction.REJECTED.value,
+            comments="not this route",
+            acted_at=utcnow(),
+        ),
+        Action(
+            instance_id=instance.id,
+            stage_sequence=4,
+            stage_name="Final Approval",
+            actor_id=world["coo"].id,
+            actor_name="COO",
+            actor_position="COO",
+            action=ApprovalAction.APPROVED.value,
+            comments="approved by coo",
+            acted_at=utcnow() + timedelta(minutes=5),
+        ),
+    ])
+    await db.commit()
+
+    journey = await service.indent_journey(db, world["indent"].id, world["pilot"])
+
+    assert journey["final_any_one_outcome"] == "Approved by COO"
+    final_stage = next(stage for stage in journey["stages"] if stage["stage_type"] == "final")
+    assert final_stage["status"] == "APPROVED"
+    assert final_stage["approver_name"] == "COO"
+    assert not any(
+        stage["stage_type"] == "final_any_one_peer"
+        and stage["approver_name"] == "SPH"
+        and stage["status"] == "NOT_REQUIRED"
+        for stage in journey["stages"]
+    )
+
+
+async def test_journey_attaches_utc_to_naive_timestamps(db):
+    world = await _approval_ladder_world(db)
+    naive_created = datetime(2026, 7, 27, 16, 49, 0)
+    world["indent"].created_at = naive_created
+    await db.commit()
+
+    journey = await service.indent_journey(db, world["indent"].id, world["pilot"])
+
+    assert journey["created_at"].tzinfo is not None
+    assert journey["created_at"].isoformat().endswith("+00:00")
+    assert journey["stages"][0]["timestamp"].tzinfo is not None
+
+
+async def test_journey_query_count_does_not_grow_per_hierarchy_level(db):
+    shallow_user, shallow_indent = await _draft_chain_world(db, depth=3, id_base=7000)
+    deep_user, deep_indent = await _draft_chain_world(db, depth=8, id_base=8000)
+
+    _, shallow_queries, shallow_ms = await _count_queries(
+        db,
+        lambda: service.indent_journey(db, shallow_indent.id, shallow_user),
+    )
+    _, deep_queries, deep_ms = await _count_queries(
+        db,
+        lambda: service.indent_journey(db, deep_indent.id, deep_user),
+    )
+
+    assert deep_queries <= shallow_queries + 2
+    assert shallow_ms >= 0
+    assert deep_ms >= 0
+
+
+async def test_final_transition_and_fulfilment_run_once(db, monkeypatch):
+    world = await _approval_ladder_world(db)
+    calls = 0
+    original_fulfil = service._fulfil
+
+    async def counted_fulfil(db_arg, indent, user):
+        nonlocal calls
+        calls += 1
+        await original_fulfil(db_arg, indent, user)
+
+    monkeypatch.setattr(service, "_fulfil", counted_fulfil)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+    for key in ("oe", "dm", "rm"):
+        await service.act_on_indent(
+            db, world["indent"].id, ApprovalAction.APPROVED, key, world[key],
+        )
+    assert calls == 0
+
+    await service.act_on_indent(
+        db, world["indent"].id, ApprovalAction.APPROVED, "final", world["sph"],
+    )
+    assert calls == 1
+
+    with pytest.raises(ValidationError):
+        await service.act_on_indent(
+            db, world["indent"].id, ApprovalAction.APPROVED, "late", world["coo"],
+        )
+    assert calls == 1
+
+
+async def test_requester_detail_capabilities_never_allow_self_approval(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+
+    detail = await service.get_indent(db, world["indent"].id, world["pilot"])
+
+    assert detail.can_submit is False
+    assert detail.can_approve is False
+    assert detail.can_reject is False
+
+
+async def test_current_approver_detail_capabilities_allow_actions(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+
+    detail = await service.get_indent(db, world["indent"].id, world["oe"])
+
+    assert detail.can_approve is True
+    assert detail.can_reject is True
+
+
+async def test_same_position_pending_holder_can_approve(db):
+    requester, _approver, it1, _ = await _world(db)
+    observer = HcmEmployee(id=4, full_name="Other Manager", emp_code="E4",
+                           is_active=True, synced_at=utcnow())
+    db.add(observer)
+    db.add(HcmPositionAssignment(id=3, employee_id=observer.id, position_id=100,
+                                 is_primary=True, is_active=True, synced_at=utcnow()))
+    await db.commit()
+    observer.active_position_id = 100
+
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    await service.submit_indent(db, indent.id, requester)
+
+    result = await service.act_on_indent(
+        db, indent.id, ApprovalAction.APPROVED, "same position holder", observer,
+    )
+    assert result.status == IndentStatus.AWAITING_ALLOCATION.value
 
 
 async def test_cannot_edit_after_submit(db):
@@ -154,6 +855,422 @@ async def test_indent_stats_counts(db):
     assert stats["by_status"]["AWAITING_ALLOCATION"] == 1
 
 
+async def test_allocation_before_final_approval_is_rejected(db):
+    requester, _approver, it1, _ = await _world(db)
+    draft = await service.create_indent(db, _create_data(it1.id), requester)
+
+    with pytest.raises(ValidationError):
+        await service.allocation_proposal(db, draft.id)
+    with pytest.raises(ValidationError):
+        await service.decide_allocation(db, AllocationIn(indent_id=draft.id, decisions=[]), requester)
+
+    pending = await service.submit_indent(db, draft.id, requester)
+    assert pending.status == IndentStatus.PENDING_APPROVAL.value
+
+    with pytest.raises(ValidationError):
+        await service.allocation_proposal(db, draft.id)
+    with pytest.raises(ValidationError):
+        await service.decide_allocation(db, AllocationIn(indent_id=draft.id, decisions=[]), requester)
+
+
+async def test_cumulative_allocation_status_uses_all_approved_allocations(db):
+    requester, _approver, it1, _ = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    line = indent.items[0]
+    line.approved_quantity = line.quantity
+    indent.status = IndentStatus.AWAITING_ALLOCATION.value
+    await db.flush()
+
+    first = Allocation(
+        allocation_no="ALLOC-CUM-1",
+        indent_id=indent.id,
+        indent_no=indent.indent_no,
+        status=AllocationStatus.APPROVED.value,
+        allocated_by_id=requester.id,
+        allocated_by_name=requester.full_name,
+    )
+    second = Allocation(
+        allocation_no="ALLOC-CUM-2",
+        indent_id=indent.id,
+        indent_no=indent.indent_no,
+        status=AllocationStatus.APPROVED.value,
+        allocated_by_id=requester.id,
+        allocated_by_name=requester.full_name,
+    )
+    db.add_all([first, second])
+    await db.flush()
+    db.add_all([
+        AllocationItem(
+            allocation_id=first.id,
+            indent_item_id=line.id,
+            item_id=it1.id,
+            requested_qty=5,
+            quantity=2,
+        ),
+        AllocationItem(
+            allocation_id=second.id,
+            indent_item_id=line.id,
+            item_id=it1.id,
+            requested_qty=5,
+            quantity=3,
+        ),
+    ])
+    await db.commit()
+
+    await service._recalculate_indent_allocation_state(db, indent)
+    await db.commit()
+    await db.refresh(indent)
+    await db.refresh(line)
+
+    assert float(line.allocated_quantity) == 5
+    assert line.status == IndentItemStatus.ALLOCATED.value
+    assert indent.status == IndentStatus.ALLOCATED.value
+
+
+async def test_leaf_user_sees_only_own_indents(db):
+    world = await _visibility_world(db)
+    page = await service.list_indents(db, PageParams(page=1, size=50), user=world["tech1"])
+
+    assert {row.id for row in page["items"]} == {world["indents"]["tech1"].id}
+
+
+async def test_leaf_tl_does_not_inherit_child_position_visibility(db):
+    world = await _visibility_world(db)
+    tl = HcmEmployee(id=27, full_name="TL One", emp_code="TL1",
+                     department_id=501, office_id=701, project_id=900,
+                     is_active=True, synced_at=utcnow())
+    db.add(tl)
+    db.add(HcmPositionAssignment(id=27, employee_id=tl.id,
+                                 employee_name=tl.full_name,
+                                 position_id=121, department_id=501,
+                                 office_id=701, is_primary=True,
+                                 is_active=True, synced_at=utcnow()))
+    await db.commit()
+    tl.active_position_id = 121
+    tl_indent = await service.create_indent(db, _create_data(world["item"].id), tl)
+
+    page = await service.list_indents(db, PageParams(page=1, size=50), user=tl)
+
+    assert {row.id for row in page["items"]} == {tl_indent.id}
+    assert world["indents"]["tech1"].id not in {row.id for row in page["items"]}
+
+
+async def test_operational_permission_does_not_grant_unrelated_status_visibility(db):
+    world = await _visibility_world(db)
+    await _grant_login(
+        db,
+        world["tech2"],
+        "stocktech",
+        ["indent.view", "allocation.view", "stock.view"],
+    )
+    await service.submit_indent(db, world["indents"]["tech1"].id, world["tech1"])
+    await service.act_on_indent(
+        db,
+        world["indents"]["tech1"].id,
+        ApprovalAction.APPROVED,
+        "branch ok",
+        world["oe1"],
+    )
+
+    page = await service.list_indents(db, PageParams(page=1, size=50), user=world["tech2"])
+
+    ids = {row.id for row in page["items"]}
+    assert world["indents"]["tech2"].id in ids
+    assert world["indents"]["tech1"].id not in ids
+
+
+async def test_oe_sees_own_branch_but_not_sibling_branch(db):
+    world = await _visibility_world(db)
+    page = await service.list_indents(db, PageParams(page=1, size=50), user=world["oe1"])
+    ids = {row.id for row in page["items"]}
+
+    assert world["indents"]["oe1"].id in ids
+    assert world["indents"]["tech1"].id in ids
+    assert world["indents"]["oe2"].id not in ids
+    assert world["indents"]["tech2"].id not in ids
+
+
+async def test_real_district_manager_position_sees_oe_subtree(db):
+    world = await _production_visibility_world(db)
+
+    page = await service.list_indents(db, PageParams(page=1, size=100), user=world["dm1"])
+    ids = {row.id for row in page["items"]}
+
+    assert world["indents"]["dm1"].id in ids
+    assert world["indents"]["oe1"].id in ids
+    assert world["indents"]["pilot1"].id in ids
+    assert world["indents"]["driver1"].id in ids
+    assert world["indents"]["dm2"].id not in ids
+    assert world["indents"]["oe2"].id not in ids
+
+
+async def test_real_regional_manager_position_sees_dm_subtree(db):
+    world = await _production_visibility_world(db)
+
+    page = await service.list_indents(db, PageParams(page=1, size=100), user=world["rm1"])
+    ids = {row.id for row in page["items"]}
+
+    assert world["indents"]["rm1"].id in ids
+    assert world["indents"]["dm1"].id in ids
+    assert world["indents"]["oe1"].id in ids
+    assert world["indents"]["pilot1"].id in ids
+    assert world["indents"]["rm2"].id not in ids
+    assert world["indents"]["dm2"].id not in ids
+
+
+async def test_same_project_reporting_branch_visible_across_different_offices(db):
+    world = await _production_visibility_world(db)
+
+    assert world["positions"]["rm1"].office_id != world["positions"]["dm1"].office_id
+    assert world["positions"]["dm1"].office_id != world["positions"]["oe1"].office_id
+    assert world["positions"]["oe1"].office_id != world["positions"]["pilot1"].office_id
+    assert {
+        world["positions"]["rm1"].project_id,
+        world["positions"]["dm1"].project_id,
+        world["positions"]["oe1"].project_id,
+        world["positions"]["pilot1"].project_id,
+    } == {19000}
+
+    oe_ids = {
+        row.id for row in
+        (await service.list_indents(db, PageParams(page=1, size=100), user=world["oe1"]))["items"]
+    }
+    dm_ids = {
+        row.id for row in
+        (await service.list_indents(db, PageParams(page=1, size=100), user=world["dm1"]))["items"]
+    }
+    rm_ids = {
+        row.id for row in
+        (await service.list_indents(db, PageParams(page=1, size=100), user=world["rm1"]))["items"]
+    }
+
+    assert world["indents"]["pilot1"].id in oe_ids
+    assert world["indents"]["pilot1"].id in dm_ids
+    assert world["indents"]["pilot1"].id in rm_ids
+
+
+async def test_sibling_dm_and_rm_branches_remain_isolated(db):
+    world = await _production_visibility_world(db)
+
+    dm2_ids = {
+        row.id for row in
+        (await service.list_indents(db, PageParams(page=1, size=100), user=world["dm2"]))["items"]
+    }
+    rm2_ids = {
+        row.id for row in
+        (await service.list_indents(db, PageParams(page=1, size=100), user=world["rm2"]))["items"]
+    }
+
+    assert world["indents"]["pilot1"].id not in dm2_ids
+    assert world["indents"]["driver1"].id not in rm2_ids
+    assert world["indents"]["tl2"].id in dm2_ids
+    assert world["indents"]["dm2"].id in rm2_ids
+
+
+async def test_sph_and_coo_have_global_read_without_approval_power(db):
+    world = await _production_visibility_world(db)
+
+    sph_ids = {
+        row.id for row in
+        (await service.list_indents(db, PageParams(page=1, size=100), user=world["sph"]))["items"]
+    }
+    coo_ids = {
+        row.id for row in
+        (await service.list_indents(db, PageParams(page=1, size=100), user=world["coo"]))["items"]
+    }
+
+    all_ids = {indent.id for indent in world["indents"].values()}
+    assert all_ids <= sph_ids
+    assert all_ids <= coo_ids
+
+    await service.submit_indent(db, world["indents"]["pilot1"].id, world["pilot1"])
+    with pytest.raises(PermissionError_):
+        await service.act_on_indent(
+            db, world["indents"]["pilot1"].id, ApprovalAction.APPROVED, "global read only",
+            world["sph"],
+        )
+    with pytest.raises(PermissionError_):
+        await service.act_on_indent(
+            db, world["indents"]["pilot1"].id, ApprovalAction.APPROVED, "global read only",
+            world["coo"],
+        )
+
+
+async def test_manager_cannot_update_or_submit_subordinate_draft(db):
+    world = await _production_visibility_world(db)
+
+    await service.get_indent(db, world["indents"]["pilot1"].id, world["dm1"])
+    with pytest.raises(PermissionError_):
+        await service.update_indent(
+            db,
+            world["indents"]["pilot1"].id,
+            IndentUpdate(remarks="manager edit"),
+            world["dm1"],
+        )
+    with pytest.raises(PermissionError_):
+        await service.submit_indent(db, world["indents"]["pilot1"].id, world["dm1"])
+
+
+async def test_invalid_active_assignment_grants_no_subtree_visibility(db):
+    world = await _production_visibility_world(db)
+    world["dm1"].active_position_id = world["positions"]["rm1"].id
+
+    page = await service.list_indents(db, PageParams(page=1, size=100), user=world["dm1"])
+
+    assert {row.id for row in page["items"]} == {world["indents"]["dm1"].id}
+
+
+async def test_missing_manager_project_context_grants_no_subtree_visibility(db):
+    world = await _production_visibility_world(db)
+    world["positions"]["dm1"].project_id = None
+    await db.commit()
+
+    page = await service.list_indents(db, PageParams(page=1, size=100), user=world["dm1"])
+    ids = {row.id for row in page["items"]}
+
+    assert ids == {world["indents"]["dm1"].id}
+
+
+async def test_null_indent_project_does_not_widen_manager_access_but_office_does_not_constrain(db):
+    world = await _production_visibility_world(db)
+    null_project = world["indents"]["pilot1"]
+    null_office = world["indents"]["driver1"]
+    null_project.project_id = None
+    null_office.office_id = None
+    await db.commit()
+
+    page = await service.list_indents(db, PageParams(page=1, size=100), user=world["dm1"])
+    ids = {row.id for row in page["items"]}
+
+    assert null_project.id not in ids
+    assert null_office.id in ids
+    assert world["indents"]["oe1"].id in ids
+
+
+async def test_dm_and_rm_see_only_their_descendant_branches(db):
+    world = await _visibility_world(db)
+    dm_page = await service.list_indents(db, PageParams(page=1, size=50), user=world["dm"])
+    rm_page = await service.list_indents(db, PageParams(page=1, size=50), user=world["rm"])
+
+    dm_ids = {row.id for row in dm_page["items"]}
+    rm_ids = {row.id for row in rm_page["items"]}
+    assert world["indents"]["dm"].id in dm_ids
+    assert world["indents"]["oe1"].id in dm_ids
+    assert world["indents"]["tech2"].id in dm_ids
+    assert world["indents"]["rm"].id not in dm_ids
+    assert world["indents"]["rm"].id in rm_ids
+    assert world["indents"]["dm"].id in rm_ids
+    assert world["indents"]["tech1"].id in rm_ids
+
+
+async def test_cross_project_descendant_is_not_visible(db):
+    world = await _visibility_world(db)
+    page = await service.list_indents(db, PageParams(page=1, size=50), user=world["oe1"])
+
+    assert world["indents"]["other_project"].id not in {row.id for row in page["items"]}
+
+
+async def test_direct_detail_cross_branch_access_is_blocked(db):
+    world = await _visibility_world(db)
+
+    with pytest.raises(NotFoundError):
+        await service.get_indent(db, world["indents"]["tech2"].id, world["oe1"])
+
+
+async def test_sibling_manager_cannot_view_or_act_on_indent(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+
+    with pytest.raises(NotFoundError):
+        await service.get_indent(db, world["indent"].id, world["sibling_oe"])
+    with pytest.raises(NotFoundError):
+        await service.act_on_indent(
+            db, world["indent"].id, ApprovalAction.APPROVED, "sibling",
+            world["sibling_oe"],
+        )
+
+
+async def test_scoped_stats_activity_and_acknowledgments_do_not_leak(db):
+    world = await _visibility_world(db)
+    await service.submit_indent(db, world["indents"]["tech1"].id, world["tech1"])
+    await service.act_on_indent(
+        db, world["indents"]["tech1"].id, ApprovalAction.APPROVED, "branch ok",
+        world["oe1"],
+    )
+    await service.submit_indent(db, world["indents"]["tech2"].id, world["tech2"])
+    await service.act_on_indent(
+        db, world["indents"]["tech2"].id, ApprovalAction.APPROVED, "sibling ok",
+        world["oe2"],
+    )
+
+    params = PageParams(page=1, size=50)
+    stats = await service.indent_stats(db, user=world["oe1"])
+    activity = await service.activity_ledger(db, params, user=world["oe1"])
+    acknowledgments = await service.list_acknowledgments(db, params, user=world["oe1"])
+
+    assert stats["total"] == 2
+    assert {row["indent_id"] for row in activity["items"]} == {
+        world["indents"]["oe1"].id,
+        world["indents"]["tech1"].id,
+    }
+    assert {row["indent_id"] for row in acknowledgments["items"]} == {
+        world["indents"]["tech1"].id,
+    }
+
+
+async def test_manager_own_indent_starts_approval_above_them(db):
+    world = await _visibility_world(db)
+    await service.submit_indent(db, world["indents"]["dm"].id, world["dm"])
+
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == world["indents"]["dm"].id)
+    )).scalars().all()
+    assert {row.approver_id for row in pending} == {world["rm"].id}
+
+
+async def test_any_one_final_approval_still_completes_with_one_approver(db):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    requester = HcmEmployee(id=41, full_name="Requester", emp_code="REQ",
+                            is_active=True, synced_at=utcnow())
+    approver_one = HcmEmployee(id=42, full_name="SPH", emp_code="SPH",
+                               is_active=True, synced_at=utcnow())
+    approver_two = HcmEmployee(id=43, full_name="COO", emp_code="COO",
+                               is_active=True, synced_at=utcnow())
+    db.add_all([item, requester, approver_one, approver_two])
+    db.add_all([
+        HcmPosition(id=410, name="Requester", is_active=True, synced_at=utcnow()),
+        HcmPosition(id=500, name="Final Approver", is_active=True, synced_at=utcnow()),
+    ])
+    db.add_all([
+        HcmPositionAssignment(id=41, employee_id=requester.id, position_id=410,
+                              is_primary=True, is_active=True, synced_at=utcnow()),
+        HcmPositionAssignment(id=42, employee_id=approver_one.id, position_id=500,
+                              is_primary=True, is_active=True, synced_at=utcnow()),
+        HcmPositionAssignment(id=43, employee_id=approver_two.id, position_id=500,
+                              is_primary=True, is_active=True, synced_at=utcnow()),
+    ])
+    wf = Workflow(code="WF-INDENT", name="Indent", doc_type="INDENT", is_active=True)
+    db.add(wf)
+    await db.flush()
+    db.add(Stage(workflow_id=wf.id, sequence=1, name="Final approval",
+                 approver_type=ApproverType.POSITION.value, position_id=500,
+                 approval_mode="ANY_ONE"))
+    await db.commit()
+    requester.active_position_id = 410
+    approver_one.active_position_id = 500
+
+    indent = await service.create_indent(db, _create_data(item.id), requester)
+    await service.submit_indent(db, indent.id, requester)
+    result = await service.act_on_indent(
+        db, indent.id, ApprovalAction.APPROVED, "one final approval", approver_one,
+    )
+
+    assert result.status == IndentStatus.AWAITING_ALLOCATION.value
+
+
 async def test_activity_acknowledgments_and_notifications(db):
     requester, approver, it1, _ = await _world(db)
     indent = await service.create_indent(db, _create_data(it1.id), requester)
@@ -166,7 +1283,7 @@ async def test_activity_acknowledgments_and_notifications(db):
     activity = await service.activity_ledger(db, params, search=indent.indent_no)
     assert activity["total"] >= 2
     assert {row["transaction_type"] for row in activity["items"]} == {
-        "RAISED", "ACKNOWLEDGED",
+        "RAISED", "SUBMITTED", "APPROVED",
     }
 
     acknowledgments = await service.list_acknowledgments(db, params)
@@ -182,3 +1299,170 @@ async def test_create_without_permission_forbidden(client, make_user, login):
     r = await client.post("/api/indents", json={"items": [{"item_id": 1, "quantity": 1}]},
                           headers=headers)
     assert r.status_code == 403
+
+
+async def test_indent_list_filters(client, db, login):
+    requester, _approver, it1, it2 = await _world(db)
+    today = utcnow().date()
+    i1 = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=10)],
+            priority="URGENT",
+            required_date=today,
+            remarks="Bolt request",
+        ),
+        requester,
+    )
+    i2 = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it2.id, quantity=20)],
+            priority="NORMAL",
+            required_date=today + timedelta(days=10),
+            remarks="Nut request",
+        ),
+        requester,
+    )
+
+    await _grant_login(db, requester, "filteruser", ["indent.view"])
+    headers = await login("filteruser", "pw")
+
+    r = await client.get(f"/api/indents?search={i1.indent_no}&page=1&size=1", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    assert r.json()["items"][0]["id"] == i1.id
+    assert r.json()["page"] == 1
+    assert r.json()["size"] == 1
+
+    r = await client.get("/api/indents?priority=URGENT", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    assert r.json()["items"][0]["id"] == i1.id
+
+    r = await client.get("/api/indents?status=DRAFT", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] >= 2
+
+    r = await client.get(f"/api/indents?required_by_to={today.isoformat()}", headers=headers)
+    assert r.status_code == 200
+    ids = {row["id"] for row in r.json()["items"]}
+    assert i1.id in ids
+    assert i2.id not in ids
+
+    r_stats = await client.get(f"/api/indents/stats?search={i1.indent_no}", headers=headers)
+    assert r_stats.status_code == 200
+    data = r_stats.json()
+    assert data["total"] == 1
+    assert data["draft"] == 1
+
+
+async def test_acknowledgment_filters(client, db, login):
+    requester, approver, it1, _ = await _world(db)
+    today_date = utcnow().date()
+    indent = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=5)],
+            required_date=today_date,
+        ),
+        requester,
+    )
+    future_indent = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=5)],
+            required_date=today_date + timedelta(days=10),
+        ),
+        requester,
+    )
+    await service.submit_indent(db, indent.id, requester)
+    await service.act_on_indent(db, indent.id, ApprovalAction.APPROVED, "Approved for issue", approver)
+    await service.submit_indent(db, future_indent.id, requester)
+    await service.act_on_indent(db, future_indent.id, ApprovalAction.APPROVED, "Approved for issue", approver)
+
+    await _grant_login(db, requester, "ackuser", ["indent.view"])
+    headers = await login("ackuser", "pw")
+
+    r = await client.get("/api/indents/acknowledgments?search=Approved%20for%20issue", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] >= 1
+    assert any(row["indent_no"] == indent.indent_no for row in r.json()["items"])
+
+    today = utcnow().date().isoformat()
+    r = await client.get(f"/api/indents/acknowledgments?date_from={today}&date_to={today}", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] >= 1
+
+    r = await client.get(f"/api/indents/acknowledgments?required_from={today}&required_to={today}", headers=headers)
+    assert r.status_code == 200
+    ids = {row["indent_id"] for row in r.json()["items"]}
+    assert indent.id in ids
+    assert future_indent.id not in ids
+
+
+async def test_activity_filters(client, db, login):
+    requester, approver, it1, _ = await _world(db)
+    today_date = utcnow().date()
+    indent = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=5)],
+            required_date=today_date,
+        ),
+        requester,
+    )
+    future_indent = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=5)],
+            required_date=today_date + timedelta(days=10),
+        ),
+        requester,
+    )
+    await service.submit_indent(db, indent.id, requester)
+    await service.act_on_indent(db, indent.id, ApprovalAction.APPROVED, "Approved for issue", approver)
+
+    await _grant_login(db, requester, "activityuser", ["indent.view"])
+    headers = await login("activityuser", "pw")
+
+    r = await client.get("/api/indents/activity?search=Bolt&transaction_type=RAISED", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] >= 1
+    assert {row["transaction_type"] for row in r.json()["items"]} == {"RAISED"}
+
+    r = await client.get(f"/api/indents/activity?item_id={it1.id}&direction=OUTWARD", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] >= 1
+    assert all(row["item_id"] == it1.id for row in r.json()["items"])
+
+    r = await client.get("/api/indents/activity?search=Approved%20for%20issue&transaction_type=APPROVED", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] >= 1
+    assert {row["transaction_type"] for row in r.json()["items"]} == {"APPROVED"}
+
+    today = today_date.isoformat()
+    r = await client.get(
+        f"/api/indents/activity?required_from={today}&required_to={today}&transaction_type=RAISED",
+        headers=headers,
+    )
+    assert r.status_code == 200
+    ids = {row["indent_id"] for row in r.json()["items"]}
+    assert indent.id in ids
+    assert future_indent.id not in ids
+
+
+async def test_read_endpoints_require_indent_view(client, make_user, login):
+    await make_user(employee_id=13, username="noview", password="pw", permissions=[])
+    headers = await login("noview", "pw")
+
+    for path in [
+        "/api/indents",
+        "/api/indents/stats",
+        "/api/indents/acknowledgments",
+        "/api/indents/activity",
+    ]:
+        r = await client.get(path, headers=headers)
+        assert r.status_code == 403
+
+

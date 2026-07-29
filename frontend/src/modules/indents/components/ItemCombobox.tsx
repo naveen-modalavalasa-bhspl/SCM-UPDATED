@@ -17,11 +17,15 @@ export function ItemCombobox({
   value,
   onChange,
   options,
+  onQueryChange,
+  isLoading = false,
   placeholder = "Type or select an item…",
 }: {
   value: number | "";
   onChange: (value: number | "") => void;
   options: ItemOption[];
+  onQueryChange?: (query: string) => void;
+  isLoading?: boolean;
   placeholder?: string;
 }) {
   const selectedLabel = options.find((option) => option.value === value)?.label ?? "";
@@ -36,6 +40,10 @@ export function ItemCombobox({
   useEffect(() => {
     setQuery(selectedLabel);
   }, [selectedLabel]);
+
+  useEffect(() => {
+    if (query !== selectedLabel) onQueryChange?.(query);
+  }, [onQueryChange, query, selectedLabel]);
 
   const select = (option: ItemOption) => {
     onChange(option.value);
@@ -99,9 +107,14 @@ export function ItemCombobox({
               {option.label}
             </button>
           ))}
-          {!filtered.length && (
+          {isLoading && (
             <div className="px-3 py-4 text-center text-sm text-muted">
-              No matching items
+              Searching items...
+            </div>
+          )}
+          {!isLoading && !filtered.length && (
+            <div className="px-3 py-4 text-center text-sm text-muted">
+              {query.trim() ? "No matching items" : "Type to search items"}
             </div>
           )}
         </div>

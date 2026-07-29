@@ -41,6 +41,10 @@ RULE_EVENTS = [
     ("MR_RAISED", "Material request raised", "inventory",
      "Fires when a shortfall becomes a material request for procurement",
      {"mr_id": "number", "indent_id": "number"}),
+    ("MR_APPROVED", "Material request approved", "inventory",
+     "Fires when an approved shortage becomes ready for Procurement",
+     {"mr_id": "number", "indent_id": "number", "priority": "text",
+      "department_id": "number"}),
 ]
 
 # code, name, type

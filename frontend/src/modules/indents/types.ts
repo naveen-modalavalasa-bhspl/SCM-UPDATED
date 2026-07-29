@@ -33,6 +33,10 @@ export interface Indent {
   remarks?: string | null;
   current_approver_name?: string | null;
   approved_at?: string | null;
+  is_bookmarked: "YES" | "NO" | string;
+  can_submit: boolean;
+  can_approve: boolean;
+  can_reject: boolean;
   created_at: string;
   items: IndentItem[];
 }
@@ -46,6 +50,7 @@ export interface IndentListRow {
   priority: string;
   total_items: number;
   current_approver_name?: string | null;
+  is_bookmarked: "YES" | "NO" | string;
   created_at: string;
 }
 
@@ -66,7 +71,7 @@ export interface IndentStats {
 export interface ActivityRow {
   event_id: string;
   event_at: string;
-  transaction_type: "RAISED" | "ACKNOWLEDGED";
+  transaction_type: "RAISED" | "SUBMITTED" | "APPROVED" | "REJECTED" | "RETURNED" | "ACKNOWLEDGED" | string;
   direction?: "INWARD" | "OUTWARD" | null;
   indent_id: number;
   indent_no: string;
@@ -111,6 +116,47 @@ export interface PendingApproval {
   doc_no?: string | null;
   summary?: string | null;
   requested_by_name?: string | null;
+  amount?: number | null;
+  waiting_since?: string | null;
+  due_at?: string | null;
+  current_stage_name?: string | null;
+}
+
+export interface ApprovalDecisionRow {
+  id: number;
+  doc_type: string;
+  doc_id: number;
+  doc_no?: string | null;
+  stage_sequence: number;
+  stage_name?: string | null;
+  decision: string;
+  comments?: string | null;
+  decision_at?: string | null;
+  requester?: string | null;
+  workflow_status: string;
+}
+
+export interface TeamQueueRow {
+  approver_id: number;
+  approver_name: string;
+  pending_count: number;
+  overdue_count: number;
+  oldest_waiting_since?: string | null;
+  average_waiting_hours: number;
+  document_types: string[];
+}
+
+export interface ApprovalDelegation {
+  id: number;
+  from_employee_id: number;
+  from_employee_name?: string | null;
+  to_employee_id: number;
+  to_employee_name?: string | null;
+  doc_type?: string | null;
+  valid_from: string;
+  valid_to: string;
+  reason?: string | null;
+  is_active: boolean;
 }
 
 export interface IndentCreate {
@@ -118,4 +164,42 @@ export interface IndentCreate {
   priority: string;
   remarks?: string | null;
   items: { item_id: number; quantity: number; remarks?: string }[];
+}
+
+export interface IndentJourneyStage {
+  sequence: number;
+  title: string;
+  status: "SUBMITTED" | "APPROVED" | "REJECTED" | "PENDING" | "NOT_REQUIRED" | string;
+  is_current?: boolean;
+  approver_name?: string | null;
+  position_name?: string | null;
+  timestamp?: string | null;
+  comments?: string | null;
+  duration_seconds?: number | null;
+  stage_type: string;
+}
+
+export interface IndentJourneyHistoryEvent {
+  id: string;
+  event_type: string;
+  title: string;
+  description?: string | null;
+  actor_name?: string | null;
+  position_name?: string | null;
+  timestamp: string;
+  comments?: string | null;
+}
+
+export interface IndentJourney {
+  indent_id: number;
+  indent_no: string;
+  status: string;
+  requested_by_name?: string | null;
+  requested_by_position?: string | null;
+  created_at: string;
+  current_stage?: string | null;
+  current_stage_message: string;
+  final_any_one_outcome?: string | null;
+  stages: IndentJourneyStage[];
+  history: IndentJourneyHistoryEvent[];
 }

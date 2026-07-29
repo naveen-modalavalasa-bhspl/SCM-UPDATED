@@ -36,3 +36,37 @@ class DelegationOut(BaseModel):
     valid_to: date
     reason: str | None = None
     is_active: bool
+
+
+class DelegationEndIn(BaseModel):
+    """Ending a delegation keeps its audit row; it is never deleted."""
+    reason: str | None = None
+
+
+class WorkflowConditionIn(BaseModel):
+    field_name: str
+    operator: str
+    field_value: str
+    logic: str = "AND"
+
+
+class WorkflowStageIn(BaseModel):
+    sequence: int = Field(ge=1)
+    name: str
+    approver_type: str
+    position_id: int | None = None
+    role_id: int | None = None
+    employee_id: int | None = None
+    approval_mode: str = "ANY_ONE"
+    is_optional: bool = False
+    can_edit_document: bool = False
+    sla_hours: int | None = Field(default=None, ge=1)
+    conditions: list[WorkflowConditionIn] = Field(default_factory=list)
+
+
+class WorkflowIn(BaseModel):
+    code: str
+    name: str
+    doc_type: str
+    is_active: bool = True
+    stages: list[WorkflowStageIn] = Field(default_factory=list)
