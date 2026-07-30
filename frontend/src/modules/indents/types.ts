@@ -70,20 +70,48 @@ export interface IndentStats {
 
 export interface ActivityRow {
   event_id: string;
-  event_at: string;
-  transaction_type: "RAISED" | "SUBMITTED" | "APPROVED" | "REJECTED" | "RETURNED" | "ACKNOWLEDGED" | string;
-  direction?: "INWARD" | "OUTWARD" | null;
   indent_id: number;
   indent_no: string;
-  status: string;
-  requested_by_name?: string | null;
-  department_name?: string | null;
+  event_type?:
+    | "REQUEST_CREATED"
+    | "REQUEST_SUBMITTED"
+    | "APPROVAL_COMPLETED"
+    | "REQUEST_REJECTED"
+    | "REQUEST_RETURNED"
+    | "APPROVAL_ROUTED_AUTOMATICALLY"
+    | "STOCK_ALLOCATED"
+    | "PROCUREMENT_REQUEST_CREATED"
+    | "BOOKMARK_ADDED"
+    | "BOOKMARK_REMOVED"
+    | string
+    | null;
+  event_label?: string | null;
+  result?: string | null;
+  result_label?: string | null;
+  occurred_at?: string | null;
+  actor_id?: number | null;
+  actor_name?: string | null;
+  actor_position?: string | null;
   item_id?: number | null;
   item_code?: string | null;
   item_name?: string | null;
+  quantity?: number | string | null;
+  requested_quantity?: number | string | null;
   uom_code?: string | null;
-  quantity: number;
-  actor_name?: string | null;
+  department_name?: string | null;
+  office_name?: string | null;
+  remarks?: string | null;
+  source_type?: string | null;
+  source_id?: number | null;
+
+  // Temporary compatibility with a backend process serving the pre-normalized
+  // Activity contract. These aliases can be removed after every deployed backend
+  // serves the normalized fields above.
+  event_at?: string | null;
+  transaction_type?: string | null;
+  direction?: string | null;
+  status?: string | null;
+  requested_by_name?: string | null;
   comments?: string | null;
 }
 
@@ -116,10 +144,6 @@ export interface PendingApproval {
   doc_no?: string | null;
   summary?: string | null;
   requested_by_name?: string | null;
-  amount?: number | null;
-  waiting_since?: string | null;
-  due_at?: string | null;
-  current_stage_name?: string | null;
 }
 
 export interface ApprovalDecisionRow {

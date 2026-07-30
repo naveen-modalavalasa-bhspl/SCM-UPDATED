@@ -13,12 +13,23 @@ from app.shared.enums import (
 
 
 class IndentActivityType(str, Enum):
-    RAISED = "RAISED"
-    SUBMITTED = "SUBMITTED"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    RETURNED = "RETURNED"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
+    REQUEST_CREATED = "REQUEST_CREATED"
+    REQUEST_SUBMITTED = "REQUEST_SUBMITTED"
+    APPROVAL_COMPLETED = "APPROVAL_COMPLETED"
+    REQUEST_REJECTED = "REQUEST_REJECTED"
+    REQUEST_RETURNED = "REQUEST_RETURNED"
+    APPROVAL_ROUTED_AUTOMATICALLY = "APPROVAL_ROUTED_AUTOMATICALLY"
+    STOCK_ALLOCATED = "STOCK_ALLOCATED"
+    PROCUREMENT_REQUEST_CREATED = "PROCUREMENT_REQUEST_CREATED"
+    BOOKMARK_ADDED = "BOOKMARK_ADDED"
+    BOOKMARK_REMOVED = "BOOKMARK_REMOVED"
+
+
+class AcknowledgmentStatus(str, Enum):
+    """Display/query values for fulfillment acknowledgments, not indent lifecycle states."""
+
+    FULFILLED = "FULFILLED"
+    PARTIALLY_FULFILLED = "PARTIALLY_FULFILLED"
 
 
 class MaterialDirection(str, Enum):
@@ -27,6 +38,7 @@ class MaterialDirection(str, Enum):
 
 
 __all__ = [
+    "AcknowledgmentStatus",
     "AllocationStatus",
     "ApprovalAction",
     "AuditAction",

@@ -209,14 +209,14 @@ function IndentBoardContent() {
 
       {!isLoading && !error && (
         <div className="-mx-4 overflow-x-auto overflow-y-hidden px-4 pb-3 md:mx-0 md:px-0">
-          <div className="flex min-w-max gap-4 md:grid md:min-w-0 md:grid-cols-6">
+          <div className="flex min-w-max items-start gap-4 md:grid md:min-w-0 md:grid-cols-6 md:items-start">
             {COLUMNS.map((column) => {
               const items = bucket(column.statuses);
               const total = columnTotal(column.statuses);
               return (
                 <section
                   key={column.title}
-                  className="flex min-h-[26rem] w-80 shrink-0 flex-col rounded-lg border border-line bg-content1 p-3 shadow-sm md:w-auto"
+                  className="flex h-fit w-80 shrink-0 self-start flex-col rounded-lg border border-line bg-content1 p-3 shadow-sm md:w-auto"
                 >
                   <div className="mb-3 flex items-center justify-between">
                     <span className="flex items-center gap-2 text-sm font-semibold text-body">
@@ -228,9 +228,9 @@ function IndentBoardContent() {
                     </span>
                   </div>
 
-                  <div className="flex min-h-72 flex-1 flex-col gap-3">
+                  <div className="flex flex-col gap-3">
                     {total === 0 && (
-                      <div className="grid min-h-52 flex-1 place-items-center rounded-lg border border-dashed border-line bg-white/70 px-4 text-center">
+                      <div className="grid min-h-52 place-items-center rounded-lg border border-dashed border-line bg-white/70 px-4 text-center">
                         <div>
                           <span className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-full bg-content2 text-muted">
                             <ClipboardList className="h-5 w-5" aria-hidden="true" />

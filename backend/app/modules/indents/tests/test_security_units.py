@@ -12,7 +12,7 @@ import pytest
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
 from app.modules.indents import service
-from app.modules.indents.enums import ApprovalAction
+from app.modules.indents.enums import AcknowledgmentStatus, ApprovalAction
 from app.modules.indents.schemas import IndentUpdate
 from app.shared.enums import IndentStatus, InstanceStatus, Priority
 
@@ -591,8 +591,9 @@ def test_invalid_create_or_update_priority_is_rejected():
 
 
 class EmptyResult:
-    def __init__(self, scalar_row=None):
+    def __init__(self, scalar_row=None, mapping_rows=None):
         self.scalar_row = scalar_row
+        self.mapping_rows = mapping_rows or []
 
     def scalars(self):
         return self
@@ -607,26 +608,28 @@ class EmptyResult:
         return (0, 0)
 
     def all(self):
-        return []
+        return self.mapping_rows
 
 
 class CapturingDb:
-    def __init__(self, scalar_row=None):
+    def __init__(self, scalar_row=None, mapping_rows=None, scalar_value=0):
         self.count_stmt = None
         self.result_stmt = None
         self.scalar_stmts = []
         self.execute_stmts = []
         self.scalar_row = scalar_row
+        self.mapping_rows = mapping_rows
+        self.scalar_value = scalar_value
 
     async def scalar(self, stmt):
         self.count_stmt = stmt
         self.scalar_stmts.append(stmt)
-        return 0
+        return self.scalar_value
 
     async def execute(self, stmt):
         self.result_stmt = stmt
         self.execute_stmts.append(stmt)
-        return EmptyResult(self.scalar_row)
+        return EmptyResult(self.scalar_row, self.mapping_rows)
 
 
 EmptyAuditResult = EmptyResult
@@ -680,10 +683,12 @@ async def test_acknowledgment_search_uses_same_visibility_and_search_filters(mon
         db,
         PageParams(page=1, size=20),
         user=user(),
-        search="  approved final  ",
+        search="  allocator name  ",
+        date_from=date(2026, 8, 2),
+        date_to=date(2026, 8, 14),
         required_from=date(2026, 8, 1),
         required_to=date(2026, 8, 15),
-        statuses=[IndentStatus.REJECTED],
+        statuses=[AcknowledgmentStatus.FULFILLED],
         priorities=[Priority.URGENT],
     )
     count_sql = sql_text(db.count_stmt)
@@ -692,21 +697,114 @@ async def test_acknowledgment_search_uses_same_visibility_and_search_filters(mon
     assert page == {"items": [], "total": 0, "page": 1, "size": 20}
     for text in (count_sql, result_sql):
         assert "ind_indents.requested_by_id = 10" in text
-        assert "%approved final%" in text
+        assert "%allocator name%" in text
         assert "ind_indents.indent_no" in text
         assert "ind_indents.requested_by_name" in text
         assert "ind_indents.department_name" in text
-        assert "wf_actions.actor_name" in text
-        assert "wf_actions.action" in text
-        assert "wf_actions.stage_name" in text
-        assert "wf_actions.comments" in text
+        assert "allocated_by_name" not in text
+        assert "inv_allocations" not in text
+        assert "allocated_qty" not in text
+        assert "fulfillment_evidence.actor_name" in text
+        assert "fulfillment_evidence.action" in text
+        assert "fulfillment_evidence.comments" in text
+        assert "wf_actions" not in text
+        assert "wf_instances" not in text
         assert "EXISTS" in text
         assert "ind_indent_items.item_code" in text
         assert "ind_indent_items.item_name" in text
-        assert "ind_indents.status IN ('REJECTED')" in text
         assert "ind_indents.priority IN ('URGENT')" in text
+        assert "date(fulfillment_evidence.acted_at)" in text.lower()
+        assert ">= '2026-08-02'" in text
+        assert "<= '2026-08-14'" in text
         assert "ind_indents.required_date >= '2026-08-01'" in text
         assert "ind_indents.required_date <= '2026-08-15'" in text
+        assert "fulfillment_evidence.action IN ('FULFILLED')" in text
+
+
+@pytest.mark.asyncio
+async def test_fully_allocated_but_unissued_indent_has_no_acknowledgment():
+    db = CapturingDb()
+
+    page = await service.list_acknowledgments(
+        db,
+        PageParams(page=1, size=20),
+        statuses=[AcknowledgmentStatus.FULFILLED],
+    )
+
+    sql = captured_sql(db)
+    assert page == {"items": [], "total": 0, "page": 1, "size": 20}
+    assert "allocated_qty" not in sql
+    assert "inv_allocations" not in sql
+    assert "ALLOCATED" not in sql
+    assert "0 = 1" in sql
+
+
+@pytest.mark.asyncio
+async def test_partial_allocation_or_lifecycle_state_has_no_acknowledgment():
+    db = CapturingDb()
+
+    page = await service.list_acknowledgments(
+        db,
+        PageParams(page=1, size=20),
+        statuses=[AcknowledgmentStatus.PARTIALLY_FULFILLED],
+    )
+
+    sql = captured_sql(db)
+    assert page == {"items": [], "total": 0, "page": 1, "size": 20}
+    assert "allocated_qty" not in sql
+    assert "ind_indents.status" not in sql
+    assert "fulfillment_evidence.action IN ('PARTIALLY_FULFILLED')" in sql
+    assert "0 = 1" in sql
+
+
+@pytest.mark.asyncio
+async def test_allocation_actor_and_timestamp_are_not_fulfillment_evidence():
+    db = CapturingDb()
+
+    await service.list_acknowledgments(db, PageParams(page=1, size=20))
+
+    sql = captured_sql(db)
+    assert "allocated_by_name" not in sql
+    assert "inv_allocations.remarks" not in sql
+    assert "inv_allocations.approved_at" not in sql
+    assert "ind_indents.updated_at" not in sql
+    assert "ind_indents.created_at" not in sql
+    assert "CAST(NULL AS DATETIME)" in sql
+
+
+@pytest.mark.asyncio
+async def test_acknowledgment_status_filters_are_display_values_and_keep_pagination():
+    full_db = CapturingDb()
+    partial_db = CapturingDb()
+
+    full_page = await service.list_acknowledgments(
+        full_db,
+        PageParams(page=3, size=10),
+        statuses=[AcknowledgmentStatus.FULFILLED],
+    )
+    partial_page = await service.list_acknowledgments(
+        partial_db,
+        PageParams(page=1, size=10),
+        statuses=[AcknowledgmentStatus.PARTIALLY_FULFILLED],
+    )
+
+    full_sql = sql_text(full_db.result_stmt)
+    partial_sql = sql_text(partial_db.result_stmt)
+    assert {status.value for status in AcknowledgmentStatus} == {
+        "FULFILLED",
+        "PARTIALLY_FULFILLED",
+    }
+    with pytest.raises(ValueError):
+        AcknowledgmentStatus(IndentStatus.ALLOCATED.value)
+    assert "ALLOCATED" not in full_sql
+    assert "allocated_qty" not in full_sql
+    assert "allocated_qty" not in partial_sql
+    assert "fulfillment_evidence.action IN ('FULFILLED')" in full_sql
+    assert "fulfillment_evidence.action IN ('PARTIALLY_FULFILLED')" in partial_sql
+    assert full_page == {"items": [], "total": 0, "page": 3, "size": 10}
+    assert partial_page == {"items": [], "total": 0, "page": 1, "size": 10}
+    assert "LIMIT 10 OFFSET 20" in full_sql
+    assert "LIMIT 10 OFFSET 0" in partial_sql
 
 
 @pytest.mark.asyncio
@@ -732,24 +830,26 @@ async def test_activity_filters_use_visibility_status_priority_and_search(monkey
     result_sql = sql_text(db.result_stmt)
 
     for text in (count_sql, result_sql):
+        assert "WITH visible_indents AS" in text
         assert "ind_indents.requested_by_id = 10" in text
         assert "%bolt approved%" in text
         assert "ind_indents.indent_no" in text
         assert "ind_indents.requested_by_name" in text
-        assert "ind_indent_items.item_code" in text
-        assert "ind_indent_items.item_name" in text
+        assert "activity_events.item_code" in text
+        assert "activity_events.item_name" in text
         assert "wf_actions.actor_name" in text
-        assert "wf_actions.action" in text
         assert "wf_actions.stage_name" in text
-        assert "wf_actions.action AS transaction_type" in text
-        assert "SUBMITTED" in text
-        assert "APPROVED" in text
-        assert "REJECTED" in text
-        assert "RETURNED" in text
+        assert "activity_events.event_label" in text
+        assert "activity_events.result_label" in text
+        assert "activity_events.department_name" in text
+        assert "activity_events.office_name" in text
+        assert "activity_events._project_name" in text
+        assert "activity_events._search_remarks" in text
         assert "ind_indents.status IN ('APPROVED')" in text
         assert "ind_indents.priority IN ('NORMAL')" in text
         assert "ind_indents.required_date >= '2026-08-01'" in text
         assert "ind_indents.required_date <= '2026-08-15'" in text
+    service.indent_access_condition.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -765,12 +865,188 @@ async def test_activity_transaction_filter_matches_real_workflow_action(monkeypa
         db,
         PageParams(page=1, size=20),
         user=user(),
-        transaction_type=service.IndentActivityType.APPROVED,
+        transaction_type=service.IndentActivityType.APPROVAL_COMPLETED,
     )
     result_sql = sql_text(db.result_stmt)
 
-    assert "wf_actions.action = 'APPROVED'" in result_sql
-    assert "RAISED" not in result_sql
+    assert "activity_events.event_type = 'APPROVAL_COMPLETED'" in result_sql
+    assert "WHEN 'APPROVED' THEN 'APPROVAL_COMPLETED'" in result_sql
+
+
+@pytest.mark.asyncio
+async def test_activity_has_one_creation_event_per_indent_without_line_join():
+    db = CapturingDb()
+
+    await service.activity_ledger(db, PageParams(page=1, size=20))
+
+    sql = sql_text(db.result_stmt)
+    creation_branch = sql.split(
+        "UNION ALL SELECT 'workflow:'",
+        maxsplit=1,
+    )[0].split("FROM (SELECT", maxsplit=1)[-1]
+    assert "'REQUEST_CREATED' AS event_type" in creation_branch
+    assert "'Draft' AS result_label" in creation_branch
+    assert "FROM visible_indents" in creation_branch
+    assert "ind_indent_items" not in creation_branch
+    assert "JOIN" not in creation_branch
+
+
+@pytest.mark.asyncio
+async def test_activity_workflow_events_have_historical_results_and_safe_labels():
+    db = CapturingDb()
+
+    await service.activity_ledger(db, PageParams(page=1, size=20))
+
+    sql = sql_text(db.result_stmt)
+    for action, event_type, result_label in (
+        ("SUBMITTED", "REQUEST_SUBMITTED", "Submitted"),
+        ("APPROVED", "APPROVAL_COMPLETED", "Approved"),
+        ("REJECTED", "REQUEST_REJECTED", "Rejected"),
+        ("RETURNED", "REQUEST_RETURNED", "Returned"),
+    ):
+        assert f"WHEN '{action}' THEN '{event_type}'" in sql
+        assert f"WHEN '{action}' THEN '{result_label}'" in sql
+    assert "Approval routed automatically" in sql
+    assert "Routed Automatically" in sql
+    assert "THEN 'System' ELSE wf_actions.actor_name" in sql
+    assert "NO_WORKFLOW" not in sql
+    assert "REPORTING_LADDER" not in sql
+    assert "EMPTY_STAGE" not in sql
+    assert "Final Approval" in sql
+    assert "Regional Manager Review" in sql
+    assert "District Manager Review" in sql
+    assert "OE Review" in sql
+
+
+@pytest.mark.asyncio
+async def test_activity_approved_allocations_aggregate_warehouse_splits():
+    db = CapturingDb()
+
+    await service.activity_ledger(db, PageParams(page=1, size=20))
+
+    sql = sql_text(db.result_stmt)
+    assert "inv_allocations.status = 'APPROVED'" in sql
+    assert "inv_allocations.approved_at IS NOT NULL" in sql
+    assert "sum(inv_allocation_items.quantity)" in sql
+    assert "max(inv_allocation_items.requested_qty)" in sql
+    assert "inv_allocation_items.indent_item_id" in sql
+    assert "GROUP BY" in sql
+    assert "wf_instances.doc_type = 'ALLOCATION'" in sql
+    assert "wf_actions.action = 'APPROVED'" in sql
+    assert "row_number() OVER" in sql
+
+
+@pytest.mark.asyncio
+async def test_activity_allocation_results_cover_full_partial_and_zero_decisions():
+    db = CapturingDb()
+
+    await service.activity_ledger(db, PageParams(page=1, size=20))
+
+    sql = sql_text(db.result_stmt)
+    assert (
+        "sum(inv_allocation_items.quantity) = "
+        "max(inv_allocation_items.requested_qty)"
+    ) in sql
+    assert "THEN 'ALLOCATED' ELSE 'PARTIALLY_ALLOCATED'" in sql
+    assert "THEN 'Allocated' ELSE 'Partially Allocated'" in sql
+    assert "inv_allocation_items.quantity > 0" not in sql
+
+
+@pytest.mark.asyncio
+async def test_activity_material_requests_keep_each_persisted_document_and_line():
+    db = CapturingDb()
+
+    await service.activity_ledger(db, PageParams(page=1, size=20))
+
+    sql = sql_text(db.result_stmt)
+    assert "'PROCUREMENT_REQUEST_CREATED' AS event_type" in sql
+    assert "'Pending Approval' AS result_label" in sql
+    assert "inv_material_requests.id" in sql
+    assert "inv_material_requests.mr_no AS actor_position" in sql
+    assert "inv_material_request_items.id" in sql
+    assert "material-request:" in sql
+    assert "DISTINCT" not in sql
+
+
+@pytest.mark.asyncio
+async def test_activity_bookmark_events_use_real_audit_changes():
+    db = CapturingDb()
+
+    await service.activity_ledger(db, PageParams(page=1, size=20))
+
+    sql = sql_text(db.result_stmt)
+    assert "sys_audit_log.entity_type = 'ind_indents'" in sql
+    assert "sys_audit_log.action = 'UPDATE'" in sql
+    assert "is_bookmarked" in sql
+    assert "'BOOKMARK_ADDED'" in sql
+    assert "'BOOKMARK_REMOVED'" in sql
+    assert "'Bookmark added'" in sql
+    assert "'Bookmark removed'" in sql
+
+
+@pytest.mark.asyncio
+async def test_activity_uses_event_result_not_current_indent_status():
+    db = CapturingDb()
+
+    await service.activity_ledger(
+        db,
+        PageParams(page=1, size=20),
+        statuses=[IndentStatus.APPROVED],
+    )
+
+    sql = sql_text(db.result_stmt)
+    response_select = sql[
+        sql.index("SELECT filtered_activity_events"):
+        sql.index("FROM (SELECT activity_events")
+    ]
+    assert "filtered_activity_events.result" in response_select
+    assert "filtered_activity_events.result_label" in response_select
+    assert "current_status" not in response_select
+    assert "ind_indents.status IN ('APPROVED')" in sql
+
+
+@pytest.mark.asyncio
+async def test_activity_orders_ties_deterministically_and_paginates_after_union():
+    db = CapturingDb()
+
+    await service.activity_ledger(db, PageParams(page=2, size=5))
+
+    sql = sql_text(db.result_stmt)
+    assert sql.count("UNION ALL") == 4
+    assert (
+        "ORDER BY filtered_activity_events.occurred_at DESC, "
+        "filtered_activity_events._source_rank DESC, "
+        "filtered_activity_events.source_id DESC, "
+        "filtered_activity_events._event_key DESC"
+    ) in sql
+    assert sql.rfind("UNION ALL") < sql.rfind("LIMIT 5 OFFSET 5")
+    assert sql.count("LIMIT 5 OFFSET 5") == 1
+
+
+@pytest.mark.asyncio
+async def test_activity_one_sided_dates_use_timestamp_ranges_without_date_function():
+    from_db = CapturingDb()
+    to_db = CapturingDb()
+
+    await service.activity_ledger(
+        from_db,
+        PageParams(page=1, size=20),
+        date_from=date(2026, 8, 2),
+    )
+    await service.activity_ledger(
+        to_db,
+        PageParams(page=1, size=20),
+        date_to=date(2026, 8, 14),
+    )
+
+    from_sql = sql_text(from_db.result_stmt)
+    to_sql = sql_text(to_db.result_stmt)
+    assert "activity_events.occurred_at >= '2026-08-02 00:00:00'" in from_sql
+    assert "activity_events.occurred_at <" not in from_sql
+    assert "activity_events.occurred_at < '2026-08-15 00:00:00'" in to_sql
+    assert "activity_events.occurred_at >=" not in to_sql
+    assert "date(activity_events.occurred_at)" not in from_sql.lower()
+    assert "date(activity_events.occurred_at)" not in to_sql.lower()
 
 
 @pytest.mark.asyncio

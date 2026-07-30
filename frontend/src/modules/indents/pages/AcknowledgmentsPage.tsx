@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, XCircle } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 import { Card } from "@/shared/components";
 import { indentApi, indentKeys, useIndentAccountCacheIsolation, useIndentAccountScope } from "../api";
 import type { AcknowledgmentRow } from "../types";
@@ -10,12 +10,12 @@ import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterC
 import { formatIndentDateTime } from "../dateTime";
 
 function actionLabel(row: AcknowledgmentRow) {
-  const action = row.action.replace(/_/g, " ").toLowerCase();
-  return row.stage_name ? `${action} at ${row.stage_name}` : action;
+  return row.action.replace(/_/g, " ").toLowerCase();
 }
 
-function isRejectedAction(row: AcknowledgmentRow) {
-  return row.action.toUpperCase() === "REJECTED";
+function isFulfillmentAcknowledgment(row: AcknowledgmentRow) {
+  const status = row.action.toUpperCase();
+  return status === "FULFILLED" || status === "PARTIALLY_FULFILLED";
 }
 
 function IndentAcknowledgmentsContent() {
@@ -55,6 +55,7 @@ function IndentAcknowledgmentsContent() {
   });
 
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / size));
+  const fulfillmentRows = (data?.items ?? []).filter(isFulfillmentAcknowledgment);
 
   return (
     <>
@@ -69,36 +70,31 @@ function IndentAcknowledgmentsContent() {
       <Card className="overflow-hidden rounded-2xl border border-line/70 bg-white shadow-sm">
         {isLoading && <p className="p-5 text-sm text-muted">Loading acknowledgments...</p>}
 
-        {!isLoading && (data?.items ?? []).map((row) => {
-          const rejected = isRejectedAction(row);
-          return (
+        {!isLoading && fulfillmentRows.map((row) => (
           <button
             key={row.id}
             type="button"
             onClick={() => nav(`/indents/${row.indent_id}`)}
             className="flex w-full items-center gap-4 border-b border-line/70 px-5 py-4 text-left last:border-b-0 hover:bg-content2/70"
           >
-            <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${
-              rejected ? "bg-bad-bg text-bad" : "bg-ok-bg text-ok"
-            }`}>
-              {rejected ? <XCircle className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
+            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ok-bg text-ok">
+              <CheckCircle2 className="h-5 w-5" />
             </span>
             <span className="min-w-0 flex-1">
               <strong className="mono block truncate text-sm font-bold text-ink">{row.indent_no}</strong>
               <span className="mt-1 block truncate text-sm text-body">
-                {row.actor_name ?? "Workflow user"} {" · "} {actionLabel(row)}
+                {row.actor_name ?? "System"} {" · "} {actionLabel(row)}
               </span>
             </span>
             <time className="shrink-0 text-right text-xs tabular-nums text-muted" dateTime={row.acted_at}>
               {formatIndentDateTime(row.acted_at)}
             </time>
           </button>
-          );
-        })}
+        ))}
 
-        {!isLoading && data?.items.length === 0 && (
+        {!isLoading && fulfillmentRows.length === 0 && (
           <p className="p-8 text-center text-sm text-muted">
-            {search ? `No acknowledgments found for “${search}”` : "No acknowledgments recorded yet."}
+            No fulfilment acknowledgments found
           </p>
         )}
       </Card>

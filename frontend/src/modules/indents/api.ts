@@ -4,9 +4,9 @@ import { useQueryClient, type Query } from "@tanstack/react-query";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type { Paginated, Option } from "@/shared/types";
 import type {
-  AcknowledgmentRow, ActivityRow, ApprovalDecisionRow, ApprovalDelegation, Indent,
-  IndentCreate, IndentListRow, IndentJourney, IndentNotification, IndentStats,
-  PendingApproval, TeamQueueRow,
+  AcknowledgmentRow, ActivityRow, ApprovalDecisionRow, ApprovalDelegation,
+  Indent, IndentCreate, IndentListRow, IndentJourney, IndentNotification,
+  IndentStats, PendingApproval, TeamQueueRow,
 } from "./types";
 
 export interface IndentQueryParams {
@@ -176,9 +176,14 @@ export const approvalApi = {
   teamQueue: () => api.get<{ items: TeamQueueRow[] }>("/api/workflow/team-queue").then((r) => r.data.items),
   delegations: (scope: "mine" | "incoming" | "team" = "mine") =>
     api.get<ApprovalDelegation[]>("/api/workflow/delegations", { params: { scope } }).then((r) => r.data),
-  delegationOptions: () => api.get<{ items: Option[] }>("/api/workflow/delegation-options").then((r) => r.data.items),
+  delegationOptions: () =>
+    api.get<{ items: Option[] }>("/api/workflow/delegation-options").then((r) => r.data.items),
   createDelegation: (data: {
-    to_employee_id: number; doc_type?: string | null; valid_from: string; valid_to: string; reason?: string;
+    to_employee_id: number;
+    doc_type?: string | null;
+    valid_from: string;
+    valid_to: string;
+    reason?: string;
   }) => api.post<ApprovalDelegation>("/api/workflow/delegations", data).then((r) => r.data),
   endDelegation: (id: number, reason?: string) =>
     api.post<ApprovalDelegation>(`/api/workflow/delegations/${id}/end`, { reason }).then((r) => r.data),

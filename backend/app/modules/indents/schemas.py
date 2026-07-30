@@ -120,23 +120,29 @@ class IndentStatsOut(BaseModel):
 
 class ActivityRow(BaseModel):
     event_id: str
-    event_at: datetime
-    transaction_type: str
-    direction: str | None = None
     indent_id: int
     indent_no: str
-    status: str
-    requested_by_name: str | None = None
-    department_name: str | None = None
+    event_type: str
+    event_label: str
+    result: str
+    result_label: str
+    occurred_at: datetime
+    actor_id: int | None = None
+    actor_name: str | None = None
+    actor_position: str | None = None
     item_id: int | None = None
     item_code: str | None = None
     item_name: str | None = None
+    quantity: float | None = None
+    requested_quantity: float | None = None
     uom_code: str | None = None
-    quantity: float = 0
-    actor_name: str | None = None
-    comments: str | None = None
+    department_name: str | None = None
+    office_name: str | None = None
+    remarks: str | None = None
+    source_type: str
+    source_id: int
 
-    @field_serializer("event_at", when_used="json")
+    @field_serializer("occurred_at", when_used="json")
     def serialize_datetime(self, value: datetime):
         return _utc_iso(value)
 

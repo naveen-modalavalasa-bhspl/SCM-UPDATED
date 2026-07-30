@@ -8,7 +8,8 @@ from app.core.pagination import Page, PageParams
 from app.platform.rbac import permissions as perms
 from app.modules.indents import service
 from app.modules.indents.enums import (
-    ApprovalAction, IndentActivityType, IndentStatus, MaterialDirection, Priority,
+    AcknowledgmentStatus, ApprovalAction, IndentActivityType, IndentStatus,
+    MaterialDirection, Priority,
 )
 from app.modules.indents.schemas import (
     AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
@@ -102,7 +103,7 @@ async def acknowledgments(params: PageParams = Depends(), search: str | None = N
                           start_date: date | None = None, end_date: date | None = None,
                           required_from: date | None = None,
                           required_to: date | None = None,
-                          status: list[IndentStatus] | None = Query(None),
+                          status: list[AcknowledgmentStatus] | None = Query(None),
                           priority: list[Priority] | None = Query(None),
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission("indent.view"))):
@@ -125,43 +126,43 @@ async def create(data: IndentCreate, db: AsyncSession = Depends(get_db),
     return await service.create_indent(db, data, user)
 
 
-@indent_router.get("/{indent_id:int}", response_model=IndentOut)
+@indent_router.get("/{indent_id}", response_model=IndentOut)
 async def get_one(indent_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission("indent.view"))):
     return await service.get_indent(db, indent_id, user)
 
 
-@indent_router.get("/{indent_id:int}/journey", response_model=IndentJourneyOut)
+@indent_router.get("/{indent_id}/journey", response_model=IndentJourneyOut)
 async def journey(indent_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission("indent.view"))):
     return await service.indent_journey(db, indent_id, user)
 
 
-@indent_router.put("/{indent_id:int}", response_model=IndentOut)
+@indent_router.put("/{indent_id}", response_model=IndentOut)
 async def update(indent_id: int, data: IndentUpdate, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.edit"))):
     return await service.update_indent(db, indent_id, data, user)
 
 
-@indent_router.post("/{indent_id:int}/submit", response_model=IndentOut)
+@indent_router.post("/{indent_id}/submit", response_model=IndentOut)
 async def submit(indent_id: int, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.submit"))):
     return await service.submit_indent(db, indent_id, user)
 
 
-@indent_router.post("/{indent_id:int}/bookmark", response_model=IndentOut)
+@indent_router.post("/{indent_id}/bookmark", response_model=IndentOut)
 async def bookmark(indent_id: int, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission("indent.view"))):
     return await service.set_indent_bookmark(db, indent_id, user, is_bookmarked=True)
 
 
-@indent_router.post("/{indent_id:int}/unbookmark", response_model=IndentOut)
+@indent_router.post("/{indent_id}/unbookmark", response_model=IndentOut)
 async def unbookmark(indent_id: int, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission("indent.view"))):
     return await service.set_indent_bookmark(db, indent_id, user, is_bookmarked=False)
 
 
-@indent_router.post("/{indent_id:int}/approve", response_model=IndentOut)
+@indent_router.post("/{indent_id}/approve", response_model=IndentOut)
 async def approve(indent_id: int, body: ActionIn = ActionIn(),
                   db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission("indent.approve"))):
@@ -170,7 +171,7 @@ async def approve(indent_id: int, body: ActionIn = ActionIn(),
     )
 
 
-@indent_router.post("/{indent_id:int}/reject", response_model=IndentOut)
+@indent_router.post("/{indent_id}/reject", response_model=IndentOut)
 async def reject(indent_id: int, body: ActionIn = ActionIn(),
                  db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.reject"))):

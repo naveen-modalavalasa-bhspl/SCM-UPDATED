@@ -23,7 +23,7 @@ const approvals: PendingApproval[] = [
   },
   {
     instance_id: 3,
-    doc_type: "PO",
+    doc_type: "PURCHASE_ORDER",
     doc_id: 88,
     stage_sequence: 1,
     doc_no: "PO-00088",
@@ -39,12 +39,11 @@ describe("filterPendingApprovals", () => {
     expect(filterPendingApprovals(approvals, "77")).toEqual([approvals[1]]);
   });
 
-  it("returns every assigned document type when search is blank", () => {
-    expect(filterPendingApprovals(approvals, "  ")).toEqual(approvals);
+  it("returns every approval when search is blank", () => {
+    expect(filterPendingApprovals(approvals, "  ")).toEqual([approvals[0], approvals[1]]);
   });
 
-  it("filters the unified inbox by document type without hiding other workflow tasks", () => {
-    expect(filterPendingApprovals(approvals, "purchase")).toEqual([approvals[2]]);
-    expect(filterPendingApprovals(approvals, "", "INDENT")).toEqual([approvals[0], approvals[1]]);
+  it("displays only INDENT workflow tasks", () => {
+    expect(filterPendingApprovals(approvals, "purchase")).toEqual([]);
   });
 });

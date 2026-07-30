@@ -5,10 +5,10 @@ Approvals go ONLY through the workflow engine; there is no approval logic here.
 """
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import String, and_, cast, exists, false, func, literal, or_, select, union_all
+from sqlalchemy import BigInteger, DateTime, Numeric, String, and_, case, cast, exists, false, func, literal, or_, select, union_all
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
@@ -19,7 +19,9 @@ from app.core.pagination import PageParams, paginate
 # here is the legal direction. This is the §3 stock-availability fork.
 from app.modules.inventory import allocations
 from app.modules.inventory import service as inventory_service
-from app.modules.inventory.models import Allocation, AllocationItem, MaterialRequest
+from app.modules.inventory.models import (
+    Allocation, AllocationItem, MaterialRequest, MaterialRequestItem,
+)
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
@@ -35,9 +37,9 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item
 from app.shared.numbering import next_number
 from app.modules.indents.enums import (
-    AllocationStatus, ApprovalAction, AuditAction, DocType, IndentActivityType,
-    IndentItemStatus, IndentStatus, InstanceStatus, MRStatus, MaterialDirection, Priority,
-    RuleActionType,
+    AcknowledgmentStatus, AllocationStatus, ApprovalAction, AuditAction, DocType,
+    IndentActivityType, IndentItemStatus, IndentStatus, InstanceStatus, MRStatus,
+    MaterialDirection, Priority, RuleActionType,
 )
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentUpdate
@@ -162,7 +164,8 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         after={"status": indent.status, "total_items": indent.total_items},
     )
     await db.commit()
-    return await get_indent(db, indent.id, user)
+    await db.refresh(indent)
+    return indent
 
 
 def _values(values) -> list[str]:
@@ -1708,31 +1711,139 @@ async def indent_stats(
     }
 
 
-def _activity_filters(stmt, *, search: str | None, date_from: date | None,
-                      date_to: date | None, statuses: list[IndentStatus] | None,
-                      priorities: list[Priority] | None,
-                      required_from: date | None = None,
-                      required_to: date | None = None, extra_search=None):
-    term = _clean_search(search)
-    if term:
-        pattern = _like_pattern(term)
-        conditions = _indent_search_conditions(pattern)
-        if extra_search:
-            conditions.extend(extra_search(pattern))
-        stmt = stmt.where(or_(*conditions))
-    if date_from:
-        stmt = stmt.where(func.date(Indent.created_at) >= date_from)
-    if date_to:
-        stmt = stmt.where(func.date(Indent.created_at) <= date_to)
-    if required_from:
-        stmt = stmt.where(Indent.required_date >= required_from)
-    if required_to:
-        stmt = stmt.where(Indent.required_date <= required_to)
-    if statuses:
-        stmt = stmt.where(Indent.status.in_(_values(statuses)))
-    if priorities:
-        stmt = stmt.where(Indent.priority.in_(_values(priorities)))
-    return stmt
+_ACTIVITY_RESPONSE_FIELDS = (
+    "event_id",
+    "indent_id",
+    "indent_no",
+    "event_type",
+    "event_label",
+    "result",
+    "result_label",
+    "occurred_at",
+    "actor_id",
+    "actor_name",
+    "actor_position",
+    "item_id",
+    "item_code",
+    "item_name",
+    "quantity",
+    "requested_quantity",
+    "uom_code",
+    "department_name",
+    "office_name",
+    "remarks",
+    "source_type",
+    "source_id",
+)
+
+
+def _activity_value(value, sql_type=None):
+    if value is None:
+        return cast(literal(None), sql_type)
+    if isinstance(value, (str, int)):
+        return literal(value)
+    return value
+
+
+def _activity_event_columns(
+    visible,
+    *,
+    event_id,
+    event_type,
+    event_label,
+    result,
+    result_label,
+    occurred_at,
+    actor_id=None,
+    actor_name=None,
+    actor_position=None,
+    item_id=None,
+    item_code=None,
+    item_name=None,
+    quantity=None,
+    requested_quantity=None,
+    uom_code=None,
+    remarks=None,
+    source_type,
+    source_id,
+    source_rank,
+    event_key,
+    search_position=None,
+    search_stage=None,
+    search_remarks=None,
+):
+    """Keep every UNION branch type-compatible and in the exact same order."""
+    return (
+        _activity_value(event_id, String).label("event_id"),
+        visible.c.indent_id,
+        visible.c.indent_no,
+        _activity_value(event_type, String).label("event_type"),
+        _activity_value(event_label, String).label("event_label"),
+        _activity_value(result, String).label("result"),
+        _activity_value(result_label, String).label("result_label"),
+        occurred_at.label("occurred_at"),
+        _activity_value(actor_id, BigInteger).label("actor_id"),
+        _activity_value(actor_name, String).label("actor_name"),
+        _activity_value(actor_position, String).label("actor_position"),
+        _activity_value(item_id, BigInteger).label("item_id"),
+        _activity_value(item_code, String).label("item_code"),
+        _activity_value(item_name, String).label("item_name"),
+        _activity_value(quantity, Numeric(16, 3)).label("quantity"),
+        _activity_value(requested_quantity, Numeric(16, 3)).label("requested_quantity"),
+        _activity_value(uom_code, String).label("uom_code"),
+        visible.c.department_name,
+        visible.c.office_name,
+        _activity_value(remarks, String).label("remarks"),
+        _activity_value(source_type, String).label("source_type"),
+        _activity_value(source_id, BigInteger).label("source_id"),
+        _activity_value(source_rank, BigInteger).label("_source_rank"),
+        _activity_value(event_key, BigInteger).label("_event_key"),
+        visible.c.requested_by_name.label("_requester_name"),
+        visible.c.project_name.label("_project_name"),
+        _activity_value(search_position, String).label("_search_position"),
+        _activity_value(search_stage, String).label("_search_stage"),
+        _activity_value(search_remarks if search_remarks is not None else remarks, String).label(
+            "_search_remarks"
+        ),
+    )
+
+
+def _activity_business_stage(stage_name):
+    """Translate persisted workflow stages without returning internal workflow codes."""
+    normalized = func.upper(func.coalesce(stage_name, literal("")))
+    return case(
+        (
+            or_(
+                normalized.like("%FINAL%"),
+                normalized.like("%STATE%PROJECT%HEAD%"),
+                normalized.like("%CHIEF%OPERATING%OFFICER%"),
+                normalized.in_(("SPH", "COO", "SPH REVIEW", "COO REVIEW")),
+            ),
+            literal("Final Approval"),
+        ),
+        (
+            or_(
+                normalized.like("%REGIONAL%MANAGER%"),
+                normalized.in_(("RM", "RM REVIEW")),
+            ),
+            literal("Regional Manager Review"),
+        ),
+        (
+            or_(
+                normalized.like("%DISTRICT%MANAGER%"),
+                normalized.in_(("DM", "DM REVIEW")),
+            ),
+            literal("District Manager Review"),
+        ),
+        (
+            or_(
+                normalized.like("%OPERATION%EXECUTIVE%"),
+                normalized.in_(("OE", "OE REVIEW")),
+            ),
+            literal("OE Review"),
+        ),
+        else_=literal("Approval Review"),
+    )
 
 
 async def activity_ledger(
@@ -1751,101 +1862,411 @@ async def activity_ledger(
     transaction_type: IndentActivityType | None = None,
     direction: MaterialDirection | None = None,
 ) -> dict:
-    """Read-only indent ledger built from frozen indent/workflow tables."""
-    scope = await indent_access_condition(db, user) if user is not None else None
-    raised = select(
-        (literal("line:") + cast(IndentItem.id, String)).label("event_id"),
-        Indent.created_at.label("event_at"),
-        literal(IndentActivityType.RAISED.value).label("transaction_type"),
-        literal(MaterialDirection.OUTWARD.value).label("direction"),
-        Indent.id.label("indent_id"), Indent.indent_no, Indent.status,
-        Indent.requested_by_name, Indent.department_name,
-        IndentItem.item_id, IndentItem.item_code, IndentItem.item_name,
-        IndentItem.uom_code, IndentItem.quantity,
-        literal(None, String).label("actor_name"),
-        IndentItem.remarks.label("comments"),
-    ).join(IndentItem, IndentItem.indent_id == Indent.id)
-    if scope is not None:
-        raised = raised.where(scope)
-    raised = _activity_filters(
-        raised, search=search, date_from=date_from, date_to=date_to,
-        required_from=required_from, required_to=required_to,
-        statuses=statuses, priorities=priorities,
-        extra_search=lambda pattern: [
-            _matches(IndentItem.item_code, pattern),
-            _matches(IndentItem.item_name, pattern),
-            _matches(IndentItem.uom_code, pattern),
-            _matches(IndentItem.remarks, pattern),
-            _matches(literal(IndentActivityType.RAISED.value), pattern),
-            _matches(literal("Request raised"), pattern),
-        ],
+    """Read-only, source-normalized audit trail over visible indents."""
+    visible_stmt = select(
+        Indent.id.label("indent_id"),
+        Indent.indent_no,
+        Indent.status.label("current_status"),
+        Indent.priority,
+        Indent.required_date,
+        Indent.requested_by_id,
+        Indent.requested_by_name,
+        Indent.position_name,
+        Indent.department_name,
+        Indent.office_name,
+        Indent.project_name,
+        Indent.created_at,
     )
-    if item_id is not None:
-        raised = raised.where(IndentItem.item_id == item_id)
-    if direction == MaterialDirection.INWARD:
-        raised = raised.where(false())
+    if user is not None:
+        visible_stmt = visible_stmt.where(await indent_access_condition(db, user))
+    if required_from:
+        visible_stmt = visible_stmt.where(Indent.required_date >= required_from)
+    if required_to:
+        visible_stmt = visible_stmt.where(Indent.required_date <= required_to)
+    if statuses:
+        visible_stmt = visible_stmt.where(Indent.status.in_(_values(statuses)))
+    if priorities:
+        visible_stmt = visible_stmt.where(Indent.priority.in_(_values(priorities)))
+    visible = visible_stmt.cte("visible_indents")
 
-    acknowledged = select(
-        (literal("action:") + cast(Action.id, String)).label("event_id"),
-        Action.acted_at.label("event_at"),
-        Action.action.label("transaction_type"),
-        literal(None, String).label("direction"),
-        Indent.id.label("indent_id"), Indent.indent_no, Indent.status,
-        Indent.requested_by_name, Indent.department_name,
-        literal(None).label("item_id"), literal(None, String).label("item_code"),
-        literal(None, String).label("item_name"), literal(None, String).label("uom_code"),
-        literal(0).label("quantity"), Action.actor_name, Action.comments,
-    ).join(
-        Instance,
-        and_(Instance.doc_id == Indent.id, Instance.doc_type == DocType.INDENT.value),
-    ).join(Action, Action.instance_id == Instance.id)
-    if scope is not None:
-        acknowledged = acknowledged.where(scope)
-    acknowledged = _activity_filters(
-        acknowledged, search=search, date_from=None, date_to=None,
-        required_from=required_from, required_to=required_to,
-        statuses=statuses, priorities=priorities,
-        extra_search=lambda pattern: [
-            _matches(Action.action, pattern),
-            _matches(Action.stage_name, pattern),
-            _matches(Action.actor_name, pattern),
-            _matches(Action.comments, pattern),
-            _matches(literal(IndentActivityType.SUBMITTED.value), pattern),
-            _matches(literal(IndentActivityType.APPROVED.value), pattern),
-            _matches(literal(IndentActivityType.REJECTED.value), pattern),
-            _matches(literal(IndentActivityType.RETURNED.value), pattern),
-            _matches(literal("Acknowledged"), pattern),
-            _matches(literal("Submitted"), pattern),
-            _matches(literal("Approved"), pattern),
-            _matches(literal("Rejected"), pattern),
-            _matches(literal("Returned"), pattern),
-            _indent_item_exists(pattern),
-        ],
+    created = select(*_activity_event_columns(
+        visible,
+        event_id=literal("indent:") + cast(visible.c.indent_id, String),
+        event_type=IndentActivityType.REQUEST_CREATED.value,
+        event_label="Request created",
+        result="DRAFT",
+        result_label="Draft",
+        occurred_at=visible.c.created_at,
+        actor_id=visible.c.requested_by_id,
+        actor_name=visible.c.requested_by_name,
+        actor_position=visible.c.position_name,
+        source_type="ind_indents",
+        source_id=visible.c.indent_id,
+        source_rank=10,
+        event_key=visible.c.indent_id,
+        search_position=visible.c.position_name,
+    )).select_from(visible)
+
+    workflow_event_type = case(
+        {
+            ApprovalAction.SUBMITTED.value: IndentActivityType.REQUEST_SUBMITTED.value,
+            ApprovalAction.APPROVED.value: IndentActivityType.APPROVAL_COMPLETED.value,
+            ApprovalAction.REJECTED.value: IndentActivityType.REQUEST_REJECTED.value,
+            ApprovalAction.RETURNED.value: IndentActivityType.REQUEST_RETURNED.value,
+            ApprovalAction.FALLBACK.value: (
+                IndentActivityType.APPROVAL_ROUTED_AUTOMATICALLY.value
+            ),
+        },
+        value=Action.action,
     )
+    workflow_event_label = case(
+        {
+            ApprovalAction.SUBMITTED.value: "Request submitted",
+            ApprovalAction.APPROVED.value: "Approval completed",
+            ApprovalAction.REJECTED.value: "Request rejected",
+            ApprovalAction.RETURNED.value: "Request returned",
+            ApprovalAction.FALLBACK.value: "Approval routed automatically",
+        },
+        value=Action.action,
+    )
+    workflow_result = case(
+        {
+            ApprovalAction.SUBMITTED.value: "SUBMITTED",
+            ApprovalAction.APPROVED.value: "APPROVED",
+            ApprovalAction.REJECTED.value: "REJECTED",
+            ApprovalAction.RETURNED.value: "RETURNED",
+            ApprovalAction.FALLBACK.value: "ROUTED_AUTOMATICALLY",
+        },
+        value=Action.action,
+    )
+    workflow_result_label = case(
+        {
+            ApprovalAction.SUBMITTED.value: "Submitted",
+            ApprovalAction.APPROVED.value: "Approved",
+            ApprovalAction.REJECTED.value: "Rejected",
+            ApprovalAction.RETURNED.value: "Returned",
+            ApprovalAction.FALLBACK.value: "Routed Automatically",
+        },
+        value=Action.action,
+    )
+    business_stage = _activity_business_stage(Action.stage_name)
+    workflow_context = case(
+        (
+            Action.action == ApprovalAction.SUBMITTED.value,
+            literal("Request Submission"),
+        ),
+        else_=business_stage,
+    )
+    workflow_actor_name = case(
+        (
+            Action.action == ApprovalAction.FALLBACK.value,
+            literal("System"),
+        ),
+        else_=Action.actor_name,
+    )
+    workflow_actor_id = case(
+        (
+            Action.action == ApprovalAction.FALLBACK.value,
+            cast(literal(None), BigInteger),
+        ),
+        else_=Action.actor_id,
+    )
+    workflow_remarks = case(
+        (
+            Action.action.in_((
+                ApprovalAction.REJECTED.value,
+                ApprovalAction.RETURNED.value,
+            )),
+            Action.comments,
+        ),
+        else_=cast(literal(None), String),
+    )
+    workflow = (
+        select(*_activity_event_columns(
+            visible,
+            event_id=literal("workflow:") + cast(Action.id, String),
+            event_type=workflow_event_type,
+            event_label=workflow_event_label,
+            result=workflow_result,
+            result_label=workflow_result_label,
+            occurred_at=Action.acted_at,
+            actor_id=workflow_actor_id,
+            actor_name=workflow_actor_name,
+            actor_position=workflow_context,
+            remarks=workflow_remarks,
+            source_type="wf_actions",
+            source_id=Action.id,
+            source_rank=20,
+            event_key=Action.id,
+            search_position=Action.actor_position,
+            search_stage=Action.stage_name,
+            search_remarks=Action.comments,
+        ))
+        .select_from(visible)
+        .join(
+            Instance,
+            and_(
+                Instance.doc_id == visible.c.indent_id,
+                Instance.doc_type == DocType.INDENT.value,
+            ),
+        )
+        .join(Action, Action.instance_id == Instance.id)
+        .where(Action.action.in_((
+            ApprovalAction.SUBMITTED.value,
+            ApprovalAction.APPROVED.value,
+            ApprovalAction.REJECTED.value,
+            ApprovalAction.RETURNED.value,
+            ApprovalAction.FALLBACK.value,
+        )))
+    )
+
+    allocation_approval_rows = (
+        select(
+            Instance.doc_id.label("allocation_id"),
+            Action.actor_id,
+            Action.actor_name,
+            Action.actor_position,
+            func.row_number().over(
+                partition_by=Instance.doc_id,
+                order_by=(Action.acted_at.desc(), Action.id.desc()),
+            ).label("approval_rank"),
+        )
+        .join(Action, Action.instance_id == Instance.id)
+        .where(
+            Instance.doc_type == DocType.ALLOCATION.value,
+            Action.action == ApprovalAction.APPROVED.value,
+        )
+        .subquery("allocation_approval_rows")
+    )
+    allocation_approval = (
+        select(allocation_approval_rows)
+        .where(allocation_approval_rows.c.approval_rank == 1)
+        .subquery("allocation_approval")
+    )
+    allocated_quantity = func.sum(AllocationItem.quantity)
+    requested_quantity = func.max(AllocationItem.requested_qty)
+    allocation_result = case(
+        (allocated_quantity == requested_quantity, literal("ALLOCATED")),
+        else_=literal("PARTIALLY_ALLOCATED"),
+    )
+    allocation_result_label = case(
+        (allocated_quantity == requested_quantity, literal("Allocated")),
+        else_=literal("Partially Allocated"),
+    )
+    allocation_remarks = func.coalesce(
+        func.max(AllocationItem.remarks),
+        Allocation.remarks,
+    )
+    allocation = (
+        select(*_activity_event_columns(
+            visible,
+            event_id=(
+                literal("allocation:")
+                + cast(Allocation.id, String)
+                + literal(":")
+                + cast(AllocationItem.indent_item_id, String)
+            ),
+            event_type=IndentActivityType.STOCK_ALLOCATED.value,
+            event_label="Stock allocated",
+            result=allocation_result,
+            result_label=allocation_result_label,
+            occurred_at=Allocation.approved_at,
+            actor_id=allocation_approval.c.actor_id,
+            actor_name=allocation_approval.c.actor_name,
+            actor_position=allocation_approval.c.actor_position,
+            item_id=func.max(AllocationItem.item_id),
+            item_code=func.max(AllocationItem.item_code),
+            item_name=func.max(AllocationItem.item_name),
+            quantity=allocated_quantity,
+            requested_quantity=requested_quantity,
+            uom_code=func.max(AllocationItem.uom_code),
+            remarks=allocation_remarks,
+            source_type="inv_allocations",
+            source_id=Allocation.id,
+            source_rank=30,
+            event_key=AllocationItem.indent_item_id,
+            search_position=allocation_approval.c.actor_position,
+            search_remarks=allocation_remarks,
+        ))
+        .select_from(visible)
+        .join(Allocation, Allocation.indent_id == visible.c.indent_id)
+        .join(AllocationItem, AllocationItem.allocation_id == Allocation.id)
+        .outerjoin(
+            allocation_approval,
+            allocation_approval.c.allocation_id == Allocation.id,
+        )
+        .where(
+            Allocation.status == AllocationStatus.APPROVED.value,
+            Allocation.approved_at.is_not(None),
+        )
+        .group_by(
+            visible.c.indent_id,
+            visible.c.indent_no,
+            visible.c.department_name,
+            visible.c.office_name,
+            visible.c.requested_by_name,
+            visible.c.project_name,
+            Allocation.id,
+            Allocation.approved_at,
+            Allocation.remarks,
+            AllocationItem.indent_item_id,
+            allocation_approval.c.actor_id,
+            allocation_approval.c.actor_name,
+            allocation_approval.c.actor_position,
+        )
+    )
+
+    material_request = (
+        select(*_activity_event_columns(
+            visible,
+            event_id=(
+                literal("material-request:")
+                + cast(MaterialRequest.id, String)
+                + literal(":")
+                + cast(MaterialRequestItem.id, String)
+            ),
+            event_type=IndentActivityType.PROCUREMENT_REQUEST_CREATED.value,
+            event_label="Procurement request created",
+            result="PENDING_APPROVAL",
+            result_label="Pending Approval",
+            occurred_at=MaterialRequest.created_at,
+            actor_id=MaterialRequest.requested_by_id,
+            actor_name=MaterialRequest.requested_by_name,
+            actor_position=MaterialRequest.mr_no,
+            item_id=MaterialRequestItem.item_id,
+            item_code=MaterialRequestItem.item_code,
+            item_name=MaterialRequestItem.item_name,
+            quantity=MaterialRequestItem.quantity,
+            requested_quantity=MaterialRequestItem.quantity,
+            uom_code=MaterialRequestItem.uom_code,
+            remarks=func.coalesce(MaterialRequestItem.remarks, MaterialRequest.remarks),
+            source_type="inv_material_requests",
+            source_id=MaterialRequest.id,
+            source_rank=40,
+            event_key=MaterialRequestItem.id,
+            search_remarks=func.coalesce(
+                MaterialRequestItem.remarks,
+                MaterialRequest.remarks,
+            ),
+        ))
+        .select_from(visible)
+        .join(MaterialRequest, MaterialRequest.indent_id == visible.c.indent_id)
+        .join(
+            MaterialRequestItem,
+            MaterialRequestItem.mr_id == MaterialRequest.id,
+        )
+    )
+
+    bookmark_to = AuditLog.changed_fields["is_bookmarked"]["to"].as_string()
+    bookmark_from = AuditLog.changed_fields["is_bookmarked"]["from"].as_string()
+    bookmark_event_type = case(
+        (bookmark_to == "YES", literal(IndentActivityType.BOOKMARK_ADDED.value)),
+        else_=literal(IndentActivityType.BOOKMARK_REMOVED.value),
+    )
+    bookmark_event_label = case(
+        (bookmark_to == "YES", literal("Bookmark added")),
+        else_=literal("Bookmark removed"),
+    )
+    bookmark_result = case(
+        (bookmark_to == "YES", literal("BOOKMARKED")),
+        else_=literal("BOOKMARK_REMOVED"),
+    )
+    bookmark_result_label = case(
+        (bookmark_to == "YES", literal("Bookmarked")),
+        else_=literal("Bookmark Removed"),
+    )
+    bookmark = (
+        select(*_activity_event_columns(
+            visible,
+            event_id=literal("audit:") + cast(AuditLog.id, String),
+            event_type=bookmark_event_type,
+            event_label=bookmark_event_label,
+            result=bookmark_result,
+            result_label=bookmark_result_label,
+            occurred_at=AuditLog.created_at,
+            actor_id=AuditLog.actor_id,
+            actor_name=AuditLog.actor_name,
+            actor_position="Bookmark",
+            source_type="sys_audit_log",
+            source_id=AuditLog.id,
+            source_rank=50,
+            event_key=AuditLog.id,
+        ))
+        .select_from(visible)
+        .join(
+            AuditLog,
+            and_(
+                AuditLog.entity_id == visible.c.indent_id,
+                AuditLog.entity_type == "ind_indents",
+            ),
+        )
+        .where(
+            AuditLog.action == AuditAction.UPDATE.value,
+            bookmark_to.in_(("YES", "NO")),
+            bookmark_from != bookmark_to,
+        )
+    )
+
+    combined_rows = union_all(
+        created,
+        workflow,
+        allocation,
+        material_request,
+        bookmark,
+    ).subquery("activity_events")
+    filtered = select(combined_rows)
+
+    term = _clean_search(search)
+    if term:
+        pattern = _like_pattern(term)
+        filtered = filtered.where(or_(
+            _matches(combined_rows.c.indent_no, pattern),
+            _matches(combined_rows.c._requester_name, pattern),
+            _matches(combined_rows.c.actor_name, pattern),
+            _matches(combined_rows.c.actor_position, pattern),
+            _matches(combined_rows.c._search_position, pattern),
+            _matches(combined_rows.c._search_stage, pattern),
+            _matches(combined_rows.c.item_code, pattern),
+            _matches(combined_rows.c.item_name, pattern),
+            _matches(combined_rows.c.event_label, pattern),
+            _matches(combined_rows.c.result_label, pattern),
+            _matches(combined_rows.c.department_name, pattern),
+            _matches(combined_rows.c.office_name, pattern),
+            _matches(combined_rows.c._project_name, pattern),
+            _matches(combined_rows.c._search_remarks, pattern),
+        ))
     if date_from:
-        acknowledged = acknowledged.where(func.date(Action.acted_at) >= date_from)
+        filtered = filtered.where(
+            combined_rows.c.occurred_at >= datetime.combine(date_from, time.min)
+        )
     if date_to:
-        acknowledged = acknowledged.where(func.date(Action.acted_at) <= date_to)
+        filtered = filtered.where(
+            combined_rows.c.occurred_at
+            < datetime.combine(date_to + timedelta(days=1), time.min)
+        )
+    if item_id is not None:
+        filtered = filtered.where(combined_rows.c.item_id == item_id)
+    if transaction_type is not None:
+        filtered = filtered.where(
+            combined_rows.c.event_type == transaction_type.value
+        )
+    if direction is not None:
+        filtered = filtered.where(false())
 
-    action_filter = transaction_type if transaction_type not in {None, IndentActivityType.RAISED} else None
-    if action_filter is not None:
-        acknowledged = acknowledged.where(Action.action == action_filter.value)
-
-    include_raised = transaction_type in {None, IndentActivityType.RAISED} and direction != MaterialDirection.INWARD
-    include_workflow = transaction_type != IndentActivityType.RAISED and direction is None and item_id is None
-    if include_raised and include_workflow:
-        combined = union_all(raised, acknowledged)
-    elif include_workflow:
-        combined = acknowledged
-    elif include_raised:
-        combined = raised
-    else:
-        combined = raised.where(false())
-
-    rows = combined.subquery()
-    stmt = select(rows).order_by(rows.c.event_at.desc())
-    total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
-    result = (await db.execute(stmt.offset(params.offset).limit(params.size))).mappings().all()
+    filtered_rows = filtered.subquery("filtered_activity_events")
+    stmt = (
+        select(*(filtered_rows.c[field] for field in _ACTIVITY_RESPONSE_FIELDS))
+        .order_by(
+            filtered_rows.c.occurred_at.desc(),
+            filtered_rows.c._source_rank.desc(),
+            filtered_rows.c.source_id.desc(),
+            filtered_rows.c._event_key.desc(),
+        )
+    )
+    total = await db.scalar(select(func.count()).select_from(filtered_rows))
+    result = (
+        await db.execute(stmt.offset(params.offset).limit(params.size))
+    ).mappings().all()
     return {
         "items": [dict(row) for row in result],
         "total": total or 0,
@@ -1864,20 +2285,43 @@ async def list_acknowledgments(
     date_to: date | None = None,
     required_from: date | None = None,
     required_to: date | None = None,
-    statuses: list[IndentStatus] | None = None,
+    statuses: list[AcknowledgmentStatus] | None = None,
     priorities: list[Priority] | None = None,
 ) -> dict:
+    # No posted, indent-linked warehouse issue/dispatch evidence exists yet.
+    # Keep the endpoint contract and security/filter clauses intact, but make the
+    # evidence relation explicitly empty. Allocation and lifecycle state are not
+    # physical fulfillment proof and must never produce an acknowledgment row.
+    # Future implementation starts only from posted out_issues.indent_id and
+    # out_issue_items.indent_item_id evidence; net quantity is issued minus
+    # returned. Do not add that calculation until linked, posted rows exist.
+    fulfillment_evidence = (
+        select(
+            cast(literal(None), BigInteger).label("indent_id"),
+            cast(literal(None), String).label("action"),
+            cast(literal(None), String).label("actor_name"),
+            cast(literal(None), String).label("comments"),
+            cast(literal(None), DateTime(timezone=True)).label("acted_at"),
+        )
+        .where(literal(0) == literal(1))
+        .subquery("fulfillment_evidence")
+    )
+    occurred_at = fulfillment_evidence.c.acted_at
     stmt = (
         select(
-            Action.id, Indent.id.label("indent_id"), Indent.indent_no, Action.action,
-            Action.stage_name, Action.actor_name, Action.actor_id, Action.actor_position,
-            Action.comments, Action.acted_at,
+            Indent.id,
+            Indent.id.label("indent_id"),
+            Indent.indent_no,
+            fulfillment_evidence.c.action,
+            cast(literal(None), String).label("stage_name"),
+            fulfillment_evidence.c.actor_name,
+            fulfillment_evidence.c.comments,
+            occurred_at,
         )
-        .join(Instance, Action.instance_id == Instance.id)
-        .join(Indent, and_(
-            Instance.doc_id == Indent.id,
-            Instance.doc_type == DocType.INDENT.value,
-        ))
+        .join(
+            fulfillment_evidence,
+            fulfillment_evidence.c.indent_id == Indent.id,
+        )
     )
     if user is not None:
         stmt = stmt.where(await indent_access_condition(db, user))
@@ -1886,33 +2330,33 @@ async def list_acknowledgments(
         pattern = _like_pattern(term)
         stmt = stmt.where(or_(
             *_indent_search_conditions(pattern),
-            _matches(Action.actor_name, pattern),
-            _matches(Action.action, pattern),
-            _matches(Action.stage_name, pattern),
-            _matches(Action.comments, pattern),
+            _matches(
+                func.coalesce(fulfillment_evidence.c.actor_name, literal("System")),
+                pattern,
+            ),
+            _matches(fulfillment_evidence.c.action, pattern),
+            _matches(fulfillment_evidence.c.comments, pattern),
             _indent_item_exists(pattern),
         ))
     if date_from:
-        stmt = stmt.where(func.date(Action.acted_at) >= date_from)
+        stmt = stmt.where(func.date(occurred_at) >= date_from)
     if date_to:
-        stmt = stmt.where(func.date(Action.acted_at) <= date_to)
+        stmt = stmt.where(func.date(occurred_at) <= date_to)
     if required_from:
         stmt = stmt.where(Indent.required_date >= required_from)
     if required_to:
         stmt = stmt.where(Indent.required_date <= required_to)
     if statuses:
-        stmt = stmt.where(Indent.status.in_(_values(statuses)))
+        stmt = stmt.where(fulfillment_evidence.c.action.in_(_values(statuses)))
     if priorities:
         stmt = stmt.where(Indent.priority.in_(_values(priorities)))
-    stmt = stmt.order_by(Action.acted_at.desc())
+    stmt = stmt.order_by(occurred_at.desc(), Indent.id.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = [
         dict(row)
         for row in (await db.execute(stmt.offset(params.offset).limit(params.size))).mappings().all()
     ]
-    actor_scope_codes = await _acknowledgment_actor_scope_codes(db, rows)
-    return {"items": _apply_acknowledgment_stage_names(rows, actor_scope_codes), "total": total or 0,
-            "page": params.page, "size": params.size}
+    return {"items": rows, "total": total or 0, "page": params.page, "size": params.size}
 
 
 async def list_notifications(db: AsyncSession, params: PageParams, user) -> dict:

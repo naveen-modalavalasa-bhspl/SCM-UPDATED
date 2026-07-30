@@ -819,10 +819,8 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
     db.add(item)
     await db.commit()
 
-    await make_user(
-        employee_id=2, username="req", password="pw",
-        permissions=["indent.view", "indent.create", "indent.submit"],
-    )
+    await make_user(employee_id=2, username="req", password="pw",
+                    permissions=["indent.view", "indent.create"])
     headers = await login("req", "pw")
 
     r = await client.post("/api/indents",
@@ -831,15 +829,10 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "DRAFT"
     assert r.json()["indent_no"].startswith("IND/")
-    assert r.json()["can_submit"] is True
 
     lst = await client.get("/api/indents", headers=headers)
     assert lst.status_code == 200
     assert lst.json()["total"] >= 1
-
-    dashboard_api = await client.get("/api/indents/dashboard", headers=headers)
-    assert dashboard_api.status_code == 404
-    assert dashboard_api.json() == {"success": False, "error": "Not Found"}
 
 
 async def test_indent_stats_counts(db):
@@ -1197,7 +1190,7 @@ async def test_sibling_manager_cannot_view_or_act_on_indent(db):
         )
 
 
-async def test_scoped_stats_activity_and_acknowledgments_do_not_leak(db):
+async def test_scoped_stats_activity_and_workflow_events_do_not_leak_into_acknowledgments(db):
     world = await _visibility_world(db)
     await service.submit_indent(db, world["indents"]["tech1"].id, world["tech1"])
     await service.act_on_indent(
@@ -1220,9 +1213,7 @@ async def test_scoped_stats_activity_and_acknowledgments_do_not_leak(db):
         world["indents"]["oe1"].id,
         world["indents"]["tech1"].id,
     }
-    assert {row["indent_id"] for row in acknowledgments["items"]} == {
-        world["indents"]["tech1"].id,
-    }
+    assert acknowledgments["items"] == []
 
 
 async def test_manager_own_indent_starts_approval_above_them(db):
@@ -1278,7 +1269,7 @@ async def test_any_one_final_approval_still_completes_with_one_approver(db):
     assert result.status == IndentStatus.AWAITING_ALLOCATION.value
 
 
-async def test_activity_acknowledgments_and_notifications(db):
+async def test_activity_workflow_events_do_not_become_acknowledgments(db):
     requester, approver, it1, _ = await _world(db)
     indent = await service.create_indent(db, _create_data(it1.id), requester)
     await service.submit_indent(db, indent.id, requester)
@@ -1289,12 +1280,15 @@ async def test_activity_acknowledgments_and_notifications(db):
 
     activity = await service.activity_ledger(db, params, search=indent.indent_no)
     assert activity["total"] >= 2
-    assert {row["transaction_type"] for row in activity["items"]} == {
-        "RAISED", "SUBMITTED", "APPROVED",
+    assert {row["event_type"] for row in activity["items"]} == {
+        "REQUEST_CREATED", "REQUEST_SUBMITTED", "APPROVAL_COMPLETED",
+    }
+    assert {row["result_label"] for row in activity["items"]} == {
+        "Draft", "Submitted", "Approved",
     }
 
     acknowledgments = await service.list_acknowledgments(db, params)
-    assert any(row["indent_no"] == indent.indent_no for row in acknowledgments["items"])
+    assert acknowledgments["items"] == []
 
     notifications = await service.list_notifications(db, params, requester)
     assert notifications["items"][0]["title"] == "Request approved"
@@ -1364,7 +1358,7 @@ async def test_indent_list_filters(client, db, login):
     assert data["draft"] == 1
 
 
-async def test_acknowledgment_filters(client, db, login):
+async def test_allocation_does_not_create_fulfillment_acknowledgments(client, db, login):
     requester, approver, it1, _ = await _world(db)
     today_date = utcnow().date()
     indent = await service.create_indent(
@@ -1387,25 +1381,56 @@ async def test_acknowledgment_filters(client, db, login):
     await service.act_on_indent(db, indent.id, ApprovalAction.APPROVED, "Approved for issue", approver)
     await service.submit_indent(db, future_indent.id, requester)
     await service.act_on_indent(db, future_indent.id, ApprovalAction.APPROVED, "Approved for issue", approver)
+    for row, allocation_no, allocated_qty, lifecycle_status in (
+        (indent, "ALLOC/ACK/001", 5, IndentStatus.ALLOCATED.value),
+        (
+            future_indent,
+            "ALLOC/ACK/002",
+            2,
+            IndentStatus.PARTIALLY_FULFILLED.value,
+        ),
+    ):
+        row.items[0].allocated_quantity = allocated_qty
+        row.status = lifecycle_status
+        db.add(Allocation(
+            allocation_no=allocation_no,
+            indent_id=row.id,
+            indent_no=row.indent_no,
+            status=AllocationStatus.APPROVED.value,
+            allocated_by_id=approver.id,
+            allocated_by_name=approver.full_name,
+            remarks="Fulfilled for issue",
+            approved_at=utcnow(),
+        ))
+    await db.commit()
 
     await _grant_login(db, requester, "ackuser", ["indent.view"])
     headers = await login("ackuser", "pw")
 
-    r = await client.get("/api/indents/acknowledgments?search=Approved%20for%20issue", headers=headers)
-    assert r.status_code == 200
-    assert r.json()["total"] >= 1
-    assert any(row["indent_no"] == indent.indent_no for row in r.json()["items"])
-
     today = utcnow().date().isoformat()
-    r = await client.get(f"/api/indents/acknowledgments?date_from={today}&date_to={today}", headers=headers)
-    assert r.status_code == 200
-    assert r.json()["total"] >= 1
+    requests = [
+        "/api/indents/acknowledgments",
+        "/api/indents/acknowledgments?search=Fulfilled%20for%20issue",
+        f"/api/indents/acknowledgments?date_from={today}&date_to={today}",
+        f"/api/indents/acknowledgments?required_from={today}&required_to={today}",
+        "/api/indents/acknowledgments?status=FULFILLED",
+        "/api/indents/acknowledgments?status=PARTIALLY_FULFILLED",
+    ]
+    for path in requests:
+        r = await client.get(path, headers=headers)
+        assert r.status_code == 200
+        assert r.json() == {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "size": 20,
+        }
 
-    r = await client.get(f"/api/indents/acknowledgments?required_from={today}&required_to={today}", headers=headers)
-    assert r.status_code == 200
-    ids = {row["indent_id"] for row in r.json()["items"]}
-    assert indent.id in ids
-    assert future_indent.id not in ids
+    r = await client.get(
+        "/api/indents/acknowledgments?status=ALLOCATED",
+        headers=headers,
+    )
+    assert r.status_code == 422
 
 
 async def test_activity_filters(client, db, login):
@@ -1433,24 +1458,36 @@ async def test_activity_filters(client, db, login):
     await _grant_login(db, requester, "activityuser", ["indent.view"])
     headers = await login("activityuser", "pw")
 
-    r = await client.get("/api/indents/activity?search=Bolt&transaction_type=RAISED", headers=headers)
+    r = await client.get(
+        f"/api/indents/activity?search={indent.indent_no}"
+        "&transaction_type=REQUEST_CREATED",
+        headers=headers,
+    )
     assert r.status_code == 200
     assert r.json()["total"] >= 1
-    assert {row["transaction_type"] for row in r.json()["items"]} == {"RAISED"}
+    assert {row["event_type"] for row in r.json()["items"]} == {"REQUEST_CREATED"}
+    assert {row["result_label"] for row in r.json()["items"]} == {"Draft"}
 
-    r = await client.get(f"/api/indents/activity?item_id={it1.id}&direction=OUTWARD", headers=headers)
+    r = await client.get(f"/api/indents/activity?item_id={it1.id}", headers=headers)
     assert r.status_code == 200
-    assert r.json()["total"] >= 1
-    assert all(row["item_id"] == it1.id for row in r.json()["items"])
+    assert r.json()["total"] == 0
 
-    r = await client.get("/api/indents/activity?search=Approved%20for%20issue&transaction_type=APPROVED", headers=headers)
+    r = await client.get(
+        "/api/indents/activity?search=Approved%20for%20issue"
+        "&transaction_type=APPROVAL_COMPLETED",
+        headers=headers,
+    )
     assert r.status_code == 200
     assert r.json()["total"] >= 1
-    assert {row["transaction_type"] for row in r.json()["items"]} == {"APPROVED"}
+    assert {row["event_type"] for row in r.json()["items"]} == {
+        "APPROVAL_COMPLETED",
+    }
+    assert {row["result_label"] for row in r.json()["items"]} == {"Approved"}
 
     today = today_date.isoformat()
     r = await client.get(
-        f"/api/indents/activity?required_from={today}&required_to={today}&transaction_type=RAISED",
+        f"/api/indents/activity?required_from={today}&required_to={today}"
+        "&transaction_type=REQUEST_CREATED",
         headers=headers,
     )
     assert r.status_code == 200
