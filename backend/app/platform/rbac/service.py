@@ -162,9 +162,18 @@ async def set_role_page_access(
     for permission_id in selected_ids - current_ids:
         db.add(RolePermission(role_id=role_id, permission_id=permission_id))
 
+    # Derived from the permissions that actually end up granted, NOT from the codes
+    # that were asked for. Several pages share one required_permission (indent.view
+    # covers twelve), so a request to drop one of them while keeping its siblings
+    # cannot be honoured — the permission stays and so does the page. Reporting the
+    # request back made the screen look like it had saved when nothing had moved.
+    granted = {
+        code for code, permission in permission_by_code.items()
+        if permission.id in selected_ids
+    }
     after = sorted(
         page.code for page in pages
-        if page.required_permission is None or page.code in set(page_codes)
+        if page.required_permission is None or page.required_permission in granted
     )
     await write_audit(
         db, entity="rbac_role_permissions", entity_id=role_id,

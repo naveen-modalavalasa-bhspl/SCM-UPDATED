@@ -236,6 +236,58 @@ class AdjustmentOut(AdjustmentListRow):
 
 # ---------------- Stock Replenishment Schema ----------------
 
+class StockLotRow(BaseModel):
+    """One stk_balance row seen as a lot: its batch, its expiry, where it sits."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    bin_id: int
+    bin_code: str | None = None
+    batch_id: int
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    days_to_expiry: int | None = None
+    available_qty: float
+    reserved_qty: float
+    total_qty: float
+    project_name: str | None = None
+    serial_number: str | None = None
+    asset_code: str | None = None
+    # Warehouse -> zone -> rack -> ... -> bin, walked up whs_warehouse_locations.
+    location_path: list[str] = []
+
+
+class StockDetailOut(BaseModel):
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    location_path: list[str] = []
+    total_available: float
+    total_reserved: float
+    total_on_hand: float
+    lots: list[StockLotRow] = []
+
+
+class ReplenishmentRuleIn(BaseModel):
+    warehouse_id: int
+    item_id: int
+    min_qty: float = Field(ge=0)
+    max_qty: float = Field(ge=0)
+    reorder_qty: float = Field(ge=0)
+
+
+class ReplenishmentRuleRow(ReplenishmentRuleIn):
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    warehouse_name: str | None = None
+    available_qty: float = 0
+    is_breached: bool = False
+
+
 class ReplenishmentRow(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     item_id: int

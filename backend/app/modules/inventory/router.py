@@ -15,6 +15,7 @@ from app.modules.inventory.schemas import (
     AgeingSummaryOut, ValuationSummaryOut, NearExpiryAlertRow,
     STOIn, STOOut, STOListRow, CycleCountIn, CycleCountUpdateIn,
     CycleCountOut, CycleCountListRow, StockOverviewKPIs,
+    StockDetailOut, ReplenishmentRuleIn, ReplenishmentRuleRow,
 )
 from app.platform.rbac import permissions as perms
 from app.shared.enums import ApprovalAction
@@ -92,6 +93,28 @@ async def reject_adjustment(id: int, db: AsyncSession = Depends(get_db),
     return await service.act_on_adjustment(db, id, "REJECT", user)
 
 
+@stock_router.get("/replenishment-rules", response_model=list[ReplenishmentRuleRow])
+async def list_replenishment_rules(warehouse_id: int | None = None,
+                                   item_id: int | None = None,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.list_replenishment_rules(db, warehouse_id, item_id, user=user)
+
+
+@stock_router.put("/replenishment-rules", response_model=ReplenishmentRuleRow)
+async def save_replenishment_rule(body: ReplenishmentRuleIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.STOCK_ADJUST))):
+    return await service.save_replenishment_rule(db, body, user)
+
+
+@stock_router.delete("/replenishment-rules/{warehouse_id}/{item_id}", status_code=204)
+async def delete_replenishment_rule(warehouse_id: int, item_id: int,
+                                    db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission(perms.STOCK_ADJUST))):
+    await service.delete_replenishment_rule(db, warehouse_id, item_id, user)
+
+
 @stock_router.get("/replenishment", response_model=list[ReplenishmentRow])
 async def replenishment(warehouse_id: int | None = None, category_id: int | None = None,
                         criticality: str | None = None, db: AsyncSession = Depends(get_db),
@@ -124,6 +147,12 @@ async def near_expiry_alerts(days: int = 90, db: AsyncSession = Depends(get_db),
 async def overview_kpis(db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.STOCK_VIEW))):
     return await service.get_overview_kpis(db, user=user)
+
+
+@stock_router.get("/{stock_id}/detail", response_model=StockDetailOut)
+async def stock_detail(stock_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.get_stock_detail(db, stock_id, user=user)
 
 
 @stock_router.get("/{item_id}/availability", response_model=ItemAvailabilityOut)

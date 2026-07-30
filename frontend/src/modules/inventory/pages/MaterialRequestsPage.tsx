@@ -116,7 +116,7 @@ export function MaterialRequestsPage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Inventory" title="Store Requests" />
+      <PageHeader eyebrow="Inventory" title="Material Requests" />
 
       <p className="mb-4 text-sm text-muted">
         Raised automatically when an approved indent runs short of stock. Procurement picks them up from here.

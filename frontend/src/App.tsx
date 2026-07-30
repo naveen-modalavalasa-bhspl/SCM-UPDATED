@@ -42,8 +42,6 @@ import { StockLedgerView } from "@/modules/inventory/components/StockLedgerView"
 import { StockReplenishmentView } from "@/modules/inventory/components/StockReplenishmentView";
 import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
 import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
-import { CycleCountsView } from "@/modules/inventory/components/CycleCountsView";
-import { ReservationsView } from "@/modules/inventory/components/ReservationsView";
 import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
 import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
@@ -100,8 +98,6 @@ function AppRoutes() {
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
         <Route path="inventory/transfers" element={<StockTransferView />} />
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
-        <Route path="inventory/cycle-counts" element={<CycleCountsView />} />
-        <Route path="inventory/reservations" element={<ReservationsView />} />
         <Route path="inventory/valuation" element={<StockValuationView />} />
         <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />

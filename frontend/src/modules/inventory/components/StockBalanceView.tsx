@@ -6,8 +6,8 @@ import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon } from "luc
 import { Button, Card, PageHeader, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect, FilterToggle } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
-import { getStockBalances, getWarehouses } from "../api";
-import type { StockBalanceItem } from "../types";
+import { getStockBalances, getStockDetail, getWarehouses } from "../api";
+import type { StockBalanceItem, StockDetail, StockLot } from "../types";
 
 /** Value columns read off stk_balance.valuation_rate / stock_value. Both are 0 across
  *  the live data, so an uncosted row says so rather than printing a confident ₹0.00. */
@@ -34,6 +34,60 @@ const EXPIRY_WINDOWS = [
   { value: 90, label: "Expiring in 90 days" },
 ];
 
+/** Warehouse › zone › rack › bin. Wraps rather than scrolls: a deep tree still reads. */
+function LocationPath({ path }: { path: (string | undefined)[] }) {
+  const parts = path.filter(Boolean) as string[];
+  if (!parts.length) return <p className="text-sm text-muted">Location unknown</p>;
+  return (
+    <div className="flex flex-wrap items-center gap-1 py-1">
+      {parts.map((p, i) => (
+        <span key={`${p}-${i}`} className="flex items-center gap-1">
+          {i > 0 && <span className="text-muted">›</span>}
+          <span
+            className={
+              i === parts.length - 1
+                ? "rounded-md bg-brand/10 px-2 py-0.5 text-sm font-semibold text-brand"
+                : "text-sm text-body"
+            }
+          >
+            {p}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function LotCard({ lot, uom }: { lot: StockLot; uom?: string }) {
+  const left = lot.days_to_expiry;
+  return (
+    <div className="rounded-lg border border-line/70 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-mono text-xs font-semibold text-ink">{lot.batch_no || "No batch"}</div>
+          <div className="text-[11px] text-muted">
+            {lot.expiry_date ? `Expires ${lot.expiry_date}` : "No expiry"}
+            {lot.project_name ? ` · ${lot.project_name}` : ""}
+          </div>
+        </div>
+        {left !== null && left !== undefined && (
+          <Chip size="sm" variant="flat" color={left <= 0 ? "danger" : left <= 30 ? "warning" : "default"}>
+            {left <= 0 ? "Expired" : `${left}d left`}
+          </Chip>
+        )}
+      </div>
+      <LocationPath path={lot.location_path} />
+      <div className="flex gap-4 text-sm">
+        <span>Available <strong className="text-ink">{lot.available_qty.toLocaleString("en-IN")}</strong> {uom}</span>
+        {lot.reserved_qty > 0 && <span className="text-warning">Reserved {lot.reserved_qty}</span>}
+      </div>
+      {(lot.serial_number || lot.asset_code) && (
+        <div className="mt-1 font-mono text-[11px] text-muted">{lot.serial_number || lot.asset_code}</div>
+      )}
+    </div>
+  );
+}
+
 export function StockBalanceView() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
@@ -44,6 +98,14 @@ export function StockBalanceView() {
   const [selected, setSelected] = useState<StockBalanceItem | null>(null);
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
+
+  // Opened only when a row is clicked: the lots and the walk down the location tree
+  // are a second query, so the list itself stays one cheap page of stk_balance.
+  const { data: detail, isLoading: detailLoading } = useQuery<StockDetail>({
+    queryKey: ["stock-detail", selected?.id],
+    queryFn: () => getStockDetail(selected!.id),
+    enabled: !!selected,
+  });
 
   const filters = {
     search,
@@ -292,19 +354,26 @@ export function StockBalanceView() {
               )}
             </SheetSection>
 
-            <SheetSection title="Location">
-              <SheetRow label="Warehouse" value={selected.warehouse_name} />
-              <SheetRow label="Bin" value={selected.bin_code} />
+            <SheetSection title="Where it sits">
+              <LocationPath path={detail?.location_path ?? [selected.warehouse_name]} />
               <SheetRow label="Project" value={selected.project_name} />
             </SheetSection>
 
             <SheetSection title="Identity & Tracking">
               <SheetRow label="Category" value={selected.category_name} />
-              <SheetRow label="Batch" value={selected.batch_number} />
-              <SheetRow label="Expiry" value={selected.expiry_date} />
               <SheetRow label="Serial number" value={selected.serial_number} />
               <SheetRow label="Asset code" value={selected.asset_code} />
               <SheetRow label="Barcode" value={selected.barcode_value} />
+            </SheetSection>
+
+            <SheetSection title={`Lots in ${selected.warehouse_name || "this warehouse"}`}>
+              {detailLoading && <p className="text-sm text-muted">Loading lots…</p>}
+              {!detailLoading && !detail?.lots.length && (
+                <p className="text-sm text-muted">No lot rows for this item here.</p>
+              )}
+              <div className="space-y-2">
+                {detail?.lots.map((lot) => <LotCard key={lot.id} lot={lot} uom={selected.uom_code} />)}
+              </div>
             </SheetSection>
 
             <SheetSection title="Costing & Planning">

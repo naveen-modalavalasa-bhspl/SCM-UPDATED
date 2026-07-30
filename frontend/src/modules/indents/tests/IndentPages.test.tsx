@@ -1553,10 +1553,13 @@ describe("indent UI shell", () => {
     });
   });
 
+  // Waiting for me carries its own toolbar now: it lists every document type, so the
+  // indent module's Date/Status/Priority filters never applied to it.
   it("hides unsupported Date, Status and Priority filters on Waiting for me", async () => {
     renderWithProviders(<IndentApprovalsPage />, "/indents/approvals");
 
-    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
+    expect(await screen.findByRole("searchbox", { name: "Search approvals" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Past due only/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Date/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Status/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Priority/ })).not.toBeInTheDocument();

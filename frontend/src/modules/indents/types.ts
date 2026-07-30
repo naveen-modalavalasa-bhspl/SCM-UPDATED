@@ -144,6 +144,12 @@ export interface PendingApproval {
   doc_no?: string | null;
   summary?: string | null;
   requested_by_name?: string | null;
+  // The engine has always returned these four (workflow/engine.pending_for_user);
+  // the screen simply never read them, so every row looked identical.
+  amount?: number | null;
+  waiting_since?: string | null;
+  due_at?: string | null;
+  current_stage_name?: string | null;
 }
 
 export interface ApprovalDecisionRow {
