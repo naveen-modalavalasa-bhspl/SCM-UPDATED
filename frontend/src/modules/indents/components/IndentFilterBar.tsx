@@ -6,7 +6,6 @@ import {
 import { useIndentFilters, type DatePreset } from "../context/IndentFilterContext";
 import {
   INDENT_PRIORITY_OPTIONS,
-  INDENT_STATUS,
   INDENT_STATUS_GROUPS,
   INDENT_STATUS_OPTIONS,
 } from "../constants";
@@ -51,12 +50,14 @@ const MOVEMENT_OPTIONS = [
   { value: "INWARD", label: "Inward" },
 ];
 
+const ACKNOWLEDGMENT_STATUS_OPTIONS = [
+  { value: "FULFILLED", label: "Fulfilled" },
+  { value: "PARTIALLY_FULFILLED", label: "Partially Fulfilled" },
+];
+
 const ACKNOWLEDGMENT_STATUS_GROUPS = [{
   label: "Fulfilment",
-  options: [
-    { value: INDENT_STATUS.ALLOCATED, label: "Fulfilled" },
-    { value: INDENT_STATUS.PARTIALLY_FULFILLED, label: "Partially Fulfilled" },
-  ],
+  options: ACKNOWLEDGMENT_STATUS_OPTIONS,
 }];
 
 const DATE_PRESETS: { key: DatePreset; label: string }[] = [
@@ -133,6 +134,9 @@ export function IndentFilterBar({
   const statusGroups = mode === "acknowledgments"
     ? ACKNOWLEDGMENT_STATUS_GROUPS
     : INDENT_STATUS_GROUPS;
+  const statusOptions = mode === "acknowledgments"
+    ? ACKNOWLEDGMENT_STATUS_OPTIONS
+    : INDENT_STATUS_OPTIONS;
 
   useEffect(() => {
     setLocalSearch(search);
@@ -488,7 +492,7 @@ export function IndentFilterBar({
           {search && <Chip size="sm" variant="flat" onClose={() => setSearch("")}>Search: {search}</Chip>}
           {hasDateFilter && <Chip size="sm" variant="flat" onClose={() => setDatePreset("all")}>Date: {startDate || "Any"} to {endDate || "Any"}</Chip>}
           {hasRequiredByFilter && <Chip size="sm" variant="flat" onClose={() => { setRequiredByFrom(""); setRequiredByTo(""); }}>Required-by: {requiredByFrom || "Any"} to {requiredByTo || "Any"}</Chip>}
-          {selectedStatuses.length > 0 && <Chip size="sm" variant="flat" onClose={() => setSelectedStatuses([])}>Status: {joinLabel(selectedStatuses, INDENT_STATUS_OPTIONS)}</Chip>}
+          {selectedStatuses.length > 0 && <Chip size="sm" variant="flat" onClose={() => setSelectedStatuses([])}>Status: {joinLabel(selectedStatuses, statusOptions)}</Chip>}
           {selectedPriorities.length > 0 && <Chip size="sm" variant="flat" onClose={() => selectedPriorities.forEach(togglePriority)}>Priority: {joinLabel(selectedPriorities, INDENT_PRIORITY_OPTIONS)}</Chip>}
           {transactionType && <Chip size="sm" variant="flat" onClose={() => setTransactionType("")}>Transaction: {joinLabel([transactionType], TRANSACTION_OPTIONS)}</Chip>}
           {showMovement && direction && <Chip size="sm" variant="flat" onClose={() => setDirection("")}>Movement: {joinLabel([direction], MOVEMENT_OPTIONS)}</Chip>}

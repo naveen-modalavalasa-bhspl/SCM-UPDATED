@@ -8,7 +8,8 @@ from app.core.pagination import Page, PageParams
 from app.platform.rbac import permissions as perms
 from app.modules.indents import service
 from app.modules.indents.enums import (
-    ApprovalAction, IndentActivityType, IndentStatus, MaterialDirection, Priority,
+    AcknowledgmentStatus, ApprovalAction, IndentActivityType, IndentStatus,
+    MaterialDirection, Priority,
 )
 from app.modules.indents.schemas import (
     AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
@@ -102,7 +103,7 @@ async def acknowledgments(params: PageParams = Depends(), search: str | None = N
                           start_date: date | None = None, end_date: date | None = None,
                           required_from: date | None = None,
                           required_to: date | None = None,
-                          status: list[IndentStatus] | None = Query(None),
+                          status: list[AcknowledgmentStatus] | None = Query(None),
                           priority: list[Priority] | None = Query(None),
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission("indent.view"))):

@@ -845,7 +845,7 @@ describe("indent UI shell", () => {
         indent_no: "IND/2026/FULL",
         action: "FULFILLED",
         stage_name: null,
-        actor_name: "Store Allocator",
+        actor_name: "Warehouse Issuer",
         comments: null,
         acted_at: "2026-07-27T10:30:00Z",
       },
@@ -855,7 +855,7 @@ describe("indent UI shell", () => {
         indent_no: "IND/2026/PART",
         action: "PARTIALLY_FULFILLED",
         stage_name: null,
-        actor_name: "Store Allocator",
+        actor_name: "Warehouse Issuer",
         comments: null,
         acted_at: "2026-07-27T10:31:00Z",
       },
@@ -867,7 +867,7 @@ describe("indent UI shell", () => {
       const items = !selected.length
         ? rows
         : rows.filter((row) => (
-          selected.includes(row.action === "FULFILLED" ? "ALLOCATED" : row.action)
+          selected.includes(row.action)
         ));
       return Promise.resolve({
         items,
@@ -899,8 +899,10 @@ describe("indent UI shell", () => {
 
     fireEvent.click(within(menu).getByText("Fulfilled"));
     await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(
-      expect.objectContaining({ status: ["ALLOCATED"], page: 1 }),
+      expect.objectContaining({ status: ["FULFILLED"], page: 1 }),
     ));
+    expect(vi.mocked(indentApi.acknowledgments).mock.lastCall?.[0]?.status).not.toContain("ALLOCATED");
+    expect(screen.getByText("Status: Fulfilled")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText("IND/2026/PART")).not.toBeInTheDocument());
     expect(screen.getByText("IND/2026/FULL")).toBeInTheDocument();
 
@@ -951,6 +953,25 @@ describe("indent UI shell", () => {
       "text-left",
     );
     expect(row?.querySelector(".bg-ok-bg.text-ok")).toBeTruthy();
+    expect(container.querySelector(".overflow-hidden.rounded-2xl.bg-white")).toBeTruthy();
+  });
+
+  it("shows the interim empty state without allocation actor or timestamp content", async () => {
+    vi.mocked(indentApi.acknowledgments).mockResolvedValueOnce({
+      items: [],
+      total: 0,
+      page: 1,
+      size: 20,
+    });
+
+    const { container } = renderWithProviders(
+      <IndentAcknowledgmentsPage />,
+      "/indents/acknowledgments",
+    );
+
+    expect(await screen.findByText("No fulfilment acknowledgments found")).toBeInTheDocument();
+    expect(screen.queryByText("Store Allocator")).not.toBeInTheDocument();
+    expect(screen.queryByText(/27 Jul/i)).not.toBeInTheDocument();
     expect(container.querySelector(".overflow-hidden.rounded-2xl.bg-white")).toBeTruthy();
   });
 
@@ -1104,8 +1125,9 @@ describe("indent UI shell", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
     fireEvent.click(await screen.findByText("Fulfilled"));
     await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      status: ["ALLOCATED"],
+      status: ["FULFILLED"],
     })));
+    expect(vi.mocked(indentApi.acknowledgments).mock.lastCall?.[0]?.status).not.toContain("ALLOCATED");
 
     fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
     fireEvent.click(await screen.findByText("Urgent"));

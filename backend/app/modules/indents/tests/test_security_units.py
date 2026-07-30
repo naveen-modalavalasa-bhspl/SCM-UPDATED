@@ -12,7 +12,7 @@ import pytest
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
 from app.modules.indents import service
-from app.modules.indents.enums import ApprovalAction
+from app.modules.indents.enums import AcknowledgmentStatus, ApprovalAction
 from app.modules.indents.schemas import IndentUpdate
 from app.shared.enums import IndentStatus, InstanceStatus, Priority
 
@@ -688,7 +688,7 @@ async def test_acknowledgment_search_uses_same_visibility_and_search_filters(mon
         date_to=date(2026, 8, 14),
         required_from=date(2026, 8, 1),
         required_to=date(2026, 8, 15),
-        statuses=[IndentStatus.ALLOCATED],
+        statuses=[AcknowledgmentStatus.FULFILLED],
         priorities=[Priority.URGENT],
     )
     count_sql = sql_text(db.count_stmt)
@@ -701,105 +701,109 @@ async def test_acknowledgment_search_uses_same_visibility_and_search_filters(mon
         assert "ind_indents.indent_no" in text
         assert "ind_indents.requested_by_name" in text
         assert "ind_indents.department_name" in text
-        assert "allocated_by_name" in text
-        assert "inv_allocations.remarks" in text
-        assert "allocated_qty" in text
+        assert "allocated_by_name" not in text
+        assert "inv_allocations" not in text
+        assert "allocated_qty" not in text
+        assert "fulfillment_evidence.actor_name" in text
+        assert "fulfillment_evidence.action" in text
+        assert "fulfillment_evidence.comments" in text
         assert "wf_actions" not in text
         assert "wf_instances" not in text
         assert "EXISTS" in text
         assert "ind_indent_items.item_code" in text
         assert "ind_indent_items.item_name" in text
         assert "ind_indents.priority IN ('URGENT')" in text
-        assert "date(coalesce" in text.lower()
+        assert "date(fulfillment_evidence.acted_at)" in text.lower()
         assert ">= '2026-08-02'" in text
         assert "<= '2026-08-14'" in text
         assert "ind_indents.required_date >= '2026-08-01'" in text
         assert "ind_indents.required_date <= '2026-08-15'" in text
+        assert "fulfillment_evidence.action IN ('FULFILLED')" in text
 
 
 @pytest.mark.asyncio
-async def test_acknowledgments_return_only_full_and_partial_fulfillment_rows():
-    occurred_at = datetime(2026, 8, 10, 9, 30, tzinfo=timezone.utc)
-    rows = [
-        {
-            "id": 101,
-            "indent_id": 101,
-            "indent_no": "IND/FULL/101",
-            "action": "FULFILLED",
-            "stage_name": None,
-            "actor_name": "Store Allocator",
-            "comments": None,
-            "acted_at": occurred_at,
-        },
-        {
-            "id": 102,
-            "indent_id": 102,
-            "indent_no": "IND/PART/102",
-            "action": IndentStatus.PARTIALLY_FULFILLED.value,
-            "stage_name": None,
-            "actor_name": None,
-            "comments": None,
-            "acted_at": occurred_at,
-        },
-    ]
-    db = CapturingDb(mapping_rows=rows, scalar_value=2)
+async def test_fully_allocated_but_unissued_indent_has_no_acknowledgment():
+    db = CapturingDb()
 
-    page = await service.list_acknowledgments(db, PageParams(page=1, size=20))
+    page = await service.list_acknowledgments(
+        db,
+        PageParams(page=1, size=20),
+        statuses=[AcknowledgmentStatus.FULFILLED],
+    )
 
-    assert page["total"] == 2
-    assert [(row["indent_no"], row["action"]) for row in page["items"]] == [
-        ("IND/FULL/101", "FULFILLED"),
-        ("IND/PART/102", IndentStatus.PARTIALLY_FULFILLED.value),
-    ]
-    assert all(row["stage_name"] is None for row in page["items"])
+    sql = captured_sql(db)
+    assert page == {"items": [], "total": 0, "page": 1, "size": 20}
+    assert "allocated_qty" not in sql
+    assert "inv_allocations" not in sql
+    assert "ALLOCATED" not in sql
+    assert "0 = 1" in sql
 
 
 @pytest.mark.asyncio
-async def test_acknowledgments_derive_quantities_without_workflow_event_rows():
+async def test_partial_allocation_or_lifecycle_state_has_no_acknowledgment():
+    db = CapturingDb()
+
+    page = await service.list_acknowledgments(
+        db,
+        PageParams(page=1, size=20),
+        statuses=[AcknowledgmentStatus.PARTIALLY_FULFILLED],
+    )
+
+    sql = captured_sql(db)
+    assert page == {"items": [], "total": 0, "page": 1, "size": 20}
+    assert "allocated_qty" not in sql
+    assert "ind_indents.status" not in sql
+    assert "fulfillment_evidence.action IN ('PARTIALLY_FULFILLED')" in sql
+    assert "0 = 1" in sql
+
+
+@pytest.mark.asyncio
+async def test_allocation_actor_and_timestamp_are_not_fulfillment_evidence():
     db = CapturingDb()
 
     await service.list_acknowledgments(db, PageParams(page=1, size=20))
 
     sql = captured_sql(db)
-    assert "ind_indent_items" in sql
-    assert "allocated_qty" in sql
-    assert "inv_allocations" in sql
-    assert f"inv_allocations.status = '{service.AllocationStatus.APPROVED.value}'" in sql
-    assert "wf_actions" not in sql
-    assert "wf_instances" not in sql
-    for workflow_action in (
-        ApprovalAction.SUBMITTED,
-        ApprovalAction.REJECTED,
-        ApprovalAction.FALLBACK,
-    ):
-        assert workflow_action.value not in sql
+    assert "allocated_by_name" not in sql
+    assert "inv_allocations.remarks" not in sql
+    assert "inv_allocations.approved_at" not in sql
+    assert "ind_indents.updated_at" not in sql
+    assert "ind_indents.created_at" not in sql
+    assert "CAST(NULL AS DATETIME)" in sql
 
 
 @pytest.mark.asyncio
-async def test_acknowledgment_status_filters_use_derived_full_or_partial_conditions():
+async def test_acknowledgment_status_filters_are_display_values_and_keep_pagination():
     full_db = CapturingDb()
     partial_db = CapturingDb()
 
-    await service.list_acknowledgments(
+    full_page = await service.list_acknowledgments(
         full_db,
-        PageParams(page=1, size=10),
-        statuses=[IndentStatus.ALLOCATED],
+        PageParams(page=3, size=10),
+        statuses=[AcknowledgmentStatus.FULFILLED],
     )
-    await service.list_acknowledgments(
+    partial_page = await service.list_acknowledgments(
         partial_db,
         PageParams(page=1, size=10),
-        statuses=[IndentStatus.PARTIALLY_FULFILLED],
+        statuses=[AcknowledgmentStatus.PARTIALLY_FULFILLED],
     )
 
     full_sql = sql_text(full_db.result_stmt)
     partial_sql = sql_text(partial_db.result_stmt)
-    assert full_sql.count("quantity_mismatch_count = 0") > partial_sql.count(
-        "quantity_mismatch_count = 0"
-    )
-    assert partial_sql.count("fulfilled_quantity > 0") > full_sql.count(
-        "fulfilled_quantity > 0"
-    )
-    assert "LIMIT 10 OFFSET 0" in full_sql
+    assert {status.value for status in AcknowledgmentStatus} == {
+        "FULFILLED",
+        "PARTIALLY_FULFILLED",
+    }
+    with pytest.raises(ValueError):
+        AcknowledgmentStatus(IndentStatus.ALLOCATED.value)
+    assert "ALLOCATED" not in full_sql
+    assert "allocated_qty" not in full_sql
+    assert "allocated_qty" not in partial_sql
+    assert "fulfillment_evidence.action IN ('FULFILLED')" in full_sql
+    assert "fulfillment_evidence.action IN ('PARTIALLY_FULFILLED')" in partial_sql
+    assert full_page == {"items": [], "total": 0, "page": 3, "size": 10}
+    assert partial_page == {"items": [], "total": 0, "page": 1, "size": 10}
+    assert "LIMIT 10 OFFSET 20" in full_sql
     assert "LIMIT 10 OFFSET 0" in partial_sql
 
 

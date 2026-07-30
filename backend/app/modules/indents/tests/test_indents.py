@@ -1358,7 +1358,7 @@ async def test_indent_list_filters(client, db, login):
     assert data["draft"] == 1
 
 
-async def test_acknowledgment_filters(client, db, login):
+async def test_allocation_does_not_create_fulfillment_acknowledgments(client, db, login):
     requester, approver, it1, _ = await _world(db)
     today_date = utcnow().date()
     indent = await service.create_indent(
@@ -1381,12 +1381,17 @@ async def test_acknowledgment_filters(client, db, login):
     await service.act_on_indent(db, indent.id, ApprovalAction.APPROVED, "Approved for issue", approver)
     await service.submit_indent(db, future_indent.id, requester)
     await service.act_on_indent(db, future_indent.id, ApprovalAction.APPROVED, "Approved for issue", approver)
-    for row, allocation_no in (
-        (indent, "ALLOC/ACK/001"),
-        (future_indent, "ALLOC/ACK/002"),
+    for row, allocation_no, allocated_qty, lifecycle_status in (
+        (indent, "ALLOC/ACK/001", 5, IndentStatus.ALLOCATED.value),
+        (
+            future_indent,
+            "ALLOC/ACK/002",
+            2,
+            IndentStatus.PARTIALLY_FULFILLED.value,
+        ),
     ):
-        row.items[0].allocated_quantity = row.items[0].quantity
-        row.status = IndentStatus.ALLOCATED.value
+        row.items[0].allocated_quantity = allocated_qty
+        row.status = lifecycle_status
         db.add(Allocation(
             allocation_no=allocation_no,
             indent_id=row.id,
@@ -1402,21 +1407,30 @@ async def test_acknowledgment_filters(client, db, login):
     await _grant_login(db, requester, "ackuser", ["indent.view"])
     headers = await login("ackuser", "pw")
 
-    r = await client.get("/api/indents/acknowledgments?search=Fulfilled%20for%20issue", headers=headers)
-    assert r.status_code == 200
-    assert r.json()["total"] >= 1
-    assert any(row["indent_no"] == indent.indent_no for row in r.json()["items"])
-
     today = utcnow().date().isoformat()
-    r = await client.get(f"/api/indents/acknowledgments?date_from={today}&date_to={today}", headers=headers)
-    assert r.status_code == 200
-    assert r.json()["total"] >= 1
+    requests = [
+        "/api/indents/acknowledgments",
+        "/api/indents/acknowledgments?search=Fulfilled%20for%20issue",
+        f"/api/indents/acknowledgments?date_from={today}&date_to={today}",
+        f"/api/indents/acknowledgments?required_from={today}&required_to={today}",
+        "/api/indents/acknowledgments?status=FULFILLED",
+        "/api/indents/acknowledgments?status=PARTIALLY_FULFILLED",
+    ]
+    for path in requests:
+        r = await client.get(path, headers=headers)
+        assert r.status_code == 200
+        assert r.json() == {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "size": 20,
+        }
 
-    r = await client.get(f"/api/indents/acknowledgments?required_from={today}&required_to={today}", headers=headers)
-    assert r.status_code == 200
-    ids = {row["indent_id"] for row in r.json()["items"]}
-    assert indent.id in ids
-    assert future_indent.id not in ids
+    r = await client.get(
+        "/api/indents/acknowledgments?status=ALLOCATED",
+        headers=headers,
+    )
+    assert r.status_code == 422
 
 
 async def test_activity_filters(client, db, login):

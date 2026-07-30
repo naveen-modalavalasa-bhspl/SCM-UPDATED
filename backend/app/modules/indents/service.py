@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Numeric, String, and_, case, cast, exists, false, func, literal, or_, select, union_all
+from sqlalchemy import BigInteger, DateTime, Numeric, String, and_, case, cast, exists, false, func, literal, or_, select, union_all
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
@@ -37,9 +37,9 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item
 from app.shared.numbering import next_number
 from app.modules.indents.enums import (
-    AllocationStatus, ApprovalAction, AuditAction, DocType, IndentActivityType,
-    IndentItemStatus, IndentStatus, InstanceStatus, MRStatus, MaterialDirection, Priority,
-    RuleActionType,
+    AcknowledgmentStatus, AllocationStatus, ApprovalAction, AuditAction, DocType,
+    IndentActivityType, IndentItemStatus, IndentStatus, InstanceStatus, MRStatus,
+    MaterialDirection, Priority, RuleActionType,
 )
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentUpdate
@@ -2285,103 +2285,43 @@ async def list_acknowledgments(
     date_to: date | None = None,
     required_from: date | None = None,
     required_to: date | None = None,
-    statuses: list[IndentStatus] | None = None,
+    statuses: list[AcknowledgmentStatus] | None = None,
     priorities: list[Priority] | None = None,
 ) -> dict:
-    fulfilled_status = IndentStatus.PARTIALLY_FULFILLED.value.removeprefix("PARTIALLY_")
-    requested_quantity = case(
-        (
-            IndentItem.approved_quantity > 0,
-            IndentItem.approved_quantity,
-        ),
-        else_=IndentItem.quantity,
-    )
-    fulfilled_quantity = func.coalesce(IndentItem.allocated_quantity, 0)
-    line_fulfillment = (
+    # No posted, indent-linked warehouse issue/dispatch evidence exists yet.
+    # Keep the endpoint contract and security/filter clauses intact, but make the
+    # evidence relation explicitly empty. Allocation and lifecycle state are not
+    # physical fulfillment proof and must never produce an acknowledgment row.
+    # Future implementation starts only from posted out_issues.indent_id and
+    # out_issue_items.indent_item_id evidence; net quantity is issued minus
+    # returned. Do not add that calculation until linked, posted rows exist.
+    fulfillment_evidence = (
         select(
-            IndentItem.indent_id.label("indent_id"),
-            func.count(IndentItem.id).label("line_count"),
-            func.coalesce(func.sum(requested_quantity), 0).label("requested_quantity"),
-            func.coalesce(func.sum(fulfilled_quantity), 0).label("fulfilled_quantity"),
-            func.sum(
-                case(
-                    (fulfilled_quantity == requested_quantity, 0),
-                    else_=1,
-                )
-            ).label("quantity_mismatch_count"),
+            cast(literal(None), BigInteger).label("indent_id"),
+            cast(literal(None), String).label("action"),
+            cast(literal(None), String).label("actor_name"),
+            cast(literal(None), String).label("comments"),
+            cast(literal(None), DateTime(timezone=True)).label("acted_at"),
         )
-        .group_by(IndentItem.indent_id)
-        .subquery()
+        .where(literal(0) == literal(1))
+        .subquery("fulfillment_evidence")
     )
-
-    allocation_occurred_at = func.coalesce(
-        Allocation.approved_at,
-        Allocation.updated_at,
-        Allocation.created_at,
-    )
-    approved_allocations = (
-        select(
-            Allocation.indent_id.label("indent_id"),
-            Allocation.allocated_by_name.label("actor_name"),
-            Allocation.remarks.label("comments"),
-            allocation_occurred_at.label("acted_at"),
-            func.row_number().over(
-                partition_by=Allocation.indent_id,
-                order_by=(allocation_occurred_at.desc(), Allocation.id.desc()),
-            ).label("event_rank"),
-        )
-        .where(Allocation.status == AllocationStatus.APPROVED.value)
-        .subquery()
-    )
-
-    explicitly_partial = Indent.status == IndentStatus.PARTIALLY_FULFILLED.value
-    completely_fulfilled = and_(
-        ~explicitly_partial,
-        line_fulfillment.c.line_count > 0,
-        line_fulfillment.c.quantity_mismatch_count == 0,
-    )
-    partially_fulfilled = or_(
-        explicitly_partial,
-        and_(
-            line_fulfillment.c.fulfilled_quantity > 0,
-            line_fulfillment.c.fulfilled_quantity < line_fulfillment.c.requested_quantity,
-        ),
-    )
-    fulfillment_status = case(
-        (
-            partially_fulfilled,
-            IndentStatus.PARTIALLY_FULFILLED.value,
-        ),
-        else_=fulfilled_status,
-    )
-    occurred_at = func.coalesce(
-        approved_allocations.c.acted_at,
-        Indent.updated_at,
-        Indent.created_at,
-    )
+    occurred_at = fulfillment_evidence.c.acted_at
     stmt = (
         select(
             Indent.id,
             Indent.id.label("indent_id"),
             Indent.indent_no,
-            fulfillment_status.label("action"),
+            fulfillment_evidence.c.action,
             cast(literal(None), String).label("stage_name"),
-            approved_allocations.c.actor_name,
-            approved_allocations.c.comments,
-            occurred_at.label("acted_at"),
+            fulfillment_evidence.c.actor_name,
+            fulfillment_evidence.c.comments,
+            occurred_at,
         )
         .join(
-            line_fulfillment,
-            line_fulfillment.c.indent_id == Indent.id,
+            fulfillment_evidence,
+            fulfillment_evidence.c.indent_id == Indent.id,
         )
-        .outerjoin(
-            approved_allocations,
-            and_(
-                approved_allocations.c.indent_id == Indent.id,
-                approved_allocations.c.event_rank == 1,
-            ),
-        )
-        .where(or_(completely_fulfilled, partially_fulfilled))
     )
     if user is not None:
         stmt = stmt.where(await indent_access_condition(db, user))
@@ -2390,9 +2330,12 @@ async def list_acknowledgments(
         pattern = _like_pattern(term)
         stmt = stmt.where(or_(
             *_indent_search_conditions(pattern),
-            _matches(func.coalesce(approved_allocations.c.actor_name, literal("System")), pattern),
-            _matches(fulfillment_status, pattern),
-            _matches(approved_allocations.c.comments, pattern),
+            _matches(
+                func.coalesce(fulfillment_evidence.c.actor_name, literal("System")),
+                pattern,
+            ),
+            _matches(fulfillment_evidence.c.action, pattern),
+            _matches(fulfillment_evidence.c.comments, pattern),
             _indent_item_exists(pattern),
         ))
     if date_from:
@@ -2404,13 +2347,7 @@ async def list_acknowledgments(
     if required_to:
         stmt = stmt.where(Indent.required_date <= required_to)
     if statuses:
-        status_values = set(_values(statuses))
-        status_conditions = []
-        if IndentStatus.ALLOCATED.value in status_values:
-            status_conditions.append(completely_fulfilled)
-        if IndentStatus.PARTIALLY_FULFILLED.value in status_values:
-            status_conditions.append(partially_fulfilled)
-        stmt = stmt.where(or_(*status_conditions) if status_conditions else Indent.id.is_(None))
+        stmt = stmt.where(fulfillment_evidence.c.action.in_(_values(statuses)))
     if priorities:
         stmt = stmt.where(Indent.priority.in_(_values(priorities)))
     stmt = stmt.order_by(occurred_at.desc(), Indent.id.desc())

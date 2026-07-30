@@ -25,12 +25,20 @@ class IndentActivityType(str, Enum):
     BOOKMARK_REMOVED = "BOOKMARK_REMOVED"
 
 
+class AcknowledgmentStatus(str, Enum):
+    """Display/query values for fulfillment acknowledgments, not indent lifecycle states."""
+
+    FULFILLED = "FULFILLED"
+    PARTIALLY_FULFILLED = "PARTIALLY_FULFILLED"
+
+
 class MaterialDirection(str, Enum):
     INWARD = "INWARD"
     OUTWARD = "OUTWARD"
 
 
 __all__ = [
+    "AcknowledgmentStatus",
     "AllocationStatus",
     "ApprovalAction",
     "AuditAction",
