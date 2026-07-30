@@ -4,6 +4,8 @@ import { indentApi } from "../api";
 const apiMock = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  put: vi.fn(),
+  delete: vi.fn(),
 }));
 
 vi.mock("@/shared/api/client", () => ({
@@ -14,6 +16,8 @@ describe("indents api", () => {
   beforeEach(() => {
     apiMock.get.mockResolvedValue({ data: {} });
     apiMock.post.mockResolvedValue({ data: {} });
+    apiMock.put.mockResolvedValue({ data: {} });
+    apiMock.delete.mockResolvedValue({ data: undefined });
     vi.clearAllMocks();
   });
 
@@ -21,7 +25,8 @@ describe("indents api", () => {
     expect(Object.keys(indentApi).sort()).toEqual(
       [
         "acknowledgments", "activity", "approve", "bookmark", "create", "get", "journey", "list",
-        "notifications", "pendingApprovals", "reject", "stats", "submit", "unbookmark",
+        "delete", "notifications", "offices", "pendingApprovals", "reject", "stats", "submit", "unbookmark",
+        "update",
       ].sort(),
     );
   });

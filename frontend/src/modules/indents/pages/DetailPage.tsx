@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronRight, Loader2, Send, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, Loader2, Pencil, Send, Trash2, X } from "lucide-react";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Skeleton, CardBody,
 } from "@heroui/react";
-import { PageHeader, Button, Card, StatusPill } from "@/shared/components";
+import { PageHeader, Button, Can, Card, StatusPill } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
 import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
@@ -32,6 +33,7 @@ export function IndentDetailPage() {
   const indentId = Number(id);
   const nav = useNavigate();
   const qc = useQueryClient();
+  const { me } = useAuth();
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +47,7 @@ export function IndentDetailPage() {
     refetchOnWindowFocus: false,
   });
 
-  const { data: journey } = useQuery({
+  const { data: journey, isLoading: isJourneyLoading } = useQuery({
     queryKey: indentKeys.journey(accountScope, indentId),
     queryFn: () => indentApi.journey(indentId),
     enabled: Number.isFinite(indentId) && Boolean(indent),
@@ -64,19 +66,47 @@ export function IndentDetailPage() {
     });
   }, [accountScope, indentId, qc]);
 
-  const refreshAfterAction = (updated: Indent) => {
+  const refreshAfterAction = (updated: Indent, refetchJourney: boolean) => {
     setError(null);
+    // Write the mutation response immediately so status and actions update at once.
     qc.setQueryData(indentKeys.detail(accountScope, indentId), updated);
+    // Submit and Approve actively refresh the mounted journey without hiding cached data.
+    qc.invalidateQueries({
+      queryKey: indentKeys.journey(accountScope, indentId),
+      refetchType: refetchJourney ? "active" : "none",
+    });
     qc.invalidateQueries({
       predicate: (query) => isIndentModuleQuery(query) && query.queryKey[3] !== "journey",
     });
-    qc.invalidateQueries({ queryKey: indentKeys.journey(accountScope, indentId), refetchType: "none" });
   };
   const onErr = (e: Error) => setError(e.message);
 
-  const submit = useMutation({ mutationFn: () => indentApi.submit(indentId), onSuccess: refreshAfterAction, onError: onErr });
-  const approve = useMutation({ mutationFn: () => indentApi.approve(indentId, ""), onSuccess: refreshAfterAction, onError: onErr });
-  const reject = useMutation({ mutationFn: () => indentApi.reject(indentId, ""), onSuccess: refreshAfterAction, onError: onErr });
+  const submit = useMutation({
+    mutationFn: () => indentApi.submit(indentId),
+    onSuccess: (updated) => refreshAfterAction(updated, true),
+    onError: onErr,
+  });
+  const approve = useMutation({
+    mutationFn: () => indentApi.approve(indentId, ""),
+    onSuccess: (updated) => refreshAfterAction(updated, true),
+    onError: onErr,
+  });
+  const reject = useMutation({
+    mutationFn: () => indentApi.reject(indentId, ""),
+    onSuccess: (updated) => refreshAfterAction(updated, false),
+    onError: onErr,
+  });
+  const deleteDraft = useMutation({
+    mutationFn: () => indentApi.delete(indentId),
+    onSuccess: () => {
+      setError(null);
+      qc.removeQueries({ queryKey: indentKeys.detail(accountScope, indentId) });
+      qc.removeQueries({ queryKey: indentKeys.journey(accountScope, indentId) });
+      qc.invalidateQueries({ predicate: isIndentModuleQuery });
+      nav("/indents");
+    },
+    onError: onErr,
+  });
 
   const unavailable = isIndentUnavailableError(loadError);
   useEffect(() => {
@@ -99,9 +129,11 @@ export function IndentDetailPage() {
 
   if (isLoading || !indent) return <Skeleton className="h-40 rounded-2xl" />;
 
+  const isDraft = indent.status === "DRAFT";
+  const showDraftActions = isDraft && indent.requested_by_id === me?.employee.id;
   const isPending = indent.status === "PENDING_APPROVAL";
   const showActions = indent.can_submit || indent.can_approve || indent.can_reject;
-  const actionPending = submit.isPending || approve.isPending || reject.isPending;
+  const actionPending = submit.isPending || approve.isPending || reject.isPending || deleteDraft.isPending;
 
   return (
     <>
@@ -109,7 +141,42 @@ export function IndentDetailPage() {
         <ArrowLeft className="h-4 w-4" /> All indents
       </button>
 
-      <PageHeader eyebrow="Indent" title={indent.indent_no} actions={<StatusPill status={indent.status} />} />
+      <PageHeader
+        eyebrow="Indent"
+        title={indent.indent_no}
+        actions={(
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <StatusPill status={indent.status} />
+            {showDraftActions && (
+              <>
+                <Can do="indent.edit">
+                  <Button
+                    variant="primary"
+                    disabled={actionPending}
+                    onClick={() => nav(`/indents/new?edit=${indent.id}`)}
+                  >
+                    <Pencil className="h-4 w-4" /> Edit Indent
+                  </Button>
+                </Can>
+                <Can do="indent.delete">
+                  <Button
+                    variant="danger"
+                    disabled={actionPending}
+                    onClick={() => {
+                      if (window.confirm(`Delete draft ${indent.indent_no}? This cannot be undone.`)) {
+                        deleteDraft.mutate();
+                      }
+                    }}
+                  >
+                    {deleteDraft.isPending ? <InlineSpinner /> : <Trash2 className="h-4 w-4" />}
+                    {deleteDraft.isPending ? "Deleting..." : "Delete Draft"}
+                  </Button>
+                </Can>
+              </>
+            )}
+          </div>
+        )}
+      />
 
       <button
         type="button"
@@ -128,7 +195,11 @@ export function IndentDetailPage() {
       >
         <Card className="transition-colors duration-150 group-hover:border-brand/40 group-hover:bg-content2 motion-reduce:transition-none">
           <CardBody className="p-5">
-            <FlowStepper status={indent.status} journey={journey} />
+            <FlowStepper
+              status={indent.status}
+              journey={journey}
+              isLoading={isJourneyLoading}
+            />
             <div className="mt-4 flex min-h-11 items-center justify-between gap-3 border-t border-line pt-3 text-sm font-semibold text-brand">
               <span>View complete approval journey</span>
               <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />

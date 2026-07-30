@@ -190,6 +190,10 @@ export interface IndentCreate {
   items: { item_id: number; quantity: number; remarks?: string }[];
 }
 
+export interface IndentUpdate extends IndentCreate {
+  office_id?: number | null;
+}
+
 export interface IndentJourneyStage {
   sequence: number;
   title: string;

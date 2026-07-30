@@ -6,7 +6,7 @@ import type { Paginated, Option } from "@/shared/types";
 import type {
   AcknowledgmentRow, ActivityRow, ApprovalDecisionRow, ApprovalDelegation,
   Indent, IndentCreate, IndentListRow, IndentJourney, IndentNotification,
-  IndentStats, PendingApproval, TeamQueueRow,
+  IndentStats, IndentUpdate, PendingApproval, TeamQueueRow,
 } from "./types";
 
 export interface IndentQueryParams {
@@ -67,6 +67,8 @@ export const indentKeys = {
     [...indentKeys.all(scope), "pending-approvals"] as const,
   detail: (scope: IndentAccountScope, id: number) =>
     [...indentKeys.all(scope), "detail", id] as const,
+  offices: (scope: IndentAccountScope) =>
+    [...indentKeys.all(scope), "offices"] as const,
   journey: (scope: IndentAccountScope, id: number) =>
     [...indentKeys.all(scope), "journey", id] as const,
   items: (scope: IndentAccountScope, context: unknown = "default") =>
@@ -152,9 +154,13 @@ export const indentApi = {
     api.get<Paginated<IndentNotification>>("/api/indents/notifications", { params: toSearchParams(params) }).then((r) => r.data),
   pendingApprovals: () =>
     api.get<{ items: PendingApproval[] }>("/api/workflow/pending").then((r) => r.data.items),
+  offices: () => api.get<{ items: Option[] }>("/api/indents/options/offices").then((r) => r.data.items),
   get: (id: number) => api.get<Indent>(`/api/indents/${id}`).then((r) => r.data),
   journey: (id: number) => api.get<IndentJourney>(`/api/indents/${id}/journey`).then((r) => r.data),
   create: (data: IndentCreate) => api.post<Indent>("/api/indents", data).then((r) => r.data),
+  update: (id: number, data: IndentUpdate) =>
+    api.put<Indent>(`/api/indents/${id}`, data).then((r) => r.data),
+  delete: (id: number) => api.delete<void>(`/api/indents/${id}`).then((r) => r.data),
   submit: (id: number) => api.post<Indent>(`/api/indents/${id}/submit`).then((r) => r.data),
   approve: (id: number, comments: string) =>
     api.post<Indent>(`/api/indents/${id}/approve`, { comments }).then((r) => r.data),

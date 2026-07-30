@@ -46,10 +46,14 @@ from app.modules.indents.schemas import IndentCreate, IndentUpdate
 
 
 PAST_REQUIRED_DATE_ERROR = "Required date cannot be earlier than today"
+REQUIRED_DATE_MANDATORY_ERROR = "Required date is mandatory."
+DUPLICATE_ITEM_ERROR = "The same item cannot be added more than once in a single indent."
 
 
-def _validate_required_date_not_past(required_date: date | None) -> None:
-    if required_date is not None and required_date < date.today():
+def _validate_required_date(required_date: date | None) -> None:
+    if required_date is None:
+        raise ValidationError(REQUIRED_DATE_MANDATORY_ERROR)
+    if required_date < date.today():
         raise ValidationError(PAST_REQUIRED_DATE_ERROR)
 
 
@@ -62,11 +66,34 @@ def _validate_priority(priority: str | None) -> str | None:
     return priority
 
 
+def _validate_unique_item_ids(items) -> None:
+    item_ids = [line.item_id for line in items]
+    if len(item_ids) != len(set(item_ids)):
+        raise ValidationError(DUPLICATE_ITEM_ERROR)
+
+
+MISSING_QTY_ERROR = "Quantity is required for every selected item."
+
+
+def _validate_item_quantities(items) -> None:
+    """Reject any line where quantity is missing, zero, or negative."""
+    for line in items:
+        if not line.quantity or line.quantity <= 0:
+            raise ValidationError(MISSING_QTY_ERROR)
+
+
 async def _items_by_id(db: AsyncSession, item_ids: list[int]) -> dict[int, Item]:
     if not item_ids:
         return {}
     rows = (await db.execute(select(Item).where(Item.id.in_(item_ids)))).scalars().all()
     return {i.id: i for i in rows}
+
+
+async def list_office_options(db: AsyncSession) -> dict:
+    rows = (await db.execute(
+        select(HcmOffice).where(HcmOffice.is_active.is_(True)).order_by(HcmOffice.name)
+    )).scalars().all()
+    return {"items": [{"id": office.id, "name": office.name} for office in rows]}
 
 
 async def _name(db: AsyncSession, model, pk) -> str | None:
@@ -114,11 +141,13 @@ async def _requester_context(db: AsyncSession, user) -> dict:
 
 
 async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
-    _validate_required_date_not_past(data.required_date)
+    _validate_required_date(data.required_date)
     priority = _validate_priority(data.priority) or Priority.NORMAL.value
 
     if not data.items:
         raise ValidationError("Indent must have at least one item")
+    _validate_item_quantities(data.items)
+    _validate_unique_item_ids(data.items)
 
     items_map = await _items_by_id(db, [line.item_id for line in data.items])
     missing = {line.item_id for line in data.items} - set(items_map)
@@ -686,24 +715,34 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot edit an indent in {indent.status} status")
 
+    _validate_required_date(data.required_date)
+
     before = {
-        "required_date": indent.required_date,
+        "required_date": indent.required_date.isoformat() if indent.required_date else None,
         "priority": indent.priority,
+        "office_id": indent.office_id,
+        "office_name": indent.office_name,
         "remarks": indent.remarks,
         "total_items": indent.total_items,
-        "total_qty": indent.total_qty,
+        "total_qty": float(indent.total_qty or 0),
     }
-    if data.required_date is not None:
-        _validate_required_date_not_past(data.required_date)
-        indent.required_date = data.required_date
+    indent.required_date = data.required_date
     if data.priority is not None:
         indent.priority = _validate_priority(data.priority)
-    if data.remarks is not None:
+    if "office_id" in data.model_fields_set:
+        office = await db.get(HcmOffice, data.office_id) if data.office_id is not None else None
+        if data.office_id is not None and (office is None or not office.is_active):
+            raise ValidationError(f"Unknown or inactive office id: {data.office_id}")
+        indent.office_id = office.id if office else None
+        indent.office_name = office.name if office else None
+    if "remarks" in data.model_fields_set:
         indent.remarks = data.remarks
 
     if data.items is not None:
         if not data.items:
             raise ValidationError("Indent must have at least one item")
+        _validate_item_quantities(data.items)
+        _validate_unique_item_ids(data.items)
         items_map = await _items_by_id(db, [l.item_id for l in data.items])
         indent.items.clear()
         for line_no, line in enumerate(data.items, start=1):
@@ -721,16 +760,38 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
         action=AuditAction.UPDATE, actor=user, before=before,
         after={
-            "required_date": indent.required_date,
+            "required_date": indent.required_date.isoformat() if indent.required_date else None,
             "priority": indent.priority,
+            "office_id": indent.office_id,
+            "office_name": indent.office_name,
             "remarks": indent.remarks,
             "total_items": indent.total_items,
-            "total_qty": indent.total_qty,
+            "total_qty": float(indent.total_qty or 0),
         },
     )
     await db.commit()
     await db.refresh(indent)
     return await _attach_capabilities(db, indent, user)
+
+
+async def delete_indent(db: AsyncSession, indent_id: int, user) -> None:
+    indent = await get_indent(db, indent_id, user)
+    if indent.requested_by_id != user.id:
+        raise PermissionError_("Only the requester can delete this indent")
+    if indent.status != IndentStatus.DRAFT.value:
+        raise ValidationError(f"Cannot delete an indent in {indent.status} status")
+
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.DEACTIVATE, actor=user,
+        before={
+            "status": indent.status,
+            "total_items": indent.total_items,
+            "total_qty": float(indent.total_qty or 0),
+        },
+    )
+    await db.delete(indent)
+    await db.commit()
 
 
 async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
@@ -1223,7 +1284,10 @@ def _final_any_one_actions(
 async def _workflow_rows(db: AsyncSession, indent_id: int) -> tuple[Instance | None, list[Action], list[Pending]]:
     instance = (await db.execute(
         select(Instance)
-        .options(load_only(Instance.id, Instance.status))
+        .options(load_only(
+            Instance.id, Instance.status, Instance.resolved_chain,
+            Instance.current_sequence, Instance.current_stage_name,
+        ))
         .where(Instance.doc_type == DocType.INDENT.value, Instance.doc_id == indent_id)
         .order_by(Instance.id.desc())
     )).scalars().first()
@@ -1377,6 +1441,29 @@ def _fallback_stage_title(positions: list[dict], *, final: bool) -> str:
     return "Approval"
 
 
+def _resolved_stage_title(link: dict, action: Action | None, *, final: bool) -> str:
+    """Format a frozen workflow rung without inventing a role not present in it."""
+    action_title = action.stage_name if action and action.stage_name else None
+    source_title = action_title or link.get("role_name") or link.get("position_name")
+    if not source_title:
+        return "Final Approval" if final else "Approval"
+    normalized = _normalised_scope_text(source_title)
+    if final:
+        if "FINAL" in normalized:
+            return source_title
+        return f"Final Approval - {_position_label(source_title)}"
+    if "REVIEW" in normalized or "APPROVAL" in normalized:
+        return source_title
+    return f"{_position_label(source_title)} Review"
+
+
+def _resolved_approver_names(link: dict) -> str | None:
+    names = link.get("approver_names")
+    if not isinstance(names, list):
+        return None
+    return ", ".join(str(name) for name in names if name) or None
+
+
 def _split_reporting_ladder(positions: list[dict]) -> tuple[list[dict], list[dict]]:
     if not positions:
         return [], []
@@ -1404,7 +1491,11 @@ def _holder_names_for_ids(positions: list[dict], holder_ids: set[int]) -> str | 
 async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
     indent = await _get_indent_for_journey(db, indent_id, user)
     instance, actions, pending = await _workflow_rows(db, indent.id)
-    positions = await _approval_positions(db, indent.position_id)
+    resolved_chain = getattr(instance, "resolved_chain", None) if instance else None
+    positions = (
+        await _approval_positions(db, indent.position_id)
+        if resolved_chain is None else []
+    )
     audits = list((await db.execute(
         select(AuditLog)
         .options(load_only(
@@ -1456,7 +1547,97 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         pending_by_sequence[_workflow_stage_sequence(row)].append(row)
 
     pending_approver_ids = {row.approver_id for rows in pending_by_sequence.values() for row in rows}
-    if positions:
+    if resolved_chain is not None:
+        chain = sorted(
+            (link for link in resolved_chain if isinstance(link, dict)),
+            key=lambda link: int(link.get("sequence", 0)),
+        )
+        for index, link in enumerate(chain):
+            workflow_sequence = int(link.get("sequence", index + 1))
+            actions_for_sequence = stage_actions.get(workflow_sequence, [])
+            action = (
+                _display_action_for_stage(actions_for_sequence)
+                if actions_for_sequence else None
+            )
+            pending_for_sequence = pending_by_sequence.get(workflow_sequence, [])
+            is_final = index == len(chain) - 1
+            explicit_status = str(link.get("status") or "").upper()
+            status = (
+                _stage_status_from_action(action)
+                if action else "NOT_REQUIRED"
+                if explicit_status == "NOT_REQUIRED" else "PENDING"
+            )
+            is_current = (
+                status != "NOT_REQUIRED"
+                and (
+                    bool(pending_for_sequence)
+                    or (
+                        instance.status == InstanceStatus.IN_PROGRESS.value
+                        and instance.current_sequence == workflow_sequence
+                    )
+                )
+            )
+            title = _resolved_stage_title(link, action, final=is_final)
+            timestamp = _utc_datetime(action.acted_at) if action else None
+            if current_stage is None and is_current:
+                current_stage = (
+                    "Waiting for final approval"
+                    if is_final else f"Waiting for {title}"
+                )
+            if is_final:
+                has_final_stage = True
+                if status == "APPROVED" and action:
+                    final_any_one_outcome = f"Approved by {action.actor_name}"
+            stages.append({
+                "sequence": len(stages) + 1,
+                "title": title,
+                "status": status,
+                "is_current": is_current,
+                "approver_name": (
+                    action.actor_name if action else _resolved_approver_names(link)
+                ),
+                "position_name": (
+                    action.actor_position if action else link.get("position_name")
+                ),
+                "timestamp": timestamp,
+                "comments": action.comments if action else None,
+                "duration_seconds": _duration_seconds(previous_at, timestamp),
+                "stage_type": "final" if is_final else "approval",
+            })
+            if timestamp:
+                previous_at = timestamp
+
+        if not chain:
+            self_actions = [
+                action for action in stage_actions.get(0, [])
+                if action.action in {
+                    ApprovalAction.APPROVED.value,
+                    ApprovalAction.REJECTED.value,
+                    ApprovalAction.RETURNED.value,
+                }
+            ]
+            if self_actions:
+                action = self_actions[-1]
+                timestamp = _utc_datetime(action.acted_at)
+                status = _stage_status_from_action(action)
+                has_final_stage = True
+                if status == "APPROVED":
+                    final_any_one_outcome = f"Approved by {action.actor_name}"
+                stages.append({
+                    "sequence": len(stages) + 1,
+                    "title": action.stage_name or "Final Approval",
+                    "status": status,
+                    "is_current": False,
+                    "approver_name": action.actor_name,
+                    "position_name": action.actor_position,
+                    "timestamp": timestamp,
+                    "comments": action.comments,
+                    "duration_seconds": _duration_seconds(previous_at, timestamp),
+                    "stage_type": "final",
+                })
+                if timestamp:
+                    previous_at = timestamp
+    elif positions:
         approval_positions, final_positions = _split_reporting_ladder(positions)
         for position in approval_positions:
             holder_ids = _holder_ids([position])

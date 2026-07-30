@@ -29,6 +29,7 @@ class IndentCreate(BaseModel):
 class IndentUpdate(BaseModel):
     required_date: date | None = None
     priority: str | None = None
+    office_id: int | None = None
     remarks: str | None = None
     items: list[IndentItemIn] | None = None
 

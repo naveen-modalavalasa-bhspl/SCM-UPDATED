@@ -126,6 +126,12 @@ async def create(data: IndentCreate, db: AsyncSession = Depends(get_db),
     return await service.create_indent(db, data, user)
 
 
+@indent_router.get("/options/offices")
+async def office_options(db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission("indent.view"))):
+    return await service.list_office_options(db)
+
+
 @indent_router.get("/{indent_id}", response_model=IndentOut)
 async def get_one(indent_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission("indent.view"))):
@@ -142,6 +148,12 @@ async def journey(indent_id: int, db: AsyncSession = Depends(get_db),
 async def update(indent_id: int, data: IndentUpdate, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.edit"))):
     return await service.update_indent(db, indent_id, data, user)
+
+
+@indent_router.delete("/{indent_id}", status_code=204)
+async def delete_draft(indent_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission("indent.delete"))):
+    await service.delete_indent(db, indent_id, user)
 
 
 @indent_router.post("/{indent_id}/submit", response_model=IndentOut)

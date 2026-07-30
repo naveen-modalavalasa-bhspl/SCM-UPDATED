@@ -378,7 +378,26 @@ async def _approval_ladder_world(db):
 
 
 def _create_data(item_id):
-    return IndentCreate(items=[IndentItemIn(item_id=item_id, quantity=5)], remarks="test")
+    return IndentCreate(
+        items=[IndentItemIn(item_id=item_id, quantity=5)],
+        required_date=date.today(),
+        remarks="test",
+    )
+
+
+def test_unique_item_id_validation_helper():
+    service._validate_unique_item_ids([
+        IndentItemIn(item_id=1, quantity=2),
+        IndentItemIn(item_id=2, quantity=3),
+    ])
+
+    with pytest.raises(ValidationError) as exc:
+        service._validate_unique_item_ids([
+            IndentItemIn(item_id=1, quantity=2),
+            IndentItemIn(item_id=1, quantity=3),
+        ])
+
+    assert str(exc.value) == service.DUPLICATE_ITEM_ERROR
 
 
 async def _draft_chain_world(db, *, depth: int, id_base: int):
@@ -445,7 +464,91 @@ async def _draft_chain_world(db, *, depth: int, id_base: int):
 async def test_create_requires_items(db):
     requester, *_ = await _world(db)
     with pytest.raises(ValidationError):
-        await service.create_indent(db, IndentCreate(items=[]), requester)
+        await service.create_indent(
+            db,
+            IndentCreate(items=[], required_date=date.today()),
+            requester,
+        )
+
+
+async def test_create_rejects_duplicate_item_ids(db):
+    requester, _approver, it1, _it2 = await _world(db)
+    data = IndentCreate(
+        items=[
+            IndentItemIn(item_id=it1.id, quantity=2),
+            IndentItemIn(item_id=it1.id, quantity=3),
+        ],
+        required_date=date.today(),
+    )
+
+    with pytest.raises(ValidationError) as exc:
+        await service.create_indent(db, data, requester)
+
+    assert str(exc.value) == service.DUPLICATE_ITEM_ERROR
+
+
+async def test_create_rejects_item_with_zero_quantity(db):
+    requester, _approver, it1, it2 = await _world(db)
+    # Pydantic Field(gt=0) already blocks quantity=0 at schema level;
+    # verify the service-level guard also raises ValidationError for any
+    # quantity that somehow passes (e.g. after a schema relaxation).
+    with pytest.raises(Exception):
+        # quantity=0 is rejected at Pydantic level (Field gt=0), which is correct
+        IndentItemIn(item_id=it1.id, quantity=0)
+
+
+async def test_create_rejects_item_with_negative_quantity(db):
+    requester, _approver, it1, _it2 = await _world(db)
+    with pytest.raises(Exception):
+        # negative quantity is rejected at Pydantic level (Field gt=0)
+        IndentItemIn(item_id=it1.id, quantity=-5)
+
+
+async def test_create_accepts_valid_item_quantities(db):
+    requester, _approver, it1, it2 = await _world(db)
+    data = IndentCreate(
+        items=[
+            IndentItemIn(item_id=it1.id, quantity=3),
+            IndentItemIn(item_id=it2.id, quantity=7),
+        ],
+        required_date=date.today(),
+    )
+    indent = await service.create_indent(db, data, requester)
+    assert indent.total_items == 2
+    assert float(indent.total_qty) == 10
+
+
+async def test_update_rejects_item_with_zero_quantity(db):
+    requester, _approver, it1, it2 = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    with pytest.raises(Exception):
+        # Pydantic Field(gt=0) blocks quantity=0 — correct defence-in-depth
+        IndentItemIn(item_id=it2.id, quantity=0)
+
+
+async def test_update_rejects_item_with_negative_quantity(db):
+    requester, _approver, it1, it2 = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    with pytest.raises(Exception):
+        IndentItemIn(item_id=it2.id, quantity=-1)
+
+
+async def test_update_accepts_valid_item_quantities(db):
+    requester, _approver, it1, it2 = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    updated = await service.update_indent(
+        db, indent.id,
+        IndentUpdate(
+            required_date=date.today(),
+            items=[
+                IndentItemIn(item_id=it1.id, quantity=10),
+                IndentItemIn(item_id=it2.id, quantity=20),
+            ],
+        ),
+        requester,
+    )
+    assert updated.total_items == 2
+    assert float(updated.total_qty) == 30
 
 
 async def test_create_sets_snapshots_and_number(db):
@@ -472,6 +575,30 @@ async def test_create_rejects_past_required_date(db):
                 items=[IndentItemIn(item_id=it1.id, quantity=5)],
                 required_date=date.today() - timedelta(days=1),
             ),
+            requester,
+        )
+
+
+async def test_create_rejects_missing_required_date(db):
+    requester, _approver, it1, _ = await _world(db)
+
+    with pytest.raises(ValidationError, match="Required date is mandatory."):
+        await service.create_indent(
+            db,
+            IndentCreate(items=[IndentItemIn(item_id=it1.id, quantity=5)]),
+            requester,
+        )
+
+
+async def test_update_rejects_missing_required_date(db):
+    requester, _approver, it1, _ = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+
+    with pytest.raises(ValidationError, match="Required date is mandatory."):
+        await service.update_indent(
+            db,
+            indent.id,
+            IndentUpdate(remarks="Missing required date"),
             requester,
         )
 
@@ -811,6 +938,66 @@ async def test_cannot_edit_after_submit(db):
         await service.update_indent(db, indent.id, IndentUpdate(remarks="late edit"), requester)
 
 
+async def test_update_draft_delivery_office(db):
+    requester, _approver, it1, _ = await _world(db)
+    db.add(HcmOffice(id=702, name="Branch Office", is_active=True, synced_at=utcnow()))
+    await db.commit()
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+
+    updated = await service.update_indent(
+        db,
+        indent.id,
+        IndentUpdate(required_date=date.today(), office_id=702),
+        requester,
+    )
+
+    assert updated.office_id == 702
+    assert updated.office_name == "Branch Office"
+
+
+async def test_requester_can_delete_draft(db):
+    requester, _approver, it1, _ = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    indent_id = indent.id
+
+    await service.delete_indent(db, indent_id, requester)
+
+    with pytest.raises(NotFoundError):
+        await service.get_indent(db, indent_id)
+
+
+async def test_cannot_delete_after_submit(db):
+    requester, _approver, it1, _ = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    await service.submit_indent(db, indent.id, requester)
+
+    with pytest.raises(ValidationError):
+        await service.delete_indent(db, indent.id, requester)
+
+
+async def test_update_rejects_duplicate_item_ids(db):
+    requester, _approver, it1, it2 = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+
+    with pytest.raises(ValidationError) as exc:
+        await service.update_indent(
+            db,
+            indent.id,
+            IndentUpdate(
+                required_date=date.today(),
+                items=[
+                    IndentItemIn(item_id=it2.id, quantity=2),
+                    IndentItemIn(item_id=it2.id, quantity=3),
+                ],
+            ),
+            requester,
+        )
+
+    assert str(exc.value) == service.DUPLICATE_ITEM_ERROR
+    unchanged = await service.get_indent(db, indent.id, requester)
+    assert [line.item_id for line in unchanged.items] == [it1.id]
+
+
 async def test_indent_create_and_list_via_api(client, db, make_user, login):
     uom = Uom(code="NOS", name="Numbers")
     db.add(uom)
@@ -823,9 +1010,14 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
                     permissions=["indent.view", "indent.create"])
     headers = await login("req", "pw")
 
-    r = await client.post("/api/indents",
-                          json={"items": [{"item_id": item.id, "quantity": 5}]},
-                          headers=headers)
+    r = await client.post(
+        "/api/indents",
+        json={
+            "required_date": date.today().isoformat(),
+            "items": [{"item_id": item.id, "quantity": 5}],
+        },
+        headers=headers,
+    )
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "DRAFT"
     assert r.json()["indent_no"].startswith("IND/")
@@ -833,6 +1025,182 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
     lst = await client.get("/api/indents", headers=headers)
     assert lst.status_code == 200
     assert lst.json()["total"] >= 1
+
+
+async def test_required_date_api_validation_for_create_and_update(
+    client, db, make_user, login,
+):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    db.add(item)
+    await db.commit()
+
+    await make_user(
+        employee_id=2,
+        username="req",
+        password="pw",
+        permissions=["indent.view", "indent.create", "indent.edit"],
+    )
+    headers = await login("req", "pw")
+    items = [{"item_id": item.id, "quantity": 5}]
+
+    missing_create = await client.post(
+        "/api/indents",
+        json={"items": items},
+        headers=headers,
+    )
+    assert missing_create.status_code == 422
+    assert missing_create.json() == {
+        "success": False,
+        "error": service.REQUIRED_DATE_MANDATORY_ERROR,
+    }
+
+    created = await client.post(
+        "/api/indents",
+        json={"required_date": date.today().isoformat(), "items": items},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+
+    missing_update = await client.put(
+        f"/api/indents/{created.json()['id']}",
+        json={"items": items},
+        headers=headers,
+    )
+    assert missing_update.status_code == 422
+    assert missing_update.json() == {
+        "success": False,
+        "error": service.REQUIRED_DATE_MANDATORY_ERROR,
+    }
+
+
+async def test_duplicate_item_api_validation_for_create_and_update(
+    client, db, make_user, login,
+):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item1 = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    item2 = Item(code="IT-0002", name="Nut", uom_id=uom.id, uom_code="NOS")
+    db.add_all([item1, item2])
+    await db.commit()
+
+    await make_user(
+        employee_id=2,
+        username="req",
+        password="pw",
+        permissions=["indent.view", "indent.create", "indent.edit"],
+    )
+    headers = await login("req", "pw")
+    unique_items = [
+        {"item_id": item1.id, "quantity": 2},
+        {"item_id": item2.id, "quantity": 3},
+    ]
+    required_date = date.today().isoformat()
+
+    created = await client.post(
+        "/api/indents",
+        json={"required_date": required_date, "items": unique_items},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+
+    updated = await client.put(
+        f"/api/indents/{created.json()['id']}",
+        json={"required_date": required_date, "items": list(reversed(unique_items))},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+
+    duplicate_items = [
+        {"item_id": item1.id, "quantity": 2},
+        {"item_id": item1.id, "quantity": 3},
+    ]
+    duplicate_create = await client.post(
+        "/api/indents",
+        json={"required_date": required_date, "items": duplicate_items},
+        headers=headers,
+    )
+    duplicate_update = await client.put(
+        f"/api/indents/{created.json()['id']}",
+        json={"required_date": required_date, "items": duplicate_items},
+        headers=headers,
+    )
+
+    expected = {"success": False, "error": service.DUPLICATE_ITEM_ERROR}
+    assert duplicate_create.status_code == 422
+    assert duplicate_create.json() == expected
+    assert duplicate_update.status_code == 422
+    assert duplicate_update.json() == expected
+
+
+async def test_draft_update_and_delete_via_api(client, db, make_user, login):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item1 = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    item2 = Item(code="IT-0002", name="Nut", uom_id=uom.id, uom_code="NOS")
+    db.add_all([item1, item2])
+    await db.commit()
+
+    await make_user(
+        employee_id=2,
+        username="draft-owner",
+        password="pw",
+        permissions=[
+            "indent.view",
+            "indent.create",
+            "indent.edit",
+            "indent.delete",
+        ],
+    )
+    headers = await login("draft-owner", "pw")
+    required_date = (date.today() + timedelta(days=2)).isoformat()
+    created = await client.post(
+        "/api/indents",
+        json={
+            "required_date": required_date,
+            "items": [{"item_id": item1.id, "quantity": 5}],
+        },
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    indent_id = created.json()["id"]
+
+    updated = await client.put(
+        f"/api/indents/{indent_id}",
+        json={
+            "required_date": required_date,
+            "priority": "URGENT",
+            "remarks": "Edited draft",
+            "items": [{"item_id": item2.id, "quantity": 7}],
+        },
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["id"] == indent_id
+    assert updated.json()["required_date"] == required_date
+    assert updated.json()["priority"] == "URGENT"
+    assert updated.json()["remarks"] == "Edited draft"
+    assert [(line["item_id"], line["quantity"]) for line in updated.json()["items"]] == [
+        (item2.id, 7),
+    ]
+
+    detail = await client.get(f"/api/indents/{indent_id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["id"] == indent_id
+    assert [(line["item_id"], line["quantity"]) for line in detail.json()["items"]] == [
+        (item2.id, 7),
+    ]
+
+    deleted = await client.delete(f"/api/indents/{indent_id}", headers=headers)
+    assert deleted.status_code == 204, deleted.text
+    assert (await client.get(f"/api/indents/{indent_id}", headers=headers)).status_code == 404
+    listed = await client.get("/api/indents", headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert indent_id not in {indent["id"] for indent in listed.json()["items"]}
 
 
 async def test_indent_stats_counts(db):

@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ItemCombobox, filterItemOptions } from "../components/ItemCombobox";
@@ -41,5 +42,37 @@ describe("ItemCombobox", () => {
     fireEvent.click(screen.getByRole("option", { name: /Albumin reagent/i }));
 
     expect(onChange).toHaveBeenCalledWith(3);
+  });
+
+  it("clears the controlled selection and does not restore it on refocus", () => {
+    vi.useFakeTimers();
+
+    function ControlledCombobox() {
+      const [value, setValue] = useState<number | "">(1);
+      return <ItemCombobox value={value} onChange={setValue} options={options} />;
+    }
+
+    render(<ControlledCombobox />);
+
+    const input = screen.getByRole("combobox", { name: "Item" });
+    expect(input).toHaveValue(options[0].label);
+
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input).toHaveValue("");
+
+    fireEvent.blur(input);
+    act(() => vi.advanceTimersByTime(100));
+    fireEvent.focus(input);
+    expect(input).toHaveValue("");
+    expect(screen.getByRole("option", { name: /4 Channel ISE Module/i })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+
+    fireEvent.change(input, { target: { value: "cotton" } });
+    fireEvent.click(screen.getByRole("option", { name: /Absorbant Cotton/i }));
+    expect(input).toHaveValue(options[1].label);
+
+    vi.useRealTimers();
   });
 });
