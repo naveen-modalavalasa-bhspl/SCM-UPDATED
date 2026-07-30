@@ -1,6 +1,9 @@
 import { api } from "@/shared/api/client";
-import type { HomeSummary } from "./types";
+import type { HomeDateRange, HomeSummary } from "./types";
 
 export const homeApi = {
-  summary: () => api.get<HomeSummary>("/api/home/summary").then((r) => r.data),
+  summary: (dateRange: HomeDateRange) =>
+    api.get<HomeSummary>("/api/home/summary", {
+      params: { date_range: dateRange },
+    }).then((r) => r.data),
 };

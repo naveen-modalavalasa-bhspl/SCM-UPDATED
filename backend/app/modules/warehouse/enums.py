@@ -14,6 +14,7 @@ class ReceiptType(str, Enum):
     """`inb_receipts.receipt_type` — which document this row is at this point."""
     GATE_ENTRY = "GATE_ENTRY"
     PURCHASE = "PURCHASE"
+    DIRECT = "DIRECT"
     TRANSFER = "TRANSFER"
     RETURN = "RETURN"
 
@@ -217,6 +218,7 @@ class WarehouseDocType(str, Enum):
     WH_ISSUE = "WH_ISSUE"
     DISPATCH = "DISPATCH"
     PURCHASE_RETURN = "PURCHASE_RETURN"
+    STOCK_MOVEMENT = "STOCK_MOVEMENT"
 
 
 class RefType(str, Enum):
@@ -245,6 +247,7 @@ ISSUE_VIEW = "issue.view"
 ISSUE_CREATE = "issue.create"
 ISSUE_POST = "issue.issue"
 STOCK_VIEW = "stock.view"
+STOCK_TRANSFER = "stock.transfer"
 MASTER_LOCATION_MANAGE = "master.location.manage"
 
 # Still to be added by the lead:

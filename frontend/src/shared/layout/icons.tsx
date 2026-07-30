@@ -2,7 +2,7 @@ import {
   Home, FileText, CheckCircle, ShoppingCart, Truck, Package, Send, Settings,
   LayoutDashboard, List, Columns3, BarChart3, Bell, Boxes, Database, Shield,
   Users, GitBranch, Hash, ScrollText, History, RefreshCw, ArrowLeftRight, RotateCcw,
-  type LucideIcon,
+  Bug, type LucideIcon,
 } from "lucide-react";
 
 const MAP: Record<string, LucideIcon> = {
@@ -30,6 +30,7 @@ const MAP: Record<string, LucideIcon> = {
   "refresh-cw": RefreshCw,
   "arrow-left-right": ArrowLeftRight,
   "rotate-ccw": RotateCcw,
+  bug: Bug,
 };
 
 export function MenuIcon({ name, className }: { name?: string | null; className?: string }) {

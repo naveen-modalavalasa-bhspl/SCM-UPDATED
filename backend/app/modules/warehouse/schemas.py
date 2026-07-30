@@ -61,26 +61,54 @@ class BinRead(_Read):
     warehouse_id: int
     code: str
     name: str | None = None
+    description: str | None = None
     parent_id: int | None = None
     bin_type: str | None = None
+    storage_type_id: int | None = None
+    barcode: str | None = None
+    floor_level: str | None = None
+    shelf_level: str | None = None
     # Derived when the tree is built, not stored — see service.bin_tree.
     path: str | None = None
     level: int | None = None
     capacity_qty: Decimal | None = None
+    capacity_volume: Decimal | None = None
+    max_weight_capacity: Decimal | None = None
+    height_cm: Decimal | None = None
+    aisle_width_meters: Decimal | None = None
+    temperature_controlled: bool = False
+    humidity_percentage: Decimal | None = None
+    target_temperature_celsius: Decimal | None = None
+    min_temperature_celsius: Decimal | None = None
+    max_temperature_celsius: Decimal | None = None
     is_pickable: bool
     is_active: bool
     occupied_qty: Decimal | None = None
-    children: list["BinRead"] = []
+    children: list["BinRead"] = Field(default_factory=list)
 
 
 class BinWrite(BaseModel):
     warehouse_id: int
     code: str = Field(min_length=1, max_length=50)
     name: str | None = None
+    description: str | None = None
     parent_id: int | None = None
     # A location's kind: BIN and COLD_STORAGE_BIN hold stock, the rest are structure.
     bin_type: str = "BIN"
     capacity_qty: Decimal | None = None
+    capacity_volume: Decimal | None = None
+    max_weight_capacity: Decimal | None = None
+    height_cm: Decimal | None = None
+    aisle_width_meters: Decimal | None = None
+    temperature_controlled: bool = False
+    humidity_percentage: Decimal | None = None
+    target_temperature_celsius: Decimal | None = None
+    min_temperature_celsius: Decimal | None = None
+    max_temperature_celsius: Decimal | None = None
+    storage_type_id: int | None = None
+    barcode: str | None = None
+    floor_level: str | None = None
+    shelf_level: str | None = None
     is_active: bool = True
 
 
@@ -98,7 +126,9 @@ class LocationRead(_Read):
     shelf_level: str | None = None
     capacity_weight: Decimal | None = None
     capacity_volume: Decimal | None = None
+    max_weight_capacity: Decimal | None = None
     height_cm: Decimal | None = None
+    aisle_width_meters: Decimal | None = None
     temperature_controlled: bool
     humidity_percentage: Decimal | None = None
     target_temperature_celsius: Decimal | None = None
@@ -112,6 +142,12 @@ class StorageTypeRead(_Read):
     name: str
     description: str | None = None
     is_active: bool
+
+
+class StorageTypeWrite(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    description: str | None = Field(default=None, max_length=200)
+    is_active: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +185,7 @@ class ReceiptWrite(BaseModel):
     receipt_type: ReceiptType = ReceiptType.PURCHASE
     grn_date: date
     po_id: int | None = None
+    transfer_id: int | None = None
     vendor_id: int | None = None
     warehouse_id: int
     project_id: int | None = None
@@ -161,7 +198,7 @@ class ReceiptWrite(BaseModel):
     lr_no: str | None = None
     gate_entry_no: str | None = None
     remarks: str | None = None
-    items: list[ReceiptItemWrite] = []
+    items: list[ReceiptItemWrite] = Field(default_factory=list)
 
 
 class ReceiptItemRead(_Read):
@@ -237,7 +274,7 @@ class ReceiptRead(_Read):
 
 
 class ReceiptDetail(ReceiptRead):
-    items: list[ReceiptItemRead] = []
+    items: list[ReceiptItemRead] = Field(default_factory=list)
 
 
 class PoLineOption(BaseModel):
@@ -251,6 +288,14 @@ class PoLineOption(BaseModel):
     received_qty: Decimal
     pending_qty: Decimal
     rate: Decimal | None = None
+
+
+class TransferReceiptSource(BaseModel):
+    transfer_id: int
+    transfer_no: str
+    warehouse_id: int
+    project_id: int | None = None
+    items: list[ReceiptItemWrite] = Field(default_factory=list)
     indent_id: int | None = None
     indent_no: str | None = None
 
@@ -276,7 +321,9 @@ class InspectionItemWrite(BaseModel):
     parameters: list[InspectionParameter] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None
+    rejection_reason: str | None = None
     remarks: str | None = None
+    serial_numbers: list[str] | None = None
 
 
 class InspectionWrite(BaseModel):
@@ -304,6 +351,7 @@ class InspectionItemRead(_Read):
     parameters: list[InspectionParameter] | None = None
     result: str
     defect_type: str | None = None
+    rejection_reason: str | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
 
@@ -369,6 +417,7 @@ class PutawayRead(_Read):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     remarks: str | None = None
+    serial_numbers: list[str] | None = None
     created_at: datetime | None = None
 
 
@@ -376,6 +425,46 @@ class PutawayConfirm(BaseModel):
     actual_bin_id: int
     qty: Decimal | None = None
     remarks: str | None = None
+    serial_numbers: list[str] | None = None
+
+
+class StockMovementWrite(BaseModel):
+    movement_type: str = Field(default="BIN_TO_BIN", max_length=30)
+    warehouse_id: int
+    source_bin_id: int
+    destination_bin_id: int
+    item_id: int
+    batch_id: int | None = None
+    quantity: Decimal = Field(gt=0)
+    serial_numbers: list[str] | None = None
+    remarks: str | None = Field(default=None, max_length=500)
+
+
+class StockMovementRead(BaseModel):
+    movement_no: str
+    movement_type: str
+    warehouse_id: int
+    warehouse_name: str | None = None
+    source_bin_id: int
+    source_bin_code: str | None = None
+    destination_bin_id: int
+    destination_bin_code: str | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    batch_id: int | None = None
+    batch_no: str | None = None
+    quantity: Decimal
+    serial_numbers: list[str] = Field(default_factory=list)
+    status: str = "COMPLETED"
+    moved_by_name: str | None = None
+    moved_at: datetime | None = None
+    remarks: str | None = None
+
+
+class StockAvailabilityRead(BaseModel):
+    available_qty: Decimal = Decimal("0")
+    serial_numbers: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +550,7 @@ class IssueItemWrite(BaseModel):
     issued_qty: Decimal | None = None
     rate: Decimal | None = None
     remarks: str | None = None
+    serial_numbers: list[str] | None = None
 
 
 class IssueWrite(BaseModel):
@@ -499,6 +589,7 @@ class IssueItemRead(_Read):
     rate: Decimal | None = None
     amount: Decimal | None = None
     remarks: str | None = None
+    serial_numbers: list[str] | None = None
 
 
 class IssueRead(_Read):
@@ -891,6 +982,10 @@ class Option(BaseModel):
 
 class ItemOption(Option):
     uom_code: str | None = None
+    is_batch_tracked: bool = False
+    is_serial_tracked: bool = False
+    is_asset: bool = False
+    requires_qi: bool = False
 
 
 class IndentIssueSource(BaseModel):

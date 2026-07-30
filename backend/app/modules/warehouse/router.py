@@ -25,7 +25,7 @@ from app.modules.warehouse.enums import (
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_POST, ISSUE_VIEW,
     MASTER_LOCATION_MANAGE, PICKING_PICK, PICKING_VIEW, PUTAWAY_EXECUTE, PUTAWAY_VIEW,
     RECEIPT_CREATE, RECEIPT_POST, RECEIPT_VIEW, RETURN_APPROVE, RETURN_CREATE, RETURN_VIEW,
-    STOCK_VIEW, WAREHOUSE_REPORT_VIEW,
+    STOCK_TRANSFER, STOCK_VIEW, WAREHOUSE_REPORT_VIEW,
 )
 from app.shared.enums import ApprovalAction
 
@@ -108,6 +108,20 @@ async def list_storage_types(db: AsyncSession = Depends(get_db),
     return await service.list_storage_types(db)
 
 
+@router.post("/storage-types", response_model=s.StorageTypeRead, status_code=201)
+async def create_storage_type(data: s.StorageTypeWrite,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    return await service.create_storage_type(db, data, user)
+
+
+@router.put("/storage-types/{storage_type_id}", response_model=s.StorageTypeRead)
+async def update_storage_type(storage_type_id: int, data: s.StorageTypeWrite,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    return await service.update_storage_type(db, storage_type_id, data, user)
+
+
 # ---------------------------------------------------------------------------
 # Inward — gate entry and GRN
 # ---------------------------------------------------------------------------
@@ -140,6 +154,12 @@ async def update_receipt(receipt_id: int, data: s.ReceiptWrite,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(RECEIPT_CREATE))):
     return await service.update_receipt(db, receipt_id, data, user)
+
+
+@router.post("/receipts/{receipt_id}/convert-to-grn", response_model=s.ReceiptDetail)
+async def convert_gate_entry(receipt_id: int, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(RECEIPT_CREATE))):
+    return await service.convert_gate_entry(db, receipt_id, user)
 
 
 @router.post("/receipts/{receipt_id}/submit", response_model=s.ReceiptDetail)
@@ -246,6 +266,34 @@ async def confirm_putaway(task_id: int, data: s.PutawayConfirm,
 async def skip_putaway(task_id: int, body: s.ReasonIn, db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(PUTAWAY_EXECUTE))):
     return await service.skip_putaway(db, task_id, body.reason, user)
+
+
+@router.get("/stock-movements", response_model=Page[s.StockMovementRead])
+async def list_stock_movements(params: PageParams = Depends(),
+                               db: AsyncSession = Depends(get_db),
+                               _=Depends(require_permission(STOCK_VIEW))):
+    return await service.list_stock_movements(db, params)
+
+
+@router.post("/stock-movements", response_model=s.StockMovementRead, status_code=201)
+async def create_stock_movement(data: s.StockMovementWrite,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(STOCK_TRANSFER))):
+    return await service.create_stock_movement(db, data, user)
+
+
+@router.get("/stock-movements/availability", response_model=s.StockAvailabilityRead)
+async def stock_availability(warehouse_id: int, source_bin_id: int, item_id: int,
+                             batch_id: int | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             _=Depends(require_permission(STOCK_VIEW))):
+    return await service.stock_availability(
+        db,
+        warehouse_id=warehouse_id,
+        source_bin_id=source_bin_id,
+        item_id=item_id,
+        batch_id=batch_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +705,15 @@ async def bin_options(warehouse_id: int, search: str | None = None,
     return await service.bin_options(db, warehouse_id, search)
 
 
+@router.get("/options/batches", response_model=list[s.Option])
+async def batch_options(item_id: int = Query(...), warehouse_id: int = Query(...),
+                        bin_id: int | None = None, db: AsyncSession = Depends(get_db),
+                        _=Depends(require_permission(STOCK_VIEW))):
+    return await service.batch_options(
+        db, item_id=item_id, warehouse_id=warehouse_id, bin_id=bin_id
+    )
+
+
 @router.get("/options/purchase-orders", response_model=list[s.Option])
 async def po_options(search: str | None = None, db: AsyncSession = Depends(get_db),
                      _=Depends(require_permission(RECEIPT_VIEW))):
@@ -670,9 +727,10 @@ async def po_lines(po_id: int = Query(...), db: AsyncSession = Depends(get_db),
 
 
 @router.get("/options/receipts", response_model=list[s.Option])
-async def receipt_options(search: str | None = None, db: AsyncSession = Depends(get_db),
+async def receipt_options(search: str | None = None, receipt_type: str | None = None,
+                          db: AsyncSession = Depends(get_db),
                           _=Depends(require_permission(RECEIPT_VIEW))):
-    return await service.receipt_options(db, search)
+    return await service.receipt_options(db, search, receipt_type)
 
 
 @router.get("/options/indents", response_model=list[s.Option])
@@ -700,6 +758,13 @@ async def picking_issue_source(picking_id: int = Query(...),
 async def issue_options(search: str | None = None, db: AsyncSession = Depends(get_db),
                         _=Depends(require_permission(DISPATCH_CREATE))):
     return await service.issue_options(db, search)
+
+
+@router.get("/options/returnable-issues", response_model=list[s.Option])
+async def returnable_issue_options(search: str | None = None,
+                                   db: AsyncSession = Depends(get_db),
+                                   _=Depends(require_permission(ISSUE_VIEW))):
+    return await service.returnable_issue_options(db, search)
 
 
 @router.get("/options/issue-dispatch-source", response_model=s.IssueDispatchSource)

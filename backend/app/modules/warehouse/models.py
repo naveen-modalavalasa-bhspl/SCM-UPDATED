@@ -18,7 +18,7 @@ from sqlalchemy import (
     JSON, BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer,
     Numeric, String, Text,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, synonym
 
 from app.core.database import Base
 from app.modules.warehouse.enums import (
@@ -222,6 +222,7 @@ class InspectionItem(Base):
     parameters = Column(JSON, nullable=True)
     result = Column(String(20), nullable=False, default=InspectionResult.PENDING.value)
     defect_type = Column(String(100), nullable=True)
+    rejection_reason = synonym("defect_type")
     remarks = Column(String(500), nullable=True)
     serial_numbers = Column(JSON, nullable=True)
 

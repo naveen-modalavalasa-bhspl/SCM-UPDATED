@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Plus, ScanLine, Trash2 } from "lucide-react";
 import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { ConfirmModal, ErrorBanner } from "../components/Feedback";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
+import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   completeInspection, createInspection, employeeOptions, getInspection, getReceipt, grnOptions,
   updateInspection, warehouseOptions,
@@ -64,6 +65,7 @@ export default function QualityInspectionForm({
   });
   const [confirming, setConfirming] = useState(false);
   const [paramsFor, setParamsFor] = useState<number | null>(null);
+  const [serialsFor, setSerialsFor] = useState<number | null>(null);
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-inspection", id],
@@ -91,7 +93,9 @@ export default function QualityInspectionForm({
         parameters: l.parameters ?? [],
         result: l.result,
         defect_type: l.defect_type,
+        rejection_reason: l.rejection_reason ?? l.defect_type,
         remarks: l.remarks,
+        serial_numbers: l.serial_numbers ?? [],
       })),
     });
   }, [doc]);
@@ -113,7 +117,9 @@ export default function QualityInspectionForm({
           parameters: [],
           result: "PASSED" as const,
           defect_type: null,
+          rejection_reason: null,
           remarks: null,
+          serial_numbers: l.serial_numbers ?? [],
         })),
       })),
   });
@@ -247,17 +253,29 @@ export default function QualityInspectionForm({
     },
     {
       key: "defect",
-      header: "Defect",
+      header: "Rejection reason",
       width: "w-36",
       hideOnNarrow: true,
       render: (l, i) => (
         <TextInput
           ariaLabel={`Defect, line ${i + 1}`}
-          value={l.defect_type}
+          value={l.rejection_reason ?? l.defect_type}
           disabled={locked || num(l.rejected_qty) === 0}
           placeholder={num(l.rejected_qty) > 0 ? "Required" : "—"}
-          onChange={(v) => patchLine(i, { defect_type: v })}
+          onChange={(v) => patchLine(i, { rejection_reason: v, defect_type: v })}
         />
+      ),
+    },
+    {
+      key: "serials",
+      header: "Accepted serials",
+      width: "w-32",
+      hideOnNarrow: true,
+      render: (line, index) => (
+        <Button variant="ghost" onClick={() => setSerialsFor(index)} disabled={locked}>
+          <ScanLine className="h-4 w-4" />
+          {line.serial_numbers?.length ?? 0}
+        </Button>
       ),
     },
     {
@@ -470,6 +488,22 @@ export default function QualityInspectionForm({
       <Section title="Evidence" hint="Test certificates, photographs of the defect.">
         <AttachmentsPanel entityType="INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
       </Section>
+
+      <SerialNumbersModal
+        isOpen={serialsFor !== null}
+        onClose={() => setSerialsFor(null)}
+        quantity={serialsFor === null ? 0 : num(form.items[serialsFor]?.accepted_qty)}
+        initial={serialsFor === null ? [] : form.items[serialsFor]?.serial_numbers ?? []}
+        itemLabel={
+          serialsFor === null
+            ? ""
+            : savedLine(serialsFor)?.item_name ?? `Line ${serialsFor + 1}`
+        }
+        readOnly={locked}
+        onSave={(serials) => {
+          if (serialsFor !== null) patchLine(serialsFor, { serial_numbers: serials });
+        }}
+      />
 
       <ConfirmModal
         isOpen={confirming}

@@ -92,8 +92,8 @@ export default function GRN() {
     <DocumentList<Receipt>
       title="Goods receipt notes"
       queryKey="wh-receipts"
-      fetch={(p) => listReceipts({ ...p, receipt_type: "PURCHASE" })}
-      extraParams={{ receipt_type: "PURCHASE" }}
+      fetch={(p) => listReceipts({ ...p, receipt_type: "GRN" })}
+      extraParams={{ receipt_type: "GRN" }}
       columns={columns}
       keyOf={(r) => r.id}
       searchIn={(r) => [r.grn_no, r.po_no, r.vendor_name, r.invoice_no, r.warehouse_name]}

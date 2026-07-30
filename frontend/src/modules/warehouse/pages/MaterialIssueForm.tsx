@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ScanLine } from "lucide-react";
 import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { ConfirmModal, ErrorBanner } from "../components/Feedback";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
@@ -9,10 +9,11 @@ import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, type TimelineEntry } from "../components/Timeline";
+import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
-  acknowledgeIssue, approveIssue, binOptions, cancelIssue, createIssue, departmentOptions,
+  acknowledgeIssue, approveIssue, batchOptions, binOptions, cancelIssue, createIssue, departmentOptions,
   employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
-  itemOptions, postIssue, projectOptions,
+  itemOptions, postIssue, projectOptions, returnableIssueOptions,
   rejectIssue, submitIssue, updateIssue, vehicleOptions,
   warehouseOptions,
 } from "../api";
@@ -49,6 +50,7 @@ const emptyLine = (): IssueItemWrite => ({
   issued_qty: 0,
   rate: null,
   remarks: null,
+  serial_numbers: [],
 });
 
 export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "OUT" | "IN" }) {
@@ -79,6 +81,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     "submit" | "approve" | "reject" | "post" | "ack" | "cancel" | null
   >(null);
   const [reason, setReason] = useState("");
+  const [serialLine, setSerialLine] = useState<number | null>(null);
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-issue", id],
@@ -117,6 +120,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         issued_qty: num(l.issued_qty),
         rate: l.rate,
         remarks: l.remarks,
+        serial_numbers: l.serial_numbers ?? [],
       })),
     });
   }, [doc]);
@@ -177,6 +181,35 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         department_id: source.department_id ?? current.department_id,
         project_id: source.project_id ?? current.project_id,
         items: source.items,
+      }));
+    },
+  });
+
+  const pullOriginal = useMutation({
+    mutationFn: (issueId: number) => getIssue(issueId),
+    onSuccess: (source) => {
+      setForm((current) => ({
+        ...current,
+        original_issue_id: source.id,
+        warehouse_id: source.warehouse_id,
+        department_id: source.department_id ?? null,
+        project_id: source.project_id ?? null,
+        issued_to_id: source.issued_to_id ?? null,
+        items: (source.items ?? [])
+          .map((line) => {
+            const open = Math.max(num(line.issued_qty) - num(line.returned_qty), 0);
+            return {
+              ...emptyLine(),
+              item_id: line.item_id,
+              bin_id: line.bin_id,
+              batch_id: line.batch_id,
+              requested_qty: open,
+              issued_qty: open,
+              rate: line.rate,
+              serial_numbers: line.serial_numbers ?? [],
+            };
+          })
+          .filter((line) => line.requested_qty > 0),
       }));
     },
   });
@@ -264,6 +297,22 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       ),
     },
     {
+      key: "batch",
+      header: "Batch",
+      width: "w-36",
+      hideOnNarrow: true,
+      render: (line, index) => (
+        <Lookup
+          name={`issue-batches-${line.item_id}-${form.warehouse_id}-${line.bin_id ?? 0}`}
+          load={() => batchOptions(line.item_id, form.warehouse_id, line.bin_id)}
+          value={line.batch_id ?? ""}
+          isDisabled={locked || !line.item_id || !form.warehouse_id}
+          onChange={(value) => patchLine(index, { batch_id: value === "" ? null : value })}
+          placeholder="Batch"
+        />
+      ),
+    },
+    {
       key: "requested",
       header: "Requested",
       numeric: true,
@@ -319,6 +368,18 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           disabled={locked}
           onChange={(v) => patchLine(i, { rate: v })}
         />
+      ),
+    },
+    {
+      key: "serials",
+      header: "Serials",
+      width: "w-28",
+      hideOnNarrow: true,
+      render: (line, index) => (
+        <Button variant="ghost" onClick={() => setSerialLine(index)} disabled={locked}>
+          <ScanLine className="h-4 w-4" />
+          {line.serial_numbers?.length ?? 0}
+        </Button>
       ),
     },
     {
@@ -494,6 +555,22 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         <AttachmentsPanel entityType="ISSUE" entityId={doc?.id} category="ISSUE" readOnly={locked} />
       </Section>
 
+      <SerialNumbersModal
+        isOpen={serialLine !== null}
+        onClose={() => setSerialLine(null)}
+        quantity={serialLine === null ? 0 : num(form.items[serialLine]?.issued_qty)}
+        initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
+        itemLabel={
+          serialLine === null
+            ? ""
+            : savedLine(serialLine)?.item_name ?? `Line ${serialLine + 1}`
+        }
+        readOnly={locked}
+        onSave={(serials) => {
+          if (serialLine !== null) patchLine(serialLine, { serial_numbers: serials });
+        }}
+      />
+
       <ConfirmModal
         isOpen={confirming === "submit"}
         title="Submit for approval?"
@@ -520,6 +597,22 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           <Field label="Comments">
             <Input value={reason} onChange={(e) => setReason(e.target.value)} />
           </Field>
+          {direction === "IN" && (
+            <Field label="Original material issue" hint="Loads only the quantity still returnable.">
+              <Lookup
+                name="original-issues"
+                load={returnableIssueOptions}
+                value={form.original_issue_id ?? ""}
+                isDisabled={locked}
+                onChange={(value) => {
+                  const issueId = value === "" ? null : value;
+                  set("original_issue_id", issueId);
+                  if (issueId) pullOriginal.mutate(issueId);
+                }}
+                placeholder="Select issued document"
+              />
+            </Field>
+          )}
         </div>
       </ConfirmModal>
 

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ScanLine } from "lucide-react";
-import { Button, Can, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { ConfirmModal, ErrorBanner } from "../components/Feedback";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
@@ -10,8 +10,9 @@ import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
-  binOptions, completeReceipt, createReceipt, getPoLines, getReceipt, itemOptions, poOptions,
-  projectOptions, submitReceipt, updateReceipt, vendorOptions, warehouseOptions,
+  binOptions, completeReceipt, convertReceiptToGrn, createReceipt, gateEntryOptions,
+  getPoLines, getReceipt, itemOptions, poOptions, projectOptions, submitReceipt,
+  updateReceipt, vendorOptions, warehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import type { Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
@@ -45,6 +46,13 @@ const emptyLine = (): ReceiptItemWrite => ({
   serial_numbers: null,
 });
 
+const RECEIPT_TYPES = [
+  { value: "PURCHASE", label: "Inward / PO receipt" },
+  { value: "DIRECT", label: "Direct receipt" },
+  { value: "RETURN", label: "Return receipt" },
+  { value: "TRANSFER", label: "Transfer receipt" },
+];
+
 export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" }) {
   const { id } = useParams();
   const nav = useNavigate();
@@ -71,6 +79,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     items: [],
   });
   const [touched, setTouched] = useState(false);
+  const [sourceGateId, setSourceGateId] = useState<number | null>(null);
   const [serialLine, setSerialLine] = useState<number | null>(null);
   const [confirming, setConfirming] = useState<"submit" | "complete" | null>(null);
 
@@ -142,6 +151,48 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       })),
   });
 
+  const gateEntry = useMutation({
+    mutationFn: (receiptId: number) => getReceipt(receiptId),
+    onSuccess: (source) => {
+      setSourceGateId(source.id);
+      setForm({
+        receipt_type: "PURCHASE",
+        grn_date: today(),
+        po_id: source.po_id ?? null,
+        vendor_id: source.vendor_id ?? null,
+        warehouse_id: source.warehouse_id,
+        project_id: source.project_id ?? null,
+        invoice_no: source.invoice_no ?? "",
+        invoice_date: source.invoice_date ?? null,
+        invoice_amount: source.invoice_amount ?? null,
+        eway_bill_no: source.eway_bill_no ?? "",
+        vehicle_no: source.vehicle_no ?? "",
+        transporter_name: source.transporter_name ?? "",
+        lr_no: source.lr_no ?? "",
+        gate_entry_no: source.gate_entry_no ?? "",
+        remarks: source.remarks ?? "",
+        items: (source.items ?? []).map((line) => ({
+          id: line.id,
+          po_item_id: line.po_item_id,
+          indent_id: line.indent_id,
+          item_id: line.item_id,
+          ordered_qty: num(line.ordered_qty),
+          received_qty: num(line.received_qty),
+          accepted_qty: num(line.received_qty),
+          rejected_qty: 0,
+          rate: line.rate,
+          batch_no: line.batch_no,
+          mfg_date: line.mfg_date,
+          expiry_date: line.expiry_date,
+          bin_id: line.bin_id || null,
+          rejection_reason: null,
+          remarks: line.remarks,
+          serial_numbers: line.serial_numbers,
+        })),
+      });
+    },
+  });
+
   const set = <K extends keyof ReceiptWrite>(key: K, value: ReceiptWrite[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
@@ -173,12 +224,26 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   const locked = !!doc && !["DRAFT", "GATE_ENTRY"].includes(doc.status);
 
   const save = useMutation({
-    mutationFn: () => (editing ? updateReceipt(Number(id), form) : createReceipt(form)),
+    mutationFn: async () => {
+      if (editing) return updateReceipt(Number(id), form);
+      if (sourceGateId) {
+        await updateReceipt(sourceGateId, form);
+        return convertReceiptToGrn(sourceGateId);
+      }
+      return createReceipt(form);
+    },
     onSuccess: (saved: Receipt) => {
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       qc.invalidateQueries({ queryKey: ["wh-gate-entries"] });
       qc.invalidateQueries({ queryKey: ["wh-receipt", String(saved.id)] });
-      if (!editing) nav(`../${saved.id}`, { replace: true });
+      if (!editing) {
+        nav(
+          sourceGateId
+            ? `/warehouse/transactions/grn/${saved.id}`
+            : `../${saved.id}`,
+          { replace: true },
+        );
+      }
     },
   });
 
@@ -192,15 +257,24 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     },
   });
 
+  const convert = useMutation({
+    mutationFn: () => convertReceiptToGrn(Number(id)),
+    onSuccess: (saved) => {
+      qc.invalidateQueries({ queryKey: ["wh-gate-entries"] });
+      qc.invalidateQueries({ queryKey: ["wh-receipts"] });
+      nav(`/warehouse/transactions/grn/${saved.id}`);
+    },
+  });
+
   const invalid = {
     warehouse: touched && !form.warehouse_id,
-    lines: touched && isGrn && form.items.length === 0,
+    lines: touched && form.items.length === 0,
   };
 
   const submitSave = () => {
     setTouched(true);
     if (!form.warehouse_id) return;
-    if (isGrn && form.items.length === 0) return;
+    if (form.items.length === 0) return;
     save.mutate();
   };
 
@@ -250,10 +324,29 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         <QtyInput
           ariaLabel={`Received quantity, line ${i + 1}`}
           value={l.received_qty}
-          disabled={locked || !isGrn}
+          disabled={locked}
           onChange={(v) => patchLine(i, { received_qty: v, accepted_qty: v })}
         />
       ),
+    },
+    {
+      key: "short",
+      header: "Short",
+      numeric: true,
+      width: "w-24",
+      hideOnNarrow: true,
+      render: (l) => (
+        <span className={Math.max(num(l.ordered_qty) - num(l.received_qty), 0) > 0 ? "text-warn" : "text-muted"}>
+          {fmtQty(Math.max(num(l.ordered_qty) - num(l.received_qty), 0))}
+        </span>
+      ),
+    },
+    {
+      key: "uom",
+      header: "UOM",
+      width: "w-20",
+      hideOnNarrow: true,
+      render: (_, i) => <span className="text-xs text-muted">{savedLine(i)?.uom_code ?? "—"}</span>,
     },
     {
       key: "accepted",
@@ -298,6 +391,20 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       ),
     },
     {
+      key: "manufactured",
+      header: "Manufactured",
+      width: "w-36",
+      hideOnNarrow: true,
+      render: (l, i) => (
+        <DateInput
+          ariaLabel={`Manufacturing date, line ${i + 1}`}
+          value={l.mfg_date}
+          disabled={locked || !isGrn}
+          onChange={(v) => patchLine(i, { mfg_date: v || null })}
+        />
+      ),
+    },
+    {
       key: "expiry",
       header: "Expiry",
       width: "w-36",
@@ -308,6 +415,21 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           value={l.expiry_date}
           disabled={locked || !isGrn}
           onChange={(v) => patchLine(i, { expiry_date: v || null })}
+        />
+      ),
+    },
+    {
+      key: "reason",
+      header: "Rejection reason",
+      width: "w-44",
+      hideOnNarrow: true,
+      render: (l, i) => (
+        <TextInput
+          ariaLabel={`Rejection reason, line ${i + 1}`}
+          value={l.rejection_reason}
+          disabled={locked || !isGrn || num(l.rejected_qty) === 0}
+          placeholder={num(l.rejected_qty) > 0 ? "Required" : "—"}
+          onChange={(v) => patchLine(i, { rejection_reason: v })}
         />
       ),
     },
@@ -382,6 +504,16 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 <Button onClick={() => setConfirming("submit")}>Submit for QC</Button>
               </Can>
             )}
+            {editing && !isGrn && doc?.status === "GATE_ENTRY" && (
+              <Can do="grn.create">
+                <Button
+                  onClick={() => convert.mutate()}
+                  disabled={convert.isPending}
+                >
+                  {convert.isPending ? "Converting…" : "Convert to GRN"}
+                </Button>
+              </Can>
+            )}
             {editing && isGrn && ["QC_PASSED", "SUBMITTED"].includes(doc?.status ?? "") && !doc?.is_stock_posted && (
               <Can do="grn.qc">
                 <Button onClick={() => setConfirming("complete")}>Post to stock</Button>
@@ -391,7 +523,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         }
       />
 
-      <ErrorBanner error={save.error ?? poLines.error} />
+      <ErrorBanner error={save.error ?? poLines.error ?? gateEntry.error ?? convert.error} />
 
       {doc && (
         <MetaCard title="Document">
@@ -412,6 +544,35 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               onChange={(e) => set("grn_date", e.target.value)}
             />
           </Field>
+          {isGrn && !editing && (
+            <Field label="Receipt type">
+              <Select
+                value={form.receipt_type}
+                onChange={(value) => {
+                  set("receipt_type", value || "PURCHASE");
+                  if (value !== "PURCHASE") setSourceGateId(null);
+                }}
+                options={RECEIPT_TYPES}
+                ariaLabel="Receipt type"
+              />
+            </Field>
+          )}
+          {isGrn && !editing && form.receipt_type === "PURCHASE" && (
+            <Field label="Material inward" hint="Converts the selected gate entry into this GRN.">
+              <Lookup
+                name="gate-entries"
+                load={gateEntryOptions}
+                value={sourceGateId ?? ""}
+                isDisabled={gateEntry.isPending}
+                onChange={(value) => {
+                  const receiptId = value === "" ? null : value;
+                  setSourceGateId(receiptId);
+                  if (receiptId) gateEntry.mutate(receiptId);
+                }}
+                placeholder="Select gate entry"
+              />
+            </Field>
+          )}
           <Field label="Warehouse">
             <Lookup
               name="warehouses"
@@ -463,7 +624,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       <Section title="Paperwork" hint="Captured once at the gate and carried onto the GRN.">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Gate entry no">
-            <Input value={form.gate_entry_no ?? ""} disabled={locked}
+            <Input value={form.gate_entry_no ?? ""}
+                   disabled
+                   placeholder={editing ? "" : "Generated when saved"}
                    onChange={(e) => set("gate_entry_no", e.target.value)} />
           </Field>
           <Field label="Vehicle no">
@@ -500,10 +663,13 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         </div>
       </Section>
 
-      {isGrn && (
-        <Section
+      <Section
           title="Lines"
-          hint="Rejected is received minus accepted — it is never typed, so the three can never disagree."
+          hint={
+            isGrn
+              ? "Rejected is received minus accepted; short is ordered minus received."
+              : "Record the physical item count at the gate. Batch, QC and serial details are completed in the GRN."
+          }
         >
           {invalid.lines && <ErrorBanner error="Add at least one line before saving." />}
           <LinesEditor
@@ -513,7 +679,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             onAdd={locked ? undefined : () => set("items", [...form.items, emptyLine()])}
             onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
             rowTone={(l) => (num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
-            empty="Pick a purchase order above, or add lines by hand."
+            empty={isGrn ? "Pick a purchase order above, or add lines by hand." : "Add the items received at the gate."}
             footer={
               <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
                 <span className="text-muted">{totals.lines} lines</span>
@@ -527,7 +693,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             }
           />
         </Section>
-      )}
 
       <Section title="Remarks">
         <Input value={form.remarks ?? ""} disabled={locked} onChange={(e) => set("remarks", e.target.value)} />
@@ -540,7 +705,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       <SerialNumbersModal
         isOpen={serialLine !== null}
         onClose={() => setSerialLine(null)}
-        quantity={serialLine === null ? 0 : num(form.items[serialLine]?.accepted_qty)}
+        quantity={serialLine === null ? 0 : num(form.items[serialLine]?.received_qty)}
         initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
         itemLabel={serialLine === null ? "" : savedLine(serialLine)?.item_name ?? `Line ${serialLine + 1}`}
         readOnly={locked}

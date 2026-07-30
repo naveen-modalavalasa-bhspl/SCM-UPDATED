@@ -99,13 +99,27 @@ export interface Bin {
   warehouse_id: number;
   code: string;
   name?: string | null;
+  description?: string | null;
   parent_id?: number | null;
   bin_type?: string | null;
+  storage_type_id?: number | null;
+  barcode?: string | null;
+  floor_level?: string | null;
+  shelf_level?: string | null;
   /** Ancestry, e.g. `block A/flr-1/rack-1`. Derived by the tree endpoint. */
   path?: string | null;
   /** Depth in the tree, 1 at the root. Derived by the tree endpoint. */
   level?: number | null;
   capacity_qty?: number | null;
+  capacity_volume?: number | null;
+  max_weight_capacity?: number | null;
+  height_cm?: number | null;
+  aisle_width_meters?: number | null;
+  temperature_controlled?: boolean;
+  humidity_percentage?: number | null;
+  target_temperature_celsius?: number | null;
+  min_temperature_celsius?: number | null;
+  max_temperature_celsius?: number | null;
   is_pickable: boolean;
   is_active: boolean;
   /** Present only on the tree endpoint. */
@@ -118,9 +132,23 @@ export interface BinWrite {
   warehouse_id: number;
   code: string;
   name?: string | null;
+  description?: string | null;
   parent_id?: number | null;
   bin_type: string;
   capacity_qty?: number | null;
+  storage_type_id?: number | null;
+  barcode?: string | null;
+  floor_level?: string | null;
+  shelf_level?: string | null;
+  capacity_volume?: number | null;
+  max_weight_capacity?: number | null;
+  height_cm?: number | null;
+  aisle_width_meters?: number | null;
+  temperature_controlled?: boolean;
+  humidity_percentage?: number | null;
+  target_temperature_celsius?: number | null;
+  min_temperature_celsius?: number | null;
+  max_temperature_celsius?: number | null;
   is_active: boolean;
 }
 
@@ -139,7 +167,9 @@ export interface WarehouseLocation {
   shelf_level?: string | null;
   capacity_weight?: number | null;
   capacity_volume?: number | null;
+  max_weight_capacity?: number | null;
   height_cm?: number | null;
+  aisle_width_meters?: number | null;
   temperature_controlled: boolean;
   humidity_percentage?: number | null;
   target_temperature_celsius?: number | null;
@@ -150,6 +180,12 @@ export interface WarehouseLocation {
 
 export interface StorageType {
   id: number;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
+}
+
+export interface StorageTypeWrite {
   name: string;
   description?: string | null;
   is_active: boolean;
@@ -318,6 +354,7 @@ export interface InspectionItem {
   parameters?: InspectionParameter[] | null;
   result: InspectionResult;
   defect_type?: string | null;
+  rejection_reason?: string | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
 }
@@ -333,7 +370,9 @@ export interface InspectionItemWrite {
   parameters?: InspectionParameter[] | null;
   result: InspectionResult;
   defect_type?: string | null;
+  rejection_reason?: string | null;
   remarks?: string | null;
+  serial_numbers?: string[] | null;
 }
 
 export interface InspectionWrite {
@@ -376,6 +415,7 @@ export interface Putaway {
   started_at?: string | null;
   completed_at?: string | null;
   remarks?: string | null;
+  serial_numbers?: string[] | null;
   created_at?: string;
 }
 
@@ -383,6 +423,7 @@ export interface PutawayConfirm {
   actual_bin_id: number;
   qty?: number;
   remarks?: string | null;
+  serial_numbers?: string[] | null;
 }
 
 /* ----------------------------------------------------------------- outward -- */
@@ -504,6 +545,7 @@ export interface IssueItem {
   rate?: number | null;
   amount?: number | null;
   remarks?: string | null;
+  serial_numbers?: string[] | null;
 }
 
 export interface IssueItemWrite {
@@ -516,6 +558,46 @@ export interface IssueItemWrite {
   issued_qty?: number;
   rate?: number | null;
   remarks?: string | null;
+  serial_numbers?: string[] | null;
+}
+
+export interface StockMovement {
+  movement_no: string;
+  movement_type: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  source_bin_id: number;
+  source_bin_code?: string | null;
+  destination_bin_id: number;
+  destination_bin_code?: string | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  quantity: number;
+  serial_numbers: string[];
+  status: string;
+  moved_by_name?: string | null;
+  moved_at?: string | null;
+  remarks?: string | null;
+}
+
+export interface StockMovementWrite {
+  movement_type: string;
+  warehouse_id: number;
+  source_bin_id: number;
+  destination_bin_id: number;
+  item_id: number;
+  batch_id?: number | null;
+  quantity: number;
+  serial_numbers?: string[];
+  remarks?: string | null;
+}
+
+export interface StockAvailability {
+  available_qty: number;
+  serial_numbers: string[];
 }
 
 export interface IssueWrite {
@@ -883,6 +965,7 @@ export interface ItemOption extends Option {
   is_batch_tracked?: boolean;
   is_serial_tracked?: boolean;
   is_asset?: boolean;
+  requires_qi?: boolean;
 }
 
 /** An open PO line the GRN screen pulls in when a PO is chosen. */

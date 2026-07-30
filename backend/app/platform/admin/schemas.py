@@ -49,3 +49,19 @@ class NotificationRuleIn(BaseModel):
 class HcmScheduleIn(BaseModel):
     enabled: bool
     interval_minutes: int = Field(ge=5, le=10080)
+
+
+class FrontendErrorIn(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    error_type: str | None = Field(default=None, max_length=200)
+    status_code: int | None = Field(default=None, ge=0, le=599)
+    http_method: str | None = Field(default=None, max_length=10)
+    endpoint: str | None = Field(default=None, max_length=500)
+    page_url: str | None = Field(default=None, max_length=1000)
+    source_file: str | None = Field(default=None, max_length=500)
+    function_name: str | None = Field(default=None, max_length=200)
+    line_number: int | None = Field(default=None, ge=0)
+    column_number: int | None = Field(default=None, ge=0)
+    stack_trace: str | None = Field(default=None, max_length=30000)
+    request_id: str | None = Field(default=None, max_length=64)
+    context: dict | None = None

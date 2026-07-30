@@ -208,6 +208,8 @@ PAGE_TREE = [
      P.ADMIN_AUDIT_VIEW, 99, "grp_settings"),
     ("admin_fallback", "/admin/fallback-log", "Fallback Log", "shield",
      P.ADMIN_AUDIT_VIEW, 100, "grp_settings"),
+    ("admin_app_logs", "/admin/app-logs", "App Logs", "bug",
+     P.ADMIN_AUDIT_VIEW, 101, "grp_settings"),
 ]
 
 

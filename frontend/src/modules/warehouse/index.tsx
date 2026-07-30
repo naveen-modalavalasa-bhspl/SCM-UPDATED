@@ -26,6 +26,9 @@ import Warehouses from "./pages/masters/Warehouses";
 import WarehouseForm from "./pages/masters/WarehouseForm";
 import WarehouseDetail from "./pages/masters/WarehouseDetail";
 import FloorPlan from "./pages/masters/FloorPlan";
+import StorageTypes from "./pages/masters/StorageTypes";
+import StockMovements from "./pages/StockMovements";
+import StockMovementForm from "./pages/StockMovementForm";
 
 /**
  * The warehouse module's own router.
@@ -62,6 +65,8 @@ export function WarehouseModule() {
 
         <Route path="putaway" element={<Putaway />} />
         <Route path="putaway/:id" element={<PutawayForm />} />
+        <Route path="stock-movements" element={<StockMovements />} />
+        <Route path="stock-movements/new" element={<StockMovementForm />} />
 
         <Route path="picklist" element={<Picklist />} />
         <Route path="picklist/new" element={<PicklistForm />} />
@@ -70,6 +75,9 @@ export function WarehouseModule() {
         <Route path="material-issues" element={<MaterialIssues />} />
         <Route path="material-issues/new" element={<MaterialIssueForm />} />
         <Route path="material-issues/:id" element={<MaterialIssueForm />} />
+        <Route path="material-returns" element={<MaterialIssues direction="IN" />} />
+        <Route path="material-returns/new" element={<MaterialIssueForm direction="IN" />} />
+        <Route path="material-returns/:id" element={<MaterialIssueForm direction="IN" />} />
 
         <Route path="dispatch" element={<Dispatch />} />
         <Route path="dispatch/new" element={<DispatchForm />} />
@@ -97,6 +105,8 @@ export function WarehouseModule() {
 
       <Route path="putaway" element={<Putaway />} />
       <Route path="putaway/:id" element={<PutawayForm />} />
+      <Route path="stock-movements" element={<StockMovements />} />
+      <Route path="stock-movements/new" element={<StockMovementForm />} />
 
       <Route path="purchase-returns" element={<PurchaseReturns />} />
       <Route path="purchase-returns/new" element={<PurchaseReturnForm />} />
@@ -105,6 +115,9 @@ export function WarehouseModule() {
       <Route path="material-issues" element={<MaterialIssues />} />
       <Route path="material-issues/new" element={<MaterialIssueForm />} />
       <Route path="material-issues/:id" element={<MaterialIssueForm />} />
+      <Route path="material-returns" element={<MaterialIssues direction="IN" />} />
+      <Route path="material-returns/new" element={<MaterialIssueForm direction="IN" />} />
+      <Route path="material-returns/:id" element={<MaterialIssueForm direction="IN" />} />
 
       <Route path="outward-labelling" element={<OutwardLabelling />} />
       <Route path="acknowledge-delivery" element={<AcknowledgeDelivery />} />
@@ -124,6 +137,7 @@ export function WarehouseModule() {
         <Route path="warehouses/:id" element={<WarehouseDetail />} />
         <Route path="warehouses/:id/edit" element={<WarehouseForm />} />
         <Route path="floor-plan" element={<FloorPlan />} />
+        <Route path="storage-types" element={<StorageTypes />} />
       </Route>
 
       {/* App.tsx also mounts this module at /grn, /stock and /issues for links that

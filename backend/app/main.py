@@ -11,8 +11,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.config import settings
 from app.core.exceptions import (
     AppException, app_exception_handler, http_exception_handler,
-    request_validation_exception_handler,
+    request_validation_exception_handler, unhandled_exception_handler,
 )
+from app.platform.admin.app_logs import capture_backend_error, safe_request_id
 
 log = logging.getLogger("app")
 
@@ -35,6 +36,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SCM ERP", version="0.1.0", lifespan=lifespan)
+app.state.error_reporter = capture_backend_error
+
+
+@app.middleware("http")
+async def request_identity(request, call_next):
+    """Give browser and server errors the same searchable correlation id."""
+    request.state.request_id = safe_request_id(request.headers.get("x-request-id"))
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,11 +56,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
 @app.get("/health", tags=["health"])
@@ -84,10 +97,10 @@ def _include_routers() -> None:
         "app.platform.hcm.router",
         "app.platform.settings.router",
         "app.platform.rbac.router",
-        "app.platform.home.router",
         "app.platform.workflow.router",
         "app.platform.rules.router",
         "app.platform.admin.router",
+        "app.modules.home.router",
         "app.modules.indents.router",
         "app.modules.procurement.router",
         "app.modules.inventory.router",

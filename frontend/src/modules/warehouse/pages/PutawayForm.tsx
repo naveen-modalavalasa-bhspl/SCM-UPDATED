@@ -29,6 +29,7 @@ export default function PutawayForm() {
   const [binId, setBinId] = useState<number | "">("");
   const [qty, setQty] = useState<number>(0);
   const [remarks, setRemarks] = useState("");
+  const [serials, setSerials] = useState<string[]>([]);
   const [scan, setScan] = useState("");
   const [scanError, setScanError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -49,6 +50,7 @@ export default function PutawayForm() {
     if (!task) return;
     setQty(Number(task.qty ?? 0));
     setBinId(task.actual_bin_id ?? task.suggested_bin_id ?? "");
+    setSerials(task.serial_numbers ?? []);
   }, [task]);
 
   const invalidate = () => {
@@ -60,7 +62,12 @@ export default function PutawayForm() {
 
   const confirm = useMutation({
     mutationFn: () =>
-      confirmPutaway(taskId, { actual_bin_id: Number(binId), qty, remarks: remarks || null }),
+      confirmPutaway(taskId, {
+        actual_bin_id: Number(binId),
+        qty,
+        remarks: remarks || null,
+        serial_numbers: serials,
+      }),
     onSuccess: () => {
       invalidate();
       setConfirming(false);
@@ -238,6 +245,21 @@ export default function PutawayForm() {
                       {b.capacity_qty ? ` · cap ${fmtQty(b.capacity_qty)}` : ""}
                     </Chip>
                   </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {serials.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                Verify accepted serials ({serials.length})
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {serials.map((serial) => (
+                  <Chip key={serial} size="sm" variant="flat">
+                    <span className="font-mono">{serial}</span>
+                  </Chip>
                 ))}
               </div>
             </div>

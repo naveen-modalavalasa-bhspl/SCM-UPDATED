@@ -1,30 +1,56 @@
+export type HomeDateRange = "week" | "month" | "quarter";
+
 export interface HomeKpi {
   key: string;
   label: string;
   value: number;
-  tone: "neutral" | "brand" | "warning" | "danger" | string;
+  detail: string;
+  detail_tone: string;
+  href: string;
+  icon: string;
+  tone: string;
 }
 
-export interface AttentionItem {
+export interface HomeAction {
+  key: string;
+  label: string;
+  href: string;
+  icon: string;
+  tone: string;
+}
+
+export interface HomeModule {
+  code: string;
+  name: string;
+  description: string;
+  href: string;
+  icon: string;
+}
+
+export interface AttentionSummary {
+  key: string;
+  label: string;
+  count: number;
+  href: string;
+  icon: string;
+  tone: string;
+}
+
+export interface RecentActivity {
   id: string;
   title: string;
-  subtitle?: string | null;
-  module: string;
+  subtitle: string;
+  occurred_at: string;
   href: string;
-  status?: string | null;
-  priority?: string | null;
-  count?: number | null;
+  icon: string;
+  tone: string;
 }
 
 export interface HomeSummary {
-  role_context: string[];
+  date_range: HomeDateRange;
   kpis: HomeKpi[];
-  needs_attention: AttentionItem[];
-  pending_approvals: AttentionItem[];
-  open_indents: AttentionItem[];
-  waiting_on_me: AttentionItem[];
-  stock_below_reorder: AttentionItem[];
-  mrs_waiting_procurement: AttentionItem[];
-  pos_due: AttentionItem[];
-  grns_pending_qc: AttentionItem[];
+  quick_actions: HomeAction[];
+  modules: HomeModule[];
+  needs_attention: AttentionSummary[];
+  recent_activity: RecentActivity[];
 }

@@ -28,7 +28,11 @@ import type {
   Receipt,
   ReceiptWrite,
   SerialNumber,
+  StockAvailability,
+  StockMovement,
+  StockMovementWrite,
   StorageType,
+  StorageTypeWrite,
   Warehouse,
   WarehouseDashboard,
   WarehouseLocation,
@@ -104,6 +108,12 @@ export const listLocations = (warehouseId: number) =>
 
 export const listStorageTypes = () => get<StorageType[]>(`${BASE}/storage-types`);
 
+export const createStorageType = (body: StorageTypeWrite) =>
+  post<StorageType>(`${BASE}/storage-types`, body);
+
+export const updateStorageType = (id: number, body: StorageTypeWrite) =>
+  put<StorageType>(`${BASE}/storage-types/${id}`, body);
+
 /* ------------------------------------------------------------------ inward -- */
 
 export const listReceipts = (params: ListParams & { receipt_type?: string } = {}) =>
@@ -115,6 +125,9 @@ export const createReceipt = (body: ReceiptWrite) => post<Receipt>(`${BASE}/rece
 
 export const updateReceipt = (id: number, body: ReceiptWrite) =>
   put<Receipt>(`${BASE}/receipts/${id}`, body);
+
+export const convertReceiptToGrn = (id: number) =>
+  post<Receipt>(`${BASE}/receipts/${id}/convert-to-grn`);
 
 /** Freezes the receipt and raises the inspection tasks behind it. */
 export const submitReceipt = (id: number) => post<Receipt>(`${BASE}/receipts/${id}/submit`);
@@ -167,6 +180,24 @@ export const skipPutaway = (id: number, reason?: string) =>
 
 /** Bins the engine suggests for this task, best first. */
 export const suggestBins = (id: number) => get<Bin[]>(`${BASE}/putaways/${id}/suggested-bins`);
+
+export const listStockMovements = (params: ListParams = {}) =>
+  get<Page<StockMovement>>(`${BASE}/stock-movements`, params);
+
+export const createStockMovement = (body: StockMovementWrite) =>
+  post<StockMovement>(`${BASE}/stock-movements`, body);
+
+export const getStockAvailability = (
+  warehouse_id: number,
+  source_bin_id: number,
+  item_id: number,
+  batch_id?: number | null,
+) => get<StockAvailability>(`${BASE}/stock-movements/availability`, {
+  warehouse_id,
+  source_bin_id,
+  item_id,
+  batch_id,
+});
 
 /* --------------------------------------------------------------- picklists -- */
 
@@ -363,9 +394,16 @@ export const warehouseOptions = () => get<Option[]>(`${BASE}/options/warehouses`
 export const binOptions = (warehouse_id: number, search?: string) =>
   get<Option[]>(`${BASE}/options/bins`, { warehouse_id, search });
 
+export const batchOptions = (item_id: number, warehouse_id: number, bin_id?: number | null) =>
+  get<Option[]>(`${BASE}/options/batches`, { item_id, warehouse_id, bin_id });
+
 export const poOptions = (search?: string) => get<Option[]>(`${BASE}/options/purchase-orders`, { search });
 
-export const grnOptions = (search?: string) => get<Option[]>(`${BASE}/options/receipts`, { search });
+export const grnOptions = (search?: string) =>
+  get<Option[]>(`${BASE}/options/receipts`, { search, receipt_type: "PURCHASE" });
+
+export const gateEntryOptions = (search?: string) =>
+  get<Option[]>(`${BASE}/options/receipts`, { search, receipt_type: "GATE_ENTRY" });
 
 export const indentOptions = (search?: string, warehouse_id?: number) =>
   get<Option[]>(`${BASE}/options/indents`, { search, warehouse_id });
@@ -392,6 +430,9 @@ export const getPickingIssueSource = (picking_id: number) =>
 
 export const issueOptions = (search?: string) =>
   get<Option[]>(`${BASE}/options/issues`, { search });
+
+export const returnableIssueOptions = (search?: string) =>
+  get<Option[]>(`${BASE}/options/returnable-issues`, { search });
 
 export const getIssueDispatchSource = (issue_id: number) =>
   get<{

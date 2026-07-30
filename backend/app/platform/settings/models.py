@@ -57,6 +57,36 @@ class AuditLog(Base):
     created_at = Column(DateTime, nullable=False, default=utcnow, index=True)
 
 
+class AppLog(Base):
+    """Operational errors captured from the API and browser.
+
+    Request bodies and authorization headers are deliberately absent.  The log
+    keeps only the information needed to locate a failure in the codebase.
+    """
+    __tablename__ = "sys_app_logs"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    request_id = Column(String(64), nullable=False, index=True)
+    source = Column(String(20), nullable=False, index=True)  # BACKEND | FRONTEND
+    level = Column(String(20), nullable=False, index=True)   # ERROR | WARNING
+    message = Column(Text, nullable=False)
+    error_type = Column(String(200), nullable=True)
+    status_code = Column(Integer, nullable=True, index=True)
+    http_method = Column(String(10), nullable=True)
+    endpoint = Column(String(500), nullable=True)
+    page_url = Column(String(1000), nullable=True)
+    source_file = Column(String(500), nullable=True)
+    function_name = Column(String(200), nullable=True)
+    line_number = Column(Integer, nullable=True)
+    column_number = Column(Integer, nullable=True)
+    stack_trace = Column(Text, nullable=True)
+    actor_id = Column(BigInteger, nullable=True, index=True)
+    actor_name = Column(String(200), nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    context_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow, index=True)
+
+
 class NotificationRule(Base):
     """Who to tell when a workflow reaches a stage, or when a rule fires."""
     __tablename__ = "sys_notification_rules"

@@ -4,7 +4,7 @@ Identity comes from HCM (hcm_employees), there is no local users table.
 Model imports are function-local so this module imports cleanly before the
 models package exists (skeleton stage) and to avoid import cycles.
 """
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 async def get_current_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ):
@@ -40,6 +41,8 @@ async def get_current_user(
     if position_id is not None and position is None:
         raise AuthenticationError("Selected position is no longer assigned")
     user.active_position_id = position["id"] if position else None
+    request.state.actor_id = user.id
+    request.state.actor_name = user.full_name
     return user
 
 

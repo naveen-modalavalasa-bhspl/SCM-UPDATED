@@ -1,5 +1,5 @@
 import { Outlet } from "react-router-dom";
-import { Map, Warehouse } from "lucide-react";
+import { Map, Snowflake, Warehouse } from "lucide-react";
 import { PageHeader, SubNav } from "@/shared/components";
 
 /**
@@ -13,6 +13,7 @@ import { PageHeader, SubNav } from "@/shared/components";
 const ITEMS = [
   { key: "warehouses", label: "Warehouses", icon: Warehouse },
   { key: "floor-plan", label: "Floor plan", icon: Map },
+  { key: "storage-types", label: "Refrigeration types", icon: Snowflake },
 ];
 
 export default function MastersLayout() {

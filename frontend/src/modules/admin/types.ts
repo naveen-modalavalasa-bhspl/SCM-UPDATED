@@ -178,6 +178,30 @@ export interface AuditRow {
   at?: string | null;
 }
 
+export interface AppLog {
+  id: number;
+  request_id: string;
+  source: "BACKEND" | "FRONTEND";
+  level: "ERROR" | "WARNING";
+  message: string;
+  error_type?: string | null;
+  status_code?: number | null;
+  http_method?: string | null;
+  endpoint?: string | null;
+  page_url?: string | null;
+  source_file?: string | null;
+  function_name?: string | null;
+  line_number?: number | null;
+  column_number?: number | null;
+  stack_trace?: string | null;
+  actor_id?: number | null;
+  actor_name?: string | null;
+  ip_address?: string | null;
+  user_agent?: string | null;
+  context_data?: Record<string, unknown> | null;
+  created_at: string;
+}
+
 export type RecipientType = "ROLE" | "POSITION" | "GROUP" | "EMPLOYEE";
 
 export interface NotificationRule {

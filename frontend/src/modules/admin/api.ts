@@ -1,9 +1,9 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  AuditRow, Conflict, DocSeries, Ladder, LadderOptions, LadderPreview, LadderRung,
-  NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult, SyncResult,
-  SyncStatus, WorkflowDefinition, WorkflowOptions,
+  AppLog, AuditRow, Conflict, DocSeries, Ladder, LadderOptions, LadderPreview,
+  LadderRung, NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult,
+  SyncResult, SyncStatus, WorkflowDefinition, WorkflowOptions,
 } from "./types";
 
 /** What the server needs to save or preview a ladder — the toggles, nothing else. */
@@ -57,6 +57,14 @@ export const adminApi = {
   // ---- Audit, notifications, numbering ----
   audit: (p: { entity?: string; action?: string; page?: number; size?: number } = {}) =>
     page<AuditRow>("/api/admin/audit", p),
+  appLogs: {
+    list: (p: {
+      source?: string; level?: string; status_code?: number;
+      search?: string; page?: number; size?: number;
+      endpoint?: string; source_file?: string; function_name?: string;
+      message?: string; request_id?: string;
+    } = {}) => page<AppLog>("/api/admin/app-logs", p),
+  },
   notifications: {
     list: () => all<NotificationRule>("/api/admin/notifications"),
     create: (body: Partial<NotificationRule>) =>

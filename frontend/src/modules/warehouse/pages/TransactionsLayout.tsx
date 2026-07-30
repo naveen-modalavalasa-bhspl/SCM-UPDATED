@@ -15,8 +15,10 @@ const ITEMS = [
   { key: "grn", label: "GRN", icon: PackageCheck },
   { key: "quality-inspection", label: "Inspection", icon: ClipboardCheck },
   { key: "putaway", label: "Putaway", icon: ArrowLeftRight },
+  { key: "stock-movements", label: "Stock movement", icon: ArrowLeftRight },
   { key: "picklist", label: "Picking", icon: ClipboardCheck },
   { key: "material-issues", label: "Issues", icon: Send },
+  { key: "material-returns", label: "Issue returns", icon: Undo2 },
   { key: "dispatch", label: "Dispatch", icon: Truck },
   { key: "purchase-returns", label: "Returns", icon: Undo2 },
 ];

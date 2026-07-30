@@ -21,6 +21,7 @@ import type { WarehouseWrite } from "../../types";
  */
 
 const TYPES = [
+  { value: "CENTRAL", label: "Central warehouse" },
   { value: "MAIN", label: "Main store" },
   { value: "TRANSIT", label: "Transit" },
   { value: "QUARANTINE", label: "Quarantine" },
@@ -170,6 +171,23 @@ export default function WarehouseForm() {
 
       <Section title="How it stores">
         <div className="space-y-4">
+          <label className="flex items-start gap-3">
+            <Switch
+              isSelected={form.warehouse_type === "CENTRAL"}
+              onValueChange={(value) => set(
+                "warehouse_type",
+                value ? "CENTRAL" : "MAIN",
+              )}
+              aria-label="Central warehouse"
+            />
+            <span>
+              <span className="block text-sm font-medium text-body">Central warehouse</span>
+              <span className="block text-xs text-muted">
+                Marks the primary warehouse in the hierarchy.
+              </span>
+            </span>
+          </label>
+
           <label className="flex items-start gap-3">
             <Switch
               isSelected={form.is_bin_managed}

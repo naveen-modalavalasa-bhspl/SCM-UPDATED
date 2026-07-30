@@ -8,7 +8,7 @@ import { ConfirmModal, ErrorBanner } from "../../components/Feedback";
 import { MetaCard, MetaRow } from "../../components/DocumentMeta";
 import { BinTree, flattenBins } from "../../components/BinTree";
 import { LabelSheet, type LabelSpec } from "../../components/LabelPrint";
-import { createBin, deleteBin, getBinTree, getWarehouse, updateBin } from "../../api";
+import { createBin, deleteBin, getBinTree, getWarehouse, listStorageTypes, updateBin } from "../../api";
 import { fmtQty } from "../../format";
 import type { Bin, BinWrite } from "../../types";
 
@@ -21,10 +21,15 @@ import type { Bin, BinWrite } from "../../types";
  */
 
 const BIN_TYPES = [
-  { value: "ZONE", label: "Zone" },
+  { value: "BLOCK", label: "Block" },
+  { value: "FLOOR", label: "Floor" },
+  { value: "AISLE", label: "Lane / aisle" },
   { value: "RACK", label: "Rack" },
   { value: "SHELF", label: "Shelf" },
-  { value: "STORAGE", label: "Storage bin" },
+  { value: "BIN", label: "Storage bin" },
+  { value: "COLD_ROOM", label: "Cold store room" },
+  { value: "REFRIGERATOR", label: "Refrigerator" },
+  { value: "COLD_STORAGE_BIN", label: "Cold storage bin" },
   { value: "STAGING", label: "Staging" },
   { value: "QUARANTINE", label: "Quarantine" },
   { value: "DAMAGE", label: "Damage" },
@@ -57,6 +62,10 @@ export default function WarehouseDetail() {
     queryKey: ["wh-bins", id],
     queryFn: () => getBinTree(warehouseId),
     enabled: !!warehouse?.is_bin_managed,
+  });
+  const { data: storageTypes = [] } = useQuery({
+    queryKey: ["wh-storage-types"],
+    queryFn: listStorageTypes,
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["wh-bins", id] });
@@ -101,10 +110,24 @@ export default function WarehouseDetail() {
       warehouse_id: warehouseId,
       code: "",
       name: "",
+      description: "",
       parent_id: parent?.id ?? null,
       // A location hanging off another is a bin by default; a top-level one is a block.
       bin_type: parent ? "BIN" : "BLOCK",
       capacity_qty: null,
+      storage_type_id: null,
+      barcode: "",
+      floor_level: "",
+      shelf_level: "",
+      capacity_volume: null,
+      max_weight_capacity: null,
+      height_cm: null,
+      aisle_width_meters: null,
+      temperature_controlled: false,
+      humidity_percentage: null,
+      target_temperature_celsius: null,
+      min_temperature_celsius: null,
+      max_temperature_celsius: null,
       is_active: true,
     });
     setAdding(true);
@@ -117,9 +140,23 @@ export default function WarehouseDetail() {
       warehouse_id: warehouseId,
       code: bin.code,
       name: bin.name ?? "",
+      description: bin.description ?? "",
       parent_id: bin.parent_id ?? null,
       bin_type: bin.bin_type ?? "BIN",
       capacity_qty: bin.capacity_qty ?? null,
+      storage_type_id: bin.storage_type_id ?? null,
+      barcode: bin.barcode ?? "",
+      floor_level: bin.floor_level ?? "",
+      shelf_level: bin.shelf_level ?? "",
+      capacity_volume: bin.capacity_volume ?? null,
+      max_weight_capacity: bin.max_weight_capacity ?? null,
+      height_cm: bin.height_cm ?? null,
+      aisle_width_meters: bin.aisle_width_meters ?? null,
+      temperature_controlled: bin.temperature_controlled ?? false,
+      humidity_percentage: bin.humidity_percentage ?? null,
+      target_temperature_celsius: bin.target_temperature_celsius ?? null,
+      min_temperature_celsius: bin.min_temperature_celsius ?? null,
+      max_temperature_celsius: bin.max_temperature_celsius ?? null,
       is_active: bin.is_active,
     });
   };
@@ -227,10 +264,30 @@ export default function WarehouseDetail() {
                     placeholder="Aisle A, rack 1, shelf 3"
                   />
                 </Field>
+                <div className="sm:col-span-2">
+                  <Field label="Description">
+                    <Input
+                      value={draft.description ?? ""}
+                      onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                      placeholder="Purpose, dimensions, or handling notes"
+                    />
+                  </Field>
+                </div>
                 <Field label="Type">
                   <Select
                     value={draft.bin_type}
-                    onChange={(v) => setDraft({ ...draft, bin_type: v || "STORAGE" })}
+                    onChange={(v) => {
+                      const binType = v || "BIN";
+                      setDraft({
+                        ...draft,
+                        bin_type: binType,
+                        temperature_controlled: [
+                          "COLD_ROOM",
+                          "REFRIGERATOR",
+                          "COLD_STORAGE_BIN",
+                        ].includes(binType),
+                      });
+                    }}
                     options={BIN_TYPES}
                     ariaLabel="Bin type"
                   />
@@ -244,6 +301,150 @@ export default function WarehouseDetail() {
                     }
                   />
                 </Field>
+                {draft.bin_type === "FLOOR" && (
+                  <>
+                    <Field label="Floor level number">
+                      <Input
+                        value={draft.floor_level ?? ""}
+                        onChange={(e) => setDraft({ ...draft, floor_level: e.target.value })}
+                      />
+                    </Field>
+                    <Field label="Height (cm)">
+                      <Input
+                        type="number"
+                        value={draft.height_cm == null ? "" : String(draft.height_cm)}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          height_cm: e.target.value === "" ? null : Number(e.target.value),
+                        })}
+                      />
+                    </Field>
+                  </>
+                )}
+                {draft.bin_type === "AISLE" && (
+                  <Field label="Aisle width (metres)">
+                    <Input
+                      type="number"
+                      value={draft.aisle_width_meters == null ? "" : String(draft.aisle_width_meters)}
+                      onChange={(e) => setDraft({
+                        ...draft,
+                        aisle_width_meters: e.target.value === "" ? null : Number(e.target.value),
+                      })}
+                    />
+                  </Field>
+                )}
+                {draft.bin_type === "RACK" && (
+                  <>
+                    <Field label="Maximum weight (kg)">
+                      <Input
+                        type="number"
+                        value={draft.max_weight_capacity == null ? "" : String(draft.max_weight_capacity)}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          max_weight_capacity: e.target.value === "" ? null : Number(e.target.value),
+                        })}
+                      />
+                    </Field>
+                    <Field label="Rack height (cm)">
+                      <Input
+                        type="number"
+                        value={draft.height_cm == null ? "" : String(draft.height_cm)}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          height_cm: e.target.value === "" ? null : Number(e.target.value),
+                        })}
+                      />
+                    </Field>
+                  </>
+                )}
+                {draft.bin_type === "SHELF" && (
+                  <Field label="Shelf level number">
+                    <Input
+                      value={draft.shelf_level ?? ""}
+                      onChange={(e) => setDraft({ ...draft, shelf_level: e.target.value })}
+                    />
+                  </Field>
+                )}
+                {["BIN", "COLD_STORAGE_BIN"].includes(draft.bin_type) && (
+                  <>
+                    <Field label="Barcode">
+                      <Input
+                        value={draft.barcode ?? ""}
+                        onChange={(e) => setDraft({ ...draft, barcode: e.target.value })}
+                      />
+                    </Field>
+                    <Field label="Volume capacity">
+                      <Input
+                        type="number"
+                        value={draft.capacity_volume == null ? "" : String(draft.capacity_volume)}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          capacity_volume: e.target.value === "" ? null : Number(e.target.value),
+                        })}
+                      />
+                    </Field>
+                  </>
+                )}
+                {["COLD_ROOM", "REFRIGERATOR", "COLD_STORAGE_BIN"].includes(draft.bin_type) && (
+                  <>
+                    <Field label="Refrigeration type">
+                      <Select
+                        value={draft.storage_type_id == null ? "" : String(draft.storage_type_id)}
+                        onChange={(value) => setDraft({
+                          ...draft,
+                          storage_type_id: value ? Number(value) : null,
+                        })}
+                        options={storageTypes
+                          .filter((row) => row.is_active)
+                          .map((row) => ({ value: String(row.id), label: row.name }))}
+                        ariaLabel="Refrigeration type"
+                      />
+                    </Field>
+                    <Field label="Target temperature °C">
+                      <Input
+                        type="number"
+                        value={draft.target_temperature_celsius == null ? "" : String(draft.target_temperature_celsius)}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          temperature_controlled: true,
+                          target_temperature_celsius: e.target.value === "" ? null : Number(e.target.value),
+                        })}
+                      />
+                    </Field>
+                    <Field label="Minimum temperature °C">
+                      <Input
+                        type="number"
+                        value={draft.min_temperature_celsius == null ? "" : String(draft.min_temperature_celsius)}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          temperature_controlled: true,
+                          min_temperature_celsius: e.target.value === "" ? null : Number(e.target.value),
+                        })}
+                      />
+                    </Field>
+                    <Field label="Maximum temperature °C">
+                      <Input
+                        type="number"
+                        value={draft.max_temperature_celsius == null ? "" : String(draft.max_temperature_celsius)}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          temperature_controlled: true,
+                          max_temperature_celsius: e.target.value === "" ? null : Number(e.target.value),
+                        })}
+                      />
+                    </Field>
+                    <Field label="Humidity %">
+                      <Input
+                        type="number"
+                        value={draft.humidity_percentage == null ? "" : String(draft.humidity_percentage)}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          humidity_percentage: e.target.value === "" ? null : Number(e.target.value),
+                        })}
+                      />
+                    </Field>
+                  </>
+                )}
                 {/* Pickable is not a switch: stock lives in bins, so whether picking
                     may take from here follows from the type above. A flag that could
                     disagree with the type would just be a second, contradictory answer. */}

@@ -3,16 +3,16 @@
 Every route is 1-3 lines and carries a permission (rule 6); the logic lives in the
 sibling service modules (rule 2).
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_permission
+from app.core.dependencies import get_current_user, require_permission
 from app.core.pagination import PageParams
-from app.platform.admin import groups, notifications, numbering, users
+from app.platform.admin import app_logs, groups, notifications, numbering, users
 from app.platform.admin.schemas import (
-    DocSeriesIn, GrantAccessIn, HcmScheduleIn, NotificationRuleIn, SetRolesIn,
-    UserGroupIn,
+    DocSeriesIn, FrontendErrorIn, GrantAccessIn, HcmScheduleIn,
+    NotificationRuleIn, SetRolesIn, UserGroupIn,
 )
 from app.platform.rbac import permissions as perms
 from app.platform.settings import service as settings_service
@@ -186,6 +186,29 @@ async def list_audit(params: PageParams = Depends(), entity: str | None = None,
                      user=Depends(require_permission(perms.ADMIN_AUDIT_VIEW))):
     return await settings_service.list_audit(db, params, entity, entity_id,
                                              actor_id, action)
+
+
+# ------------------------- application logs ------------------------- #
+@router.get("/app-logs")
+async def list_app_logs(params: PageParams = Depends(), source: str | None = None,
+                        level: str | None = None, status_code: int | None = None,
+                        search: str | None = None, endpoint: str | None = None,
+                        source_file: str | None = None,
+                        function_name: str | None = None,
+                        message: str | None = None, request_id: str | None = None,
+                        db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.ADMIN_AUDIT_VIEW))):
+    return await app_logs.list_app_logs(
+        db, params, source, level, status_code, search,
+        endpoint, source_file, function_name, message, request_id,
+    )
+
+
+@router.post("/app-logs/client-errors", status_code=202)
+async def report_client_error(data: FrontendErrorIn, request: Request,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(get_current_user)):
+    return await app_logs.capture_frontend_error(db, data, request, user)
 
 
 # --------------------------- HCM sync --------------------------- #

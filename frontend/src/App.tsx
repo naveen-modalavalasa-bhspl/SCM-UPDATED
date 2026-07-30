@@ -5,7 +5,7 @@ import { HeroUIProvider } from "@heroui/react";
 import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
 import { LoginPage } from "@/pages/LoginPage";
-import { DashboardPage } from "@/pages/DashboardPage";
+import { HomePage } from "@/modules/home/pages/HomePage";
 import { IndentListPage } from "@/modules/indents/pages/ListPage";
 import { IndentFormPage } from "@/modules/indents/pages/FormPage";
 import { IndentDetailPage } from "@/modules/indents/pages/DetailPage";
@@ -31,6 +31,7 @@ import { WorkflowsPage } from "@/modules/admin/pages/WorkflowsPage";
 import { ApprovalConfigPage } from "@/modules/admin/pages/ApprovalConfigPage";
 import { PoliciesPage } from "@/modules/admin/pages/PoliciesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
+import { AppLogsPage } from "@/modules/admin/pages/AppLogsPage";
 import { NumberingPage } from "@/modules/admin/pages/NumberingPage";
 import { NotificationsPage } from "@/modules/admin/pages/NotificationsPage";
 import { MastersPage } from "@/modules/masters/pages/MastersPage";
@@ -74,7 +75,7 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={me ? <Navigate to="/" replace /> : <LoginPage />} />
       <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
-        <Route index element={<DashboardPage />} />
+        <Route index element={<HomePage />} />
         <Route path="indents" element={<IndentListPage />} />
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
@@ -118,6 +119,7 @@ function AppRoutes() {
         <Route path="admin/approvals-config" element={<ApprovalConfigPage />} />
         <Route path="admin/policies" element={<PoliciesPage />} />
         <Route path="admin/audit" element={<AuditPage />} />
+        <Route path="admin/app-logs" element={<AppLogsPage />} />
         <Route path="admin/numbering" element={<NumberingPage />} />
         <Route path="admin/notifications" element={<NotificationsPage />} />
         <Route path="admin/fallback-log" element={<FallbackLogPage />} />
