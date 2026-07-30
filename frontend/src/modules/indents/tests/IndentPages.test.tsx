@@ -5,7 +5,7 @@ import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
 import { IndentFilterBar } from "../components/IndentFilterBar";
-import { MaterialRequestsNav } from "../components/MaterialRequestsNav";
+import { IndentsNav } from "../components/IndentsNav";
 import { buildStatusBreakdownData } from "../components/StatusBreakdownChart";
 import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
 import { IndentDashboardPage } from "../pages/DashboardPage";
@@ -396,10 +396,10 @@ beforeEach(() => {
 });
 
 describe("indent UI shell", () => {
-  it("keeps MaterialRequestsNav as the single navigation row", () => {
+  it("keeps IndentsNav as the single navigation row", () => {
     renderWithProviders(
       <>
-        <MaterialRequestsNav />
+        <IndentsNav />
         <IndentModuleHeader title="All requests" showFilters={false} />
       </>,
       "/indents",
@@ -410,12 +410,12 @@ describe("indent UI shell", () => {
   });
 
   it("marks the current indent tab active", () => {
-    renderWithProviders(<MaterialRequestsNav />, "/indents/board");
+    renderWithProviders(<IndentsNav />, "/indents/board");
     expect(screen.getByRole("link", { name: "Board" })).toHaveAttribute("aria-current", "page");
   });
 
   it("keeps renamed navigation labels on existing routes", () => {
-    renderWithProviders(<MaterialRequestsNav />, "/indents/notifications");
+    renderWithProviders(<IndentsNav />, "/indents/notifications");
 
     expect(screen.getByRole("link", { name: "Board" })).toHaveAttribute("href", "/indents/board");
     expect(screen.getByRole("link", { name: "Alert & Notification" })).toHaveAttribute("href", "/indents/notifications");

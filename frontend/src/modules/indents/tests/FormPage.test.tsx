@@ -124,7 +124,7 @@ describe("IndentFormPage", () => {
     renderForm();
 
     await waitFor(() => expect(masterApi.items).toHaveBeenCalledWith());
-    expect(screen.getByText("Material Requests")).toBeInTheDocument();
+    expect(screen.getByText("Indents")).toBeInTheDocument();
     expect(screen.queryByText("Attachments")).not.toBeInTheDocument();
     expect(screen.queryByText("Stock availability not checked")).not.toBeInTheDocument();
   });

@@ -4,7 +4,6 @@ import { CalendarClock, X } from "lucide-react";
 import { Button, Card, Field, Input, PageHeader, ResponsiveList, Select, StatusPill, type Column } from "@/shared/components";
 import { approvalApi } from "../api";
 import type { ApprovalDelegation } from "../types";
-import { ApprovalsNav } from "../components/ApprovalsNav";
 
 type Tab = "mine" | "incoming" | "team";
 const tabs: { value: Tab; label: string }[] = [
@@ -46,7 +45,6 @@ export function DelegationsPage() {
   const canCreate = Number(delegateId) > 0 && validFrom <= validTo && !create.isPending;
   return <>
     <PageHeader eyebrow="Approvals" title="Delegations" />
-    <ApprovalsNav />
     <p className="mb-4 max-w-3xl text-sm text-body">Set temporary cover for leave, travel, or a vacancy. The original approver remains visible in the audit history, and the system prevents inactive employees and circular routes.</p>
     <Card className="mb-5 p-4"><h2 className="mb-3 flex items-center gap-2 font-semibold text-ink"><CalendarClock className="h-5 w-5" /> Create delegation</h2>
       <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">

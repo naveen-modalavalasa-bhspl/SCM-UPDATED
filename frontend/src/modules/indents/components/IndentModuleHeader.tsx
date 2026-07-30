@@ -7,6 +7,8 @@ type FilterMode = "indents" | "acknowledgments" | "activity";
 
 interface IndentModuleHeaderProps {
   title?: string;
+  /** Approvals reuses this header but is its own module — do not label it INDENT. */
+  eyebrow?: string;
   showCreate?: boolean;
   showFilters?: boolean;
   filterMode?: FilterMode;
@@ -22,6 +24,7 @@ interface IndentModuleHeaderProps {
 
 export function IndentModuleHeader({
   title = "Indent",
+  eyebrow = "INDENT",
   showCreate = true,
   showFilters = true,
   filterMode = "indents",
@@ -39,7 +42,7 @@ export function IndentModuleHeader({
   return (
     <div className="mb-5">
       <PageHeader
-        eyebrow="INDENT"
+        eyebrow={eyebrow}
         title={title}
         actions={
           showCreate ? (

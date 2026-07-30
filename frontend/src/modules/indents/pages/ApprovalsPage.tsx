@@ -38,6 +38,7 @@ function IndentApprovalsContent() {
   return (
     <>
       <IndentModuleHeader
+        eyebrow="Approvals"
         title="Waiting for me"
         showCreate={false}
         showRequiredBy={false}

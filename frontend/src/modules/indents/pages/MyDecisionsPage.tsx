@@ -5,7 +5,6 @@ import { Download } from "lucide-react";
 import { Button, Card, Input, PageHeader, ResponsiveList, Select, StatusPill, type Column } from "@/shared/components";
 import { approvalApi } from "../api";
 import type { ApprovalDecisionRow } from "../types";
-import { ApprovalsNav } from "../components/ApprovalsNav";
 
 const documentLabel = (value: string) => value.replace(/_/g, " ");
 const targetFor = (row: ApprovalDecisionRow) => row.doc_type === "INDENT" ? `/indents/${row.doc_id}`
@@ -41,7 +40,6 @@ export function MyDecisionsPage() {
   ];
   return <>
     <PageHeader eyebrow="Approvals" title="My Decisions" actions={<Button variant="ghost" onClick={() => exportRows(rows)} disabled={!rows.length}><Download className="h-4 w-4" /> Export CSV</Button>} />
-    <ApprovalsNav />
     <p className="mb-4 text-sm text-body">This is your permanent, read-only decision history. Decisions and audit timestamps cannot be changed or removed.</p>
     <Card className="mb-4 grid gap-3 p-4 sm:grid-cols-[1fr_220px]"><Input aria-label="Search decisions" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search document, requester or comment" /><Select ariaLabel="Decision" value={decision} onChange={setDecision} placeholder="All decisions" options={["APPROVED", "REJECTED", "RETURNED"].map((value) => ({ value, label: value[0] + value.slice(1).toLowerCase() }))} /></Card>
     {query.error ? <p className="rounded-xl bg-danger/10 p-4 text-sm text-danger">{(query.error as Error).message}</p> : <ResponsiveList data={rows} loading={query.isLoading} keyOf={(row) => row.id} columns={columns} onRowClick={(row) => nav(targetFor(row))} empty="You have not made an approval decision yet." renderCard={(row) => <div className="space-y-1"><div className="flex justify-between gap-3"><strong className="mono text-ink">{row.doc_no ?? `#${row.doc_id}`}</strong><StatusPill status={row.decision} /></div><p className="text-sm text-body">{documentLabel(row.doc_type)} · {row.stage_name ?? `Stage ${row.stage_sequence}`}</p>{row.comments && <p className="text-sm text-muted">{row.comments}</p>}<p className="text-xs text-muted">{row.decision_at ? new Date(row.decision_at).toLocaleString() : "—"}</p></div>} />}

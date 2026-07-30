@@ -1,10 +1,15 @@
 """DB engine + session + Base. No table definitions here."""
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
 _is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+
+# The one collation the whole schema uses. Migration f9b0c1d2e3f4 converged
+# every table on it; keep the two in step.
+DB_COLLATION = "utf8mb4_unicode_ci"
 
 
 class Base(DeclarativeBase):
@@ -30,6 +35,19 @@ else:
         pool_timeout=30,
         echo=False,
     )
+
+    # Every table is utf8mb4_unicode_ci (migration f9b0c1d2e3f4) but the server
+    # default is utf8mb4_0900_ai_ci, so a fresh connection talks 0900_ai_ci.
+    # CAST(:param AS CHAR) then lands at the same coercibility as a real column
+    # with a different collation and MySQL refuses the query with 1271 "Illegal
+    # mix of collations" — which is what broke the indent activity ledger's
+    # UNION. aiomysql's own handshake overrides connect_args=init_command, so
+    # set it here, after the connection is fully established.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _pin_connection_collation(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"SET NAMES utf8mb4 COLLATE {DB_COLLATION}")
+        cursor.close()
 
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

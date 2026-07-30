@@ -1,5 +1,6 @@
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LogOut, Boxes } from "lucide-react";
+import { LogOut, Boxes, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { Avatar, Select, SelectItem, Tab, Tabs } from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { MenuIcon } from "@/shared/layout/icons";
@@ -13,27 +14,39 @@ function moduleHome(root: MenuItem): string {
   return root.children?.length ? root.children[0].path : root.path;
 }
 
-function Brand() {
+function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-2.5">
-      <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand text-white shadow-sm">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand text-white shadow-sm">
         <Boxes className="h-5 w-5" strokeWidth={2.2} />
       </span>
-      <div className="leading-tight">
-        <div className="font-display text-[15px] font-bold text-ink">
-          SCM<span className="text-signal">·</span>ERP
+      {!compact && (
+        <div className="leading-tight">
+          <div className="font-display text-[15px] font-bold text-ink">
+            SCM<span className="text-signal">·</span>ERP
+          </div>
+          <div className="text-[10px] uppercase tracking-[0.18em] text-muted">Supply Chain</div>
         </div>
-        <div className="text-[10px] uppercase tracking-[0.18em] text-muted">Supply Chain</div>
-      </div>
+      )}
     </div>
   );
 }
+
+const RAIL_STORAGE_KEY = "scm.sidebar.collapsed";
 
 export function AppLayout() {
   const { me, logout, switchPosition } = useAuth();
   const menu = me?.menu ?? [];
   const nav = useNavigate();
   const loc = useLocation().pathname;
+  // ponytail: localStorage, not a settings table — a rail width is per-device UI
+  // state, not something the server needs to know about.
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem(RAIL_STORAGE_KEY) === "1",
+  );
+  useEffect(() => {
+    localStorage.setItem(RAIL_STORAGE_KEY, collapsed ? "1" : "0");
+  }, [collapsed]);
 
   // Resolve the active module (sidebar) + active sub-page (tabs) by longest path match.
   const pairs = menu.flatMap((r) =>
@@ -70,38 +83,80 @@ export function AppLayout() {
   return (
     <div className="flex min-h-full">
       {/* Sidebar — module names only */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[236px] flex-col border-r border-line bg-content1/80 px-3 py-5 backdrop-blur md:flex">
-        <div className="px-2">
-          <Brand />
+      <aside
+        className={`fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-line bg-content1/80 px-3 py-5 backdrop-blur transition-[width] duration-200 md:flex ${
+          collapsed ? "w-[72px]" : "w-[236px]"
+        }`}
+      >
+        <div className={`flex items-center ${collapsed ? "justify-center" : "justify-between px-2"}`}>
+          <Brand compact={collapsed} />
+          {!collapsed && (
+            <button
+              onClick={() => setCollapsed(true)}
+              className="grid h-8 w-8 place-items-center rounded-lg text-muted transition-colors hover:bg-default hover:text-ink"
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+            >
+              <PanelLeftClose className="h-[18px] w-[18px]" />
+            </button>
+          )}
         </div>
-        <nav className="mt-7 flex-1 space-y-1">
+        {collapsed && (
+          <button
+            onClick={() => setCollapsed(false)}
+            className="mt-4 grid h-9 w-full place-items-center rounded-lg text-muted transition-colors hover:bg-default hover:text-ink"
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+          >
+            <PanelLeftOpen className="h-[18px] w-[18px]" />
+          </button>
+        )}
+        <nav className={`flex-1 space-y-1 ${collapsed ? "mt-4" : "mt-7"}`}>
           {menu.map((root) => {
             const active = root === activeRoot;
             return (
               <button
                 key={root.code}
                 onClick={() => nav(moduleHome(root))}
-                className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
+                // The label is the accessible name when expanded; collapsed it is
+                // gone, so carry it on aria-label/title or the rail is unusable
+                // with a screen reader.
+                aria-label={root.name}
+                title={collapsed ? root.name : undefined}
+                className={`flex w-full items-center rounded-xl py-2.5 text-sm font-medium transition-colors ${
+                  collapsed ? "justify-center px-0" : "gap-3 px-3"
+                } ${
                   active ? "bg-brand-050 text-brand" : "text-muted hover:bg-default hover:text-ink"
                 }`}
               >
-                <MenuIcon name={root.icon} className="h-[18px] w-[18px]" />
-                {root.name}
+                <MenuIcon name={root.icon} className="h-[18px] w-[18px] shrink-0" />
+                {!collapsed && root.name}
               </button>
             );
           })}
         </nav>
-        <div className="mt-2 flex items-center gap-3 rounded-xl border border-line bg-content1 p-2.5">
+        <div
+          className={`mt-2 flex items-center rounded-xl border border-line bg-content1 ${
+            collapsed ? "flex-col gap-2 p-2" : "gap-3 p-2.5"
+          }`}
+        >
           <Avatar size="sm" name={me?.employee.name ?? "U"} className="bg-brand-050 text-brand" />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-semibold text-ink">{me?.employee.name}</div>
-            <div className="truncate text-xs text-muted">{me?.roles.join(" · ")}</div>
-          </div>
-          <button onClick={logout} className="text-muted hover:text-bad" aria-label="Sign out">
+          {!collapsed && (
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold text-ink">{me?.employee.name}</div>
+              <div className="truncate text-xs text-muted">{me?.roles.join(" · ")}</div>
+            </div>
+          )}
+          <button
+            onClick={logout}
+            className="text-muted hover:text-bad"
+            aria-label="Sign out"
+            title={collapsed ? "Sign out" : undefined}
+          >
             <LogOut className="h-4 w-4" />
           </button>
         </div>
-        {positionSelector()}
+        {!collapsed && positionSelector()}
       </aside>
 
       {/* Main column.
@@ -110,7 +165,11 @@ export function AppLayout() {
           (Warehouse has twelve) then stretched this column past the viewport and took
           the page content with it, and the `overflow-x-auto` on the tab strip below
           never engaged because the strip was never the thing overflowing. */}
-      <div className="flex min-h-full min-w-0 flex-1 flex-col md:pl-[236px]">
+      <div
+        className={`flex min-h-full min-w-0 flex-1 flex-col transition-[padding] duration-200 ${
+          collapsed ? "md:pl-[72px]" : "md:pl-[236px]"
+        }`}
+      >
         <header className="sticky top-0 z-20 border-b border-line bg-content1/80 backdrop-blur">
           <div className="flex items-center justify-between px-4 py-3 md:px-8">
             <div className="md:hidden">
@@ -121,7 +180,9 @@ export function AppLayout() {
               <span className="font-display text-lg font-bold text-ink">{activeRoot?.name}</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="md:hidden">{positionSelector(true)}</div>
+              {/* The rail owns this when expanded; collapsed it has nowhere to
+                  live, so surface it here rather than lose position switching. */}
+              <div className={collapsed ? undefined : "md:hidden"}>{positionSelector(true)}</div>
               <Avatar size="sm" name={me?.employee.name ?? "U"} className="bg-brand-050 text-brand" />
             </div>
           </div>
@@ -168,7 +229,8 @@ export function AppLayout() {
         </header>
 
         <main className="flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
-          <div className="mx-auto max-w-6xl">
+          {/* Collapsing the rail is a request for room — let the content claim it. */}
+          <div className={`mx-auto ${collapsed ? "max-w-7xl" : "max-w-6xl"}`}>
             <Outlet />
           </div>
         </main>

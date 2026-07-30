@@ -72,7 +72,7 @@ export function IndentFormPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Material Requests" title="New request" />
+      <PageHeader eyebrow="Indents" title="New request" />
 
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
