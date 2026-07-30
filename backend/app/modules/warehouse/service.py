@@ -15,8 +15,12 @@ creation from the masters and never refreshed, so a document keeps saying what t
 were called when it was raised.
 """
 import logging
+import os
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy import String, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +52,18 @@ from app.shared.numbering import next_number
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
+
+# Where uploaded documents are stored. The location is deployment configuration, so it
+# comes from the environment; the default sits beside the app so a fresh checkout works
+# without one more required key. Nothing but this constant knows the path.
+_UPLOAD_ROOT = Path(os.getenv("UPLOAD_DIR")
+                    or Path(__file__).resolve().parents[3] / "var" / "uploads")
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+
+def _slug(value: str) -> str:
+    """A folder name that cannot climb out of the store."""
+    return re.sub(r"[^a-z0-9_-]+", "_", (value or "other").lower()) or "other"
 
 
 def _d(value) -> Decimal:
@@ -312,7 +328,7 @@ async def delete_bin(db: AsyncSession, bin_id: int, user) -> None:
                               "or deactivate the bin instead.")
 
     await write_audit(db, entity="whs_bins", entity_id=row.id, entity_no=row.code,
-                      action=AuditAction.DELETE, actor=user, before={"code": row.code})
+                      action=AuditAction.DEACTIVATE, actor=user, before={"code": row.code})
     await db.delete(row)
     await db.commit()
 
@@ -408,12 +424,18 @@ def _receipt_totals(receipt: m.Receipt) -> None:
 
 
 async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
-                               lines: list[s.ReceiptItemWrite]) -> None:
+                               lines: list[s.ReceiptItemWrite], *,
+                               require_serials: bool = True) -> None:
     """Replaces the receipt's lines, deriving what must be derived.
 
     Accepted is capped at received and rejected is the remainder, so the three
     quantities cannot contradict each other whatever the client sent. `short_qty` is
     only meaningful against an order, so it stays zero on a free line.
+
+    `require_serials` is off for a gate entry. At the gate a storekeeper counts cartons
+    off a vehicle; the serial of each unit inside is read later, at the GRN and at
+    putaway. Demanding them at the gate would stop a serialised consignment being
+    booked in at all.
     """
     receipt.items.clear()
     await db.flush()
@@ -426,7 +448,11 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"Line {index}: serial numbers must be unique")
-        if item.is_serial_tracked:
+        if serials and not item.is_serial_tracked:
+            raise ValidationError(
+                f"Line {index}: {item.code} is not configured for serial tracking"
+            )
+        if item.is_serial_tracked and require_serials:
             if received != received.to_integral_value():
                 raise ValidationError(
                     f"Line {index}: a serial-tracked item needs a whole-number quantity"
@@ -436,10 +462,6 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
                     f"Line {index}: enter {int(received)} serial numbers, one for each "
                     "received unit"
                 )
-        elif serials:
-            raise ValidationError(
-                f"Line {index}: {item.code} is not configured for serial tracking"
-            )
 
         accepted = received if line.accepted_qty is None else min(_d(line.accepted_qty), received)
         rejected = received - accepted
@@ -575,11 +597,12 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         project = None
 
     receipt = m.Receipt(
+        items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
         grn_no=await next_number(db, WarehouseDocType.RECEIPT.value),
         receipt_type=data.receipt_type.value,
         grn_date=data.grn_date,
         po_id=data.po_id,
-        po_no=await _po_number(db, data.po_id),
+        po_no=await _receipt_po_number(db, data),
         transfer_id=transfer.id if transfer else None,
         transfer_no=transfer.sto_no if transfer else None,
         vendor_id=data.vendor_id,
@@ -612,7 +635,7 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
     db.add(receipt)
     await db.flush()
 
-    await _apply_receipt_lines(db, receipt, data.items)
+    await _apply_receipt_lines(db, receipt, data.items, require_serials=not is_gate_entry)
     await db.flush()
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
@@ -647,7 +670,7 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
 
     receipt.grn_date = data.grn_date
     receipt.po_id = data.po_id
-    receipt.po_no = await _po_number(db, data.po_id)
+    receipt.po_no = await _receipt_po_number(db, data)
     receipt.transfer_id = transfer.id if transfer else None
     receipt.transfer_no = transfer.sto_no if transfer else None
     receipt.vendor_id = data.vendor_id
@@ -667,7 +690,10 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
     receipt.gate_entry_no = data.gate_entry_no
     receipt.remarks = data.remarks
 
-    await _apply_receipt_lines(db, receipt, data.items)
+    await _apply_receipt_lines(
+        db, receipt, data.items,
+        require_serials=receipt.receipt_type != ReceiptType.GATE_ENTRY.value,
+    )
     await db.flush()
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
@@ -1107,11 +1133,24 @@ async def _suggest_bin(db: AsyncSession, warehouse_id: int, item_id: int) -> Bin
 
 
 async def _po_number(db: AsyncSession, po_id: int | None) -> str | None:
+    """Selects `po_no` and nothing else.
+
+    `db.get(PurchaseOrder, ...)` names every column the procurement ORM maps, and the
+    live `pro_purchase_orders` has fewer of them (no `indent_id`, `office_id`,
+    `facility_id`, `total_amount`), so MySQL answers 1054 and the whole receipt 500s.
+    The warehouse only ever wants the number to snapshot, so it asks for the number.
+    """
     if not po_id:
         return None
     from app.modules.procurement.models import PurchaseOrder
-    po = await db.get(PurchaseOrder, po_id)
-    return po.po_no if po else None
+    return await db.scalar(select(PurchaseOrder.po_no).where(PurchaseOrder.id == po_id))
+
+
+async def _receipt_po_number(db: AsyncSession, data: s.ReceiptWrite) -> str | None:
+    """A PO-backed receipt snapshots the order's own number; a gate entry carries the
+    one the driver's paperwork says, typed in by the storekeeper — the goods arrive
+    whether or not the order was ever raised in this system."""
+    return await _po_number(db, data.po_id) or (data.po_no or "").strip() or None
 
 
 async def po_lines(db: AsyncSession, po_id: int) -> list[s.PoLineOption]:
@@ -1120,14 +1159,17 @@ async def po_lines(db: AsyncSession, po_id: int) -> list[s.PoLineOption]:
     Already-received quantity is summed from the receipts against this PO rather than
     trusted from a column, because a line can be received across several deliveries.
     """
-    from app.modules.procurement.models import POItem, PurchaseOrder
+    from app.modules.procurement.models import POItem
 
-    po = await db.get(PurchaseOrder, po_id)
-    if po is None:
+    # Named columns on both tables — the mapped rows carry columns the live schema does
+    # not have (see _po_number), and the GRN form only needs what a line orders.
+    if await _po_number(db, po_id) is None:
         raise NotFoundError(f"Purchase order {po_id} not found")
 
     items = (await db.execute(
-        select(POItem).where(POItem.po_id == po_id).order_by(POItem.id))).scalars().all()
+        select(POItem.id, POItem.item_id, POItem.item_code, POItem.item_name,
+               POItem.uom_code, POItem.quantity, POItem.rate)
+        .where(POItem.po_id == po_id).order_by(POItem.id))).all()
 
     received_rows = (await db.execute(
         select(m.ReceiptItem.po_item_id, func.coalesce(func.sum(m.ReceiptItem.received_qty), 0))
@@ -1286,6 +1328,7 @@ async def create_inspection(db: AsyncSession, data: s.InspectionWrite, user) -> 
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
 
     inspection = m.Inspection(
+        items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
         inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
         inspection_date=data.inspection_date,
         receipt_id=data.receipt_id,
@@ -2296,8 +2339,14 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
         issue.items.append(m.MaterialIssueLine(
             line_no=index, indent_item_id=line.indent_item_id,
             item_id=item.id, item_code=item.code, item_name=item.name, uom_code=item.uom_code,
-            bin_id=line.bin_id, bin_code=await _bin_code(db, line.bin_id),
-            batch_id=line.batch_id, batch_no=batch.batch_no if batch else None,
+            # 0, not NULL. The live out_issue_items has bin_id and batch_id NOT NULL
+            # DEFAULT 0 — the module's own NO_BIN/NO_BATCH convention — while the ORM
+            # calls them nullable. Passing the NULL through failed the insert outright,
+            # so an indent-linked issue (where bin and batch come from the reservation,
+            # not from the line) could not be created at all.
+            bin_id=line.bin_id or m.NO_BIN, bin_code=await _bin_code(db, line.bin_id),
+            batch_id=line.batch_id or m.NO_BATCH,
+            batch_no=batch.batch_no if batch else None,
             expiry_date=batch.expiry_date if batch else None,
             requested_qty=requested, issued_qty=issued, returned_qty=ZERO,
             rate=rate or None, amount=(issued * rate) if rate else None,
@@ -2375,6 +2424,11 @@ async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     )
 
     issue = m.MaterialIssue(
+        # items=[] is not cosmetic. Without it the collection is unloaded after the
+        # flush below, and _apply_issue_lines() opens with .clear(), which fires a lazy
+        # SELECT. A lazy load inside an AsyncSession raises MissingGreenlet, so the
+        # create failed before writing a single line. Same reason on every create_* here.
+        items=[],
         issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value),
         issue_type=data.issue_type.value,
         issue_date=data.issue_date,
@@ -2874,7 +2928,9 @@ async def _apply_dispatch_lines(db: AsyncSession, dispatch: m.Dispatch,
         dispatch.items.append(m.DispatchItem(
             line_no=index, package_id=line.package_id, indent_id=line.indent_id,
             item_id=item.id, item_code=item.code, item_name=item.name, uom_code=item.uom_code,
-            batch_id=line.batch_id, batch_no=batch.batch_no if batch else None,
+            # 0, not NULL — out_dispatch_items.batch_id is NOT NULL DEFAULT 0 live.
+            batch_id=line.batch_id or m.NO_BATCH,
+            batch_no=batch.batch_no if batch else None,
             serial_no=line.serial_no,
             quantity=qty, delivered_qty=ZERO,
             rate=rate or None, amount=(qty * rate) if rate else None,
@@ -2938,6 +2994,10 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
             )
 
     dispatch = m.Dispatch(
+        # See create_issue. All three are delete-orphan collections, so the flush wants
+        # them loaded to work out the cascade — which is a lazy load, which an
+        # AsyncSession cannot do.
+        items=[], packages=[], events=[],
         dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value),
         dispatch_type=data.dispatch_type.value,
         dispatch_date=data.dispatch_date,
@@ -3187,7 +3247,7 @@ async def delete_package(db: AsyncSession, dispatch_id: int, package_id: int,
     _dispatch_totals(dispatch)
 
     await write_audit(db, entity="out_dispatch_packages", entity_id=package_id,
-                      entity_no=package.package_no, action=AuditAction.DELETE, actor=user,
+                      entity_no=package.package_no, action=AuditAction.DEACTIVATE, actor=user,
                       before={"package_no": package.package_no})
     await db.commit()
     return await get_dispatch(db, dispatch_id)
@@ -3529,6 +3589,7 @@ async def create_return(db: AsyncSession, data: s.ReturnWrite, user) -> m.Purcha
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
 
     doc = m.PurchaseReturn(
+        items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
         return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value),
         return_date=data.return_date,
         po_id=data.po_id or (receipt.po_id if receipt else None),
@@ -3838,13 +3899,36 @@ async def list_attachments(db: AsyncSession, entity_type: str,
 
 
 async def add_attachment(db: AsyncSession, *, entity_type: str, entity_id: int,
-                         file_name: str, file_path: str, file_size: int | None,
-                         mime_type: str | None, doc_category: str | None,
-                         user) -> m.Attachment:
+                         upload, doc_category: str | None, user) -> m.Attachment:
+    """Writes the bytes, then the row.
+
+    The row used to be written on its own, with a `file_path` pointing at an
+    `/uploads/...` URL nothing served: every upload reported success and every link was
+    dead. The file is stored under a generated name so two invoices called `scan.pdf`
+    cannot overwrite each other, and `file_path` is kept relative to the store so the
+    directory can move without rewriting the table.
+    """
+    payload = await upload.read()
+    if not payload:
+        raise ValidationError("That file is empty — nothing was uploaded.")
+    if len(payload) > MAX_ATTACHMENT_BYTES:
+        raise ValidationError(
+            f"A document must be {MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB or smaller.")
+
+    # Only the last segment: a browser may send a full path, and a crafted one must not
+    # be able to write outside the store.
+    file_name = Path(upload.filename or "file").name
+    folder = _UPLOAD_ROOT / _slug(entity_type) / str(entity_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    stored = folder / f"{uuid4().hex}{Path(file_name).suffix.lower()}"
+    stored.write_bytes(payload)
+
     row = m.Attachment(
         entity_type=entity_type, entity_id=entity_id,
-        file_name=file_name, file_path=file_path, file_size=file_size,
-        mime_type=mime_type, doc_category=doc_category,
+        file_name=file_name,
+        file_path=stored.relative_to(_UPLOAD_ROOT).as_posix(),
+        file_size=len(payload),
+        mime_type=upload.content_type, doc_category=doc_category,
         uploaded_by_id=getattr(user, "id", None), uploaded_by_name=_name(user),
     )
     db.add(row)
@@ -3857,12 +3941,27 @@ async def add_attachment(db: AsyncSession, *, entity_type: str, entity_id: int,
     return row
 
 
+async def attachment_file(db: AsyncSession, attachment_id: int) -> tuple[Path, str, str]:
+    """The path, download name and type of a stored document."""
+    row = await _get(db, m.Attachment, attachment_id, "Attachment")
+    path = _UPLOAD_ROOT / (row.file_path or "").lstrip("/")
+    if not path.is_file():
+        raise NotFoundError(
+            f"{row.file_name} is recorded but its file is not on the server. "
+            "Upload it again.")
+    return path, row.file_name, row.mime_type or "application/octet-stream"
+
+
 async def delete_attachment(db: AsyncSession, attachment_id: int, user) -> None:
     row = await _get(db, m.Attachment, attachment_id, "Attachment")
     await write_audit(db, entity="sys_attachments", entity_id=row.id, entity_no=row.file_name,
-                      action=AuditAction.DELETE, actor=user, before={"file": row.file_name})
+                      action=AuditAction.DEACTIVATE, actor=user, before={"file": row.file_name})
+    stored = _UPLOAD_ROOT / (row.file_path or "").lstrip("/")
     await db.delete(row)
     await db.commit()
+    # After the commit: a file left behind is tidy-up, a row pointing at a deleted file
+    # is a broken document.
+    stored.unlink(missing_ok=True)
 
 
 async def list_notifications(db: AsyncSession, params: PageParams, user, *,
@@ -4306,14 +4405,16 @@ async def batch_options(
 
 
 async def po_options(db: AsyncSession, search: str | None = None) -> list[dict]:
+    # Three columns, not the whole row: see _po_number for why selecting the mapped
+    # PurchaseOrder is a 1054 against the live schema.
     from app.modules.procurement.models import PurchaseOrder
-    stmt = select(PurchaseOrder)
+    stmt = select(PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.vendor_name)
     if search:
         stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
     rows = (await db.execute(
-        stmt.order_by(PurchaseOrder.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
-    return [{"id": r.id, "code": r.po_no,
-             "name": getattr(r, "vendor_name", None) or r.po_no} for r in rows]
+        stmt.order_by(PurchaseOrder.id.desc()).limit(LOOKUP_LIMIT))).all()
+    return [{"id": po_id, "code": po_no, "name": vendor_name or po_no}
+            for po_id, po_no, vendor_name in rows]
 
 
 async def receipt_options(

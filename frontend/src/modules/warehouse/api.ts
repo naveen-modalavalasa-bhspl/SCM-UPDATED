@@ -349,6 +349,11 @@ export const uploadAttachment = async (
   return (await api.post<Attachment>(`${BASE}/attachments`, form)).data;
 };
 
+/** The stored file. Fetched through axios rather than linked to, so the request
+ *  carries the bearer token the download endpoint asks for. */
+export const downloadAttachment = async (id: number) =>
+  (await api.get<Blob>(`${BASE}/attachments/${id}/download`, { responseType: "blob" })).data;
+
 export const deleteAttachment = (id: number) => del(`${BASE}/attachments/${id}`);
 
 /* ----------------------------------------------------------- notifications -- */

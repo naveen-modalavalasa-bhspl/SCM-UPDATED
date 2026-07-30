@@ -13,6 +13,7 @@ the door rather than leaving it open.
 from datetime import date
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -630,9 +631,15 @@ async def add_attachment(entity_type: str = Form(...), entity_id: int = Form(...
                          db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(RECEIPT_CREATE))):
     return await service.add_attachment(
-        db, entity_type=entity_type, entity_id=entity_id, file_name=file.filename or "file",
-        file_path=f"/uploads/{entity_type.lower()}/{entity_id}/{file.filename}",
-        file_size=file.size, mime_type=file.content_type, doc_category=doc_category, user=user)
+        db, entity_type=entity_type, entity_id=entity_id, upload=file,
+        doc_category=doc_category, user=user)
+
+
+@router.get("/attachments/{attachment_id}/download")
+async def download_attachment(attachment_id: int, db: AsyncSession = Depends(get_db),
+                              _=Depends(require_permission(STOCK_VIEW))):
+    path, file_name, mime_type = await service.attachment_file(db, attachment_id)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
 
 
 @router.delete("/attachments/{attachment_id}", status_code=204)

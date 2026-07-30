@@ -50,14 +50,14 @@ async def _conditions_out(db: AsyncSession, stage_id: int) -> list[dict]:
 
 async def _active_ladder(db: AsyncSession, project_id: int | None,
                          doc_type: str) -> Workflow | None:
-    return (await db.execute(
-        select(Workflow).where(
-            Workflow.doc_type == doc_type,
-            (Workflow.project_id == project_id if project_id is not None
-             else Workflow.project_id.is_(None)),
-            Workflow.is_active.is_(True),
-        ).order_by(Workflow.version.desc(), Workflow.id.desc())
-    )).scalars().first()
+    """This scope's own ladder — never another project's, never a plain workflow.
+
+    Scoped, so the screen always shows what it is about to overwrite. Ladder-only, so a
+    leftover non-ladder workflow for the same doc type cannot make a saved ladder look
+    like it was never saved (see ladder.active_ladder).
+    """
+    found = await ladder.active_ladder(db, project_id, doc_type)
+    return found[0] if found else None
 
 
 async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) -> dict:

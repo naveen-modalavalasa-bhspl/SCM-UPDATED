@@ -221,6 +221,32 @@ async def _holders_of(db: AsyncSession, position_ids: list[int],
 
 # ---------------- loading a saved ladder ----------------
 
+async def active_ladder(db: AsyncSession, project_id: int | None,
+                        doc_type: str) -> tuple[Workflow, list[Stage]] | None:
+    """The newest active ladder for EXACTLY this scope, or nothing.
+
+    Scans the scope's active workflows instead of judging only the top row. More than
+    one workflow can be active for a doc type — a seeded WF-*, a policy saved on the
+    Workflows screen — and any of them can sort above the configured ladder. Judging
+    only the top row let such a row hide the ladder completely, which silently handed
+    routing back to the reporting-line fallback: the toggles in Settings > Approvals
+    Config were saved and then ignored.
+    """
+    stmt = select(Workflow).where(
+        Workflow.doc_type == doc_type, Workflow.is_active.is_(True))
+    stmt = (stmt.where(Workflow.project_id == project_id) if project_id is not None
+            else stmt.where(Workflow.project_id.is_(None)))
+    rows = (await db.execute(
+        stmt.order_by(Workflow.version.desc(), Workflow.id.desc()))).scalars().all()
+    for wf in rows:
+        stages = list((await db.execute(
+            select(Stage).where(Stage.workflow_id == wf.id).order_by(Stage.sequence)
+        )).scalars().all())
+        if is_ladder(stages):
+            return wf, stages
+    return None
+
+
 async def find_ladder(db: AsyncSession, project_id: int | None,
                       doc_type: str) -> tuple[Workflow, list[Stage]] | None:
     """This project's ladder, else the company-wide one, else nothing.
@@ -230,19 +256,9 @@ async def find_ladder(db: AsyncSession, project_id: int | None,
     having no ladder yet.
     """
     for candidate in ([project_id, None] if project_id is not None else [None]):
-        stmt = select(Workflow).where(
-            Workflow.doc_type == doc_type, Workflow.is_active.is_(True))
-        stmt = (stmt.where(Workflow.project_id == candidate) if candidate is not None
-                else stmt.where(Workflow.project_id.is_(None)))
-        wf = (await db.execute(stmt.order_by(Workflow.version.desc(), Workflow.id.desc()))
-              ).scalars().first()
-        if wf is None:
-            continue
-        stages = list((await db.execute(
-            select(Stage).where(Stage.workflow_id == wf.id).order_by(Stage.sequence)
-        )).scalars().all())
-        if is_ladder(stages):
-            return wf, stages
+        found = await active_ladder(db, candidate, doc_type)
+        if found is not None:
+            return found
     return None
 
 

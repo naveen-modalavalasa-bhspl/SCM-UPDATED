@@ -274,6 +274,10 @@ export interface ReceiptItemWrite {
   po_item_id?: number | null;
   indent_id?: number | null;
   item_id: number;
+  /** Labels only, so a line pulled from a PO can name its item before it is saved.
+   *  The service snapshots both from the item master and ignores what is sent. */
+  item_code?: string | null;
+  item_name?: string | null;
   ordered_qty?: number;
   received_qty: number;
   accepted_qty?: number;
@@ -292,6 +296,9 @@ export interface ReceiptWrite {
   receipt_type: string;
   grn_date: string;
   po_id?: number | null;
+  /** Typed on a gate entry, straight off the driver's paperwork. Ignored when
+   *  `po_id` is set — a PO-backed receipt takes the order's own number. */
+  po_no?: string | null;
   vendor_id?: number | null;
   warehouse_id: number;
   project_id?: number | null;

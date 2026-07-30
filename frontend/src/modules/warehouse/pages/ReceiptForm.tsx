@@ -12,7 +12,7 @@ import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   binOptions, completeReceipt, convertReceiptToGrn, createReceipt, gateEntryOptions,
   getPoLines, getReceipt, itemOptions, poOptions, projectOptions, submitReceipt,
-  updateReceipt, vendorOptions, warehouseOptions,
+  updateReceipt, uploadAttachment, vendorOptions, warehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import type { Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
@@ -23,7 +23,14 @@ import type { Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
  * the LR and the invoice at the second one.
  *
  * `receipt_type` decides how much of the form is on show: a gate entry captures the
- * paperwork and the vehicle; a GRN adds the counted quantities, batches and bins.
+ * paperwork, the vehicle and a head count of what came off it; a GRN adds the
+ * inspection detail — accepted and rejected quantities, batch and expiry, bin, rate and
+ * serials. Asking for any of that at the gate is asking a security guard to do QC, so
+ * `GRN_ONLY_LINE_COLUMNS` keeps those columns out of the inward grid entirely.
+ *
+ * The purchase order is a picker on a GRN, where choosing an order fills the lines from
+ * it, and a plain text box on a gate entry, where the number is read off the driver's
+ * paperwork and may belong to an order this system never raised.
  *
  * Quantities are the load-bearing part. `received_qty` is what came off the vehicle,
  * `accepted_qty` is what you are keeping, and `rejected_qty` is derived — never
@@ -46,6 +53,12 @@ const emptyLine = (): ReceiptItemWrite => ({
   serial_numbers: null,
 });
 
+/** Line columns a gate entry does not ask for — they belong to the GRN, after the
+ *  consignment has been opened and inspected. */
+const GRN_ONLY_LINE_COLUMNS = new Set([
+  "accepted", "rejected", "batch", "manufactured", "expiry", "reason", "bin", "rate", "serials",
+]);
+
 const RECEIPT_TYPES = [
   { value: "PURCHASE", label: "Inward / PO receipt" },
   { value: "DIRECT", label: "Direct receipt" },
@@ -64,6 +77,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     receipt_type: mode,
     grn_date: today(),
     po_id: null,
+    po_no: "",
     vendor_id: null,
     warehouse_id: 0,
     project_id: null,
@@ -80,6 +94,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   });
   const [touched, setTouched] = useState(false);
   const [sourceGateId, setSourceGateId] = useState<number | null>(null);
+  // Documents picked before the first save: they have no receipt to hang off yet.
+  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   const [serialLine, setSerialLine] = useState<number | null>(null);
   const [confirming, setConfirming] = useState<"submit" | "complete" | null>(null);
 
@@ -96,6 +112,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       receipt_type: doc.receipt_type,
       grn_date: doc.grn_date,
       po_id: doc.po_id ?? null,
+      po_no: doc.po_no ?? "",
       vendor_id: doc.vendor_id ?? null,
       warehouse_id: doc.warehouse_id,
       project_id: doc.project_id ?? null,
@@ -113,6 +130,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         po_item_id: l.po_item_id,
         indent_id: l.indent_id,
         item_id: l.item_id,
+        item_code: l.item_code,
+        item_name: l.item_name,
         ordered_qty: num(l.ordered_qty),
         received_qty: num(l.received_qty),
         accepted_qty: num(l.accepted_qty),
@@ -142,6 +161,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           ...emptyLine(),
           po_item_id: l.po_item_id,
           item_id: l.item_id,
+          // Carried so the grid can name the item before the line is saved.
+          item_code: l.item_code ?? null,
+          item_name: l.item_name ?? null,
           indent_id: l.indent_id ?? null,
           ordered_qty: num(l.pending_qty),
           received_qty: num(l.pending_qty),
@@ -159,6 +181,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         receipt_type: "PURCHASE",
         grn_date: today(),
         po_id: source.po_id ?? null,
+        po_no: source.po_no ?? "",
         vendor_id: source.vendor_id ?? null,
         warehouse_id: source.warehouse_id,
         project_id: source.project_id ?? null,
@@ -176,6 +199,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           po_item_id: line.po_item_id,
           indent_id: line.indent_id,
           item_id: line.item_id,
+          item_code: line.item_code,
+          item_name: line.item_name,
           ordered_qty: num(line.ordered_qty),
           received_qty: num(line.received_qty),
           accepted_qty: num(line.received_qty),
@@ -225,17 +250,27 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
   const save = useMutation({
     mutationFn: async () => {
-      if (editing) return updateReceipt(Number(id), form);
-      if (sourceGateId) {
-        await updateReceipt(sourceGateId, form);
-        return convertReceiptToGrn(sourceGateId);
+      const saved = await (async () => {
+        if (editing) return updateReceipt(Number(id), form);
+        if (sourceGateId) {
+          await updateReceipt(sourceGateId, form);
+          return convertReceiptToGrn(sourceGateId);
+        }
+        return createReceipt(form);
+      })();
+      // Files picked before the record existed. Uploaded here rather than dropped,
+      // and inside the mutation so a failure shows on the same banner as the save.
+      for (const file of stagedFiles) {
+        await uploadAttachment("RECEIPT", saved.id, file, "INWARD");
       }
-      return createReceipt(form);
+      setStagedFiles([]);
+      return saved;
     },
     onSuccess: (saved: Receipt) => {
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       qc.invalidateQueries({ queryKey: ["wh-gate-entries"] });
       qc.invalidateQueries({ queryKey: ["wh-receipt", String(saved.id)] });
+      qc.invalidateQueries({ queryKey: ["wh-attachments", "RECEIPT", saved.id] });
       if (!editing) {
         nav(
           sourceGateId
@@ -278,21 +313,26 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     save.mutate();
   };
 
-  const columns: LineColumn<ReceiptItemWrite>[] = [
+  const allColumns: LineColumn<ReceiptItemWrite>[] = [
     {
       key: "item",
+      // The widest column by a distance: an item code is five segments long and the
+      // name after it is what the storekeeper actually reads. Left to size itself it
+      // collapsed to a few characters of each.
+      width: "w-[30%] min-w-[15rem]",
       header: "Item",
       render: (l, i) => {
+        // A saved line already carries its snapshot code/name and a line pulled from a
+        // PO carries the order's, so both read as text; only a hand-added line keeps its
+        // picker, and a PO-backed line is never repointed at another item.
         const saved = savedLine(i);
-        // A saved line already carries its snapshot code/name; only a new line needs
-        // the picker, and a PO-backed line is never repointed at another item.
+        const code = saved?.item_code ?? l.item_code;
+        const name = saved?.item_name ?? l.item_name;
         if (saved || l.po_item_id) {
           return (
             <div className="min-w-0">
-              <div className="truncate font-mono text-xs font-semibold text-ink">
-                {saved?.item_code ?? "—"}
-              </div>
-              <div className="truncate text-xs text-muted">{saved?.item_name ?? "PO line"}</div>
+              <div className="truncate text-sm font-medium text-ink">{name ?? "PO line"}</div>
+              <div className="truncate font-mono text-[11px] text-muted">{code ?? "—"}</div>
             </div>
           );
         }
@@ -478,6 +518,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     },
   ];
 
+  const columns = allColumns.filter((c) => isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key));
+
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
   const label = isGrn ? "GRN" : "Gate entry";
@@ -585,19 +627,32 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               errorMessage={invalid.warehouse ? "Pick the receiving warehouse." : undefined}
             />
           </Field>
-          <Field label="Purchase order" hint={isGrn ? "Picking a PO fills the lines." : undefined}>
-            <Lookup
-              name="purchase-orders"
-              load={poOptions}
-              value={form.po_id ?? ""}
-              isDisabled={locked}
-              onChange={(v) => {
-                set("po_id", v === "" ? null : v);
-                if (v !== "" && isGrn) poLines.mutate(v);
-              }}
-              placeholder="Against PO"
-            />
-          </Field>
+          {isGrn ? (
+            <Field label="Purchase order" hint="Picking a PO fills the lines.">
+              <Lookup
+                name="purchase-orders"
+                load={poOptions}
+                value={form.po_id ?? ""}
+                isDisabled={locked}
+                onChange={(v) => {
+                  set("po_id", v === "" ? null : v);
+                  if (v !== "") poLines.mutate(v);
+                }}
+                placeholder="Against PO"
+              />
+            </Field>
+          ) : (
+            /* Typed, not picked: the number comes off the paperwork the driver hands
+             * over, and the goods still arrive when the order was raised elsewhere. */
+            <Field label="Purchase order" hint="As printed on the delivery paperwork.">
+              <Input
+                value={form.po_no ?? ""}
+                disabled={locked}
+                placeholder="PO number"
+                onChange={(e) => set("po_no", e.target.value)}
+              />
+            </Field>
+          )}
           <Field label="Vendor">
             <Lookup
               name="vendors"
@@ -681,14 +736,20 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             rowTone={(l) => (num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
             empty={isGrn ? "Pick a purchase order above, or add lines by hand." : "Add the items received at the gate."}
             footer={
+              /* Only what the columns above show: totalling accepted, rejected and
+               * value at the gate would report figures nobody entered there. */
               <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
                 <span className="text-muted">{totals.lines} lines</span>
                 <span className="text-ink">Received <b className="tabular">{fmtQty(totals.received)}</b></span>
-                <span className="text-ok">Accepted <b className="tabular">{fmtQty(totals.accepted)}</b></span>
-                <span className={totals.rejected > 0 ? "text-bad" : "text-muted"}>
-                  Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
-                </span>
-                <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
+                {isGrn && (
+                  <>
+                    <span className="text-ok">Accepted <b className="tabular">{fmtQty(totals.accepted)}</b></span>
+                    <span className={totals.rejected > 0 ? "text-bad" : "text-muted"}>
+                      Rejected <b className="tabular">{fmtQty(totals.rejected)}</b>
+                    </span>
+                    <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
+                  </>
+                )}
               </div>
             }
           />
@@ -699,7 +760,13 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       </Section>
 
       <Section title="Documents" hint="Invoice copy, LR slip, packing list, weighbridge ticket.">
-        <AttachmentsPanel entityType="RECEIPT" entityId={doc?.id} category="INWARD" readOnly={locked} />
+        <AttachmentsPanel
+          entityType="RECEIPT"
+          entityId={doc?.id}
+          category="INWARD"
+          readOnly={locked}
+          onStagedChange={setStagedFiles}
+        />
       </Section>
 
       <SerialNumbersModal

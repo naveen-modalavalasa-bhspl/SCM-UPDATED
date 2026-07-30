@@ -6,7 +6,8 @@ vi.mock("@/shared/api/client", () => ({
 
 import { api } from "@/shared/api/client";
 import {
-  confirmPutaway, getPoLines, listBatches, listIssues, listReceipts, listSerials, runReport,
+  confirmPutaway, downloadAttachment, getPoLines, listBatches, listIssues, listReceipts,
+  listSerials, runReport, uploadAttachment,
 } from "../api";
 
 const mockGet = api.get as unknown as ReturnType<typeof vi.fn>;
@@ -70,6 +71,28 @@ describe("warehouse api", () => {
     await runReport("batch-expiry", { date_from: "2026-07-01", date_to: "2026-07-31" });
     expect(mockGet).toHaveBeenCalledWith("/api/warehouse/reports/batch-expiry", expect.anything());
     expect(paramsOf(mockGet)).toEqual({ date_from: "2026-07-01", date_to: "2026-07-31" });
+  });
+
+  it("uploads a document as multipart, with the entity it hangs off", async () => {
+    mockPost.mockResolvedValueOnce({ data: { id: 3, file_name: "invoice.pdf" } });
+    const file = new File([new Uint8Array([1, 2, 3])], "invoice.pdf", { type: "application/pdf" });
+    await uploadAttachment("RECEIPT", 7, file, "INWARD");
+
+    const [url, body] = mockPost.mock.calls.at(-1)!;
+    expect(url).toBe("/api/warehouse/attachments");
+    expect(body).toBeInstanceOf(FormData);
+    expect((body as FormData).get("entity_type")).toBe("RECEIPT");
+    expect((body as FormData).get("entity_id")).toBe("7");
+    expect((body as FormData).get("doc_category")).toBe("INWARD");
+    expect((body as FormData).get("file")).toBeInstanceOf(File);
+  });
+
+  it("downloads a document as a blob, so the request carries the token", async () => {
+    mockGet.mockResolvedValueOnce({ data: new Blob(["pdf"]) });
+    await downloadAttachment(3);
+    expect(mockGet).toHaveBeenCalledWith("/api/warehouse/attachments/3/download", {
+      responseType: "blob",
+    });
   });
 
   it("returns the page envelope untouched so callers read {items,total}", async () => {

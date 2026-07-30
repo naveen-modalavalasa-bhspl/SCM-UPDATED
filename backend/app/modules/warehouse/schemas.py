@@ -185,6 +185,10 @@ class ReceiptWrite(BaseModel):
     receipt_type: ReceiptType = ReceiptType.PURCHASE
     grn_date: date
     po_id: int | None = None
+    # A gate entry is typed from the driver's paperwork, which may name an order that
+    # was never raised in this system, so the number is accepted as text. When `po_id`
+    # is set the service snapshots the order's own number and ignores this.
+    po_no: str | None = Field(default=None, max_length=50)
     transfer_id: int | None = None
     vendor_id: int | None = None
     warehouse_id: int

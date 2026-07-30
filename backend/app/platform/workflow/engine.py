@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm import service as hcm_service
+from app.platform.hcm.models import HcmPositionAssignment
 from app.platform.workflow import fallback, ladder, resolver
 from app.platform.workflow.conditions import stage_applies
 from app.platform.workflow.models import (
@@ -142,6 +143,45 @@ async def _is_reporting_chain_position(
         if position.parent_position_id == active_position_id:
             return True
         position = await hcm_service.get_position(db, position.parent_position_id)
+    return False
+
+
+async def _requester_position_ids(
+    db: AsyncSession, instance: Instance, context: dict,
+) -> list[int]:
+    """The post(s) the document was raised from, for the reporting-manager check.
+
+    act() is normally handed `requester_position_id` in the context, but not every
+    module has it: an allocation records who allocated, not the post they sat in. With
+    nothing to compare against, the check below failed closed and refused EVERY
+    approver — no allocation raised by someone with a real reporting line could be
+    approved at all. So fall back to the posts the raiser actually holds, which is the
+    same question asked a different way.
+    """
+    explicit = context.get("requester_position_id")
+    if explicit:
+        return [int(explicit)]
+    if instance.started_by_id is None:
+        return []
+    return list((await db.execute(
+        select(HcmPositionAssignment.position_id).where(
+            HcmPositionAssignment.employee_id == instance.started_by_id,
+            HcmPositionAssignment.is_active.is_(True),
+        )
+    )).scalars().all())
+
+
+async def _approver_is_above_requester(
+    db: AsyncSession, instance: Instance, context: dict, active_position_id: int | None,
+) -> bool:
+    positions = await _requester_position_ids(db, instance, context)
+    if not positions:
+        # Nothing to compare against. Authority is still enforced — the caller has
+        # already checked the actor is one of this stage's pending approvers.
+        return True
+    for position_id in positions:
+        if await _is_reporting_chain_position(db, position_id, active_position_id):
+            return True
     return False
 
 
@@ -506,8 +546,8 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
         if active_position_id != stage.position_id:
             raise PermissionError_("Switch to the approval position before acting")
     elif stage.approver_type == ApproverType.REPORTING_MANAGER.value:
-        if not await _is_reporting_chain_position(
-            db, context.get("requester_position_id"), active_position_id,
+        if not await _approver_is_above_requester(
+            db, instance, context, active_position_id,
         ):
             raise PermissionError_("Switch to the reporting-manager position before acting")
 
