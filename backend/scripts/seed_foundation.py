@@ -6,6 +6,10 @@ role assignments. Enough to log in and load /api/auth/me.
 
 Run:  ALLOW_DEMO_DATA=true python -m scripts.seed_foundation
 
+Like scripts/seed.py, this refuses a non-loopback database unless `--allow-remote` is
+passed, and never deletes a menu page unless `--prune` is passed. To add or repair menu
+rows on a real server use `scripts.provision_pages`, which upserts and never deletes.
+
 NOTE: seeds demo rows into hcm_employees (normally sync-owned) because the app needs
 identities to log in before a real HCM sync. Demo ids are 900001+ to avoid clashing
 with real HCM ids.
@@ -47,18 +51,23 @@ USERS = [
 # where a module dev adds a screen). Keeping a second copy here silently deleted every
 # page the copy had not caught up with — Inventory and the warehouse sub-pages vanished
 # from the rail the moment this script ran.
-from scripts.seed import PAGE_TREE  # noqa: E402
+# `_refuse_remote` comes from seed.py for the same reason PAGE_TREE does: one copy, so
+# hardening one script cannot leave the other one open. seed.py grew the loopback guard
+# and the opt-in prune after a run wiped 20 live menu pages; this script kept deleting
+# unconditionally and wiped 21 more on 2026-07-30.
+from scripts.seed import PAGE_TREE, _refuse_remote  # noqa: E402
 
 
 async def _get(db, model, **filt):
     return (await db.execute(select(model).filter_by(**filt))).scalar_one_or_none()
 
 
-async def seed():
+async def seed(*, allow_remote: bool = False, prune: bool = False):
     if not settings.ALLOW_DEMO_DATA:
         raise SystemExit(
             "Demo seed blocked. Set ALLOW_DEMO_DATA=true only in a development environment."
         )
+    _refuse_remote(allow_remote)
     created_passwords = {}
     async with SessionLocal() as db:
         # permissions
@@ -102,12 +111,22 @@ async def seed():
         for code, *_rest, parent in PAGE_TREE:
             page = await db.get(Page, code_to_id[code])
             page.parent_id = code_to_id[parent] if parent else None
+        # Opt-in, exactly as seed.py does it. A page this branch has never heard of is
+        # far more likely to be newer than the branch than to be dead.
         valid_page_codes = {code for code, *_rest in PAGE_TREE}
         stale_pages = (await db.execute(
             select(Page).where(Page.code.notin_(valid_page_codes))
         )).scalars().all()
-        for page in stale_pages:
-            await db.delete(page)
+        if stale_pages and not prune:
+            print("  %d page(s) in the database are not in PAGE_TREE and were LEFT ALONE: %s"
+                  % (len(stale_pages), ", ".join(sorted(p.code for p in stale_pages))))
+            print("  If they really are dead, re-run with --prune. If they are newer than "
+                  "this branch, pull first — do not prune.")
+        elif stale_pages:
+            for page in stale_pages:
+                await db.delete(page)
+            print("  pruned %d page(s): %s"
+                  % (len(stale_pages), ", ".join(sorted(p.code for p in stale_pages))))
         await db.flush()
 
         # employees + credentials + roles
@@ -146,4 +165,7 @@ async def seed():
 
 
 if __name__ == "__main__":
-    asyncio.run(seed())
+    import sys
+
+    asyncio.run(seed(allow_remote="--allow-remote" in sys.argv,
+                     prune="--prune" in sys.argv))
