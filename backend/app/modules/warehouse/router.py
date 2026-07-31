@@ -131,11 +131,13 @@ async def update_storage_type(storage_type_id: int, data: s.StorageTypeWrite,
 async def list_receipts(params: PageParams = Depends(), receipt_type: str | None = None,
                         status: str | None = None, warehouse_id: int | None = None,
                         search: str | None = None, date_from: date | None = None,
-                        date_to: date | None = None, db: AsyncSession = Depends(get_db),
+                        date_to: date | None = None, gate_register: bool = False,
+                        db: AsyncSession = Depends(get_db),
                         _=Depends(require_permission(RECEIPT_VIEW))):
     return await service.list_receipts(db, params, receipt_type=receipt_type, status=status,
                                        warehouse_id=warehouse_id, search=search,
-                                       date_from=date_from, date_to=date_to)
+                                       date_from=date_from, date_to=date_to,
+                                       gate_register=gate_register)
 
 
 @router.get("/receipts/{receipt_id}", response_model=s.ReceiptDetail)

@@ -46,12 +46,17 @@ def normalise_pattern(pattern: str) -> str:
     return _FIELD.sub(swap, pattern or DEFAULT_PATTERN)
 
 
-def render(pattern: str | None, prefix: str, fiscal_year: str, number: int) -> str:
+def render(pattern: str | None, prefix: str, fiscal_year: str, number: int,
+           **extra: str) -> str:
     """Format one document number, falling back rather than raising on a bad pattern:
-    a misconfigured series must not block the document being created."""
+    a misconfigured series must not block the document being created.
+
+    `extra` carries series-specific tokens the caller knows about and this file does
+    not — a LOT number's `{WH}` and `{PATH}`, for instance. Unknown tokens are left
+    alone by `normalise_pattern`, so they resolve here or fall back."""
     try:
         return normalise_pattern(pattern or DEFAULT_PATTERN).format(
-            prefix=prefix, fy=fiscal_year, num=number)
+            prefix=prefix, fy=fiscal_year, num=number, **extra)
     except (KeyError, ValueError, IndexError):
         return f"{prefix}/{fiscal_year}/{number:04d}"
 
@@ -75,14 +80,26 @@ _DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      # PURCHASE_RETURN, which collides with how people say "PO").
                      "receipt": "REC", "gate_entry": "GE", "inspection": "QC",
                      "putaway": "PUT", "picking": "PICK", "wh_issue": "WHI",
-                     "dispatch": "DSP", "purchase_return": "PRET"}
+                     "dispatch": "DSP", "purchase_return": "PRET",
+                     # The lot stamped on stock at putaway; its pattern carries the
+                     # storage path, so a lot number reads as where the stock went.
+                     "lot": "LOT"}
+
+
+# A doc type whose number is more than prefix/year/sequence says so here, or the
+# auto-created series would quietly drop the extra tokens the caller passes.
+_DEFAULT_PATTERNS = {"lot": "{PREFIX}/{WH}/{PATH}/{FY}/{SEQ:5}"}
 
 
 def default_prefix(doc_type: str) -> str:
     return _DEFAULT_PREFIXES.get(doc_type.lower(), doc_type[:3].upper())
 
 
-async def next_number(db: AsyncSession, doc_type: str) -> str:
+def default_pattern(doc_type: str) -> str:
+    return _DEFAULT_PATTERNS.get(doc_type.lower(), DEFAULT_PATTERN)
+
+
+async def next_number(db: AsyncSession, doc_type: str, **extra: str) -> str:
     fy = _fiscal_year()
     row = (await db.execute(
         select(DocSeries).where(
@@ -99,7 +116,8 @@ async def next_number(db: AsyncSession, doc_type: str) -> str:
             "Configure it under Settings > Document Numbering.",
             doc_type, default_prefix(doc_type))
         row = DocSeries(doc_type=doc_type, fiscal_year=fy,
-                        prefix=default_prefix(doc_type), pattern=DEFAULT_PATTERN,
+                        prefix=default_prefix(doc_type),
+                        pattern=default_pattern(doc_type),
                         last_number=0, is_active=True)
         db.add(row)
         await db.flush()
@@ -115,4 +133,4 @@ async def next_number(db: AsyncSession, doc_type: str) -> str:
     n = row.last_number
     await db.flush()
 
-    return render(row.pattern, row.prefix, row.fiscal_year or fy, n)
+    return render(row.pattern, row.prefix, row.fiscal_year or fy, n, **extra)

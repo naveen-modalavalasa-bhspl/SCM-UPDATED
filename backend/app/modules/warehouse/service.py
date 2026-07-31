@@ -132,6 +132,60 @@ async def _bin_code(db: AsyncSession, bin_id: int | None) -> str | None:
     return row.code if row else None
 
 
+async def _ancestry(db: AsyncSession, bin_id: int | None) -> list[Bin]:
+    """The chain from the outermost structure down to this location, inclusive.
+
+    Walked through `parent_id` rather than read from a stored path, for the reason
+    `bin_tree` gives: a derived ancestry cannot disagree with the tree. The visited
+    set stops a cycle in the data from becoming an infinite loop here.
+    """
+    if not bin_id:
+        return []
+    chain: list[Bin] = []
+    seen: set[int] = set()
+    current = await db.get(Bin, bin_id)
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        chain.append(current)
+        current = await db.get(Bin, current.parent_id) if current.parent_id else None
+    chain.reverse()
+    return chain
+
+
+# Enough of a code to recognise the level by, short enough that six of them still read
+# as one lot number.
+_LOT_TOKEN = re.compile(r"[A-Za-z0-9]+")
+
+
+def _lot_token(location: Bin) -> str:
+    """One path segment of a lot number, e.g. `flr-1` -> `F1`, `block A` -> `A`.
+
+    The last alphanumeric group of the code is what people actually say ("rack one",
+    "bin A1"); a purely numeric one is prefixed with the storage type's initial so
+    `flr-1` and `lane -1` do not both collapse to `1`.
+    """
+    parts = _LOT_TOKEN.findall(location.code or "")
+    tail = parts[-1] if parts else str(location.id)
+    if tail.isdigit():
+        tail = f"{(location.bin_type or 'L')[:1].upper()}{tail}"
+    return tail.upper()
+
+
+async def _next_lot_no(db: AsyncSession, warehouse: Warehouse, target: Bin) -> str:
+    """`LOT/WH10/A-F1-L1-R1-S1-A1/2026-27/00001`.
+
+    The path is where the stock physically is, so the lot number answers "where did
+    this come to rest" without a join. The counter is the ordinary document series,
+    which means a lot number is gapless and admin-editable like every other number.
+    """
+    chain = await _ancestry(db, target.id)
+    path = "-".join(_lot_token(node) for node in chain) or _lot_token(target)
+    return await next_number(
+        db, WarehouseDocType.LOT.value,
+        WH=f"WH{warehouse.id}" if warehouse else "WH0", PATH=path,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Warehouse master
 # ---------------------------------------------------------------------------
@@ -297,7 +351,12 @@ async def update_bin(db: AsyncSession, bin_id: int, data: s.BinWrite, user) -> B
         setattr(row, field, value)
     if data.parent_id:
         # Validates the parent exists; depth is derived when the tree is built.
-        await _get(db, Bin, data.parent_id, "Parent bin")
+        parent = await _get(db, Bin, data.parent_id, "Parent bin")
+        # Same rule as create_bin. Without it a location can be re-parented into
+        # another warehouse, where it is invisible to that warehouse's tree and to
+        # its own — which is exactly how BIN1 ended up under a lane in warehouse 10.
+        if parent.warehouse_id != row.warehouse_id:
+            raise ValidationError("A bin cannot sit under a parent in another warehouse")
 
     await db.flush()
     await write_audit(db, entity="whs_warehouse_locations", entity_id=row.id,
@@ -424,18 +483,19 @@ def _receipt_totals(receipt: m.Receipt) -> None:
 
 
 async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
-                               lines: list[s.ReceiptItemWrite], *,
-                               require_serials: bool = True) -> None:
+                               lines: list[s.ReceiptItemWrite]) -> None:
     """Replaces the receipt's lines, deriving what must be derived.
 
     Accepted is capped at received and rejected is the remainder, so the three
     quantities cannot contradict each other whatever the client sent. `short_qty` is
     only meaningful against an order, so it stays zero on a free line.
 
-    `require_serials` is off for a gate entry. At the gate a storekeeper counts cartons
-    off a vehicle; the serial of each unit inside is read later, at the GRN and at
-    putaway. Demanding them at the gate would stop a serialised consignment being
-    booked in at all.
+    Serials are optional here, at every stage of the receipt. A storekeeper counting
+    cartons off a vehicle cannot read the serial of each unit inside them, and requiring
+    it stopped serialised consignments being booked in at all. Putaway is where every
+    unit is accounted for: `confirm_putaway` takes exactly one serial per unit placed,
+    so nothing reaches a bin unidentified. What is captured earlier is a head start on
+    that, not a gate.
     """
     receipt.items.clear()
     await db.flush()
@@ -452,16 +512,12 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             raise ValidationError(
                 f"Line {index}: {item.code} is not configured for serial tracking"
             )
-        if item.is_serial_tracked and require_serials:
-            if received != received.to_integral_value():
-                raise ValidationError(
-                    f"Line {index}: a serial-tracked item needs a whole-number quantity"
-                )
-            if len(serials) != int(received):
-                raise ValidationError(
-                    f"Line {index}: enter {int(received)} serial numbers, one for each "
-                    "received unit"
-                )
+        # Partial capture is allowed — the rest are read at putaway — but never more
+        # serials than units, which could only mean units nobody received.
+        if item.is_serial_tracked and len(serials) > received:
+            raise ValidationError(
+                f"Line {index}: {len(serials)} serial numbers for {received} received"
+            )
 
         accepted = received if line.accepted_qty is None else min(_d(line.accepted_qty), received)
         rejected = received - accepted
@@ -505,9 +561,16 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
 async def list_receipts(db: AsyncSession, params: PageParams, *, receipt_type: str | None = None,
                         status: str | None = None, warehouse_id: int | None = None,
                         search: str | None = None, date_from: date | None = None,
-                        date_to: date | None = None) -> dict:
+                        date_to: date | None = None, gate_register: bool = False) -> dict:
     stmt = select(m.Receipt)
-    if receipt_type:
+    if gate_register:
+        # The gate register is a log of vehicles that arrived, not a queue of open ones.
+        # Converting a gate entry rewrites `receipt_type` to PURCHASE on the same row, so
+        # filtering on the type emptied the screen the moment the entry was worked on.
+        # The gate entry number is the thing that never changes: it is stamped once at
+        # the gate and carried onto the GRN.
+        stmt = stmt.where(m.Receipt.gate_entry_no.is_not(None))
+    elif receipt_type:
         # Older imports called ordinary purchase receipts "direct". Keep them visible
         # as GRNs while the data-hardening migration normalises existing rows.
         if receipt_type == "GRN":
@@ -635,7 +698,7 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
     db.add(receipt)
     await db.flush()
 
-    await _apply_receipt_lines(db, receipt, data.items, require_serials=not is_gate_entry)
+    await _apply_receipt_lines(db, receipt, data.items)
     await db.flush()
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
@@ -690,10 +753,7 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
     receipt.gate_entry_no = data.gate_entry_no
     receipt.remarks = data.remarks
 
-    await _apply_receipt_lines(
-        db, receipt, data.items,
-        require_serials=receipt.receipt_type != ReceiptType.GATE_ENTRY.value,
-    )
+    await _apply_receipt_lines(db, receipt, data.items)
     await db.flush()
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
@@ -1087,11 +1147,17 @@ async def _raise_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
         return existing
 
     suggested = await _suggest_bin(db, receipt.warehouse_id, line.item_id)
+    item = await _item_snapshot(db, line.item_id)
     task = m.PutawayTask(
         putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value),
         grn_id=receipt.id, grn_item_id=line.id,
         warehouse_id=receipt.warehouse_id,
         item_id=line.item_id, batch_id=line.batch_id or None,
+        # `whs_warehouse_items.uom_id` is NOT NULL in the live schema while the mapped
+        # column says otherwise, so leaving it unset raised an IntegrityError the moment
+        # an inspection released a line to a bin-managed site. It carries no foreign key,
+        # so an item without a unit still gets a task rather than blocking the putaway.
+        uom_id=item.uom_id or 0,
         qty=_d(line.accepted_qty),
         suggested_bin_id=suggested.id if suggested else None,
         putaway_type=(PutawayType.SYSTEM_DIRECTED if suggested
@@ -1232,6 +1298,10 @@ async def _raise_inspection_for(
 ) -> m.Inspection:
     """The inspection a submitted receipt creates, seeded from its lines."""
     inspection = m.Inspection(
+        # see create_receipt: once the flush below makes this row persistent, the first
+        # touch of an uninitialised collection is a lazy SELECT, which async has no
+        # greenlet to run in. Handing it an empty list loads it up front.
+        items=[],
         inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
         inspection_date=date.today(),
         receipt_id=receipt.id, grn_no=receipt.grn_no,
@@ -1295,15 +1365,13 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
-        if item.is_serial_tracked:
-            if accepted != accepted.to_integral_value():
-                raise ValidationError(
-                    f"{item.code}: accepted serial quantity must be a whole number"
-                )
-            if len(serials) != int(accepted):
-                raise ValidationError(
-                    f"{item.code}: select {int(accepted)} accepted serial numbers"
-                )
+        # Optional here too: an inspector who checked a sample records what they read and
+        # leaves the rest to putaway, which accounts for every unit. Never more accepted
+        # serials than units accepted, though — that is a contradiction, not a shortfall.
+        if item.is_serial_tracked and len(serials) > accepted:
+            raise ValidationError(
+                f"{item.code}: {len(serials)} serial numbers for {accepted} accepted"
+            )
         reason = line.rejection_reason or line.defect_type
 
         if rejected > ZERO and not (reason or "").strip():
@@ -1409,7 +1477,10 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                 continue
             original_serials = list(line.serial_numbers or [])
             accepted_serials = list(verdict.serial_numbers or [])
-            if not set(accepted_serials).issubset(set(original_serials)):
+            # Only meaningful when the GRN read the serials in the first place. It often
+            # does not — they are optional until putaway — and then the inspection's own
+            # list is the first record of them, not a selection from an earlier one.
+            if original_serials and not set(accepted_serials).issubset(set(original_serials)):
                 raise ValidationError(
                     f"{line.item_code}: accepted serials must come from the GRN"
                 )
@@ -1467,6 +1538,48 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
     return await get_inspection(db, inspection_id)
 
 
+async def _reopen_receipt_after_cancel(db: AsyncSession, inspection: m.Inspection,
+                                       user) -> None:
+    """Walk a receipt back to DRAFT when the inspection holding it is cancelled.
+
+    Submitting moves the receipt to PENDING_QC and hands it to an inspection. Cancel that
+    inspection and the receipt was stranded: PENDING_QC has nothing left to complete it,
+    and the status is outside what `update_receipt` will edit — the document could not be
+    corrected or finished by anyone. A receipt whose serials were never captured wedged
+    exactly this way.
+
+    It only reopens what is genuinely untouched. Lines that do not require QC are
+    released to stock or putaway at submit (`_prepare_receipt_line`), and re-submitting
+    would post them a second time, so a receipt with any released line stays where it is.
+    """
+    if not inspection.receipt_id:
+        return
+    receipt = await get_receipt(db, inspection.receipt_id)
+    if receipt.status != ReceiptStatus.PENDING_QC.value or receipt.is_stock_posted:
+        return
+
+    other_open = (await db.execute(
+        select(m.Inspection.id).where(
+            m.Inspection.receipt_id == receipt.id,
+            m.Inspection.id != inspection.id,
+            m.Inspection.status.in_((InspectionStatus.DRAFT.value,
+                                     InspectionStatus.IN_PROGRESS.value)),
+        ).limit(1))).scalars().first()
+    if other_open:
+        return
+
+    if any(line.qc_status == QcStatus.PASSED.value for line in receipt.items):
+        return   # a line already went to stock or putaway; re-submitting would repeat it
+
+    before = {"status": receipt.status}
+    receipt.status = ReceiptStatus.DRAFT.value
+    await write_audit(db, entity="inb_receipts", entity_id=receipt.id,
+                      entity_no=receipt.grn_no, action=AuditAction.UPDATE, actor=user,
+                      before=before,
+                      after={"status": receipt.status,
+                             "reason": f"{inspection.inspection_no} cancelled"})
+
+
 async def cancel_inspection(db: AsyncSession, inspection_id: int, reason: str | None,
                             user) -> m.Inspection:
     inspection = await get_inspection(db, inspection_id)
@@ -1480,6 +1593,7 @@ async def cancel_inspection(db: AsyncSession, inspection_id: int, reason: str | 
     await write_audit(db, entity="inb_inspections", entity_id=inspection.id,
                       entity_no=inspection.inspection_no, action=AuditAction.UPDATE, actor=user,
                       before=before, after={"status": inspection.status, "reason": reason})
+    await _reopen_receipt_after_cancel(db, inspection, user)
     await db.commit()
     return await get_inspection(db, inspection_id)
 
@@ -1515,12 +1629,22 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
         "suggested_bin_code": await _bin_code(db, task.suggested_bin_id),
         "actual_bin_id": task.actual_bin_id,
         "actual_bin_code": await _bin_code(db, task.actual_bin_id),
+        # The whole storage path, so the screen can say "block A > flr-1 > … > bin A1"
+        # rather than a bin code with no context.
+        "actual_bin_path": " / ".join(
+            node.code for node in await _ancestry(db, task.actual_bin_id)
+        ) or None,
+        "lot_no": task.lot_no,
         "putaway_type": task.putaway_type, "status": task.status,
         "assigned_to": task.assigned_to, "assigned_to_name": None,
         "scanned_by": task.scanned_by, "scanned_at": task.scanned_at,
         "started_at": task.started_at, "completed_at": task.completed_at,
         "remarks": task.remarks,
+        # Whatever was captured upstream, which may be nothing: serials are optional at
+        # the GRN and at inspection. Putaway is where every unit is named, so the screen
+        # needs to know whether to ask — hence the flag beside them.
         "serial_numbers": list(receipt_item.serial_numbers or []) if receipt_item else [],
+        "is_serial_tracked": bool(item.is_serial_tracked) if item else False,
         "created_at": task.created_at,
     }
 
@@ -1618,6 +1742,11 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                      bin_id=target.id, batch_id=task.batch_id or m.NO_BATCH,
                      project_id=project_id)
 
+    # The lot is stamped here and only here: it names the storage path, so it cannot
+    # be known before a bin is chosen. A split putaway leaves the remainder without
+    # one until it is itself confirmed into a bin, which may be a different one.
+    task.lot_no = await _next_lot_no(db, await db.get(Warehouse, task.warehouse_id), target)
+
     await _place_serials(db, task, target, serials, receipt, receipt_item)
 
     task.actual_bin_id = target.id
@@ -1705,6 +1834,7 @@ async def _place_serials(
     for serial in serials:
         serial.bin_id = target.id
         serial.status = SerialStatus.AVAILABLE.value
+        serial.lot_no = task.lot_no
         code = f"{(item.code if item else 'ITM')}-{serial.id:06d}"
         if is_asset:
             serial.asset_code = serial.asset_code or code
@@ -2040,6 +2170,7 @@ async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
                 )
 
     picking = m.Picking(
+        items=[],   # see create_issue: keeps the append below off a lazy load
         pick_no=await next_number(db, WarehouseDocType.PICKING.value),
         pick_date=data.pick_date,
         warehouse_id=wh.id, warehouse_name=wh.name,

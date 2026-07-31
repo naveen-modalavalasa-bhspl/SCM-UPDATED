@@ -12,14 +12,16 @@ import type { Receipt } from "../types";
  * records who arrived with what paperwork; the GRN records what was actually counted
  * off the vehicle. Keeping them one row means the GRN already knows the vehicle, the
  * LR and the invoice without anyone retyping them.
+ *
+ * This is a register, not a queue: it lists every entry ever made at the gate, so the
+ * list asks for `gate_register` rather than `receipt_type=GATE_ENTRY`. Converting an
+ * entry rewrites that type to PURCHASE on the same row, which used to make the entry
+ * vanish from here the moment somebody worked on it. Only two states are worth showing
+ * — still at the gate (draft), or turned into a GRN (done).
  */
 
-const STATUSES = [
-  { value: "DRAFT", label: "Draft" },
-  { value: "GATE_ENTRY", label: "At the gate" },
-  { value: "RECEIVED", label: "Received" },
-  { value: "CANCELLED", label: "Cancelled" },
-];
+/** Draft while the row is still typed as a gate entry; done once it became a GRN. */
+const isDraft = (r: Receipt) => r.receipt_type === "GATE_ENTRY";
 
 export default function MaterialInward() {
   const nav = useNavigate();
@@ -68,36 +70,40 @@ export default function MaterialInward() {
       ),
     },
     { key: "warehouse", header: "Warehouse", hideOnNarrow: true, render: (r) => r.warehouse_name ?? "—" },
-    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "status",
+      header: "Status",
+      render: (r) => <StatusPill status={isDraft(r) ? "DRAFT" : "DONE"} />,
+    },
   ];
 
   return (
     <DocumentList<Receipt>
       title="Gate entry"
       queryKey="wh-gate-entries"
-      fetch={(p) => listReceipts({ ...p, receipt_type: "GATE_ENTRY" })}
-      extraParams={{ receipt_type: "GATE_ENTRY" }}
+      fetch={(p) => listReceipts({ ...p, gate_register: true })}
+      extraParams={{ gate_register: true }}
       columns={columns}
       keyOf={(r) => r.id}
       searchIn={(r) => [r.gate_entry_no, r.grn_no, r.vendor_name, r.vehicle_no, r.invoice_no, r.lr_no, r.po_no]}
       searchPlaceholder="Search gate entry, vehicle, invoice or LR…"
-      statuses={STATUSES}
       createTo="new"
       createLabel="New gate entry"
       createPermission="grn.create"
-      onRowClick={(r) => nav(String(r.id))}
-      empty="Nothing at the gate."
+      // A converted entry is a GRN now; opening it in the gate form would offer to edit
+      // it as something it no longer is.
+      onRowClick={(r) => nav(isDraft(r) ? String(r.id) : `../grn/${r.id}`)}
+      empty="No gate entries yet."
       kpis={(rows) => [
-        { label: "At the gate", value: rows.filter((r) => r.status === "GATE_ENTRY").length, tone: "text-warn" },
-        { label: "Drafts", value: rows.filter((r) => r.status === "DRAFT").length },
-        { label: "Received today", value: rows.filter((r) => r.grn_date === new Date().toISOString().slice(0, 10)).length },
-        { label: "Total lines", value: rows.reduce((s, r) => s + (r.total_items ?? 0), 0) },
+        { label: "Draft", value: rows.filter(isDraft).length, tone: "text-warn" },
+        { label: "Done", value: rows.filter((r) => !isDraft(r)).length },
+        { label: "Entries", value: rows.length },
       ]}
       renderCard={(r) => (
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
             <span className="font-mono text-xs font-semibold text-ink">{r.gate_entry_no ?? r.grn_no}</span>
-            <StatusPill status={r.status} />
+            <StatusPill status={isDraft(r) ? "DRAFT" : "DONE"} />
           </div>
           <div className="truncate text-sm text-body">{r.vendor_name ?? "—"}</div>
           <div className="truncate text-[11px] text-muted">

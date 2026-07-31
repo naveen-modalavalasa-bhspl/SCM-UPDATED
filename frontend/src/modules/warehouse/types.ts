@@ -413,6 +413,10 @@ export interface Putaway {
   suggested_bin_code?: string | null;
   actual_bin_id?: number | null;
   actual_bin_code?: string | null;
+  /** The full storage path, e.g. `block A / flr-1 / lane -1 / rack-1 / shf-1 / bin A1`. */
+  actual_bin_path?: string | null;
+  /** `LOT/WH10/A-F1-L1-R1-S1-A1/2026-27/00001`. Stamped at confirm, empty before. */
+  lot_no?: string | null;
   putaway_type: "system_directed" | "manual";
   status: PutawayStatus;
   assigned_to?: number | null;
@@ -423,6 +427,8 @@ export interface Putaway {
   completed_at?: string | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  /** Serials are optional upstream but mandatory here — the screen asks when this is set. */
+  is_serial_tracked?: boolean;
   created_at?: string;
 }
 

@@ -11,7 +11,7 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   binOptions, completeReceipt, convertReceiptToGrn, createReceipt, gateEntryOptions,
-  getPoLines, getReceipt, itemOptions, poOptions, projectOptions, submitReceipt,
+  getReceipt, itemOptions, projectOptions, submitReceipt,
   updateReceipt, uploadAttachment, vendorOptions, warehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
@@ -28,9 +28,11 @@ import type { Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
  * serials. Asking for any of that at the gate is asking a security guard to do QC, so
  * `GRN_ONLY_LINE_COLUMNS` keeps those columns out of the inward grid entirely.
  *
- * The purchase order is a picker on a GRN, where choosing an order fills the lines from
- * it, and a plain text box on a gate entry, where the number is read off the driver's
- * paperwork and may belong to an order this system never raised.
+ * The purchase order is a typed box on both. It used to be a picker on the GRN that
+ * filled the lines from the chosen order, but procurement does not raise orders in this
+ * system yet, so that picker listed nothing and the lines it was there to fill had to be
+ * keyed by hand anyway. The number is read off the driver's paperwork and may belong to
+ * an order this system never saw.
  *
  * Quantities are the load-bearing part. `received_qty` is what came off the vehicle,
  * `accepted_qty` is what you are keeping, and `rejected_qty` is derived — never
@@ -105,6 +107,18 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     enabled: editing,
   });
 
+  /* Gate entries still waiting to become a GRN. Converting one flips its `receipt_type`,
+   * so an entry that was already converted on its own screen is gone from this list —
+   * it IS a GRN draft by then. Shares the Lookup's cache key, so this is not a second
+   * request; it exists only so the field can say why it is empty rather than looking
+   * broken. */
+  const { data: pendingGateEntries = [] } = useQuery({
+    queryKey: ["wh-lookup", "gate-entries", ""],
+    queryFn: () => gateEntryOptions(),
+    staleTime: 5 * 60_000,
+    enabled: isGrn && !editing,
+  });
+
   /** Loading a saved receipt back into the editable shape. */
   useEffect(() => {
     if (!doc) return;
@@ -150,28 +164,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
   /** Snapshot labels for lines loaded from the server, so the grid needs no joins. */
   const savedLine = (index: number) => doc?.items?.[index];
-
-  /** Pulling a PO in replaces the lines with its open ones. */
-  const poLines = useMutation({
-    mutationFn: (poId: number) => getPoLines(poId),
-    onSuccess: (lines) =>
-      setForm((f) => ({
-        ...f,
-        items: lines.map((l) => ({
-          ...emptyLine(),
-          po_item_id: l.po_item_id,
-          item_id: l.item_id,
-          // Carried so the grid can name the item before the line is saved.
-          item_code: l.item_code ?? null,
-          item_name: l.item_name ?? null,
-          indent_id: l.indent_id ?? null,
-          ordered_qty: num(l.pending_qty),
-          received_qty: num(l.pending_qty),
-          accepted_qty: num(l.pending_qty),
-          rate: l.rate ?? null,
-        })),
-      })),
-  });
 
   const gateEntry = useMutation({
     mutationFn: (receiptId: number) => getReceipt(receiptId),
@@ -283,8 +275,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   });
 
   const act = useMutation({
-    mutationFn: (what: "submit" | "complete") =>
-      what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id)),
+    /* Save first. "Submit for QC" used to post nothing but the id, so anything typed and
+     * not saved — serial numbers above all, whose modal button reads "Save serials" and
+     * only updates the grid — was silently dropped, and the line reached inspection
+     * without the serials the storekeeper had just scanned. */
+    mutationFn: async (what: "submit" | "complete") => {
+      if (!locked) await updateReceipt(Number(id), form);
+      return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["wh-receipt", id] });
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
@@ -565,7 +563,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         }
       />
 
-      <ErrorBanner error={save.error ?? poLines.error ?? gateEntry.error ?? convert.error} />
+      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error} />
 
       {doc && (
         <MetaCard title="Document">
@@ -600,7 +598,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             </Field>
           )}
           {isGrn && !editing && form.receipt_type === "PURCHASE" && (
-            <Field label="Material inward" hint="Converts the selected gate entry into this GRN.">
+            <Field
+              label="Material inward"
+              hint={
+                pendingGateEntries.length
+                  ? "Converts the selected gate entry into this GRN."
+                  : "No gate entry is waiting. One converted from its own screen is already a GRN draft — open it from the GRN list instead."
+              }
+            >
               <Lookup
                 name="gate-entries"
                 load={gateEntryOptions}
@@ -611,7 +616,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                   setSourceGateId(receiptId);
                   if (receiptId) gateEntry.mutate(receiptId);
                 }}
-                placeholder="Select gate entry"
+                placeholder={
+                  pendingGateEntries.length ? "Select gate entry" : "No gate entries waiting"
+                }
               />
             </Field>
           )}
@@ -627,32 +634,19 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               errorMessage={invalid.warehouse ? "Pick the receiving warehouse." : undefined}
             />
           </Field>
-          {isGrn ? (
-            <Field label="Purchase order" hint="Picking a PO fills the lines.">
-              <Lookup
-                name="purchase-orders"
-                load={poOptions}
-                value={form.po_id ?? ""}
-                isDisabled={locked}
-                onChange={(v) => {
-                  set("po_id", v === "" ? null : v);
-                  if (v !== "") poLines.mutate(v);
-                }}
-                placeholder="Against PO"
-              />
-            </Field>
-          ) : (
-            /* Typed, not picked: the number comes off the paperwork the driver hands
-             * over, and the goods still arrive when the order was raised elsewhere. */
-            <Field label="Purchase order" hint="As printed on the delivery paperwork.">
-              <Input
-                value={form.po_no ?? ""}
-                disabled={locked}
-                placeholder="PO number"
-                onChange={(e) => set("po_no", e.target.value)}
-              />
-            </Field>
-          )}
+          {/* Typed, not picked, on the GRN as well as the gate entry: the number comes
+            * off the paperwork the driver hands over. Procurement does not raise orders
+            * in this system yet, so a picker would offer a list nobody can fill and the
+            * goods arrive regardless. `po_id` stays on the form so a receipt already
+            * linked to an order keeps its link through an edit. */}
+          <Field label="Purchase order" hint="As printed on the delivery paperwork.">
+            <Input
+              value={form.po_no ?? ""}
+              disabled={locked}
+              placeholder="PO number"
+              onChange={(e) => set("po_no", e.target.value)}
+            />
+          </Field>
           <Field label="Vendor">
             <Lookup
               name="vendors"

@@ -116,8 +116,10 @@ export const updateStorageType = (id: number, body: StorageTypeWrite) =>
 
 /* ------------------------------------------------------------------ inward -- */
 
-export const listReceipts = (params: ListParams & { receipt_type?: string } = {}) =>
-  get<Page<Receipt>>(`${BASE}/receipts`, params);
+/** `gate_register` lists every row that was ever a gate entry, converted or not. */
+export const listReceipts = (
+  params: ListParams & { receipt_type?: string; gate_register?: boolean } = {},
+) => get<Page<Receipt>>(`${BASE}/receipts`, params);
 
 export const getReceipt = (id: number) => get<Receipt>(`${BASE}/receipts/${id}`);
 

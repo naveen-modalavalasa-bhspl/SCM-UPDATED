@@ -6,7 +6,8 @@ import { ArrowLeft, ScanLine, SkipForward } from "lucide-react";
 import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { ConfirmModal, ErrorBanner } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { Lookup } from "../components/Lookup";
+import { LocationPicker } from "../components/LocationPicker";
+import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import { binOptions, confirmPutaway, getPutaway, skipPutaway, startPutaway, suggestBins } from "../api";
 import { fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
 
@@ -34,6 +35,7 @@ export default function PutawayForm() {
   const [scanError, setScanError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [skipping, setSkipping] = useState(false);
+  const [enteringSerials, setEnteringSerials] = useState(false);
 
   const { data: task, isLoading, error } = useQuery({
     queryKey: ["wh-putaway", id],
@@ -142,7 +144,14 @@ export default function PutawayForm() {
             )}
             {!done && (
               <Can do="stock.transfer">
-                <Button onClick={() => setConfirming(true)} disabled={binId === "" || qty <= 0}>
+                <Button
+                  onClick={() => setConfirming(true)}
+                  // One serial per unit placed, or the bin holds stock nobody can trace.
+                  disabled={
+                    binId === "" || qty <= 0 ||
+                    (!!task.is_serial_tracked && serials.length !== Math.floor(qty))
+                  }
+                >
                   Confirm putaway
                 </Button>
               </Can>
@@ -166,6 +175,8 @@ export default function PutawayForm() {
         <MetaRow label="Started" value={fmtDateTime(task.started_at)} />
         <MetaRow label="Completed" value={fmtDateTime(task.completed_at)} />
         <MetaRow label="Scanned by" value={task.scanned_by ? fmtDateTime(task.scanned_at) : "—"} />
+        <MetaRow label="Location" value={task.actual_bin_path ?? "—"} />
+        <MetaRow label="Lot" value={<span className="font-mono">{task.lot_no ?? "—"}</span>} />
       </MetaCard>
 
       {done ? (
@@ -173,12 +184,22 @@ export default function PutawayForm() {
           <div className="mb-1 font-display text-lg font-bold text-ok">Put away</div>
           <p className="text-sm text-muted">
             {fmtQty(task.qty)} {task.uom_code ?? ""} placed in{" "}
-            <span className="font-mono font-semibold text-ink">{task.actual_bin_code ?? "—"}</span> on{" "}
-            {fmtDateTime(task.completed_at)}.
+            <span className="font-mono font-semibold text-ink">
+              {task.actual_bin_path ?? task.actual_bin_code ?? "—"}
+            </span>{" "}
+            on {fmtDateTime(task.completed_at)}.
           </p>
+          {task.lot_no && (
+            <p className="mt-2 text-sm text-muted">
+              Lot <span className="font-mono font-semibold text-ink">{task.lot_no}</span>
+            </p>
+          )}
         </Card>
       ) : (
-        <Section title="Place it" hint="Scan the bin label, or pick the bin from the list.">
+        <Section
+          title="Place it"
+          hint="Scan the bin label, or walk the warehouse down to the bin."
+        >
           <ErrorBanner error={scanError} />
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -202,17 +223,6 @@ export default function PutawayForm() {
               </label>
             </Field>
 
-            <Field label="Bin">
-              <Lookup
-                name={`bins-${task.warehouse_id}`}
-                load={(s) => binOptions(task.warehouse_id, s)}
-                value={binId}
-                onChange={setBinId}
-                placeholder="Pick a bin"
-                fallback={suggested.map((b) => ({ id: b.id, code: b.code, name: b.name ?? b.path ?? "" }))}
-              />
-            </Field>
-
             <Field label="Quantity" hint="Less than the task quantity leaves the rest outstanding.">
               <Input
                 type="number"
@@ -220,6 +230,17 @@ export default function PutawayForm() {
                 onChange={(e) => setQty(Number(e.target.value))}
               />
             </Field>
+          </div>
+
+          {/* The whole hierarchy this warehouse was configured with, one dropdown per
+            * level. A scan or a suggested-bin chip drives it too, so there is one
+            * answer to "where is this going" however it was chosen. */}
+          <div className="mt-4">
+            <LocationPicker
+              warehouseId={task.warehouse_id}
+              value={binId}
+              onChange={setBinId}
+            />
           </div>
 
           {overriding && (
@@ -250,18 +271,36 @@ export default function PutawayForm() {
             </div>
           )}
 
-          {serials.length > 0 && (
+          {/* Putaway is where every unit is named. The GRN and the inspection may each
+            * have captured serials or none — this step cannot, because a unit going into
+            * a bin unidentified is a unit nobody can find again. Whatever came down from
+            * upstream is prefilled; the rest is read off the units here. */}
+          {task.is_serial_tracked && (
             <div className="mt-4">
-              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
-                Verify accepted serials ({serials.length})
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                  Serial numbers
+                </span>
+                <span className={`text-xs font-semibold ${
+                  serials.length === Math.floor(qty) ? "text-ok" : "text-warn"
+                }`}>
+                  {serials.length} of {Math.floor(qty)} captured
+                </span>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="mb-2 flex flex-wrap gap-2">
                 {serials.map((serial) => (
                   <Chip key={serial} size="sm" variant="flat">
                     <span className="font-mono">{serial}</span>
                   </Chip>
                 ))}
+                {serials.length === 0 && (
+                  <span className="text-sm text-muted">None captured yet.</span>
+                )}
               </div>
+              <Button variant="subtle" onClick={() => setEnteringSerials(true)}>
+                <ScanLine className="h-4 w-4" />
+                {serials.length ? "Edit serials" : "Enter serials"}
+              </Button>
             </div>
           )}
 
@@ -283,6 +322,15 @@ export default function PutawayForm() {
         error={confirm.error}
         onConfirm={() => confirm.mutate()}
         onClose={() => setConfirming(false)}
+      />
+
+      <SerialNumbersModal
+        isOpen={enteringSerials}
+        onClose={() => setEnteringSerials(false)}
+        quantity={qty}
+        initial={serials}
+        itemLabel={task.item_name ?? task.item_code ?? ""}
+        onSave={setSerials}
       />
 
       <ConfirmModal

@@ -255,6 +255,11 @@ class PutawayTask(Base):
     suggested_bin_id = Column(BigInteger, nullable=True)
     actual_bin_id = Column(BigInteger, nullable=True)
 
+    # Stamped at confirm, never before: a lot names *where* the stock landed
+    # (LOT/WH10/A-F1-L1-R1-S1-A1/2026-27/00001), so it cannot exist until a bin is
+    # chosen. Indexed because "what is in lot X" is the question it exists to answer.
+    lot_no = Column(String(120), index=True, nullable=True)
+
     putaway_type = Column(
         String(20), nullable=False, default=PutawayType.SYSTEM_DIRECTED.value
     )
@@ -709,6 +714,8 @@ class SerialNumber(Base):
     bin_id = Column(BigInteger, nullable=True)
     asset_code = Column(String(100), nullable=True)
     consumable_code = Column(String(100), nullable=True)
+    # The lot the unit was put away under; same value as the putaway task's.
+    lot_no = Column(String(120), index=True, nullable=True)
     status = Column(String(20), nullable=False, default=SerialStatus.AVAILABLE.value)
     remarks = Column(String(500), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)

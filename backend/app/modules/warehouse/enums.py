@@ -219,6 +219,8 @@ class WarehouseDocType(str, Enum):
     DISPATCH = "DISPATCH"
     PURCHASE_RETURN = "PURCHASE_RETURN"
     STOCK_MOVEMENT = "STOCK_MOVEMENT"
+    # Not a document — a series, so a lot number is numbered like everything else.
+    LOT = "lot"
 
 
 class RefType(str, Enum):

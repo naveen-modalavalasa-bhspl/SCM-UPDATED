@@ -11,7 +11,8 @@ import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
-  completeInspection, createInspection, employeeOptions, getInspection, getReceipt, grnOptions,
+  cancelInspection, completeInspection, createInspection, employeeOptions, getInspection,
+  getReceipt, grnOptions,
   updateInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
@@ -64,6 +65,7 @@ export default function QualityInspectionForm({
     items: [],
   });
   const [confirming, setConfirming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [paramsFor, setParamsFor] = useState<number | null>(null);
   const [serialsFor, setSerialsFor] = useState<number | null>(null);
 
@@ -95,10 +97,37 @@ export default function QualityInspectionForm({
         defect_type: l.defect_type,
         rejection_reason: l.rejection_reason ?? l.defect_type,
         remarks: l.remarks,
-        serial_numbers: l.serial_numbers ?? [],
+        // Left null when the line carries no decision yet — the picker reads that as
+        // "nothing rejected", where [] would mean "every unit rejected".
+        serial_numbers: l.serial_numbers ?? null,
       })),
     });
   }, [doc]);
+
+  /* The GRN's serials, by receipt line. They were read off the units at goods receipt,
+   * so inspection picks from them: a serial typed here is one that was never received,
+   * and completion rejects any accepted serial that is not on the GRN. */
+  const { data: grn } = useQuery({
+    queryKey: ["wh-receipt", String(doc?.receipt_id ?? "")],
+    queryFn: () => getReceipt(Number(doc?.receipt_id)),
+    enabled: !!doc?.receipt_id,
+  });
+
+  const grnSerials = useMemo(() => {
+    const byLine = new Map<number, string[]>();
+    for (const line of grn?.items ?? []) byLine.set(line.id, line.serial_numbers ?? []);
+    return byLine;
+  }, [grn]);
+
+  /** The GRN serials behind an inspection line — null when it captured none, which puts
+   *  the modal back into capture mode so QC can read them here instead. Serials are
+   *  optional at both stages; putaway is what accounts for every unit. */
+  const availableSerials = (index: number | null) => {
+    if (index === null) return null;
+    const receiptItemId = form.items[index]?.receipt_item_id;
+    const serials = receiptItemId ? grnSerials.get(receiptItemId) : undefined;
+    return serials?.length ? serials : null;
+  };
 
   /** Pulling the receipt in seeds the lines from what was actually received. */
   const pullReceipt = useMutation({
@@ -170,11 +199,31 @@ export default function QualityInspectionForm({
   });
 
   const complete = useMutation({
-    mutationFn: () => completeInspection(Number(id)),
+    /* Save first. The server refuses to complete while any *saved* line is PENDING, and
+     * a line is seeded PENDING when the receipt raises the inspection — so an inspector
+     * who filled the grid and pressed Complete was told the lines were still pending
+     * while the confirm modal in front of them counted their own unsaved passes. */
+    mutationFn: async () => {
+      await updateInspection(Number(id), form);
+      return completeInspection(Number(id));
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["wh-inspection", id] });
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       setConfirming(false);
+    },
+  });
+
+  /* Cancelling hands the GRN back: the server walks an untouched receipt out of
+   * PENDING_QC to DRAFT, which is the only way to correct lines — serials above all —
+   * once the receipt has been submitted. */
+  const cancel = useMutation({
+    mutationFn: () => cancelInspection(Number(id)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["wh-inspection", id] });
+      qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
+      qc.invalidateQueries({ queryKey: ["wh-receipts"] });
+      setCancelling(false);
     },
   });
 
@@ -271,12 +320,18 @@ export default function QualityInspectionForm({
       header: "Accepted serials",
       width: "w-32",
       hideOnNarrow: true,
-      render: (line, index) => (
-        <Button variant="ghost" onClick={() => setSerialsFor(index)} disabled={locked}>
-          <ScanLine className="h-4 w-4" />
-          {line.serial_numbers?.length ?? 0}
-        </Button>
-      ),
+      render: (line, index) => {
+        const available = availableSerials(index);
+        // An untouched line has decided nothing, which means nothing rejected — show it
+        // as all accepted rather than as zero.
+        const accepted = line.serial_numbers?.length ?? available?.length ?? 0;
+        return (
+          <Button variant="ghost" onClick={() => setSerialsFor(index)} disabled={locked}>
+            <ScanLine className="h-4 w-4" />
+            {available ? `${accepted}/${available.length}` : accepted}
+          </Button>
+        );
+      },
     },
     {
       key: "params",
@@ -311,6 +366,13 @@ export default function QualityInspectionForm({
               <Can do="grn.qc">
                 <Button variant="subtle" onClick={() => save.mutate()} disabled={save.isPending}>
                   {save.isPending ? "Saving…" : "Save"}
+                </Button>
+              </Can>
+            )}
+            {editing && !locked && (
+              <Can do="grn.qc">
+                <Button variant="subtle" onClick={() => setCancelling(true)}>
+                  Cancel inspection
                 </Button>
               </Can>
             )}
@@ -493,15 +555,23 @@ export default function QualityInspectionForm({
         isOpen={serialsFor !== null}
         onClose={() => setSerialsFor(null)}
         quantity={serialsFor === null ? 0 : num(form.items[serialsFor]?.accepted_qty)}
-        initial={serialsFor === null ? [] : form.items[serialsFor]?.serial_numbers ?? []}
+        initial={serialsFor === null ? null : form.items[serialsFor]?.serial_numbers}
+        available={availableSerials(serialsFor)}
         itemLabel={
           serialsFor === null
             ? ""
             : savedLine(serialsFor)?.item_name ?? `Line ${serialsFor + 1}`
         }
         readOnly={locked}
-        onSave={(serials) => {
-          if (serialsFor !== null) patchLine(serialsFor, { serial_numbers: serials });
+        onSave={(accepted) => {
+          // The units kept are the quantity accepted — one serial is one unit, so
+          // letting the inspector type a different number could only disagree with it.
+          if (serialsFor !== null) {
+            patchLine(serialsFor, {
+              serial_numbers: accepted,
+              ...(availableSerials(serialsFor) ? { accepted_qty: accepted.length } : {}),
+            });
+          }
         }}
       />
 
@@ -525,6 +595,24 @@ export default function QualityInspectionForm({
         error={complete.error}
         onConfirm={() => complete.mutate()}
         onClose={() => setConfirming(false)}
+      />
+
+      <ConfirmModal
+        isOpen={cancelling}
+        title="Cancel this inspection?"
+        message={
+          <>
+            The inspection is closed and its GRN goes back to draft, so the lines can be
+            corrected and submitted again. A GRN with stock already released stays where
+            it is.
+          </>
+        }
+        confirmLabel="Cancel inspection"
+        danger
+        busy={cancel.isPending}
+        error={cancel.error}
+        onConfirm={() => cancel.mutate()}
+        onClose={() => setCancelling(false)}
       />
     </div>
   );

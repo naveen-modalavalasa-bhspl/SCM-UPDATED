@@ -412,6 +412,10 @@ class PutawayRead(_Read):
     suggested_bin_code: str | None = None
     actual_bin_id: int | None = None
     actual_bin_code: str | None = None
+    # Derived from the location tree, not stored — see service._ancestry.
+    actual_bin_path: str | None = None
+    # Stamped at confirm from the storage path; empty until the task is completed.
+    lot_no: str | None = None
     putaway_type: str
     status: str
     assigned_to: int | None = None
@@ -422,6 +426,7 @@ class PutawayRead(_Read):
     completed_at: datetime | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    is_serial_tracked: bool = False
     created_at: datetime | None = None
 
 
