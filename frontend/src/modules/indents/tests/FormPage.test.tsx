@@ -47,6 +47,12 @@ vi.mock("../api", async () => {
         [...scoped(scope), "detail", id] as const,
       offices: (scope: { employeeId: number | null; activePositionId: number | null }) =>
         [...scoped(scope), "offices"] as const,
+      bomChoices: (scope: { employeeId: number | null; activePositionId: number | null }) =>
+        [...scoped(scope), "bom-choices"] as const,
+      bomChoiceItems: (
+        scope: { employeeId: number | null; activePositionId: number | null },
+        bomId: number,
+      ) => [...scoped(scope), "bom-choice-items", bomId] as const,
     },
     isIndentModuleQuery,
     useIndentAccountScope: () => ({ employeeId: 1, activePositionId: 10 }),
@@ -80,6 +86,58 @@ vi.mock("../api", async () => {
     },
     masterApi: {
       items: vi.fn(() => Promise.resolve(mockItems)),
+      boms: vi.fn(() => Promise.resolve([
+        {
+          id: 101,
+          code: "BOM-EMERGENCY",
+          name: "Emergency Kit",
+          project_name: "Main Hospital",
+          description: "Standard emergency supplies",
+          total_items: 2,
+          is_active: true,
+        },
+        {
+          id: 102,
+          code: "BOM-LAB",
+          name: "Lab Starter Kit",
+          total_items: 1,
+          is_active: true,
+        },
+      ])),
+      bomItems: vi.fn((bomId: number) => Promise.resolve(bomId === 102
+        ? [{
+            id: 1003,
+            bom_id: 102,
+            line_no: 1,
+            item_id: 3,
+            item_code: "IT-LT",
+            item_name: "Disinfectant",
+            uom_code: "lt",
+            quantity: null,
+          }]
+        : [
+            {
+              id: 1001,
+              bom_id: 101,
+              line_no: 1,
+              item_id: 1,
+              item_code: "IT-ML",
+              item_name: "Syrup",
+              uom_code: "ml",
+              quantity: 2,
+            },
+            {
+              id: 1002,
+              bom_id: 101,
+              line_no: 2,
+              item_id: 2,
+              item_code: "IT-G",
+              item_name: "Powder",
+              category_name: "Pharmacy",
+              uom_code: "g",
+              quantity: 3,
+            },
+          ])),
     },
   };
 });
@@ -138,6 +196,126 @@ afterEach(() => {
 });
 
 describe("IndentFormPage", () => {
+  it("shows Choose BOM only on a new indent and opens the picker", async () => {
+    const view = renderForm();
+
+    const chooseBom = screen.getByRole("button", { name: "Choose BOM" });
+    fireEvent.click(chooseBom);
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Choose BOM" })).toBeInTheDocument();
+    expect(screen.getByText("Select a saved BOM and adjust before creating."))
+      .toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Emergency Kit/ })).toBeInTheDocument();
+
+    view.unmount();
+    vi.mocked(indentApi.get).mockResolvedValueOnce({
+      id: 42,
+      indent_no: "IND/2026/0042",
+      status: "DRAFT",
+      priority: "NORMAL",
+      required_date: "2026-08-02",
+      total_items: 1,
+      total_qty: 5,
+      is_bookmarked: "NO",
+      can_submit: true,
+      can_approve: false,
+      can_reject: false,
+      created_at: "2026-07-28T10:00:00Z",
+      requested_by_id: 1,
+      items: [{
+        id: 10,
+        item_id: 1,
+        item_code: "IT-ML",
+        item_name: "Syrup",
+        uom_code: "ml",
+        quantity: 5,
+        ordered_quantity: 0,
+        received_quantity: 0,
+      }],
+    });
+    renderForm("/indents/new?edit=42");
+
+    expect(await screen.findByText("Edit IND/2026/0042")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Choose BOM" })).not.toBeInTheDocument();
+  });
+
+  it("lists and searches only BOMs from Masters", async () => {
+    renderForm();
+    fireEvent.click(screen.getByRole("button", { name: "Choose BOM" }));
+
+    expect(await screen.findByRole("button", { name: /Emergency Kit/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Lab Starter Kit/ })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search BOMs" }), {
+      target: { value: "lab" },
+    });
+    expect(screen.queryByRole("button", { name: /Emergency Kit/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Lab Starter Kit/ })).toBeInTheDocument();
+
+    expect(screen.queryByText("Item Groups")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(masterApi.boms).toHaveBeenCalledTimes(1);
+  });
+
+  it("previews BOM items and adds their default quantities without creating an indent", async () => {
+    renderForm();
+    fireEvent.click(screen.getByRole("button", { name: "Choose BOM" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Emergency Kit/ }));
+
+    expect(await screen.findByRole("region", { name: "Included items" })).toBeInTheDocument();
+    expect(screen.getByText("IT-G")).toBeInTheDocument();
+    expect(screen.getByText("Pharmacy")).toBeInTheDocument();
+    expect(masterApi.bomItems).toHaveBeenCalledWith(101);
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this BOM" }));
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("combobox", { name: "Item" })).toHaveLength(2);
+    });
+    expect(screen.getByRole("spinbutton", { name: "Quantity (ml)" })).toHaveValue(2);
+    expect(screen.getByRole("spinbutton", { name: "Quantity (g)" })).toHaveValue(3);
+    expect(indentApi.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps manual items, skips duplicate item_ids, and leaves imported quantities editable", async () => {
+    renderForm();
+    await selectFirstItemAndQuantity("7");
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose BOM" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Emergency Kit/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Use this BOM" }));
+
+    expect(await screen.findByText("Some items were already added and were skipped."))
+      .toBeInTheDocument();
+    expect(screen.getAllByRole("combobox", { name: "Item" })).toHaveLength(2);
+    expect(screen.getByRole("spinbutton", { name: "Quantity (ml)" })).toHaveValue(7);
+
+    const importedQuantity = screen.getByRole("spinbutton", { name: "Quantity (g)" });
+    expect(importedQuantity).toHaveValue(3);
+    fireEvent.change(importedQuantity, { target: { value: "9" } });
+    expect(importedQuantity).toHaveValue(9);
+  });
+
+  it("leaves a missing BOM quantity empty and preserves quantity validation", async () => {
+    renderForm();
+    fireEvent.click(screen.getByRole("button", { name: "Choose BOM" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Lab Starter Kit/ }));
+
+    expect(await screen.findByText("IT-LT")).toBeInTheDocument();
+    expect(screen.getByText("lt")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Use this BOM" }));
+
+    expect(screen.getByRole("spinbutton", { name: "Quantity (lt)" })).toHaveValue(null);
+    fireEvent.change(screen.getByLabelText("Required date"), {
+      target: { value: "2026-07-28" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create indent" }));
+
+    expect(screen.getByText("Quantity is required for this item.")).toBeInTheDocument();
+    expect(indentApi.create).not.toHaveBeenCalled();
+  });
+
   it("loads the existing item list when the form opens", async () => {
     renderForm();
 

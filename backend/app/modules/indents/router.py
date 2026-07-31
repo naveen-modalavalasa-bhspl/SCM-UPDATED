@@ -152,7 +152,7 @@ async def update(indent_id: int, data: IndentUpdate, db: AsyncSession = Depends(
 
 @indent_router.delete("/{indent_id}", status_code=204)
 async def delete_draft(indent_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission("indent.delete"))):
+                       user=Depends(require_permission("indent.view"))):
     await service.delete_indent(db, indent_id, user)
 
 

@@ -5,8 +5,8 @@ import { useAuth } from "@/shared/auth/AuthContext";
 import type { Paginated, Option } from "@/shared/types";
 import type {
   AcknowledgmentRow, ActivityRow, ApprovalDecisionRow, ApprovalDelegation,
-  Indent, IndentCreate, IndentListRow, IndentJourney, IndentNotification,
-  IndentStats, IndentUpdate, PendingApproval, TeamQueueRow,
+  BomChoice, BomChoiceItem, Indent, IndentCreate, IndentListRow, IndentJourney,
+  IndentNotification, IndentStats, IndentUpdate, PendingApproval, TeamQueueRow,
 } from "./types";
 
 export interface IndentQueryParams {
@@ -73,6 +73,10 @@ export const indentKeys = {
     [...indentKeys.all(scope), "journey", id] as const,
   items: (scope: IndentAccountScope, context: unknown = "default") =>
     [...indentKeys.all(scope), "items", context] as const,
+  bomChoices: (scope: IndentAccountScope) =>
+    [...indentKeys.all(scope), "bom-choices"] as const,
+  bomChoiceItems: (scope: IndentAccountScope, bomId: number) =>
+    [...indentKeys.all(scope), "bom-choice-items", bomId] as const,
 };
 
 export function isIndentModuleQuery(query: Query) {
@@ -126,6 +130,27 @@ function toSearchParams(params: object = {}) {
   return searchParams;
 }
 
+async function allMasterRows<T>(
+  url: string,
+  params: Record<string, string | number | undefined> = {},
+) {
+  const size = 500;
+  const first = (
+    await api.get<Paginated<T>>(url, { params: { ...params, size } })
+  ).data;
+  const pageCount = Math.ceil((first.total ?? first.items.length) / size);
+  if (pageCount <= 1) return first.items;
+
+  const remaining = await Promise.all(
+    Array.from({ length: pageCount - 1 }, (_, index) =>
+      api.get<Paginated<T>>(url, {
+        params: { ...params, page: index + 2, size },
+      }).then((response) => response.data.items),
+    ),
+  );
+  return [first.items, ...remaining].flat();
+}
+
 export const indentApi = {
   list: (params: IndentQueryParams = {}) =>
     api.get<Paginated<IndentListRow>>("/api/indents", { params: toSearchParams(params) }).then((r) => r.data),
@@ -172,8 +197,13 @@ export const indentApi = {
 
 export const masterApi = {
   items: (search?: string) =>
-    api.get<Paginated<Option>>("/api/items", { params: { search, size: 100 } }).then((r) => r.data.items),
+    allMasterRows<Option>("/api/items", { search }),
   facilities: () => api.get<{ items: Option[] }>("/api/facilities").then((r) => r.data.items),
+  boms: () =>
+    allMasterRows<BomChoice>("/api/boms")
+      .then((items) => items.filter((bom) => bom.is_active)),
+  bomItems: (bomId: number) =>
+    allMasterRows<BomChoiceItem>("/api/bom-items", { bom_id: bomId }),
 };
 
 export const approvalApi = {

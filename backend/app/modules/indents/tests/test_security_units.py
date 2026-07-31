@@ -519,6 +519,11 @@ async def test_delete_rejects_non_draft_and_non_requester(monkeypatch):
     )
     db = SimpleNamespace(delete=AsyncMock(), commit=AsyncMock())
     monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service.rbac_service,
+        "get_user_permissions",
+        AsyncMock(return_value=set()),
+    )
 
     with pytest.raises(ValidationError):
         await service.delete_indent(db, 77, requester)
@@ -529,6 +534,32 @@ async def test_delete_rejects_non_draft_and_non_requester(monkeypatch):
 
     db.delete.assert_not_awaited()
     db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_permission_allows_deleting_another_requesters_draft(monkeypatch):
+    permitted_user = user(employee_id=20)
+    draft = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        requested_by_id=10,
+        status=IndentStatus.DRAFT.value,
+        total_items=1,
+        total_qty=Decimal("5.000"),
+    )
+    db = SimpleNamespace(delete=AsyncMock(), commit=AsyncMock())
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=draft))
+    monkeypatch.setattr(service, "write_audit", AsyncMock())
+    monkeypatch.setattr(
+        service.rbac_service,
+        "get_user_permissions",
+        AsyncMock(return_value={service.perms.INDENT_DELETE}),
+    )
+
+    await service.delete_indent(db, 77, permitted_user)
+
+    db.delete.assert_awaited_once_with(draft)
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

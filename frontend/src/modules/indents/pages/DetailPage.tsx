@@ -33,7 +33,7 @@ export function IndentDetailPage() {
   const indentId = Number(id);
   const nav = useNavigate();
   const qc = useQueryClient();
-  const { me } = useAuth();
+  const { can, me } = useAuth();
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
   const [error, setError] = useState<string | null>(null);
@@ -130,7 +130,8 @@ export function IndentDetailPage() {
   if (isLoading || !indent) return <Skeleton className="h-40 rounded-2xl" />;
 
   const isDraft = indent.status === "DRAFT";
-  const showDraftActions = isDraft && indent.requested_by_id === me?.employee.id;
+  const isDraftOwner = isDraft && indent.requested_by_id === me?.employee.id;
+  const showDeleteDraft = isDraft && (isDraftOwner || can("indent.delete"));
   const isPending = indent.status === "PENDING_APPROVAL";
   const showActions = indent.can_submit || indent.can_approve || indent.can_reject;
   const actionPending = submit.isPending || approve.isPending || reject.isPending || deleteDraft.isPending;
@@ -147,32 +148,30 @@ export function IndentDetailPage() {
         actions={(
           <div className="flex flex-wrap items-center justify-end gap-2">
             <StatusPill status={indent.status} />
-            {showDraftActions && (
-              <>
-                <Can do="indent.edit">
-                  <Button
-                    variant="primary"
-                    disabled={actionPending}
-                    onClick={() => nav(`/indents/new?edit=${indent.id}`)}
-                  >
-                    <Pencil className="h-4 w-4" /> Edit Indent
-                  </Button>
-                </Can>
-                <Can do="indent.delete">
-                  <Button
-                    variant="danger"
-                    disabled={actionPending}
-                    onClick={() => {
-                      if (window.confirm(`Delete draft ${indent.indent_no}? This cannot be undone.`)) {
-                        deleteDraft.mutate();
-                      }
-                    }}
-                  >
-                    {deleteDraft.isPending ? <InlineSpinner /> : <Trash2 className="h-4 w-4" />}
-                    {deleteDraft.isPending ? "Deleting..." : "Delete Draft"}
-                  </Button>
-                </Can>
-              </>
+            {isDraftOwner && (
+              <Can do="indent.edit">
+                <Button
+                  variant="primary"
+                  disabled={actionPending}
+                  onClick={() => nav(`/indents/new?edit=${indent.id}`)}
+                >
+                  <Pencil className="h-4 w-4" /> Edit Indent
+                </Button>
+              </Can>
+            )}
+            {showDeleteDraft && (
+              <Button
+                variant="danger"
+                disabled={actionPending}
+                onClick={() => {
+                  if (window.confirm(`Delete draft ${indent.indent_no}? This cannot be undone.`)) {
+                    deleteDraft.mutate();
+                  }
+                }}
+              >
+                {deleteDraft.isPending ? <InlineSpinner /> : <Trash2 className="h-4 w-4" />}
+                {deleteDraft.isPending ? "Deleting..." : "Delete Draft"}
+              </Button>
             )}
           </div>
         )}

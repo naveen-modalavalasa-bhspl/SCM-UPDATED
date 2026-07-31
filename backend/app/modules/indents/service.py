@@ -776,10 +776,14 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
 
 async def delete_indent(db: AsyncSession, indent_id: int, user) -> None:
     indent = await get_indent(db, indent_id, user)
-    if indent.requested_by_id != user.id:
-        raise PermissionError_("Only the requester can delete this indent")
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot delete an indent in {indent.status} status")
+    if indent.requested_by_id != user.id:
+        user_perms = await rbac_service.get_user_permissions(
+            db, user, getattr(user, "active_position_id", None),
+        )
+        if perms.INDENT_DELETE not in user_perms:
+            raise PermissionError_("Only the requester can delete this indent")
 
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,

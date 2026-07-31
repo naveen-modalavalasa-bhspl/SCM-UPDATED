@@ -1153,7 +1153,6 @@ async def test_draft_update_and_delete_via_api(client, db, make_user, login):
             "indent.view",
             "indent.create",
             "indent.edit",
-            "indent.delete",
         ],
     )
     headers = await login("draft-owner", "pw")

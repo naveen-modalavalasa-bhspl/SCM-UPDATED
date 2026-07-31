@@ -144,6 +144,10 @@ export interface PendingApproval {
   doc_no?: string | null;
   summary?: string | null;
   requested_by_name?: string | null;
+  amount?: number | null;
+  waiting_since?: string | null;
+  due_at?: string | null;
+  current_stage_name?: string | null;
 }
 
 export interface ApprovalDecisionRow {
@@ -192,6 +196,36 @@ export interface IndentCreate {
 
 export interface IndentUpdate extends IndentCreate {
   office_id?: number | null;
+}
+
+export interface BomChoice {
+  id: number;
+  code: string;
+  name: string;
+  project_name?: string | null;
+  description?: string | null;
+  total_items: number;
+  is_active: boolean;
+}
+
+export interface BomChoiceItem {
+  id: number;
+  bom_id: number;
+  line_no: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  category_name?: string | null;
+  uom_code?: string | null;
+  quantity?: number | null;
+}
+
+export interface TemplateLineItem {
+  item_id: number;
+  item_code: string;
+  item_name: string;
+  uom_code?: string | null;
+  quantity?: number | null;
 }
 
 export interface IndentJourneyStage {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { indentApi } from "../api";
+import { indentApi, masterApi } from "../api";
 
 const apiMock = vi.hoisted(() => ({
   get: vi.fn(),
@@ -52,5 +52,25 @@ describe("indents api", () => {
     expect(params.has("required_by_from")).toBe(false);
     expect(params.has("required_by_to")).toBe(false);
     expect(params.has("priority")).toBe(false);
+  });
+
+  it("reads BOM choices without requesting the Item Group API", async () => {
+    apiMock.get
+      .mockResolvedValueOnce({ data: { items: [{ id: 1, name: "Kit", is_active: true }] } })
+      .mockResolvedValueOnce({ data: { items: [{ id: 2, bom_id: 1, item_id: 9 }] } });
+
+    await masterApi.boms();
+    await masterApi.bomItems(1);
+
+    expect(apiMock.get).toHaveBeenNthCalledWith(1, "/api/boms", {
+      params: { size: 500 },
+    });
+    expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/bom-items", {
+      params: { bom_id: 1, size: 500 },
+    });
+    expect(apiMock.get).not.toHaveBeenCalledWith(
+      "/api/item-groups",
+      expect.anything(),
+    );
   });
 });

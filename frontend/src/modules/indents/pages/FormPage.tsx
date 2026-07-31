@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
 import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -10,7 +10,8 @@ import {
   useIndentAccountCacheIsolation, useIndentAccountScope,
 } from "../api";
 import { ItemCombobox } from "../components/ItemCombobox";
-import type { IndentCreate, IndentUpdate } from "../types";
+import { ChooseBomModal } from "../components/ChooseBomModal";
+import type { IndentCreate, IndentUpdate, TemplateLineItem } from "../types";
 
 interface Line {
   item_id: number | "";
@@ -77,6 +78,8 @@ export function IndentFormPage() {
   );
   const [lines, setLines] = useState<Line[]>([{ item_id: "", quantity: "" }]);
   const [error, setError] = useState<string | null>(null);
+  const [bomPickerOpen, setBomPickerOpen] = useState(false);
+  const [bomNotice, setBomNotice] = useState<string | null>(null);
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
   const today = localDateString();
   const requiredDateError = !requiredDate
@@ -86,7 +89,7 @@ export function IndentFormPage() {
       : null;
   const visibleRequiredDateError = hasAttemptedSubmit ? requiredDateError : null;
 
-  const { data: items = [] } = useQuery({
+  const { data: items = [], error: itemCatalogError } = useQuery({
     queryKey: indentKeys.items(accountScope, "form"),
     queryFn: () => masterApi.items(),
   });
@@ -175,6 +178,38 @@ export function IndentFormPage() {
     setLines((current) => clearResolvedDuplicateErrors(
       current.filter((_, index) => index !== i),
     ));
+  const addTemplateItems = (templateItems: TemplateLineItem[], unavailableCount: number) => {
+    const existingIds = new Set(
+      lines.filter((line) => line.item_id !== "").map((line) => Number(line.item_id)),
+    );
+    const newItems = templateItems.filter((item) => !existingIds.has(item.item_id));
+    const duplicateCount = templateItems.length - newItems.length;
+
+    if (newItems.length > 0) {
+      setLines((current) => {
+        const retained = current.filter((line) => line.item_id !== "");
+        const imported: Line[] = newItems.map((item) => ({
+          item_id: item.item_id,
+          quantity: item.quantity != null && Number(item.quantity) > 0
+            ? Number(item.quantity)
+            : "",
+        }));
+        return clearResolvedDuplicateErrors([
+          ...retained,
+          ...imported,
+        ]);
+      });
+    }
+
+    const notices = [];
+    if (duplicateCount > 0) notices.push("Some items were already added and were skipped.");
+    if (unavailableCount > 0) {
+      notices.push(
+        `${unavailableCount} unavailable ${unavailableCount === 1 ? "item was" : "items were"} skipped.`,
+      );
+    }
+    setBomNotice(notices.join(" ") || `${newItems.length} ${newItems.length === 1 ? "item" : "items"} added.`);
+  };
   const hasSelectedItems = lines.some((line) => line.item_id !== "");
   const duplicateRows = duplicateItemRows(lines);
   const hasDuplicateError = duplicateRows.size > 0
@@ -232,7 +267,18 @@ export function IndentFormPage() {
       <PageHeader
         eyebrow="Indents"
         title={isEditing ? `Edit ${draft?.indent_no ?? "indent"}` : "New request"}
+        actions={!isEditing ? (
+          <Button variant="primary" onClick={() => setBomPickerOpen(true)}>
+            <LibraryBig className="h-4 w-4" /> Choose BOM
+          </Button>
+        ) : undefined}
       />
+
+      {bomNotice && (
+        <div className="mb-4 rounded-xl bg-ok-bg px-4 py-3 text-sm font-medium text-ok" role="status">
+          {bomNotice}
+        </div>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -427,6 +473,17 @@ export function IndentFormPage() {
             : (isEditing ? "Save changes" : "Create indent")}
         </Button>
       </div>
+
+      {!isEditing && (
+        <ChooseBomModal
+          isOpen={bomPickerOpen}
+          accountScope={accountScope}
+          availableItems={items}
+          itemCatalogError={itemCatalogError}
+          onClose={() => setBomPickerOpen(false)}
+          onUse={addTemplateItems}
+        />
+      )}
     </>
   );
 }

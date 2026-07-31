@@ -51,11 +51,12 @@ vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 const mockAccount = vi.hoisted(() => ({
   employeeId: 1 as number | null,
   activePositionId: 10 as number | null,
+  canDeleteIndent: false,
 }));
 
 vi.mock("@/shared/auth/AuthContext", () => ({
   useAuth: () => ({
-    can: () => true,
+    can: (code: string) => code !== "indent.delete" || mockAccount.canDeleteIndent,
     me: {
       employee: { id: mockAccount.employeeId, name: "Test User" },
       active_position: mockAccount.activePositionId
@@ -380,6 +381,7 @@ function activityRow(overrides: Partial<ActivityRow> = {}): ActivityRow {
 beforeEach(() => {
   mockAccount.employeeId = 1;
   mockAccount.activePositionId = 10;
+  mockAccount.canDeleteIndent = false;
   vi.mocked(indentApi.get).mockResolvedValue(detailIndent());
   vi.mocked(indentApi.journey).mockResolvedValue(journeyData());
   vi.mocked(indentApi.submit).mockResolvedValue(detailIndent({ status: "PENDING_APPROVAL", can_submit: false }));
@@ -2290,6 +2292,32 @@ describe("indent UI shell", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("location")).toHaveTextContent("/indents/new?edit=42");
     });
+  });
+
+  it("hides Draft actions from a non-owner without delete permission", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      status: "DRAFT",
+      requested_by_id: 2,
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit Indent" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete Draft" })).not.toBeInTheDocument();
+  });
+
+  it("shows Delete Draft to a permitted non-owner without exposing Edit Indent", async () => {
+    mockAccount.canDeleteIndent = true;
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      status: "DRAFT",
+      requested_by_id: 2,
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByRole("button", { name: "Delete Draft" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit Indent" })).not.toBeInTheDocument();
   });
 
   it("deletes a confirmed Draft and returns to All Requests", async () => {
