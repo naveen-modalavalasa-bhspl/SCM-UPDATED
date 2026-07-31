@@ -9,18 +9,30 @@ import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { getStockLedger, getWarehouses } from "../api";
 import type { StockLedgerItem } from "../types";
 
-// stk_ledger.ref_type — the values the engine actually writes (shared/enums.RefType).
+/**
+ * stk_ledger.ref_type — every value that actually reaches the table.
+ *
+ * The first five come from shared/enums.RefType; the rest are the warehouse module's
+ * own WarehouseDocType, which move_stock() writes verbatim. Putaway lands as RECEIPT
+ * (it is the goods-receipt document being put on a shelf) and a bin-to-bin stock
+ * in/out lands as STOCK_MOVEMENT — without these rows the filter hid real movements.
+ */
 const REF_TYPES = [
   { value: "GRN", label: "Goods Receipt" },
   { value: "ISSUE", label: "Material Issue" },
   { value: "TRANSFER", label: "Stock Transfer" },
   { value: "ADJUSTMENT", label: "Adjustment" },
   { value: "RESERVATION", label: "Reservation" },
+  { value: "RECEIPT", label: "Receipt / Putaway" },
+  { value: "STOCK_MOVEMENT", label: "Stock In / Out (bin move)" },
+  { value: "WH_ISSUE", label: "Warehouse Issue" },
+  { value: "DISPATCH", label: "Dispatch" },
+  { value: "PURCHASE_RETURN", label: "Purchase Return" },
 ];
 
 const DIRECTIONS = [
-  { value: "IN", label: "Receipts (IN)" },
-  { value: "OUT", label: "Issues (OUT)" },
+  { value: "IN", label: "Stock In (IN)" },
+  { value: "OUT", label: "Stock Out (OUT)" },
 ];
 
 /** Comma-safe CSV cell. Export is a plain Blob — no library for six columns. */

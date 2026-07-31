@@ -3,10 +3,12 @@
 Physical stock changes go ONLY through move_stock(); reservation columns go ONLY
 through allocation.py. Nothing else assigns to stk_balance.
 """
+import json
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select, or_, and_
+from sqlalchemy import func, select, or_, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
@@ -21,8 +23,10 @@ from app.platform.hcm.models import HcmFacility
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.models import Role, UserRole
 from app.platform.rbac.service import get_user_permissions
+from app.platform.admin.notifications import recipients_for
+from app.platform.notifications import service as notifications
 from app.platform.rules import evaluator as rules
-from app.platform.settings.service import write_audit
+from app.platform.settings.service import get_setting, set_setting, write_audit
 from app.platform.workflow import engine
 from app.shared.enums import (
     AuditAction, DocType, IndentStatus, InstanceStatus, MRStatus, Priority, RefType,
@@ -30,8 +34,11 @@ from app.shared.enums import (
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
-from app.shared.models.warehouse import Warehouse
+from app.shared.models.warehouse import Warehouse, WarehouseLocation
 from app.shared.numbering import next_number
+
+
+logger = logging.getLogger(__name__)
 
 
 def _d(value) -> Decimal:
@@ -191,6 +198,12 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         created_by_id=user.id, created_by_name=user.full_name,
     ))
     await db.flush()
+
+    # Warehouse-wide availability after this move, and what it was a moment ago.
+    if direction == StockDirection.OUT.value:
+        after = await _available_at(db, item_id, warehouse_id)
+        await notify_if_below_minimum(db, item_id, warehouse_id,
+                                      after + float(qty), after)
     return stock
 
 
@@ -689,18 +702,238 @@ async def get_adjustment(db: AsyncSession, adjustment_id: int) -> StockAdjustmen
 
 # ---------------- Stock Replenishment ----------------
 
+async def get_stock_detail(db: AsyncSession, stock_id: int, user=None) -> dict:
+    """One balance row opened up: every lot of that item in that warehouse, and the
+    full walk down the location tree to each one.
+
+    A stk_balance row is already one lot (item + bin + batch + project), so the answer
+    to "where is this and what else of it is here" is its siblings in the same
+    warehouse. Batch mfg/vendor detail lives in stk_batches, which the warehouse module
+    owns and inventory may not import (rule 5) — batch number and expiry are on the
+    balance row itself and are what the shelf needs.
+    """
+    stock = await db.get(Stock, stock_id)
+    if stock is None:
+        raise NotFoundError(f"Stock row {stock_id} not found")
+    warehouse_ids = await _scoped_warehouse_ids(db, user)
+    if warehouse_ids is not None and stock.warehouse_id not in warehouse_ids:
+        raise PermissionError_("Warehouse is outside your assigned office")
+
+    warehouse = await db.get(Warehouse, stock.warehouse_id)
+    locations = {
+        loc.id: loc for loc in (await db.execute(
+            select(WarehouseLocation)
+            .where(WarehouseLocation.warehouse_id == stock.warehouse_id)
+        )).scalars().all()
+    }
+
+    def path_to(bin_id: int) -> list[str]:
+        """Warehouse -> ... -> bin. Ancestry is walked from parent_id, never stored."""
+        trail, current, guard = [], locations.get(bin_id), 0
+        while current is not None and guard < 20:
+            trail.append(current.name or current.code)
+            current, guard = locations.get(current.parent_id), guard + 1
+        head = warehouse.name if warehouse else str(stock.warehouse_id)
+        return [head, *reversed(trail)]
+
+    rows = (await db.execute(
+        select(Stock)
+        .where(Stock.item_id == stock.item_id, Stock.warehouse_id == stock.warehouse_id)
+        .order_by(Stock.expiry_date.is_(None), Stock.expiry_date.asc(), Stock.bin_id)
+    )).scalars().all()
+
+    today = date.today()
+    lots = [{
+        "id": r.id, "bin_id": r.bin_id, "bin_code": r.bin_code,
+        "batch_id": r.batch_id, "batch_no": r.batch_no, "expiry_date": r.expiry_date,
+        "days_to_expiry": (r.expiry_date - today).days if r.expiry_date else None,
+        "available_qty": float(r.available_qty or 0),
+        "reserved_qty": float(r.reserved_qty or 0),
+        "total_qty": float(r.total_qty or 0),
+        "project_name": r.project_name, "serial_number": r.serial_number,
+        "asset_code": r.asset_code,
+        "location_path": path_to(r.bin_id),
+    } for r in rows]
+
+    return {
+        "id": stock.id, "item_id": stock.item_id, "item_code": stock.item_code,
+        "item_name": stock.item_name, "uom_code": stock.uom_code,
+        "warehouse_id": stock.warehouse_id,
+        "warehouse_name": warehouse.name if warehouse else stock.warehouse_name,
+        "location_path": path_to(stock.bin_id),
+        "total_available": sum(lot["available_qty"] for lot in lots),
+        "total_reserved": sum(lot["reserved_qty"] for lot in lots),
+        "total_on_hand": sum(lot["total_qty"] for lot in lots),
+        "lots": lots,
+    }
+
+
+# ---------------- replenishment rules (per item, per warehouse) ----------------
+#
+# ponytail: the rules live in one sys_settings JSON row, not a new table — the brief
+# forbids schema changes and this is a handful of numbers per item/warehouse. `text`
+# holds ~65 KB, i.e. roughly a thousand rules; move to a stk_ table if it ever fills up.
+REPLENISHMENT_RULES_KEY = "inventory.replenishment_rules"
+
+
+def _rule_key(warehouse_id: int, item_id: int) -> str:
+    return f"{warehouse_id}:{item_id}"
+
+
+async def load_replenishment_rules(db: AsyncSession) -> dict[str, dict]:
+    raw = await get_setting(db, REPLENISHMENT_RULES_KEY)
+    return json.loads(raw) if raw else {}
+
+
+async def list_replenishment_rules(db: AsyncSession, warehouse_id: int | None = None,
+                                   item_id: int | None = None, user=None) -> list[dict]:
+    """Every configured rule, with the live availability it is judged against."""
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    rules_map = await load_replenishment_rules(db)
+
+    out = []
+    for rule in rules_map.values():
+        if warehouse_id and rule["warehouse_id"] != warehouse_id:
+            continue
+        if item_id and rule["item_id"] != item_id:
+            continue
+        if warehouse_ids is not None and rule["warehouse_id"] not in warehouse_ids:
+            continue
+        item = await db.get(Item, rule["item_id"])
+        warehouse = await db.get(Warehouse, rule["warehouse_id"])
+        available = await _available_at(db, rule["item_id"], rule["warehouse_id"])
+        out.append({
+            **rule,
+            "item_code": item.code if item else None,
+            "item_name": item.name if item else None,
+            "uom_code": item.uom_code if item else None,
+            "warehouse_name": warehouse.name if warehouse else None,
+            "available_qty": available,
+            "is_breached": available < rule["min_qty"],
+        })
+    return sorted(out, key=lambda r: (r["warehouse_name"] or "", r["item_name"] or ""))
+
+
+async def save_replenishment_rule(db: AsyncSession, data, user) -> dict:
+    """Create or replace the rule for one item in one warehouse."""
+    if data.max_qty < data.min_qty:
+        raise ValidationError("Maximum quantity cannot be below the minimum")
+    if await db.get(Item, data.item_id) is None:
+        raise NotFoundError(f"Item {data.item_id} not found")
+    if await db.get(Warehouse, data.warehouse_id) is None:
+        raise NotFoundError(f"Warehouse {data.warehouse_id} not found")
+
+    rules_map = await load_replenishment_rules(db)
+    rules_map[_rule_key(data.warehouse_id, data.item_id)] = data.model_dump()
+    await set_setting(db, REPLENISHMENT_RULES_KEY, json.dumps(rules_map),
+                      value_type="json", category="inventory")
+    await write_audit(
+        db, entity="sys_settings", entity_id=0, entity_no=REPLENISHMENT_RULES_KEY,
+        action=AuditAction.UPDATE, actor=user, after=data.model_dump(),
+        summary="Replenishment rule saved")
+    await db.commit()
+    rows = await list_replenishment_rules(db, data.warehouse_id, data.item_id, user)
+    return rows[0]
+
+
+async def delete_replenishment_rule(db: AsyncSession, warehouse_id: int, item_id: int,
+                                    user) -> None:
+    rules_map = await load_replenishment_rules(db)
+    if rules_map.pop(_rule_key(warehouse_id, item_id), None) is None:
+        raise NotFoundError("No replenishment rule for that item and warehouse")
+    await set_setting(db, REPLENISHMENT_RULES_KEY, json.dumps(rules_map),
+                      value_type="json", category="inventory")
+    await write_audit(
+        db, entity="sys_settings", entity_id=0, entity_no=REPLENISHMENT_RULES_KEY,
+        action=AuditAction.DELETE, actor=user,
+        before={"warehouse_id": warehouse_id, "item_id": item_id},
+        summary="Replenishment rule removed")
+    await db.commit()
+
+
+async def _available_at(db: AsyncSession, item_id: int, warehouse_id: int) -> float:
+    stmt = select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
+        Stock.item_id == item_id, Stock.warehouse_id == warehouse_id)
+    return float((await db.execute(stmt)).scalar() or 0)
+
+
+async def notify_if_below_minimum(db: AsyncSession, item_id: int, warehouse_id: int,
+                                  before_qty: float, after_qty: float) -> None:
+    """Tell the warehouse and inventory when a move takes an item under its minimum.
+
+    Only on the crossing, so a warehouse that is already short is not re-notified on
+    every issue. Never raises: a stock movement must not fail because nobody could be
+    told about it.
+    """
+    try:
+        rule = (await load_replenishment_rules(db)).get(_rule_key(warehouse_id, item_id))
+        if not rule or not (before_qty >= rule["min_qty"] > after_qty):
+            return
+
+        warehouse = await db.get(Warehouse, warehouse_id)
+        item = await db.get(Item, item_id)
+        targets = await recipients_for(db, "STOCK_BELOW_THRESHOLD")
+        if warehouse is not None and warehouse.incharge_id:
+            targets = targets | {warehouse.incharge_id}
+        if not targets:
+            return
+
+        await notifications.notify(
+            db, targets,
+            title=f"{item.code if item else item_id} below minimum",
+            body=(f"{after_qty:g} left at {warehouse.name if warehouse else warehouse_id} "
+                  f"(minimum {rule['min_qty']:g}, reorder {rule['reorder_qty']:g})."),
+            deep_link="/inventory/replenishment",
+            entity_type="stk_balance", entity_id=item_id,
+        )
+    except Exception:  # noqa: BLE001 — see docstring
+        logger.exception("Replenishment notification failed for item %s wh %s",
+                         item_id, warehouse_id)
+
+
 async def get_stock_replenishment(db: AsyncSession, warehouse_id: int | None = None,
                                   category_id: int | None = None,
                                   criticality: str | None = None, user=None) -> list[dict]:
-    """Items where total available quantity is below reorder level."""
+    """What needs reordering: rule breaches first, then plain reorder-level shortfalls."""
     warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
     can_view_valuation = await _can_view_valuation(db, user)
+
+    results = []
+    ruled_items = set()
+    for rule in await list_replenishment_rules(db, warehouse_id, user=user):
+        ruled_items.add(rule["item_id"])
+        if not rule["is_breached"]:
+            continue
+        item = await db.get(Item, rule["item_id"])
+        if category_id and (item is None or item.category_id != category_id):
+            continue
+        results.append({
+            "item_id": rule["item_id"],
+            "item_code": rule["item_code"], "item_name": rule["item_name"],
+            "uom_code": rule["uom_code"],
+            "category_name": str(item.category_id) if item and item.category_id else None,
+            "warehouse_id": rule["warehouse_id"],
+            "warehouse_name": rule["warehouse_name"],
+            "available_qty": rule["available_qty"],
+            "reorder_level": rule["min_qty"],
+            "min_order_qty": rule["reorder_qty"],
+            # Top back up to max if one is set, else order the configured reorder batch.
+            "suggested_order_qty": max(
+                rule["reorder_qty"], rule["max_qty"] - rule["available_qty"]),
+            "lead_time_days": getattr(item, "lead_time_days", 7),
+            "last_purchase_price": (
+                float(getattr(item, "purchase_price", 0) or 0)
+                if can_view_valuation else None
+            ),
+            "criticality": criticality or "HIGH",
+        })
+
     stmt = select(Item).where(Item.is_active.is_(True), Item.reorder_level.isnot(None), Item.reorder_level > 0)
     if category_id:
         stmt = stmt.where(Item.category_id == category_id)
 
-    items = list((await db.execute(stmt)).scalars().all())
-    results = []
+    items = [i for i in (await db.execute(stmt)).scalars().all()
+             if i.id not in ruled_items]
 
     for item in items:
         stock_stmt = select(func.coalesce(func.sum(Stock.available_qty), 0)).where(

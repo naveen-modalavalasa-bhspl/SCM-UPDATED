@@ -753,16 +753,7 @@ class Attachment(Base):
     created_at = created_at_col()
 
 
-class Notification(Base):
-    """`sys_notifications`. Raised when a document needs someone."""
-    __tablename__ = "sys_notifications"
-
-    id = pk()
-    employee_id = Column(BigInteger, index=True, nullable=False)
-    title = Column(String(200), nullable=False)
-    body = Column(String(1000), nullable=True)
-    entity_type = Column(String(50), nullable=True)
-    entity_id = Column(BigInteger, nullable=True)
-    deep_link = Column(String(300), nullable=True)
-    is_read = Column(Boolean, nullable=False, default=False)
-    created_at = created_at_col()
+# `sys_notifications` moved to platform/settings/models.py — the app shell's bell and
+# inventory both need it, and neither may import this module (rule 5). Re-exported so
+# `m.Notification` keeps working across the warehouse service and its screens.
+from app.platform.settings.models import Notification  # noqa: E402,F401

@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch } from "@heroui/react";
 import { ArrowLeft, Pencil, Plus, Printer } from "lucide-react";
 import { Button, Can, Card, Field, Input, PageHeader, Select, SubNav } from "@/shared/components";
-import { ConfirmModal, ErrorBanner } from "../../components/Feedback";
+import { ConfirmModal, ErrorBanner } from "@/shared/components";
 import { MetaCard, MetaRow } from "../../components/DocumentMeta";
 import { BinTree, flattenBins } from "../../components/BinTree";
 import { LabelSheet, type LabelSpec } from "../../components/LabelPrint";

@@ -391,6 +391,53 @@ export interface StockOverviewKPIs {
   dead_stock_count: number;
 }
 
+/** One lot inside a warehouse: its batch, its expiry, and the walk down to its bin. */
+export interface StockLot {
+  id: number;
+  bin_id: number;
+  bin_code?: string | null;
+  batch_id: number;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  days_to_expiry?: number | null;
+  available_qty: number;
+  reserved_qty: number;
+  total_qty: number;
+  project_name?: string | null;
+  serial_number?: string | null;
+  asset_code?: string | null;
+  location_path: string[];
+}
+
+export interface StockDetail {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  location_path: string[];
+  total_available: number;
+  total_reserved: number;
+  total_on_hand: number;
+  lots: StockLot[];
+}
+
+export interface ReplenishmentRule {
+  warehouse_id: number;
+  item_id: number;
+  min_qty: number;
+  max_qty: number;
+  reorder_qty: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  warehouse_name?: string | null;
+  available_qty?: number;
+  is_breached?: boolean;
+}
+
 export interface ReservationRow {
   id: number;
   stock_id: number;

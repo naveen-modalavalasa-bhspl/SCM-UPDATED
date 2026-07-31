@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Switch } from "@heroui/react";
 import { ArrowLeft } from "lucide-react";
 import { Button, Field, Input, PageHeader, Select } from "@/shared/components";
-import { ErrorBanner } from "../../components/Feedback";
+import { ErrorBanner } from "@/shared/components";
 import { Section } from "../../components/DocumentMeta";
 import { Lookup } from "../../components/Lookup";
 import { createWarehouse, employeeOptions, getWarehouse, updateWarehouse } from "../../api";

@@ -4,7 +4,7 @@ import { Thermometer } from "lucide-react";
 import {
   Card, ResponsiveList, Select, StatusPill, type Column,
 } from "@/shared/components";
-import { ErrorBanner } from "../../components/Feedback";
+import { ErrorBanner } from "@/shared/components";
 import { MetaGrid, MetaRow } from "../../components/DocumentMeta";
 import { listLocations, warehouseOptions } from "../../api";
 import { fmtQty, humanise } from "../../format";

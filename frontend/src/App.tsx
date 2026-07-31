@@ -42,8 +42,6 @@ import { StockLedgerView } from "@/modules/inventory/components/StockLedgerView"
 import { StockReplenishmentView } from "@/modules/inventory/components/StockReplenishmentView";
 import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
 import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
-import { CycleCountsView } from "@/modules/inventory/components/CycleCountsView";
-import { ReservationsView } from "@/modules/inventory/components/ReservationsView";
 import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
 import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
@@ -54,6 +52,7 @@ import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
 import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
 import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
+import { ToastProvider } from "@/shared/components";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -100,8 +99,6 @@ function AppRoutes() {
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
         <Route path="inventory/transfers" element={<StockTransferView />} />
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
-        <Route path="inventory/cycle-counts" element={<CycleCountsView />} />
-        <Route path="inventory/reservations" element={<ReservationsView />} />
         <Route path="inventory/valuation" element={<StockValuationView />} />
         <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
@@ -134,9 +131,12 @@ function Shell() {
   const navigate = useNavigate();
   return (
     <HeroUIProvider navigate={navigate} useHref={useHref}>
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
+      {/* Outside AuthProvider so a toast can fire during login too. */}
+      <ToastProvider>
+        <AuthProvider>
+          <AppRoutes />
+        </AuthProvider>
+      </ToastProvider>
     </HeroUIProvider>
   );
 }

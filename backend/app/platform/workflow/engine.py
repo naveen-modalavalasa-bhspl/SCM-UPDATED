@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm import service as hcm_service
 from app.platform.hcm.models import HcmPositionAssignment
+from app.platform.notifications import service as notifications
 from app.platform.workflow import fallback, ladder, resolver
 from app.platform.workflow.conditions import stage_applies
 from app.platform.workflow.models import (
@@ -235,6 +236,43 @@ async def _next_reporting_ladder_approvers(
     ), is_final
 
 
+async def _notify_pending(db: AsyncSession, instance: Instance, approvers: list,
+                          context: dict) -> None:
+    """Tell the people a document has just landed on.
+
+    Every route that creates a wf_pending row comes through here, so an approver is
+    told once per stage no matter which path put it in front of them. Before this,
+    nothing anywhere wrote sys_notifications for an approval: the queue filled up and
+    the only way to find out was to go and look.
+    """
+    await notifications.notify(
+        db,
+        [a.id for a in approvers],
+        title=f"{instance.doc_no or instance.doc_type} needs your approval",
+        body=(context.get("doc_summary")
+              or f"Raised by {instance.started_by_name or 'a colleague'}"),
+        deep_link=notifications.link_for(instance.doc_type, instance.doc_id),
+        entity_type=instance.doc_type,
+        entity_id=instance.doc_id,
+    )
+
+
+async def _notify_outcome(db: AsyncSession, instance: Instance, approved: bool,
+                          actor, comments: str = "") -> None:
+    """Tell the raiser how it went. They started this and never hear back otherwise."""
+    verdict = "approved" if approved else "rejected"
+    await notifications.notify(
+        db,
+        [instance.started_by_id],
+        title=f"{instance.doc_no or instance.doc_type} {verdict}",
+        body=(f"{getattr(actor, 'full_name', 'An approver')} {verdict} it."
+              + (f" “{comments}”" if comments else "")),
+        deep_link=notifications.link_for(instance.doc_type, instance.doc_id),
+        entity_type=instance.doc_type,
+        entity_id=instance.doc_id,
+    )
+
+
 async def _materialize_specific_pending(
     db: AsyncSession, instance: Instance, approvers: list, context: dict,
 ) -> None:
@@ -252,6 +290,7 @@ async def _materialize_specific_pending(
             due_at=instance.due_at,
         ))
     await db.flush()
+    await _notify_pending(db, instance, approvers, context)
 
 
 async def _materialize_pending(
@@ -293,6 +332,7 @@ async def _materialize_pending(
             due_at=instance.due_at,
         ))
     await db.flush()
+    await _notify_pending(db, instance, approvers, context)
     return approvers
 
 
@@ -428,6 +468,7 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
         instance.status = InstanceStatus.REJECTED.value
         instance.completed_at = utcnow()
         await _clear_pending(db, instance.id)
+        await _notify_outcome(db, instance, False, user, comments)
         await db.flush()
         return instance
 
@@ -445,6 +486,7 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
         await _open_ladder_link(db, instance, nxt[0], context)
     else:
         await _finish_ladder(db, instance)
+        await _notify_outcome(db, instance, True, user, comments)
     await db.flush()
     return instance
 
@@ -572,6 +614,7 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
         instance.status = InstanceStatus.REJECTED.value
         instance.completed_at = utcnow()
         await _clear_pending(db, instance.id)
+        await _notify_outcome(db, instance, False, user, comments)
         await db.flush()
         return instance
 
@@ -608,10 +651,12 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
                 instance.status = InstanceStatus.APPROVED.value
                 instance.completed_at = utcnow()
                 instance.current_stage_name = None
+                await _notify_outcome(db, instance, True, user, comments)
         else:
             instance.status = InstanceStatus.APPROVED.value
             instance.completed_at = utcnow()
             instance.current_stage_name = None
+            await _notify_outcome(db, instance, True, user, comments)
     await db.flush()
     return instance
 

@@ -96,6 +96,7 @@ def _include_routers() -> None:
         "app.platform.auth.router",
         "app.platform.hcm.router",
         "app.platform.settings.router",
+        "app.platform.notifications.router",
         "app.platform.rbac.router",
         "app.platform.workflow.router",
         "app.platform.rules.router",

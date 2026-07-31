@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { IndianRupee, TriangleAlert, CalendarClock, Lock, History } from "lucide-react";
+import { IndianRupee, TriangleAlert, CalendarClock, Lock, History, RefreshCw } from "lucide-react";
 import { Button, Card, PageHeader, StatCard } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { getOverviewKPIs } from "../api";
@@ -11,16 +11,31 @@ const inr = (n: number) => `₹${n.toLocaleString("en-IN", { minimumFractionDigi
 export function InventoryOverviewPage() {
   const { can } = useAuth();
   const canViewValuation = can("stock.valuation.view");
-  const { data: k, isLoading } = useQuery<StockOverviewKPIs>({
+  // A dashboard nobody has to reload: the numbers move whenever stock does, so the
+  // page refetches on focus and on a slow tick rather than serving whatever was
+  // cached when it first mounted.
+  const { data: k, isLoading, isFetching, dataUpdatedAt, refetch } = useQuery<StockOverviewKPIs>({
     queryKey: ["stock-overview-kpis"],
     queryFn: getOverviewKPIs,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
   });
 
-  const onHand = (k?.total_reserved_qty ?? 0) + (k?.total_available_qty ?? 0);
+  const onHand = k?.total_available_qty ?? 0;
 
   return (
     <div>
-      <PageHeader eyebrow="Inventory" title="Overview & Analytics" />
+      <PageHeader
+        eyebrow="Inventory"
+        title="Overview & Analytics"
+        actions={
+          <Button variant="ghost" disabled={isFetching} onClick={() => refetch()}>
+            <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} />
+            {dataUpdatedAt ? `Updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : "Refresh"}
+          </Button>
+        }
+      />
 
       {isLoading ? (
         <div className="p-6 text-sm text-muted">Loading inventory KPIs…</div>
@@ -57,7 +72,7 @@ export function InventoryOverviewPage() {
               <p className="text-sm text-body">
                 <strong>{k?.dead_stock_count ?? 0}</strong> items have not moved in over 60 days.
               </p>
-              <p className="mt-1 text-xs text-muted">Total on-hand across all warehouses: {onHand.toFixed(2)}</p>
+              <p className="mt-1 text-xs text-muted">Total available across all warehouses: {onHand.toFixed(2)}</p>
             </Card>
 
             <Card className="p-5">

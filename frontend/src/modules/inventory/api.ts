@@ -9,8 +9,10 @@ import type {
   MaterialRequestListRow,
   MovementRow,
   Page,
+  ReplenishmentRule,
   StockBalanceFilter,
   StockBalanceItem,
+  StockDetail,
   StockLedgerFilter,
   StockLedgerItem,
   StockRow,
@@ -237,11 +239,22 @@ export const rejectStockAdjustment = (id: number) =>
 export const getReplenishments = (params?: { warehouse_id?: number; category_id?: number; criticality?: string }) =>
   api.get("/api/stock/replenishment", { params }).then((r) => r.data);
 
-export const getReservations = (params?: { item_id?: number; warehouse_id?: number; status?: string; page?: number; size?: number }) =>
-  api.get("/api/reservations", { params }).then((r) => r.data);
+/** Every lot of this row's item in this row's warehouse, plus the path to each bin. */
+export const getStockDetail = (stockId: number) =>
+  api.get<StockDetail>(`/api/stock/${stockId}/detail`).then((r) => r.data);
 
-export const releaseReservation = (id: number) =>
-  api.post(`/api/reservations/${id}/release`).then((r) => r.data);
+export const listReplenishmentRules = (params?: { warehouse_id?: number; item_id?: number }) =>
+  api.get<ReplenishmentRule[]>("/api/stock/replenishment-rules", { params: clean(params ?? {}) })
+    .then((r) => r.data);
+
+export const saveReplenishmentRule = (rule: ReplenishmentRule) =>
+  api.put<ReplenishmentRule>("/api/stock/replenishment-rules", {
+    warehouse_id: rule.warehouse_id, item_id: rule.item_id,
+    min_qty: rule.min_qty, max_qty: rule.max_qty, reorder_qty: rule.reorder_qty,
+  }).then((r) => r.data);
+
+export const deleteReplenishmentRule = (warehouseId: number, itemId: number) =>
+  api.delete<void>(`/api/stock/replenishment-rules/${warehouseId}/${itemId}`).then((r) => r.data);
 
 export const getItemAvailability = (itemId: number, projectId?: number, warehouseId?: number) =>
   api.get(`/api/stock/${itemId}/availability`, { params: { project_id: projectId, warehouse_id: warehouseId } }).then((r) => r.data);
@@ -272,22 +285,6 @@ export const dispatchSTO = (id: number) =>
 
 export const receiveSTO = (id: number) =>
   api.post(`/api/stock/sto/${id}/receive`).then((r) => r.data);
-
-export const createCycleCount = (data: any) =>
-  api.post("/api/stock/cycle-counts", data).then((r) => r.data);
-
-export const listCycleCounts = (params?: { warehouse_id?: number; status?: string; page?: number; size?: number }) =>
-  api.get("/api/stock/cycle-counts", { params }).then((r) => r.data);
-
-export const getCycleCount = (id: number) =>
-  api.get(`/api/stock/cycle-counts/${id}`).then((r) => r.data);
-
-export const updateCycleCount = (id: number, data: any) =>
-  api.put(`/api/stock/cycle-counts/${id}`, data).then((r) => r.data);
-
-export const postCycleCount = (id: number) =>
-  api.post(`/api/stock/cycle-counts/${id}/post`).then((r) => r.data);
-
 
 export const approveAllocation = (id: number, comments = "") =>
   api.post(`/api/allocations/${id}/approve`, { comments }).then((r) => r.data);

@@ -5,13 +5,15 @@ import {
 } from "@heroui/react";
 import { Check, Copy, KeyRound, Search, ShieldOff, UserPlus } from "lucide-react";
 import {
-  Button, Can, PageHeader, ResponsiveList, Select, StatCard, type Column,
+  Button, Can, ConfirmModal, PageHeader, ResponsiveList, Select, StatCard,
+  useAction, type Column,
 } from "@/shared/components";
 import { rbacApi } from "../api";
 import { PermissionMatrix } from "../components/PermissionMatrix";
 import { ReportingView } from "../components/ReportingView";
 import { AccessLookup } from "../components/AccessLookup";
-import type { AdminUserRow, GrantResult } from "../types";
+// Aliased: the component below is also called PageAccessMatrix.
+import type { AdminUserRow, GrantResult, PageAccessMatrix as PageAccessData } from "../types";
 
 const PAGE_SIZE = 50;
 
@@ -60,22 +62,26 @@ export function UsersPage() {
     onError: (e: Error) => setError(e.message),
   });
 
-  const saveRoles = useMutation({
-    mutationFn: () => rbacApi.users.setRoles(selected!.employee_id, roleIds),
-    onSuccess: () => { setSelected(null); refresh(); },
-    onError: (e: Error) => setError(e.message),
+  const saveRoles = useAction({
+    run: () => rbacApi.users.setRoles(selected!.employee_id, roleIds),
+    success: () => `Roles updated for ${selected?.full_name ?? "this user"}`,
+    onDone: () => { setSelected(null); refresh(); },
   });
 
-  const revoke = useMutation({
-    mutationFn: (id: number) => rbacApi.users.revoke(id),
-    onSuccess: () => { setSelected(null); refresh(); },
-    onError: (e: Error) => setError(e.message),
+  /* Revoking locks someone out and resetting invalidates the password they are using
+     right now. Both were a single click on a small button inside an open modal. */
+  const [confirmAction, setConfirmAction] = useState<"revoke" | "reset" | null>(null);
+
+  const revoke = useAction({
+    run: (id: number) => rbacApi.users.revoke(id),
+    success: () => `Access revoked for ${selected?.full_name ?? "this user"}`,
+    onDone: () => { setConfirmAction(null); setSelected(null); refresh(); },
   });
 
-  const reset = useMutation({
-    mutationFn: (id: number) => rbacApi.users.resetPassword(id),
-    onSuccess: (r) => { setIssued(r); refresh(); },
-    onError: (e: Error) => setError(e.message),
+  const reset = useAction({
+    run: (id: number) => rbacApi.users.resetPassword(id),
+    success: "Password reset — copy the new one before closing",
+    onDone: (r) => { setConfirmAction(null); setIssued(r); refresh(); },
   });
 
   const open = (row: AdminUserRow) => {
@@ -344,12 +350,12 @@ export function UsersPage() {
                   {selected?.has_access && (
                     <Can do="admin.users.manage">
                       <Button variant="ghost" className="text-bad hover:bg-bad-bg"
-                              onClick={() => revoke.mutate(selected.employee_id)}
+                              onClick={() => setConfirmAction("revoke")}
                               disabled={revoke.isPending}>
                         <ShieldOff className="h-4 w-4" /> Revoke
                       </Button>
                       <Button variant="ghost"
-                              onClick={() => reset.mutate(selected.employee_id)}
+                              onClick={() => setConfirmAction("reset")}
                               disabled={reset.isPending}>
                         <KeyRound className="h-4 w-4" /> Reset password
                       </Button>
@@ -376,21 +382,81 @@ export function UsersPage() {
           )}
         </ModalContent>
       </Modal>
+
+      <ConfirmModal
+        isOpen={confirmAction !== null}
+        title={
+          confirmAction === "revoke"
+            ? `Revoke access for ${selected?.full_name}?`
+            : `Reset the password for ${selected?.full_name}?`
+        }
+        message={
+          confirmAction === "revoke"
+            ? "They are signed out and cannot log in again until access is granted afresh. Their roles are removed."
+            : "Their current password stops working immediately. A new one is shown once and cannot be retrieved later."
+        }
+        confirmLabel={confirmAction === "revoke" ? "Revoke access" : "Reset password"}
+        danger={confirmAction === "revoke"}
+        busy={revoke.isPending || reset.isPending}
+        error={revoke.error ?? reset.error}
+        onConfirm={() => {
+          if (!selected) return;
+          if (confirmAction === "revoke") revoke.mutate(selected.employee_id);
+          else reset.mutate(selected.employee_id);
+        }}
+        onClose={() => setConfirmAction(null)}
+      />
     </>
   );
 }
 
 
+type AccessPage = PageAccessData["pages"][number];
+
+/** Pages that are granted and revoked together, because they share one permission. */
+interface PageGroup {
+  permission: string | null;
+  pages: AccessPage[];
+  alwaysOn: boolean;
+}
+
+/**
+ * Pages sharing a `required_permission` are one switch, not many.
+ *
+ * Access is stored only as role -> permission (`rbac_role_permissions`); there is no
+ * per-page grant table. Twelve pages hang off `indent.view` alone. A column per page
+ * therefore promised something the data cannot do: unticking one of the twelve left
+ * the permission in place — because the other eleven still needed it — and the box
+ * came straight back on the next refetch. The screen looked frozen.
+ *
+ * Grouping makes the control match what is actually stored, so every click sticks.
+ */
+export function groupPagesByPermission(pages: AccessPage[]): PageGroup[] {
+  const groups = new Map<string, PageGroup>();
+  pages.forEach((page) => {
+    // Always-on pages have no permission to share; each stands alone and is read-only.
+    const key = page.always_on ? `always:${page.code}` : `perm:${page.required_permission}`;
+    const existing = groups.get(key);
+    if (existing) existing.pages.push(page);
+    else groups.set(key, {
+      permission: page.required_permission ?? null,
+      pages: [page],
+      alwaysOn: page.always_on,
+    });
+  });
+  return [...groups.values()];
+}
+
 function PageAccessMatrix() {
-  const qc = useQueryClient();
   const matrix = useQuery({
     queryKey: ["rbac", "page-access"],
     queryFn: rbacApi.pageAccess,
   });
-  const update = useMutation({
-    mutationFn: ({ roleId, pageCodes }: { roleId: number; pageCodes: string[] }) =>
+  const update = useAction({
+    run: ({ roleId, pageCodes }: { roleId: number; pageCodes: string[] }) =>
       rbacApi.setPageAccess(roleId, pageCodes),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rbac", "page-access"] }),
+    success: "Page access updated",
+    invalidates: [["rbac", "page-access"]],
   });
 
   if (matrix.isLoading) {
@@ -404,10 +470,15 @@ function PageAccessMatrix() {
     </div>;
   }
 
-  const toggle = (roleId: number, held: string[], pageCode: string) => {
-    const next = held.includes(pageCode)
-      ? held.filter((code) => code !== pageCode)
-      : [...held, pageCode];
+  const groups = groupPagesByPermission(matrix.data.pages);
+
+  /** Every page in the group moves together — the permission behind them is one row. */
+  const toggle = (roleId: number, held: string[], group: PageGroup) => {
+    const codes = group.pages.map((page) => page.code);
+    const on = codes.every((code) => held.includes(code));
+    const next = on
+      ? held.filter((code) => !codes.includes(code))
+      : [...held, ...codes.filter((code) => !held.includes(code))];
     update.mutate({ roleId, pageCodes: next });
   };
 
@@ -417,6 +488,7 @@ function PageAccessMatrix() {
         <h2 className="text-base font-semibold text-ink">Page access by role</h2>
         <p className="mt-1 text-sm text-muted">
           HCM roles are listed first. My Desk and other public pages are always available.
+          Pages that share a permission are granted together and are shown as one column.
         </p>
       </div>
       <div className="overflow-x-auto">
@@ -426,10 +498,18 @@ function PageAccessMatrix() {
               <th className="sticky left-0 z-10 min-w-56 bg-content2 px-4 py-3 text-left font-semibold text-ink">
                 Role
               </th>
-              {matrix.data.pages.map((page) => (
-                <th key={page.code}
-                    className="max-w-36 px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-body">
-                  {page.name}
+              {groups.map((group) => (
+                <th key={group.permission ?? group.pages[0].code}
+                    className="max-w-44 px-3 py-3 align-bottom text-center text-xs font-semibold text-body">
+                  <div className="uppercase tracking-wide">
+                    {group.pages.map((page) => page.name).join(" · ")}
+                  </div>
+                  {group.permission && (
+                    <div className="mt-1 font-mono text-[10px] font-normal normal-case text-muted">
+                      {group.permission}
+                      {group.pages.length > 1 && ` · ${group.pages.length} pages`}
+                    </div>
+                  )}
                 </th>
               ))}
             </tr>
@@ -441,18 +521,23 @@ function PageAccessMatrix() {
                   <div className="font-semibold text-ink">{role.name}</div>
                   <div className="text-[11px] font-medium text-muted">{role.source}</div>
                 </td>
-                {matrix.data.pages.map((page) => {
-                  const checked = page.always_on || role.page_codes.includes(page.code);
+                {groups.map((group) => {
+                  const checked = group.alwaysOn
+                    || group.pages.every((page) => role.page_codes.includes(page.code));
                   return (
-                    <td key={page.code} className="px-3 py-3 text-center">
+                    <td key={group.permission ?? group.pages[0].code} className="px-3 py-3 text-center">
                       <button
                         type="button"
-                        disabled={page.always_on || update.isPending}
-                        title={page.always_on ? "Always on" : `${role.name}: ${page.name}`}
-                        onClick={() => toggle(role.id, role.page_codes, page.code)}
+                        disabled={group.alwaysOn || update.isPending}
+                        title={
+                          group.alwaysOn
+                            ? "Always on"
+                            : `${role.name}: ${group.permission} — ${group.pages.map((p) => p.name).join(", ")}`
+                        }
+                        onClick={() => toggle(role.id, role.page_codes, group)}
                         className={`inline-flex h-6 w-6 items-center justify-center rounded-md border transition ${
                           checked
-                            ? page.always_on
+                            ? group.alwaysOn
                               ? "border-line bg-content2 text-muted"
                               : "border-brand bg-brand text-white"
                             : "border-line bg-content1 text-transparent hover:border-brand"

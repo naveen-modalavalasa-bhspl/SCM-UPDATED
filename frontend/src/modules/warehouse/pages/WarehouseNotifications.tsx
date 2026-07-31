@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, CheckCheck } from "lucide-react";
 import { Button, Card, PageHeader, SubNav } from "@/shared/components";
-import { EmptyState, ErrorBanner } from "../components/Feedback";
+import { EmptyState, ErrorBanner } from "@/shared/components";
 import { listNotifications, markAllNotificationsRead, markNotificationRead } from "../api";
 import { fmtDateTime } from "../format";
 
