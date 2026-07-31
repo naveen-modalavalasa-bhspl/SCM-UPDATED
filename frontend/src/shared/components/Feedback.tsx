@@ -1,14 +1,18 @@
 import type { ReactNode } from "react";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import { AlertTriangle, Inbox } from "lucide-react";
-import { Button, Card } from "@/shared/components";
+// Straight from ./ui, not the barrel: the barrel re-exports this file, and a module
+// that imports its own barrel is a cycle waiting to bite at load time.
+import { Button, Card } from "./ui";
 
 /**
  * Error, empty and confirm surfaces.
  *
  * The screens this replaced popped an antd `message` toast for every failure, which
  * vanished after three seconds and left the form looking like it had saved. A failed
- * write stays on screen here until the user does something about it.
+ * write stays on screen here until the user does something about it. That rule still
+ * holds now this lives in `shared/`: `<Toast>` announces successes, which are safe to
+ * miss; failures belong in an `<ErrorBanner>` that stays put.
  */
 
 /** Renders nothing when there is no error, so call sites need no conditional. */

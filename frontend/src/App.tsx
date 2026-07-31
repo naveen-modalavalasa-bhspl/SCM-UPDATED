@@ -52,6 +52,7 @@ import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
 import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
 import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
+import { ToastProvider } from "@/shared/components";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -130,9 +131,12 @@ function Shell() {
   const navigate = useNavigate();
   return (
     <HeroUIProvider navigate={navigate} useHref={useHref}>
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
+      {/* Outside AuthProvider so a toast can fire during login too. */}
+      <ToastProvider>
+        <AuthProvider>
+          <AppRoutes />
+        </AuthProvider>
+      </ToastProvider>
     </HeroUIProvider>
   );
 }

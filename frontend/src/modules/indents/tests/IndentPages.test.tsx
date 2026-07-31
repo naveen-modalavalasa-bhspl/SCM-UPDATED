@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ToastProvider } from "@/shared/components";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -162,7 +163,10 @@ function createTestQueryClient() {
 
 function renderWithProviders(ui: ReactElement, route = "/indents", client = createTestQueryClient()) {
   const result = render(
+    // ToastProvider mirrors App.tsx: screens now report success through it, and a
+    // page rendered without one throws rather than quietly losing its feedback.
     <QueryClientProvider client={client}>
+      <ToastProvider>
       <MemoryRouter initialEntries={[route]}>
         <Routes>
           <Route path="/indents/:id/journey" element={ui} />
@@ -171,6 +175,7 @@ function renderWithProviders(ui: ReactElement, route = "/indents", client = crea
           <Route path="*" element={ui} />
         </Routes>
       </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -2520,12 +2525,16 @@ describe("indent UI shell", () => {
     mockAccount.employeeId = 2;
     mockAccount.activePositionId = 20;
     view.rerender(
+      // Same provider stack as renderWithProviders — a rerender that drops one
+      // unmounts and remounts the tree, which is not what this test is about.
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={["/indents/42"]}>
-          <Routes>
-            <Route path="/indents/:id" element={<IndentDetailPage />} />
-          </Routes>
-        </MemoryRouter>
+        <ToastProvider>
+          <MemoryRouter initialEntries={["/indents/42"]}>
+            <Routes>
+              <Route path="/indents/:id" element={<IndentDetailPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
       </QueryClientProvider>,
     );
 

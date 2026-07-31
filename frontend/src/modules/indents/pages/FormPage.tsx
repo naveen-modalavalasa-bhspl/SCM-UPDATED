@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { CardBody } from "@heroui/react";
-import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
+import {
+  PageHeader, Button, Card, ErrorBanner, Field, Input, Select, useAction,
+} from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import {
   indentApi, indentKeys, isIndentModuleQuery, masterApi,
@@ -36,7 +38,6 @@ export function IndentFormPage() {
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
   const [lines, setLines] = useState<Line[]>([{ item_id: "", quantity: "" }]);
-  const [error, setError] = useState<string | null>(null);
   const today = localDateString();
   const requiredDateError = requiredDate && requiredDate < today
     ? PAST_REQUIRED_DATE_ERROR
@@ -47,8 +48,8 @@ export function IndentFormPage() {
     queryFn: () => masterApi.items(),
   });
 
-  const create = useMutation({
-    mutationFn: () =>
+  const create = useAction({
+    run: () =>
       indentApi.create({
         priority,
         required_date: requiredDate || null,
@@ -57,11 +58,13 @@ export function IndentFormPage() {
           .filter((l) => l.item_id !== "" && l.quantity !== "")
           .map((l) => ({ item_id: Number(l.item_id), quantity: Number(l.quantity) })),
     }),
-    onSuccess: (indent) => {
+    // Names the document, because the screen navigates away the moment it saves and
+    // the number is the only thing the raiser can quote afterwards.
+    success: (indent) => `${indent.indent_no} raised`,
+    onDone: (indent) => {
       qc.invalidateQueries({ predicate: isIndentModuleQuery });
       nav(`/indents/${indent.id}`);
     },
-    onError: (e: Error) => setError(e.message),
   });
 
   const setLine = (i: number, patch: Partial<Line>) =>
@@ -185,9 +188,9 @@ export function IndentFormPage() {
         </Card>
       </div>
 
-      {error && (
-        <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>
-      )}
+      {/* The toast confirms success; a failure stays pinned here, next to the form
+          the person still has to fix. */}
+      <div className="mt-4"><ErrorBanner error={create.error} /></div>
 
       <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
         <Button variant="subtle" className="flex-1 md:flex-none" onClick={() => nav("/indents")}>
@@ -197,7 +200,6 @@ export function IndentFormPage() {
           className="flex-1 md:flex-none"
           disabled={validLines.length === 0 || Boolean(requiredDateError) || create.isPending}
           onClick={() => {
-            setError(null);
             if (requiredDateError) return;
             create.mutate();
           }}

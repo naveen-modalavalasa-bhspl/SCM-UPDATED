@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, ChevronRight, Loader2, Send, X } from "lucide-react";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Skeleton, CardBody,
 } from "@heroui/react";
-import { PageHeader, Button, Card, StatusPill } from "@/shared/components";
+import { PageHeader, Button, Card, StatusPill, useAction } from "@/shared/components";
 import { FlowStepper } from "../components/FlowStepper";
 import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
@@ -72,11 +72,25 @@ export function IndentDetailPage() {
     });
     qc.invalidateQueries({ queryKey: indentKeys.journey(accountScope, indentId), refetchType: "none" });
   };
-  const onErr = (e: Error) => setError(e.message);
 
-  const submit = useMutation({ mutationFn: () => indentApi.submit(indentId), onSuccess: refreshAfterAction, onError: onErr });
-  const approve = useMutation({ mutationFn: () => indentApi.approve(indentId, ""), onSuccess: refreshAfterAction, onError: onErr });
-  const reject = useMutation({ mutationFn: () => indentApi.reject(indentId, ""), onSuccess: refreshAfterAction, onError: onErr });
+  // The document status changes under you on all three, which is easy to miss on a
+  // long detail page — the toast says which way it went. The error banner already on
+  // this screen still catches failures.
+  const submit = useAction({
+    run: () => indentApi.submit(indentId),
+    success: (updated) => `${updated.indent_no} sent for approval`,
+    onDone: refreshAfterAction,
+  });
+  const approve = useAction({
+    run: () => indentApi.approve(indentId, ""),
+    success: (updated) => `${updated.indent_no} approved`,
+    onDone: refreshAfterAction,
+  });
+  const reject = useAction({
+    run: () => indentApi.reject(indentId, ""),
+    success: (updated) => `${updated.indent_no} rejected`,
+    onDone: refreshAfterAction,
+  });
 
   const unavailable = isIndentUnavailableError(loadError);
   useEffect(() => {

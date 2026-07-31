@@ -4,6 +4,7 @@ import { LogOut, Boxes, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { Avatar, Select, SelectItem, Tab, Tabs } from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { MenuIcon } from "@/shared/layout/icons";
+import { NotificationBell } from "@/shared/layout/NotificationBell";
 import type { MenuItem } from "@/shared/types";
 import { IndentsNav } from "@/modules/indents/components/IndentsNav";
 
@@ -183,6 +184,7 @@ export function AppLayout() {
               {/* The rail owns this when expanded; collapsed it has nowhere to
                   live, so surface it here rather than lose position switching. */}
               <div className={collapsed ? undefined : "md:hidden"}>{positionSelector(true)}</div>
+              <NotificationBell />
               <Avatar size="sm" name={me?.employee.name ?? "U"} className="bg-brand-050 text-brand" />
             </div>
           </div>

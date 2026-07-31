@@ -6,7 +6,7 @@ import { Plus } from "lucide-react";
 import {
   Button, Can, PageHeader, ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
-import { ErrorBanner } from "../../components/Feedback";
+import { ErrorBanner } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../../components/FilterBar";
 import { listWarehouses } from "../../api";
 import type { Warehouse } from "../../types";

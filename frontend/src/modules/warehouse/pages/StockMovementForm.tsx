@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ScanLine } from "lucide-react";
 import { Button, Can, Card, Field, Input, PageHeader, Select } from "@/shared/components";
 import { batchOptions, binOptions, createStockMovement, getStockAvailability, itemOptions, warehouseOptions } from "../api";
-import { ErrorBanner } from "../components/Feedback";
+import { ErrorBanner } from "@/shared/components";
 import { Lookup } from "../components/Lookup";
 import { Section } from "../components/DocumentMeta";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";

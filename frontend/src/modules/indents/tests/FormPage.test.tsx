@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { ToastProvider } from "@/shared/components";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -80,12 +81,14 @@ function renderForm(ui: ReactElement = <IndentFormPage />) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
+      <ToastProvider>
       <MemoryRouter initialEntries={["/indents/new"]}>
         <Routes>
           <Route path="/indents/new" element={ui} />
           <Route path="/indents/:id" element={<output aria-label="detail route" />} />
         </Routes>
       </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
 }

@@ -4,7 +4,7 @@ import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch } from
 import { Pencil, Plus } from "lucide-react";
 import { Button, Can, Card, Field, Input, PageHeader } from "@/shared/components";
 import { createStorageType, listStorageTypes, updateStorageType } from "../../api";
-import { ErrorBanner } from "../../components/Feedback";
+import { ErrorBanner } from "@/shared/components";
 import type { StorageType, StorageTypeWrite } from "../../types";
 
 const EMPTY: StorageTypeWrite = {

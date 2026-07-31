@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Thermometer } from "lucide-react";
 import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { ConfirmModal, ErrorBanner } from "../components/Feedback";
+import { ConfirmModal, ErrorBanner } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";

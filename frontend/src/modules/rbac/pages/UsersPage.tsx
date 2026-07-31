@@ -5,7 +5,8 @@ import {
 } from "@heroui/react";
 import { Check, Copy, KeyRound, Search, ShieldOff, UserPlus } from "lucide-react";
 import {
-  Button, Can, PageHeader, ResponsiveList, Select, StatCard, type Column,
+  Button, Can, ConfirmModal, PageHeader, ResponsiveList, Select, StatCard,
+  useAction, type Column,
 } from "@/shared/components";
 import { rbacApi } from "../api";
 import { PermissionMatrix } from "../components/PermissionMatrix";
@@ -61,22 +62,26 @@ export function UsersPage() {
     onError: (e: Error) => setError(e.message),
   });
 
-  const saveRoles = useMutation({
-    mutationFn: () => rbacApi.users.setRoles(selected!.employee_id, roleIds),
-    onSuccess: () => { setSelected(null); refresh(); },
-    onError: (e: Error) => setError(e.message),
+  const saveRoles = useAction({
+    run: () => rbacApi.users.setRoles(selected!.employee_id, roleIds),
+    success: () => `Roles updated for ${selected?.full_name ?? "this user"}`,
+    onDone: () => { setSelected(null); refresh(); },
   });
 
-  const revoke = useMutation({
-    mutationFn: (id: number) => rbacApi.users.revoke(id),
-    onSuccess: () => { setSelected(null); refresh(); },
-    onError: (e: Error) => setError(e.message),
+  /* Revoking locks someone out and resetting invalidates the password they are using
+     right now. Both were a single click on a small button inside an open modal. */
+  const [confirmAction, setConfirmAction] = useState<"revoke" | "reset" | null>(null);
+
+  const revoke = useAction({
+    run: (id: number) => rbacApi.users.revoke(id),
+    success: () => `Access revoked for ${selected?.full_name ?? "this user"}`,
+    onDone: () => { setConfirmAction(null); setSelected(null); refresh(); },
   });
 
-  const reset = useMutation({
-    mutationFn: (id: number) => rbacApi.users.resetPassword(id),
-    onSuccess: (r) => { setIssued(r); refresh(); },
-    onError: (e: Error) => setError(e.message),
+  const reset = useAction({
+    run: (id: number) => rbacApi.users.resetPassword(id),
+    success: "Password reset — copy the new one before closing",
+    onDone: (r) => { setConfirmAction(null); setIssued(r); refresh(); },
   });
 
   const open = (row: AdminUserRow) => {
@@ -345,12 +350,12 @@ export function UsersPage() {
                   {selected?.has_access && (
                     <Can do="admin.users.manage">
                       <Button variant="ghost" className="text-bad hover:bg-bad-bg"
-                              onClick={() => revoke.mutate(selected.employee_id)}
+                              onClick={() => setConfirmAction("revoke")}
                               disabled={revoke.isPending}>
                         <ShieldOff className="h-4 w-4" /> Revoke
                       </Button>
                       <Button variant="ghost"
-                              onClick={() => reset.mutate(selected.employee_id)}
+                              onClick={() => setConfirmAction("reset")}
                               disabled={reset.isPending}>
                         <KeyRound className="h-4 w-4" /> Reset password
                       </Button>
@@ -377,6 +382,30 @@ export function UsersPage() {
           )}
         </ModalContent>
       </Modal>
+
+      <ConfirmModal
+        isOpen={confirmAction !== null}
+        title={
+          confirmAction === "revoke"
+            ? `Revoke access for ${selected?.full_name}?`
+            : `Reset the password for ${selected?.full_name}?`
+        }
+        message={
+          confirmAction === "revoke"
+            ? "They are signed out and cannot log in again until access is granted afresh. Their roles are removed."
+            : "Their current password stops working immediately. A new one is shown once and cannot be retrieved later."
+        }
+        confirmLabel={confirmAction === "revoke" ? "Revoke access" : "Reset password"}
+        danger={confirmAction === "revoke"}
+        busy={revoke.isPending || reset.isPending}
+        error={revoke.error ?? reset.error}
+        onConfirm={() => {
+          if (!selected) return;
+          if (confirmAction === "revoke") revoke.mutate(selected.employee_id);
+          else reset.mutate(selected.employee_id);
+        }}
+        onClose={() => setConfirmAction(null)}
+      />
     </>
   );
 }
@@ -419,15 +448,15 @@ export function groupPagesByPermission(pages: AccessPage[]): PageGroup[] {
 }
 
 function PageAccessMatrix() {
-  const qc = useQueryClient();
   const matrix = useQuery({
     queryKey: ["rbac", "page-access"],
     queryFn: rbacApi.pageAccess,
   });
-  const update = useMutation({
-    mutationFn: ({ roleId, pageCodes }: { roleId: number; pageCodes: string[] }) =>
+  const update = useAction({
+    run: ({ roleId, pageCodes }: { roleId: number; pageCodes: string[] }) =>
       rbacApi.setPageAccess(roleId, pageCodes),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rbac", "page-access"] }),
+    success: "Page access updated",
+    invalidates: [["rbac", "page-access"]],
   });
 
   if (matrix.isLoading) {

@@ -4,7 +4,7 @@ import { FileText, Paperclip, Trash2, Upload } from "lucide-react";
 import { Button } from "@/shared/components";
 import { deleteAttachment, downloadAttachment, listAttachments, uploadAttachment } from "../api";
 import { fmtDateTime } from "../format";
-import { ErrorBanner } from "./Feedback";
+import { ErrorBanner } from "@/shared/components";
 
 /**
  * Documents hung off a warehouse record — invoice copies, LR slips, QC certificates,

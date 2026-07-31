@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { TrendingDown, Clock, FilePlus2, Info, Trash2, Plus } from "lucide-react";
 import {
-  Button, Card, Field, Input, PageHeader, ResponsiveList, Select, StatCard, type Column,
+  Button, Card, ConfirmModal, Field, Input, PageHeader, ResponsiveList, Select,
+  StatCard, useAction, type Column,
 } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import {
@@ -81,7 +82,6 @@ function SegmentedTabs({ value, onChange }: { value: Tab; onChange: (t: Tab) => 
  * actually needs on its own shelf.
  */
 function RulesPanel({ warehouses }: { warehouses: { id: number; name: string }[] }) {
-  const qc = useQueryClient();
   const [draft, setDraft] = useState<ReplenishmentRule | null>(null);
 
   const { data: rules = [], isLoading } = useQuery({
@@ -90,15 +90,23 @@ function RulesPanel({ warehouses }: { warehouses: { id: number; name: string }[]
   });
   const { data: items = [] } = useQuery({ queryKey: ["catalog-items"], queryFn: getCatalogItems });
 
-  const done = () => {
-    setDraft(null);
-    qc.invalidateQueries({ queryKey: ["replenishment-rules"] });
-    qc.invalidateQueries({ queryKey: ["replenishment"] });
-  };
-  const save = useMutation({ mutationFn: saveReplenishmentRule, onSuccess: done });
-  const remove = useMutation({
-    mutationFn: (r: ReplenishmentRule) => deleteReplenishmentRule(r.warehouse_id, r.item_id),
-    onSuccess: done,
+  const [ruleToDelete, setRuleToDelete] = useState<ReplenishmentRule | null>(null);
+  const invalidates = [["replenishment-rules"], ["replenishment"]];
+
+  const save = useAction({
+    run: saveReplenishmentRule,
+    success: (rule) => `Rule saved for ${rule.item_code ?? "item"} at ${rule.warehouse_name ?? "warehouse"}`,
+    invalidates,
+    onDone: () => setDraft(null),
+  });
+
+  // Deleting stops the below-minimum alert for this item entirely, which is a quiet
+  // failure nobody notices until stock runs out. Worth one question first.
+  const remove = useAction({
+    run: (r: ReplenishmentRule) => deleteReplenishmentRule(r.warehouse_id, r.item_id),
+    success: "Replenishment rule removed",
+    invalidates,
+    onDone: () => { setRuleToDelete(null); setDraft(null); },
   });
 
   const set = (patch: Partial<ReplenishmentRule>) =>
@@ -147,7 +155,7 @@ function RulesPanel({ warehouses }: { warehouses: { id: number; name: string }[]
       render: (r) => (
         <div className="flex gap-1">
           <Button variant="ghost" onClick={() => setDraft(r)}>Edit</Button>
-          <Button variant="ghost" onClick={() => remove.mutate(r)} aria-label="Delete rule">
+          <Button variant="ghost" onClick={() => setRuleToDelete(r)} aria-label="Delete rule">
             <Trash2 size={14} />
           </Button>
         </div>
@@ -241,6 +249,24 @@ function RulesPanel({ warehouses }: { warehouses: { id: number; name: string }[]
           )}
         />
       </Card>
+
+      <ConfirmModal
+        isOpen={ruleToDelete !== null}
+        title="Remove this replenishment rule?"
+        message={
+          <>
+            <strong>{ruleToDelete?.item_name}</strong> at{" "}
+            <strong>{ruleToDelete?.warehouse_name}</strong> will no longer be watched, and
+            nobody is told when it drops below {ruleToDelete?.min_qty}.
+          </>
+        }
+        confirmLabel="Remove rule"
+        danger
+        busy={remove.isPending}
+        error={remove.error}
+        onConfirm={() => ruleToDelete && remove.mutate(ruleToDelete)}
+        onClose={() => setRuleToDelete(null)}
+      />
     </>
   );
 }

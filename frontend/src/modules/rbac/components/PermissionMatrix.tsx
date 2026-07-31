@@ -4,7 +4,7 @@ import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader,
 } from "@heroui/react";
 import { Check, Copy, Plus, Search, Trash2 } from "lucide-react";
-import { Button, Can, Field, Input } from "@/shared/components";
+import { Button, Can, ConfirmModal, Field, Input, useAction } from "@/shared/components";
 import { rbacApi } from "../api";
 import type { PermissionDef, RoleWithPermissions } from "../types";
 
@@ -56,10 +56,13 @@ export function PermissionMatrix() {
     onError: (e: Error) => setError(e.message),
   });
 
-  const deleteRole = useMutation({
-    mutationFn: (roleId: number) => rbacApi.matrix.deleteRole(roleId),
-    onSuccess: refresh,
-    onError: (e: Error) => setError(e.message),
+  // Deleting a role strips every user holding it of that access, and there is no undo,
+  // so it asks first. It used to fire on the first click of a 14px icon.
+  const [roleToDelete, setRoleToDelete] = useState<RoleWithPermissions | null>(null);
+  const deleteRole = useAction({
+    run: (roleId: number) => rbacApi.matrix.deleteRole(roleId),
+    success: () => `Role “${roleToDelete?.name}” deleted`,
+    onDone: () => { setRoleToDelete(null); refresh(); },
   });
 
   const allRoles = (roles.data ?? []).filter((r) => r.is_active);
@@ -238,7 +241,7 @@ export function PermissionMatrix() {
                         </button>
                         {!role.is_system && (
                           <button type="button" title="Delete role"
-                                  onClick={() => deleteRole.mutate(role.id)}
+                                  onClick={() => setRoleToDelete(role)}
                                   className="text-muted hover:text-bad">
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
@@ -355,6 +358,23 @@ export function PermissionMatrix() {
           )}
         </ModalContent>
       </Modal>
+
+      <ConfirmModal
+        isOpen={roleToDelete !== null}
+        title={`Delete “${roleToDelete?.name}”?`}
+        message={
+          <>
+            Everyone holding this role loses the {roleToDelete?.permissions.length ?? 0}{" "}
+            permission(s) it grants, immediately. This cannot be undone.
+          </>
+        }
+        confirmLabel="Delete role"
+        danger
+        busy={deleteRole.isPending}
+        error={deleteRole.error}
+        onConfirm={() => roleToDelete && deleteRole.mutate(roleToDelete.id)}
+        onClose={() => setRoleToDelete(null)}
+      />
     </div>
   );
 }

@@ -128,6 +128,25 @@ class UserCredential(Base):
     updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
 
+class Notification(Base):
+    """`sys_notifications`. Raised when a document, or a stock level, needs someone.
+
+    Lives here rather than in the warehouse module that first wrote it: it is a sys_
+    table, the app shell's notification bell reads it, and inventory writes to it —
+    none of which may import a module further down the chain (rule 5).
+    """
+    __tablename__ = "sys_notifications"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    employee_id = Column(BigInteger, index=True, nullable=False)
+    title = Column(String(200), nullable=False)
+    body = Column(String(1000), nullable=True)
+    entity_type = Column(String(50), nullable=True)
+    entity_id = Column(BigInteger, nullable=True)
+    deep_link = Column(String(300), nullable=True)
+    is_read = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+
+
 class UserSession(Base):
     __tablename__ = "sys_sessions"
     id = Column(BigInteger, primary_key=True, autoincrement=True)

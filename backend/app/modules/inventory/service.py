@@ -24,6 +24,7 @@ from app.platform.rbac import permissions as perms
 from app.platform.rbac.models import Role, UserRole
 from app.platform.rbac.service import get_user_permissions
 from app.platform.admin.notifications import recipients_for
+from app.platform.notifications import service as notifications
 from app.platform.rules import evaluator as rules
 from app.platform.settings.service import get_setting, set_setting, write_audit
 from app.platform.workflow import engine
@@ -856,16 +857,6 @@ async def _available_at(db: AsyncSession, item_id: int, warehouse_id: int) -> fl
     return float((await db.execute(stmt)).scalar() or 0)
 
 
-# `sys_notifications` is mapped by the warehouse module, which inventory may not import
-# (rule 5 — inventory is the base of the chain). One INSERT is cheaper than a second
-# mapped class fighting the first over the same table.
-_NOTIFY_SQL = text(
-    "INSERT INTO sys_notifications "
-    "(employee_id, title, body, entity_type, entity_id, deep_link, is_read, created_at) "
-    "VALUES (:employee_id, :title, :body, 'stk_balance', :entity_id, :deep_link, 0, :now)"
-)
-
-
 async def notify_if_below_minimum(db: AsyncSession, item_id: int, warehouse_id: int,
                                   before_qty: float, after_qty: float) -> None:
     """Tell the warehouse and inventory when a move takes an item under its minimum.
@@ -887,16 +878,14 @@ async def notify_if_below_minimum(db: AsyncSession, item_id: int, warehouse_id: 
         if not targets:
             return
 
-        title = f"{item.code if item else item_id} below minimum"
-        body = (f"{after_qty:g} left at {warehouse.name if warehouse else warehouse_id} "
-                f"(minimum {rule['min_qty']:g}, reorder {rule['reorder_qty']:g}).")
-        now = utcnow()
-        for employee_id in targets:
-            await db.execute(_NOTIFY_SQL, {
-                "employee_id": employee_id, "title": title[:200], "body": body[:1000],
-                "entity_id": item_id, "deep_link": "/inventory/replenishment",
-                "now": now,
-            })
+        await notifications.notify(
+            db, targets,
+            title=f"{item.code if item else item_id} below minimum",
+            body=(f"{after_qty:g} left at {warehouse.name if warehouse else warehouse_id} "
+                  f"(minimum {rule['min_qty']:g}, reorder {rule['reorder_qty']:g})."),
+            deep_link="/inventory/replenishment",
+            entity_type="stk_balance", entity_id=item_id,
+        )
     except Exception:  # noqa: BLE001 — see docstring
         logger.exception("Replenishment notification failed for item %s wh %s",
                          item_id, warehouse_id)
