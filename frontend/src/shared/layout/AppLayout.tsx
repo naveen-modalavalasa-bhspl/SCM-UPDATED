@@ -145,7 +145,10 @@ export function AppLayout() {
           {!collapsed && (
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-semibold text-ink">{me?.employee.name}</div>
-              <div className="truncate text-xs text-muted">{me?.roles.join(" · ")}</div>
+              <div className="truncate text-xs font-medium text-muted">
+                {me?.employee.code ?? `Employee #${me?.employee.id}`}
+              </div>
+              <div className="truncate text-[11px] text-muted">{me?.roles.join(" · ")}</div>
             </div>
           )}
           <button

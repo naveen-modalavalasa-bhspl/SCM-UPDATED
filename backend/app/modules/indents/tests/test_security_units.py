@@ -137,9 +137,26 @@ async def test_leaf_user_sees_only_own_and_workflow_related_indents(monkeypatch)
     )
 
     assert "ind_indents.requested_by_id = 10" in text
+    assert "ind_indents.position_id = 100" in text
     assert "ind_indents.position_id IN" not in text
     assert "wf_pending" in text
     assert "wf_actions" in text
+    assert "wf_actions.actor_position = 'PILOT-AP-104-MMU'" in text
+
+
+@pytest.mark.asyncio
+async def test_requester_visibility_is_scoped_to_selected_position(monkeypatch):
+    text = await access_sql(
+        monkeypatch,
+        role_name="Storekeeper",
+        descendants=[],
+        project_id=900,
+        employee_id=10,
+    )
+
+    assert "ind_indents.requested_by_id = 10" in text
+    assert "ind_indents.position_id = 100" in text
+    assert "wf_actions.actor_position = 'Storekeeper'" in text
 
 
 @pytest.mark.asyncio

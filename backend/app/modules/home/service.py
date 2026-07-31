@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.home.schemas import DateRange
+from app.modules.indents import service as indent_service
 from app.modules.indents.models import Indent
 from app.modules.inventory.models import Stock
 from app.modules.procurement.models import PurchaseOrder
@@ -218,11 +219,12 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
     attention: list[dict] = []
 
     if perms.INDENT_VIEW in permissions:
+        indent_scope = await indent_service.indent_access_condition(db, user)
         indent_count = await _count(
-            db, Indent, Indent.requested_by_id == user.id, Indent.created_at >= since,
+            db, Indent, indent_scope, Indent.created_at >= since,
         )
         pending_indents = await _count(
-            db, Indent, Indent.requested_by_id == user.id,
+            db, Indent, indent_scope,
             Indent.status == IndentStatus.PENDING_APPROVAL.value,
         )
         kpis.append(_kpi(

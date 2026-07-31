@@ -3,10 +3,16 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mockAuth = vi.hoisted(() => ({
+  me: {
+    employee: { id: 7, name: "Sarah Buyer" },
+    active_position: { id: 70, name: "Buyer" },
+    roles: ["Buyer"],
+  },
+}));
+
 vi.mock("@/shared/auth/AuthContext", () => ({
-  useAuth: () => ({
-    me: { employee: { name: "Sarah Buyer" }, roles: ["Buyer"] },
-  }),
+  useAuth: () => ({ me: mockAuth.me }),
 }));
 
 vi.mock("@/shared/api/client", () => ({
@@ -40,11 +46,11 @@ const summary = {
   recent_activity: [],
 };
 
-function renderPage() {
+function renderPage(client = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+})) {
   return render(
-    <QueryClientProvider client={new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    })}>
+    <QueryClientProvider client={client}>
       <MemoryRouter>
         <HomePage />
       </MemoryRouter>
@@ -54,6 +60,11 @@ function renderPage() {
 
 describe("HomePage", () => {
   beforeEach(() => {
+    mockAuth.me = {
+      employee: { id: 7, name: "Sarah Buyer" },
+      active_position: { id: 70, name: "Buyer" },
+      roles: ["Buyer"],
+    };
     mockGet.mockReset();
     mockGet.mockResolvedValue({ data: summary });
   });
@@ -78,5 +89,37 @@ describe("HomePage", () => {
         "/api/home/summary", { params: { date_range: "week" } },
       ),
     );
+  });
+
+  it("fetches fresh KPI values when the logged-in account position changes", async () => {
+    const switchedSummary = {
+      ...summary,
+      kpis: [{ ...summary.kpis[0], value: 4 }],
+    };
+    mockGet
+      .mockResolvedValueOnce({ data: summary })
+      .mockResolvedValueOnce({ data: switchedSummary });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    const view = renderPage(client);
+
+    await screen.findByText("15");
+    mockAuth.me = {
+      employee: { id: 15037, name: "Anusha" },
+      active_position: { id: 1501, name: "Lab Technician" },
+      roles: ["LT"],
+    };
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <HomePage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("4")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Hello, Anusha" })).toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledTimes(2);
   });
 });

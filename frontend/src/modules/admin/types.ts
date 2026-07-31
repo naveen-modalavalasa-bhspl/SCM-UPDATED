@@ -227,6 +227,14 @@ export interface LadderRung {
   position_role_id: number;
   is_enabled: boolean;
   holders: { id: number; name: string; code?: string | null }[];
+  positions: {
+    id: number;
+    name: string;
+    department_id?: number | null;
+    department_name: string;
+    holders: { id: number; name: string; code?: string | null }[];
+  }[];
+  selected_position_ids: number[];
   /** Nobody in this project holds a position at this rank any more. */
   is_dead?: boolean;
   /** HCM added this rank after the ladder was saved; offered switched off. */

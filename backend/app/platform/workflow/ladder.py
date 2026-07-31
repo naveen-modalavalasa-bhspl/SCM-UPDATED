@@ -37,9 +37,10 @@ document is self-approved, recorded explicitly.
 """
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.platform.hcm.models import (
-    HcmEmployee, HcmPosition, HcmPositionAssignment,
+    HcmDepartment, HcmEmployee, HcmPosition, HcmPositionAssignment,
 )
 from app.platform.workflow.conditions import stage_applies
 from app.platform.workflow.models import Stage, StageCondition, Workflow
@@ -71,6 +72,8 @@ MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Procurement"]
 LADDER_CODE_PREFIX = "LADDER"
 # Guards against a cycle in HCM's position tree, which would otherwise hang the walk.
 MAX_CLIMB = 20
+APPROVER_SCOPE_FIELD = "__approver_positions_configured"
+APPROVER_POSITION_FIELD = "__approver_position_id"
 
 
 def ladder_code(project_id: int | None, doc_type: str) -> str:
@@ -110,8 +113,15 @@ async def list_doc_types() -> list[dict]:
 
 async def _project_positions(db: AsyncSession,
                              project_id: int | None) -> list[HcmPosition]:
-    """The positions actually held by this project's people."""
-    stmt = select(HcmPosition).where(HcmPosition.is_active.is_(True))
+    """The positions actually held by this project's people.
+
+    Only the columns the ladder reads: `raw` is HCM's whole payload as JSON, and
+    dragging 3,400 of them across the wire is most of what the query costs.
+    """
+    stmt = select(HcmPosition).options(load_only(
+        HcmPosition.name, HcmPosition.parent_position_id, HcmPosition.department_id,
+        HcmPosition.role_id, HcmPosition.role_name, HcmPosition.job_name,
+    )).where(HcmPosition.is_active.is_(True))
     if project_id is not None:
         stmt = stmt.where(HcmPosition.id.in_(
             select(HcmPositionAssignment.position_id)
@@ -123,6 +133,35 @@ async def _project_positions(db: AsyncSession,
     return list((await db.execute(stmt)).scalars().all())
 
 
+def _chunks(values: list[int], size: int = 1000) -> list[list[int]]:
+    """A live project holds ~3,400 posts; one IN () of that width is asking for
+    trouble with max_allowed_packet, and a handful of round trips costs nothing."""
+    return [values[start:start + size] for start in range(0, len(values), size)]
+
+
+async def _parent_map(db: AsyncSession,
+                      positions: list[HcmPosition]) -> dict[int, int | None]:
+    """position -> parent, for the project's posts and every ancestor above them.
+
+    Loaded a generation at a time. The tree is about ten deep whatever the project's
+    size, so this is ten queries, not one per post.
+    """
+    parent_of: dict[int, int | None] = {p.id: p.parent_position_id for p in positions}
+    frontier = {p for p in parent_of.values() if p is not None and p not in parent_of}
+    while frontier:
+        found: dict[int, int | None] = {}
+        for chunk in _chunks(list(frontier)):
+            rows = (await db.execute(
+                select(HcmPosition.id, HcmPosition.parent_position_id)
+                .where(HcmPosition.id.in_(chunk))
+            )).all()
+            found.update({row[0]: row[1] for row in rows})
+        # A parent HCM no longer has is a top: the walk stops there rather than looping.
+        parent_of.update({position_id: found.get(position_id) for position_id in frontier})
+        frontier = {p for p in found.values() if p is not None and p not in parent_of}
+    return parent_of
+
+
 async def _depths(db: AsyncSession, positions: list[HcmPosition]) -> dict[int, int]:
     """How far each position sits below the top of HCM's tree.
 
@@ -131,23 +170,33 @@ async def _depths(db: AsyncSession, positions: list[HcmPosition]) -> dict[int, i
     project's own positions are still walked, so a gap in the middle does not flatten
     everything below it.
     """
-    known = {p.id: p for p in positions}
+    parent_of = await _parent_map(db, positions)
     depths: dict[int, int] = {}
 
-    async def depth_of(position_id: int, seen: set[int]) -> int:
-        if position_id in depths:
-            return depths[position_id]
-        position = known.get(position_id) or await db.get(HcmPosition, position_id)
-        if position is None or not position.parent_position_id or position_id in seen:
-            depths[position_id] = 0
-            return 0
-        seen.add(position_id)
-        value = await depth_of(position.parent_position_id, seen) + 1
-        depths[position_id] = value
-        return value
+    def depth_of(position_id: int) -> None:
+        # Climb to the first ancestor whose depth is already known (or to the top),
+        # then count back down the path. Iterative, so a deep tree cannot blow the
+        # stack and each position is measured once.
+        path: list[int] = []
+        seen: set[int] = set()
+        current = position_id
+        while True:
+            if current in depths:
+                depth = depths[current]
+                break
+            parent = parent_of.get(current)
+            if parent is None or current in seen:
+                depths[current] = depth = 0
+                break
+            seen.add(current)
+            path.append(current)
+            current = parent
+        for node in reversed(path):
+            depth += 1
+            depths[node] = depth
 
     for position in positions:
-        await depth_of(position.id, set())
+        depth_of(position.id)
     return depths
 
 
@@ -162,6 +211,8 @@ async def project_ranks(db: AsyncSession, project_id: int | None) -> list[dict]:
     if not positions:
         return []
     depths = await _depths(db, positions)
+    holders_of, assignment_of = await _position_people(
+        db, [p.id for p in positions], project_id)
 
     by_role: dict[int, dict] = {}
     for position in positions:
@@ -171,10 +222,10 @@ async def project_ranks(db: AsyncSession, project_id: int | None) -> list[dict]:
             "role_id": position.role_id,
             "role_name": position.role_name or position.job_name or position.name,
             "depths": [],
-            "position_ids": [],
+            "members": [],
         })
         entry["depths"].append(depths.get(position.id, 0))
-        entry["position_ids"].append(position.id)
+        entry["members"].append(position)
 
     for entry in by_role.values():
         # The most common depth, not the shallowest. HCM's tree has orphans — one
@@ -188,35 +239,121 @@ async def project_ranks(db: AsyncSession, project_id: int | None) -> list[dict]:
         entry["depth"] = min(counts, key=lambda d: (-counts[d], d))
         del entry["depths"]
 
+    # Each post's department, resolved for all of them before any is named, so the
+    # names cost one query instead of a lookup per post.
+    department_of = {
+        position.id: (
+            assignment_of.get(position.id, (None, None))[0]
+            or position.department_id
+            or getattr(assignment_of.get(position.id, (None, None))[1],
+                       "department_id", None)
+        )
+        for position in positions
+    }
+    department_names = await _department_names(
+        db, {d for d in department_of.values() if d is not None})
+
     ranks = sorted(by_role.values(), key=lambda r: (r["depth"], r["role_name"]))
     out = []
     for rank in ranks:
-        holders = await _holders_of(db, rank["position_ids"], project_id)
+        holders = _dedupe(
+            holder
+            for position in rank["members"]
+            for holder in holders_of.get(position.id, [])
+        )
+        position_options = []
+        for position in rank["members"]:
+            employee = assignment_of.get(position.id, (None, None))[1]
+            department_id = department_of[position.id]
+            department_name = None
+            if employee and employee.department_id == department_id:
+                department_name = employee.department_name
+            if department_name is None and department_id is not None:
+                department_name = department_names.get(department_id)
+            position_holders = holders_of.get(position.id, [])
+            position_options.append({
+                "id": position.id,
+                "name": position.name,
+                "department_id": department_id,
+                "department_name": department_name or "No department",
+                "holders": [
+                    {"id": holder.id, "name": holder.full_name,
+                     "code": holder.emp_code}
+                    for holder in position_holders[:8]
+                ],
+            })
         out.append({
             "role_id": rank["role_id"],
             "role_name": rank["role_name"],
             "depth": rank["depth"],
-            "position_count": len(rank["position_ids"]),
+            "position_count": len(rank["members"]),
             "holders": [{"id": h.id, "name": h.full_name, "code": h.emp_code}
                         for h in holders[:8]],
             "holder_count": len(holders),
+            "positions": sorted(
+                position_options,
+                key=lambda row: (row["department_name"], row["name"]),
+            ),
         })
     return out
 
 
-async def _holders_of(db: AsyncSession, position_ids: list[int],
-                      project_id: int | None) -> list[HcmEmployee]:
-    if not position_ids:
-        return []
-    stmt = (select(HcmEmployee)
-            .join(HcmPositionAssignment,
-                  HcmPositionAssignment.employee_id == HcmEmployee.id)
-            .where(HcmPositionAssignment.position_id.in_(position_ids),
+def _dedupe(employees) -> list[HcmEmployee]:
+    """One row per person, first sighting wins — someone can hold two posts at a rank."""
+    out: dict[int, HcmEmployee] = {}
+    for employee in employees:
+        out.setdefault(employee.id, employee)
+    return list(out.values())
+
+
+async def _position_people(
+    db: AsyncSession, position_ids: list[int], project_id: int | None,
+) -> tuple[dict[int, list[HcmEmployee]], dict[int, tuple[int | None, HcmEmployee]]]:
+    """Every active assignment on these posts, in one sweep instead of per post.
+
+    The config screen asks the same two questions of all 3,400 posts a live project
+    holds — who fills this, and which department is it in — and asking them one post at
+    a time cost ten thousand round trips to a remote MySQL, which is why the screen
+    took a minute and a half to open.
+
+    Returns holders (this project's people only: an assignment made from another
+    project must not show up under a rung) and, separately, the first active assignment
+    whoever holds it, which is what the department is read from. That split is
+    deliberate — it is the one the per-post queries had.
+    """
+    holders: dict[int, list[HcmEmployee]] = {}
+    first: dict[int, tuple[int | None, HcmEmployee]] = {}
+    for chunk in _chunks(position_ids):
+        rows = (await db.execute(
+            select(HcmPositionAssignment.position_id,
+                   HcmPositionAssignment.department_id,
+                   HcmEmployee)
+            .options(load_only(
+                HcmEmployee.full_name, HcmEmployee.emp_code, HcmEmployee.project_id,
+                HcmEmployee.department_id, HcmEmployee.department_name,
+            ))
+            .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
+            .where(HcmPositionAssignment.position_id.in_(chunk),
                    HcmPositionAssignment.is_active.is_(True),
-                   HcmEmployee.is_active.is_(True)))
-    if project_id is not None:
-        stmt = stmt.where(HcmEmployee.project_id == project_id)
-    return list((await db.execute(stmt)).scalars().unique().all())
+                   HcmEmployee.is_active.is_(True))
+            .order_by(HcmPositionAssignment.id)
+        )).all()
+        for position_id, department_id, employee in rows:
+            first.setdefault(position_id, (department_id, employee))
+            if project_id is None or employee.project_id == project_id:
+                holders.setdefault(position_id, []).append(employee)
+    return {pid: _dedupe(people) for pid, people in holders.items()}, first
+
+
+async def _department_names(db: AsyncSession,
+                            department_ids: set[int]) -> dict[int, str]:
+    if not department_ids:
+        return {}
+    rows = (await db.execute(
+        select(HcmDepartment.id, HcmDepartment.name)
+        .where(HcmDepartment.id.in_(department_ids))
+    )).all()
+    return {row[0]: row[1] for row in rows}
 
 
 # ---------------- loading a saved ladder ----------------
@@ -262,24 +399,48 @@ async def find_ladder(db: AsyncSession, project_id: int | None,
     return None
 
 
-async def _enabled_role_ids(db: AsyncSession, stages: list[Stage],
-                            context: dict) -> set[int]:
+async def _enabled_role_scopes(db: AsyncSession, stages: list[Stage],
+                               context: dict) -> dict[int, set[int] | None]:
     """Which rungs apply to this document.
 
     A rung with conditions is governed entirely by them; a rung without conditions is
     governed by its toggle. One rule covers both jobs — gating an enabled rung, and
     force-including a disabled one ("over five lakh, always include the COO").
     """
-    enabled: set[int] = set()
+    enabled: dict[int, set[int] | None] = {}
     for stage in stages:
         if stage.position_role_id is None:
             continue
-        conditions = list((await db.execute(
-            select(StageCondition).where(StageCondition.stage_id == stage.id)
-        )).scalars().all()) if stage.id is not None else []
+        if stage.id is not None:
+            stored = list((await db.execute(
+                select(StageCondition).where(StageCondition.stage_id == stage.id)
+            )).scalars().all())
+            configured = any(
+                condition.field_name == APPROVER_SCOPE_FIELD
+                for condition in stored
+            )
+            selected_positions = {
+                int(condition.field_value)
+                for condition in stored
+                if condition.field_name == APPROVER_POSITION_FIELD
+            }
+            conditions = [
+                condition for condition in stored
+                if condition.field_name not in {
+                    APPROVER_SCOPE_FIELD, APPROVER_POSITION_FIELD,
+                }
+            ]
+        else:
+            configured = getattr(stage, "selected_position_ids", None) is not None
+            selected_positions = set(
+                getattr(stage, "selected_position_ids", None) or []
+            )
+            conditions = getattr(stage, "conditions", [])
         applies = stage_applies(conditions, context) if conditions else stage.is_enabled
         if applies:
-            enabled.add(stage.position_role_id)
+            enabled[stage.position_role_id] = (
+                selected_positions if configured else None
+            )
     return enabled
 
 
@@ -296,7 +457,7 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
     """
     if requester_position_id is None:
         return []
-    enabled = await _enabled_role_ids(db, stages, context or {})
+    enabled = await _enabled_role_scopes(db, stages, context or {})
     if not enabled:
         return []
 
@@ -314,7 +475,10 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
         parent = await db.get(HcmPosition, parent_id)
         if parent is None:
             break
-        if parent.role_id in enabled and parent.is_active:
+        position_scope = enabled.get(parent.role_id)
+        role_enabled = parent.role_id in enabled
+        position_enabled = position_scope is None or parent.id in position_scope
+        if role_enabled and position_enabled and parent.is_active:
             holders = await _position_holders(db, parent.id, requester_id)
             # A rung nobody fills is skipped rather than held: a vacant seat must not
             # strand the document. Delegation covers the named-stand-in case.
@@ -373,6 +537,9 @@ def build_stages(ranks: list[dict], enabled_role_ids: set[int] | None = None) ->
         "position_role_id": rank["role_id"],
         "is_enabled": (enabled_role_ids is None
                        or rank["role_id"] in enabled_role_ids),
+        "selected_position_ids": [
+            position["id"] for position in rank.get("positions", [])
+        ],
         "conditions": [],
     } for index, rank in enumerate(ranks)]
 

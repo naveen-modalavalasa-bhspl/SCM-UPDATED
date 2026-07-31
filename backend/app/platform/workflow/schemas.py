@@ -79,6 +79,9 @@ class LadderRungIn(BaseModel):
     position_role_id: int
     name: str
     is_enabled: bool = True
+    # None means a legacy role-wide rung. An explicit list restricts the role to
+    # these exact HCM positions; [] intentionally disables every position.
+    selected_position_ids: list[int] | None = None
     conditions: list[WorkflowConditionIn] = Field(default_factory=list)
 
 

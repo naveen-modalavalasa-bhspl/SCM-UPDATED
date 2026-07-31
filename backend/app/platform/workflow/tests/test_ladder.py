@@ -150,6 +150,30 @@ async def test_the_chain_follows_the_raisers_own_branch(db):
     assert [link["position_id"] for link in second.resolved_chain][0] == 613
 
 
+async def test_role_rung_can_limit_approval_to_selected_positions(db):
+    holders = await _org(db, with_second_branch=True)
+    scoped_rungs = []
+    for rung in _rungs(off={"SPH", "District Manager", "OE", "MMU Pilot"}):
+        if rung["position_role_id"] == 3:
+            rung["selected_position_ids"] = [603]
+        elif rung["position_role_id"] == 1:
+            rung["selected_position_ids"] = [601]
+        scoped_rungs.append(rung)
+    await ladder_config.save_ladder(db, LadderIn(
+        project_id=PROJECT, doc_type="INDENT", rungs=scoped_rungs,
+    ), holders[601])
+
+    selected_branch = await engine.start(
+        db, "INDENT", 21, {"requester_position_id": 606}, holders[606],
+    )
+    other_branch = await engine.start(
+        db, "INDENT", 22, {"requester_position_id": 616}, holders[616],
+    )
+
+    assert [link["position_id"] for link in selected_branch.resolved_chain] == [603, 601]
+    assert [link["position_id"] for link in other_branch.resolved_chain] == [601]
+
+
 async def test_a_rung_nobody_fills_is_skipped(db):
     """The Regional Manager's seat is vacant. The indent climbs past it rather than
     stalling — a vacant post must never strand a document."""

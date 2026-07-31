@@ -11,6 +11,7 @@ const rungPayload = (rungs: LadderRung[]) => rungs.map((rung) => ({
   position_role_id: rung.position_role_id,
   name: rung.name,
   is_enabled: rung.is_enabled,
+  selected_position_ids: rung.selected_position_ids,
   conditions: rung.conditions,
 }));
 

@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { MenuIcon } from "@/shared/layout/icons";
-import { homeApi } from "../api";
+import { homeApi, homeKeys } from "../api";
 import type {
   AttentionSummary, HomeAction, HomeDateRange, HomeKpi, HomeModule,
   RecentActivity,
@@ -176,9 +176,14 @@ export function HomePage() {
   const { me } = useAuth();
   const [dateRange, setDateRange] = useState<HomeDateRange>("week");
   const [showAllModules, setShowAllModules] = useState(false);
+  const accountScope = {
+    employeeId: me?.employee.id ?? null,
+    activePositionId: me?.active_position?.id ?? null,
+  };
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["home-summary", dateRange],
+    queryKey: homeKeys.summary(accountScope, dateRange),
     queryFn: () => homeApi.summary(dateRange),
+    enabled: accountScope.employeeId !== null,
   });
 
   if (isLoading) return <HomeSkeleton />;

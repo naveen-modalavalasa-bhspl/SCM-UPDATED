@@ -475,7 +475,16 @@ async def indent_access_condition(db: AsyncSession, user):
     descendant_ids = await _descendant_position_ids(db, position_id) if assignment else []
     project_id = position.project_id if position else None
 
-    visible = [Indent.requested_by_id == user.id]
+    # An employee can hold multiple positions.  The requester id identifies the
+    # person, while position_id identifies the capacity in which the indent was
+    # raised; both must match for "my indents" visibility.  Without the position
+    # predicate, switching from (for example) LT to Storekeeper leaked the LT
+    # indents into the Storekeeper session.
+    requester_scope = and_(
+        Indent.requested_by_id == user.id,
+        Indent.position_id == position_id,
+    )
+    visible = [requester_scope]
 
     if _has_global_indent_read(scope_code, role_codes):
         visible.append(literal(True))
@@ -485,12 +494,22 @@ async def indent_access_condition(db: AsyncSession, user):
             Indent.project_id == project_id,
         ))
 
+    participant_conditions = [
+        Instance.id.in_(select(Pending.instance_id).where(Pending.approver_id == user.id)),
+    ]
+    # Workflow actions snapshot the position name used for the decision.  Match
+    # that snapshot to the selected position so a submit/approve action performed
+    # in one capacity does not make the document visible in another capacity.
+    if position is not None:
+        participant_conditions.append(Instance.id.in_(
+            select(Action.instance_id).where(
+                Action.actor_id == user.id,
+                Action.actor_position == position.name,
+            )
+        ))
     participant_instances = select(Instance.doc_id).where(
         Instance.doc_type == DocType.INDENT.value,
-        or_(
-            Instance.id.in_(select(Pending.instance_id).where(Pending.approver_id == user.id)),
-            Instance.id.in_(select(Action.instance_id).where(Action.actor_id == user.id)),
-        ),
+        or_(*participant_conditions),
     )
     visible.append(Indent.id.in_(participant_instances))
 

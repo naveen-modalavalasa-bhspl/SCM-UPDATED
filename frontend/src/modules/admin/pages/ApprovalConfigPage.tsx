@@ -32,6 +32,23 @@ const newCondition = (): WorkflowCondition => ({
   field_name: "amount", operator: "GT", field_value: "", logic: "AND",
 });
 
+const positionDepartments = (rung: LadderRung) => {
+  const groups = new Map<string, {
+    id: number | null; name: string; positions: LadderRung["positions"];
+  }>();
+  for (const position of rung.positions ?? []) {
+    const key = String(position.department_id ?? "none");
+    const group = groups.get(key) ?? {
+      id: position.department_id ?? null,
+      name: position.department_name || "No department",
+      positions: [],
+    };
+    group.positions.push(position);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+};
+
 export function ApprovalConfigPage() {
   const qc = useQueryClient();
   const [projectId, setProjectId] = useState<number | null>(null);
@@ -111,12 +128,25 @@ export function ApprovalConfigPage() {
     if (saved.length !== rungs.length) return true;
     return rungs.some((rung, index) =>
       rung.is_enabled !== saved[index]?.is_enabled
+      || JSON.stringify([...(rung.selected_position_ids ?? [])].sort((a, b) => a - b))
+        !== JSON.stringify([...(saved[index]?.selected_position_ids ?? [])].sort((a, b) => a - b))
       || JSON.stringify(rung.conditions) !== JSON.stringify(saved[index]?.conditions));
   }, [rungs, ladder.data]);
 
   const patchRung = (index: number, values: Partial<LadderRung>) =>
     setRungs((current) => current.map((rung, i) =>
       i === index ? { ...rung, ...values } : rung));
+
+  const togglePositions = (index: number, positionIds: number[], selected: boolean) =>
+    setRungs((current) => current.map((rung, i) => {
+      if (i !== index) return rung;
+      const next = new Set(rung.selected_position_ids ?? []);
+      for (const positionId of positionIds) {
+        if (selected) next.add(positionId);
+        else next.delete(positionId);
+      }
+      return { ...rung, selected_position_ids: [...next] };
+    }));
 
   const projectName = options.data?.projects.find((p) => p.id === projectId)?.name ?? "";
   const enabledCount = rungs.filter((r) => r.is_enabled || r.conditions.length > 0).length;
@@ -244,14 +274,71 @@ export function ApprovalConfigPage() {
                   className="min-h-11 rounded-lg px-3 text-xs font-semibold text-brand"
                   onClick={() => setAdvanced(advanced === index ? null : index)}
                 >
+                  {(rung.selected_position_ids ?? []).length} of {rung.positions?.length ?? 0} positions
                   {rung.conditions.length > 0
-                    ? `${rung.conditions.length} condition${rung.conditions.length > 1 ? "s" : ""}`
-                    : "Add condition"}
+                    ? ` · ${rung.conditions.length} condition${rung.conditions.length > 1 ? "s" : ""}`
+                    : ""}
                 </button>
               </div>
 
               {advanced === index && (
                 <div className="border-t border-line/50 bg-content2/40 px-4 py-3">
+                  <div className="mb-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink">
+                      Eligible approver positions
+                    </div>
+                    <p className="mb-3 text-xs text-muted">
+                      Selecting a department selects every position in it. You can still
+                      adjust individual positions afterwards.
+                    </p>
+                    <div className="space-y-3">
+                      {positionDepartments(rung).map((department) => {
+                        const departmentIds = department.positions.map((position) => position.id);
+                        const selectedIds = new Set(rung.selected_position_ids ?? []);
+                        const allSelected = departmentIds.length > 0
+                          && departmentIds.every((id) => selectedIds.has(id));
+                        return (
+                          <div key={department.id ?? department.name} className="rounded-lg border border-line bg-content1 p-3">
+                            <label className="flex min-h-8 items-center gap-2 text-sm font-semibold text-ink">
+                              <input
+                                type="checkbox"
+                                checked={allSelected}
+                                onChange={(event) => togglePositions(
+                                  index, departmentIds, event.target.checked,
+                                )}
+                              />
+                              {department.name}
+                              <span className="text-xs font-normal text-muted">
+                                ({department.positions.length})
+                              </span>
+                            </label>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                              {department.positions.map((position) => (
+                                <label key={position.id} className="flex min-h-8 items-start gap-2 text-xs text-body">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedIds.has(position.id)}
+                                    onChange={(event) => togglePositions(
+                                      index, [position.id], event.target.checked,
+                                    )}
+                                  />
+                                  <span>
+                                    <span className="font-medium text-ink">{position.name}</span>
+                                    {position.holders.length > 0 && (
+                                      <span className="block text-muted">
+                                        {position.holders.map((holder) => holder.name).join(", ")}
+                                      </span>
+                                    )}
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="border-t border-line pt-3">
                   <p className="mb-2 text-xs text-muted">
                     With a condition, this rank is governed by the condition instead of the
                     switch — use it for "over ₹5,00,000, always include this rank".
@@ -305,6 +392,7 @@ export function ApprovalConfigPage() {
                   >
                     <Plus className="h-4 w-4" /> Add condition
                   </Button>
+                  </div>
                 </div>
               )}
             </li>
