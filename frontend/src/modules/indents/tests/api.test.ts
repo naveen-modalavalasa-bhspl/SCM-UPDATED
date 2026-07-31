@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { indentApi, masterApi } from "../api";
+import { indentApi, indentKeys, masterApi } from "../api";
 
 const apiMock = vi.hoisted(() => ({
   get: vi.fn(),
@@ -52,6 +52,27 @@ describe("indents api", () => {
     expect(params.has("required_by_from")).toBe(false);
     expect(params.has("required_by_to")).toBe(false);
     expect(params.has("priority")).toBe(false);
+  });
+
+  it("keys the All Requests query by pagination and every visible filter", () => {
+    const scope = { employeeId: 1, activePositionId: 10 };
+    const filters = {
+      page: 2,
+      size: 50,
+      search: "Bolt",
+      created_date_from: "2026-07-01",
+      created_date_to: "2026-07-31",
+      status: ["APPROVED"],
+      priority: ["HIGH"],
+    };
+
+    expect(indentKeys.list(scope, filters)).toEqual([
+      "indents-module",
+      1,
+      10,
+      "list",
+      filters,
+    ]);
   });
 
   it("reads BOM choices without requesting the Item Group API", async () => {

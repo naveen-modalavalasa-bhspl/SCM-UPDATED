@@ -411,6 +411,75 @@ async def test_active_workflow_assignee_can_approve(monkeypatch):
     db.commit.assert_awaited_once()
 
 
+@pytest.mark.parametrize("comments", ["", "   "])
+@pytest.mark.asyncio
+async def test_reject_requires_reason_before_workflow_action(monkeypatch, comments):
+    approver = user(employee_id=20)
+    db = SimpleNamespace()
+    indent = SimpleNamespace(
+        id=77,
+        status=IndentStatus.PENDING_APPROVAL.value,
+        requested_by_id=10,
+    )
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=indent))
+    active_task = AsyncMock()
+    monkeypatch.setattr(service, "_assert_active_workflow_task", active_task)
+    monkeypatch.setattr(service.engine, "act", AsyncMock())
+
+    with pytest.raises(ValidationError, match=service.REJECTION_REASON_REQUIRED_ERROR):
+        await service.act_on_indent(
+            db,
+            77,
+            ApprovalAction.REJECTED,
+            comments,
+            approver,
+        )
+
+    active_task.assert_awaited_once_with(db, 77, 20)
+    service.engine.act.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reject_trims_reason_before_workflow_action(monkeypatch):
+    approver = user(employee_id=20)
+    indent = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        status=IndentStatus.PENDING_APPROVAL.value,
+        requested_by_id=10,
+        department_id=1,
+        position_id=101,
+        position_name="OE",
+        total_qty=5,
+        current_approver_name="OE",
+    )
+    db = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=indent))
+    monkeypatch.setattr(service, "_assert_active_workflow_task", AsyncMock())
+    monkeypatch.setattr(
+        service.engine,
+        "act",
+        AsyncMock(return_value=SimpleNamespace(status=InstanceStatus.REJECTED.value)),
+    )
+    release = AsyncMock()
+    monkeypatch.setattr(service.inventory_service, "release_for_indent", release)
+    monkeypatch.setattr(service, "write_audit", AsyncMock())
+    monkeypatch.setattr(service, "_attach_capabilities", AsyncMock(return_value=indent))
+
+    result = await service.act_on_indent(
+        db,
+        77,
+        ApprovalAction.REJECTED,
+        "  Incorrect quantity  ",
+        approver,
+    )
+
+    assert result.status == IndentStatus.REJECTED.value
+    assert service.engine.act.await_args.args[5] == "Incorrect quantity"
+    release.assert_awaited_once_with(db, 77)
+    db.commit.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_self_approval_is_rejected_before_workflow_action(monkeypatch):
     requester = user(employee_id=10)

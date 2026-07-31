@@ -3,7 +3,8 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Circle, Clock, Loader2, X } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
-import { Button, Card, StatusPill } from "@/shared/components";
+import { Button, Card } from "@/shared/components";
+import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
   isIndentUnavailableError, useIndentAccountCacheIsolation, useIndentAccountScope,
@@ -79,7 +80,16 @@ function JourneyStageRow({ stage }: { stage: IndentJourneyStage }) {
           {when && <span>{when}</span>}
           {duration && <span>Duration {duration}</span>}
         </div>
-        {stage.comments && <p className="mt-3 break-words text-sm text-body">{stage.comments}</p>}
+        {rejected && (
+          <div className="mt-3 rounded-md border border-bad/20 bg-content2 px-3 py-2.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-bad">
+              Rejection reason
+            </p>
+            <p className="mt-1 break-words text-sm font-medium leading-5 text-body">
+              {stage.comments?.trim() || "Not provided"}
+            </p>
+          </div>
+        )}
       </article>
     </li>
   );
@@ -167,7 +177,7 @@ export function IndentJourneyPage() {
             </div>
           </dl>
         </div>
-        <StatusPill status={data.status} />
+        <IndentStatusBadge status={data.status} journey={data} />
       </header>
 
       {error && <p className="rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}
@@ -197,7 +207,9 @@ export function IndentJourneyPage() {
                         {event.description && <p className="mt-1 break-words text-sm text-muted">{event.description}</p>}
                         {event.actor_name && <p className="mt-1 break-words text-sm text-body">{event.actor_name}</p>}
                         {event.position_name && <p className="break-words text-xs text-muted">{event.position_name}</p>}
-                        {event.comments && <p className="mt-2 break-words text-sm text-body">{event.comments}</p>}
+                        {event.event_type !== "REJECTED" && event.comments && (
+                          <p className="mt-2 break-words text-sm text-body">{event.comments}</p>
+                        )}
                       </article>
                     ))}
                   </div>

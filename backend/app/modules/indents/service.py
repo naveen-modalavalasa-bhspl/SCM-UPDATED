@@ -48,6 +48,7 @@ from app.modules.indents.schemas import IndentCreate, IndentUpdate
 PAST_REQUIRED_DATE_ERROR = "Required date cannot be earlier than today"
 REQUIRED_DATE_MANDATORY_ERROR = "Required date is mandatory."
 DUPLICATE_ITEM_ERROR = "The same item cannot be added more than once in a single indent."
+REJECTION_REASON_REQUIRED_ERROR = "Rejection reason is required."
 
 
 def _validate_required_date(required_date: date | None) -> None:
@@ -854,6 +855,10 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
     if indent.requested_by_id == user.id:
         raise ValidationError("Requester cannot approve or reject their own indent")
     await _assert_active_workflow_task(db, indent.id, user.id)
+    if action == ApprovalAction.REJECTED:
+        comments = (comments or "").strip()
+        if not comments:
+            raise ValidationError(REJECTION_REASON_REQUIRED_ERROR)
 
     before_status = indent.status
     context = {

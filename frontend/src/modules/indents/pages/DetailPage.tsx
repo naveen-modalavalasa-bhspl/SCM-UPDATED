@@ -3,17 +3,21 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, ChevronRight, Loader2, Pencil, Send, Trash2, X } from "lucide-react";
 import {
-  Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Skeleton, CardBody,
+  CardBody, Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Skeleton,
+  Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { PageHeader, Button, Can, Card, StatusPill } from "@/shared/components";
+import { PageHeader, Button, Can, Card } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
+import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
   isIndentModuleQuery, isIndentUnavailableError, useIndentAccountCacheIsolation,
   useIndentAccountScope,
 } from "../api";
 import type { Indent } from "../types";
+
+const REJECTION_REASON_MAX_LENGTH = 250;
 
 function Detail({ label, value }: { label: string; value: ReactNode }) {
   return (
@@ -37,6 +41,8 @@ export function IndentDetailPage() {
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
   const [error, setError] = useState<string | null>(null);
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [rejectionReason, setRejectionReason] = useState("");
 
   const { data: indent, isLoading, error: loadError } = useQuery({
     queryKey: indentKeys.detail(accountScope, indentId),
@@ -70,7 +76,7 @@ export function IndentDetailPage() {
     setError(null);
     // Write the mutation response immediately so status and actions update at once.
     qc.setQueryData(indentKeys.detail(accountScope, indentId), updated);
-    // Submit and Approve actively refresh the mounted journey without hiding cached data.
+    // Actions actively refresh the mounted journey without hiding cached data.
     qc.invalidateQueries({
       queryKey: indentKeys.journey(accountScope, indentId),
       refetchType: refetchJourney ? "active" : "none",
@@ -92,8 +98,12 @@ export function IndentDetailPage() {
     onError: onErr,
   });
   const reject = useMutation({
-    mutationFn: () => indentApi.reject(indentId, ""),
-    onSuccess: (updated) => refreshAfterAction(updated, false),
+    mutationFn: (reason: string) => indentApi.reject(indentId, reason),
+    onSuccess: (updated) => {
+      setRejectOpen(false);
+      setRejectionReason("");
+      refreshAfterAction(updated, true);
+    },
     onError: onErr,
   });
   const deleteDraft = useMutation({
@@ -135,6 +145,16 @@ export function IndentDetailPage() {
   const isPending = indent.status === "PENDING_APPROVAL";
   const showActions = indent.can_submit || indent.can_approve || indent.can_reject;
   const actionPending = submit.isPending || approve.isPending || reject.isPending || deleteDraft.isPending;
+  const trimmedRejectionReason = rejectionReason.trim();
+  const closeRejectModal = () => {
+    if (reject.isPending) return;
+    setRejectOpen(false);
+    setRejectionReason("");
+  };
+  const confirmReject = () => {
+    if (!trimmedRejectionReason || reject.isPending) return;
+    reject.mutate(trimmedRejectionReason);
+  };
 
   return (
     <>
@@ -147,7 +167,7 @@ export function IndentDetailPage() {
         title={indent.indent_no}
         actions={(
           <div className="flex flex-wrap items-center justify-end gap-2">
-            <StatusPill status={indent.status} />
+            <IndentStatusBadge status={indent.status} journey={journey} />
             {isDraftOwner && (
               <Can do="indent.edit">
                 <Button
@@ -248,7 +268,9 @@ export function IndentDetailPage() {
         </Card>
       </div>
 
-      {error && <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>}
+      {error && !rejectOpen && (
+        <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>
+      )}
 
       {showActions && (
         <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
@@ -260,8 +282,18 @@ export function IndentDetailPage() {
           {(indent.can_reject || indent.can_approve) && (
             <>
               {indent.can_reject && (
-                <Button variant="danger" className="flex-1 md:flex-none" disabled={actionPending} onClick={() => !actionPending && reject.mutate()}>
-                  {reject.isPending ? <InlineSpinner /> : <X className="h-4 w-4" />} {reject.isPending ? "Rejecting..." : "Reject"}
+                <Button
+                  variant="danger"
+                  className="flex-1 md:flex-none"
+                  disabled={actionPending}
+                  onClick={() => {
+                    if (actionPending) return;
+                    setError(null);
+                    setRejectionReason("");
+                    setRejectOpen(true);
+                  }}
+                >
+                  <X className="h-4 w-4" /> Reject
                 </Button>
               )}
               {indent.can_approve && (
@@ -273,6 +305,74 @@ export function IndentDetailPage() {
           )}
         </div>
       )}
+
+      <Modal
+        isOpen={rejectOpen}
+        onOpenChange={(open) => {
+          if (!open) closeRejectModal();
+        }}
+        placement="center"
+      >
+        <ModalContent>
+          {() => (
+            <>
+              <ModalHeader>Reject indent</ModalHeader>
+              <ModalBody className="gap-3">
+                <p className="text-sm text-body">
+                  Please enter the reason for rejecting this indent.
+                </p>
+                <label htmlFor="indent-rejection-reason" className="text-sm font-semibold text-body">
+                  Reason for rejection
+                </label>
+                <textarea
+                  id="indent-rejection-reason"
+                  autoFocus
+                  maxLength={REJECTION_REASON_MAX_LENGTH}
+                  value={rejectionReason}
+                  disabled={reject.isPending}
+                  aria-invalid={!trimmedRejectionReason}
+                  aria-describedby="indent-rejection-reason-helper indent-rejection-reason-error"
+                  placeholder="Example: Incorrect quantity or item not required"
+                  wrap="soft"
+                  className="h-[120px] w-full resize-none overflow-x-hidden whitespace-pre-wrap break-words rounded-lg border border-line bg-content1 px-3 py-2 text-sm leading-5 text-body [overflow-wrap:anywhere] outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  onChange={(event) => setRejectionReason(event.target.value)}
+                />
+                <div className="flex items-start justify-between gap-3 text-xs text-muted">
+                  <p id="indent-rejection-reason-helper">
+                    Enter a short reason. This will be visible in the approval journey.
+                  </p>
+                  <span className="shrink-0 tabular-nums" aria-live="polite">
+                    {rejectionReason.length}/{REJECTION_REASON_MAX_LENGTH}
+                  </span>
+                </div>
+                {!trimmedRejectionReason && (
+                  <p id="indent-rejection-reason-error" className="text-sm font-medium text-bad">
+                    Rejection reason is required.
+                  </p>
+                )}
+                {error && (
+                  <div className="rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">
+                    {error}
+                  </div>
+                )}
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="ghost" disabled={reject.isPending} onClick={closeRejectModal}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="danger"
+                  disabled={!trimmedRejectionReason || reject.isPending}
+                  onClick={confirmReject}
+                >
+                  {reject.isPending ? <InlineSpinner /> : <X className="h-4 w-4" />}
+                  {reject.isPending ? "Rejecting..." : "Reject indent"}
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
     </>
   );
 }

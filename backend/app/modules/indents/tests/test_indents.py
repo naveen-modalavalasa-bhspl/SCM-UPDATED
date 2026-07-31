@@ -677,6 +677,35 @@ async def test_pilot_submit_routes_to_oe_current_approver(db):
     assert {row.approver_id for row in pending} == {world["oe"].id}
 
 
+async def test_reject_requires_and_exposes_trimmed_reason_in_journey(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+
+    with pytest.raises(ValidationError, match=service.REJECTION_REASON_REQUIRED_ERROR):
+        await service.act_on_indent(
+            db,
+            world["indent"].id,
+            ApprovalAction.REJECTED,
+            "   ",
+            world["oe"],
+        )
+
+    rejected = await service.act_on_indent(
+        db,
+        world["indent"].id,
+        ApprovalAction.REJECTED,
+        "  Incorrect quantity  ",
+        world["oe"],
+    )
+    journey = await service.indent_journey(db, world["indent"].id, world["pilot"])
+    rejected_stage = next(stage for stage in journey["stages"] if stage["status"] == "REJECTED")
+
+    assert rejected.status == IndentStatus.REJECTED.value
+    assert rejected_stage["title"] == "OE Review"
+    assert rejected_stage["approver_name"] == "OE"
+    assert rejected_stage["comments"] == "Incorrect quantity"
+
+
 async def test_reporting_manager_ladder_advances_oe_to_dm_to_rm_to_final_group(db):
     world = await _approval_ladder_world(db)
     await service.submit_indent(db, world["indent"].id, world["pilot"])

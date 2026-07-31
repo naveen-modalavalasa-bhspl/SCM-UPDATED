@@ -143,9 +143,10 @@ export function IndentFilterBar({
   }, [search]);
 
   useEffect(() => {
+    if (localSearch === search) return;
     const timer = window.setTimeout(() => setSearch(localSearch), 300);
     return () => window.clearTimeout(timer);
-  }, [localSearch, setSearch]);
+  }, [localSearch, search, setSearch]);
 
   useEffect(() => {
     function closeOnOutsideClick(event: MouseEvent) {
