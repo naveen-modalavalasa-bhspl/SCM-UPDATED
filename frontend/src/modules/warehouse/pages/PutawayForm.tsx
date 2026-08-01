@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, ScanLine, SkipForward } from "lucide-react";
 import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
-import { ConfirmModal, ErrorBanner } from "@/shared/components";
+import { ConfirmModal, ErrorBanner } from "../components/compat";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
