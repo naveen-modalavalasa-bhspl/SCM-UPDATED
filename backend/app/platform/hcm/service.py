@@ -25,13 +25,6 @@ async def get_position_holders(db: AsyncSession, position_id: int,
     emp_ids = [r for r in (await db.execute(stmt)).scalars().all() if r is not None]
 
     if not emp_ids:
-        # fallback: employees whose primary position is this one
-        emp_ids = [
-            r for r in (await db.execute(
-                select(HcmEmployee.id).where(HcmEmployee.position_id == position_id)
-            )).scalars().all()
-        ]
-    if not emp_ids:
         return []
     rows = await db.execute(
         select(HcmEmployee).where(HcmEmployee.id.in_(emp_ids), HcmEmployee.is_active.is_(True))

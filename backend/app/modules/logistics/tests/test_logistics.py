@@ -2,6 +2,9 @@
 import pytest
 
 from app.core.exceptions import ValidationError
+# Stock moved to modules/inventory when it became the base module; logistics keeps
+# GRN and Issues and calls inventory_service.move_stock().
+from app.modules.inventory import service as inventory_service
 from app.modules.logistics import service
 from app.modules.logistics.schemas import GRNCreate, GRNLineIn
 from app.modules.procurement.models import POItem, PurchaseOrder
@@ -9,6 +12,7 @@ from app.platform.hcm.models import HcmEmployee
 from app.shared.enums import GRNStatus, POStatus, StockDirection
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom, Vendor
+from app.shared.models.warehouse import Warehouse
 
 FACILITY = 801
 
@@ -55,10 +59,13 @@ async def test_qc_pass_increases_stock(db):
     result = await service.qc_pass(db, grn.id, store)
     assert result.status == GRNStatus.QC_PASSED.value
 
-    stock = (await service.list_stock(db, _params(), item_id=item.id))["items"]
+    stock = (await inventory_service.list_stock(db, _params(), item_id=item.id))["items"]
     assert len(stock) == 1
-    assert float(stock[0].quantity) == 8
-    assert stock[0].facility_id == FACILITY
+    # stk_balance has available_qty / reserved_qty / total_qty -- there is no
+# 'quantity' column. This assertion never ran while the suite was skipping.
+    assert float(stock[0].available_qty) == 8
+    warehouse = await db.get(Warehouse, stock[0].warehouse_id)
+    assert warehouse.facility_id == FACILITY
 
 
 async def test_partial_receipt_keeps_po_partially_received(db):
@@ -78,8 +85,10 @@ async def test_cannot_grn_unopen_po(db):
 async def test_move_stock_out_insufficient_raises(db):
     item, po, po_item, store = await _po_world(db)
     with pytest.raises(ValidationError):
-        await service.move_stock(db, FACILITY, item.id, 5, StockDirection.OUT.value,
-                                 "ADJUSTMENT", 0, "ADJ-1", store)
+        await inventory_service.move_stock(
+            db, item_id=item.id, qty=5, direction=StockDirection.OUT.value,
+            ref_type="ADJUSTMENT", ref_id=0, ref_no="ADJ-1", user=store,
+            facility_id=FACILITY)
 
 
 def _params():

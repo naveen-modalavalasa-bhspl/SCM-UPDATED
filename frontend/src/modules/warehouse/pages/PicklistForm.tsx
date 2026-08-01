@@ -1,11 +1,9 @@
-import { Select } from "../components/compat";
+import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip, Progress } from "@heroui/react";
 import { ArrowLeft, Check } from "lucide-react";
-import { Button, Can, Field, Input, PageHeader, StatusPill } from "@/shared/components";
-import { ConfirmModal, ErrorBanner } from "../components/compat";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";

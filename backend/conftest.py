@@ -2,9 +2,12 @@
 created from the same credentials as the app (.env). Each test gets a freshly
 created schema (drop_all + create_all) for isolation. No SQLite anywhere.
 """
+import os
 import re
+from urllib.parse import quote, unquote
 
 import pymysql
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -23,30 +26,90 @@ from app.shared.models.base import utcnow
 _DSN_RE = re.compile(r"mysql\+aiomysql://([^:]+):([^@]*)@([^:/]+):(\d+)/(.+)")
 
 
+def _source_url() -> str:
+    """TEST_DATABASE_URL wins so the suite can point at a local MySQL. The app's
+    DATABASE_URL may name a shared server whose account cannot CREATE DATABASE, or
+    which only accepts connections from whitelisted hosts.
+
+    Checked in os.environ first (a one-off override on the command line), then in
+    settings, which is what actually reads .env — putting it only in .env and reading
+    only os.getenv silently did nothing, and every DB test kept skipping.
+    """
+    return (os.getenv("TEST_DATABASE_URL")
+            or settings.TEST_DATABASE_URL
+            or settings.DATABASE_URL)
+
+
 def _parts():
-    m = _DSN_RE.match(settings.DATABASE_URL)
+    m = _DSN_RE.match(_source_url())
     if not m:
-        raise RuntimeError("DATABASE_URL must be mysql+aiomysql://... to run tests")
+        raise RuntimeError(
+            "DATABASE_URL (or TEST_DATABASE_URL) must be mysql+aiomysql://... to run tests")
     user, pw, host, port, db = m.groups()
-    return user, pw, host, int(port), db
+    # pw arrives percent-encoded from the URL (# -> %23). SQLAlchemy decodes it when it
+    # parses the DSN, but pymysql is handed the value directly and needs it raw.
+    return unquote(user), unquote(pw), host, int(port), db
 
 
 def _test_dsn() -> str:
+    """_parts() hands back a decoded password for pymysql; SQLAlchemy parses a URL,
+    so it has to go back in percent-encoded or a '#' truncates the DSN."""
     user, pw, host, port, db = _parts()
-    return f"mysql+aiomysql://{user}:{pw}@{host}:{port}/{db}_test"
+    suffix = "" if db.endswith("_test") else "_test"
+    return (f"mysql+aiomysql://{quote(user, safe='')}:{quote(pw, safe='')}"
+            f"@{host}:{port}/{db}{suffix}")
 
 
-def _ensure_test_db() -> None:
-    user, pw, host, port, db = _parts()
-    conn = pymysql.connect(host=host, port=port, user=user, password=pw)
+def _ensure_test_db() -> str | None:
+    """Returns None on success, or a human-readable reason the suite cannot run.
+
+    Raising here would surface as a bare ImportError on conftest, which hides the
+    actual cause (no MySQL, wrong credentials, host not whitelisted).
+    """
     try:
-        conn.cursor().execute(f"CREATE DATABASE IF NOT EXISTS {db}_test CHARACTER SET utf8mb4")
+        user, pw, host, port, db = _parts()
+    except RuntimeError as exc:
+        return str(exc)
+    if db.endswith("_test"):
+        return None    # caller pointed us straight at a database they already made
+    try:
+        conn = pymysql.connect(host=host, port=port, user=user, password=pw,
+                               connect_timeout=10)
+    except Exception as exc:
+        return (f"cannot reach MySQL at {host}:{port} as {user!r} ({exc}). "
+                f"Set TEST_DATABASE_URL to a MySQL you can create databases on.")
+    try:
+        conn.cursor().execute(
+            f"CREATE DATABASE IF NOT EXISTS {db}_test CHARACTER SET utf8mb4")
         conn.commit()
+    except Exception as exc:
+        return (f"{user!r} cannot CREATE DATABASE {db}_test ({exc}). "
+                f"Set TEST_DATABASE_URL, or have the DBA create it and grant access.")
     finally:
         conn.close()
+    return None
 
 
-_ensure_test_db()
+_SKIP_REASON = _ensure_test_db()
+
+
+DB_FIXTURES = {"engine", "session_factory", "db", "client", "make_user", "login"}
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip loudly rather than erroring out of conftest, so `pytest -q` still reports
+    which tests exist and exactly why they did not run.
+
+    Only tests that actually ask for a database fixture are skipped; pure-logic tests
+    (operators, conflict overlap, numbering periods) still run and still catch
+    regressions on a machine with no MySQL.
+    """
+    if not _SKIP_REASON:
+        return
+    marker = pytest.mark.skip(reason=f"No test database: {_SKIP_REASON}")
+    for item in items:
+        if DB_FIXTURES & set(getattr(item, "fixturenames", ())):
+            item.add_marker(marker)
 
 
 @pytest_asyncio.fixture
@@ -93,9 +156,11 @@ def make_user(db):
     permission codes. Returns the HcmEmployee."""
     async def _make(employee_id=1, username="user", password="pw",
                     full_name="Test User", permissions=()):
+        # sys_local_credentials has no username column: login matches emp_code or
+        # email (see auth/service.authenticate), so the login name IS the emp_code.
         db.add(HcmEmployee(id=employee_id, full_name=full_name,
-                           emp_code=f"E{employee_id}", is_active=True, synced_at=utcnow()))
-        db.add(UserCredential(employee_id=employee_id, username=username,
+                           emp_code=username, is_active=True, synced_at=utcnow()))
+        db.add(UserCredential(employee_id=employee_id,
                               password_hash=hash_password(password)))
         role = Role(code=f"R_{username}", name=username, is_active=True)
         db.add(role)
@@ -106,7 +171,12 @@ def make_user(db):
                 select(Permission).where(Permission.code == code)
             )).scalar_one_or_none()
             if perm is None:
-                perm = Permission(code=code)
+                # module/resource/action are NOT NULL. Derive them from the code
+                # ("indent.view" -> indents/indent/view) rather than passing None,
+                # which sends an explicit NULL and raises 1048.
+                head, _, tail = code.partition(".")
+                perm = Permission(code=code, module=head, resource=head,
+                                  action=tail or "view", description=code)
                 db.add(perm)
                 await db.flush()
             db.add(RolePermission(role_id=role.id, permission_id=perm.id))

@@ -8,17 +8,28 @@ from app.shared.models.master import Item, Uom
 
 def test_all_tables_registered():
     names = set(Base.metadata.tables.keys())
-    # a representative sample across every prefix must be present
+    # A representative sample across every prefix must be present. Names here are the
+    # ones the live SCM_REBUILD schema actually uses: the balance/ledger pair is
+    # stk_balance/stk_ledger, and the sys_ tables are sys_doc_series and
+    # sys_local_credentials.
     expected = {
-        "mst_items", "mst_vendors", "mst_uom",
+        "mst_items", "mst_vendors", "mst_uom", "mst_uom_conversions", "mst_projects",
+        "mst_brands", "mst_item_classes", "mst_packaging", "mst_features",
+        "mst_attributes", "mst_attribute_mappings",
+        "mst_price_lists", "mst_price_list_items",
+        "mst_boms", "mst_bom_items", "mst_item_specs",
+        "whs_warehouses", "whs_warehouse_locations",
         "hcm_employees", "hcm_positions", "hcm_position_assignments", "sys_hcm_sync_log",
         "rbac_permissions", "rbac_roles", "rbac_user_roles", "rbac_pages",
+        "rbac_user_groups", "rbac_user_group_members",
         "wf_workflows", "wf_stages", "wf_instances", "wf_actions",
-        "sys_settings", "sys_doc_numbers", "sys_user_credentials",
+        "rule_events", "rule_rules", "rule_conditions", "rule_actions",
+        "rule_executions",
+        "sys_settings", "sys_doc_series", "sys_local_credentials", "sys_audit_log",
+        "sys_notification_rules",
         "ind_indents", "ind_indent_items",
         "pro_purchase_orders", "pro_po_items",
-        "lgs_grn", "lgs_grn_items", "lgs_issues", "lgs_issue_items",
-        "stk_stock", "stk_movements",
+        "stk_balance", "stk_ledger",
     }
     missing = expected - names
     assert not missing, f"missing tables: {missing}"

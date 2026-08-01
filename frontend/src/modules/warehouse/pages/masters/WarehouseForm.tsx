@@ -1,11 +1,9 @@
-import { Select } from "../../components/compat";
+import { Button, ErrorBanner, Field, Input, PageHeader, Select } from "@/shared/components";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Switch } from "@heroui/react";
 import { ArrowLeft } from "lucide-react";
-import { Button, Field, PageHeader } from "@/shared/components";
-import { ErrorBanner, Input } from "../../components/compat";
 import { Section } from "../../components/DocumentMeta";
 import { Lookup } from "../../components/Lookup";
 import { createWarehouse, employeeOptions, getWarehouse, updateWarehouse } from "../../api";

@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Card, Field, Input, PageHeader, ResponsiveList, type Column } from "@/shared/components";
-import { EmptyState, ErrorBanner, SubNav } from "../components/compat";
+import { Card, EmptyState, ErrorBanner, Field, Input, PageHeader, ResponsiveList, SubNav, type Column } from "@/shared/components";
 import { Lookup } from "../components/Lookup";
 import { runReport, warehouseOptions, type ReportKey } from "../api";
 import { fmtDate, fmtMoney, fmtQty, today } from "../format";

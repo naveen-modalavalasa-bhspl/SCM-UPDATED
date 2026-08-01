@@ -1,4 +1,4 @@
-import { Select } from "./compat";
+import { Select } from "@/shared/components";
 import { useQuery } from "@tanstack/react-query";
 import type { Option } from "../types";
 

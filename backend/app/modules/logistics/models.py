@@ -1,12 +1,17 @@
-"""lgs_ and stk_ tables — GRN, Issues, Stock. Owned by modules/logistics.
+"""lgs_ tables — GRN and Issues. Owned by modules/logistics.
 
-stk_movements is an append-only ledger: never UPDATE or DELETE a row.
-Stock is facility-wise: UNIQUE(facility_id, item_id) makes move_stock() upsert
-safe under concurrency.
+Stock (stk_balance, stk_ledger) moved to modules/inventory: Inventory is the base
+module and owns every stock table, so logistics calls inventory.service.move_stock()
+rather than mutating balances itself.
+
+KNOWN GAP: the GRN and Issue models below still map lgs_grn / lgs_issues, which do
+not exist in the live SCM_REBUILD schema — the DB team models inbound receipts as
+inb_receipts and issues as out_issues. Those belong to the Inventory and Warehouse
+modules and are out of scope for the Admin & Masters build, so they are left as-is
+and flagged here rather than silently half-migrated.
 """
 from sqlalchemy import (
-    BigInteger, Column, Date, ForeignKey, Integer, Numeric, String,
-    Text, Index, UniqueConstraint,
+    Column, Date, ForeignKey, Integer, Numeric, String, Text, Index,
 )
 from sqlalchemy.orm import relationship
 
@@ -105,35 +110,3 @@ class IssueItem(Base):
     issue = relationship("Issue", back_populates="items")
 
 
-class Stock(Base):
-    __tablename__ = "stk_stock"    # current balance, one row per item+facility
-    id = pk()
-    facility_id = Column(BigInteger, index=True, nullable=False)
-    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
-    item_code = Column(String(50), nullable=True)   # snapshot
-    item_name = Column(String(300), nullable=True)  # snapshot
-    quantity = Column(Numeric(16, 3), nullable=False, default=0)
-    reserved_quantity = Column(Numeric(16, 3), nullable=False, default=0)
-    updated_at = updated_at_col()
-    __table_args__ = (UniqueConstraint("facility_id", "item_id", name="uq_stock_facility_item"),)
-
-
-class StockMovement(Base):
-    __tablename__ = "stk_movements"   # append-only ledger
-    id = pk()
-    facility_id = Column(BigInteger, index=True, nullable=False)
-    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
-    direction = Column(String(3), nullable=False)   # IN | OUT
-    quantity = Column(Numeric(16, 3), nullable=False)
-    balance_after = Column(Numeric(16, 3), nullable=False)
-    ref_type = Column(String(20), nullable=True)    # GRN | ISSUE | ADJUSTMENT | TRANSFER
-    ref_id = Column(BigInteger, nullable=True)
-    ref_no = Column(String(30), nullable=True)
-    created_by_id = soft_fk()
-    created_by_name = Column(String(200), nullable=True)
-    remarks = Column(Text, nullable=True)
-    created_at = created_at_col()
-
-
-Index("ix_stk_mov_item_created", StockMovement.item_id, StockMovement.created_at.desc())
-Index("ix_stk_mov_ref", StockMovement.ref_type, StockMovement.ref_id)

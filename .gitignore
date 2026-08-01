@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.deploy.example
 backend/.env
 frontend/.env
 *.pem
@@ -88,3 +89,8 @@ desktop.ini
 logs/
 tmp/
 temp/
+
+# ---- Uploaded documents (invoice copies, LR slips, PODs) ----
+# Default store for sys_attachments files; override with UPLOAD_DIR in backend/.env.
+var/
+backend/var/

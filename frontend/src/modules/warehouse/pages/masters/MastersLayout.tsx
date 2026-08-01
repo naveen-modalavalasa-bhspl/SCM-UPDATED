@@ -1,7 +1,6 @@
 import { Outlet } from "react-router-dom";
 import { Map, Snowflake, Warehouse } from "lucide-react";
-import { PageHeader } from "@/shared/components";
-import { SubNav } from "../../components/compat";
+import { PageHeader, SubNav } from "@/shared/components";
 
 /**
  * The warehouse master shell.

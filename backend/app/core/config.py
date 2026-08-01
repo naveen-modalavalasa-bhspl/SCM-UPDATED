@@ -10,14 +10,27 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # --- Database (MySQL only) — required ---
     DATABASE_URL: str
+    # Optional: point the test suite at a MySQL the developer can CREATE DATABASE on.
+    # The shared server's SCM account cannot, so without this the 100+ DB-backed tests
+    # skip and the reservation maths goes unverified. Read here rather than straight
+    # from os.environ so it can live in .env like every other setting.
+    TEST_DATABASE_URL: str | None = None
 
     # --- Auth — required ---
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+    # Demo seeds create mock HCM identities and local credentials. Production must
+    # opt in explicitly rather than accepting demo access by accident.
+    ALLOW_DEMO_DATA: bool = False
 
     # --- CORS (comma-separated) ---
     CORS_ORIGINS: str = "http://localhost:5173"
+    # Let any machine on the local network reach the API, for demos and phone testing.
+    # A regex over the private ranges rather than "*": the API sends credentials, and
+    # browsers reject a wildcard origin when they are present. Off unless set, so
+    # nothing is exposed by accident.
+    CORS_ALLOW_PRIVATE_NETWORK: bool = False
 
     # --- HCM integration — required (base URL + key from env) ---
     HCM_BASE_URL: str
@@ -30,6 +43,18 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def cors_origin_regex(self) -> str | None:
+        """Matches http(s)://<private-ip-or-hostname>[:port] on 10/x, 172.16-31/x,
+        192.168/x and localhost. Returns None when the flag is off."""
+        if not self.CORS_ALLOW_PRIVATE_NETWORK:
+            return None
+        host = (r"(localhost|127\.0\.0\.1|\[::1\]"
+                r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                r"|192\.168\.\d{1,3}\.\d{1,3}"
+                r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})")
+        return rf"^https?://{host}(:\d+)?$"
 
 
 settings = Settings()

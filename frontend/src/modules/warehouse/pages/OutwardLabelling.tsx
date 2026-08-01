@@ -1,10 +1,8 @@
-import { Select } from "../components/compat";
+import { Button, Can, Card, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox, Chip } from "@heroui/react";
 import { Package, Trash2 } from "lucide-react";
-import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
-import { ErrorBanner } from "../components/compat";
 import { Section } from "../components/DocumentMeta";
 import { LabelSheet, type LabelSpec } from "../components/LabelPrint";
 import { Lookup } from "../components/Lookup";

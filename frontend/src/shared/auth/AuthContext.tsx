@@ -6,6 +6,7 @@ interface AuthState {
   me: Me | null;
   loading: boolean;
   login: (username: string, password: string) => Promise<void>;
+  switchPosition: (positionId: number) => Promise<void>;
   logout: () => void;
   can: (code: string) => boolean;
 }
@@ -40,6 +41,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await loadMe();
   }
 
+  async function switchPosition(positionId: number) {
+    const { data } = await api.post<{ access_token: string }>(
+      "/api/auth/switch-position", { position_id: positionId },
+    );
+    localStorage.setItem("token", data.access_token);
+    setLoading(true);
+    await loadMe();
+  }
+
   function logout() {
     localStorage.removeItem("token");
     setMe(null);
@@ -48,7 +58,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const can = (code: string) => !!me?.permissions.includes(code);
 
   return (
-    <AuthContext.Provider value={{ me, loading, login, logout, can }}>
+    <AuthContext.Provider value={{ me, loading, login, switchPosition, logout, can }}>
       {children}
     </AuthContext.Provider>
   );

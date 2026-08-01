@@ -31,8 +31,12 @@ export function ResponsiveList<T>({
 
   return (
     <>
-      {/* Desktop / tablet */}
-      <div className="hidden md:block">
+      {/* Desktop / tablet.
+       * The scroll container is here, not on the Table: `base` carried overflow-hidden,
+       * which CLIPPED a table wider than the page instead of scrolling it — the last
+       * columns were simply unreachable, with no scrollbar to say so. Wide content
+       * scrolls inside its own box; the page itself never scrolls sideways. */}
+      <div className="hidden overflow-x-auto md:block">
         <Table
           aria-label="List"
           removeWrapper
@@ -42,7 +46,7 @@ export function ResponsiveList<T>({
             if (r) onRowClick(r);
           } : undefined}
           classNames={{
-            base: "overflow-hidden rounded-2xl border border-line/70 bg-content1",
+            base: "rounded-2xl border border-line/70 bg-content1",
             th: "bg-content2 text-[11px] font-semibold uppercase tracking-wider text-muted",
             tr: onRowClick ? "cursor-pointer transition-colors hover:bg-brand-050/50" : "",
             td: "py-3.5 text-sm",

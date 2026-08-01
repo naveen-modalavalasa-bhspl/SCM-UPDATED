@@ -9,11 +9,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 T = TypeVar("T")
 
 
+# Master dropdowns legitimately need every row in one call — there are 62 item
+# categories and hundreds of bins, and a picker cannot paginate. The old ceiling of
+# 100 made those requests fail with 422, and the screens rendered as empty rather
+# than as an error, so several master tabs looked broken for no visible reason.
+MAX_PAGE_SIZE = 500
+
+
 class PageParams:
     def __init__(
         self,
         page: int = Query(1, ge=1),
-        size: int = Query(20, ge=1, le=100),
+        size: int = Query(20, ge=1, le=MAX_PAGE_SIZE),
     ):
         self.page = page
         self.size = size

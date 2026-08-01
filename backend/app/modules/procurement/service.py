@@ -10,10 +10,11 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.indents import service as indent_service
 from app.modules.indents.models import IndentItem
+from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import POItem, PurchaseOrder
 from app.modules.procurement.schemas import POCreate
 from app.platform.workflow import engine
-from app.shared.enums import DocType, IndentStatus, InstanceStatus, POStatus
+from app.shared.enums import DocType, IndentStatus, InstanceStatus, MRStatus, POStatus
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Vendor
 from app.shared.numbering import next_number
@@ -25,10 +26,38 @@ def _d(value) -> Decimal:
 
 async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate, user) -> PurchaseOrder:
     indent = await indent_service.get_indent(db, indent_id)
-    if indent.status not in (IndentStatus.APPROVED.value, IndentStatus.PARTIALLY_ORDERED.value):
+    # An approved indent that the availability check could not fill lands in
+    # PENDING_PROCUREMENT or PARTIALLY_FULFILLED. Those are still approved indents --
+    # they are in fact the ones that most need buying -- so they convert to a PO too.
+    BUYABLE = (
+        IndentStatus.APPROVED.value,
+        IndentStatus.PARTIALLY_ORDERED.value,
+        IndentStatus.PENDING_PROCUREMENT.value,
+        IndentStatus.PARTIALLY_FULFILLED.value,
+    )
+    if indent.status not in BUYABLE:
         raise ValidationError("Only approved indents can be converted to a PO")
     if not data.lines:
         raise ValidationError("PO must have at least one line")
+
+    approved_mr_items: list[MaterialRequestItem] = []
+    if indent.status in {
+        IndentStatus.PENDING_PROCUREMENT.value,
+        IndentStatus.PARTIALLY_FULFILLED.value,
+    }:
+        approved_mr_items = list((await db.execute(
+            select(MaterialRequestItem)
+            .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+            .where(
+                MaterialRequest.indent_id == indent.id,
+                MaterialRequest.status == MRStatus.APPROVED.value,
+            )
+            .order_by(MaterialRequestItem.id)
+        )).scalars().all())
+        if not approved_mr_items:
+            raise ValidationError(
+                "The shortage Material Request must be approved before Procurement"
+            )
 
     vendor = await db.get(Vendor, data.vendor_id)
     if not vendor:
@@ -50,8 +79,10 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         created_by_id=user.id,
         created_by_name=user.full_name,
         office_id=indent.office_id,
-        facility_id=indent.facility_id,
-        facility_name=indent.facility_name,
+        # Indents now snapshot the HCM office; the old facility fields were removed.
+        # Warehouse will choose the physical receipt location in its own module.
+        facility_id=None,
+        facility_name=indent.office_name,
         status=POStatus.DRAFT.value,
         remarks=data.remarks,
     )
@@ -63,6 +94,20 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         item = items_map.get(line.item_id)
         if not item:
             raise ValidationError(f"Unknown item id: {line.item_id}")
+        matching_mr_items = [
+            mr_line for mr_line in approved_mr_items
+            if mr_line.indent_item_id == line.indent_item_id
+            and mr_line.item_id == line.item_id
+        ]
+        if approved_mr_items:
+            remaining = sum(
+                _d(mr_line.quantity) - _d(mr_line.ordered_quantity or 0)
+                for mr_line in matching_mr_items
+            )
+            if not matching_mr_items or _d(line.quantity) > remaining:
+                raise ValidationError(
+                    f"PO quantity for item {item.code} exceeds the approved MR shortage"
+                )
         amount = _d(line.quantity) * _d(line.rate)
         tax = amount * _d(line.tax_percent) / _d(100)
         sub_total += amount
@@ -78,6 +123,14 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
             ind_item = await db.get(IndentItem, line.indent_item_id)
             if ind_item:
                 ind_item.ordered_quantity = (ind_item.ordered_quantity or 0) + _d(line.quantity)
+        to_apply = _d(line.quantity)
+        for mr_line in matching_mr_items:
+            if to_apply <= 0:
+                break
+            available = _d(mr_line.quantity) - _d(mr_line.ordered_quantity or 0)
+            applied = min(available, to_apply)
+            mr_line.ordered_quantity = _d(mr_line.ordered_quantity or 0) + applied
+            to_apply -= applied
 
     po.sub_total = sub_total
     po.tax_amount = tax_total

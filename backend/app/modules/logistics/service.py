@@ -1,7 +1,8 @@
-"""Logistics business logic: GRN, QC, stock and issues.
+"""Logistics business logic: GRN, QC and issues.
 
-May import procurement (backward in the chain). Stock is mutated ONLY through
-move_stock(); no code anywhere assigns stk_stock.quantity directly.
+May import inventory, indents and procurement (all backward in the chain). Stock is
+mutated ONLY through inventory_service.move_stock(); no code here assigns to
+stk_balance columns.
 """
 from decimal import Decimal
 
@@ -10,9 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
-from app.modules.logistics.models import (
-    GRN, GRNItem, Issue, IssueItem, Stock, StockMovement,
-)
+from app.modules.inventory import service as inventory_service
+from app.modules.logistics.models import GRN, GRNItem, Issue, IssueItem
 from app.modules.logistics.schemas import GRNCreate, IssueCreate
 from app.modules.procurement import service as po_service
 from app.modules.procurement.models import POItem
@@ -24,59 +24,6 @@ from app.shared.numbering import next_number
 
 def _d(value) -> Decimal:
     return Decimal(str(value))
-
-
-# ---------------- stock: the single mutation point ----------------
-
-async def move_stock(db: AsyncSession, facility_id: int, item_id: int, qty,
-                     direction: str, ref_type: str, ref_id: int, ref_no: str, user) -> Stock:
-    """The ONLY function that changes stock. Always writes a stk_movements row."""
-    qty = _d(qty)
-    if qty <= 0:
-        raise ValidationError("Stock movement quantity must be positive")
-
-    stock = (await db.execute(
-        select(Stock).where(Stock.facility_id == facility_id, Stock.item_id == item_id)
-        .with_for_update()
-    )).scalar_one_or_none()
-    if stock is None:
-        item = await db.get(Item, item_id)
-        stock = Stock(facility_id=facility_id, item_id=item_id,
-                      item_code=item.code if item else None,
-                      item_name=item.name if item else None, quantity=Decimal("0"))
-        db.add(stock)
-        await db.flush()
-
-    delta = qty if direction == StockDirection.IN.value else -qty
-    new_balance = (stock.quantity or Decimal("0")) + delta
-    if new_balance < 0:
-        raise ValidationError("Insufficient stock for this movement")
-    stock.quantity = new_balance
-
-    db.add(StockMovement(
-        facility_id=facility_id, item_id=item_id, direction=direction, quantity=qty,
-        balance_after=new_balance, ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
-        created_by_id=user.id, created_by_name=user.full_name,
-    ))
-    await db.flush()
-    return stock
-
-
-async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None = None,
-                     facility_id: int | None = None) -> dict:
-    stmt = select(Stock)
-    if item_id is not None:
-        stmt = stmt.where(Stock.item_id == item_id)
-    if facility_id is not None:
-        stmt = stmt.where(Stock.facility_id == facility_id)
-    return await paginate(db, stmt.order_by(Stock.item_name), params)
-
-
-async def list_movements(db: AsyncSession, params: PageParams, item_id: int | None = None) -> dict:
-    stmt = select(StockMovement)
-    if item_id is not None:
-        stmt = stmt.where(StockMovement.item_id == item_id)
-    return await paginate(db, stmt.order_by(StockMovement.created_at.desc()), params)
 
 
 # ---------------- GRN ----------------
@@ -158,7 +105,7 @@ async def qc_pass(db: AsyncSession, grn_id: int, user) -> GRN:
     grn.status = GRNStatus.QC_PASSED.value
     for line in grn.items:
         if line.accepted_quantity and line.accepted_quantity > 0:
-            await move_stock(
+            await inventory_service.move_stock(
                 db, facility_id=grn.facility_id, item_id=line.item_id,
                 qty=line.accepted_quantity, direction=StockDirection.IN.value,
                 ref_type=RefType.GRN.value, ref_id=grn.id, ref_no=grn.grn_no, user=user,
@@ -225,7 +172,7 @@ async def issue_stock(db: AsyncSession, issue_id: int, user) -> Issue:
     if issue.status != IssueStatus.DRAFT.value:
         raise ValidationError(f"Cannot issue an issue in {issue.status} status")
     for line in issue.items:
-        await move_stock(
+        await inventory_service.move_stock(
             db, facility_id=issue.facility_id, item_id=line.item_id, qty=line.quantity,
             direction=StockDirection.OUT.value, ref_type=RefType.ISSUE.value,
             ref_id=issue.id, ref_no=issue.issue_no, user=user,

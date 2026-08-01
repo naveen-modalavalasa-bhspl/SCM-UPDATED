@@ -63,32 +63,6 @@ class GRNListRow(BaseModel):
     created_at: datetime
 
 
-class StockRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    facility_id: int
-    item_id: int
-    item_code: str | None = None
-    item_name: str | None = None
-    quantity: float
-    reserved_quantity: float
-    updated_at: datetime
-
-
-class MovementRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    facility_id: int
-    item_id: int
-    direction: str
-    quantity: float
-    balance_after: float
-    ref_type: str | None = None
-    ref_no: str | None = None
-    created_by_name: str | None = None
-    created_at: datetime
-
-
 class IssueLineIn(BaseModel):
     item_id: int
     quantity: float = Field(gt=0)

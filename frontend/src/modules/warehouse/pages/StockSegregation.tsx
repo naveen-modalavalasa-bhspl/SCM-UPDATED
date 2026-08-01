@@ -1,9 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { Card, PageHeader, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
-import { ErrorBanner } from "../components/compat";
-import { SubNav } from "../components/compat";
+import { Card, ErrorBanner, PageHeader, ResponsiveList, StatCard, StatusPill, SubNav, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { LabelSheet, type LabelSpec } from "../components/LabelPrint";
 import { listBatches, listSerials } from "../api";

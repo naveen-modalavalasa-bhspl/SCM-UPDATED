@@ -1,7 +1,6 @@
 import { Outlet } from "react-router-dom";
 import { ArrowLeftRight, ClipboardCheck, PackageCheck, PackageOpen, Send, Truck, Undo2 } from "lucide-react";
-import { PageHeader } from "@/shared/components";
-import { SubNav } from "../components/compat";
+import { PageHeader, SubNav } from "@/shared/components";
 
 /**
  * The transactions shell — one strip over the whole warehouse document chain.

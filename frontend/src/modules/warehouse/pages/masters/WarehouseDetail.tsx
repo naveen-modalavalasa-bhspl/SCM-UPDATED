@@ -1,11 +1,9 @@
-import { Select } from "../../components/compat";
+import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, SubNav } from "@/shared/components";
 import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch } from "@heroui/react";
 import { ArrowLeft, Pencil, Plus, Printer } from "lucide-react";
-import { Button, Can, Card, Field, Input, PageHeader } from "@/shared/components";
-import { ConfirmModal, ErrorBanner, SubNav } from "../../components/compat";
 import { MetaCard, MetaRow } from "../../components/DocumentMeta";
 import { BinTree, flattenBins } from "../../components/BinTree";
 import { LabelSheet, type LabelSpec } from "../../components/LabelPrint";

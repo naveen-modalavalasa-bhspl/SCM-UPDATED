@@ -5,8 +5,7 @@ import { HeroUIProvider } from "@heroui/react";
 import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
 import { LoginPage } from "@/pages/LoginPage";
-import { DashboardPage } from "@/pages/DashboardPage";
-import { Placeholder } from "@/shared/components/Placeholder";
+import { HomePage } from "@/modules/home/pages/HomePage";
 import { IndentListPage } from "@/modules/indents/pages/ListPage";
 import { IndentFormPage } from "@/modules/indents/pages/FormPage";
 import { IndentDetailPage } from "@/modules/indents/pages/DetailPage";
@@ -15,18 +14,56 @@ import { IndentBoardPage } from "@/modules/indents/pages/BoardPage";
 import { IndentAcknowledgmentsPage } from "@/modules/indents/pages/AcknowledgmentsPage";
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
+// Approvals is its own module now — the inbox, decisions, team queue, reports and the
+// indent review screen all live there, not inside indents.
+import { ApprovalsPage, MyDecisionsPage, TeamQueuePage } from "@/modules/approvals";
+import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
-import { GRNListPage } from "@/modules/logistics/pages/GRNListPage";
-import { StockPage } from "@/modules/logistics/pages/StockPage";
-import { IssuesPage } from "@/modules/logistics/pages/IssuesPage";
+// The warehouse module owns goods receipt, stock and issues now; it routes its own
+// sub-pages, so these paths hand the whole subtree to it.
+import { WarehouseModule } from "@/modules/warehouse";
 import { AdminPage } from "@/modules/admin/pages/AdminPage";
+import { UsersPage } from "@/modules/rbac/pages/UsersPage";
+import { GroupsPage } from "@/modules/rbac/pages/GroupsPage";
+import { RulesPage } from "@/modules/admin/pages/RulesPage";
+import { WorkflowsPage } from "@/modules/admin/pages/WorkflowsPage";
+import { ApprovalConfigPage } from "@/modules/admin/pages/ApprovalConfigPage";
+import { CustomLadderPage } from "@/modules/admin/pages/CustomLadderPage";
+import { PoliciesPage } from "@/modules/admin/pages/PoliciesPage";
+import { AuditPage } from "@/modules/admin/pages/AuditPage";
+import { AppLogsPage } from "@/modules/admin/pages/AppLogsPage";
+import { NumberingPage } from "@/modules/admin/pages/NumberingPage";
+import { NotificationsPage } from "@/modules/admin/pages/NotificationsPage";
+import { MastersPage } from "@/modules/masters/pages/MastersPage";
+import { InventoryOverviewPage } from "@/modules/inventory/pages/OverviewPage";
+// Each inventory screen is its own route so it can appear in the left rail.
+import { StockBalanceView } from "@/modules/inventory/components/StockBalanceView";
+import { StockLedgerView } from "@/modules/inventory/components/StockLedgerView";
+import { StockReplenishmentView } from "@/modules/inventory/components/StockReplenishmentView";
+import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
+import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
+import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
+import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
+import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
+import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
+import { AllocationApprovalsPage } from "@/modules/inventory/pages/AllocationApprovalsPage";
+import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialRequestDetailPage";
+import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
+import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
+import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
+import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
+import { ToastProvider } from "@/shared/components";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
 });
 
 function FullScreen({ children }: { children: ReactNode }) {
-  return <div className="grid min-h-full place-items-center text-muted">{children}</div>;
+  return (
+    <div className="flex h-screen w-screen items-center justify-center font-sans text-lg text-ink">
+      {children}
+    </div>
+  );
 }
 
 function AppRoutes() {
@@ -37,7 +74,7 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={me ? <Navigate to="/" replace /> : <LoginPage />} />
       <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
-        <Route index element={<DashboardPage />} />
+        <Route index element={<HomePage />} />
         <Route path="indents" element={<IndentListPage />} />
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
@@ -45,13 +82,53 @@ function AppRoutes() {
         <Route path="indents/reports" element={<IndentReportsPage />} />
         <Route path="indents/notifications" element={<IndentNotificationsPage />} />
         <Route path="indents/new" element={<IndentFormPage />} />
+        <Route path="indents/:id/journey" element={<IndentJourneyPage />} />
         <Route path="indents/:id" element={<IndentDetailPage />} />
-        <Route path="approvals" element={<Placeholder title="My Approvals" />} />
+        {/* Reports, the correction form and the indent review screen are reached from
+            the inbox via ?view=reports / ?correction= / ?reviewIndent=, so they need
+            no route of their own. */}
+        <Route path="approvals" element={<ApprovalsPage />} />
+        <Route path="approvals/decisions" element={<MyDecisionsPage />} />
+        <Route path="approvals/team-queue" element={<TeamQueuePage />} />
+        {/* Delegation is retired. The route stays so old links and bookmarks land
+            somewhere real instead of on a blank page. */}
+        <Route path="approvals/delegations" element={<Navigate to="/approvals" replace />} />
         <Route path="pos" element={<POListPage />} />
-        <Route path="grn" element={<GRNListPage />} />
-        <Route path="stock" element={<StockPage />} />
-        <Route path="issues" element={<IssuesPage />} />
+        <Route path="grn/*" element={<WarehouseModule />} />
+        <Route path="stock/*" element={<WarehouseModule />} />
+        <Route path="issues/*" element={<WarehouseModule />} />
+        <Route path="warehouse/*" element={<WarehouseModule />} />
+        <Route path="inventory" element={<InventoryOverviewPage />} />
+        <Route path="inventory/stock-balance" element={<StockBalanceView />} />
+        <Route path="inventory/ledger" element={<StockLedgerView />} />
+        <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
+        <Route path="inventory/transfers" element={<StockTransferView />} />
+        <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
+        <Route path="inventory/valuation" element={<StockValuationView />} />
+        <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
+        <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
+        <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
+        <Route path="inventory/allocation-approvals" element={<AllocationApprovalsPage />} />
+        <Route path="inventory/demand" element={<ItemDemandPage />} />
+        <Route path="inventory/labels" element={<LabelsPage />} />
+        <Route path="inventory/material-requests/:id" element={<MaterialRequestDetailPage />} />
         <Route path="admin" element={<AdminPage />} />
+        <Route path="admin/settings" element={<SettingsPage />} />
+        <Route path="rbac/access" element={<UsersPage />} />
+        <Route path="rbac/groups" element={<GroupsPage />} />
+        <Route path="admin/rules" element={<RulesPage />} />
+        <Route path="admin/workflows" element={<WorkflowsPage />} />
+        <Route path="admin/approvals-config" element={<ApprovalConfigPage />} />
+        {/* Reached from the Approvals Config screen, not from the menu — adding it to
+            rbac_pages would mean reseeding, and seed prunes the live tree. */}
+        <Route path="admin/approvals-config/custom" element={<CustomLadderPage />} />
+        <Route path="admin/policies" element={<PoliciesPage />} />
+        <Route path="admin/audit" element={<AuditPage />} />
+        <Route path="admin/app-logs" element={<AppLogsPage />} />
+        <Route path="admin/numbering" element={<NumberingPage />} />
+        <Route path="admin/notifications" element={<NotificationsPage />} />
+        <Route path="admin/fallback-log" element={<FallbackLogPage />} />
+        <Route path="masters" element={<MastersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
@@ -62,9 +139,12 @@ function Shell() {
   const navigate = useNavigate();
   return (
     <HeroUIProvider navigate={navigate} useHref={useHref}>
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
+      {/* Outside AuthProvider so a toast can fire during login too. */}
+      <ToastProvider>
+        <AuthProvider>
+          <AppRoutes />
+        </AuthProvider>
+      </ToastProvider>
     </HeroUIProvider>
   );
 }

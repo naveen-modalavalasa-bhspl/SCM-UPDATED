@@ -1,7 +1,6 @@
-import { Select } from "./compat";
+import { Field, Select } from "@/shared/components";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Field } from "@/shared/components";
 import { getBinTree } from "../api";
 import type { Bin } from "../types";
 import { humanise } from "../format";

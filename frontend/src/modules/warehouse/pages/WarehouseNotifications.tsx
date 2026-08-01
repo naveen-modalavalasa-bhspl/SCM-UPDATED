@@ -2,8 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, CheckCheck } from "lucide-react";
-import { Button, Card, PageHeader } from "@/shared/components";
-import { EmptyState, ErrorBanner, SubNav } from "../components/compat";
+import { Button, Card, EmptyState, ErrorBanner, PageHeader, SubNav } from "@/shared/components";
 import { listNotifications, markAllNotificationsRead, markNotificationRead } from "../api";
 import { fmtDateTime } from "../format";
 

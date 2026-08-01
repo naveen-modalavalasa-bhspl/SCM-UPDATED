@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import { ScanLine, Trash2 } from "lucide-react";
-import { Button } from "@/shared/components";
-import { ErrorBanner } from "./compat";
+import { Button, ErrorBanner } from "@/shared/components";
 
 /**
  * Captures the serial numbers of a receipt or issue line — or, at inspection, picks

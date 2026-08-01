@@ -4,17 +4,22 @@ Seeds: permissions, 5 roles + role_permissions, the grouped menu (rbac_pages),
 6 demo employees (hcm_employees) with local credentials (sys_local_credentials) and
 role assignments. Enough to log in and load /api/auth/me.
 
-Run:  python -m scripts.seed_foundation
-Login with the employee code (e.g. 'admin') and password 'password123'.
+Run:  ALLOW_DEMO_DATA=true python -m scripts.seed_foundation
+
+Like scripts/seed.py, this refuses a non-loopback database unless `--allow-remote` is
+passed, and never deletes a menu page unless `--prune` is passed. To add or repair menu
+rows on a real server use `scripts.provision_pages`, which upserts and never deletes.
 
 NOTE: seeds demo rows into hcm_employees (normally sync-owned) because the app needs
 identities to log in before a real HCM sync. Demo ids are 900001+ to avoid clashing
 with real HCM ids.
 """
 import asyncio
+import secrets
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.security import hash_password
 from app.platform.hcm.models import HcmEmployee
@@ -23,8 +28,6 @@ from app.platform.rbac.models import Page, Permission, Role, RolePermission, Use
 from app.platform.settings.models import UserCredential
 from app.shared.enums import UserRole as RoleCode
 from app.shared.models.base import utcnow
-
-PASSWORD = "password123"
 
 ROLE_PERMS = {
     RoleCode.ADMIN.value: P.ALL_CODES,
@@ -44,33 +47,28 @@ USERS = [
     ("planthead", 900006, "Padma Planthead", RoleCode.APPROVER.value),
 ]
 
-# (code, path, name, icon, required_permission, sort_order, parent_code)
-PAGE_TREE = [
-    ("home", "/", "Home", "home", None, 0, None),
-    ("grp_indents", "/indents/dashboard", "Indents", "file-text", P.INDENT_VIEW, 10, None),
-    ("ind_dashboard", "/indents/dashboard", "Dashboard", "layout-dashboard", P.INDENT_VIEW, 11, "grp_indents"),
-    ("ind_list", "/indents", "List", "list", P.INDENT_VIEW, 12, "grp_indents"),
-    ("ind_board", "/indents/board", "Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
-    ("ind_ack", "/indents/acknowledgments", "Acknowledgments", "check-circle", P.INDENT_VIEW, 14, "grp_indents"),
-    ("ind_reports", "/indents/reports", "Reports", "bar-chart", P.INDENT_VIEW, 15, "grp_indents"),
-    ("ind_notifications", "/indents/notifications", "Notifications", "bell", P.INDENT_VIEW, 16, "grp_indents"),
-    ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
-    ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
-    ("po_list", "/pos", "Purchase Orders", "shopping-cart", P.PO_VIEW, 31, "grp_purchasing"),
-    ("grp_warehouse", "/stock", "Warehouse", "truck", P.STOCK_VIEW, 40, None),
-    ("grn", "/grn", "Goods Receipt", "truck", P.GRN_VIEW, 41, "grp_warehouse"),
-    ("stock", "/stock", "Stock", "package", P.STOCK_VIEW, 42, "grp_warehouse"),
-    ("issues", "/issues", "Issues", "send", P.ISSUE_VIEW, 43, "grp_warehouse"),
-    ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
-    ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
-]
+# The menu has ONE source of truth: scripts/seed.py PAGE_TREE (per CLAUDE.md, that is
+# where a module dev adds a screen). Keeping a second copy here silently deleted every
+# page the copy had not caught up with — Inventory and the warehouse sub-pages vanished
+# from the rail the moment this script ran.
+# `_refuse_remote` comes from seed.py for the same reason PAGE_TREE does: one copy, so
+# hardening one script cannot leave the other one open. seed.py grew the loopback guard
+# and the opt-in prune after a run wiped 20 live menu pages; this script kept deleting
+# unconditionally and wiped 21 more on 2026-07-30.
+from scripts.seed import PAGE_TREE, _refuse_remote  # noqa: E402
 
 
 async def _get(db, model, **filt):
     return (await db.execute(select(model).filter_by(**filt))).scalar_one_or_none()
 
 
-async def seed():
+async def seed(*, allow_remote: bool = False, prune: bool = False):
+    if not settings.ALLOW_DEMO_DATA:
+        raise SystemExit(
+            "Demo seed blocked. Set ALLOW_DEMO_DATA=true only in a development environment."
+        )
+    _refuse_remote(allow_remote)
+    created_passwords = {}
     async with SessionLocal() as db:
         # permissions
         perm_by_code = {}
@@ -113,6 +111,23 @@ async def seed():
         for code, *_rest, parent in PAGE_TREE:
             page = await db.get(Page, code_to_id[code])
             page.parent_id = code_to_id[parent] if parent else None
+        # Opt-in, exactly as seed.py does it. A page this branch has never heard of is
+        # far more likely to be newer than the branch than to be dead.
+        valid_page_codes = {code for code, *_rest in PAGE_TREE}
+        stale_pages = (await db.execute(
+            select(Page).where(Page.code.notin_(valid_page_codes))
+        )).scalars().all()
+        if stale_pages and not prune:
+            print("  %d page(s) in the database are not in PAGE_TREE and were LEFT ALONE: %s"
+                  % (len(stale_pages), ", ".join(sorted(p.code for p in stale_pages))))
+            print("  If they really are dead, re-run with --prune. If they are newer than "
+                  "this branch, pull first — do not prune.")
+        elif stale_pages:
+            for page in stale_pages:
+                await db.delete(page)
+            print("  pruned %d page(s): %s"
+                  % (len(stale_pages), ", ".join(sorted(p.code for p in stale_pages))))
+        await db.flush()
 
         # employees + credentials + roles
         for emp_code, emp_id, name, role_code in USERS:
@@ -126,19 +141,31 @@ async def seed():
             await db.flush()
             cred = await db.get(UserCredential, emp_id)
             if not cred:
-                db.add(UserCredential(employee_id=emp_id, password_hash=hash_password(PASSWORD)))
+                temporary_password = secrets.token_urlsafe(12)
+                created_passwords[emp_code] = temporary_password
+                db.add(UserCredential(
+                    employee_id=emp_id,
+                    password_hash=hash_password(temporary_password),
+                    must_change=True,
+                ))
             if not await _get(db, UserRole, employee_id=emp_id, role_id=role_by_code[role_code]):
                 db.add(UserRole(employee_id=emp_id, role_id=role_by_code[role_code]))
 
         await db.commit()
 
-    print(f"\n  Foundation seeded into scm_rebuild. Password for all: {PASSWORD}\n")
-    print("  %-14s %-14s %s" % ("LOGIN (emp_code)", "ROLE", "NAME"))
-    print("  " + "-" * 48)
+    print("\n  Foundation seeded into scm_rebuild. New accounts use unique one-time passwords.\n")
+    print("  %-14s %-14s %-28s %s" % (
+        "LOGIN", "ROLE", "TEMP PASSWORD", "NAME",
+    ))
+    print("  " + "-" * 78)
     for emp_code, _id, name, role in USERS:
-        print("  %-14s %-14s %s" % (emp_code, role, name))
+        password = created_passwords.get(emp_code, "(existing credential unchanged)")
+        print("  %-14s %-14s %-28s %s" % (emp_code, role, password, name))
     print()
 
 
 if __name__ == "__main__":
-    asyncio.run(seed())
+    import sys
+
+    asyncio.run(seed(allow_remote="--allow-remote" in sys.argv,
+                     prune="--prune" in sys.argv))

@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, Paperclip, Trash2, Upload } from "lucide-react";
-import { Button } from "@/shared/components";
+import { Button, ErrorBanner } from "@/shared/components";
 import { deleteAttachment, downloadAttachment, listAttachments, uploadAttachment } from "../api";
 import { fmtDateTime } from "../format";
-import { ErrorBanner } from "./compat";
 
 /**
  * Documents hung off a warehouse record — invoice copies, LR slips, QC certificates,

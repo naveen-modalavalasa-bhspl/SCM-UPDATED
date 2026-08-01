@@ -2,9 +2,8 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch } from "@heroui/react";
 import { Pencil, Plus } from "lucide-react";
-import { Button, Can, Card, Field, Input, PageHeader } from "@/shared/components";
+import { Button, Can, Card, ErrorBanner, Field, Input, PageHeader } from "@/shared/components";
 import { createStorageType, listStorageTypes, updateStorageType } from "../../api";
-import { ErrorBanner } from "../../components/compat";
 import type { StorageType, StorageTypeWrite } from "../../types";
 
 const EMPTY: StorageTypeWrite = {

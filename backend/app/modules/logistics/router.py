@@ -1,4 +1,4 @@
-"""Logistics endpoints: GRN, stock, issues. No logic — routes call the service."""
+"""Logistics endpoints: GRN and issues. No logic — routes call the service."""
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,7 +7,7 @@ from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.logistics import service
 from app.modules.logistics.schemas import (
-    GRNCreate, GRNListRow, GRNOut, IssueCreate, IssueOut, MovementRow, StockRow,
+    GRNCreate, GRNListRow, GRNOut, IssueCreate, IssueOut,
 )
 from app.platform.rbac import permissions as perms
 
@@ -48,24 +48,6 @@ async def qc_fail(grn_id: int, db: AsyncSession = Depends(get_db),
     return await service.qc_fail(db, grn_id, user)
 
 
-# ---- Stock ----
-stock_router = APIRouter(prefix="/api/stock")
-
-
-@stock_router.get("", response_model=Page[StockRow])
-async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
-                     facility_id: int | None = None, db: AsyncSession = Depends(get_db),
-                     user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_stock(db, params, item_id, facility_id)
-
-
-@stock_router.get("/movements", response_model=Page[MovementRow])
-async def movements(params: PageParams = Depends(), item_id: int | None = None,
-                    db: AsyncSession = Depends(get_db),
-                    user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_movements(db, params, item_id)
-
-
 # ---- Issues ----
 issue_router = APIRouter(prefix="/api/issues")
 
@@ -89,5 +71,4 @@ async def issue_stock(issue_id: int, db: AsyncSession = Depends(get_db),
 
 
 router.include_router(grn_router)
-router.include_router(stock_router)
 router.include_router(issue_router)
