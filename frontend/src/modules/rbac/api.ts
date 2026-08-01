@@ -3,7 +3,7 @@ import type { Paginated } from "@/shared/types";
 import type {
   AccessSummary, AdminUserRow, FeatureAccessMatrix, GrantResult, GroupMember,
   OrgTree, PageAccessMatrix, PermissionDef, PermissionHolders, Region,
-  Reporting, RoleWithPermissions, SetPermissionsResult, UserGroup, ViewAs,
+  Reporting, RoleWithPermissions, SetPermissionsResult, UserFilters, UserGroup, ViewAs,
 } from "./types";
 
 type ListParams = { search?: string; page?: number; size?: number };
@@ -16,8 +16,16 @@ export const rbacApi = {
   users: {
     // Served by the RBAC module (supports role_id filtering + pagination); the
     // grant/revoke/reset/setRoles actions below stay on the admin endpoints.
-    list: (params: ListParams & { with_access?: boolean; role_id?: number }) =>
-      page<AdminUserRow>("/api/rbac/users", params),
+    list: (params: ListParams & {
+      with_access?: boolean; role_id?: number;
+      department?: string; position_id?: number;
+    }) => page<AdminUserRow>("/api/rbac/users", params),
+    // What the Department and Position dropdowns offer. Positions narrow to the chosen
+    // department — 3,729 posts exist, a dozen or so in any one department.
+    filters: (department?: string) =>
+      api.get<UserFilters>("/api/rbac/user-filters", {
+        params: department ? { department } : {},
+      }).then((response) => response.data),
     summary: () =>
       api.get<AccessSummary>("/api/admin/users/summary").then((response) => response.data),
     grant: (body: { employee_id: number; role_ids: number[]; password?: string | null }) =>

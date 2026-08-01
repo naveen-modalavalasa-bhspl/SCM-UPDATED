@@ -1,7 +1,8 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  AppLog, AuditRow, Conflict, DocSeries, Ladder, LadderOptions, LadderPreview,
+  AppLog, AuditRow, Conflict, CustomLadder, CustomLadderStep, DocSeries, Ladder,
+  LadderDepartment, LadderOptions, LadderPosition, LadderPost, LadderPreview, LadderRank,
   LadderRung, NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult,
   SyncResult, SyncStatus, WorkflowDefinition, WorkflowOptions,
 } from "./types";
@@ -99,6 +100,16 @@ export const adminApi = {
       api.get<Ladder>("/api/workflow/ladders", {
         params: { doc_type: docType, ...(projectId != null ? { project_id: projectId } : {}) },
       }).then((r) => r.data),
+    // Ranks and a rank's posts are keyed on the PROJECT, not the document, so they are
+    // read separately and stay cached while the admin flips between documents.
+    ranks: (projectId: number | null) =>
+      api.get<{ ranks: LadderRank[] }>("/api/workflow/ladders/ranks", {
+        params: projectId != null ? { project_id: projectId } : {},
+      }).then((r) => r.data.ranks),
+    rankPositions: (projectId: number | null, roleId: number) =>
+      api.get<{ positions: LadderPosition[] }>("/api/workflow/ladders/rank-positions", {
+        params: { role_id: roleId, ...(projectId != null ? { project_id: projectId } : {}) },
+      }).then((r) => r.data.positions),
     // Runs against the toggles currently on screen, saved or not, so the admin sees
     // the outcome of a change before committing to it.
     preview: (projectId: number | null, docType: string, rungs: LadderRung[],
@@ -114,6 +125,28 @@ export const adminApi = {
     copy: (fromProjectId: number | null, docType: string, toProjectIds: number[]) =>
       api.post<{ copied_to: number[] }>("/api/workflow/ladders/copy", {
         from_project_id: fromProjectId, doc_type: docType, to_project_ids: toProjectIds,
+      }).then((r) => r.data),
+  },
+  // ---- Build your own ladder: departments, then the posts inside one ----
+  // A department is a dozen posts, not three thousand, which is why this screen shows
+  // checkboxes instead of a search box over 2,787 people.
+  customLadders: {
+    departments: (projectId: number | null) =>
+      api.get<{ departments: LadderDepartment[] }>("/api/workflow/ladders/departments", {
+        params: projectId != null ? { project_id: projectId } : {},
+      }).then((r) => r.data.departments),
+    posts: (projectId: number | null, department: string) =>
+      api.get<{ posts: LadderPost[] }>("/api/workflow/ladders/department-posts", {
+        params: { department, ...(projectId != null ? { project_id: projectId } : {}) },
+      }).then((r) => r.data.posts),
+    get: (projectId: number | null, docType: string) =>
+      api.get<CustomLadder>("/api/workflow/ladders/custom", {
+        params: { doc_type: docType, ...(projectId != null ? { project_id: projectId } : {}) },
+      }).then((r) => r.data),
+    save: (projectId: number | null, docType: string, steps: CustomLadderStep[]) =>
+      api.post<CustomLadder>("/api/workflow/ladders/custom", {
+        project_id: projectId, doc_type: docType,
+        steps: steps.map((step) => ({ position_id: step.position_id, name: step.name })),
       }).then((r) => r.data),
   },
   docSeries: {

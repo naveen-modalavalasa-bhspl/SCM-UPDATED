@@ -70,72 +70,107 @@ def _selected_positions_out(rows: list[StageCondition],
     ]
 
 
+async def ranks(db: AsyncSession, project_id: int | None) -> dict:
+    """The project's ranks with their holders — read on its own, keyed on the project.
+
+    Split out of get_ladder because ranks do not depend on the document type: switching
+    the Document dropdown used to re-derive all of this for an identical answer.
+    """
+    return {"ranks": await ladder.project_ranks(db, project_id)}
+
+
+async def rank_positions(db: AsyncSession, project_id: int | None,
+                         role_id: int) -> dict:
+    """One rank's posts — fetched when the admin opens that rung, not before."""
+    return {"positions": await ladder.rank_positions(db, project_id, role_id)}
+
+
 async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) -> dict:
     """The saved ladder for this project and document, or a draft built from the
-    ranks the project's own people hold, with everything switched on."""
+    ranks the project's own people hold, with everything switched on.
+
+    Deliberately narrow: rungs, their toggles and their counts. The holders' NAMES come
+    from ranks() and a rung's positions from rank_positions(), because both are keyed on
+    the project alone and would otherwise be re-read on every document switch.
+    """
     _validate_doc_type(doc_type)
-    ranks = await ladder.project_ranks(db, project_id)
-    by_role = {rank["role_id"]: rank for rank in ranks}
 
     # This scope's own ladder — never another project's, never a plain workflow, so a
     # leftover non-ladder workflow for the same doc type cannot make a saved ladder
     # look like it was never saved (see ladder.active_ladder). Its rungs come back with
     # it; re-reading them here was three fetches of the same rows.
     found = await ladder.active_ladder(db, project_id, doc_type)
+    # A hand-built ladder lives on the same scope but names posts, not ranks. Rendering
+    # its stages here would draw rungs with no rank at all, so this screen shows the
+    # rank draft and flags that the custom one is what actually runs.
+    if found is not None and ladder.is_custom_ladder(found[0]):
+        draft = await ladder.autobuild(db, project_id, doc_type)
+        draft["in_flight"] = 0
+        draft["rungs"] = draft.pop("stages")
+        draft["has_custom"] = True
+        return draft
     if found is None:
         draft = await ladder.autobuild(db, project_id, doc_type)
         draft["in_flight"] = 0
         draft["rungs"] = draft.pop("stages")
-        for rung in draft["rungs"]:
-            rank = by_role.get(rung["position_role_id"], {})
-            rung["holders"] = rank.get("holders", [])
-            rung["holder_count"] = rank.get("holder_count", 0)
-            rung["positions"] = rank.get("positions", [])
-            rung["is_dead"] = not rank.get("holders")
+        draft["has_custom"] = False
         return draft
 
     wf, rows = found
+    # Counts, not rows: seventeen grouped results instead of 3,400 positions.
+    summary = await ladder.project_rank_summary(db, project_id)
     conditions_by_stage = await _conditions_by_stage(db, [row.id for row in rows])
+
+    # Position ids are needed only where they are not already stored: a rung saved
+    # before positions could be pinned, and a rank HCM has added since. Normally both
+    # sets are empty and this is no query at all.
+    known = {row.position_role_id for row in rows}
+    unpinned = {
+        row.position_role_id for row in rows
+        if not any(condition.field_name == ladder.APPROVER_SCOPE_FIELD
+                   for condition in conditions_by_stage.get(row.id, []))
+    }
+    added = sorted(
+        (rank for role_id, rank in summary.items() if role_id not in known),
+        key=lambda rank: rank["role_name"] or "",
+    )
+    position_ids = await ladder.project_position_ids(
+        db, project_id, unpinned | {rank["role_id"] for rank in added})
+
     rungs = []
     for row in rows:
-        rank = by_role.get(row.position_role_id, {})
-        position_ids = [position["id"] for position in rank.get("positions", [])]
+        rank = summary.get(row.position_role_id, {})
         stored = conditions_by_stage.get(row.id, [])
         rungs.append({
             "sequence": row.sequence,
             "name": row.name,
             "position_role_id": row.position_role_id,
             "is_enabled": row.is_enabled,
-            "holders": rank.get("holders", []),
+            "position_count": rank.get("position_count", 0),
             "holder_count": rank.get("holder_count", 0),
-            "positions": rank.get("positions", []),
-            "selected_position_ids": _selected_positions_out(stored, position_ids),
+            "selected_position_ids": _selected_positions_out(
+                stored, position_ids.get(row.position_role_id, [])),
             # A rung nobody in this project fills any more: HCM removed or renamed the
             # positions under it. Flagged rather than silently skipped.
-            "is_dead": not rank.get("holders"),
+            "is_dead": not rank.get("holder_count"),
             "conditions": _conditions_out(stored),
         })
 
     # Ranks HCM added since this ladder was saved. Offered switched off, so a new rank
     # never starts approving documents on its own.
-    known = {row.position_role_id for row in rows}
-    for rank in ranks:
-        if rank["role_id"] not in known:
-            rungs.append({
-                "sequence": len(rungs) + 1,
-                "name": rank["role_name"],
-                "position_role_id": rank["role_id"],
-                "is_enabled": False,
-                "holders": rank["holders"],
-                "holder_count": rank["holder_count"],
-                "positions": rank.get("positions", []),
-                "selected_position_ids": [
-                    position["id"] for position in rank.get("positions", [])
-                ],
-                "is_dead": False,
-                "is_new_rank": True,
-                "conditions": [],
-            })
+    for rank in added:
+        rungs.append({
+            "sequence": len(rungs) + 1,
+            "name": rank["role_name"],
+            "position_role_id": rank["role_id"],
+            "is_enabled": False,
+            "position_count": rank["position_count"],
+            "holder_count": rank["holder_count"],
+            "selected_position_ids": position_ids.get(rank["role_id"], []),
+            "is_dead": not rank["holder_count"],
+            "is_new_rank": True,
+            "conditions": [],
+        })
 
     in_flight = (await db.execute(
         select(func.count(Instance.id)).where(
@@ -151,7 +186,7 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
         "doc_type": doc_type,
         "module": wf.module or ladder.MODULE_BY_DOC_TYPE.get(doc_type, "Other"),
         "is_new": False,
-        "ranks": ranks,
+        "has_custom": False,
         "rungs": rungs,
         "in_flight": in_flight,
     }
@@ -225,19 +260,12 @@ async def save_ladder(db: AsyncSession, data: LadderIn, user) -> dict:
             "Switch on at least one rank with an eligible position, "
             "or nothing would ever be approved")
 
-    available_ranks = {
-        rank["role_id"]: rank
-        for rank in await ladder.project_ranks(db, data.project_id)
-    }
+    available = await ladder.project_position_ids(
+        db, data.project_id, {rung.position_role_id for rung in data.rungs})
     for rung in data.rungs:
         if rung.selected_position_ids is None:
             continue
-        allowed = {
-            position["id"]
-            for position in available_ranks.get(
-                rung.position_role_id, {},
-            ).get("positions", [])
-        }
+        allowed = set(available.get(rung.position_role_id, []))
         if not set(rung.selected_position_ids).issubset(allowed):
             raise ValidationError(
                 f"One or more positions do not belong to {rung.name} in this project"
@@ -330,7 +358,8 @@ async def copy_ladder(db: AsyncSession, data: LadderCopyIn, user) -> dict:
         ranks = await ladder.project_ranks(db, project_id)
         if not ranks:
             continue
-        rungs = ladder.build_stages(ranks, enabled)
+        position_ids = await ladder.project_position_ids(db, project_id)
+        rungs = ladder.build_stages(ranks, position_ids, enabled)
         await save_ladder(db, LadderIn(
             project_id=project_id, doc_type=data.doc_type,
             rungs=[{"position_role_id": r["position_role_id"], "name": r["name"],

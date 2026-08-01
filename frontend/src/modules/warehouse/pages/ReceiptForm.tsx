@@ -1,9 +1,8 @@
+import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ScanLine } from "lucide-react";
-import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { ConfirmModal, ErrorBanner } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -11,11 +10,11 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   binOptions, completeReceipt, convertReceiptToGrn, createReceipt, gateEntryOptions,
-  getReceipt, itemOptions, projectOptions, submitReceipt,
+  getReceipt, itemOptions, submitReceipt,
   updateReceipt, uploadAttachment, vendorOptions, warehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
-import type { Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
+import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
 
 /**
  * One form for both a gate entry and a GRN — they are one `inb_receipts` row at two
@@ -42,6 +41,9 @@ import type { Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
 
 const emptyLine = (): ReceiptItemWrite => ({
   item_id: 0,
+  uom_code: null,
+  is_asset: false,
+  is_serial_tracked: false,
   ordered_qty: 0,
   received_qty: 0,
   accepted_qty: 0,
@@ -67,6 +69,9 @@ const RECEIPT_TYPES = [
   { value: "RETURN", label: "Return receipt" },
   { value: "TRANSFER", label: "Transfer receipt" },
 ];
+
+const lifeDateLabel = (line?: Pick<ReceiptItemWrite, "is_asset"> | null) =>
+  line?.is_asset ? "Warranty" : "Expiry";
 
 export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" }) {
   const { id } = useParams();
@@ -146,6 +151,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         item_id: l.item_id,
         item_code: l.item_code,
         item_name: l.item_name,
+        uom_code: l.uom_code,
+        is_asset: l.is_asset,
+        is_serial_tracked: l.is_serial_tracked,
         ordered_qty: num(l.ordered_qty),
         received_qty: num(l.received_qty),
         accepted_qty: num(l.accepted_qty),
@@ -193,6 +201,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           item_id: line.item_id,
           item_code: line.item_code,
           item_name: line.item_name,
+          uom_code: line.uom_code,
+          is_asset: line.is_asset,
+          is_serial_tracked: line.is_serial_tracked,
           ordered_qty: num(line.ordered_qty),
           received_qty: num(line.received_qty),
           accepted_qty: num(line.received_qty),
@@ -240,8 +251,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
   const locked = !!doc && !["DRAFT", "GATE_ENTRY"].includes(doc.status);
 
+  const validateSerialLines = () => {
+    for (const [index, line] of form.items.entries()) {
+      if (!line.is_serial_tracked) continue;
+      const required = Math.floor(num(line.received_qty));
+      if (num(line.received_qty) !== required) {
+        throw new Error(`Line ${index + 1}: serialized received quantity must be a whole number.`);
+      }
+      const actual = line.serial_numbers?.length ?? 0;
+      if (actual !== required) {
+        throw new Error(`Line ${index + 1}: enter exactly ${required} serial numbers before saving.`);
+      }
+    }
+  };
+
   const save = useMutation({
     mutationFn: async () => {
+      validateSerialLines();
       const saved = await (async () => {
         if (editing) return updateReceipt(Number(id), form);
         if (sourceGateId) {
@@ -264,12 +290,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       qc.invalidateQueries({ queryKey: ["wh-receipt", String(saved.id)] });
       qc.invalidateQueries({ queryKey: ["wh-attachments", "RECEIPT", saved.id] });
       if (!editing) {
-        nav(
-          sourceGateId
-            ? `/warehouse/transactions/grn/${saved.id}`
-            : `../${saved.id}`,
-          { replace: true },
-        );
+        if (!isGrn) {
+          nav("/warehouse/transactions/material-inward", { replace: true });
+          return;
+        }
+        nav(`/warehouse/transactions/grn/${saved.id}`, { replace: true });
       }
     },
   });
@@ -280,6 +305,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
      * only updates the grid — was silently dropped, and the line reached inspection
      * without the serials the storekeeper had just scanned. */
     mutationFn: async (what: "submit" | "complete") => {
+      validateSerialLines();
       if (!locked) await updateReceipt(Number(id), form);
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
     },
@@ -339,7 +365,18 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             name="items"
             load={itemOptions}
             value={l.item_id || ""}
-            onChange={(v) => patchLine(i, { item_id: v === "" ? 0 : v })}
+            onChange={(v, option) => {
+              const item = option as ItemOption | undefined;
+              patchLine(i, {
+                item_id: v === "" ? 0 : v,
+                item_code: item?.code ?? null,
+                item_name: item?.name ?? null,
+                uom_code: item?.uom_code ?? null,
+                is_asset: item?.is_asset ?? false,
+                is_serial_tracked: item?.is_serial_tracked ?? false,
+                serial_numbers: item?.is_serial_tracked ? l.serial_numbers : null,
+              });
+            }}
             placeholder="Pick an item"
           />
         );
@@ -357,7 +394,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       key: "received",
       header: "Received",
       numeric: true,
-      width: "w-28",
+      width: "min-w-[10rem] w-40",
       render: (l, i) => (
         <QtyInput
           ariaLabel={`Received quantity, line ${i + 1}`}
@@ -384,7 +421,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       header: "UOM",
       width: "w-20",
       hideOnNarrow: true,
-      render: (_, i) => <span className="text-xs text-muted">{savedLine(i)?.uom_code ?? "—"}</span>,
+      render: (l, i) => <span className="text-xs text-muted">{savedLine(i)?.uom_code ?? l.uom_code ?? "—"}</span>,
     },
     {
       key: "accepted",
@@ -416,7 +453,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     {
       key: "batch",
       header: "Batch",
-      width: "w-32",
+      width: "min-w-[18rem] w-72",
       hideOnNarrow: true,
       render: (l, i) => (
         <TextInput
@@ -444,12 +481,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     },
     {
       key: "expiry",
-      header: "Expiry",
-      width: "w-36",
+      header: "Expiry / Warranty",
+      width: "min-w-[12rem] w-48",
       hideOnNarrow: true,
       render: (l, i) => (
         <DateInput
-          ariaLabel={`Expiry, line ${i + 1}`}
+          ariaLabel={`${lifeDateLabel(l)} date, line ${i + 1}`}
           value={l.expiry_date}
           disabled={locked || !isGrn}
           onChange={(v) => patchLine(i, { expiry_date: v || null })}
@@ -459,7 +496,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     {
       key: "reason",
       header: "Rejection reason",
-      width: "w-44",
+      width: "min-w-[16rem] w-64",
       hideOnNarrow: true,
       render: (l, i) => (
         <TextInput
@@ -491,7 +528,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       key: "rate",
       header: "Rate",
       numeric: true,
-      width: "w-24",
+      width: "min-w-[10rem] w-40",
       hideOnNarrow: true,
       render: (l, i) => (
         <QtyInput
@@ -508,10 +545,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       width: "w-28",
       hideOnNarrow: true,
       render: (l, i) => (
-        <Button variant="ghost" onClick={() => setSerialLine(i)} disabled={!isGrn}>
-          <ScanLine className="h-4 w-4" />
-          {l.serial_numbers?.length ? `${l.serial_numbers.length}` : "Add"}
-        </Button>
+        l.is_serial_tracked ? (
+          <Button variant="ghost" onClick={() => setSerialLine(i)} disabled={!isGrn}>
+            <ScanLine className="h-4 w-4" />
+            {l.serial_numbers?.length ? `${l.serial_numbers.length}` : "Add"}
+          </Button>
+        ) : (
+          <span className="text-xs text-muted">—</span>
+        )
       ),
     },
   ];
@@ -657,16 +698,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               placeholder="Vendor"
             />
           </Field>
-          <Field label="Project">
-            <Lookup
-              name="projects"
-              load={projectOptions}
-              value={form.project_id ?? ""}
-              isDisabled={locked}
-              onChange={(v) => set("project_id", v === "" ? null : v)}
-              placeholder="Project"
-            />
-          </Field>
         </div>
       </Section>
 
@@ -725,6 +756,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             rows={form.items}
             columns={columns}
             keyOf={(_, i) => i}
+            minTableWidth={isGrn ? "min-w-[1500px]" : "min-w-[900px]"}
             onAdd={locked ? undefined : () => set("items", [...form.items, emptyLine()])}
             onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
             rowTone={(l) => (num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
@@ -768,7 +800,13 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         onClose={() => setSerialLine(null)}
         quantity={serialLine === null ? 0 : num(form.items[serialLine]?.received_qty)}
         initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
-        itemLabel={serialLine === null ? "" : savedLine(serialLine)?.item_name ?? `Line ${serialLine + 1}`}
+        itemLabel={
+          serialLine === null
+            ? ""
+            : savedLine(serialLine)?.item_name
+              ?? form.items[serialLine]?.item_name
+              ?? `Line ${serialLine + 1}`
+        }
         readOnly={locked}
         onSave={(serials) => serialLine !== null && patchLine(serialLine, { serial_numbers: serials })}
       />

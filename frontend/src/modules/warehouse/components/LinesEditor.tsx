@@ -41,6 +41,8 @@ interface Props<T> {
   empty?: string;
   /** Shown when the caller wants a line marked, e.g. a rejected quantity in red. */
   rowTone?: (row: T) => string | undefined;
+  /** Minimum table width for dense documents whose cells need room to breathe. */
+  minTableWidth?: string;
 }
 
 export function LinesEditor<T>({
@@ -53,6 +55,7 @@ export function LinesEditor<T>({
   footer,
   empty = "No lines yet.",
   rowTone,
+  minTableWidth = "min-w-[720px]",
 }: Props<T>) {
   const head = (
     <>
@@ -75,7 +78,7 @@ export function LinesEditor<T>({
       {/* Desktop: a real grid. The scroll box is here so a wide document scrolls
        * inside its own card rather than pushing the page sideways. */}
       <div className="hidden overflow-x-auto rounded-2xl border border-line/70 bg-content1 md:block">
-        <table className="w-full min-w-[720px] border-collapse">
+        <table className={`w-full ${minTableWidth} border-collapse`}>
           <thead className="bg-content2">
             <tr>{head}</tr>
           </thead>
@@ -97,7 +100,7 @@ export function LinesEditor<T>({
                       key={c.key}
                       className={`px-3 py-2 align-middle text-sm ${c.numeric ? "text-right" : ""} ${
                         c.hideOnNarrow ? "hidden lg:table-cell" : ""
-                      }`}
+                      } ${c.width ?? ""}`}
                     >
                       {c.render(row, i)}
                     </td>

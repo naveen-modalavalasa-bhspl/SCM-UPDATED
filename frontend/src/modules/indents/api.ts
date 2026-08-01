@@ -4,9 +4,9 @@ import { useQueryClient, type Query } from "@tanstack/react-query";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type { Paginated, Option } from "@/shared/types";
 import type {
-  AcknowledgmentRow, ActivityRow, ApprovalDecisionRow, ApprovalDelegation,
+  AcknowledgmentRow, ActivityRow,
   BomChoice, BomChoiceItem, Indent, IndentCreate, IndentListRow, IndentJourney,
-  IndentNotification, IndentStats, IndentUpdate, PendingApproval, TeamQueueRow,
+  IndentNotification, IndentStats, IndentUpdate,
 } from "./types";
 
 export interface IndentQueryParams {
@@ -58,8 +58,6 @@ export const indentKeys = {
     [...indentKeys.all(scope), "acknowledgments", filters] as const,
   notifications: (scope: IndentAccountScope, filters: unknown = {}) =>
     [...indentKeys.all(scope), "notifications", filters] as const,
-  pendingApprovals: (scope: IndentAccountScope) =>
-    [...indentKeys.all(scope), "pending-approvals"] as const,
   detail: (scope: IndentAccountScope, id: number) =>
     [...indentKeys.all(scope), "detail", id] as const,
   offices: (scope: IndentAccountScope) =>
@@ -200,8 +198,6 @@ export const indentApi = {
       params: toSearchParams(params),
       signal,
     }).then((r) => r.data),
-  pendingApprovals: () =>
-    api.get<{ items: PendingApproval[] }>("/api/workflow/pending").then((r) => r.data.items),
   offices: () => api.get<{ items: Option[] }>("/api/indents/options/offices").then((r) => r.data.items),
   get: (id: number) => api.get<Indent>(`/api/indents/${id}`).then((r) => r.data),
   journey: (id: number) => api.get<IndentJourney>(`/api/indents/${id}/journey`).then((r) => r.data),
@@ -227,23 +223,4 @@ export const masterApi = {
       .then((items) => items.filter((bom) => bom.is_active)),
   bomItems: (bomId: number) =>
     allMasterRows<BomChoiceItem>("/api/bom-items", { bom_id: bomId }),
-};
-
-export const approvalApi = {
-  pending: () => api.get<{ items: PendingApproval[] }>("/api/workflow/pending").then((r) => r.data.items),
-  decisions: () => api.get<{ items: ApprovalDecisionRow[] }>("/api/workflow/my-decisions").then((r) => r.data.items),
-  teamQueue: () => api.get<{ items: TeamQueueRow[] }>("/api/workflow/team-queue").then((r) => r.data.items),
-  delegations: (scope: "mine" | "incoming" | "team" = "mine") =>
-    api.get<ApprovalDelegation[]>("/api/workflow/delegations", { params: { scope } }).then((r) => r.data),
-  delegationOptions: () =>
-    api.get<{ items: Option[] }>("/api/workflow/delegation-options").then((r) => r.data.items),
-  createDelegation: (data: {
-    to_employee_id: number;
-    doc_type?: string | null;
-    valid_from: string;
-    valid_to: string;
-    reason?: string;
-  }) => api.post<ApprovalDelegation>("/api/workflow/delegations", data).then((r) => r.data),
-  endDelegation: (id: number, reason?: string) =>
-    api.post<ApprovalDelegation>(`/api/workflow/delegations/${id}/end`, { reason }).then((r) => r.data),
 };

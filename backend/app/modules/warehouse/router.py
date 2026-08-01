@@ -595,10 +595,12 @@ async def cancel_return(return_id: int, body: s.ReasonIn, db: AsyncSession = Dep
 @router.get("/serials", response_model=Page[s.SerialRead])
 async def list_serials(params: PageParams = Depends(), status: str | None = None,
                        item_id: int | None = None, batch_id: int | None = None,
+                       warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, db: AsyncSession = Depends(get_db),
                        _=Depends(require_permission(STOCK_VIEW))):
     return await service.list_serials(db, params, status=status, item_id=item_id,
-                                      batch_id=batch_id, search=search)
+                                      batch_id=batch_id, warehouse_id=warehouse_id,
+                                      bin_id=bin_id, search=search)
 
 
 @router.get("/batches", response_model=Page[s.BatchRead])
@@ -709,9 +711,12 @@ async def warehouse_options(db: AsyncSession = Depends(get_db),
 
 @router.get("/options/bins", response_model=list[s.Option])
 async def bin_options(warehouse_id: int, search: str | None = None,
+                      item_id: int | None = None, batch_id: int | None = None,
                       db: AsyncSession = Depends(get_db),
                       _=Depends(require_permission(STOCK_VIEW))):
-    return await service.bin_options(db, warehouse_id, search)
+    return await service.bin_options(
+        db, warehouse_id, search, item_id=item_id, batch_id=batch_id
+    )
 
 
 @router.get("/options/batches", response_model=list[s.Option])

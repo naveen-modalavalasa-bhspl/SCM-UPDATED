@@ -320,7 +320,9 @@ export const getReturnableLines = (grnId: number) =>
 
 /* ------------------------------------------------------- serials & batches -- */
 
-export const listSerials = (params: ListParams & { item_id?: number; batch_id?: number } = {}) =>
+export const listSerials = (
+  params: ListParams & { item_id?: number; batch_id?: number; warehouse_id?: number; bin_id?: number } = {},
+) =>
   get<Page<SerialNumber>>(`${BASE}/serials`, params);
 
 export const listBatches = (params: ListParams & { item_id?: number; expiring_days?: number } = {}) =>
@@ -398,8 +400,13 @@ export const vendorOptions = (search?: string) => get<Option[]>(`${BASE}/options
 
 export const warehouseOptions = () => get<Option[]>(`${BASE}/options/warehouses`);
 
-export const binOptions = (warehouse_id: number, search?: string) =>
-  get<Option[]>(`${BASE}/options/bins`, { warehouse_id, search });
+export const binOptions = (
+  warehouse_id: number,
+  search?: string,
+  item_id?: number | null,
+  batch_id?: number | null,
+) =>
+  get<Option[]>(`${BASE}/options/bins`, { warehouse_id, search, item_id, batch_id });
 
 export const batchOptions = (item_id: number, warehouse_id: number, bin_id?: number | null) =>
   get<Option[]>(`${BASE}/options/batches`, { item_id, warehouse_id, bin_id });
@@ -422,6 +429,7 @@ export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
     warehouse_id: number;
     department_id?: number | null;
     project_id?: number | null;
+    issued_to_id?: number | null;
     items: IssueWrite["items"];
   }>(`${BASE}/options/indent-issue-source`, { indent_id, warehouse_id });
 

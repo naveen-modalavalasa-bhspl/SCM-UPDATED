@@ -9,16 +9,19 @@
  * Everything here is two dropdowns, a list of toggles, and a sentence telling the
  * admin what the toggles just did. */
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch,
 } from "@heroui/react";
 import {
-  AlertTriangle, ArrowRight, Copy, Plus, RotateCcw, Sparkles, Trash2,
+  AlertTriangle, ArrowRight, Copy, ListOrdered, Plus, RotateCcw, Sparkles, Trash2,
 } from "lucide-react";
 import { Button, Card, Field, Input, PageHeader, Select } from "@/shared/components";
 import { adminApi } from "../api";
-import type { LadderRung, Operator, WorkflowCondition } from "../types";
+import type {
+  LadderHolder, LadderPosition, LadderRung, Operator, WorkflowCondition,
+} from "../types";
 import { OPERATOR_LABEL } from "../ruleLanguage";
 
 const CONDITION_FIELDS = [
@@ -28,15 +31,26 @@ const CONDITION_FIELDS = [
 ];
 const CONDITION_OPERATORS: Operator[] = ["GT", "GTE", "LT", "LTE", "EQ", "NEQ"];
 
+/** Rank names and their people change only when HCM syncs, and a rank's posts not even
+ *  then — long enough that re-reading them on every visit is pure waste. */
+const HCM_STALE_MS = 5 * 60 * 1000;
+
+/** "Naresh Babu Metta +42". The count is the rank's real total; the names are the
+ *  first few, and arrive with the ranks read a moment after the rungs. */
+const holderLabel = (holders: LadderHolder[] | undefined, total: number) => {
+  if (!holders?.length) return total > 0 ? `${total} holder${total > 1 ? "s" : ""}` : "";
+  return `${holders[0].name}${total > 1 ? ` +${total - 1}` : ""}`;
+};
+
 const newCondition = (): WorkflowCondition => ({
   field_name: "amount", operator: "GT", field_value: "", logic: "AND",
 });
 
-const positionDepartments = (rung: LadderRung) => {
+const positionDepartments = (positions: LadderPosition[]) => {
   const groups = new Map<string, {
-    id: number | null; name: string; positions: LadderRung["positions"];
+    id: number | null; name: string; positions: LadderPosition[];
   }>();
-  for (const position of rung.positions ?? []) {
+  for (const position of positions) {
     const key = String(position.department_id ?? "none");
     const group = groups.get(key) ?? {
       id: position.department_id ?? null,
@@ -49,8 +63,86 @@ const positionDepartments = (rung: LadderRung) => {
   return [...groups.values()];
 };
 
+/** The posts under one rank, read only once the rung is opened.
+ *
+ *  A live project holds ~3,400 posts across seventeen ranks. Shipping all of them with
+ *  every ladder read cost 1.3 MB and seconds, to fill in a panel that is closed until
+ *  somebody clicks it. */
+function RungPositions({ projectId, roleId, selected, onToggle }: {
+  projectId: number | null;
+  roleId: number;
+  selected: number[];
+  onToggle: (positionIds: number[], selected: boolean) => void;
+}) {
+  const positions = useQuery({
+    queryKey: ["admin", "ladder-rank-positions", projectId, roleId],
+    queryFn: () => adminApi.ladders.rankPositions(projectId, roleId),
+    enabled: projectId !== null,
+    staleTime: HCM_STALE_MS,
+  });
+  const selectedIds = new Set(selected);
+
+  return (
+    <div className="mb-4">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink">
+        Eligible approver positions
+      </div>
+      <p className="mb-3 text-xs text-muted">
+        Selecting a department selects every position in it. You can still
+        adjust individual positions afterwards.
+      </p>
+      {positions.isLoading && <div className="text-sm text-muted">Loading positions…</div>}
+      {positions.isError && (
+        <div className="text-sm text-bad">Could not load this rank's positions.</div>
+      )}
+      <div className="space-y-3">
+        {positionDepartments(positions.data ?? []).map((department) => {
+          const departmentIds = department.positions.map((position) => position.id);
+          const allSelected = departmentIds.length > 0
+            && departmentIds.every((id) => selectedIds.has(id));
+          return (
+            <div key={department.id ?? department.name} className="rounded-lg border border-line bg-content1 p-3">
+              <label className="flex min-h-8 items-center gap-2 text-sm font-semibold text-ink">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={(event) => onToggle(departmentIds, event.target.checked)}
+                />
+                {department.name}
+                <span className="text-xs font-normal text-muted">
+                  ({department.positions.length})
+                </span>
+              </label>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                {department.positions.map((position) => (
+                  <label key={position.id} className="flex min-h-8 items-start gap-2 text-xs text-body">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(position.id)}
+                      onChange={(event) => onToggle([position.id], event.target.checked)}
+                    />
+                    <span>
+                      <span className="font-medium text-ink">{position.name}</span>
+                      {position.holders.length > 0 && (
+                        <span className="block text-muted">
+                          {position.holders.map((holder) => holder.name).join(", ")}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function ApprovalConfigPage() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [projectId, setProjectId] = useState<number | null>(null);
   const [docType, setDocType] = useState("INDENT");
   const [rungs, setRungs] = useState<LadderRung[]>([]);
@@ -72,11 +164,27 @@ export function ApprovalConfigPage() {
     if (projectId === null && first) setProjectId(first.id);
   }, [options.data, projectId]);
 
+  // Two reads, deliberately. The ladder is per project AND document; the ranks behind
+  // it are per project only, so flipping the Document dropdown no longer re-derives
+  // an identical answer from 3,400 HCM positions.
   const ladder = useQuery({
     queryKey: ["admin", "ladders", projectId, docType],
     queryFn: () => adminApi.ladders.get(projectId, docType),
     enabled: projectId !== null,
+    staleTime: HCM_STALE_MS,
   });
+
+  const ranks = useQuery({
+    queryKey: ["admin", "ladder-ranks", projectId],
+    queryFn: () => adminApi.ladders.ranks(projectId),
+    enabled: projectId !== null,
+    staleTime: HCM_STALE_MS,
+  });
+
+  const holdersOf = useMemo(
+    () => new Map((ranks.data ?? []).map((rank) => [rank.role_id, rank.holders])),
+    [ranks.data],
+  );
 
   // The server's rungs are the starting point; from then on the toggles are local
   // until Save, so the preview can follow them live.
@@ -100,6 +208,8 @@ export function ApprovalConfigPage() {
     mutationFn: () => adminApi.ladders.save(projectId, docType, rungs),
     onSuccess: () => {
       setConfirming(false);
+      // Only the ladder moved. The ranks and their posts come from HCM and are
+      // untouched by a save, so they keep their cache.
       qc.invalidateQueries({ queryKey: ["admin", "ladders"] });
     },
     onError: (err: Error) => { setConfirming(false); setError(err.message); },
@@ -202,7 +312,24 @@ export function ApprovalConfigPage() {
         </div>
       </Card>
 
-      {ladder.data?.is_new && (
+      {ladder.data?.has_custom && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/30 bg-warn-bg px-4 py-3">
+          <p className="text-sm text-warn">
+            This document is approved by a ladder you built by hand, not by the ranks
+            below. Saving here would replace it.
+          </p>
+          <Button
+            variant="ghost"
+            onClick={() => navigate(
+              `/admin/approvals-config/custom?doc_type=${docType}`
+              + (projectId !== null ? `&project_id=${projectId}` : ""))}
+          >
+            Open it
+          </Button>
+        </div>
+      )}
+
+      {ladder.data?.is_new && !ladder.data?.has_custom && (
         <div className="mb-4 flex items-start gap-3 rounded-xl border border-brand/25 bg-brand-050 px-4 py-3">
           <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-brand" />
           <div>
@@ -260,13 +387,13 @@ export function ApprovalConfigPage() {
                     )}
                   </div>
                   <div className="mt-0.5 text-xs text-muted">
-                    {rung.holders.length === 0
+                    {rung.is_dead
                       ? <span className="inline-flex items-center gap-1 text-bad">
                           <AlertTriangle className="h-3 w-3" />
                           Nobody holds this rank — it will be skipped
                         </span>
-                      : `${rung.holders[0].name}${rung.holders.length > 1
-                          ? ` +${rung.holders.length - 1}` : ""}`}
+                      : holderLabel(holdersOf.get(rung.position_role_id),
+                                    rung.holder_count)}
                   </div>
                 </div>
                 <button
@@ -274,7 +401,7 @@ export function ApprovalConfigPage() {
                   className="min-h-11 rounded-lg px-3 text-xs font-semibold text-brand"
                   onClick={() => setAdvanced(advanced === index ? null : index)}
                 >
-                  {(rung.selected_position_ids ?? []).length} of {rung.positions?.length ?? 0} positions
+                  {(rung.selected_position_ids ?? []).length} of {rung.position_count} positions
                   {rung.conditions.length > 0
                     ? ` · ${rung.conditions.length} condition${rung.conditions.length > 1 ? "s" : ""}`
                     : ""}
@@ -283,61 +410,12 @@ export function ApprovalConfigPage() {
 
               {advanced === index && (
                 <div className="border-t border-line/50 bg-content2/40 px-4 py-3">
-                  <div className="mb-4">
-                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink">
-                      Eligible approver positions
-                    </div>
-                    <p className="mb-3 text-xs text-muted">
-                      Selecting a department selects every position in it. You can still
-                      adjust individual positions afterwards.
-                    </p>
-                    <div className="space-y-3">
-                      {positionDepartments(rung).map((department) => {
-                        const departmentIds = department.positions.map((position) => position.id);
-                        const selectedIds = new Set(rung.selected_position_ids ?? []);
-                        const allSelected = departmentIds.length > 0
-                          && departmentIds.every((id) => selectedIds.has(id));
-                        return (
-                          <div key={department.id ?? department.name} className="rounded-lg border border-line bg-content1 p-3">
-                            <label className="flex min-h-8 items-center gap-2 text-sm font-semibold text-ink">
-                              <input
-                                type="checkbox"
-                                checked={allSelected}
-                                onChange={(event) => togglePositions(
-                                  index, departmentIds, event.target.checked,
-                                )}
-                              />
-                              {department.name}
-                              <span className="text-xs font-normal text-muted">
-                                ({department.positions.length})
-                              </span>
-                            </label>
-                            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                              {department.positions.map((position) => (
-                                <label key={position.id} className="flex min-h-8 items-start gap-2 text-xs text-body">
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedIds.has(position.id)}
-                                    onChange={(event) => togglePositions(
-                                      index, [position.id], event.target.checked,
-                                    )}
-                                  />
-                                  <span>
-                                    <span className="font-medium text-ink">{position.name}</span>
-                                    {position.holders.length > 0 && (
-                                      <span className="block text-muted">
-                                        {position.holders.map((holder) => holder.name).join(", ")}
-                                      </span>
-                                    )}
-                                  </span>
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <RungPositions
+                    projectId={projectId}
+                    roleId={rung.position_role_id}
+                    selected={rung.selected_position_ids ?? []}
+                    onToggle={(ids, on) => togglePositions(index, ids, on)}
+                  />
                   <div className="border-t border-line pt-3">
                   <p className="mb-2 text-xs text-muted">
                     With a condition, this rank is governed by the condition instead of the
@@ -454,6 +532,25 @@ export function ApprovalConfigPage() {
               raised and fixed for that document, whatever you change afterwards.
             </p>
           )}
+        </div>
+
+        {/* Climbing only works when the approver is above the raiser. For Inventory
+            and Warehouse they are not — the whole warehouse department sits on posts
+            with no parent, and all of them share one rank. That needs a ladder built
+            by hand out of posts. */}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line/70 pt-4">
+          <p className="text-xs text-muted">
+            Approver isn't above whoever raises it — a warehouse or stores person?
+            Pick them by post instead.
+          </p>
+          <Button
+            variant="ghost"
+            onClick={() => navigate(
+              `/admin/approvals-config/custom?doc_type=${docType}`
+              + (projectId !== null ? `&project_id=${projectId}` : ""))}
+          >
+            <ListOrdered className="h-4 w-4" /> Build your own ladder
+          </Button>
         </div>
       </Card>
 

@@ -70,6 +70,11 @@ DOC_TYPE_LABEL: dict[str, str] = {
 MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Procurement"]
 
 LADDER_CODE_PREFIX = "LADDER"
+# A hand-built ladder: an ordered list of POSTS with no climbing, for the documents
+# whose approvers are not above the raiser at all (see custom_ladder.py). Told apart by
+# the workflow code, so a plain POSITION workflow from the Workflows screen is never
+# mistaken for one.
+CUSTOM_CODE_PREFIX = "CUSTOM"
 # Guards against a cycle in HCM's position tree, which would otherwise hang the walk.
 MAX_CLIMB = 20
 APPROVER_SCOPE_FIELD = "__approver_positions_configured"
@@ -83,6 +88,11 @@ def ladder_code(project_id: int | None, doc_type: str) -> str:
 def is_ladder(stages: list[Stage]) -> bool:
     """A workflow is a ladder when its stages name ranks rather than positions."""
     return any(s.position_role_id is not None for s in stages)
+
+
+def is_custom_ladder(wf: Workflow) -> bool:
+    """A hand-built ladder: its stages name posts, and nothing is climbed."""
+    return (wf.code or "").startswith(f"{CUSTOM_CODE_PREFIX}-")
 
 
 # ---------------- discovery: what an admin may configure ----------------
@@ -111,26 +121,90 @@ async def list_doc_types() -> list[dict]:
     } for code in DOC_TYPE_LABEL]
 
 
-async def _project_positions(db: AsyncSession,
-                             project_id: int | None) -> list[HcmPosition]:
-    """The positions actually held by this project's people.
-
-    Only the columns the ladder reads: `raw` is HCM's whole payload as JSON, and
-    dragging 3,400 of them across the wire is most of what the query costs.
-    """
-    stmt = select(HcmPosition).options(load_only(
-        HcmPosition.name, HcmPosition.parent_position_id, HcmPosition.department_id,
-        HcmPosition.role_id, HcmPosition.role_name, HcmPosition.job_name,
-    )).where(HcmPosition.is_active.is_(True))
-    if project_id is not None:
-        stmt = stmt.where(HcmPosition.id.in_(
-            select(HcmPositionAssignment.position_id)
+def _held_position_ids(project_id: int):
+    """Sub-select: the positions this project's people actually sit in."""
+    return (select(HcmPositionAssignment.position_id)
             .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
             .where(HcmPositionAssignment.is_active.is_(True),
                    HcmEmployee.is_active.is_(True),
-                   HcmEmployee.project_id == project_id)
-        ))
-    return list((await db.execute(stmt)).scalars().all())
+                   HcmEmployee.project_id == project_id))
+
+
+async def _project_position_rows(db: AsyncSession, project_id: int | None) -> list:
+    """The positions held by this project's people — id, parent and rank, nothing else.
+
+    A column select rather than mapped objects. A live project holds ~3,400 posts, and
+    building that many ORM instances (each with `raw`, HCM's whole payload as JSON)
+    cost more than the query did.
+    """
+    stmt = select(HcmPosition.id, HcmPosition.parent_position_id,
+                  HcmPosition.role_id, HcmPosition.role_name,
+                  HcmPosition.job_name, HcmPosition.name).where(
+        HcmPosition.is_active.is_(True))
+    if project_id is not None:
+        stmt = stmt.where(HcmPosition.id.in_(_held_position_ids(project_id)))
+    return list((await db.execute(stmt)).all())
+
+
+async def project_position_ids(db: AsyncSession, project_id: int | None,
+                               role_ids: set[int] | None = None) -> dict[int, list[int]]:
+    """rank -> the position ids under it. Two columns, so it stays cheap even when the
+    answer is every post in the project."""
+    if role_ids is not None and not role_ids:
+        return {}
+    stmt = select(HcmPosition.role_id, HcmPosition.id).where(
+        HcmPosition.is_active.is_(True), HcmPosition.role_id.isnot(None))
+    if role_ids is not None:
+        stmt = stmt.where(HcmPosition.role_id.in_(list(role_ids)))
+    if project_id is not None:
+        stmt = stmt.where(HcmPosition.id.in_(_held_position_ids(project_id)))
+    out: dict[int, list[int]] = {}
+    for role_id, position_id in (await db.execute(stmt)).all():
+        out.setdefault(role_id, []).append(position_id)
+    return out
+
+
+async def project_rank_summary(db: AsyncSession,
+                               project_id: int | None) -> dict[int, dict]:
+    """rank -> name, how many posts sit under it, how many people fill it.
+
+    Counted in MySQL. The config screen only ever shows these numbers, and counting
+    3,400 rows there beats dragging them across a WAN to count them in Python.
+    """
+    stmt = (select(
+        HcmPosition.role_id,
+        func.min(func.coalesce(HcmPosition.role_name, HcmPosition.job_name,
+                               HcmPosition.name)).label("role_name"),
+        func.count(func.distinct(HcmPosition.id)).label("position_count"),
+        func.count(func.distinct(HcmPositionAssignment.employee_id))
+            .label("holder_count"),
+    ).select_from(HcmPosition)
+     .where(HcmPosition.is_active.is_(True), HcmPosition.role_id.isnot(None))
+     .group_by(HcmPosition.role_id))
+    if project_id is not None:
+        # Inner: a rank exists for this project only through the posts its own people
+        # hold, which is the same set _project_position_rows walks.
+        stmt = (stmt
+                .join(HcmPositionAssignment,
+                      HcmPositionAssignment.position_id == HcmPosition.id)
+                .join(HcmEmployee,
+                      HcmEmployee.id == HcmPositionAssignment.employee_id)
+                .where(HcmPositionAssignment.is_active.is_(True),
+                       HcmEmployee.is_active.is_(True),
+                       HcmEmployee.project_id == project_id))
+    else:
+        # Company-wide: every active post counts, filled or not.
+        stmt = (stmt
+                .join(HcmPositionAssignment,
+                      (HcmPositionAssignment.position_id == HcmPosition.id)
+                      & (HcmPositionAssignment.is_active.is_(True)), isouter=True)
+                .join(HcmEmployee,
+                      (HcmEmployee.id == HcmPositionAssignment.employee_id)
+                      & (HcmEmployee.is_active.is_(True)), isouter=True))
+    return {row.role_id: {"role_id": row.role_id, "role_name": row.role_name,
+                          "position_count": row.position_count,
+                          "holder_count": row.holder_count}
+            for row in (await db.execute(stmt)).all()}
 
 
 def _chunks(values: list[int], size: int = 1000) -> list[list[int]]:
@@ -139,8 +213,7 @@ def _chunks(values: list[int], size: int = 1000) -> list[list[int]]:
     return [values[start:start + size] for start in range(0, len(values), size)]
 
 
-async def _parent_map(db: AsyncSession,
-                      positions: list[HcmPosition]) -> dict[int, int | None]:
+async def _parent_map(db: AsyncSession, positions: list) -> dict[int, int | None]:
     """position -> parent, for the project's posts and every ancestor above them.
 
     Loaded a generation at a time. The tree is about ten deep whatever the project's
@@ -162,7 +235,7 @@ async def _parent_map(db: AsyncSession,
     return parent_of
 
 
-async def _depths(db: AsyncSession, positions: list[HcmPosition]) -> dict[int, int]:
+async def _depths(db: AsyncSession, positions: list) -> dict[int, int]:
     """How far each position sits below the top of HCM's tree.
 
     Depth is the only honest rank order available: level_order puts COO and SPH on the
@@ -201,101 +274,129 @@ async def _depths(db: AsyncSession, positions: list[HcmPosition]) -> dict[int, i
 
 
 async def project_ranks(db: AsyncSession, project_id: int | None) -> list[dict]:
-    """The ranks this project's people hold, highest first.
+    """The ranks this project's people hold, highest first — names and counts.
 
-    Each carries the real holders, so the config screen can show who is behind a rung
-    and flag one that nobody fills — the dead-rung check for when an HCM sync removes
-    the last position at a rank.
+    The POSITIONS behind a rank are deliberately not here. A live project holds ~3,400
+    of them and the screen shows at most one rank's worth at a time, so shipping every
+    one on every read was 1.3 MB of payload to draw seventeen toggles. rank_positions()
+    fetches a rank's posts when the admin actually opens it.
     """
-    positions = await _project_positions(db, project_id)
-    if not positions:
+    rows = await _project_position_rows(db, project_id)
+    if not rows:
         return []
-    depths = await _depths(db, positions)
-    holders_of, assignment_of = await _position_people(
-        db, [p.id for p in positions], project_id)
+    depths = await _depths(db, rows)
+    holders_of = await _rank_holders(db, project_id)
 
     by_role: dict[int, dict] = {}
-    for position in positions:
-        if position.role_id is None:
+    for row in rows:
+        if row.role_id is None:
             continue
-        entry = by_role.setdefault(position.role_id, {
-            "role_id": position.role_id,
-            "role_name": position.role_name or position.job_name or position.name,
-            "depths": [],
-            "members": [],
+        entry = by_role.setdefault(row.role_id, {
+            "role_id": row.role_id,
+            "role_name": row.role_name or row.job_name or row.name,
+            "depths": {},
+            "position_count": 0,
         })
-        entry["depths"].append(depths.get(position.id, 0))
-        entry["members"].append(position)
+        depth = depths.get(row.id, 0)
+        entry["depths"][depth] = entry["depths"].get(depth, 0) + 1
+        entry["position_count"] += 1
 
+    out = []
     for entry in by_role.values():
         # The most common depth, not the shallowest. HCM's tree has orphans — one
         # District Manager post with no parent sits at depth 0, and taking the minimum
         # would hoist the whole rank up next to the COO. The bulk of a rank's posts
         # hang at its real height, so the mode is the honest answer. Ties go to the
         # shallower depth.
-        counts: dict[int, int] = {}
-        for depth in entry["depths"]:
-            counts[depth] = counts.get(depth, 0) + 1
-        entry["depth"] = min(counts, key=lambda d: (-counts[d], d))
-        del entry["depths"]
+        counts = entry.pop("depths")
+        holders = holders_of.get(entry["role_id"], [])
+        out.append({
+            **entry,
+            "depth": min(counts, key=lambda d: (-counts[d], d)),
+            "holders": holders[:8],
+            "holder_count": len(holders),
+        })
+    return sorted(out, key=lambda r: (r["depth"], r["role_name"]))
 
+
+async def _rank_holders(db: AsyncSession,
+                        project_id: int | None) -> dict[int, list[dict]]:
+    """rank -> the people who fill it, deduplicated (someone can hold two posts at one).
+
+    Keyed by rank rather than by position: the screen names holders per rung, and
+    grouping in the database's projection instead of building 3,400 per-position
+    entries is the difference between a big read and a small one.
+    """
+    stmt = (select(HcmPosition.role_id, HcmEmployee.id, HcmEmployee.full_name,
+                   HcmEmployee.emp_code)
+            .join(HcmPositionAssignment,
+                  HcmPositionAssignment.position_id == HcmPosition.id)
+            .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
+            .where(HcmPosition.is_active.is_(True),
+                   HcmPosition.role_id.isnot(None),
+                   HcmPositionAssignment.is_active.is_(True),
+                   HcmEmployee.is_active.is_(True)))
+    if project_id is not None:
+        # This project's people only: an assignment made from another project must not
+        # show up under a rung here.
+        stmt = stmt.where(HcmEmployee.project_id == project_id)
+    people: dict[int, dict[int, dict]] = {}
+    for role_id, employee_id, full_name, emp_code in (await db.execute(stmt)).all():
+        people.setdefault(role_id, {}).setdefault(
+            employee_id, {"id": employee_id, "name": full_name, "code": emp_code})
+    return {role_id: list(found.values()) for role_id, found in people.items()}
+
+
+async def rank_positions(db: AsyncSession, project_id: int | None,
+                         role_id: int) -> list[dict]:
+    """Every post at ONE rank, with its department and who fills it.
+
+    Read only when an admin opens a rank's advanced panel. Doing this for all seventeen
+    ranks up front is what made the config screen take seconds to appear.
+    """
+    stmt = select(HcmPosition.id, HcmPosition.name, HcmPosition.department_id).where(
+        HcmPosition.is_active.is_(True), HcmPosition.role_id == role_id)
+    if project_id is not None:
+        stmt = stmt.where(HcmPosition.id.in_(_held_position_ids(project_id)))
+    rows = list((await db.execute(stmt)).all())
+    if not rows:
+        return []
+
+    holders_of, assignment_of = await _position_people(
+        db, [row.id for row in rows], project_id)
     # Each post's department, resolved for all of them before any is named, so the
     # names cost one query instead of a lookup per post.
     department_of = {
-        position.id: (
-            assignment_of.get(position.id, (None, None))[0]
-            or position.department_id
-            or getattr(assignment_of.get(position.id, (None, None))[1],
+        row.id: (
+            assignment_of.get(row.id, (None, None))[0]
+            or row.department_id
+            or getattr(assignment_of.get(row.id, (None, None))[1],
                        "department_id", None)
         )
-        for position in positions
+        for row in rows
     }
     department_names = await _department_names(
         db, {d for d in department_of.values() if d is not None})
 
-    ranks = sorted(by_role.values(), key=lambda r: (r["depth"], r["role_name"]))
     out = []
-    for rank in ranks:
-        holders = _dedupe(
-            holder
-            for position in rank["members"]
-            for holder in holders_of.get(position.id, [])
-        )
-        position_options = []
-        for position in rank["members"]:
-            employee = assignment_of.get(position.id, (None, None))[1]
-            department_id = department_of[position.id]
-            department_name = None
-            if employee and employee.department_id == department_id:
-                department_name = employee.department_name
-            if department_name is None and department_id is not None:
-                department_name = department_names.get(department_id)
-            position_holders = holders_of.get(position.id, [])
-            position_options.append({
-                "id": position.id,
-                "name": position.name,
-                "department_id": department_id,
-                "department_name": department_name or "No department",
-                "holders": [
-                    {"id": holder.id, "name": holder.full_name,
-                     "code": holder.emp_code}
-                    for holder in position_holders[:8]
-                ],
-            })
+    for row in rows:
+        employee = assignment_of.get(row.id, (None, None))[1]
+        department_id = department_of[row.id]
+        department_name = None
+        if employee and employee.department_id == department_id:
+            department_name = employee.department_name
+        if department_name is None and department_id is not None:
+            department_name = department_names.get(department_id)
         out.append({
-            "role_id": rank["role_id"],
-            "role_name": rank["role_name"],
-            "depth": rank["depth"],
-            "position_count": len(rank["members"]),
-            "holders": [{"id": h.id, "name": h.full_name, "code": h.emp_code}
-                        for h in holders[:8]],
-            "holder_count": len(holders),
-            "positions": sorted(
-                position_options,
-                key=lambda row: (row["department_name"], row["name"]),
-            ),
+            "id": row.id,
+            "name": row.name,
+            "department_id": department_id,
+            "department_name": department_name or "No department",
+            "holders": [{"id": holder.id, "name": holder.full_name,
+                         "code": holder.emp_code}
+                        for holder in holders_of.get(row.id, [])[:8]],
         })
-    return out
+    return sorted(out, key=lambda row: (row["department_name"], row["name"]))
 
 
 def _dedupe(employees) -> list[HcmEmployee]:
@@ -379,7 +480,10 @@ async def active_ladder(db: AsyncSession, project_id: int | None,
         stages = list((await db.execute(
             select(Stage).where(Stage.workflow_id == wf.id).order_by(Stage.sequence)
         )).scalars().all())
-        if is_ladder(stages):
+        # A hand-built ladder counts too. Its stages carry a post rather than a rank, so
+        # is_ladder() cannot see it, and without this the engine would fall back to
+        # climbing — which for Inventory and Warehouse reaches nobody.
+        if is_custom_ladder(wf) or is_ladder(stages):
             return wf, stages
     return None
 
@@ -529,7 +633,8 @@ async def project_for(db: AsyncSession, position_id: int | None,
 
 # ---------------- building and saving ----------------
 
-def build_stages(ranks: list[dict], enabled_role_ids: set[int] | None = None) -> list[dict]:
+def build_stages(ranks: list[dict], position_ids: dict[int, list[int]],
+                 enabled_role_ids: set[int] | None = None) -> list[dict]:
     """Turn a list of ranks into ladder rungs, everything on unless told otherwise."""
     return [{
         "sequence": index + 1,
@@ -537,9 +642,10 @@ def build_stages(ranks: list[dict], enabled_role_ids: set[int] | None = None) ->
         "position_role_id": rank["role_id"],
         "is_enabled": (enabled_role_ids is None
                        or rank["role_id"] in enabled_role_ids),
-        "selected_position_ids": [
-            position["id"] for position in rank.get("positions", [])
-        ],
+        "position_count": rank.get("position_count", 0),
+        "holder_count": rank.get("holder_count", 0),
+        "is_dead": not rank.get("holder_count"),
+        "selected_position_ids": position_ids.get(rank["role_id"], []),
         "conditions": [],
     } for index, rank in enumerate(ranks)]
 
@@ -551,6 +657,7 @@ async def autobuild(db: AsyncSession, project_id: int | None, doc_type: str) -> 
     what turns it into version 1.
     """
     ranks = await project_ranks(db, project_id)
+    position_ids = await project_position_ids(db, project_id)
     return {
         "workflow_id": None,
         "version": 0,
@@ -558,8 +665,7 @@ async def autobuild(db: AsyncSession, project_id: int | None, doc_type: str) -> 
         "doc_type": doc_type,
         "module": MODULE_BY_DOC_TYPE.get(doc_type, "Other"),
         "is_new": True,
-        "ranks": ranks,
-        "stages": build_stages(ranks),
+        "stages": build_stages(ranks, position_ids),
     }
 
 

@@ -1,10 +1,9 @@
+import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, Plus, ScanLine, Trash2 } from "lucide-react";
-import { Button, Can, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { ConfirmModal, ErrorBanner } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -119,9 +118,8 @@ export default function QualityInspectionForm({
     return byLine;
   }, [grn]);
 
-  /** The GRN serials behind an inspection line — null when it captured none, which puts
-   *  the modal back into capture mode so QC can read them here instead. Serials are
-   *  optional at both stages; putaway is what accounts for every unit. */
+  /** The GRN serials behind an inspection line. Serial-tracked items must already have
+   *  these from goods receipt, so QC selects accepted units from this list. */
   const availableSerials = (index: number | null) => {
     if (index === null) return null;
     const receiptItemId = form.items[index]?.receipt_item_id;
@@ -189,8 +187,26 @@ export default function QualityInspectionForm({
 
   const locked = !!doc && doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS";
 
+  const validateAcceptedSerials = () => {
+    for (const [index, line] of form.items.entries()) {
+      const available = availableSerials(index);
+      if (!available) continue;
+      const required = Math.floor(num(line.accepted_qty));
+      if (num(line.accepted_qty) !== required) {
+        throw new Error(`Line ${index + 1}: accepted quantity must be a whole number for serialized items.`);
+      }
+      const actual = line.serial_numbers?.length ?? available.length;
+      if (actual !== required) {
+        throw new Error(`Line ${index + 1}: select exactly ${required} accepted serial numbers.`);
+      }
+    }
+  };
+
   const save = useMutation({
-    mutationFn: () => (editing ? updateInspection(Number(id), form) : createInspection(form)),
+    mutationFn: () => {
+      validateAcceptedSerials();
+      return editing ? updateInspection(Number(id), form) : createInspection(form);
+    },
     onSuccess: (saved: Inspection) => {
       qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
       qc.invalidateQueries({ queryKey: ["wh-inspection", String(saved.id)] });
@@ -204,6 +220,7 @@ export default function QualityInspectionForm({
      * who filled the grid and pressed Complete was told the lines were still pending
      * while the confirm modal in front of them counted their own unsaved passes. */
     mutationFn: async () => {
+      validateAcceptedSerials();
       await updateInspection(Number(id), form);
       return completeInspection(Number(id));
     },

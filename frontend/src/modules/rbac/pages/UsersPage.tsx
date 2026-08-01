@@ -16,6 +16,9 @@ import { AccessLookup } from "../components/AccessLookup";
 import type { AdminUserRow, GrantResult, PageAccessMatrix as PageAccessData } from "../types";
 
 const PAGE_SIZE = 50;
+/** Departments and posts move only when HCM syncs — long enough that re-reading them
+ *  on every keystroke in the search box is pure waste. */
+const HCM_STALE_MS = 5 * 60 * 1000;
 
 /**
  * There is no users table: identity is the HCM employee mirror. "Creating a user"
@@ -29,6 +32,10 @@ export function UsersPage() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "with" | "without">("all");
   const [roleId, setRoleId] = useState<number | null>(null);
+  // Department first, position second: a position dropdown over all 3,729 posts is
+  // unreadable, and picking the department cuts it to the dozen that department holds.
+  const [department, setDepartment] = useState<string>("");
+  const [positionId, setPositionId] = useState<number | null>(null);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<AdminUserRow | null>(null);
   const [roleIds, setRoleIds] = useState<number[]>([]);
@@ -39,12 +46,20 @@ export function UsersPage() {
     queryKey: ["rbac", "users", "summary"], queryFn: rbacApi.users.summary,
   });
   const roles = useQuery({ queryKey: ["rbac", "roles"], queryFn: rbacApi.roles });
+  // Re-read when the department changes: the position list is derived from it.
+  const filters = useQuery({
+    queryKey: ["rbac", "user-filters", department],
+    queryFn: () => rbacApi.users.filters(department || undefined),
+    staleTime: HCM_STALE_MS,
+  });
   const users = useQuery({
-    queryKey: ["rbac", "users", search, filter, roleId, page],
+    queryKey: ["rbac", "users", search, filter, roleId, department, positionId, page],
     queryFn: () => rbacApi.users.list({
       search: search || undefined,
       with_access: filter === "all" ? undefined : filter === "with",
       role_id: roleId ?? undefined,
+      department: department || undefined,
+      position_id: positionId ?? undefined,
       page,
       size: PAGE_SIZE,
     }),
@@ -187,6 +202,51 @@ export function UsersPage() {
             onChange={(v) => { setRoleId(v === "" ? null : Number(v)); setPage(1); }}
           />
         </div>
+        <div className="min-w-0 sm:w-56">
+          <Select
+            value={department}
+            placeholder="All departments"
+            ariaLabel="Department"
+            options={[
+              { value: "", label: "All departments" },
+              ...(filters.data?.departments ?? []).map((d) => ({
+                value: d.name, label: `${d.name} (${d.count})`,
+              })),
+            ]}
+            onChange={(v) => {
+              setDepartment(String(v));
+              // The chosen post almost certainly is not in the new department, and a
+              // stale one would silently return nobody.
+              setPositionId(null);
+              setPage(1);
+            }}
+          />
+        </div>
+        <div className="min-w-0 sm:w-56">
+          <Select
+            value={positionId ?? ""}
+            placeholder={department ? "All positions" : "All positions (pick a dept)"}
+            ariaLabel="Position"
+            options={[
+              { value: "", label: "All positions" },
+              ...(filters.data?.positions ?? []).map((p) => ({
+                value: p.id, label: `${p.name} (${p.count})`,
+              })),
+            ]}
+            onChange={(v) => { setPositionId(v === "" ? null : Number(v)); setPage(1); }}
+          />
+        </div>
+        {(roleId !== null || department !== "" || positionId !== null) && (
+          <button
+            type="button"
+            className="h-11 rounded-xl px-3 text-sm font-semibold text-brand"
+            onClick={() => {
+              setRoleId(null); setDepartment(""); setPositionId(null); setPage(1);
+            }}
+          >
+            Clear filters
+          </button>
+        )}
         <div className="flex gap-1 rounded-xl bg-content2 p-1">
           {([["all", "All"], ["with", "With access"], ["without", "Without"]] as const)
             .map(([key, label]) => (

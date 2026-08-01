@@ -180,12 +180,14 @@ export interface WarehouseLocation {
 
 export interface StorageType {
   id: number;
+  code?: string | null;
   name: string;
   description?: string | null;
   is_active: boolean;
 }
 
 export interface StorageTypeWrite {
+  code?: string | null;
   name: string;
   description?: string | null;
   is_active: boolean;
@@ -250,6 +252,8 @@ export interface ReceiptItem {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
+  is_asset?: boolean;
+  is_serial_tracked?: boolean;
   ordered_qty: number;
   received_qty: number;
   accepted_qty: number;
@@ -278,6 +282,9 @@ export interface ReceiptItemWrite {
    *  The service snapshots both from the item master and ignores what is sent. */
   item_code?: string | null;
   item_name?: string | null;
+  uom_code?: string | null;
+  is_asset?: boolean;
+  is_serial_tracked?: boolean;
   ordered_qty?: number;
   received_qty: number;
   accepted_qty?: number;
@@ -408,6 +415,7 @@ export interface Putaway {
   uom_code?: string | null;
   batch_id?: number | null;
   batch_no?: string | null;
+  expiry_date?: string | null;
   qty: number;
   suggested_bin_id?: number | null;
   suggested_bin_code?: string | null;
@@ -429,6 +437,7 @@ export interface Putaway {
   serial_numbers?: string[] | null;
   /** Serials are optional upstream but mandatory here — the screen asks when this is set. */
   is_serial_tracked?: boolean;
+  is_asset?: boolean;
   created_at?: string;
 }
 
@@ -472,6 +481,7 @@ export interface PickingItem {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
+  is_serial_tracked?: boolean;
   bin_id?: number | null;
   bin_code?: string | null;
   batch_id?: number | null;
@@ -547,6 +557,7 @@ export interface IssueItem {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
+  is_serial_tracked?: boolean;
   bin_id?: number | null;
   bin_code?: string | null;
   batch_id?: number | null;
@@ -565,6 +576,9 @@ export interface IssueItemWrite {
   id?: number;
   indent_item_id?: number | null;
   item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  is_serial_tracked?: boolean;
   bin_id?: number | null;
   batch_id?: number | null;
   requested_qty: number;
@@ -886,6 +900,7 @@ export interface SerialNumber {
   item_id: number;
   item_code?: string | null;
   item_name?: string | null;
+  is_asset?: boolean;
   serial_number: string;
   batch_id?: number | null;
   batch_no?: string | null;
@@ -907,6 +922,7 @@ export interface Batch {
   item_id: number;
   item_code?: string | null;
   item_name?: string | null;
+  is_asset?: boolean;
   vendor_id?: number | null;
   vendor_name?: string | null;
   mfg_date?: string | null;

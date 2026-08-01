@@ -136,56 +136,9 @@ export interface IndentNotification {
   created_at: string;
 }
 
-export interface PendingApproval {
-  instance_id: number;
-  doc_type: string;
-  doc_id: number;
-  stage_sequence: number;
-  doc_no?: string | null;
-  summary?: string | null;
-  requested_by_name?: string | null;
-  amount?: number | null;
-  waiting_since?: string | null;
-  due_at?: string | null;
-  current_stage_name?: string | null;
-}
-
-export interface ApprovalDecisionRow {
-  id: number;
-  doc_type: string;
-  doc_id: number;
-  doc_no?: string | null;
-  stage_sequence: number;
-  stage_name?: string | null;
-  decision: string;
-  comments?: string | null;
-  decision_at?: string | null;
-  requester?: string | null;
-  workflow_status: string;
-}
-
-export interface TeamQueueRow {
-  approver_id: number;
-  approver_name: string;
-  pending_count: number;
-  overdue_count: number;
-  oldest_waiting_since?: string | null;
-  average_waiting_hours: number;
-  document_types: string[];
-}
-
-export interface ApprovalDelegation {
-  id: number;
-  from_employee_id: number;
-  from_employee_name?: string | null;
-  to_employee_id: number;
-  to_employee_name?: string | null;
-  doc_type?: string | null;
-  valid_from: string;
-  valid_to: string;
-  reason?: string | null;
-  is_active: boolean;
-}
+// The approval inbox shapes (PendingApproval, ApprovalDecisionRow, TeamQueueRow)
+// moved to modules/approvals/types.ts along with the screens that read them.
+// Delegation is no longer exposed at all — see modules/approvals/__init__.py.
 
 export interface IndentCreate {
   required_date?: string | null;

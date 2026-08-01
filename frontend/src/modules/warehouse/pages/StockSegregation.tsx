@@ -1,8 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { Card, PageHeader, ResponsiveList, StatCard, StatusPill, SubNav, type Column } from "@/shared/components";
-import { ErrorBanner } from "@/shared/components";
+import { Card, ErrorBanner, PageHeader, ResponsiveList, StatCard, StatusPill, SubNav, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { LabelSheet, type LabelSpec } from "../components/LabelPrint";
 import { listBatches, listSerials } from "../api";
@@ -42,9 +41,14 @@ const SERIAL_STATUSES = [
   { value: "scrapped", label: "Scrapped" },
 ];
 
-function expiryTone(days: number | null) {
-  if (days === null) return { label: "No expiry", color: "default" as const };
-  if (days < 0) return { label: `Expired ${-days}d ago`, color: "danger" as const };
+function lifeDateLabel(row: Pick<Batch, "is_asset">) {
+  return row.is_asset ? "Warranty" : "Expiry";
+}
+
+function expiryTone(days: number | null, label = "Expiry") {
+  const lower = label.toLowerCase();
+  if (days === null) return { label: `No ${lower}`, color: "default" as const };
+  if (days < 0) return { label: `${label} ended ${-days}d ago`, color: "danger" as const };
   if (days <= 30) return { label: `${days}d left`, color: "danger" as const };
   if (days <= 90) return { label: `${days}d left`, color: "warning" as const };
   return { label: `${days}d left`, color: "success" as const };
@@ -123,11 +127,13 @@ export default function StockSegregation() {
     },
     {
       key: "expiry",
-      header: "Expiry",
+      header: "Expiry / Warranty",
       render: (b) => {
-        const tone = expiryTone(daysUntil(b.expiry_date));
+        const label = lifeDateLabel(b);
+        const tone = expiryTone(daysUntil(b.expiry_date), label);
         return (
           <div>
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</div>
             <div className="text-sm text-ink">{fmtDate(b.expiry_date)}</div>
             <Chip size="sm" variant="flat" color={tone.color}>{tone.label}</Chip>
           </div>
@@ -214,7 +220,7 @@ export default function StockSegregation() {
             placeholder="Search batch, item, vendor or GRN…"
             onReset={() => { setSearch(""); setBucket(""); }}
           >
-            <FilterSelect label="Expiry" allLabel="Any expiry" value={bucket} onChange={setBucket}
+            <FilterSelect label="Expiry / Warranty" allLabel="Any date" value={bucket} onChange={setBucket}
                           options={EXPIRY_BUCKETS} />
           </FilterBar>
 
@@ -227,7 +233,8 @@ export default function StockSegregation() {
             loading={batches.isLoading}
             empty="No batches match these filters."
             renderCard={(b) => {
-              const tone = expiryTone(daysUntil(b.expiry_date));
+              const label = lifeDateLabel(b);
+              const tone = expiryTone(daysUntil(b.expiry_date), label);
               return (
                 <div className="space-y-1">
                   <div className="flex items-center justify-between gap-2">
@@ -236,7 +243,7 @@ export default function StockSegregation() {
                   </div>
                   <div className="truncate text-sm text-body">{b.item_name ?? b.item_code ?? "—"}</div>
                   <div className="text-[11px] text-muted">
-                    {fmtQty(b.initial_qty)} · {b.vendor_name ?? "—"} · {fmtDate(b.expiry_date)}
+                    {fmtQty(b.initial_qty)} · {b.vendor_name ?? "—"} · {label}: {fmtDate(b.expiry_date)}
                   </div>
                 </div>
               );

@@ -488,12 +488,20 @@ async def _positions_by_employee(db: AsyncSession, employee_ids: list[int]) -> d
 
 
 async def list_users(db: AsyncSession, params: PageParams, search: str | None = None,
-                     with_access: bool | None = None, role_id: int | None = None) -> dict:
+                     with_access: bool | None = None, role_id: int | None = None,
+                     department: str | None = None,
+                     position_id: int | None = None) -> dict:
     """Paginated employee directory for the Roles & Access screen.
 
-    role_id narrows to the holders of one role; search matches name, code or email;
-    with_access filters to those who can (or cannot) sign in. The credential table is
-    read in one query rather than per row, because there are ~2,800 employees.
+    role_id narrows to the holders of one role; department and position_id narrow to a
+    department or one exact post; search matches name, code or email; with_access
+    filters to those who can (or cannot) sign in. The credential table is read in one
+    query rather than per row, because there are ~2,800 employees.
+
+    Department is matched by NAME, not id. HCM carries duplicate department rows under
+    the same name — "Warehouse" exists twice — and an employee's department_id points at
+    a different one than their position's does, so an id filter silently drops half a
+    department.
     """
     stmt = select(HcmEmployee).where(HcmEmployee.is_active.is_(True))
     if search:
@@ -506,6 +514,13 @@ async def list_users(db: AsyncSession, params: PageParams, search: str | None = 
         stmt = stmt.where(HcmEmployee.id.notin_(select(UserCredential.employee_id)))
     if role_id is not None:
         stmt = stmt.where(HcmEmployee.id.in_(await _employee_ids_for_role(db, role_id)))
+    if department:
+        stmt = stmt.where(HcmEmployee.department_name == department)
+    if position_id is not None:
+        stmt = stmt.where(HcmEmployee.id.in_(
+            select(HcmPositionAssignment.employee_id).where(
+                HcmPositionAssignment.position_id == position_id,
+                HcmPositionAssignment.is_active.is_(True))))
 
     page = await paginate(db, stmt.order_by(HcmEmployee.full_name), params)
     employees = page["items"]
@@ -534,6 +549,45 @@ async def list_users(db: AsyncSession, params: PageParams, search: str | None = 
         "positions": positions.get(e.id, []),
     } for e in employees]
     return page
+
+
+async def user_filters(db: AsyncSession, department: str | None = None) -> dict:
+    """What the Department and Position dropdowns on the Roles & Access screen offer.
+
+    Counted in MySQL and keyed on the employee, so every option is a filter that
+    actually returns somebody — an empty result is never offered.
+
+    Positions narrow to the chosen department. There are 3,729 posts in the mirror and
+    only a dozen or so in any one department, which is the difference between a
+    dropdown you can read and one you have to search.
+    """
+    departments = [{"name": row.name, "count": row.count} for row in (await db.execute(
+        select(HcmEmployee.department_name.label("name"),
+               func.count(HcmEmployee.id).label("count"))
+        .where(HcmEmployee.is_active.is_(True),
+               HcmEmployee.department_name.isnot(None),
+               HcmEmployee.department_name != "")
+        .group_by(HcmEmployee.department_name)
+        .order_by(HcmEmployee.department_name)
+    )).all()]
+
+    stmt = (select(HcmPosition.id, HcmPosition.name,
+                   func.count(func.distinct(HcmPositionAssignment.employee_id))
+                       .label("count"))
+            .select_from(HcmPosition)
+            .join(HcmPositionAssignment,
+                  HcmPositionAssignment.position_id == HcmPosition.id)
+            .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
+            .where(HcmPosition.is_active.is_(True),
+                   HcmPositionAssignment.is_active.is_(True),
+                   HcmEmployee.is_active.is_(True))
+            .group_by(HcmPosition.id, HcmPosition.name)
+            .order_by(HcmPosition.name))
+    if department:
+        stmt = stmt.where(HcmEmployee.department_name == department)
+    positions = [{"id": row.id, "name": row.name, "count": row.count}
+                 for row in (await db.execute(stmt)).all()]
+    return {"departments": departments, "positions": positions}
 
 
 # --------------------------------------------------------------------------- #

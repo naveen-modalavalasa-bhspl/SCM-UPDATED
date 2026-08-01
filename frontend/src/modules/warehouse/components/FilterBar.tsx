@@ -1,6 +1,6 @@
+import { Button, Card, Select } from "@/shared/components";
 import type { ReactNode } from "react";
 import { Search, X } from "lucide-react";
-import { Button, Card, Select } from "@/shared/components";
 
 /** The option shape `<Select>` takes. Declared here because the shared barrel
  *  exports the component but not its option type, and modules do not edit shared. */

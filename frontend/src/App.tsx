@@ -14,10 +14,9 @@ import { IndentBoardPage } from "@/modules/indents/pages/BoardPage";
 import { IndentAcknowledgmentsPage } from "@/modules/indents/pages/AcknowledgmentsPage";
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
-import { IndentApprovalsPage } from "@/modules/indents/pages/ApprovalsPage";
-import { MyDecisionsPage } from "@/modules/indents/pages/MyDecisionsPage";
-import { TeamQueuePage } from "@/modules/indents/pages/TeamQueuePage";
-import { DelegationsPage } from "@/modules/indents/pages/DelegationsPage";
+// Approvals is its own module now — the inbox, decisions, team queue, reports and the
+// indent review screen all live there, not inside indents.
+import { ApprovalsPage, MyDecisionsPage, TeamQueuePage } from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
@@ -29,6 +28,7 @@ import { GroupsPage } from "@/modules/rbac/pages/GroupsPage";
 import { RulesPage } from "@/modules/admin/pages/RulesPage";
 import { WorkflowsPage } from "@/modules/admin/pages/WorkflowsPage";
 import { ApprovalConfigPage } from "@/modules/admin/pages/ApprovalConfigPage";
+import { CustomLadderPage } from "@/modules/admin/pages/CustomLadderPage";
 import { PoliciesPage } from "@/modules/admin/pages/PoliciesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { AppLogsPage } from "@/modules/admin/pages/AppLogsPage";
@@ -84,10 +84,15 @@ function AppRoutes() {
         <Route path="indents/new" element={<IndentFormPage />} />
         <Route path="indents/:id/journey" element={<IndentJourneyPage />} />
         <Route path="indents/:id" element={<IndentDetailPage />} />
-        <Route path="approvals" element={<IndentApprovalsPage />} />
+        {/* Reports, the correction form and the indent review screen are reached from
+            the inbox via ?view=reports / ?correction= / ?reviewIndent=, so they need
+            no route of their own. */}
+        <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="approvals/decisions" element={<MyDecisionsPage />} />
         <Route path="approvals/team-queue" element={<TeamQueuePage />} />
-        <Route path="approvals/delegations" element={<DelegationsPage />} />
+        {/* Delegation is retired. The route stays so old links and bookmarks land
+            somewhere real instead of on a blank page. */}
+        <Route path="approvals/delegations" element={<Navigate to="/approvals" replace />} />
         <Route path="pos" element={<POListPage />} />
         <Route path="grn/*" element={<WarehouseModule />} />
         <Route path="stock/*" element={<WarehouseModule />} />
@@ -114,6 +119,9 @@ function AppRoutes() {
         <Route path="admin/rules" element={<RulesPage />} />
         <Route path="admin/workflows" element={<WorkflowsPage />} />
         <Route path="admin/approvals-config" element={<ApprovalConfigPage />} />
+        {/* Reached from the Approvals Config screen, not from the menu — adding it to
+            rbac_pages would mean reseeding, and seed prunes the live tree. */}
+        <Route path="admin/approvals-config/custom" element={<CustomLadderPage />} />
         <Route path="admin/policies" element={<PoliciesPage />} />
         <Route path="admin/audit" element={<AuditPage />} />
         <Route path="admin/app-logs" element={<AppLogsPage />} />

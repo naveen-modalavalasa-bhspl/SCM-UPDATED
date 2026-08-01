@@ -16,7 +16,7 @@ from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm import service as hcm_service
 from app.platform.hcm.models import HcmPositionAssignment
 from app.platform.notifications import service as notifications
-from app.platform.workflow import fallback, ladder, resolver
+from app.platform.workflow import custom_ladder, fallback, ladder, resolver
 from app.platform.workflow.conditions import stage_applies
 from app.platform.workflow.models import (
     Action, Instance, Pending, Stage, StageCondition, Workflow,
@@ -390,8 +390,14 @@ async def _finish_ladder(db: AsyncSession, instance: Instance) -> None:
 async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dict,
                         user, project_id: int | None,
                         requester_position_id: int | None) -> Instance:
-    chain = await ladder.resolve_chain(
-        db, stages, requester_position_id, user.id, context)
+    # A hand-built ladder names its posts outright, so there is nothing to climb — and
+    # for Inventory and Warehouse there is nothing above the raiser to reach anyway.
+    chain = (
+        await custom_ladder.resolve_fixed_chain(db, stages, user.id)
+        if ladder.is_custom_ladder(wf)
+        else await ladder.resolve_chain(
+            db, stages, requester_position_id, user.id, context)
+    )
 
     instance = Instance(
         doc_type=doc_type, doc_id=doc_id, workflow_id=wf.id,
@@ -503,8 +509,10 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     # No position means no reporting line to climb, and an empty climb reads as "top of
     # the ladder, self-approve". That would hand anyone without a post their own
     # approval, so they take the old path and land on the fallback's admin safety net.
-    found = (await ladder.find_ladder(db, project_id, doc_type)
-             if requester_position_id is not None else None)
+    found = await ladder.find_ladder(db, project_id, doc_type)
+    if (found is not None and requester_position_id is None
+            and not ladder.is_custom_ladder(found[0])):
+        found = None
     if found is not None:
         return await _start_ladder(db, found[0], found[1], doc_type, doc_id, context,
                                    user, project_id, requester_position_id)

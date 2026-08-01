@@ -299,7 +299,9 @@ export function StatusBreakdownChart({
     let anchorClientY = sliceBounds.top + sliceBounds.height / 2;
     const anchorX = Number(slice.dataset.anchorX);
     const anchorY = Number(slice.dataset.anchorY);
-    const matrix = slice.getScreenCTM();
+    // getScreenCTM is absent on a detached slice and in jsdom; without the guard a
+    // legend-row hover throws. Falling through leaves the bounding-box anchor above.
+    const matrix = typeof slice.getScreenCTM === "function" ? slice.getScreenCTM() : null;
     const svg = slice.ownerSVGElement;
     if (Number.isFinite(anchorX) && Number.isFinite(anchorY) && matrix && svg) {
       const anchor = svg.createSVGPoint();

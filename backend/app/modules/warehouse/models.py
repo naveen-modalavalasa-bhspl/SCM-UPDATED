@@ -737,6 +737,7 @@ class StorageType(Base):
     __tablename__ = "whs_warehouse_storage_types"
 
     id = pk()
+    code = Column(String(50), nullable=False)
     name = Column(String(50), nullable=False)
     description = Column(String(200), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)

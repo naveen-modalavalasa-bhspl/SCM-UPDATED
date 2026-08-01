@@ -17,6 +17,14 @@ export interface AdminUserRow {
   positions: { id: number; name: string }[];
 }
 
+/** The Department and Position dropdowns on Roles & Access. Every option carries its
+ *  headcount, and only options that match somebody are offered. Positions narrow to
+ *  the chosen department. */
+export interface UserFilters {
+  departments: { name: string; count: number }[];
+  positions: { id: number; name: string; count: number }[];
+}
+
 export interface AccessSummary {
   active_employees: number;
   users_with_access: number;

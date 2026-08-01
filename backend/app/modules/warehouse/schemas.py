@@ -111,6 +111,17 @@ class BinWrite(BaseModel):
     shelf_level: str | None = None
     is_active: bool = True
 
+    @field_validator(
+        "name", "description", "barcode", "floor_level", "shelf_level",
+        "capacity_qty", "capacity_volume", "max_weight_capacity", "height_cm",
+        "aisle_width_meters", "humidity_percentage", "target_temperature_celsius",
+        "min_temperature_celsius", "max_temperature_celsius", "storage_type_id",
+        mode="before",
+    )
+    @classmethod
+    def blank_to_none(cls, value):
+        return None if value == "" else value
+
 
 class LocationRead(_Read):
     id: int
@@ -139,15 +150,22 @@ class LocationRead(_Read):
 
 class StorageTypeRead(_Read):
     id: int
+    code: str | None = None
     name: str
     description: str | None = None
     is_active: bool
 
 
 class StorageTypeWrite(BaseModel):
+    code: str | None = Field(default=None, max_length=50)
     name: str = Field(min_length=1, max_length=50)
     description: str | None = Field(default=None, max_length=200)
     is_active: bool = True
+
+    @field_validator("code", "description", mode="before")
+    @classmethod
+    def blank_to_none(cls, value):
+        return None if value == "" else value
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +234,8 @@ class ReceiptItemRead(_Read):
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
+    is_asset: bool = False
+    is_serial_tracked: bool = False
     ordered_qty: Decimal
     received_qty: Decimal
     accepted_qty: Decimal
@@ -407,6 +427,7 @@ class PutawayRead(_Read):
     uom_code: str | None = None
     batch_id: int | None = None
     batch_no: str | None = None
+    expiry_date: date | None = None
     qty: Decimal
     suggested_bin_id: int | None = None
     suggested_bin_code: str | None = None
@@ -427,6 +448,7 @@ class PutawayRead(_Read):
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     is_serial_tracked: bool = False
+    is_asset: bool = False
     created_at: datetime | None = None
 
 
@@ -510,6 +532,7 @@ class PickingItemRead(_Read):
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
+    is_serial_tracked: bool = False
     bin_id: int | None = None
     bin_code: str | None = None
     batch_id: int | None = None
@@ -553,6 +576,9 @@ class IssueItemWrite(BaseModel):
     id: int | None = None
     indent_item_id: int | None = None
     item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    is_serial_tracked: bool = False
     bin_id: int | None = None
     batch_id: int | None = None
     requested_qty: Decimal
@@ -587,6 +613,7 @@ class IssueItemRead(_Read):
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
+    is_serial_tracked: bool = False
     bin_id: int | None = None
     bin_code: str | None = None
     batch_id: int | None = None
@@ -917,6 +944,7 @@ class BatchRead(_Read):
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
+    is_asset: bool = False
     vendor_id: int | None = None
     vendor_name: str | None = None
     mfg_date: date | None = None
@@ -935,6 +963,7 @@ class SerialRead(_Read):
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
+    is_asset: bool = False
     serial_number: str
     batch_id: int | None = None
     batch_no: str | None = None
@@ -1003,6 +1032,7 @@ class IndentIssueSource(BaseModel):
     warehouse_id: int
     department_id: int | None = None
     project_id: int | None = None
+    issued_to_id: int | None = None
     items: list[IssueItemWrite] = []
 
 

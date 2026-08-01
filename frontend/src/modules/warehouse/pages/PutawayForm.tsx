@@ -3,13 +3,12 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, ScanLine, SkipForward } from "lucide-react";
-import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
-import { ConfirmModal, ErrorBanner } from "@/shared/components";
+import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import { binOptions, confirmPutaway, getPutaway, skipPutaway, startPutaway, suggestBins } from "../api";
-import { fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
+import { fmtDate, fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
 
 /**
  * One putaway task: take this quantity to this bin and confirm it.
@@ -73,7 +72,7 @@ export default function PutawayForm() {
     onSuccess: () => {
       invalidate();
       setConfirming(false);
-      nav("..");
+      nav("/warehouse/transactions/putaway", { replace: true });
     },
   });
 
@@ -82,7 +81,7 @@ export default function PutawayForm() {
     onSuccess: () => {
       invalidate();
       setSkipping(false);
-      nav("..");
+      nav("/warehouse/transactions/putaway", { replace: true });
     },
   });
 
@@ -169,6 +168,7 @@ export default function PutawayForm() {
         <MetaRow label="Warehouse" value={task.warehouse_name} />
         <MetaRow label="Item" value={`${task.item_code ?? ""} ${task.item_name ?? ""}`.trim() || "—"} />
         <MetaRow label="Batch" value={task.batch_no} />
+        <MetaRow label={task.is_asset ? "Warranty" : "Expiry"} value={fmtDate(task.expiry_date)} />
         <MetaRow label="Quantity" value={<span className="tabular">{fmtQty(task.qty)} {task.uom_code ?? ""}</span>} />
         <MetaRow label="Directed" value={humanise(task.putaway_type)} />
         <MetaRow label="Assigned to" value={task.assigned_to_name} />
@@ -192,6 +192,12 @@ export default function PutawayForm() {
           {task.lot_no && (
             <p className="mt-2 text-sm text-muted">
               Lot <span className="font-mono font-semibold text-ink">{task.lot_no}</span>
+            </p>
+          )}
+          {task.expiry_date && (
+            <p className="mt-2 text-sm text-muted">
+              {task.is_asset ? "Warranty" : "Expiry"}{" "}
+              <span className="font-semibold text-ink">{fmtDate(task.expiry_date)}</span>
             </p>
           )}
         </Card>

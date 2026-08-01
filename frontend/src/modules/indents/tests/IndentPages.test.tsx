@@ -15,7 +15,6 @@ import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterC
 import { IndentDashboardPage } from "../pages/DashboardPage";
 import { IndentListPage } from "../pages/ListPage";
 import { IndentBoardPage } from "../pages/BoardPage";
-import { IndentApprovalsPage } from "../pages/ApprovalsPage";
 import { IndentAcknowledgmentsPage } from "../pages/AcknowledgmentsPage";
 import { IndentReportsPage } from "../pages/ReportsPage";
 import { IndentNotificationsPage } from "../pages/NotificationsPage";
@@ -101,7 +100,6 @@ vi.mock("../api", async () => {
     activity: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "activity", filters] as const,
     acknowledgments: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "acknowledgments", filters] as const,
     notifications: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown = {}) => [...scoped(scope), "notifications", filters] as const,
-    pendingApprovals: (scope: { employeeId: number | null; activePositionId: number | null }) => [...scoped(scope), "pending-approvals"] as const,
     detail: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "detail", id] as const,
     journey: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "journey", id] as const,
     items: (scope: { employeeId: number | null; activePositionId: number | null }, context = "default") => [...scoped(scope), "items", context] as const,
@@ -181,7 +179,6 @@ vi.mock("../api", async () => {
     delete: vi.fn(),
     bookmark: vi.fn(),
     unbookmark: vi.fn(),
-    pendingApprovals: vi.fn(() => Promise.resolve([])),
     },
   };
 });
@@ -525,18 +522,19 @@ describe("indent UI shell", () => {
     );
 
     expect(screen.getAllByRole("navigation", { name: "Indent" })).toHaveLength(1);
-    expect(screen.getAllByRole("link")).toHaveLength(6);
+    // Five tabs: Board is parked, so it is no longer one of them.
+    expect(screen.getAllByRole("link")).toHaveLength(5);
   });
 
   it("marks the current indent tab active", () => {
-    renderWithProviders(<IndentsNav />, "/indents/board");
-    expect(screen.getByRole("link", { name: "Board" })).toHaveAttribute("aria-current", "page");
+    renderWithProviders(<IndentsNav />, "/indents/acknowledgments");
+    expect(screen.getByRole("link", { name: "Acknowledgments" })).toHaveAttribute("aria-current", "page");
   });
 
   it("keeps renamed navigation labels on existing routes", () => {
     renderWithProviders(<IndentsNav />, "/indents/notifications");
 
-    expect(screen.getByRole("link", { name: "Board" })).toHaveAttribute("href", "/indents/board");
+    expect(screen.queryByRole("link", { name: "Board" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Alert & Notification" })).toHaveAttribute("href", "/indents/notifications");
     expect(screen.getByRole("link", { name: "Alert & Notification" })).toHaveAttribute("aria-current", "page");
   });
@@ -706,15 +704,19 @@ describe("indent UI shell", () => {
         .toBeCloseTo(69 / 90, 2);
     }
 
+    // Legend rows are read-only labels, not buttons — filtering by clicking a status
+    // was removed, so the rows carry no role and no press state.
     const legend = screen.getByTestId("status-breakdown-legend");
-    expect(within(legend).getAllByRole("button").map((row) => row.getAttribute("aria-label"))).toEqual([
+    const legendRows = within(legend).getAllByTestId(/^status-legend-row-/);
+    expect(within(legend).queryAllByRole("button")).toHaveLength(0);
+    expect(legendRows.map((row) => row.getAttribute("aria-label"))).toEqual([
       "Pending approval: 4 indents, 27 percent",
       "Awaiting allocation: 5 indents, 33 percent",
       "Allocated: 2 indents, 13 percent",
       "Rejected: 3 indents, 20 percent",
       "Draft: 1 indent, 7 percent",
     ]);
-    expect(within(legend).getAllByRole("button")[0]).toHaveClass(
+    expect(legendRows[0]).toHaveClass(
       "grid-cols-[0.625rem_minmax(0,1fr)_2.5rem_3rem]",
       "min-h-9",
       "gap-x-2",
@@ -766,22 +768,20 @@ describe("indent UI shell", () => {
     expect(byStatus).toEqual(original);
   });
 
-  it("keeps slice hover tooltips separate from row hover, focus and the existing filter action", async () => {
+  it("shows a slice tooltip on hover and never filters from the chart", async () => {
     const interactiveStats = overviewStats({
       AWAITING_ALLOCATION: 7,
       PENDING_APPROVAL: 4,
       APPROVED: 2,
       DRAFT: 2,
     });
-    vi.mocked(indentApi.stats)
-      .mockResolvedValueOnce(interactiveStats)
-      .mockResolvedValueOnce(interactiveStats);
+    // One response only: nothing in the chart refetches any more.
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(interactiveStats);
 
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
     const slice = await screen.findByTestId("status-donut-slice-AWAITING_ALLOCATION");
     expect(slice).toHaveAccessibleName("Awaiting allocation: 7 indents, 54 percent");
-    expect(slice).toHaveAttribute("tabindex", "0");
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
     fireEvent.mouseEnter(slice);
@@ -796,34 +796,20 @@ describe("indent UI shell", () => {
     fireEvent.mouseLeave(slice);
     await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
 
+    // The chart is read-only. Hovering a legend row highlights it and anchors the
+    // same tooltip to that row's slice; clicking one must not refetch or filter.
     const row = screen.getByTestId("status-legend-row-AWAITING_ALLOCATION");
     const statsCallsBeforeHover = vi.mocked(indentApi.stats).mock.calls.length;
     fireEvent.mouseEnter(row);
     expect(row).toHaveAttribute("data-hovered", "true");
     expect(row).toHaveAttribute("data-selected", "false");
-    expect(row).toHaveAttribute("aria-pressed", "false");
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
     expect(indentApi.stats).toHaveBeenCalledTimes(statsCallsBeforeHover);
     fireEvent.mouseLeave(row);
+    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
 
-    fireEvent.focus(row);
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-    expect(slice).toHaveAttribute("data-active", "false");
-    expect(row).toHaveAttribute("data-hovered", "true");
-
-    const statsCallsBeforeKeyboard = vi.mocked(indentApi.stats).mock.calls.length;
-    fireEvent.keyDown(slice, { key: "Enter" });
-    await waitFor(() => expect(indentApi.stats).toHaveBeenCalledTimes(statsCallsBeforeKeyboard + 1));
-    await waitFor(() => expect(indentApi.stats).toHaveBeenLastCalledWith(
-      expect.objectContaining({ status: ["AWAITING_ALLOCATION"] }),
-      expect.anything(),
-    ));
-    expect(screen.getByTestId("status-legend-row-AWAITING_ALLOCATION")).toHaveAttribute("aria-pressed", "true");
-
-    fireEvent.click(screen.getByTestId("status-legend-row-AWAITING_ALLOCATION"));
-    await waitFor(() => expect(
-      screen.getByTestId("status-legend-row-AWAITING_ALLOCATION"),
-    ).toHaveAttribute("aria-pressed", "false"));
+    fireEvent.click(row);
+    await waitFor(() => expect(indentApi.stats).toHaveBeenCalledTimes(statsCallsBeforeHover));
+    expect(row).not.toHaveAttribute("aria-pressed");
   });
 
   it("shows a neutral empty donut, zero centre KPI and filtered empty-state message", async () => {
@@ -866,7 +852,7 @@ describe("indent UI shell", () => {
     expect(allocatedPath).toHaveAttribute("stroke-width", "0");
     expect(Number(allocatedSlice.getAttribute("data-inner-radius"))).toBeGreaterThan(0);
     fireEvent.click(allocated);
-    expect(allocated).toHaveAttribute("aria-pressed", "true");
+    expect(allocated).not.toHaveAttribute("aria-pressed");
     expect(chart.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
   });
 
@@ -878,9 +864,8 @@ describe("indent UI shell", () => {
 
     const { container } = renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
-    const rejected = await screen.findByRole("button", {
-      name: "Rejected: 1 indent, 100 percent",
-    });
+    const rejected = await screen.findByTestId("status-legend-row-REJECTED");
+    expect(rejected).toHaveAccessibleName("Rejected: 1 indent, 100 percent");
     expect(within(rejected).getByTestId("status-legend-count-REJECTED")).toHaveTextContent(/^1$/);
     expect(within(rejected).getByTestId("status-legend-percentage-REJECTED")).toHaveTextContent(/^100%$/);
     expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("1 total indent");
@@ -2362,15 +2347,6 @@ describe("indent UI shell", () => {
     await waitFor(() => {
       expect(screen.queryByText("Unable to load activity ledger")).not.toBeInTheDocument();
     });
-  });
-
-  it("hides unsupported Date, Status and Priority filters on Waiting for me", async () => {
-    renderWithProviders(<IndentApprovalsPage />, "/indents/approvals");
-
-    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^Date/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^Status/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^Priority/ })).not.toBeInTheDocument();
   });
 
   it("uses wrap-friendly toolbar layout for mobile widths", async () => {

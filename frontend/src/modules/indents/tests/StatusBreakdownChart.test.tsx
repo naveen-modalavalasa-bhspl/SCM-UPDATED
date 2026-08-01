@@ -48,7 +48,11 @@ const DISPLAYED_STATUSES = [
   "DRAFT",
 ];
 
-function setContainerBounds(container: HTMLElement) {
+/**
+ * The tooltip is a child of the layout wrapper and is positioned against it, so
+ * that — not the donut box — is the element whose bounds have to be mocked.
+ */
+function setContainerBounds(container: HTMLElement = screen.getByTestId("status-breakdown-layout")) {
   vi.spyOn(container, "getBoundingClientRect").mockReturnValue({
     x: 100,
     y: 50,
@@ -64,10 +68,9 @@ function setContainerBounds(container: HTMLElement) {
 
 describe("StatusBreakdownChart tooltip interaction", () => {
   it("positions beside the pointer and follows movement within the same slice", () => {
-    render(<StatusBreakdownChart byStatus={STATUS_DATA} onStatusClick={vi.fn()} />);
-    const container = screen.getByTestId("status-donut-container");
+    render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
     const slice = screen.getByTestId("status-donut-slice-AWAITING_ALLOCATION");
-    setContainerBounds(container);
+    setContainerBounds();
 
     fireEvent.mouseEnter(slice, { clientX: 180, clientY: 130 });
 
@@ -103,20 +106,23 @@ describe("StatusBreakdownChart tooltip interaction", () => {
     })).toEqual({ x: 8, y: 8 });
   });
 
-  it("dismisses on slice or donut leave and never opens from status-row hover", () => {
-    render(<StatusBreakdownChart byStatus={STATUS_DATA} onStatusClick={vi.fn()} />);
+  it("dismisses on slice or donut leave and also opens from status-row hover", () => {
+    render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
     const container = screen.getByTestId("status-donut-container");
     const slice = screen.getByTestId("status-donut-slice-AWAITING_ALLOCATION");
     const row = screen.getByTestId("status-legend-row-AWAITING_ALLOCATION");
-    setContainerBounds(container);
+    setContainerBounds();
 
     fireEvent.mouseEnter(slice, { clientX: 180, clientY: 130 });
     expect(screen.getByRole("tooltip")).toBeInTheDocument();
     fireEvent.mouseLeave(slice);
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
+    // Hovering a legend row anchors the same tooltip to that row's slice.
     fireEvent.mouseEnter(row);
     expect(row).toHaveAttribute("data-hovered", "true");
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+    fireEvent.mouseLeave(row);
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
     fireEvent.mouseEnter(slice, { clientX: 180, clientY: 130 });
@@ -124,66 +130,48 @@ describe("StatusBreakdownChart tooltip interaction", () => {
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
-  it("closes before row and slice filters while hover and selection stay independent", () => {
-    const onStatusClick = vi.fn();
-    render(
-      <StatusBreakdownChart
-        byStatus={STATUS_DATA}
-        onStatusClick={onStatusClick}
-        selectedStatuses={["DRAFT"]}
-      />,
-    );
-    const container = screen.getByTestId("status-donut-container");
+  it("keeps hover and selection independent", () => {
+    // The chart is read-only: selection arrives as a prop from the filter bar, so
+    // hovering a slice must never disturb which rows are marked selected.
+    render(<StatusBreakdownChart byStatus={STATUS_DATA} selectedStatuses={["DRAFT"]} />);
     const awaitingSlice = screen.getByTestId("status-donut-slice-AWAITING_ALLOCATION");
     const awaitingRow = screen.getByTestId("status-legend-row-AWAITING_ALLOCATION");
     const draftRow = screen.getByTestId("status-legend-row-DRAFT");
-    setContainerBounds(container);
+    setContainerBounds();
 
     fireEvent.mouseEnter(awaitingSlice, { clientX: 180, clientY: 130 });
     expect(awaitingSlice).toHaveAttribute("data-active", "true");
     expect(awaitingRow).toHaveAttribute("data-selected", "false");
     expect(draftRow).toHaveAttribute("data-selected", "true");
 
-    fireEvent.click(awaitingRow);
-    expect(onStatusClick).toHaveBeenLastCalledWith("AWAITING_ALLOCATION");
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    fireEvent.mouseLeave(awaitingSlice);
+    expect(awaitingSlice).toHaveAttribute("data-active", "false");
+    expect(awaitingRow).toHaveAttribute("data-selected", "false");
     expect(draftRow).toHaveAttribute("data-selected", "true");
-
-    fireEvent.mouseEnter(awaitingSlice, { clientX: 200, clientY: 150 });
-    expect(screen.getByRole("tooltip")).toBeInTheDocument();
-    fireEvent.click(awaitingSlice);
-    expect(onStatusClick).toHaveBeenLastCalledWith("AWAITING_ALLOCATION");
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
   it("dismisses when the selected filter or filtered chart data changes", () => {
-    const { rerender } = render(
-      <StatusBreakdownChart byStatus={STATUS_DATA} onStatusClick={vi.fn()} />,
-    );
-    const container = screen.getByTestId("status-donut-container");
+    const { rerender } = render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
     const slice = screen.getByTestId("status-donut-slice-AWAITING_ALLOCATION");
-    setContainerBounds(container);
+    setContainerBounds();
 
     fireEvent.mouseEnter(slice, { clientX: 180, clientY: 130 });
     expect(screen.getByRole("tooltip")).toBeInTheDocument();
     rerender(
       <StatusBreakdownChart
         byStatus={STATUS_DATA}
-        onStatusClick={vi.fn()}
         selectedStatuses={["AWAITING_ALLOCATION"]}
       />,
     );
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
-    const updatedContainer = screen.getByTestId("status-donut-container");
     const updatedSlice = screen.getByTestId("status-donut-slice-AWAITING_ALLOCATION");
-    setContainerBounds(updatedContainer);
+    setContainerBounds();
     fireEvent.mouseEnter(updatedSlice, { clientX: 180, clientY: 130 });
     expect(screen.getByRole("tooltip")).toBeInTheDocument();
     rerender(
       <StatusBreakdownChart
         byStatus={{ AWAITING_ALLOCATION: 3 }}
-        onStatusClick={vi.fn()}
         selectedStatuses={["AWAITING_ALLOCATION"]}
       />,
     );
@@ -193,7 +181,7 @@ describe("StatusBreakdownChart tooltip interaction", () => {
 
 describe("StatusBreakdownChart presentation", () => {
   it("shows exactly the five supported statuses in the required order and excludes Other", () => {
-    render(<StatusBreakdownChart byStatus={STATUS_DATA} onStatusClick={vi.fn()} />);
+    render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
 
     expect(screen.getAllByTestId(/^status-legend-row-/).map((row) => (
       row.getAttribute("data-testid")?.replace("status-legend-row-", "")
@@ -223,7 +211,7 @@ describe("StatusBreakdownChart presentation", () => {
     expect(entries.map(({ status }) => status)).toEqual(DISPLAYED_STATUSES);
     expect(entries.map(({ percentage }) => percentage)).toEqual([27, 33, 13, 20, 7]);
 
-    render(<StatusBreakdownChart byStatus={byStatus} onStatusClick={vi.fn()} />);
+    render(<StatusBreakdownChart byStatus={byStatus} />);
     expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("15 total indents");
     expect(screen.getByTestId("status-legend-percentage-PENDING_APPROVAL")).toHaveTextContent("27%");
     expect(screen.getByTestId("status-legend-percentage-DRAFT")).toHaveTextContent("7%");
@@ -233,7 +221,6 @@ describe("StatusBreakdownChart presentation", () => {
     render(
       <StatusBreakdownChart
         byStatus={{ ALLOCATED: 6, DRAFT: 0, REJECTED: Number.NaN, APPROVED: 40 }}
-        onStatusClick={vi.fn()}
       />,
     );
 
@@ -246,7 +233,7 @@ describe("StatusBreakdownChart presentation", () => {
   });
 
   it("uses padded responsive sizing and the preserved status colours", () => {
-    render(<StatusBreakdownChart byStatus={STATUS_DATA} onStatusClick={vi.fn()} />);
+    render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
 
     expect(screen.getByTestId("status-donut-slice-DRAFT")).toHaveAttribute("fill", "var(--color-neutral)");
     expect(screen.getByTestId("status-donut-container")).toHaveClass(
@@ -265,11 +252,7 @@ describe("StatusBreakdownChart presentation", () => {
 
   it("does not apply a selected or focus outline to a slice", () => {
     render(
-      <StatusBreakdownChart
-        byStatus={STATUS_DATA}
-        onStatusClick={vi.fn()}
-        selectedStatuses={["DRAFT"]}
-      />,
+      <StatusBreakdownChart byStatus={STATUS_DATA} selectedStatuses={["DRAFT"]} />,
     );
 
     const selectedSlice = screen.getByTestId("status-donut-slice-DRAFT");
@@ -287,7 +270,6 @@ describe("StatusBreakdownChart presentation", () => {
     render(
       <StatusBreakdownChart
         byStatus={{ ALLOCATED: 6, APPROVED: 99 }}
-        onStatusClick={vi.fn()}
         selectedStatuses={["ALLOCATED"]}
       />,
     );

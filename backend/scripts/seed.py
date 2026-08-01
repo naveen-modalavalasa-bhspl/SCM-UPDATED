@@ -99,7 +99,9 @@ PAGE_TREE = [
     ("grp_indents", "/indents/dashboard", "Indents", "file-text", P.INDENT_VIEW, 10, None),
     ("ind_dashboard", "/indents/dashboard", "Overview", "layout-dashboard", P.INDENT_VIEW, 11, "grp_indents"),
     ("ind_list", "/indents", "All Requests", "list", P.INDENT_VIEW, 12, "grp_indents"),
-    ("ind_board", "/indents/board", "Status Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
+    # Parked (rbac_pages.is_active = 0); route and BoardPage still exist. Leaving the
+    # row here would put it back on the menu at the next seed.
+    # ("ind_board", "/indents/board", "Status Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
     ("ind_ack", "/indents/acknowledgments", "Acknowledgments", "check-circle", P.INDENT_VIEW, 14, "grp_indents"),
     ("ind_reports", "/indents/reports", "Activity Ledger", "bar-chart", P.INDENT_VIEW, 15, "grp_indents"),
     ("ind_notifications", "/indents/notifications", "Notifications", "bell", P.INDENT_VIEW, 16, "grp_indents"),
@@ -108,7 +110,8 @@ PAGE_TREE = [
     ("approval_waiting", "/approvals", "Waiting for Me", "check-circle", P.INDENT_VIEW, 21, "approvals"),
     ("approval_decisions", "/approvals/decisions", "My Decisions", "history", P.INDENT_VIEW, 22, "approvals"),
     ("approval_team", "/approvals/team-queue", "Team Queue", "users", P.INDENT_VIEW, 23, "approvals"),
-    ("approval_delegations", "/approvals/delegations", "Delegations", "arrow-right-left", P.INDENT_VIEW, 24, "approvals"),
+    # Delegations is gone: the approvals module does not expose it, and the route now
+    # redirects to the inbox. Existing wf_delegations rows are left as history.
 
     ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
     ("po_list", "/pos", "Purchase Orders", "shopping-cart", P.PO_VIEW, 31, "grp_purchasing"),
@@ -163,14 +166,19 @@ PAGE_TREE = [
     ("inv_allocation_approvals", "/inventory/allocation-approvals",
      "Allocation Approvals", "badge-check",
      P.ALLOCATION_APPROVE, 57, "grp_inventory"),
-    ("inv_demand", "/inventory/demand", "Demand by Item", "boxes",
-     P.ALLOCATION_VIEW, 58, "grp_inventory"),
+    # Parked, not deleted: Demand by Item, Adjustments and Valuation & Ageing are
+    # off the menu (rbac_pages.is_active = 0) until they are implemented properly.
+    # seed_pages sets is_active = True for everything in PAGE_TREE, so leaving the
+    # rows here would put the screens back on the rail at the next seed. The routes
+    # and page code are still in the frontend — restore a row here to bring one back.
+    # ("inv_demand", "/inventory/demand", "Demand by Item", "boxes",
+    #  P.ALLOCATION_VIEW, 58, "grp_inventory"),
     ("inv_mr", "/inventory/material-requests", "Material Requests", "file-text",
      P.MR_VIEW, 59, "grp_inventory"),
-    ("inv_adjustments", "/inventory/adjustments", "Adjustments", "sliders",
-     P.STOCK_ADJUST, 60, "grp_inventory"),
-    ("inv_valuation", "/inventory/valuation", "Valuation & Ageing", "indian-rupee",
-     P.STOCK_VALUATION_VIEW, 63, "grp_inventory"),
+    # ("inv_adjustments", "/inventory/adjustments", "Adjustments", "sliders",
+    #  P.STOCK_ADJUST, 60, "grp_inventory"),
+    # ("inv_valuation", "/inventory/valuation", "Valuation & Ageing", "indian-rupee",
+    #  P.STOCK_VALUATION_VIEW, 63, "grp_inventory"),
     ("inv_labels", "/inventory/labels", "Labels & Printing", "printer",
      P.STOCK_VIEW, 64, "grp_inventory"),
 

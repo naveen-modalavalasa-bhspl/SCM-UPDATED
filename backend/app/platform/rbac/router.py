@@ -18,9 +18,18 @@ router = APIRouter(prefix="/api/rbac", tags=["rbac"])
 @router.get("/users")
 async def list_users(params: PageParams = Depends(), search: str | None = None,
                      with_access: bool | None = None, role_id: int | None = None,
+                     department: str | None = None, position_id: int | None = None,
                      db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.ADMIN_USERS_MANAGE))):
-    return await service.list_users(db, params, search, with_access, role_id)
+    return await service.list_users(db, params, search, with_access, role_id,
+                                    department, position_id)
+
+
+@router.get("/user-filters")
+async def user_filters(department: str | None = None,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.ADMIN_USERS_MANAGE))):
+    return await service.user_filters(db, department)
 
 
 @router.get("/users/{employee_id}/reporting")

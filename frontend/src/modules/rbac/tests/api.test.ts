@@ -12,7 +12,7 @@ describe("RBAC api", () => {
 
   it("exposes user-access operations", () => {
     expect(Object.keys(rbacApi.users).sort()).toEqual(
-      ["grant", "list", "resetPassword", "revoke", "setRoles", "summary"],
+      ["filters", "grant", "list", "resetPassword", "revoke", "setRoles", "summary"],
     );
   });
 

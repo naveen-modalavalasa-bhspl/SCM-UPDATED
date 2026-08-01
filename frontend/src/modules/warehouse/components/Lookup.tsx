@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
 import { Select } from "@/shared/components";
+import { useQuery } from "@tanstack/react-query";
 import type { Option } from "../types";
 
 /**

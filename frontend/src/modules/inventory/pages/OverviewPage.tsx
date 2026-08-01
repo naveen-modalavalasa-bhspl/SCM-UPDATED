@@ -81,9 +81,8 @@ export function InventoryOverviewPage() {
                 <Link to="/inventory/stock-balance"><Button>Stock Balance</Button></Link>
                 <Link to="/inventory/ledger"><Button variant="ghost">Stock Ledger</Button></Link>
                 <Link to="/inventory/replenishment"><Button variant="ghost">Replenishment</Button></Link>
-                {canViewValuation && (
-                  <Link to="/inventory/valuation"><Button variant="ghost">Valuation</Button></Link>
-                )}
+                {/* Valuation & Ageing is parked — the route and the view are still
+                    here, but the screen is off the menu until it is implemented. */}
               </div>
             </Card>
           </div>

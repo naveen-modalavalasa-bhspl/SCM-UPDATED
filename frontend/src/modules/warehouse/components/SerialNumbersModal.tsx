@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import { ScanLine, Trash2 } from "lucide-react";
-import { Button } from "@/shared/components";
-import { ErrorBanner } from "@/shared/components";
+import { Button, ErrorBanner } from "@/shared/components";
 
 /**
  * Captures the serial numbers of a receipt or issue line — or, at inspection, picks
@@ -29,6 +28,7 @@ export function SerialNumbersModal({
   itemLabel,
   readOnly = false,
   available = null,
+  pickMode = "reject",
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -41,9 +41,12 @@ export function SerialNumbersModal({
   readOnly?: boolean;
   /** The GRN's serials for this line. Present = pick mode, absent = type them. */
   available?: string[] | null;
+  /** `reject` is QC semantics; `select` is used when issuing stock from a bin. */
+  pickMode?: "reject" | "select";
 }) {
   const [serials, setSerials] = useState<string[]>([]);
   const [entry, setEntry] = useState("");
+  const [bulkEntry, setBulkEntry] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const picking = available !== null && available !== undefined;
@@ -54,6 +57,7 @@ export function SerialNumbersModal({
       // carries no decision (null), which is not the same as "every unit rejected".
       setSerials(picking && initial == null ? available ?? [] : initial ?? []);
       setEntry("");
+      setBulkEntry("");
       setError(null);
     }
     // `initial` is a fresh array on every render of the parent grid; keying the reset
@@ -61,59 +65,113 @@ export function SerialNumbersModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
+  const required = Math.floor(quantity);
+
   if (picking) {
-    const accepted = new Set(serials);
-    const rejected = (available ?? []).filter((s) => !accepted.has(s));
+    const selected = new Set(serials);
+    const visible = (available ?? []).filter((s) =>
+      entry.trim() ? s.toLowerCase().includes(entry.trim().toLowerCase()) : true,
+    );
+    const rejected = (available ?? []).filter((s) => !selected.has(s));
     const toggle = (serial: string) =>
       setSerials((rows) =>
         rows.includes(serial) ? rows.filter((r) => r !== serial) : [...rows, serial],
       );
+    const scanOrSearch = () => {
+      const value = entry.trim();
+      if (!value) return;
+      const exact = (available ?? []).find((s) => s.toLowerCase() === value.toLowerCase());
+      if (exact) {
+        if (!selected.has(exact)) toggle(exact);
+        setEntry("");
+        setError(null);
+      }
+    };
+    const selectMode = pickMode === "select";
 
     return (
       <Modal isOpen={isOpen} onClose={onClose} size="lg" scrollBehavior="inside">
         <ModalContent>
           <ModalHeader className="flex-col items-start gap-0.5">
-            <span className="font-display text-lg font-bold text-ink">Reject serial numbers</span>
+            <span className="font-display text-lg font-bold text-ink">
+              {selectMode ? "Select serial numbers" : "Reject serial numbers"}
+            </span>
             <span className="text-xs font-normal text-muted">{itemLabel}</span>
           </ModalHeader>
 
           <ModalBody>
+            {!readOnly && (
+              <label className="relative mb-3 block">
+                <ScanLine className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                <input
+                  autoFocus
+                  value={entry}
+                  onChange={(e) => setEntry(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      scanOrSearch();
+                    }
+                  }}
+                  placeholder={selectMode ? "Search or scan an available serial" : "Search serials"}
+                  aria-label="Search serial numbers"
+                  className="min-h-11 w-full rounded-md border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
+                />
+              </label>
+            )}
+            <ErrorBanner error={error} />
+
             <div className="mb-3 flex items-center justify-between text-sm">
-              <span className="text-muted">Tick the units you are rejecting.</span>
+              <span className="text-muted">
+                {selectMode ? "Tick the units being issued." : "Tick the units you are rejecting."}
+              </span>
               <span className="font-semibold text-ink">
-                {accepted.size} accepted · <span className="text-bad">{rejected.length} rejected</span>
+                {selectMode ? (
+                  <>{selected.size} selected</>
+                ) : (
+                  <>{selected.size} accepted · <span className="text-bad">{rejected.length} rejected</span></>
+                )}
               </span>
             </div>
 
             {(available ?? []).length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">
-                No serials were captured on the GRN for this line.
+                {selectMode ? "No available serials found for this item, batch and bin." : "No serials were captured on the GRN for this line."}
+              </div>
+            ) : visible.length === 0 ? (
+              <div className="py-8 text-center text-sm text-muted">
+                No serials match the search.
               </div>
             ) : (
               <ul className="space-y-1.5">
-                {(available ?? []).map((s, i) => {
-                  const isRejected = !accepted.has(s);
+                {visible.map((s, i) => {
+                  const isSelected = selected.has(s);
+                  const isRejected = !isSelected;
                   return (
                     <li key={s}>
                       <label
                         className={`flex min-h-11 cursor-pointer items-center gap-3 rounded-lg border px-3 ${
-                          isRejected ? "border-bad/50 bg-bad-bg/40" : "border-line/70 bg-content1"
+                          selectMode
+                            ? isSelected ? "border-brand/50 bg-brand/5" : "border-line/70 bg-content1"
+                            : isRejected ? "border-bad/50 bg-bad-bg/40" : "border-line/70 bg-content1"
                         }`}
                       >
                         <input
                           type="checkbox"
-                          checked={isRejected}
+                          checked={selectMode ? isSelected : isRejected}
                           disabled={readOnly}
                           onChange={() => toggle(s)}
-                          aria-label={`Reject ${s}`}
-                          className="h-4 w-4 shrink-0 accent-current text-bad"
+                          aria-label={`${selectMode ? "Select" : "Reject"} ${s}`}
+                          className={`h-4 w-4 shrink-0 accent-current ${selectMode ? "text-brand" : "text-bad"}`}
                         />
                         <span className="w-6 shrink-0 text-[11px] text-muted tabular">{i + 1}</span>
                         <span className="truncate font-mono text-sm text-ink">{s}</span>
-                        <span className={`ml-auto text-[11px] font-semibold uppercase ${
+                        <span className={`ml-auto text-[11px] font-semibold uppercase ${selectMode ? (
+                          isSelected ? "text-brand" : "text-muted"
+                        ) : (
                           isRejected ? "text-bad" : "text-ok"
-                        }`}>
-                          {isRejected ? "Rejected" : "Accepted"}
+                        )}`}>
+                          {selectMode ? (isSelected ? "Selected" : "Available") : (isRejected ? "Rejected" : "Accepted")}
                         </span>
                       </label>
                     </li>
@@ -128,7 +186,11 @@ export function SerialNumbersModal({
             {!readOnly && (
               <Button
                 onClick={() => {
-                  onSave((available ?? []).filter((s) => accepted.has(s)));
+                  if (selectMode && selected.size !== required) {
+                    setError(`Select exactly ${required} serial numbers; ${selected.size} selected.`);
+                    return;
+                  }
+                  onSave((available ?? []).filter((s) => selected.has(s)));
                   onClose();
                 }}
               >
@@ -141,7 +203,6 @@ export function SerialNumbersModal({
     );
   }
 
-  const required = Math.floor(quantity);
   const remaining = required - serials.length;
 
   const add = (raw: string) => {
@@ -160,15 +221,46 @@ export function SerialNumbersModal({
     setEntry("");
   };
 
+  const parseBulk = (raw: string) =>
+    raw
+      .split(/[\s,;]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+  const addMany = (raw: string) => {
+    const incoming = parseBulk(raw);
+    if (!incoming.length) return;
+
+    const duplicatesInPaste = incoming.filter((value, index) => incoming.indexOf(value) !== index);
+    if (duplicatesInPaste.length) {
+      setError(`${duplicatesInPaste[0]} appears more than once in the pasted list.`);
+      return;
+    }
+
+    const existing = new Set(serials);
+    const duplicate = incoming.find((value) => existing.has(value));
+    if (duplicate) {
+      setError(`${duplicate} is already on this line.`);
+      return;
+    }
+
+    if (serials.length + incoming.length > required) {
+      setError(`This line is for ${required}; pasted list would capture ${serials.length + incoming.length}.`);
+      return;
+    }
+
+    setSerials((rows) => [...rows, ...incoming]);
+    setBulkEntry("");
+    setError(null);
+  };
+
   // A plain expression, not a useMemo: pick mode returns before this point, and a hook
   // that only runs on one branch breaks the rules of hooks.
   const tone = remaining === 0 ? "text-ok" : remaining < 0 ? "text-bad" : "text-warn";
 
   const save = () => {
-    // Capturing fewer than the line holds is allowed: putaway reads the serial of every
-    // unit it places, so this is a head start, not the record of account.
-    if (serials.length > required) {
-      setError(`This line is for ${required} — ${serials.length} captured.`);
+    if (serials.length !== required) {
+      setError(`This line needs exactly ${required} serial numbers; ${serials.length} captured.`);
       return;
     }
     onSave(serials);
@@ -194,23 +286,48 @@ export function SerialNumbersModal({
           </div>
 
           {!readOnly && (
-            <label className="relative mb-4 block">
-              <ScanLine className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-              <input
-                autoFocus
-                value={entry}
-                onChange={(e) => setEntry(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    add(entry);
-                  }
-                }}
-                placeholder="Scan or type a serial, then press Enter"
-                aria-label="Serial number"
-                className="min-h-11 w-full rounded-md border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
-              />
-            </label>
+            <div className="mb-4 space-y-3">
+              <label className="relative block">
+                <ScanLine className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                <input
+                  autoFocus
+                  value={entry}
+                  onChange={(e) => setEntry(e.target.value)}
+                  onPaste={(e) => {
+                    const pasted = e.clipboardData.getData("text");
+                    if (parseBulk(pasted).length > 1) {
+                      e.preventDefault();
+                      addMany(pasted);
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      add(entry);
+                    }
+                  }}
+                  placeholder="Scan or type a serial"
+                  aria-label="Serial number"
+                  className="min-h-11 w-full rounded-md border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
+                />
+              </label>
+
+              <div className="rounded-xl border border-line/70 bg-content2/40 p-3">
+                <textarea
+                  value={bulkEntry}
+                  onChange={(e) => setBulkEntry(e.target.value)}
+                  placeholder="Paste serial numbers"
+                  aria-label="Bulk serial numbers"
+                  rows={4}
+                  className="min-h-28 w-full resize-y rounded-md border border-line bg-content1 px-3 py-2 font-mono text-sm text-ink outline-none placeholder:font-sans placeholder:text-muted focus:border-brand"
+                />
+                <div className="mt-2 flex justify-end">
+                  <Button variant="subtle" onClick={() => addMany(bulkEntry)}>
+                    Add pasted
+                  </Button>
+                </div>
+              </div>
+            </div>
           )}
 
           {serials.length === 0 ? (

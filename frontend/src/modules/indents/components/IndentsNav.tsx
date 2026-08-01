@@ -1,6 +1,6 @@
 import { LayoutGroup, motion, useReducedMotion } from "framer-motion";
 import {
-  Bell, ClipboardCheck, Columns3, Gauge, List, ScrollText,
+  Bell, ClipboardCheck, Gauge, List, ScrollText,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
@@ -10,7 +10,8 @@ import { NavLink } from "react-router-dom";
 const destinations = [
   { key: "/indents/dashboard", label: "Overview", icon: Gauge },
   { key: "/indents", label: "All requests", icon: List, end: true },
-  { key: "/indents/board", label: "Board", icon: Columns3 },
+  // Board is parked: the route and BoardPage are still here, just off the tab bar.
+  // { key: "/indents/board", label: "Board", icon: Columns3 },
   { key: "/indents/acknowledgments", label: "Acknowledgments", icon: ClipboardCheck },
   { key: "/indents/reports", label: "Activity ledger", icon: ScrollText },
   { key: "/indents/notifications", label: "Alert & Notification", icon: Bell },

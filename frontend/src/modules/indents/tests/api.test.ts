@@ -25,7 +25,7 @@ describe("indents api", () => {
     expect(Object.keys(indentApi).sort()).toEqual(
       [
         "acknowledgments", "activity", "approve", "bookmark", "create", "get", "journey", "list",
-        "delete", "notifications", "offices", "pendingApprovals", "reject", "stats", "submit", "unbookmark",
+        "delete", "notifications", "offices", "reject", "stats", "submit", "unbookmark",
         "update",
       ].sort(),
     );

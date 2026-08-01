@@ -5,9 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_permission
 from app.platform.rbac import permissions as perms
-from app.platform.workflow import engine, ladder_config, service
+from app.platform.workflow import custom_ladder, engine, ladder_config, service
 from app.platform.workflow.schemas import (
-    DelegationEndIn, DelegationIn, DelegationOut, LadderCopyIn, LadderIn,
+    CustomLadderIn, DelegationEndIn, DelegationIn, DelegationOut, LadderCopyIn, LadderIn,
     WorkflowActionIn, WorkflowActionOut, WorkflowIn,
 )
 
@@ -22,6 +22,25 @@ async def ladder_options(
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
     return await ladder_config.options(db)
+
+
+@router.get("/ladders/ranks")
+async def ladder_ranks(
+    project_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await ladder_config.ranks(db, project_id)
+
+
+@router.get("/ladders/rank-positions")
+async def ladder_rank_positions(
+    role_id: int,
+    project_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await ladder_config.rank_positions(db, project_id, role_id)
 
 
 @router.get("/ladders")
@@ -63,6 +82,49 @@ async def copy_ladder(
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
     return await ladder_config.copy_ladder(db, body, user)
+
+
+# ---------------- Settings > Approvals Config > Build your own ladder ----------------
+#
+# For the documents whose approvers are not above the raiser: pick a department, tick
+# the posts, done. See platform/workflow/custom_ladder.py.
+
+@router.get("/ladders/departments")
+async def ladder_departments(
+    project_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await custom_ladder.departments(db, project_id)
+
+
+@router.get("/ladders/department-posts")
+async def ladder_department_posts(
+    department: str,
+    project_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await custom_ladder.department_posts(db, project_id, department)
+
+
+@router.get("/ladders/custom")
+async def get_custom_ladder(
+    doc_type: str,
+    project_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await custom_ladder.get_custom(db, project_id, doc_type)
+
+
+@router.post("/ladders/custom")
+async def save_custom_ladder(
+    body: CustomLadderIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await custom_ladder.save_custom(db, body, user)
 
 
 @router.get("/definitions")

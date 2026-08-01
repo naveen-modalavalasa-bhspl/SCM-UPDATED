@@ -221,19 +221,40 @@ export interface NotificationRule {
 /** A rung names a RANK (hcm_positions.role_id — COO, SPH, REGIONAL MANAGER…), never
  *  a person and never a position row. The approver is found at submit time by
  *  climbing the raiser's own reporting line. */
+export interface LadderHolder {
+  id: number;
+  name: string;
+  code?: string | null;
+}
+
+export interface LadderPosition {
+  id: number;
+  name: string;
+  department_id?: number | null;
+  department_name: string;
+  holders: LadderHolder[];
+}
+
+/** A rank with its people. Keyed on the project alone, so it survives a change of
+ *  document — which is why it is fetched apart from the ladder. */
+export interface LadderRank {
+  role_id: number;
+  role_name: string;
+  depth: number;
+  position_count: number;
+  holders: LadderHolder[];
+  holder_count: number;
+}
+
 export interface LadderRung {
   sequence: number;
   name: string;
   position_role_id: number;
   is_enabled: boolean;
-  holders: { id: number; name: string; code?: string | null }[];
-  positions: {
-    id: number;
-    name: string;
-    department_id?: number | null;
-    department_name: string;
-    holders: { id: number; name: string; code?: string | null }[];
-  }[];
+  /** How many posts sit under this rank, and how many people fill them. The posts
+   *  themselves are loaded only when the rung is opened — a live project has ~3,400. */
+  position_count: number;
+  holder_count: number;
   selected_position_ids: number[];
   /** Nobody in this project holds a position at this rank any more. */
   is_dead?: boolean;
@@ -250,6 +271,9 @@ export interface Ladder {
   module: string;
   /** No ladder saved yet — these rungs are an unsaved draft from the project's ranks. */
   is_new: boolean;
+  /** A hand-built ladder is what actually runs for this document; these rungs are only
+   *  a draft. One scope has one ladder, so saving here would replace it. */
+  has_custom?: boolean;
   rungs: LadderRung[];
   /** Documents mid-approval that will finish on the version now live. */
   in_flight: number;
@@ -259,6 +283,44 @@ export interface LadderOptions {
   projects: { id: number; name: string }[];
   doc_types: { code: string; label: string; module: string }[];
   module_order: string[];
+}
+
+/* ---- hand-built ladders (Approvals Config > Build your own ladder) ----
+ *
+ * For Inventory and Warehouse the approver is not above the raiser at all — the whole
+ * warehouse department sits on posts with no parent and no children, and all twelve
+ * share one rank. So a step names a POST, and the steps run in the order they were
+ * ticked. Still not a person: whoever takes the chair inherits the approval. */
+
+export interface LadderDepartment {
+  name: string;
+  position_count: number;
+}
+
+export interface LadderPost {
+  id: number;
+  name: string;
+  role_name: string;
+  holders: LadderHolder[];
+}
+
+export interface CustomLadderStep {
+  sequence: number;
+  position_id: number;
+  name: string;
+  holders: LadderHolder[];
+  /** Nobody sits in this chair any more — it is skipped at submit. */
+  is_dead?: boolean;
+}
+
+export interface CustomLadder {
+  workflow_id: number | null;
+  version: number;
+  project_id: number | null;
+  doc_type: string;
+  is_new: boolean;
+  steps: CustomLadderStep[];
+  in_flight: number;
 }
 
 export interface LadderPreview {

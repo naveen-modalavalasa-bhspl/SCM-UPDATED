@@ -107,6 +107,9 @@ def _include_routers() -> None:
         "app.modules.inventory.router",
         "app.modules.logistics.router",
         "app.modules.warehouse.router",
+        # Last in the chain: approvals presents tasks from every other module, so it
+        # imports them all and nothing imports it back.
+        "app.modules.approvals.router",
         "app.shared.masters.router",
     ]
     for path in router_paths:

@@ -1,5 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/shared/api/client", () => ({
@@ -12,26 +13,45 @@ import { ApprovalConfigPage } from "../pages/ApprovalConfigPage";
 const mockGet = api.get as unknown as ReturnType<typeof vi.fn>;
 const mockPost = api.post as unknown as ReturnType<typeof vi.fn>;
 
-const rung = (level: number, name: string, enabled: boolean, holder: string) => ({
+// A rung carries the toggle and the counts; the holders' names come from the separate,
+// project-keyed ranks read, and the positions only when a rung is opened.
+const rung = (level: number, name: string, enabled: boolean, dead = false) => ({
   sequence: level, name, position_role_id: level, is_enabled: enabled,
-  holders: [{ id: level * 10, name: holder }], is_dead: false, conditions: [],
+  position_count: 4, holder_count: dead ? 0 : 1, selected_position_ids: [],
+  is_dead: dead, conditions: [],
 });
+const rank = (level: number, name: string, holder: string) => ({
+  role_id: level, role_name: name, depth: level, position_count: 4,
+  holders: [{ id: level * 10, name: holder }], holder_count: 1,
+});
+
+const RANKS = [
+  rank(1, "COO", "DVD Prasad"),
+  rank(2, "SPH", "Naresh Babu Metta"),
+  rank(3, "Regional Manager", "Shaik Ikbal Hussain"),
+  rank(4, "District Manager", "V Suresh Kumar"),
+  rank(5, "OE", "T Bethaiah"),
+  rank(6, "MMU Pilot", "A Bala Raju"),
+];
+
+const OPTIONS = {
+  projects: [{ id: 500, name: "104-MMU-AP-Pulicherla" }],
+  doc_types: [
+    { code: "INDENT", label: "Indent", module: "Indents" },
+    { code: "GRN", label: "Goods Receipt", module: "Warehouse" },
+  ],
+  module_order: ["Indents", "Inventory", "Warehouse"],
+};
 
 beforeEach(() => {
   mockGet.mockReset();
   mockPost.mockReset();
   mockGet.mockImplementation((url: string) => {
     if (url === "/api/workflow/ladders/options") {
-      return Promise.resolve({
-        data: {
-          projects: [{ id: 500, name: "104-MMU-AP-Pulicherla" }],
-          doc_types: [
-            { code: "INDENT", label: "Indent", module: "Indents" },
-            { code: "GRN", label: "Goods Receipt", module: "Warehouse" },
-          ],
-          module_order: ["Indents", "Inventory", "Warehouse"],
-        },
-      });
+      return Promise.resolve({ data: OPTIONS });
+    }
+    if (url === "/api/workflow/ladders/ranks") {
+      return Promise.resolve({ data: { ranks: RANKS } });
     }
     if (url === "/api/workflow/ladders") {
       return Promise.resolve({
@@ -39,12 +59,12 @@ beforeEach(() => {
           workflow_id: 7, version: 3, project_id: 500, doc_type: "INDENT",
           module: "Indents", is_new: false, in_flight: 20,
           rungs: [
-            rung(1, "COO", true, "DVD Prasad"),
-            rung(2, "SPH", true, "Naresh Babu Metta"),
-            rung(3, "Regional Manager", true, "Shaik Ikbal Hussain"),
-            rung(4, "District Manager", false, "V Suresh Kumar"),
-            rung(5, "OE", false, "T Bethaiah"),
-            rung(6, "MMU Pilot", false, "A Bala Raju"),
+            rung(1, "COO", true),
+            rung(2, "SPH", true),
+            rung(3, "Regional Manager", true),
+            rung(4, "District Manager", false),
+            rung(5, "OE", false),
+            rung(6, "MMU Pilot", false),
           ],
         },
       });
@@ -72,11 +92,14 @@ beforeEach(() => {
   });
 });
 
+// Wrapped in a router: the screen links out to the hand-built ladder screen.
 const renderPage = () => render(
   <QueryClientProvider client={new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })}>
-    <ApprovalConfigPage />
+    <MemoryRouter>
+      <ApprovalConfigPage />
+    </MemoryRouter>
   </QueryClientProvider>,
 );
 
@@ -103,11 +126,13 @@ describe("ApprovalConfigPage", () => {
   it("warns that a rank nobody holds will be skipped", async () => {
     mockGet.mockImplementation((url: string) => {
       if (url === "/api/workflow/ladders/options") {
+        return Promise.resolve({ data: OPTIONS });
+      }
+      if (url === "/api/workflow/ladders/ranks") {
         return Promise.resolve({
           data: {
-            projects: [{ id: 500, name: "104-MMU-AP-Pulicherla" }],
-            doc_types: [{ code: "INDENT", label: "Indent", module: "Indents" }],
-            module_order: ["Indents"],
+            ranks: [{ role_id: 3, role_name: "Regional Manager", depth: 3,
+                      position_count: 4, holders: [], holder_count: 0 }],
           },
         });
       }
@@ -115,10 +140,7 @@ describe("ApprovalConfigPage", () => {
         data: {
           workflow_id: 7, version: 1, project_id: 500, doc_type: "INDENT",
           module: "Indents", is_new: false, in_flight: 0,
-          rungs: [{
-            sequence: 1, name: "Regional Manager", position_role_id: 3,
-            is_enabled: true, holders: [], is_dead: true, conditions: [],
-          }],
+          rungs: [rung(3, "Regional Manager", true, true)],
         },
       });
     });
@@ -129,22 +151,56 @@ describe("ApprovalConfigPage", () => {
       screen.getByText(/Nobody holds this rank/)).toBeInTheDocument());
   });
 
-  it("explains that an unsaved project starts from its own ranks", async () => {
+  it("loads a rank's positions only when that rung is opened", async () => {
     mockGet.mockImplementation((url: string) => {
       if (url === "/api/workflow/ladders/options") {
+        return Promise.resolve({ data: OPTIONS });
+      }
+      if (url === "/api/workflow/ladders/ranks") {
+        return Promise.resolve({ data: { ranks: RANKS } });
+      }
+      if (url === "/api/workflow/ladders/rank-positions") {
         return Promise.resolve({
           data: {
-            projects: [{ id: 500, name: "104-MMU-AP-Pulicherla" }],
-            doc_types: [{ code: "INDENT", label: "Indent", module: "Indents" }],
-            module_order: ["Indents"],
+            positions: [{ id: 603, name: "RM Kadapa", department_id: 9,
+                          department_name: "Operations", holders: [] }],
           },
         });
       }
       return Promise.resolve({
         data: {
+          workflow_id: 7, version: 1, project_id: 500, doc_type: "INDENT",
+          module: "Indents", is_new: false, in_flight: 0,
+          rungs: [rung(3, "Regional Manager", true)],
+        },
+      });
+    });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Regional Manager")).toBeInTheDocument());
+    const positionCalls = () => mockGet.mock.calls
+      .filter(([url]) => url === "/api/workflow/ladders/rank-positions");
+    expect(positionCalls()).toHaveLength(0);
+
+    fireEvent.click(screen.getByText(/0 of 4 positions/));
+
+    await waitFor(() => expect(screen.getByText("RM Kadapa")).toBeInTheDocument());
+    expect(positionCalls()[0][1].params).toMatchObject({ role_id: 3, project_id: 500 });
+  });
+
+  it("explains that an unsaved project starts from its own ranks", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/api/workflow/ladders/options") {
+        return Promise.resolve({ data: OPTIONS });
+      }
+      if (url === "/api/workflow/ladders/ranks") {
+        return Promise.resolve({ data: { ranks: RANKS } });
+      }
+      return Promise.resolve({
+        data: {
           workflow_id: null, version: 0, project_id: 500, doc_type: "INDENT",
           module: "Indents", is_new: true, in_flight: 0,
-          rungs: [rung(1, "COO", true, "DVD Prasad")],
+          rungs: [rung(1, "COO", true)],
         },
       });
     });

@@ -1,10 +1,9 @@
+import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, SubNav } from "@/shared/components";
 import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch } from "@heroui/react";
 import { ArrowLeft, Pencil, Plus, Printer } from "lucide-react";
-import { Button, Can, Card, Field, Input, PageHeader, Select, SubNav } from "@/shared/components";
-import { ConfirmModal, ErrorBanner } from "@/shared/components";
 import { MetaCard, MetaRow } from "../../components/DocumentMeta";
 import { BinTree, flattenBins } from "../../components/BinTree";
 import { LabelSheet, type LabelSpec } from "../../components/LabelPrint";
@@ -21,9 +20,11 @@ import type { Bin, BinWrite } from "../../types";
  */
 
 const BIN_TYPES = [
+  { value: "ZONE", label: "Zone" },
   { value: "BLOCK", label: "Block" },
   { value: "FLOOR", label: "Floor" },
   { value: "AISLE", label: "Lane / aisle" },
+  { value: "ROOM", label: "Room" },
   { value: "RACK", label: "Rack" },
   { value: "SHELF", label: "Shelf" },
   { value: "BIN", label: "Storage bin" },
@@ -39,6 +40,36 @@ const TABS = [
   { key: "bins", label: "Bins" },
   { key: "labels", label: "Bin labels" },
 ];
+
+const defaultChildType = (parent: Bin | null) => {
+  const type = (parent?.bin_type ?? "").toUpperCase();
+  if (!parent) return "BLOCK";
+  if (["BLOCK", "ZONE"].includes(type)) return "FLOOR";
+  if (type === "FLOOR") return "AISLE";
+  if (["AISLE", "ROOM"].includes(type)) return "RACK";
+  if (type === "RACK") return "SHELF";
+  return "BIN";
+};
+
+const cleanDraft = (draft: BinWrite): BinWrite => ({
+  ...draft,
+  name: draft.name?.trim() || null,
+  description: draft.description?.trim() || null,
+  barcode: draft.barcode?.trim() || null,
+  floor_level: draft.floor_level?.toString().trim() || null,
+  shelf_level: draft.shelf_level?.toString().trim() || null,
+});
+
+const coldDefaultsFrom = (parent: Bin | null) => ({
+  storage_type_id: parent?.storage_type_id ?? null,
+  temperature_controlled: !!parent?.temperature_controlled,
+  humidity_percentage: parent?.humidity_percentage ?? null,
+  target_temperature_celsius: parent?.target_temperature_celsius ?? null,
+  min_temperature_celsius: parent?.min_temperature_celsius ?? null,
+  max_temperature_celsius: parent?.max_temperature_celsius ?? null,
+});
+
+const isColdType = (type: string) => ["COLD_ROOM", "REFRIGERATOR", "COLD_STORAGE_BIN"].includes(type);
 
 export default function WarehouseDetail() {
   const { id } = useParams();
@@ -71,7 +102,10 @@ export default function WarehouseDetail() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ["wh-bins", id] });
 
   const saveBin = useMutation({
-    mutationFn: () => (editing ? updateBin(editing.id, draft!) : createBin(draft!)),
+    mutationFn: () => {
+      const body = cleanDraft(draft!);
+      return editing ? updateBin(editing.id, body) : createBin(body);
+    },
     onSuccess: () => {
       invalidate();
       setAdding(false);
@@ -105,6 +139,7 @@ export default function WarehouseDetail() {
     }));
 
   const openAdd = (parent: Bin | null) => {
+    const cold = coldDefaultsFrom(parent);
     setEditing(null);
     setDraft({
       warehouse_id: warehouseId,
@@ -112,10 +147,8 @@ export default function WarehouseDetail() {
       name: "",
       description: "",
       parent_id: parent?.id ?? null,
-      // A location hanging off another is a bin by default; a top-level one is a block.
-      bin_type: parent ? "BIN" : "BLOCK",
+      bin_type: defaultChildType(parent),
       capacity_qty: null,
-      storage_type_id: null,
       barcode: "",
       floor_level: "",
       shelf_level: "",
@@ -123,11 +156,7 @@ export default function WarehouseDetail() {
       max_weight_capacity: null,
       height_cm: null,
       aisle_width_meters: null,
-      temperature_controlled: false,
-      humidity_percentage: null,
-      target_temperature_celsius: null,
-      min_temperature_celsius: null,
-      max_temperature_celsius: null,
+      ...cold,
       is_active: true,
     });
     setAdding(true);
@@ -273,6 +302,25 @@ export default function WarehouseDetail() {
                     />
                   </Field>
                 </div>
+                <Field label="Parent">
+                  <Select
+                    value={draft.parent_id == null ? "" : String(draft.parent_id)}
+                    onChange={(value) => {
+                      const parent = value ? flat.find((row) => row.id === Number(value)) ?? null : null;
+                      setDraft({ ...draft, parent_id: parent?.id ?? null, ...coldDefaultsFrom(parent) });
+                    }}
+                    options={[
+                      { value: "", label: "Top level" },
+                      ...flat
+                        .filter((row) => row.id !== editing?.id)
+                        .map((row) => ({
+                          value: String(row.id),
+                          label: `${row.path ?? row.code} (${BIN_TYPES.find((t) => t.value === row.bin_type)?.label ?? row.bin_type ?? "Location"})`,
+                        })),
+                    ]}
+                    ariaLabel="Parent location"
+                  />
+                </Field>
                 <Field label="Type">
                   <Select
                     value={draft.bin_type}
@@ -281,11 +329,7 @@ export default function WarehouseDetail() {
                       setDraft({
                         ...draft,
                         bin_type: binType,
-                        temperature_controlled: [
-                          "COLD_ROOM",
-                          "REFRIGERATOR",
-                          "COLD_STORAGE_BIN",
-                        ].includes(binType),
+                        temperature_controlled: isColdType(binType) || !!draft.temperature_controlled,
                       });
                     }}
                     options={BIN_TYPES}
@@ -385,7 +429,15 @@ export default function WarehouseDetail() {
                     </Field>
                   </>
                 )}
-                {["COLD_ROOM", "REFRIGERATOR", "COLD_STORAGE_BIN"].includes(draft.bin_type) && (
+                <label className="flex items-center gap-3">
+                  <Switch
+                    isSelected={!!draft.temperature_controlled}
+                    onValueChange={(value) => setDraft({ ...draft, temperature_controlled: value })}
+                    aria-label="Temperature controlled"
+                  />
+                  <span className="text-sm text-body">Temperature controlled</span>
+                </label>
+                {(draft.temperature_controlled || isColdType(draft.bin_type)) && (
                   <>
                     <Field label="Refrigeration type">
                       <Select
@@ -396,7 +448,7 @@ export default function WarehouseDetail() {
                         })}
                         options={storageTypes
                           .filter((row) => row.is_active)
-                          .map((row) => ({ value: String(row.id), label: row.name }))}
+                          .map((row) => ({ value: String(row.id), label: row.code ? `${row.code} — ${row.name}` : row.name }))}
                         ariaLabel="Refrigeration type"
                       />
                     </Field>

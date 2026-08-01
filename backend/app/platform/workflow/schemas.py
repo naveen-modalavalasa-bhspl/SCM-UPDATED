@@ -91,6 +91,18 @@ class LadderIn(BaseModel):
     rungs: list[LadderRungIn] = Field(default_factory=list)
 
 
+class CustomLadderStepIn(BaseModel):
+    """One step of a hand-built ladder: a POST, not a rank and not a person."""
+    position_id: int
+    name: str
+
+
+class CustomLadderIn(BaseModel):
+    project_id: int | None = None
+    doc_type: str
+    steps: list[CustomLadderStepIn] = Field(default_factory=list)
+
+
 class LadderCopyIn(BaseModel):
     """Copy a saved ladder onto other projects, matched by level.
 
