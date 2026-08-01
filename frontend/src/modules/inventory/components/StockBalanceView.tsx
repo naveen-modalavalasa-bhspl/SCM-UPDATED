@@ -81,8 +81,8 @@ function LotCard({ lot, uom }: { lot: StockLot; uom?: string }) {
         <span>Available <strong className="text-ink">{lot.available_qty.toLocaleString("en-IN")}</strong> {uom}</span>
         {lot.reserved_qty > 0 && <span className="text-warning">Reserved {lot.reserved_qty}</span>}
       </div>
-      {(lot.serial_number || lot.asset_code) && (
-        <div className="mt-1 font-mono text-[11px] text-muted">{lot.serial_number || lot.asset_code}</div>
+      {lot.asset_code && (
+        <div className="mt-1 font-mono text-[11px] text-muted">{lot.asset_code}</div>
       )}
     </div>
   );
@@ -179,16 +179,6 @@ export function StockBalanceView() {
       ),
     },
     {
-      key: "identifier",
-      header: "Serial / Asset",
-      hideOnNarrow: true,
-      render: (r) => (
-        <span className="font-mono text-xs text-body">
-          {r.serial_number || r.asset_code || r.consumable_code || <span className="text-muted">—</span>}
-        </span>
-      ),
-    },
-    {
       key: "available",
       header: "Available",
       className: "text-right",
@@ -258,7 +248,7 @@ export function StockBalanceView() {
       <FilterBar
         search={search}
         onSearch={setSearch}
-        searchPlaceholder="Scan a barcode, or search item / batch / bin / serial…"
+        searchPlaceholder="Scan a barcode, or search item / batch / bin…"
         onClear={clear}
         active={activeFilters}
       >
@@ -300,6 +290,9 @@ export function StockBalanceView() {
                 </div>
                 <div className="font-mono text-[11px] text-muted">{r.item_code}</div>
                 <div className="text-xs text-muted">{r.warehouse_name} · {r.bin_code || "No bin"}</div>
+                <div className="text-xs text-muted">
+                  Batch {r.batch_number || "—"} · {r.expiry_date ? `Expires ${r.expiry_date}` : "No expiry"}
+                </div>
                 <div className="flex gap-4 text-sm">
                   <span>Available <strong>{qty(r.available_qty, r.uom_code)}</strong></span>
                   <span className="text-muted">Reserved {r.reserved_qty}</span>
@@ -361,7 +354,6 @@ export function StockBalanceView() {
 
             <SheetSection title="Identity & Tracking">
               <SheetRow label="Category" value={selected.category_name} />
-              <SheetRow label="Serial number" value={selected.serial_number} />
               <SheetRow label="Asset code" value={selected.asset_code} />
               <SheetRow label="Barcode" value={selected.barcode_value} />
             </SheetSection>

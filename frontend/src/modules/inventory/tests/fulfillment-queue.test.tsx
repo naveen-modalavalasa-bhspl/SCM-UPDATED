@@ -56,4 +56,43 @@ describe("FulfillmentQueuePage", () => {
     await waitFor(() => expect(screen.getByText("ALLOCATION SCREEN")).toBeInTheDocument());
     expect(screen.queryByText("HOME")).not.toBeInTheDocument();
   });
+
+  it("hides an indent that already has an allocation awaiting approval", async () => {
+    mockGet.mockImplementation((url: string, cfg: any) => {
+      if (url === "/api/allocations") {
+        return Promise.resolve({
+          data: {
+            items: [{ id: 91, indent_id: INDENT.id, status: "PENDING_APPROVAL" }],
+            total: 1,
+            page: 1,
+            size: 100,
+          },
+        });
+      }
+      return Promise.resolve({
+        data:
+          cfg?.params?.status === "AWAITING_ALLOCATION"
+            ? { items: [INDENT], total: 1, page: 1, size: 100 }
+            : { items: [], total: 0, page: 1, size: 100 },
+      });
+    });
+
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={["/inventory/fulfillment"]}>
+          <Routes>
+            <Route path="/inventory/fulfillment" element={<FulfillmentQueuePage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => {
+      expect(mockGet).toHaveBeenCalledWith(
+        "/api/allocations",
+        expect.objectContaining({ params: expect.objectContaining({ status: "PENDING_APPROVAL" }) }),
+      );
+      expect(screen.queryByText(INDENT.indent_no)).not.toBeInTheDocument();
+    });
+  });
 });

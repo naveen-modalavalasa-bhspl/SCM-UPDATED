@@ -33,10 +33,31 @@ from app.shared.models.warehouse import Warehouse
 from app.shared.numbering import next_number
 
 ZERO = Decimal("0")
+ACTIVE_ALLOCATION_STATUSES = (
+    AllocationStatus.DRAFT.value,
+    AllocationStatus.PENDING_APPROVAL.value,
+)
 
 
 def _d(value) -> Decimal:
     return Decimal(str(value or 0))
+
+
+async def ensure_no_active(db: AsyncSession, indent_id: int) -> None:
+    """An indent may have only one undecided allocation at a time."""
+    existing = (await db.execute(
+        select(Allocation.allocation_no, Allocation.status)
+        .where(
+            Allocation.indent_id == indent_id,
+            Allocation.status.in_(ACTIVE_ALLOCATION_STATUSES),
+        )
+        .limit(1)
+    )).first()
+    if existing:
+        raise ValidationError(
+            f"Allocation {existing.allocation_no} for this indent is already "
+            f"awaiting approval"
+        )
 
 
 # ---------------- propose: read-only ----------------
@@ -106,6 +127,7 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
     """
     if not decisions:
         raise ValidationError("An allocation needs at least one line")
+    await ensure_no_active(db, indent_id)
 
     ctx = ctx or {}
     alloc = Allocation(

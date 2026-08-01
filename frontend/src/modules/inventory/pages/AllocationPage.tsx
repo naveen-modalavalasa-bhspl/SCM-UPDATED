@@ -75,8 +75,11 @@ export function AllocationPage() {
       );
       return createAllocation(id, payload, remarks || undefined);
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["fulfillment-queue"] });
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["fulfillment-queue"] }),
+        qc.invalidateQueries({ queryKey: ["allocations", "PENDING_APPROVAL"] }),
+      ]);
       nav("/inventory/fulfillment");
     },
   });

@@ -45,6 +45,17 @@ def _d(value) -> Decimal:
     return Decimal(str(value))
 
 
+async def _batch_snapshot(db: AsyncSession, batch_id: int) -> tuple[str | None, date | None]:
+    """Resolve batch values for the stock balance snapshot columns."""
+    if not batch_id:
+        return None, None
+    row = (await db.execute(
+        text("SELECT batch_no, expiry_date FROM stk_batches WHERE id = :batch_id"),
+        {"batch_id": batch_id},
+    )).mappings().one_or_none()
+    return (row["batch_no"], row["expiry_date"]) if row else (None, None)
+
+
 async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     """Warehouses visible to this login; None means the admin/global scope."""
     if user is None:
@@ -154,6 +165,7 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
 
     bin_id, batch_id, project_id = bin_id or NO_BIN, batch_id or NO_BATCH, \
         project_id or NO_PROJECT
+    batch_no, expiry_date = await _batch_snapshot(db, batch_id)
 
     stock = (await db.execute(
         select(Stock).where(Stock.item_id == item_id,
@@ -173,10 +185,15 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                       item_code=item.code if item else None,
                       item_name=item.name if item else None,
                       uom_code=item.uom_code if item else None,
-                      bin_id=bin_id, batch_id=batch_id, project_id=project_id,
+                      bin_id=bin_id, batch_id=batch_id, batch_no=batch_no,
+                      expiry_date=expiry_date, project_id=project_id,
                       available_qty=Decimal("0"), total_qty=Decimal("0"))
         db.add(stock)
         await db.flush()
+    elif batch_id != NO_BATCH and batch_no is not None:
+        # Repair older snapshot rows when their next real stock movement touches them.
+        stock.batch_no = batch_no
+        stock.expiry_date = expiry_date
 
     delta = qty if direction == StockDirection.IN.value else -qty
     new_balance = (stock.available_qty or Decimal("0")) + delta
@@ -192,7 +209,7 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         warehouse_name=stock.warehouse_name,
         item_id=item_id, item_code=stock.item_code, item_name=stock.item_name,
         uom_code=stock.uom_code,
-        bin_id=bin_id, batch_id=batch_id, project_id=project_id,
+        bin_id=bin_id, batch_id=batch_id, batch_no=batch_no, project_id=project_id,
         direction=direction, quantity=qty, balance_after=new_balance,
         ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
         created_by_id=user.id, created_by_name=user.full_name,

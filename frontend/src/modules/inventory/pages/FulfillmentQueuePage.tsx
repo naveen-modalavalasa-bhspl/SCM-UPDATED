@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { PageHeader, Card, ResponsiveList, StatusPill, type Column } from "@/shared/components";
 import { FilterBar } from "../components/FilterBar";
-import { getFulfillmentQueue } from "../api";
+import { getFulfillmentQueue, listAllocations } from "../api";
 
 /**
  * What the availability check decided, per indent.
@@ -50,10 +50,25 @@ export function FulfillmentQueuePage() {
       queryFn: () => getFulfillmentQueue(b.key),
     })),
   });
+  const pending = useQuery({
+    queryKey: ["allocations", "PENDING_APPROVAL"],
+    queryFn: () => listAllocations({ status: "PENDING_APPROVAL" }),
+  });
+  const pendingIndentIds = useMemo(
+    () => new Set((pending.data?.items ?? []).map((allocation) => allocation.indent_id)),
+    [pending.data],
+  );
+
+  const visibleItems = (index: number) => {
+    const items = (results[index]?.data?.items ?? []) as unknown as QueueRow[];
+    return BUCKETS[index].key === "AWAITING_ALLOCATION"
+      ? items.filter((indent) => !pendingIndentIds.has(indent.id))
+      : items;
+  };
 
   const activeIndex = BUCKETS.findIndex((b) => b.key === status);
   const active = results[activeIndex];
-  const all = (active?.data?.items ?? []) as unknown as QueueRow[];
+  const all = visibleItems(activeIndex);
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -118,7 +133,7 @@ export function FulfillmentQueuePage() {
       {/* Counts live on the tabs, so the queue's shape is visible without clicking. */}
       <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
         {BUCKETS.map((b, i) => {
-          const count = (results[i]?.data?.items ?? []).length;
+          const count = visibleItems(i).length;
           const on = b.key === status;
           return (
             <button
@@ -156,7 +171,7 @@ export function FulfillmentQueuePage() {
         <Card className="p-2">
           <ResponsiveList
             data={rows}
-            loading={active?.isLoading}
+            loading={active?.isLoading || (status === "AWAITING_ALLOCATION" && pending.isFetching)}
             keyOf={(r) => r.id}
             // An indent waiting on a decision opens the allocation screen; one already
             // decided opens the indent itself. Clicking the row should do the thing the

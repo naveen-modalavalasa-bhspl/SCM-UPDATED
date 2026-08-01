@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
+from app.core.exceptions import ValidationError
 from app.modules.inventory import allocations
 from app.modules.inventory.models import (
     NO_BIN, NO_PROJECT, Allocation, MaterialRequest, Reservation, Stock,
@@ -241,6 +242,24 @@ async def test_rejecting_an_allocation_reserves_nothing(db, actor):
     row = await _reload(db, stocked)
     assert row.available_qty == Decimal("60")
     assert row.reserved_qty == Decimal("0")
+
+
+async def test_indent_cannot_be_submitted_twice_while_allocation_is_pending(db, actor):
+    stocked, _bare, main, _lip, admin = await _world(db)
+    await _stock(db, stocked, main, 60)
+    first = await allocations.create(db, 61, "IND-61", [
+        _decision(1, stocked, 40, main, 40)], actor)
+
+    with pytest.raises(ValidationError, match="already awaiting approval"):
+        await allocations.create(db, 61, "IND-61", [
+            _decision(1, stocked, 40, main, 40)], actor)
+
+    await allocations.act(
+        db, first.id, ApprovalAction.REJECTED.value, admin, "revise allocation",
+    )
+    replacement = await allocations.create(db, 61, "IND-61", [
+        _decision(1, stocked, 30, main, 40)], actor)
+    assert replacement.status == AllocationStatus.PENDING_APPROVAL.value
 
 
 async def test_reservation_is_tagged_to_the_indent_line(db, actor):

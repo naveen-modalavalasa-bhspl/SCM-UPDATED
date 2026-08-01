@@ -7,11 +7,12 @@ stock.view.
 """
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.modules.inventory import service
 from app.modules.inventory.models import Stock
 from app.platform.rbac.models import Role, UserRole
+from app.shared.enums import RefType, StockDirection
 from app.shared.models.master import Item
 from app.shared.models.warehouse import Warehouse
 
@@ -32,6 +33,36 @@ def test_inventory_imports_no_sibling_module():
     siblings = ("app.modules.indents", "app.modules.procurement",
                 "app.modules.logistics", "app.modules.warehouse")
     assert not [s for s in siblings if s in source]
+
+
+async def test_move_stock_snapshots_batch_and_expiry(db, make_user):
+    user = await make_user(employee_id=88, username="batch-snapshot", password="pw")
+    warehouse = Warehouse(id=8801, code="WH-BATCH", name="Batch warehouse")
+    item = Item(id=8802, code="BATCHED", name="Batch tracked", uom_code="PCS")
+    db.add_all((warehouse, item))
+    await db.flush()
+    await db.execute(text("""
+        INSERT INTO stk_batches
+            (id, batch_no, item_id, item_code, item_name, expiry_date,
+             initial_qty, status, created_at)
+        VALUES
+            (8803, 'B-2026', :item_id, :item_code, :item_name, '2028-12-31',
+             5, 'ACTIVE', CURRENT_TIMESTAMP)
+    """), {"item_id": item.id, "item_code": item.code, "item_name": item.name})
+
+    stock = await service.move_stock(
+        db, item_id=item.id, qty=5, direction=StockDirection.IN.value,
+        ref_type=RefType.ADJUSTMENT.value,
+        ref_id=1, ref_no="TEST-1", user=user, warehouse_id=warehouse.id,
+        batch_id=8803,
+    )
+
+    assert stock.batch_no == "B-2026"
+    assert stock.expiry_date.isoformat() == "2028-12-31"
+    movement = (await db.execute(
+        select(service.StockMovement).where(service.StockMovement.item_id == item.id)
+    )).scalar_one()
+    assert movement.batch_no == "B-2026"
 
 
 async def test_stock_endpoint_requires_permission(client, make_user, login):
