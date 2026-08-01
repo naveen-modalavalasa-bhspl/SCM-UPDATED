@@ -419,6 +419,34 @@ async def cancel_issue(issue_id: int, body: s.ReasonIn, db: AsyncSession = Depen
 # Dispatch
 # ---------------------------------------------------------------------------
 
+@router.get("/consignments", response_model=Page[s.DispatchRead])
+async def list_consignments(params: PageParams = Depends(), status: str | None = None,
+                            warehouse_id: int | None = None, search: str | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            _=Depends(require_permission(DISPATCH_VIEW))):
+    return await service.list_consignments(db, params, status=status,
+                                           warehouse_id=warehouse_id, search=search)
+
+
+@router.get("/consignments/{consignment_id}", response_model=s.DispatchDetail)
+async def get_consignment(consignment_id: int, db: AsyncSession = Depends(get_db),
+                          _=Depends(require_permission(DISPATCH_VIEW))):
+    return await service.get_dispatch(db, consignment_id)
+
+
+@router.post("/consignments", response_model=s.DispatchDetail, status_code=201)
+async def create_consignment(data: s.ConsignmentWrite, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(DISPATCH_CREATE))):
+    return await service.create_consignment(db, data, user)
+
+
+@router.put("/consignments/{consignment_id}", response_model=s.DispatchDetail)
+async def update_consignment(consignment_id: int, data: s.ConsignmentWrite,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(DISPATCH_CREATE))):
+    return await service.update_consignment(db, consignment_id, data, user)
+
+
 @router.get("/dispatches", response_model=Page[s.DispatchRead])
 async def list_dispatches(params: PageParams = Depends(), status: str | None = None,
                           warehouse_id: int | None = None, search: str | None = None,

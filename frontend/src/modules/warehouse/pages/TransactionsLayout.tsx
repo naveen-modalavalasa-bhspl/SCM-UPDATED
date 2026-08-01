@@ -1,5 +1,5 @@
 import { Outlet } from "react-router-dom";
-import { ArrowLeftRight, ClipboardCheck, PackageCheck, PackageOpen, Send, Truck, Undo2 } from "lucide-react";
+import { ArrowLeftRight, ClipboardCheck, PackageCheck, PackageOpen, Send, Boxes, Truck, Undo2 } from "lucide-react";
 import { PageHeader, SubNav } from "@/shared/components";
 
 /**
@@ -11,16 +11,17 @@ import { PageHeader, SubNav } from "@/shared/components";
  * away, picked, issued, dispatched, returned.
  */
 const ITEMS = [
-  { key: "material-inward", label: "Gate entry", icon: PackageOpen },
-  { key: "grn", label: "GRN", icon: PackageCheck },
-  { key: "quality-inspection", label: "Inspection", icon: ClipboardCheck },
-  { key: "putaway", label: "Putaway", icon: ArrowLeftRight },
-  { key: "stock-movements", label: "Stock movement", icon: ArrowLeftRight },
-  { key: "picklist", label: "Picking", icon: ClipboardCheck },
-  { key: "material-issues", label: "Issues", icon: Send },
-  { key: "material-returns", label: "Issue returns", icon: Undo2 },
-  { key: "dispatch", label: "Dispatch", icon: Truck },
-  { key: "purchase-returns", label: "Returns", icon: Undo2 },
+  { key: "/warehouse/transactions/material-inward", label: "Gate entry", icon: PackageOpen },
+  { key: "/warehouse/transactions/grn", label: "GRN", icon: PackageCheck },
+  { key: "/warehouse/transactions/quality-inspection", label: "Inspection", icon: ClipboardCheck },
+  { key: "/warehouse/transactions/putaway", label: "Putaway", icon: ArrowLeftRight },
+  { key: "/warehouse/transactions/stock-movements", label: "Stock movement", icon: ArrowLeftRight },
+  { key: "/warehouse/transactions/picklist", label: "Picking", icon: ClipboardCheck },
+  { key: "/warehouse/transactions/material-issues", label: "Issues", icon: Send },
+  { key: "/warehouse/transactions/material-returns", label: "Issue returns", icon: Undo2 },
+  { key: "/warehouse/transactions/consignments", label: "Consignments", icon: Boxes },
+  { key: "/warehouse/transactions/dispatch", label: "Dispatch", icon: Truck },
+  { key: "/warehouse/transactions/purchase-returns", label: "Returns", icon: Undo2 },
 ];
 
 export default function TransactionsLayout() {

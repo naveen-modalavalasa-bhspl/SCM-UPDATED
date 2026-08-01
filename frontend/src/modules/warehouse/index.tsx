@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import TransactionsLayout from "./pages/TransactionsLayout";
 import WarehouseDashboard from "./pages/WarehouseDashboard";
 import MaterialInward from "./pages/MaterialInward";
@@ -12,6 +12,8 @@ import Picklist from "./pages/Picklist";
 import PicklistForm from "./pages/PicklistForm";
 import MaterialIssues from "./pages/MaterialIssues";
 import MaterialIssueForm from "./pages/MaterialIssueForm";
+import Consignments from "./pages/Consignments";
+import ConsignmentForm from "./pages/ConsignmentForm";
 import Dispatch from "./pages/Dispatch";
 import DispatchForm from "./pages/DispatchForm";
 import PurchaseReturns from "./pages/PurchaseReturns";
@@ -79,6 +81,13 @@ export function WarehouseModule() {
         <Route path="material-returns/new" element={<MaterialIssueForm direction="IN" />} />
         <Route path="material-returns/:id" element={<MaterialIssueForm direction="IN" />} />
 
+        <Route path="consignments" element={<Consignments />} />
+        <Route path="consignments/new" element={<ConsignmentForm />} />
+        <Route path="consignments/:id" element={<ConsignmentForm />} />
+
+        <Route path="dispatch/consignments" element={<Consignments />} />
+        <Route path="dispatch/consignments/new" element={<ConsignmentForm />} />
+        <Route path="dispatch/consignments/:id" element={<ConsignmentForm />} />
         <Route path="dispatch" element={<Dispatch />} />
         <Route path="dispatch/new" element={<DispatchForm />} />
         <Route path="dispatch/:id" element={<DispatchForm />} />
@@ -119,6 +128,17 @@ export function WarehouseModule() {
       <Route path="material-returns/new" element={<MaterialIssueForm direction="IN" />} />
       <Route path="material-returns/:id" element={<MaterialIssueForm direction="IN" />} />
 
+      <Route path="consignments" element={<Navigate to="/warehouse/dispatch/consignments" replace />} />
+      <Route path="consignments/new" element={<Navigate to="/warehouse/dispatch/consignments/new" replace />} />
+      <Route path="consignments/:id" element={<ConsignmentRedirect />} />
+
+      <Route path="dispatch/consignments" element={<Consignments />} />
+      <Route path="dispatch/consignments/new" element={<ConsignmentForm />} />
+      <Route path="dispatch/consignments/:id" element={<ConsignmentForm />} />
+      <Route path="dispatch" element={<Dispatch />} />
+      <Route path="dispatch/new" element={<DispatchForm />} />
+      <Route path="dispatch/:id" element={<DispatchForm />} />
+
       <Route path="outward-labelling" element={<OutwardLabelling />} />
       <Route path="acknowledge-delivery" element={<AcknowledgeDelivery />} />
       <Route path="stock-segregation" element={<StockSegregation />} />
@@ -145,6 +165,11 @@ export function WarehouseModule() {
       <Route path="*" element={<Navigate to="/warehouse" replace />} />
     </Routes>
   );
+}
+
+function ConsignmentRedirect() {
+  const { id } = useParams();
+  return <Navigate to={`/warehouse/dispatch/consignments/${id}`} replace />;
 }
 
 export default WarehouseModule;

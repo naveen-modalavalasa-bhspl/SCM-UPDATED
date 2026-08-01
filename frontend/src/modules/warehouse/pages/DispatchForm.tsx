@@ -1,47 +1,24 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Thermometer } from "lucide-react";
+import {
+  ArrowLeft,
+  Barcode,
+  Boxes,
+  Package,
+  ShieldAlert,
+  Thermometer,
+  Truck,
+} from "lucide-react";
+import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { DispatchFlowNav } from "../components/DispatchFlowNav";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, toTimeline } from "../components/Timeline";
-import {
-  addDispatchEvent, approveDispatch, cancelDispatch, carrierOptions, createDispatch,
-  dispatchGateOut, getDispatch, getIssueDispatchSource, issueOptions, itemOptions,
-  projectOptions, rejectDispatch, submitDispatch, updateDispatch, vehicleOptions,
-  vendorOptions, warehouseOptions,
-} from "../api";
-import { fmtMoney, fmtQty, num, today } from "../format";
-import type { Dispatch, DispatchItemWrite, DispatchWrite } from "../types";
-
-/**
- * Build a consignment, get it approved, and send it out of the gate.
- *
- * Packing and labelling deliberately live on the Outward labelling screen, not here:
- * this form is the commercial document (what, to whom, on which vehicle), and
- * packing is a physical job done later by someone else at a bench.
- *
- * The cold-chain event box is on this screen because a temperature reading has to be
- * recordable the moment it is taken, including after the consignment has left.
- */
-
-const TYPES = [
-  { value: "TRANSFER", label: "Stock transfer" },
-  { value: "CUSTOMER", label: "To a customer" },
-  { value: "VENDOR_RETURN", label: "Vendor return" },
-  { value: "PROJECT", label: "To a project site" },
-];
-
-const MODES = [
-  { value: "ROAD", label: "Road" },
-  { value: "RAIL", label: "Rail" },
-  { value: "AIR", label: "Air" },
-  { value: "SEA", label: "Sea" },
-  { value: "COURIER", label: "Courier" },
-];
+import { addDispatchEvent, cancelDispatch, dispatchGateOut, getDispatch, listConsignments } from "../api";
+import { fmtDate, fmtMoney, fmtQty, humanise, num } from "../format";
+import type { Dispatch, DispatchItem, DispatchPackage } from "../types";
 
 const EVENTS = [
   { value: "PICKED_UP", label: "Picked up" },
@@ -51,52 +28,60 @@ const EVENTS = [
   { value: "DELIVERED", label: "Delivered" },
 ];
 
-const emptyLine = (): DispatchItemWrite => ({
-  item_id: 0,
-  batch_id: null,
-  serial_no: null,
-  quantity: 0,
-  rate: null,
-  remarks: null,
-});
+type GroupedItem = DispatchItem & {
+  serials: string[];
+  quantity: number;
+  amount: number;
+};
+
+const packageItems = (doc: Dispatch, pkg: DispatchPackage): GroupedItem[] => {
+  const rows = new Map<string, GroupedItem>();
+  (doc.items ?? [])
+    .filter((line) => line.package_id === pkg.id)
+    .forEach((line) => {
+      const key = `${line.item_id}:${line.batch_id ?? 0}:${line.rate ?? ""}:${line.remarks ?? ""}`;
+      const current = rows.get(key);
+      rows.set(key, {
+        ...line,
+        serials: [
+          ...(current?.serials ?? []),
+          ...(line.serial_no ? [line.serial_no] : []),
+        ],
+        quantity: num(current?.quantity) + num(line.quantity),
+        amount: num(current?.amount) + num(line.amount),
+      });
+    });
+  return Array.from(rows.values());
+};
+
+const destinationOf = (doc: Dispatch) =>
+  doc.destination_office_name
+  ?? doc.delivery_address
+  ?? doc.to_warehouse_name
+  ?? doc.customer_name
+  ?? doc.vendor_name
+  ?? "";
 
 export default function DispatchForm() {
   const { id } = useParams();
   const nav = useNavigate();
+  const [searchParams] = useSearchParams();
   const qc = useQueryClient();
   const editing = !!id && id !== "new";
+  const initialConsignmentId = Number(searchParams.get("consignment_id") ?? 0);
 
-  const [form, setForm] = useState<DispatchWrite>({
-    dispatch_type: "TRANSFER",
-    dispatch_date: today(),
-    warehouse_id: 0,
-    to_warehouse_id: null,
-    customer_id: null,
-    vendor_id: null,
-    project_id: null,
-    delivery_address: "",
-    contact_person: "",
-    contact_phone: "",
-    ref_type: null,
-    ref_id: null,
-    transport_mode: "ROAD",
-    carrier_id: null,
-    vehicle_id: null,
-    driver_name: "",
-    driver_phone: "",
-    lr_no: "",
-    eway_bill_no: "",
-    freight_amount: null,
-    expected_delivery: null,
-    remarks: "",
-    items: [],
-  });
-  const [confirming, setConfirming] = useState<
-    "submit" | "approve" | "reject" | "gate" | "cancel" | null
-  >(null);
+  const [selectedConsignment, setSelectedConsignment] = useState<number | "">(
+    initialConsignmentId > 0 ? initialConsignmentId : "",
+  );
   const [gatePass, setGatePass] = useState("");
-  const [reason, setReason] = useState("");
-  const [event, setEvent] = useState({ event_type: "IN_TRANSIT", location_name: "", temperature_c: "", notes: "" });
+  const [cancelReason, setCancelReason] = useState("");
+  const [confirming, setConfirming] = useState<"gate" | "cancel" | null>(null);
+  const [event, setEvent] = useState({
+    event_type: "IN_TRANSIT",
+    location_name: "",
+    temperature_c: "",
+    notes: "",
+  });
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-dispatch", id],
@@ -104,103 +89,32 @@ export default function DispatchForm() {
     enabled: editing,
   });
 
-  useEffect(() => {
-    if (!doc) return;
-    setForm({
-      dispatch_type: doc.dispatch_type,
-      dispatch_date: doc.dispatch_date,
-      warehouse_id: doc.warehouse_id,
-      to_warehouse_id: doc.to_warehouse_id ?? null,
-      customer_id: doc.customer_id ?? null,
-      vendor_id: doc.vendor_id ?? null,
-      project_id: doc.project_id ?? null,
-      delivery_address: doc.delivery_address ?? "",
-      contact_person: doc.contact_person ?? "",
-      contact_phone: doc.contact_phone ?? "",
-      ref_type: doc.ref_type ?? null,
-      ref_id: doc.ref_id ?? null,
-      transport_mode: doc.transport_mode ?? "ROAD",
-      carrier_id: doc.carrier_id ?? null,
-      vehicle_id: doc.vehicle_id ?? null,
-      driver_name: doc.driver_name ?? "",
-      driver_phone: doc.driver_phone ?? "",
-      lr_no: doc.lr_no ?? "",
-      eway_bill_no: doc.eway_bill_no ?? "",
-      freight_amount: doc.freight_amount ?? null,
-      expected_delivery: doc.expected_delivery ?? null,
-      remarks: doc.remarks ?? "",
-      items: (doc.items ?? []).map((l) => ({
-        id: l.id,
-        package_id: l.package_id,
-        indent_id: l.indent_id,
-        item_id: l.item_id,
-        batch_id: l.batch_id,
-        serial_no: l.serial_no,
-        quantity: num(l.quantity),
-        rate: l.rate,
-        remarks: l.remarks,
-      })),
-    });
-  }, [doc]);
-
-  const savedLine = (i: number) => doc?.items?.[i];
-
-  const set = <K extends keyof DispatchWrite>(key: K, value: DispatchWrite[K]) =>
-    setForm((f) => ({ ...f, [key]: value }));
-
-  const patchLine = (index: number, patch: Partial<DispatchItemWrite>) =>
-    setForm((f) => ({ ...f, items: f.items.map((l, i) => (i === index ? { ...l, ...patch } : l)) }));
-
-  const totals = useMemo(
-    () => ({
-      lines: form.items.length,
-      qty: form.items.reduce((s, l) => s + num(l.quantity), 0),
-      value: form.items.reduce((s, l) => s + num(l.quantity) * num(l.rate), 0),
-    }),
-    [form.items],
-  );
-
-  const locked = !!doc && doc.status !== "DRAFT";
-
-  const save = useMutation({
-    mutationFn: () => (editing ? updateDispatch(Number(id), form) : createDispatch(form)),
-    onSuccess: (saved: Dispatch) => {
+  const confirmSelected = useMutation({
+    mutationFn: () => dispatchGateOut(Number(selectedConsignment), gatePass || undefined),
+    onSuccess: (saved) => {
       qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
+      qc.invalidateQueries({ queryKey: ["wh-consignments"] });
       qc.invalidateQueries({ queryKey: ["wh-dispatch", String(saved.id)] });
-      if (!editing) nav(`../${saved.id}`, { replace: true });
+      nav(`../${saved.id}`, { replace: true });
     },
   });
 
-  const pullIssue = useMutation({
-    mutationFn: (issueId: number) => getIssueDispatchSource(issueId),
-    onSuccess: (source) => {
-      setForm((current) => ({
-        ...current,
-        warehouse_id: source.warehouse_id,
-        project_id: source.project_id ?? current.project_id,
-        ref_type: "WH_ISSUE",
-        ref_id: source.issue_id,
-        items: source.items,
-      }));
-    },
-  });
-
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
-    qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
-  };
-
-  const act = useMutation({
-    mutationFn: (what: "submit" | "approve" | "reject" | "gate" | "cancel") => {
-      const numId = Number(id);
-      if (what === "submit") return submitDispatch(numId);
-      if (what === "approve") return approveDispatch(numId, reason);
-      if (what === "reject") return rejectDispatch(numId, reason);
-      if (what === "gate") return dispatchGateOut(numId, gatePass || undefined);
-      return cancelDispatch(numId, reason || undefined);
-    },
+  const gateOut = useMutation({
+    mutationFn: () => dispatchGateOut(Number(id), gatePass || undefined),
     onSuccess: () => {
-      invalidate();
+      qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
+      qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
+      qc.invalidateQueries({ queryKey: ["wh-consignments"] });
+      setConfirming(null);
+    },
+  });
+
+  const cancel = useMutation({
+    mutationFn: () => cancelDispatch(Number(id), cancelReason || undefined),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
+      qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
+      qc.invalidateQueries({ queryKey: ["wh-consignments"] });
       setConfirming(null);
     },
   });
@@ -214,137 +128,97 @@ export default function DispatchForm() {
         notes: event.notes || null,
       }),
     onSuccess: () => {
-      invalidate();
+      qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
       setEvent({ event_type: "IN_TRANSIT", location_name: "", temperature_c: "", notes: "" });
     },
   });
 
-  const columns: LineColumn<DispatchItemWrite>[] = [
-    {
-      key: "item",
-      header: "Item",
-      render: (l, i) => {
-        const saved = savedLine(i);
-        if (saved) {
-          return (
-            <div className="min-w-0">
-              <div className="truncate font-mono text-xs font-semibold text-ink">{saved.item_code ?? "—"}</div>
-              <div className="truncate text-xs text-muted">{saved.item_name ?? "—"}</div>
-            </div>
-          );
-        }
-        return (
-          <Lookup
-            name="items"
-            load={itemOptions}
-            value={l.item_id || ""}
-            onChange={(v) => patchLine(i, { item_id: v === "" ? 0 : v })}
-            placeholder="Pick an item"
-          />
-        );
-      },
-    },
-    {
-      key: "qty",
-      header: "Quantity",
-      numeric: true,
-      width: "w-28",
-      render: (l, i) => (
-        <QtyInput
-          ariaLabel={`Quantity, line ${i + 1}`}
-          value={l.quantity}
-          disabled={locked}
-          onChange={(v) => patchLine(i, { quantity: v })}
-        />
-      ),
-    },
-    {
-      key: "delivered",
-      header: "Delivered",
-      numeric: true,
-      width: "w-24",
-      hideOnNarrow: true,
-      render: (_l, i) => (
-        <span className="tabular text-muted">{fmtQty(savedLine(i)?.delivered_qty ?? 0)}</span>
-      ),
-    },
-    {
-      key: "serial",
-      header: "Serial",
-      width: "w-36",
-      hideOnNarrow: true,
-      render: (l, i) => (
-        <TextInput
-          ariaLabel={`Serial, line ${i + 1}`}
-          value={l.serial_no}
-          disabled={locked}
-          onChange={(v) => patchLine(i, { serial_no: v })}
-        />
-      ),
-    },
-    {
-      key: "rate",
-      header: "Rate",
-      numeric: true,
-      width: "w-24",
-      hideOnNarrow: true,
-      render: (l, i) => (
-        <QtyInput
-          ariaLabel={`Rate, line ${i + 1}`}
-          value={l.rate ?? 0}
-          disabled={locked}
-          onChange={(v) => patchLine(i, { rate: v })}
-        />
-      ),
-    },
-    {
-      key: "package",
-      header: "Package",
-      width: "w-28",
-      hideOnNarrow: true,
-      render: (_l, i) => {
-        const pkg = doc?.packages?.find((p) => p.id === savedLine(i)?.package_id);
-        return <span className="text-xs text-muted">{pkg?.package_no ?? "unpacked"}</span>;
-      },
-    },
-  ];
+  const packageCount = doc?.packages?.length ?? 0;
+  const itemCount = doc?.items?.reduce((sum, line) => sum + num(line.quantity), 0) ?? 0;
+  const value = doc?.items?.reduce((sum, line) => sum + num(line.amount), 0) ?? 0;
+  const destination = doc ? destinationOf(doc) : "";
+  const packageGroups = useMemo(
+    () => (doc?.packages ?? []).map((pkg) => ({ pkg, items: doc ? packageItems(doc, pkg) : [] })),
+    [doc],
+  );
 
-  if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
+  if (editing && isLoading) {
+    return <div className="py-16 text-center text-muted">Loading...</div>;
+  }
+
+  if (!editing) {
+    return (
+      <div>
+        <DispatchFlowNav />
+        <PageHeader
+          eyebrow="Warehouse"
+          title="Confirm dispatch"
+          actions={
+            <>
+              <Button variant="ghost" onClick={() => nav("..")}>
+                <ArrowLeft className="h-4 w-4" /> Back
+              </Button>
+              <Can do="dispatch.gate_out">
+                <Button
+                  onClick={() => confirmSelected.mutate()}
+                  disabled={selectedConsignment === "" || confirmSelected.isPending}
+                >
+                  <Truck className="h-4 w-4" />
+                  {confirmSelected.isPending ? "Confirming..." : "Confirm dispatch"}
+                </Button>
+              </Can>
+            </>
+          }
+        />
+        <ErrorBanner error={confirmSelected.error} />
+        <Section title="Ready consignment" hint="Only packed consignments are available for dispatch confirmation.">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <Field label="Consignment">
+              <Lookup
+                name="ready-consignments"
+                load={async () => {
+                  const page = await listConsignments({ size: 100, status: "PACKED" });
+                  return page.items.map((row) => ({
+                    id: row.id,
+                    code: row.dispatch_no,
+                    name: `${destinationOf(row) || row.ref_no || "Material issue"} - ${row.total_packages} pkg - ${fmtQty(row.total_qty)}`,
+                  }));
+                }}
+                value={selectedConsignment}
+                onChange={setSelectedConsignment}
+                placeholder="Select packed consignment"
+              />
+            </Field>
+            <Field label="Gate pass no">
+              <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
+            </Field>
+          </div>
+        </Section>
+      </div>
+    );
+  }
+
+  if (!doc) return <div className="py-16 text-center text-muted">Dispatch not found.</div>;
 
   return (
     <div>
+      <DispatchFlowNav />
       <PageHeader
         eyebrow="Warehouse"
-        title={editing ? `Dispatch ${doc?.dispatch_no ?? ""}` : "New dispatch"}
+        title={`Dispatch ${doc.dispatch_no}`}
         actions={
           <>
             <Button variant="ghost" onClick={() => nav("..")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            {!locked && (
-              <Can do="dispatch.create">
-                <Button variant="subtle" onClick={() => save.mutate()} disabled={save.isPending}>
-                  {save.isPending ? "Saving…" : "Save"}
+            {["APPROVED", "PACKED"].includes(doc.status) && (
+              <Can do="dispatch.gate_out">
+                <Button onClick={() => setConfirming("gate")}>
+                  <Truck className="h-4 w-4" /> Gate out
                 </Button>
               </Can>
             )}
-            {editing && doc?.status === "DRAFT" && (
-              <Can do="dispatch.create">
-                <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
-              </Can>
-            )}
-            {editing && doc?.status === "PENDING_APPROVAL" && (
-              <Can do="dispatch.approve">
-                <Button variant="subtle" onClick={() => setConfirming("approve")}>Approve</Button>
-                <Button variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
-              </Can>
-            )}
-            {editing && ["APPROVED", "PACKED"].includes(doc?.status ?? "") && (
-              <Can do="dispatch.gate_out">
-                <Button onClick={() => setConfirming("gate")}>Gate out</Button>
-              </Can>
-            )}
-            {editing && doc && !["CANCELLED", "ACKNOWLEDGED", "DELIVERED"].includes(doc.status) && (
+            {!["CANCELLED", "ACKNOWLEDGED", "DELIVERED"].includes(doc.status) && (
               <Can do="dispatch.approve">
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
@@ -353,234 +227,181 @@ export default function DispatchForm() {
         }
       />
 
-      <ErrorBanner error={save.error ?? pullIssue.error} />
-
-      {doc && (
-        <MetaCard title="Consignment">
-          <MetaRow label="Number" value={<span className="font-mono">{doc.dispatch_no}</span>} />
-          <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
-          <MetaRow label="Gate pass" value={<span className="font-mono">{doc.gate_pass_no ?? "—"}</span>} />
-          <MetaRow label="Packages" value={doc.total_packages} />
-          <MetaRow label="Weight" value={`${fmtQty(doc.total_weight_kg)} kg`} />
-          <MetaRow label="Approved by" value={doc.approved_by_name} />
-          <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name} />
-          <MetaRow
-            label="POD"
-            value={
-              doc.pod_url ? (
-                <a href={doc.pod_url} target="_blank" rel="noreferrer" className="text-brand hover:underline">
-                  View
-                </a>
-              ) : "—"
-            }
-          />
-        </MetaCard>
-      )}
-
-      <Section title="Destination">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Date">
-            <Input type="date" value={form.dispatch_date} disabled={locked}
-                   onChange={(e) => set("dispatch_date", e.target.value)} />
-          </Field>
-          <Field label="Type">
-            <Select value={form.dispatch_type} onChange={(v) => set("dispatch_type", v)} options={TYPES}
-                    isDisabled={locked} ariaLabel="Dispatch type" />
-          </Field>
-          <Field label="From warehouse">
-            <Lookup name="warehouses" load={warehouseOptions} value={form.warehouse_id || ""} isDisabled={locked}
-                    onChange={(v) => set("warehouse_id", v === "" ? 0 : v)} placeholder="Origin" />
-          </Field>
-          <Field label="To warehouse">
-            <Lookup name="warehouses" load={warehouseOptions} value={form.to_warehouse_id ?? ""} isDisabled={locked}
-                    onChange={(v) => set("to_warehouse_id", v === "" ? null : v)} placeholder="Destination site" />
-          </Field>
-          <Field label="Vendor">
-            <Lookup name="vendors" load={vendorOptions} value={form.vendor_id ?? ""} isDisabled={locked}
-                    onChange={(v) => set("vendor_id", v === "" ? null : v)} placeholder="Vendor" />
-          </Field>
-          <Field label="Project">
-            <Lookup name="projects" load={projectOptions} value={form.project_id ?? ""} isDisabled={locked}
-                    onChange={(v) => set("project_id", v === "" ? null : v)} placeholder="Project" />
-          </Field>
-          <Field label="Against posted issue" hint="Optional; avoids moving stock twice.">
-            <Lookup name="posted-issues" load={issueOptions} value={form.ref_id ?? ""} isDisabled={locked}
-                    onChange={(v) => {
-                      const issueId = v === "" ? null : v;
-                      setForm((current) => ({
-                        ...current,
-                        ref_type: issueId ? "WH_ISSUE" : null,
-                        ref_id: issueId,
-                      }));
-                      if (issueId) pullIssue.mutate(issueId);
-                    }} placeholder="Material issue" />
-          </Field>
-          <Field label="Expected delivery">
-            <Input type="date" value={form.expected_delivery ?? ""} disabled={locked}
-                   onChange={(e) => set("expected_delivery", e.target.value || null)} />
-          </Field>
-          <div className="sm:col-span-2">
-            <Field label="Delivery address">
-              <Input value={form.delivery_address ?? ""} disabled={locked}
-                     onChange={(e) => set("delivery_address", e.target.value)} />
-            </Field>
+      <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-4">
+        <div className="rounded-lg border border-line bg-content1 p-4">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted">
+            <Truck className="h-4 w-4" /> Status
           </div>
-          <Field label="Contact person">
-            <Input value={form.contact_person ?? ""} disabled={locked}
-                   onChange={(e) => set("contact_person", e.target.value)} />
-          </Field>
-          <Field label="Contact phone">
-            <Input value={form.contact_phone ?? ""} disabled={locked}
-                   onChange={(e) => set("contact_phone", e.target.value)} />
-          </Field>
+          <div className="mt-2"><StatusPill status={doc.status} /></div>
         </div>
+        <div className="rounded-lg border border-line bg-content1 p-4">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted">
+            <Boxes className="h-4 w-4" /> Packages
+          </div>
+          <div className="mt-1 text-2xl font-bold text-ink">{packageCount}</div>
+        </div>
+        <div className="rounded-lg border border-line bg-content1 p-4">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted">
+            <Package className="h-4 w-4" /> Quantity
+          </div>
+          <div className="mt-1 text-2xl font-bold text-ink">{fmtQty(itemCount)}</div>
+        </div>
+        <div className="rounded-lg border border-line bg-content1 p-4">
+          <div className="text-xs font-semibold uppercase text-muted">Value</div>
+          <div className="mt-1 text-2xl font-bold text-ink">₹ {fmtMoney(value)}</div>
+        </div>
+      </div>
+
+      <MetaCard title="Consignment">
+        <MetaRow label="Number" value={<span className="font-mono">{doc.dispatch_no}</span>} />
+        <MetaRow label="Material issue" value={<span className="font-mono">{doc.ref_no ?? "-"}</span>} />
+        <MetaRow label="Date" value={fmtDate(doc.dispatch_date)} />
+        <MetaRow label="Type" value={humanise(doc.dispatch_type)} />
+        <MetaRow label="From" value={doc.warehouse_name} />
+        <MetaRow label="Destination" value={destination || "—"} />
+        <MetaRow label="Gate pass" value={<span className="font-mono">{doc.gate_pass_no ?? "-"}</span>} />
+        <MetaRow label="Gate out" value={fmtDate(doc.gate_out_at)} />
+        <MetaRow label="Security" value={doc.security_by_name} />
+        <MetaRow label="Transport" value={doc.carrier_name ?? doc.vehicle_number ?? doc.transport_mode} />
+        <MetaRow label="LR no" value={<span className="font-mono">{doc.lr_no ?? "-"}</span>} />
+        <MetaRow label="Expected" value={fmtDate(doc.expected_delivery)} />
+      </MetaCard>
+
+      <Section title="Packages" hint="Package-level view of the dispatched consignment.">
+        {packageGroups.length === 0 ? (
+          <div className="rounded-lg border border-line bg-content2 px-4 py-8 text-center text-sm text-muted">
+            No packages are attached to this consignment.
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {packageGroups.map(({ pkg, items }) => (
+              <div key={pkg.id} className="overflow-hidden rounded-lg border border-line bg-content1 shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line bg-content2/70 px-4 py-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="font-display text-base font-bold text-ink">{pkg.package_no}</h3>
+                      <StatusPill status={pkg.status} />
+                      {pkg.is_fragile && <span className="inline-flex items-center gap-1 rounded-full bg-bad-bg px-2 py-1 text-[11px] font-semibold text-bad"><ShieldAlert className="h-3 w-3" /> Fragile</span>}
+                      {pkg.is_temp_controlled && <span className="inline-flex items-center gap-1 rounded-full bg-brand-050 px-2 py-1 text-[11px] font-semibold text-brand"><Thermometer className="h-3 w-3" /> Temp controlled</span>}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+                      <span>{pkg.package_type ?? "Package"}</span>
+                      <span className="inline-flex items-center gap-1"><Barcode className="h-3 w-3" /> {pkg.barcode ?? "-"}</span>
+                      <span>packed by {pkg.packed_by_name ?? "-"}</span>
+                      <span>{fmtDate(pkg.packed_at)}</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-right text-xs text-muted sm:grid-cols-4">
+                    <div><div className="font-semibold text-ink">{fmtQty(pkg.weight_kg)} kg</div><div>Weight</div></div>
+                    <div><div className="font-semibold text-ink">{fmtQty(pkg.length_cm)}</div><div>Length</div></div>
+                    <div><div className="font-semibold text-ink">{fmtQty(pkg.width_cm)}</div><div>Width</div></div>
+                    <div><div className="font-semibold text-ink">{fmtQty(pkg.height_cm)}</div><div>Height</div></div>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="min-w-[900px] w-full text-sm">
+                    <thead className="bg-content1 text-left text-[11px] uppercase text-muted">
+                      <tr>
+                        <th className="px-4 py-2">Item</th>
+                        <th className="px-4 py-2">Batch</th>
+                        <th className="px-4 py-2 text-right">Qty</th>
+                        <th className="px-4 py-2 text-right">Rate</th>
+                        <th className="px-4 py-2 text-right">Amount</th>
+                        <th className="px-4 py-2">Serials</th>
+                        <th className="px-4 py-2">Remarks</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((line) => (
+                        <tr key={`${pkg.id}-${line.item_id}-${line.batch_id ?? 0}-${line.serials.join("|")}`} className="border-t border-line">
+                          <td className="px-4 py-3">
+                            <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
+                            <div className="max-w-[280px] truncate text-xs text-muted">{line.item_name ?? "-"}</div>
+                          </td>
+                          <td className="px-4 py-3 text-xs text-muted">{line.batch_no ?? "-"}</td>
+                          <td className="px-4 py-3 text-right tabular">{fmtQty(line.quantity)} {line.uom_code ?? ""}</td>
+                          <td className="px-4 py-3 text-right tabular">₹ {fmtMoney(line.rate)}</td>
+                          <td className="px-4 py-3 text-right tabular">₹ {fmtMoney(line.amount)}</td>
+                          <td className="px-4 py-3">
+                            {line.serials.length ? (
+                              <div className="flex max-w-[320px] flex-wrap gap-1">
+                                {line.serials.slice(0, 8).map((serial) => (
+                                  <span key={serial} className="rounded-md bg-content2 px-2 py-1 font-mono text-[11px] text-ink">
+                                    {serial}
+                                  </span>
+                                ))}
+                                {line.serials.length > 8 && (
+                                  <span className="rounded-md bg-content2 px-2 py-1 text-[11px] text-muted">
+                                    +{line.serials.length - 8}
+                                  </span>
+                                )}
+                              </div>
+                            ) : "-"}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-muted">{line.remarks ?? "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
 
-      <Section title="Transport">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Mode">
-            <Select value={form.transport_mode ?? "ROAD"} onChange={(v) => set("transport_mode", v)}
-                    options={MODES} isDisabled={locked} ariaLabel="Transport mode" />
-          </Field>
-          <Field label="Carrier">
-            <Lookup name="carriers" load={carrierOptions} value={form.carrier_id ?? ""} isDisabled={locked}
-                    onChange={(v) => set("carrier_id", v === "" ? null : v)} placeholder="Carrier" />
-          </Field>
-          <Field label="Vehicle">
-            <Lookup name="vehicles" load={vehicleOptions} value={form.vehicle_id ?? ""} isDisabled={locked}
-                    onChange={(v) => set("vehicle_id", v === "" ? null : v)} placeholder="Vehicle" />
-          </Field>
-          <Field label="Driver">
-            <Input value={form.driver_name ?? ""} disabled={locked}
-                   onChange={(e) => set("driver_name", e.target.value)} />
-          </Field>
-          <Field label="Driver phone">
-            <Input value={form.driver_phone ?? ""} disabled={locked}
-                   onChange={(e) => set("driver_phone", e.target.value)} />
-          </Field>
-          <Field label="LR no">
-            <Input value={form.lr_no ?? ""} disabled={locked} onChange={(e) => set("lr_no", e.target.value)} />
-          </Field>
-          <Field label="E-way bill">
-            <Input value={form.eway_bill_no ?? ""} disabled={locked}
-                   onChange={(e) => set("eway_bill_no", e.target.value)} />
-          </Field>
-          <Field label="Freight">
-            <Input
-              type="number"
-              value={form.freight_amount == null ? "" : String(form.freight_amount)}
-              disabled={locked}
-              onChange={(e) => set("freight_amount", e.target.value === "" ? null : Number(e.target.value))}
+      <Section
+        title="Custody trail"
+        hint="Every scan, stop and temperature reading, in order."
+        actions={
+          <Can do="dispatch.view">
+            <Button variant="subtle" onClick={() => logEvent.mutate()} disabled={logEvent.isPending}>
+              {logEvent.isPending ? "Recording..." : "Record event"}
+            </Button>
+          </Can>
+        }
+      >
+        <ErrorBanner error={logEvent.error} />
+        <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="Event">
+            <Select
+              value={event.event_type}
+              onChange={(v) => setEvent((e) => ({ ...e, event_type: v }))}
+              options={EVENTS}
+              ariaLabel="Event type"
             />
           </Field>
-        </div>
-      </Section>
-
-      <Section title="Lines">
-        <LinesEditor
-          rows={form.items}
-          columns={columns}
-          keyOf={(_, i) => i}
-          onAdd={locked ? undefined : () => set("items", [...form.items, emptyLine()])}
-          onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
-          empty="Add what is going on the vehicle."
-          footer={
-            <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
-              <span className="text-muted">{totals.lines} lines</span>
-              <span className="text-ink">Qty <b className="tabular">{fmtQty(totals.qty)}</b></span>
-              <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
-            </div>
-          }
-        />
-      </Section>
-
-      {doc && (
-        <Section
-          title="Custody trail"
-          hint="Every scan, stop and temperature reading, in order."
-          actions={
-            <Can do="dispatch.view">
-              <Button variant="subtle" onClick={() => logEvent.mutate()} disabled={logEvent.isPending}>
-                {logEvent.isPending ? "Recording…" : "Record event"}
-              </Button>
-            </Can>
-          }
-        >
-          <ErrorBanner error={logEvent.error} />
-
-          <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Field label="Event">
-              <Select
-                value={event.event_type}
-                onChange={(v) => setEvent((e) => ({ ...e, event_type: v }))}
-                options={EVENTS}
-                ariaLabel="Event type"
-              />
-            </Field>
-            <Field label="Location">
-              <Input value={event.location_name}
-                     onChange={(e) => setEvent((v) => ({ ...v, location_name: e.target.value }))} />
-            </Field>
-            <Field label="Temperature (°C)">
-              <Input type="number" value={event.temperature_c}
-                     onChange={(e) => setEvent((v) => ({ ...v, temperature_c: e.target.value }))} />
-            </Field>
-            <Field label="Notes">
-              <Input value={event.notes} onChange={(e) => setEvent((v) => ({ ...v, notes: e.target.value }))} />
-            </Field>
-          </div>
-
-          {doc.events?.some((e) => e.is_breach) && (
-            <div className="mb-4 flex items-center gap-2 rounded-lg border border-bad/30 bg-bad-bg px-3 py-2 text-sm text-bad">
-              <Thermometer className="h-4 w-4" /> This consignment has a recorded temperature breach.
-            </div>
-          )}
-
-          <Timeline entries={toTimeline(doc.events)} empty="No events recorded for this consignment." />
-        </Section>
-      )}
-
-      <Section title="Documents" hint="LR copy, e-way bill, proof of delivery.">
-        <AttachmentsPanel entityType="DISPATCH" entityId={doc?.id} category="DISPATCH" />
-      </Section>
-
-      <ConfirmModal
-        isOpen={confirming === "submit"}
-        title="Submit for approval?"
-        message="The consignment goes to the approval chain and can no longer be edited."
-        confirmLabel="Submit"
-        busy={act.isPending}
-        error={act.error}
-        onConfirm={() => act.mutate("submit")}
-        onClose={() => setConfirming(null)}
-      />
-
-      <ConfirmModal
-        isOpen={confirming === "approve" || confirming === "reject"}
-        title={confirming === "approve" ? "Approve this dispatch?" : "Reject this dispatch?"}
-        message="This records your decision in the shared approval history."
-        confirmLabel={confirming === "approve" ? "Approve" : "Reject"}
-        danger={confirming === "reject"}
-        busy={act.isPending}
-        error={act.error}
-        onConfirm={() => act.mutate(confirming === "approve" ? "approve" : "reject")}
-        onClose={() => setConfirming(null)}
-      >
-        <div className="mt-3">
-          <Field label="Comments">
-            <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+          <Field label="Location">
+            <Input value={event.location_name} onChange={(e) => setEvent((v) => ({ ...v, location_name: e.target.value }))} />
+          </Field>
+          <Field label="Temperature (C)">
+            <Input type="number" value={event.temperature_c} onChange={(e) => setEvent((v) => ({ ...v, temperature_c: e.target.value }))} />
+          </Field>
+          <Field label="Notes">
+            <Input value={event.notes} onChange={(e) => setEvent((v) => ({ ...v, notes: e.target.value }))} />
           </Field>
         </div>
-      </ConfirmModal>
+        {doc.events?.some((entry) => entry.is_breach) && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-bad/30 bg-bad-bg px-3 py-2 text-sm text-bad">
+            <Thermometer className="h-4 w-4" /> This consignment has a recorded temperature breach.
+          </div>
+        )}
+        <Timeline entries={toTimeline(doc.events)} empty="No events recorded for this consignment." />
+      </Section>
+
+      <Section title="Documents" hint="LR copy, e-way bill, proof of delivery.">
+        <AttachmentsPanel entityType="DISPATCH" entityId={doc.id} category="DISPATCH" />
+      </Section>
 
       <ConfirmModal
         isOpen={confirming === "gate"}
-        title="Send it out of the gate?"
-        message="The consignment is marked dispatched and security records the gate pass."
+        title="Send this consignment out?"
+        message="The consignment is marked dispatched and the linked material issue becomes dispatched."
         confirmLabel="Gate out"
-        busy={act.isPending}
-        error={act.error}
-        onConfirm={() => act.mutate("gate")}
+        busy={gateOut.isPending}
+        error={gateOut.error}
+        onConfirm={() => gateOut.mutate()}
         onClose={() => setConfirming(null)}
       >
         <div className="mt-3">
@@ -596,14 +417,14 @@ export default function DispatchForm() {
         message="The consignment stops here."
         confirmLabel="Cancel dispatch"
         danger
-        busy={act.isPending}
-        error={act.error}
-        onConfirm={() => act.mutate("cancel")}
+        busy={cancel.isPending}
+        error={cancel.error}
+        onConfirm={() => cancel.mutate()}
         onClose={() => setConfirming(null)}
       >
         <div className="mt-3">
           <Field label="Reason">
-            <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+            <Input value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} />
           </Field>
         </div>
       </ConfirmModal>

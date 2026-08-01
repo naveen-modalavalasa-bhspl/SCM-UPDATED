@@ -523,6 +523,8 @@ export interface Issue {
   vehicle_number?: string | null;
   issued_to_id?: number | null;
   issued_to_name?: string | null;
+  destination_office_id?: number | null;
+  destination_office_name?: string | null;
   direction: "OUT" | "IN";
   original_issue_id?: number | null;
   original_issue_no?: string | null;
@@ -659,6 +661,8 @@ export interface Dispatch {
   vendor_name?: string | null;
   project_id?: number | null;
   project_name?: string | null;
+  destination_office_id?: number | null;
+  destination_office_name?: string | null;
   delivery_address?: string | null;
   contact_person?: string | null;
   contact_phone?: string | null;
@@ -798,7 +802,9 @@ export interface DispatchWrite {
 }
 
 export interface PackageWrite {
+  package_no?: string | null;
   package_type?: string | null;
+  barcode?: string | null;
   weight_kg?: number | null;
   length_cm?: number | null;
   width_cm?: number | null;
@@ -806,6 +812,78 @@ export interface PackageWrite {
   is_fragile?: boolean;
   is_temp_controlled?: boolean;
   item_ids?: number[];
+}
+
+export interface ConsignmentPackageItemWrite {
+  indent_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  serial_no?: string | null;
+  serial_numbers?: string[];
+  is_serial_tracked?: boolean;
+  quantity: number;
+  rate?: number | null;
+  remarks?: string | null;
+}
+
+export interface ConsignmentPackageWrite {
+  package_no?: string | null;
+  package_type?: string | null;
+  barcode?: string | null;
+  weight_kg?: number | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  is_fragile?: boolean;
+  is_temp_controlled?: boolean;
+  items: ConsignmentPackageItemWrite[];
+}
+
+export interface ConsignmentWrite {
+  issue_id: number;
+  dispatch_type: string;
+  dispatch_date: string;
+  to_warehouse_id?: number | null;
+  customer_id?: number | null;
+  vendor_id?: number | null;
+  project_id?: number | null;
+  delivery_address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  transport_mode?: string | null;
+  carrier_id?: number | null;
+  vehicle_id?: number | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  lr_no?: string | null;
+  eway_bill_no?: string | null;
+  freight_amount?: number | null;
+  expected_delivery?: string | null;
+  remarks?: string | null;
+  packages: ConsignmentPackageWrite[];
+}
+
+export interface IssueDispatchSourceItem extends DispatchItemWrite {
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  is_serial_tracked?: boolean;
+  serial_numbers?: string[];
+}
+
+export interface IssueDispatchSource {
+  issue_id: number;
+  issue_no: string;
+  warehouse_id: number;
+  project_id?: number | null;
+  destination_office_id?: number | null;
+  destination_office_name?: string | null;
+  items: IssueDispatchSourceItem[];
 }
 
 export interface DispatchEventWrite {

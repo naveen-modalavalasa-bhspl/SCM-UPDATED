@@ -2,6 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
+import { DispatchFlowNav } from "../components/DispatchFlowNav";
 import { listDispatches } from "../api";
 import { daysUntil, fmtDate, fmtQty, humanise } from "../format";
 import type { Dispatch as DispatchDoc } from "../types";
@@ -28,6 +29,14 @@ const STATUSES = [
 
 const SETTLED = ["DELIVERED", "ACKNOWLEDGED", "CANCELLED"];
 
+const destinationOf = (row: DispatchDoc) =>
+  row.destination_office_name
+  ?? row.delivery_address
+  ?? row.to_warehouse_name
+  ?? row.customer_name
+  ?? row.vendor_name
+  ?? "";
+
 export default function Dispatch() {
   const nav = useNavigate();
 
@@ -44,11 +53,11 @@ export default function Dispatch() {
     },
     {
       key: "to",
-      header: "To",
+      header: "Destination",
       render: (r) => (
         <div className="min-w-0">
           <div className="truncate text-sm text-ink">
-            {r.to_warehouse_name ?? r.customer_name ?? r.vendor_name ?? "—"}
+            {destinationOf(r) || "—"}
           </div>
           <div className="truncate text-[11px] text-muted">{humanise(r.dispatch_type)}</div>
         </div>
@@ -94,47 +103,50 @@ export default function Dispatch() {
   ];
 
   return (
-    <DocumentList<DispatchDoc>
-      title="Dispatch"
-      queryKey="wh-dispatches"
-      fetch={listDispatches}
-      columns={columns}
-      keyOf={(r) => r.id}
-      searchIn={(r) => [
-        r.dispatch_no, r.ref_no, r.customer_name, r.vendor_name, r.to_warehouse_name,
-        r.vehicle_number, r.lr_no, r.gate_pass_no,
-      ]}
-      searchPlaceholder="Search dispatch, destination, vehicle or LR…"
-      statuses={STATUSES}
-      createTo="new"
-      createLabel="New dispatch"
-      createPermission="issue.issue"
-      onRowClick={(r) => nav(String(r.id))}
-      empty="No dispatches match these filters."
-      kpis={(rows) => [
-        { label: "In transit", value: rows.filter((r) => ["DISPATCHED", "IN_TRANSIT"].includes(r.status)).length },
-        { label: "Awaiting gate-out", value: rows.filter((r) => r.status === "PACKED").length, tone: "text-warn" },
-        {
-          label: "Late",
-          value: rows.filter((r) => (daysUntil(r.expected_delivery) ?? 1) < 0 && !SETTLED.includes(r.status)).length,
-          tone: "text-bad",
-        },
-        { label: "Packages out", value: rows.reduce((s, r) => s + (r.total_packages ?? 0), 0) },
-      ]}
-      renderCard={(r) => (
-        <div className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-mono text-xs font-semibold text-ink">{r.dispatch_no}</span>
-            <StatusPill status={r.status} />
+    <>
+      <DispatchFlowNav />
+      <DocumentList<DispatchDoc>
+        title="Dispatches"
+        queryKey="wh-dispatches"
+        fetch={listDispatches}
+        columns={columns}
+        keyOf={(r) => r.id}
+        searchIn={(r) => [
+          r.dispatch_no, r.ref_no, r.destination_office_name, r.customer_name, r.vendor_name, r.to_warehouse_name,
+          r.vehicle_number, r.lr_no, r.gate_pass_no,
+        ]}
+        searchPlaceholder="Search dispatch, destination, vehicle or LR..."
+        statuses={STATUSES}
+        createTo="new"
+        createLabel="Confirm dispatch"
+        createPermission="dispatch.gate_out"
+        onRowClick={(r) => nav(String(r.id))}
+        empty="No dispatches match these filters."
+        kpis={(rows) => [
+          { label: "In transit", value: rows.filter((r) => ["DISPATCHED", "IN_TRANSIT"].includes(r.status)).length },
+          { label: "Awaiting gate-out", value: rows.filter((r) => r.status === "PACKED").length, tone: "text-warn" },
+          {
+            label: "Late",
+            value: rows.filter((r) => (daysUntil(r.expected_delivery) ?? 1) < 0 && !SETTLED.includes(r.status)).length,
+            tone: "text-bad",
+          },
+          { label: "Packages out", value: rows.reduce((s, r) => s + (r.total_packages ?? 0), 0) },
+        ]}
+        renderCard={(r) => (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-xs font-semibold text-ink">{r.dispatch_no}</span>
+              <StatusPill status={r.status} />
+            </div>
+            <div className="truncate text-sm text-body">
+              {destinationOf(r) || "—"}
+            </div>
+            <div className="text-[11px] text-muted">
+              {r.vehicle_number ?? "no vehicle"} · {r.total_packages} pkg · {fmtQty(r.total_qty)}
+            </div>
           </div>
-          <div className="truncate text-sm text-body">
-            {r.to_warehouse_name ?? r.customer_name ?? r.vendor_name ?? "—"}
-          </div>
-          <div className="text-[11px] text-muted">
-            {r.vehicle_number ?? "no vehicle"} · {r.total_packages} pkg · {fmtQty(r.total_qty)}
-          </div>
-        </div>
-      )}
-    />
+        )}
+      />
+    </>
   );
 }
