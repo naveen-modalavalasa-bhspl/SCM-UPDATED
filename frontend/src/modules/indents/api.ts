@@ -32,11 +32,6 @@ export interface IndentQueryParams {
   size?: number;
 }
 
-type ReactQueryContext = {
-  queryKey: readonly unknown[];
-  signal?: AbortSignal;
-};
-
 export const INDENT_QUERY_STALE_TIME = 45_000;
 export const INDENT_QUERY_GC_TIME = 5 * 60_000;
 export const INDENT_QUERY_ROOT = "indents-module";
@@ -61,8 +56,8 @@ export const indentKeys = {
     [...indentKeys.all(scope), "activity", filters] as const,
   acknowledgments: (scope: IndentAccountScope, filters: unknown) =>
     [...indentKeys.all(scope), "acknowledgments", filters] as const,
-  notifications: (scope: IndentAccountScope) =>
-    [...indentKeys.all(scope), "notifications"] as const,
+  notifications: (scope: IndentAccountScope, filters: unknown = {}) =>
+    [...indentKeys.all(scope), "notifications", filters] as const,
   pendingApprovals: (scope: IndentAccountScope) =>
     [...indentKeys.all(scope), "pending-approvals"] as const,
   detail: (scope: IndentAccountScope, id: number) =>
@@ -108,9 +103,18 @@ export function useIndentAccountCacheIsolation(scope: IndentAccountScope) {
   }, [current, qc]);
 }
 
-function normalizeParams(params?: IndentQueryParams | ReactQueryContext): IndentQueryParams {
-  if (params && "queryKey" in params) return {};
-  return params ?? {};
+export function normalizeIndentQueryParams<T extends object>(params: T): T {
+  return Object.fromEntries(
+    Object.entries(params)
+      .filter(([, value]) => value !== undefined && value !== null && value !== "")
+      .map(([key, value]) => [
+        key,
+        Array.isArray(value)
+          ? [...value].filter((item) => item !== undefined && item !== null && item !== "").sort()
+          : value,
+      ])
+      .filter(([, value]) => !Array.isArray(value) || value.length > 0),
+  ) as T;
 }
 
 function toSearchParams(params: object = {}) {
@@ -152,17 +156,26 @@ async function allMasterRows<T>(
 }
 
 export const indentApi = {
-  list: (params: IndentQueryParams = {}) =>
-    api.get<Paginated<IndentListRow>>("/api/indents", { params: toSearchParams(params) }).then((r) => r.data),
-  stats: (params?: IndentQueryParams | ReactQueryContext) =>
-    api.get<IndentStats>("/api/indents/stats", { params: toSearchParams(normalizeParams(params)) }).then((r) => r.data),
+  list: (params: IndentQueryParams = {}, signal?: AbortSignal) =>
+    api.get<Paginated<IndentListRow>>("/api/indents", {
+      params: toSearchParams(params),
+      signal,
+    }).then((r) => r.data),
+  stats: (params: IndentQueryParams = {}, signal?: AbortSignal) =>
+    api.get<IndentStats>("/api/indents/stats", {
+      params: toSearchParams(params),
+      signal,
+    }).then((r) => r.data),
   activity: (params: {
     search?: string; date_from?: string; date_to?: string; item_id?: number;
     required_from?: string; required_to?: string;
     status?: string | string[]; priority?: string | string[];
     transaction_type?: string; direction?: string;
     page?: number; size?: number;
-  }) => api.get<Paginated<ActivityRow>>("/api/indents/activity", { params: toSearchParams(params) }).then((r) => r.data),
+  }, signal?: AbortSignal) => api.get<Paginated<ActivityRow>>("/api/indents/activity", {
+    params: toSearchParams(params),
+    signal,
+  }).then((r) => r.data),
   acknowledgments: (params: {
     search?: string;
     date_from?: string;
@@ -175,8 +188,18 @@ export const indentApi = {
     size?: number;
   } = {}) =>
     api.get<Paginated<AcknowledgmentRow>>("/api/indents/acknowledgments", { params: toSearchParams(params) }).then((r) => r.data),
-  notifications: (params: { page?: number; size?: number } = {}) =>
-    api.get<Paginated<IndentNotification>>("/api/indents/notifications", { params: toSearchParams(params) }).then((r) => r.data),
+  notifications: (params: {
+    search?: string;
+    date_from?: string;
+    date_to?: string;
+    status?: string | string[];
+    page?: number;
+    size?: number;
+  } = {}, signal?: AbortSignal) =>
+    api.get<Paginated<IndentNotification>>("/api/indents/notifications", {
+      params: toSearchParams(params),
+      signal,
+    }).then((r) => r.data),
   pendingApprovals: () =>
     api.get<{ items: PendingApproval[] }>("/api/workflow/pending").then((r) => r.data.items),
   offices: () => api.get<{ items: Option[] }>("/api/indents/options/offices").then((r) => r.data.items),

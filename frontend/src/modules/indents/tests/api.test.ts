@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { indentApi, indentKeys, masterApi } from "../api";
+import { indentApi, indentKeys, masterApi, normalizeIndentQueryParams } from "../api";
 
 const apiMock = vi.hoisted(() => ({
   get: vi.fn(),
@@ -73,6 +73,80 @@ describe("indents api", () => {
       "list",
       filters,
     ]);
+  });
+
+  it("normalizes equivalent filter sets for stable query keys", () => {
+    const normalized = normalizeIndentQueryParams({
+      search: "",
+      status: ["REJECTED", "DRAFT"],
+      priority: [],
+      department_id: [20, 10],
+      page: 1,
+    });
+
+    expect(normalized).toEqual({
+      status: ["DRAFT", "REJECTED"],
+      department_id: [10, 20],
+      page: 1,
+    });
+  });
+
+  it("isolates Activity and Notification caches by employee and active position", () => {
+    const filters = normalizeIndentQueryParams({
+      status: ["REJECTED", "DRAFT"],
+      page: 1,
+      size: 20,
+    });
+    const firstScope = { employeeId: 1, activePositionId: 10 };
+    const secondEmployee = { employeeId: 2, activePositionId: 10 };
+    const secondPosition = { employeeId: 1, activePositionId: 20 };
+
+    expect(indentKeys.activity(firstScope, filters)).not.toEqual(
+      indentKeys.activity(secondEmployee, filters),
+    );
+    expect(indentKeys.activity(firstScope, filters)).not.toEqual(
+      indentKeys.activity(secondPosition, filters),
+    );
+    expect(indentKeys.notifications(firstScope, filters)).not.toEqual(
+      indentKeys.notifications(secondEmployee, filters),
+    );
+    expect(indentKeys.notifications(firstScope, filters)).not.toEqual(
+      indentKeys.notifications(secondPosition, filters),
+    );
+  });
+
+  it("passes AbortSignals to filter-sensitive requests", async () => {
+    const listController = new AbortController();
+    const statsController = new AbortController();
+    const activityController = new AbortController();
+    const notificationsController = new AbortController();
+
+    await indentApi.list({ status: ["DRAFT"] }, listController.signal);
+    await indentApi.stats({ status: ["DRAFT"] }, statsController.signal);
+    await indentApi.activity(
+      { transaction_type: "REQUEST_REJECTED" },
+      activityController.signal,
+    );
+    await indentApi.notifications(
+      { status: ["ALLOCATED"] },
+      notificationsController.signal,
+    );
+
+    expect(apiMock.get).toHaveBeenNthCalledWith(1, "/api/indents", expect.objectContaining({
+      signal: listController.signal,
+    }));
+    expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/indents/stats", expect.objectContaining({
+      signal: statsController.signal,
+    }));
+    expect(apiMock.get).toHaveBeenNthCalledWith(3, "/api/indents/activity", expect.objectContaining({
+      signal: activityController.signal,
+    }));
+    const activityParams = apiMock.get.mock.calls[2][1].params as URLSearchParams;
+    expect(activityParams.get("transaction_type")).toBe("REQUEST_REJECTED");
+    expect(activityParams.has("status")).toBe(false);
+    expect(apiMock.get).toHaveBeenNthCalledWith(4, "/api/indents/notifications", expect.objectContaining({
+      signal: notificationsController.signal,
+    }));
   });
 
   it("reads BOM choices without requesting the Item Group API", async () => {

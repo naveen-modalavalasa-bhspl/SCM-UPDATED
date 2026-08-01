@@ -115,9 +115,15 @@ async def acknowledgments(params: PageParams = Depends(), search: str | None = N
 
 
 @indent_router.get("/notifications", response_model=Page[IndentNotificationRow])
-async def notifications(params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
+async def notifications(params: PageParams = Depends(), search: str | None = None,
+                        date_from: date | None = None, date_to: date | None = None,
+                        status: list[IndentStatus] | None = Query(None),
+                        db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission("indent.view"))):
-    return await service.list_notifications(db, params, user)
+    return await service.list_notifications(
+        db, params, user, search=search, date_from=date_from, date_to=date_to,
+        statuses=status,
+    )
 
 
 @indent_router.post("", response_model=IndentOut)

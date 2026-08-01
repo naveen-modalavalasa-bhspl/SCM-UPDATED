@@ -1,7 +1,7 @@
 """Indents module tests: creation rules, the DRAFT->PENDING->AWAITING_ALLOCATION flow through
 the engine, edit locking, and an API smoke test with permissions."""
 import pytest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 
 from sqlalchemy import event, select
@@ -10,6 +10,7 @@ from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
 from app.core.security import hash_password
 from app.modules.indents import service
+from app.modules.indents.models import IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
 from app.modules.indents.enums import AllocationStatus, ApprovalAction, IndentItemStatus
 from app.modules.inventory.models import Allocation, AllocationItem
@@ -1722,15 +1723,70 @@ async def test_indent_list_filters(client, db, login):
         requester,
     )
 
+    i1.indent_no = "IND/2026/0012"
+    i1.requested_by_name = "Visible Requester"
+    i1.department_name = "Field Operations"
+    i1.status = IndentStatus.AWAITING_ALLOCATION.value
+
+    i2.indent_no = "IND/2026/0099"
+    i2.requested_by_name = "Other Requester"
+    i2.department_name = "Finance"
+    i2.requested_by_code = "HiddenEmployeeCode12"
+    i2.position_name = "HiddenPosition12"
+    i2.office_name = "HiddenOffice12"
+    i2.project_name = "HiddenProject12"
+    i2.remarks = "HiddenIndentRemarks12"
+    i2.total_qty = 12
+    i2_line = (await db.execute(
+        select(IndentItem).where(IndentItem.indent_id == i2.id)
+    )).scalar_one()
+    i2_line.item_code = "HiddenItemCode12"
+    i2_line.item_name = "HiddenItemName12"
+    i2_line.uom_code = "HiddenUom12"
+    i2_line.remarks = "HiddenLineRemarks12"
+    i2_line.quantity = 12
+    await db.commit()
+
     await _grant_login(db, requester, "filteruser", ["indent.view"])
     headers = await login("filteruser", "pw")
 
-    r = await client.get(f"/api/indents?search={i1.indent_no}&page=1&size=1", headers=headers)
+    r = await client.get(
+        "/api/indents",
+        params={"search": "  0012  ", "page": 1, "size": 1},
+        headers=headers,
+    )
     assert r.status_code == 200
     assert r.json()["total"] == 1
     assert r.json()["items"][0]["id"] == i1.id
     assert r.json()["page"] == 1
     assert r.json()["size"] == 1
+
+    for term in ("visible requester", "FIELD OPERATIONS", "aWaItInG aLlOcAtIoN"):
+        r = await client.get("/api/indents", params={"search": term}, headers=headers)
+        assert r.status_code == 200
+        assert r.json()["total"] == 1
+        assert r.json()["items"][0]["id"] == i1.id
+
+    hidden_terms = (
+        "HiddenEmployeeCode12",
+        "HiddenPosition12",
+        "HiddenOffice12",
+        "HiddenProject12",
+        "HiddenIndentRemarks12",
+        "HiddenItemCode12",
+        "HiddenItemName12",
+        "HiddenUom12",
+        "HiddenLineRemarks12",
+    )
+    for term in hidden_terms:
+        r = await client.get("/api/indents", params={"search": term}, headers=headers)
+        assert r.status_code == 200
+        assert r.json()["total"] == 0
+
+    r = await client.get("/api/indents", params={"search": "12"}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    assert r.json()["items"][0]["id"] == i1.id
 
     r = await client.get("/api/indents?priority=URGENT", headers=headers)
     assert r.status_code == 200
@@ -1739,7 +1795,27 @@ async def test_indent_list_filters(client, db, login):
 
     r = await client.get("/api/indents?status=DRAFT", headers=headers)
     assert r.status_code == 200
-    assert r.json()["total"] >= 2
+    assert r.json()["total"] == 1
+    assert r.json()["items"][0]["id"] == i2.id
+
+    r = await client.get(
+        "/api/indents",
+        params={
+            "search": "awaiting allocation",
+            "created_date_from": today.isoformat(),
+            "created_date_to": today.isoformat(),
+            "status": IndentStatus.AWAITING_ALLOCATION.value,
+            "priority": "URGENT",
+            "page": 1,
+            "size": 1,
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    assert r.json()["items"][0]["id"] == i1.id
+    assert r.json()["page"] == 1
+    assert r.json()["size"] == 1
 
     r = await client.get(f"/api/indents?required_by_to={today.isoformat()}", headers=headers)
     assert r.status_code == 200
@@ -1751,7 +1827,7 @@ async def test_indent_list_filters(client, db, login):
     assert r_stats.status_code == 200
     data = r_stats.json()
     assert data["total"] == 1
-    assert data["draft"] == 1
+    assert data["by_status"] == {IndentStatus.AWAITING_ALLOCATION.value: 1}
 
 
 async def test_allocation_does_not_create_fulfillment_acknowledgments(client, db, login):
@@ -1874,11 +1950,57 @@ async def test_activity_filters(client, db, login):
         headers=headers,
     )
     assert r.status_code == 200
+    assert r.json()["total"] == 0
+
+    for visible_term in (
+        "Approval completed",
+        "Approved",
+        approver.full_name,
+        indent.department_name,
+    ):
+        r = await client.get(
+            "/api/indents/activity",
+            params={
+                "search": visible_term,
+                "transaction_type": "APPROVAL_COMPLETED",
+            },
+            headers=headers,
+        )
+        assert r.status_code == 200
+        assert r.json()["total"] >= 1
+
+    indent.office_name = "HiddenActivityOffice"
+    indent.project_name = "HiddenActivityProject"
+    await db.commit()
+    for hidden_term in ("HiddenActivityOffice", "HiddenActivityProject"):
+        r = await client.get(
+            "/api/indents/activity", params={"search": hidden_term}, headers=headers,
+        )
+        assert r.status_code == 200
+        assert r.json()["total"] == 0
+
+    r = await client.get(
+        "/api/indents/activity",
+        params={
+            "status": IndentStatus.AWAITING_ALLOCATION.value,
+            "date_from": today_date.isoformat(),
+            "date_to": today_date.isoformat(),
+            "page": 1,
+            "size": 1,
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200
     assert r.json()["total"] >= 1
-    assert {row["event_type"] for row in r.json()["items"]} == {
-        "APPROVAL_COMPLETED",
-    }
-    assert {row["result_label"] for row in r.json()["items"]} == {"Approved"}
+    assert r.json()["size"] == 1
+
+    invalid = await client.get(
+        "/api/indents/activity",
+        params={"date_from": "2026-08-01", "date_to": "2026-07-31"},
+        headers=headers,
+    )
+    assert invalid.status_code == 422
+    assert "date_from" in invalid.json()["error"]
 
     today = today_date.isoformat()
     r = await client.get(
@@ -1890,6 +2012,203 @@ async def test_activity_filters(client, db, login):
     ids = {row["indent_id"] for row in r.json()["items"]}
     assert indent.id in ids
     assert future_indent.id not in ids
+
+
+async def test_notification_filters_visible_content_before_pagination(client, db, login):
+    requester, approver, it1, _ = await _world(db)
+    today = utcnow().date()
+    approved = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=2)],
+            required_date=today,
+        ),
+        requester,
+    )
+    rejected = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=3)],
+            required_date=today,
+        ),
+        requester,
+    )
+    await service.submit_indent(db, approved.id, requester)
+    await service.act_on_indent(db, approved.id, ApprovalAction.APPROVED, "hidden approval note", approver)
+    rejected.status = IndentStatus.REJECTED.value
+    approved.updated_at = datetime(2026, 7, 31, 23, 59, 59, tzinfo=timezone.utc)
+    rejected.updated_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    approved.office_name = "HiddenNotificationOffice"
+    approved.project_name = "HiddenNotificationProject"
+    approved.remarks = "HiddenNotificationRemarks"
+    await db.commit()
+
+    await _grant_login(db, requester, "notificationfilteruser", ["indent.view"])
+    headers = await login("notificationfilteruser", "pw")
+
+    for visible_term in (
+        approved.indent_no,
+        "Request approved",
+        "approved and with inventory",
+        "awaiting allocation",
+    ):
+        response = await client.get(
+            "/api/indents/notifications", params={"search": visible_term}, headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["total"] == 1
+        assert response.json()["items"][0]["indent_id"] == approved.id
+
+    for hidden_term in (
+        "HiddenNotificationOffice",
+        "HiddenNotificationProject",
+        "HiddenNotificationRemarks",
+        "hidden approval note",
+    ):
+        response = await client.get(
+            "/api/indents/notifications", params={"search": hidden_term}, headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+
+    response = await client.get(
+        "/api/indents/notifications",
+        params={
+            "date_from": "2026-07-31",
+            "date_to": "2026-07-31",
+            "status": IndentStatus.AWAITING_ALLOCATION.value,
+            "page": 1,
+            "size": 1,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["indent_id"] == approved.id
+
+    rejected_response = await client.get(
+        "/api/indents/notifications",
+        params={"status": IndentStatus.REJECTED.value},
+        headers=headers,
+    )
+    assert rejected_response.status_code == 200
+    assert {row["indent_id"] for row in rejected_response.json()["items"]} == {
+        rejected.id,
+    }
+
+    invalid = await client.get(
+        "/api/indents/notifications",
+        params={"date_from": "2026-08-01", "date_to": "2026-07-31"},
+        headers=headers,
+    )
+    assert invalid.status_code == 422
+    assert "date_from" in invalid.json()["error"]
+
+
+async def test_indent_list_and_stats_date_ranges_are_validated_inclusive_and_combined(
+    client, db, login,
+):
+    requester, other_user, it1, _ = await _world(db)
+    rows = []
+    for required_date in (date.today(), date.today() + timedelta(days=1), date.today() + timedelta(days=1)):
+        rows.append(await service.create_indent(
+            db,
+            IndentCreate(
+                items=[IndentItemIn(item_id=it1.id, quantity=1)],
+                required_date=required_date,
+            ),
+            requester,
+        ))
+    hidden = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=1)],
+            required_date=date.today(),
+        ),
+        other_user,
+    )
+
+    rows[0].created_at = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+    rows[0].required_date = date(2026, 8, 1)
+    rows[1].created_at = datetime(2026, 7, 31, 23, 59, 59, tzinfo=timezone.utc)
+    rows[1].required_date = date(2026, 8, 10)
+    rows[2].created_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    rows[2].required_date = date(2026, 8, 10)
+    hidden.created_at = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+    hidden.required_date = date(2026, 8, 5)
+    await db.commit()
+
+    await _grant_login(db, requester, "daterangeuser", ["indent.view"])
+    headers = await login("daterangeuser", "pw")
+
+    july = {
+        "created_date_from": "2026-07-01",
+        "created_date_to": "2026-07-31",
+        "page": 1,
+        "size": 1,
+    }
+    response = await client.get("/api/indents", params=july, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["total"] == 2
+    assert response.json()["size"] == 1
+    assert response.json()["items"][0]["id"] in {rows[0].id, rows[1].id}
+    assert hidden.id not in {item["id"] for item in response.json()["items"]}
+
+    same_raised_day = await client.get(
+        "/api/indents",
+        params={"created_date_from": "2026-07-31", "created_date_to": "2026-07-31"},
+        headers=headers,
+    )
+    assert same_raised_day.status_code == 200
+    assert {item["id"] for item in same_raised_day.json()["items"]} == {rows[1].id}
+
+    same_required_day = await client.get(
+        "/api/indents",
+        params={"required_by_from": "2026-08-10", "required_by_to": "2026-08-10"},
+        headers=headers,
+    )
+    assert same_required_day.status_code == 200
+    assert {item["id"] for item in same_required_day.json()["items"]} == {
+        rows[1].id, rows[2].id,
+    }
+
+    combined = {
+        "created_date_from": "2026-07-01",
+        "created_date_to": "2026-07-31",
+        "required_by_from": "2026-08-01",
+        "required_by_to": "2026-08-10",
+    }
+    combined_list = await client.get("/api/indents", params=combined, headers=headers)
+    combined_stats = await client.get("/api/indents/stats", params=combined, headers=headers)
+    assert combined_list.status_code == 200
+    assert combined_stats.status_code == 200
+    assert {item["id"] for item in combined_list.json()["items"]} == {
+        rows[0].id, rows[1].id,
+    }
+    assert combined_stats.json()["total"] == combined_list.json()["total"] == 2
+
+    invalid_requests = [
+        ("/api/indents", {
+            "created_date_from": "2026-08-01",
+            "created_date_to": "2026-07-31",
+        }, "created_date_from"),
+        ("/api/indents/stats", {
+            "created_date_from": "2026-08-01",
+            "created_date_to": "2026-07-31",
+        }, "created_date_from"),
+        ("/api/indents", {
+            "required_by_from": "2026-08-11",
+            "required_by_to": "2026-08-10",
+        }, "required_by_from"),
+        ("/api/indents/stats", {
+            "required_by_from": "2026-08-11",
+            "required_by_to": "2026-08-10",
+        }, "required_by_from"),
+    ]
+    for path, params, field in invalid_requests:
+        invalid = await client.get(path, params=params, headers=headers)
+        assert invalid.status_code == 422
+        assert field in invalid.json()["error"]
 
 
 async def test_read_endpoints_require_indent_view(client, make_user, login):

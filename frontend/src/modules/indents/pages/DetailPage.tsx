@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, ChevronRight, Loader2, Pencil, Send, Trash2, X } from "lucide-react";
 import {
@@ -10,6 +10,9 @@ import { PageHeader, Button, Can, Card } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
+import { activityLedgerReturnUrlFromState } from "../context/ActivityLedgerUrlState";
+import { allRequestsReturnUrlFromState } from "../context/AllRequestsUrlState";
+import { notificationsReturnUrlFromState } from "../context/NotificationsUrlState";
 import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
   isIndentModuleQuery, isIndentUnavailableError, useIndentAccountCacheIsolation,
@@ -36,6 +39,17 @@ export function IndentDetailPage() {
   const { id } = useParams();
   const indentId = Number(id);
   const nav = useNavigate();
+  const location = useLocation();
+  const allRequestsReturnUrl = allRequestsReturnUrlFromState(location.state);
+  const activityLedgerReturnUrl = activityLedgerReturnUrlFromState(location.state);
+  const notificationsReturnUrl = notificationsReturnUrlFromState(location.state);
+  const returnUrl = notificationsReturnUrl ?? activityLedgerReturnUrl ?? allRequestsReturnUrl;
+  const returnLabel = notificationsReturnUrl
+    ? "Alert & Notification"
+    : activityLedgerReturnUrl ? "Activity ledger" : "All indents";
+  const unavailableReturnLabel = notificationsReturnUrl
+    ? "Back to Alert & Notification"
+    : activityLedgerReturnUrl ? "Back to Activity ledger" : "Back to All requests";
   const qc = useQueryClient();
   const { can, me } = useAuth();
   const accountScope = useIndentAccountScope();
@@ -130,8 +144,8 @@ export function IndentDetailPage() {
     return (
       <div className="space-y-4 rounded-xl border border-line bg-content1 p-5">
         <p className="text-sm font-semibold text-body">This indent is not available to your current account</p>
-        <Button variant="secondary" onClick={() => nav("/indents")}>
-          <ArrowLeft className="h-4 w-4" /> Back to All requests
+        <Button variant="secondary" onClick={() => nav(returnUrl)}>
+          <ArrowLeft className="h-4 w-4" /> {unavailableReturnLabel}
         </Button>
       </div>
     );
@@ -158,8 +172,8 @@ export function IndentDetailPage() {
 
   return (
     <>
-      <button onClick={() => nav("/indents")} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-muted hover:text-body">
-        <ArrowLeft className="h-4 w-4" /> All indents
+      <button onClick={() => nav(returnUrl)} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-muted hover:text-body">
+        <ArrowLeft className="h-4 w-4" /> {returnLabel}
       </button>
 
       <PageHeader

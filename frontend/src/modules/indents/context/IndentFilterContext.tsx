@@ -1,6 +1,7 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 
 export type DatePreset = "all" | "today" | "this_week" | "this_month" | "custom";
+export type RequiredByPreset = "any" | "today" | "next_7_days" | "next_30_days" | "custom";
 
 export interface FilterState {
   search: string;
@@ -9,6 +10,7 @@ export interface FilterState {
   endDate: string;
   requiredByFrom: string;
   requiredByTo: string;
+  requiredByPreset: RequiredByPreset;
   selectedStatuses: string[];
   selectedPriorities: string[];
   selectedDepartments: number[];
@@ -37,6 +39,11 @@ export interface IndentFilterContextType {
   setRequiredByFrom: (val: string) => void;
   requiredByTo: string;
   setRequiredByTo: (val: string) => void;
+  requiredByPreset: RequiredByPreset;
+  applyRaisedDate: (preset: DatePreset, from: string, to: string) => void;
+  clearRaisedDate: () => void;
+  applyRequiredByDate: (preset: RequiredByPreset, from: string, to: string) => void;
+  clearRequiredByDate: () => void;
 
   selectedStatuses: string[];
   setSelectedStatuses: (val: string[]) => void;
@@ -89,6 +96,20 @@ export interface IndentFilterContextType {
 
 const IndentFilterContext = createContext<IndentFilterContextType | undefined>(undefined);
 
+export function IndentFilterValueProvider({
+  children,
+  value,
+}: {
+  children: ReactNode;
+  value: IndentFilterContextType;
+}) {
+  return (
+    <IndentFilterContext.Provider value={value}>
+      {children}
+    </IndentFilterContext.Provider>
+  );
+}
+
 function getPresetDates(preset: DatePreset): { startDate: string; endDate: string } {
   const now = new Date();
   const fmt = (d: Date) => {
@@ -121,6 +142,7 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
   const [endDate, setEndDate] = useState("");
   const [requiredByFrom, setRequiredByFrom] = useState("");
   const [requiredByTo, setRequiredByTo] = useState("");
+  const [requiredByPreset, setRequiredByPreset] = useState<RequiredByPreset>("any");
 
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [selectedPriorities, setSelectedPriorities] = useState<string[]>([]);
@@ -138,12 +160,14 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
   const [sortDir, setSortDir] = useState("desc");
   const [page, setPage] = useState(1);
 
-  const resetPage = () => setPage(1);
+  const resetPage = useCallback(() => setPage(1), []);
 
-  const setSearchAndReset = (val: string) => {
-    setSearch(val.trim());
+  const setSearchAndReset = useCallback((val: string) => {
+    const nextSearch = val.trim();
+    if (nextSearch === search) return;
+    setSearch(nextSearch);
     resetPage();
-  };
+  }, [resetPage, search]);
 
   const setDepartmentId = (id: number | null) => {
     setDepartmentIdState(id);
@@ -245,10 +269,42 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
     resetPage();
   };
 
-  const setSelectedStatusesAndReset = (val: string[]) => {
+  const applyRaisedDate = useCallback((preset: DatePreset, from: string, to: string) => {
+    setDatePresetState(preset);
+    setStartDate(from);
+    setEndDate(to);
+    resetPage();
+  }, [resetPage]);
+
+  const clearRaisedDate = useCallback(() => {
+    setDatePresetState("all");
+    setStartDate("");
+    setEndDate("");
+    resetPage();
+  }, [resetPage]);
+
+  const applyRequiredByDate = useCallback((
+    preset: RequiredByPreset,
+    from: string,
+    to: string,
+  ) => {
+    setRequiredByPreset(preset);
+    setRequiredByFrom(from);
+    setRequiredByTo(to);
+    resetPage();
+  }, [resetPage]);
+
+  const clearRequiredByDate = useCallback(() => {
+    setRequiredByPreset("any");
+    setRequiredByFrom("");
+    setRequiredByTo("");
+    resetPage();
+  }, [resetPage]);
+
+  const setSelectedStatusesAndReset = useCallback((val: string[]) => {
     setSelectedStatuses(val);
     resetPage();
-  };
+  }, [resetPage]);
 
   const setSelectedPrioritiesAndReset = (val: string[]) => {
     setSelectedPriorities(val);
@@ -277,6 +333,7 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
     setEndDate("");
     setRequiredByFrom("");
     setRequiredByTo("");
+    setRequiredByPreset("any");
     setSelectedStatuses([]);
     setSelectedPriorities([]);
     setSelectedDepartments([]);
@@ -296,7 +353,7 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
   const activeFilterCount =
     (search.trim() ? 1 : 0) +
     (datePreset !== "all" || startDate || endDate ? 1 : 0) +
-    (requiredByFrom || requiredByTo ? 1 : 0) +
+    (requiredByPreset !== "any" || requiredByFrom || requiredByTo ? 1 : 0) +
     selectedStatuses.length +
     selectedPriorities.length +
     selectedDepartments.length +
@@ -323,6 +380,11 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
         setRequiredByFrom: setRequiredByFromAndReset,
         requiredByTo,
         setRequiredByTo: setRequiredByToAndReset,
+        requiredByPreset,
+        applyRaisedDate,
+        clearRaisedDate,
+        applyRequiredByDate,
+        clearRequiredByDate,
         selectedStatuses,
         setSelectedStatuses: setSelectedStatusesAndReset,
         toggleStatus,

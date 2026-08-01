@@ -61,6 +61,53 @@ def test_required_date_validation_accepts_today():
     service._validate_required_date(date.today())
 
 
+def test_indent_filter_range_validation_accepts_same_day_and_rejects_reversed_ranges():
+    same_day = date(2026, 7, 31)
+    service._validate_indent_date_ranges(same_day, same_day, same_day, same_day)
+
+    with pytest.raises(ValidationError, match="created_date_from.*created_date_to"):
+        service._validate_indent_date_ranges(
+            date(2026, 8, 1), date(2026, 7, 31), None, None,
+        )
+    with pytest.raises(ValidationError, match="required_by_from.*required_by_to"):
+        service._validate_indent_date_ranges(
+            None, None, date(2026, 8, 11), date(2026, 8, 10),
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_indent_ranges_fail_before_database_work():
+    with pytest.raises(ValidationError, match="created_date_from"):
+        await service.list_indents(
+            SimpleNamespace(),
+            PageParams(page=1, size=20),
+            date_from=date(2026, 8, 2),
+            date_to=date(2026, 8, 1),
+        )
+    with pytest.raises(ValidationError, match="required_by_from"):
+        await service.indent_stats(
+            SimpleNamespace(),
+            required_by_from=date(2026, 8, 2),
+            required_by_to=date(2026, 8, 1),
+        )
+
+    with pytest.raises(ValidationError, match="date_from.*date_to"):
+        await service.activity_ledger(
+            SimpleNamespace(),
+            PageParams(page=1, size=20),
+            date_from=date(2026, 8, 2),
+            date_to=date(2026, 8, 1),
+        )
+    with pytest.raises(ValidationError, match="date_from.*date_to"):
+        await service.list_notifications(
+            SimpleNamespace(),
+            PageParams(page=1, size=20),
+            user(),
+            date_from=date(2026, 8, 2),
+            date_to=date(2026, 8, 1),
+        )
+
+
 def assignment(name="PILOT-AP-104-MMU", position_id=100):
     return SimpleNamespace(
         employee_id=10,
@@ -101,24 +148,57 @@ def test_unknown_indent_status_detection_reports_only_non_enum_values():
     ]) == {"LEGACY_UNKNOWN"}
 
 
-def test_indent_search_uses_snapshot_fields_exists_and_escaped_like():
+def test_main_indent_search_uses_only_visible_fields_and_escaped_like():
     stmt = service._apply_indent_filters(
         service.select(service.Indent),
         search=" ACME_% ",
     )
-    text = sql_text(stmt)
+    text = sql_text(stmt.whereclause)
 
     assert "ind_indents.indent_no" in text
     assert "ind_indents.requested_by_name" in text
-    assert "ind_indents.position_name" in text
     assert "ind_indents.department_name" in text
-    assert "ind_indents.project_name" in text
-    assert "ind_indents.office_name" in text
-    assert "EXISTS" in text
-    assert "ind_indent_items.item_code" in text
-    assert "ind_indent_items.item_name" in text
+    assert "replace(ind_indents.status" in text
+    assert "ind_indents.requested_by_code" not in text
+    assert "ind_indents.position_name" not in text
+    assert "ind_indents.project_name" not in text
+    assert "ind_indents.office_name" not in text
+    assert "ind_indents.remarks" not in text
+    assert "ind_indent_items" not in text
+    assert "EXISTS" not in text
     assert "ACME\\_\\%" in text
     assert "ESCAPE '\\'" in text
+
+
+def test_main_indent_date_predicates_use_inclusive_dates_and_next_day_timestamp_boundary():
+    stmt = service._apply_indent_filters(
+        service.select(service.Indent),
+        date_from=date(2026, 7, 1),
+        date_to=date(2026, 7, 31),
+        required_by_from=date(2026, 8, 1),
+        required_by_to=date(2026, 8, 10),
+    )
+    text = sql_text(stmt.whereclause)
+
+    assert "date(ind_indents.created_at)" not in text.lower()
+    assert "ind_indents.created_at >= '2026-07-01" in text
+    assert "ind_indents.created_at < '2026-08-01" in text
+    assert "ind_indents.required_date >= '2026-08-01'" in text
+    assert "ind_indents.required_date <= '2026-08-10'" in text
+
+
+def test_numeric_main_indent_search_uses_only_indent_number():
+    stmt = service._apply_indent_filters(
+        service.select(service.Indent),
+        search=" 12 ",
+    )
+    text = sql_text(stmt.whereclause)
+
+    assert "ind_indents.indent_no" in text
+    assert "ind_indents.requested_by_name" not in text
+    assert "ind_indents.department_name" not in text
+    assert "ind_indents.status" not in text
+    assert "ind_indent_items" not in text
 
 
 def test_indent_search_ignores_blank_terms():
@@ -857,6 +937,26 @@ def captured_sql(db: CapturingDb) -> str:
 
 
 @pytest.mark.asyncio
+async def test_list_indents_uses_id_as_a_stable_pagination_tie_breaker():
+    descending = CapturingDb()
+    await service.list_indents(descending, PageParams(page=4, size=20))
+    assert "ORDER BY ind_indents.created_at DESC, ind_indents.id DESC" in sql_text(
+        descending.result_stmt,
+    )
+
+    ascending = CapturingDb()
+    await service.list_indents(
+        ascending,
+        PageParams(page=4, size=20),
+        sort_by="status",
+        sort_dir="asc",
+    )
+    assert "ORDER BY ind_indents.status ASC, ind_indents.id ASC" in sql_text(
+        ascending.result_stmt,
+    )
+
+
+@pytest.mark.asyncio
 async def test_global_visibility_applies_to_all_indent_read_surfaces(monkeypatch):
     indent = SimpleNamespace(id=77, indent_no="IND/77")
     monkeypatch.setattr(
@@ -1070,7 +1170,16 @@ async def test_activity_filters_use_visibility_status_priority_and_search(monkey
 
 
 @pytest.mark.asyncio
-async def test_activity_transaction_filter_matches_real_workflow_action(monkeypatch):
+@pytest.mark.parametrize("event_type", [
+    service.IndentActivityType.STOCK_ALLOCATED,
+    service.IndentActivityType.APPROVAL_COMPLETED,
+    service.IndentActivityType.REQUEST_SUBMITTED,
+    service.IndentActivityType.REQUEST_CREATED,
+])
+async def test_activity_transaction_filter_matches_event_before_count_and_pagination(
+    monkeypatch,
+    event_type,
+):
     db = CapturingDb()
     monkeypatch.setattr(
         service,
@@ -1082,12 +1191,15 @@ async def test_activity_transaction_filter_matches_real_workflow_action(monkeypa
         db,
         PageParams(page=1, size=20),
         user=user(),
-        transaction_type=service.IndentActivityType.APPROVAL_COMPLETED,
+        transaction_type=event_type,
     )
+    count_sql = sql_text(db.count_stmt)
     result_sql = sql_text(db.result_stmt)
 
-    assert "activity_events.event_type = 'APPROVAL_COMPLETED'" in result_sql
-    assert "WHEN 'APPROVED' THEN 'APPROVAL_COMPLETED'" in result_sql
+    predicate = f"activity_events.event_type = '{event_type.value}'"
+    assert predicate in count_sql
+    assert predicate in result_sql
+    assert result_sql.index(predicate) < result_sql.index("LIMIT 20 OFFSET 0")
 
 
 @pytest.mark.asyncio
@@ -1264,6 +1376,47 @@ async def test_activity_one_sided_dates_use_timestamp_ranges_without_date_functi
     assert "activity_events.occurred_at >=" not in to_sql
     assert "date(activity_events.occurred_at)" not in from_sql.lower()
     assert "date(activity_events.occurred_at)" not in to_sql.lower()
+
+
+@pytest.mark.asyncio
+async def test_notification_filters_visible_content_before_stable_pagination(monkeypatch):
+    db = CapturingDb()
+    monkeypatch.setattr(
+        service,
+        "indent_access_condition",
+        AsyncMock(return_value=service.Indent.requested_by_id == 10),
+    )
+
+    await service.list_notifications(
+        db,
+        PageParams(page=2, size=5),
+        user(),
+        search="approved",
+        date_from=date(2026, 7, 1),
+        date_to=date(2026, 7, 31),
+        statuses=[IndentStatus.AWAITING_ALLOCATION],
+    )
+
+    sql = sql_text(db.result_stmt)
+    assert "ind_indents.requested_by_id = 10" in sql
+    assert "lower(ind_indents.indent_no)" in sql
+    assert "Request approved" in sql
+    assert "approved and with inventory" in sql
+    assert "replace(ind_indents.status, '_', ' ')" in sql
+    assert "ind_indents.updated_at >= '2026-07-01 00:00:00+00:00'" in sql
+    assert "ind_indents.updated_at < '2026-08-01 00:00:00+00:00'" in sql
+    assert "ind_indents.status IN ('AWAITING_ALLOCATION')" in sql
+    assert "ORDER BY ind_indents.updated_at DESC, ind_indents.id DESC" in sql
+    assert sql.rfind("WHERE") < sql.rfind("LIMIT 5 OFFSET 5")
+    for hidden_field in (
+        "requested_by_code",
+        "position_name",
+        "department_name",
+        "office_name",
+        "project_name",
+        "remarks",
+    ):
+        assert hidden_field not in sql
 
 
 @pytest.mark.asyncio

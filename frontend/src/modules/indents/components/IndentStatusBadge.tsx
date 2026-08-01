@@ -1,6 +1,12 @@
 import { Chip } from "@heroui/react";
 import { StatusPill } from "@/shared/components";
+import { INDENT_STATUS } from "../constants";
 import type { IndentJourney, IndentJourneyStage } from "../types";
+
+const TOP_ALLOCATION_STATUS_TONE: Partial<Record<string, string>> = {
+  [INDENT_STATUS.ALLOCATED]: "bg-ok-bg text-ok",
+  [INDENT_STATUS.AWAITING_ALLOCATION]: "bg-info-bg text-info",
+};
 
 function cleanStageName(value: string) {
   return value.replace(/[A-Za-z]+/g, (word) =>
@@ -48,6 +54,23 @@ function rejectedStageLabel(journey?: IndentJourney) {
 }
 
 export function IndentStatusBadge({ status, journey }: { status: string; journey?: IndentJourney }) {
+  const allocationTone = TOP_ALLOCATION_STATUS_TONE[status];
+  if (allocationTone) {
+    return (
+      <Chip
+        size="sm"
+        radius="full"
+        variant="flat"
+        classNames={{
+          base: allocationTone,
+          content: "text-[11px] font-semibold uppercase tracking-wide",
+        }}
+      >
+        {status.replace(/_/g, " ")}
+      </Chip>
+    );
+  }
+
   const label = status === "PENDING_APPROVAL"
     ? pendingStageLabel(journey)
     : status === "REJECTED"

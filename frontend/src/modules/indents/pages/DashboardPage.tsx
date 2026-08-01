@@ -1,11 +1,22 @@
+import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { CalendarDays, CheckCircle2, Clock, FileText, Package, PencilLine, XCircle } from "lucide-react";
 import { Card, StatCard, StatusPill } from "@/shared/components";
-import { indentApi, indentKeys, useIndentAccountCacheIsolation, useIndentAccountScope } from "../api";
+import {
+  INDENT_QUERY_GC_TIME,
+  INDENT_QUERY_STALE_TIME,
+  indentApi,
+  indentKeys,
+  normalizeIndentQueryParams,
+  useIndentAccountCacheIsolation,
+  useIndentAccountScope,
+} from "../api";
+import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
 import { StatusBreakdownChart } from "../components/StatusBreakdownChart";
 import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
+import { INDENT_REQUEST_STATUS_FILTER_OPTIONS, INDENT_STATUS } from "../constants";
 
 function IndentDashboardContent() {
   const nav = useNavigate();
@@ -19,46 +30,76 @@ function IndentDashboardContent() {
     requiredByTo,
     selectedStatuses,
     selectedPriorities,
-    toggleStatus,
   } = useIndentFilters();
   const hasCompleteDateRange = Boolean(startDate && endDate);
 
-  const filterParams = {
-    search: search || undefined,
+  const filterParams = useMemo(() => normalizeIndentQueryParams({
+    search,
     created_date_from: hasCompleteDateRange ? startDate : undefined,
     created_date_to: hasCompleteDateRange ? endDate : undefined,
-    required_by_from: requiredByFrom || undefined,
-    required_by_to: requiredByTo || undefined,
-    status: selectedStatuses.length ? selectedStatuses : undefined,
-    priority: selectedPriorities.length ? selectedPriorities : undefined,
-  };
+    required_by_from: requiredByFrom,
+    required_by_to: requiredByTo,
+    status: selectedStatuses,
+    priority: selectedPriorities,
+  }), [
+    endDate,
+    hasCompleteDateRange,
+    requiredByFrom,
+    requiredByTo,
+    search,
+    selectedPriorities,
+    selectedStatuses,
+    startDate,
+  ]);
 
   const {
     data: stats,
     isLoading: statsLoading,
+    isFetching: statsFetching,
     error: statsError,
   } = useQuery({
     queryKey: indentKeys.stats(accountScope, filterParams),
-    queryFn: () => indentApi.stats(filterParams),
+    queryFn: ({ signal }) => indentApi.stats(filterParams, signal),
     placeholderData: (previousData) => previousData,
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
   });
 
   const {
     data: recent,
     isLoading: recentLoading,
+    isFetching: recentFetching,
     error: recentError,
   } = useQuery({
     queryKey: indentKeys.recent(accountScope, filterParams),
-    queryFn: () => indentApi.list({ ...filterParams, size: 6 }),
+    queryFn: ({ signal }) => indentApi.list({ ...filterParams, size: 6 }, signal),
     placeholderData: (previousData) => previousData,
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
   });
   const recentIndents = recent?.items ?? [];
+  const isFetching = statsFetching || recentFetching;
+  const isRefreshing = isFetching && Boolean(stats || recent);
   const handleViewAll = () => nav("/indents");
 
   return (
     <>
-      <IndentModuleHeader title="Overview" />
+      <IndentModuleHeader
+        title="Overview"
+        statusFilterOptions={INDENT_REQUEST_STATUS_FILTER_OPTIONS}
+        separateDateFilters
+        searchPlaceholder="Search by indent no., requester, department or status..."
+      />
 
+      <section className="relative" aria-label="Overview results" aria-busy={isFetching}>
+        <div
+          role="status"
+          aria-live="polite"
+          className={`pointer-events-none absolute right-3 top-2 z-20 rounded-full bg-content1/95 px-2.5 py-1 text-xs font-medium text-muted shadow-sm transition-opacity duration-150 ${isRefreshing ? "opacity-100" : "opacity-0"}`}
+        >
+          {isRefreshing ? "Updating results…" : ""}
+        </div>
+        <div className={`transition-opacity duration-150 ${isRefreshing ? "opacity-70" : "opacity-100"}`}>
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard label="Total indents" tone="text-ink" icon={<FileText className="h-4 w-4" />} value={stats?.total ?? "-"} />
         <StatCard label="Awaiting approval" tone="text-warn" icon={<Clock className="h-4 w-4" />} value={stats?.awaiting_approval ?? "-"} />
@@ -79,11 +120,16 @@ function IndentDashboardContent() {
       <div className="mt-5 grid gap-5 lg:grid-cols-3">
         <Card className="p-5 lg:col-span-2">
           <div className="mb-4">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">Status Breakdown</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">STATUS BREAKDOWN</h2>
             <p className="mt-1 text-xs text-muted">Current distribution by workflow status</p>
           </div>
           {statsLoading && <p className="py-4 text-sm text-muted">Loading status breakdown...</p>}
-          {stats && <StatusBreakdownChart byStatus={stats.by_status} onStatusClick={toggleStatus} />}
+          {stats && (
+            <StatusBreakdownChart
+              byStatus={stats.by_status}
+              selectedStatuses={selectedStatuses}
+            />
+          )}
         </Card>
 
         <Card className="p-5">
@@ -111,7 +157,10 @@ function IndentDashboardContent() {
                   <span className="mono block text-sm font-semibold text-ink">{indent.indent_no}</span>
                   <span className="text-xs text-muted">{indent.requested_by_name || indent.department_name || "Unknown"}</span>
                 </span>
-                <StatusPill status={indent.status} />
+                {indent.status === INDENT_STATUS.ALLOCATED
+                  || indent.status === INDENT_STATUS.AWAITING_ALLOCATION
+                  ? <IndentStatusBadge status={indent.status} />
+                  : <StatusPill status={indent.status} />}
               </button>
             ))}
             {!recentLoading && recent?.items.length === 0 && (
@@ -120,6 +169,8 @@ function IndentDashboardContent() {
           </div>
         </Card>
       </div>
+        </div>
+      </section>
     </>
   );
 }

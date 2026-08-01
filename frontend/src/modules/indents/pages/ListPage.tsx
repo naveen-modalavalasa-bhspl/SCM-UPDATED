@@ -1,24 +1,53 @@
-import { useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Spinner, Skeleton, Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
 import { StatusPill } from "@/shared/components";
-import { indentApi, indentKeys, useIndentAccountCacheIsolation, useIndentAccountScope } from "../api";
+import {
+  INDENT_QUERY_GC_TIME,
+  INDENT_QUERY_STALE_TIME,
+  indentApi,
+  indentKeys,
+  normalizeIndentQueryParams,
+  useIndentAccountCacheIsolation,
+  useIndentAccountScope,
+} from "../api";
 import type { IndentListRow } from "../types";
-import { IndentBookmarkButton } from "../components/IndentBookmarkButton";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
-import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
+import { IndentFilterValueProvider, useIndentFilters } from "../context/IndentFilterContext";
+import {
+  allRequestsReturnState,
+  readAllRequestsScroll,
+  saveAllRequestsScroll,
+  useAllRequestsUrlState,
+} from "../context/AllRequestsUrlState";
 import { formatIndentShortDate } from "../dateTime";
+import { INDENT_REQUEST_STATUS_FILTER_OPTIONS, INDENT_STATUS } from "../constants";
 
 interface Column<T> {
   key: string;
   header: string;
   render: (row: T) => ReactNode;
-  className?: string;
+  className: string;
   hideOnNarrow?: boolean;
+}
+
+function AllRequestsStatusBadge({ status }: { status: string }) {
+  const tone = status === INDENT_STATUS.ALLOCATED
+    ? "bg-ok-bg text-ok"
+    : status === INDENT_STATUS.AWAITING_ALLOCATION
+      ? "bg-info-bg text-info"
+      : null;
+
+  if (!tone) return <StatusPill status={status} />;
+
+  return (
+    <span className={`inline-flex h-6 items-center rounded-full px-2 text-[11px] font-semibold uppercase tracking-wide ${tone}`}>
+      {status.replace(/_/g, " ")}
+    </span>
+  );
 }
 
 function Pager({
@@ -60,11 +89,18 @@ function Pager({
   );
 }
 
-function IndentListContent() {
+function IndentListContent({
+  listUrl,
+  size,
+  replacePage,
+}: {
+  listUrl: string;
+  size: number;
+  replacePage: (page: number) => void;
+}) {
   const nav = useNavigate();
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
-  const [bookmarkError, setBookmarkError] = useState("");
   const {
     search,
     startDate,
@@ -80,46 +116,106 @@ function IndentListContent() {
     setPage,
   } = useIndentFilters();
 
-  const size = 20;
   const hasCompleteDateRange = Boolean(startDate && endDate);
-  const filterParams = {
-    search: search || undefined,
+  const filterParams = useMemo(() => normalizeIndentQueryParams({
+    search,
     created_date_from: hasCompleteDateRange ? startDate : undefined,
     created_date_to: hasCompleteDateRange ? endDate : undefined,
-    required_by_from: requiredByFrom || undefined,
-    required_by_to: requiredByTo || undefined,
-    status: selectedStatuses.length ? selectedStatuses : undefined,
-    priority: selectedPriorities.length ? selectedPriorities : undefined,
-    department_id: selectedDepartments.length ? selectedDepartments : undefined,
+    required_by_from: requiredByFrom,
+    required_by_to: requiredByTo,
+    status: selectedStatuses,
+    priority: selectedPriorities,
+    department_id: selectedDepartments,
     sort_by: sortBy,
     sort_dir: sortDir,
     page,
     size,
-  };
+  }), [
+    endDate,
+    hasCompleteDateRange,
+    page,
+    requiredByFrom,
+    requiredByTo,
+    search,
+    selectedDepartments,
+    selectedPriorities,
+    selectedStatuses,
+    sortBy,
+    sortDir,
+    startDate,
+  ]);
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, isFetching, error } = useQuery({
     queryKey: indentKeys.list(accountScope, filterParams),
-    queryFn: () => indentApi.list(filterParams),
+    queryFn: ({ signal }) => indentApi.list(filterParams, signal),
     placeholderData: (previousData) => previousData,
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
   });
   const rows = data?.items ?? [];
+  const isRefreshing = isFetching && Boolean(data);
+  const restoredScrollUrl = useRef<string | null>(null);
+
+  useLayoutEffect(() => {
+    if (!data) return;
+    const lastPage = Math.max(1, Math.ceil(data.total / size));
+    if (page > lastPage) replacePage(lastPage);
+  }, [data, page, replacePage, size]);
+
+  useEffect(() => {
+    if (!data || restoredScrollUrl.current === listUrl) return;
+    restoredScrollUrl.current = listUrl;
+    const scrollY = readAllRequestsScroll(listUrl);
+    if (scrollY === null) return;
+    const frame = window.requestAnimationFrame(() => window.scrollTo(0, scrollY));
+    return () => window.cancelAnimationFrame(frame);
+  }, [data, listUrl]);
+
+  useEffect(() => () => saveAllRequestsScroll(listUrl), [listUrl]);
+
+  const openIndent = useCallback((indentId: number) => {
+    saveAllRequestsScroll(listUrl);
+    nav(`/indents/${indentId}`, { state: allRequestsReturnState(listUrl) });
+  }, [listUrl, nav]);
 
   const columns: Column<IndentListRow>[] = [
-    { key: "no", header: "Indent", render: (row) => <span className="mono font-semibold text-ink">{row.indent_no}</span> },
-    { key: "req", header: "Requested by", render: (row) => row.requested_by_name ?? "-", hideOnNarrow: true },
-    { key: "dept", header: "Department", render: (row) => row.department_name ?? "-" },
-    { key: "items", header: "Lines", render: (row) => <span className="tabular-nums text-muted">{row.total_items}</span> },
-    { key: "status", header: "Status", render: (row) => <StatusPill status={row.status} /> },
-    { key: "date", header: "Raised", render: (row) => <span className="text-muted">{formatIndentShortDate(row.created_at)}</span>, hideOnNarrow: true },
     {
-      key: "bookmark",
-      header: "",
-      className: "text-right",
-      render: (row) => (
-        <span className="flex justify-end">
-          <IndentBookmarkButton row={row} accountScope={accountScope} onError={setBookmarkError} />
-        </span>
-      ),
+      key: "no",
+      header: "Indent",
+      className: "w-[26%] px-4 text-left align-middle lg:w-[18%]",
+      render: (row) => <span className="mono font-semibold text-ink">{row.indent_no}</span>,
+    },
+    {
+      key: "req",
+      header: "Requested by",
+      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[20%]",
+      hideOnNarrow: true,
+      render: (row) => <span className="block truncate">{row.requested_by_name ?? "-"}</span>,
+    },
+    {
+      key: "dept",
+      header: "Department",
+      className: "w-[30%] overflow-hidden px-4 text-left align-middle lg:w-[20%]",
+      render: (row) => <span className="block truncate">{row.department_name ?? "-"}</span>,
+    },
+    {
+      key: "items",
+      header: "Items",
+      className: "w-[12%] px-4 text-center align-middle lg:w-[10%]",
+      render: (row) => <span className="block tabular-nums text-muted">{row.total_items}</span>,
+    },
+    {
+      key: "status",
+      header: "Status",
+      className: "w-[32%] px-4 text-left align-middle lg:w-[18%]",
+      render: (row) => <AllRequestsStatusBadge status={row.status} />,
+    },
+    {
+      key: "date",
+      header: "Raised",
+      className: "w-0 px-4 text-left align-middle lg:w-[14%]",
+      hideOnNarrow: true,
+      render: (row) => <span className="whitespace-nowrap text-muted">{formatIndentShortDate(row.created_at)}</span>,
     },
   ];
   const colByKey = Object.fromEntries(columns.map((column) => [column.key, column])) as Record<string, Column<IndentListRow>>;
@@ -127,10 +223,23 @@ function IndentListContent() {
 
   return (
     <>
-      <IndentModuleHeader title="All requests" />
+      <IndentModuleHeader
+        title="All requests"
+        statusFilterOptions={INDENT_REQUEST_STATUS_FILTER_OPTIONS}
+        separateDateFilters
+        searchPlaceholder="Search by indent no., requester, department or status..."
+      />
 
-      {bookmarkError && <p className="mb-4 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{bookmarkError}</p>}
       {error && <p className="mb-4 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}
+      <section className="relative" aria-label="Indent results" aria-busy={isFetching}>
+        <div
+          role="status"
+          aria-live="polite"
+          className={`pointer-events-none absolute right-3 top-2 z-20 rounded-full bg-content1/95 px-2.5 py-1 text-xs font-medium text-muted shadow-sm transition-opacity duration-150 ${isRefreshing ? "opacity-100" : "opacity-0"}`}
+        >
+          {isRefreshing ? "Updating results…" : ""}
+        </div>
+        <div className={`transition-opacity duration-150 ${isRefreshing ? "opacity-70" : "opacity-100"}`}>
       <div className="hidden md:block">
         <Table
           aria-label="List"
@@ -138,10 +247,11 @@ function IndentListContent() {
           selectionMode="none"
           onRowAction={(key) => {
             const row = rowByKey.get(String(key));
-            if (row) nav(`/indents/${row.id}`);
+            if (row) openIndent(row.id);
           }}
           classNames={{
             base: "overflow-hidden rounded-2xl border border-line/70 bg-content1",
+            table: "table-fixed",
             th: "bg-content2 text-[11px] font-semibold uppercase tracking-wider text-muted",
             tr: "cursor-pointer transition-colors hover:bg-brand-050/50",
             td: "py-3.5 text-sm",
@@ -149,7 +259,7 @@ function IndentListContent() {
         >
           <TableHeader columns={columns}>
             {(column) => (
-              <TableColumn key={column.key} className={column.hideOnNarrow ? "hidden lg:table-cell" : ""}>
+              <TableColumn key={column.key} className={`${column.className} ${column.hideOnNarrow ? "hidden lg:table-cell" : ""}`}>
                 {column.header}
               </TableColumn>
             )}
@@ -165,7 +275,7 @@ function IndentListContent() {
                 {(columnKey) => {
                   const column = colByKey[String(columnKey)];
                   return (
-                    <TableCell className={`${column.className ?? ""} ${column.hideOnNarrow ? "hidden lg:table-cell" : ""}`}>
+                    <TableCell className={`${column.className} ${column.hideOnNarrow ? "hidden lg:table-cell" : ""}`}>
                       {column.render(row)}
                     </TableCell>
                   );
@@ -186,11 +296,11 @@ function IndentListContent() {
                   key={row.id}
                   role="button"
                   tabIndex={0}
-                  onClick={() => nav(`/indents/${row.id}`)}
+                  onClick={() => openIndent(row.id)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
-                      nav(`/indents/${row.id}`);
+                      openIndent(row.id);
                     }
                   }}
                   className="block w-full rounded-2xl border border-line/70 bg-content1 p-4 text-left shadow-sm transition-transform active:scale-[0.99]"
@@ -201,10 +311,7 @@ function IndentListContent() {
                         <span className="mono block truncate font-semibold text-ink">{row.indent_no}</span>
                         <span className="mt-1 block text-xs text-muted">{row.department_name ?? "-"}</span>
                       </span>
-                      <span className="flex shrink-0 items-center gap-2">
-                        <StatusPill status={row.status} />
-                        <IndentBookmarkButton row={row} accountScope={accountScope} onError={setBookmarkError} />
-                      </span>
+                      <AllRequestsStatusBadge status={row.status} />
                     </div>
                     <div className="flex items-center justify-between gap-3 text-sm text-muted">
                       <span>{row.requested_by_name ?? "-"}</span>
@@ -215,14 +322,17 @@ function IndentListContent() {
               ))}
       </div>
       {data && <Pager page={page} size={size} total={data.total} onPage={setPage} />}
+        </div>
+      </section>
     </>
   );
 }
 
 export function IndentListPage() {
+  const { filters, listUrl, replacePage, size } = useAllRequestsUrlState();
   return (
-    <IndentFilterProvider>
-      <IndentListContent />
-    </IndentFilterProvider>
+    <IndentFilterValueProvider value={filters}>
+      <IndentListContent listUrl={listUrl} size={size} replacePage={replacePage} />
+    </IndentFilterValueProvider>
   );
 }

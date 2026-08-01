@@ -3,7 +3,7 @@ import { Plus } from "lucide-react";
 import { PageHeader, Button, Can } from "@/shared/components";
 import { IndentFilterBar } from "./IndentFilterBar";
 
-type FilterMode = "indents" | "acknowledgments" | "activity";
+type FilterMode = "indents" | "acknowledgments" | "activity" | "notifications";
 
 interface IndentModuleHeaderProps {
   title?: string;
@@ -12,6 +12,10 @@ interface IndentModuleHeaderProps {
   showCreate?: boolean;
   showFilters?: boolean;
   filterMode?: FilterMode;
+  statusFilterOptions?: { value: string; label: string }[];
+  statusFilterLabel?: string;
+  singleStatusSelection?: boolean;
+  separateDateFilters?: boolean;
   showRequiredBy?: boolean;
   showDate?: boolean;
   showStatus?: boolean;
@@ -28,6 +32,10 @@ export function IndentModuleHeader({
   showCreate = true,
   showFilters = true,
   filterMode = "indents",
+  statusFilterOptions,
+  statusFilterLabel,
+  singleStatusSelection,
+  separateDateFilters,
   showRequiredBy,
   showDate,
   showStatus,
@@ -57,6 +65,10 @@ export function IndentModuleHeader({
       {showFilters && (
         <IndentFilterBar
           mode={filterMode}
+          statusFilterOptions={statusFilterOptions}
+          statusFilterLabel={statusFilterLabel}
+          singleStatusSelection={singleStatusSelection}
+          separateDateFilters={separateDateFilters}
           showRequiredBy={showRequiredBy}
           showDate={showDate}
           showStatus={showStatus}
