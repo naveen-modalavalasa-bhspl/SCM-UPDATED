@@ -169,7 +169,7 @@ export default function PicklistForm() {
       <div>
         <PageHeader
           eyebrow="Warehouse"
-          title="New picklist"
+          title="New material fulfilment"
           actions={
             <>
               <Button variant="ghost" onClick={() => nav("..")}>
@@ -180,7 +180,7 @@ export default function PicklistForm() {
                   onClick={() => create.mutate()}
                   disabled={create.isPending || !form.warehouse_id || form.items.length === 0}
                 >
-                  {create.isPending ? "Creating…" : "Create picklist"}
+                  {create.isPending ? "Creating…" : "Create fulfilment"}
                 </Button>
               </Can>
             </>
@@ -189,7 +189,7 @@ export default function PicklistForm() {
 
         <ErrorBanner error={create.error ?? pullIndent.error} />
 
-        <Section title="Picklist">
+        <Section title="Material fulfilment">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="Date">
               <Input type="date" value={form.pick_date} onChange={(e) => set("pick_date", e.target.value)} />
@@ -262,7 +262,7 @@ export default function PicklistForm() {
   /* -------------------------------------------------------- released work -- */
 
   if (isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
-  if (!doc) return <div className="py-16 text-center text-muted">Picklist not found.</div>;
+  if (!doc) return <div className="py-16 text-center text-muted">Material fulfilment not found.</div>;
 
   const lines = doc.items ?? [];
   const progress = percent(doc.picked_lines, doc.total_lines);
@@ -340,7 +340,7 @@ export default function PicklistForm() {
     <div>
       <PageHeader
         eyebrow="Warehouse"
-        title={`Picklist ${doc.pick_no}`}
+        title={`Material fulfilment ${doc.pick_no}`}
         actions={
           <>
             <Button variant="ghost" onClick={() => nav("..")}>
@@ -364,7 +364,7 @@ export default function PicklistForm() {
 
       <ErrorBanner error={release.error ?? pick.error} />
 
-      <MetaCard title="Picklist">
+      <MetaCard title="Material fulfilment">
         <MetaRow label="Number" value={<span className="font-mono">{doc.pick_no}</span>} />
         <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
         <MetaRow label="For" value={`${humanise(doc.ref_type)} ${doc.ref_no ?? ""}`.trim()} />
@@ -394,14 +394,14 @@ export default function PicklistForm() {
           columns={workColumns}
           keyOf={(l) => l.id}
           rowTone={(l) => (l.status === "PICKED" ? "bg-ok-bg/30" : undefined)}
-          empty="This picklist has no lines."
+          empty="This fulfilment has no lines."
         />
       </Section>
 
       <ConfirmModal
         isOpen={confirming}
         title="Complete picking?"
-        message={`${doc.picked_lines} of ${doc.total_lines} lines are picked. Completing hands the picklist on; unpicked lines stay short.`}
+        message={`${doc.picked_lines} of ${doc.total_lines} lines are picked. Completing hands the fulfilment on; unpicked lines stay short.`}
         confirmLabel="Complete"
         busy={complete.isPending}
         error={complete.error}

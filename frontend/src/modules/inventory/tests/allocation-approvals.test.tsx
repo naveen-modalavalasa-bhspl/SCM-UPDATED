@@ -80,4 +80,55 @@ describe("AllocationApprovalsPage", () => {
       expect(mockPost).toHaveBeenCalledWith("/api/allocations/3/approve", { comments: "" });
     });
   });
+
+  it("loads a completed allocation directly from My Decisions without action buttons", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/api/workflow/pending") {
+        return Promise.resolve({ data: { items: [] } });
+      }
+      if (url === "/api/allocations/3") {
+        return Promise.resolve({
+          data: {
+            id: 3,
+            allocation_no: "ALC/0003",
+            indent_id: 12,
+            indent_no: "IND/0012",
+            status: "APPROVED",
+            allocated_by_name: "Inventory Executive",
+            current_approver_name: null,
+            approved_at: "2026-07-28T12:00:00Z",
+            created_at: "2026-07-28T10:00:00Z",
+            items: [{
+              id: 1,
+              indent_item_id: 21,
+              item_id: 5,
+              item_code: "CEMENT",
+              item_name: "Cement",
+              uom_code: "BAG",
+              requested_qty: 100,
+              quantity: 60,
+              warehouse_id: 1,
+              warehouse_name: "Main Store",
+            }],
+          },
+        });
+      }
+      return Promise.reject(new Error(`Unexpected GET ${url}`));
+    });
+
+    render(
+      <QueryClientProvider client={new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      })}>
+        <MemoryRouter initialEntries={["/inventory/allocation-approvals?review=3&decision=1"]}>
+          <AllocationApprovalsPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText("Review ALC/0003")).toBeInTheDocument());
+    expect(screen.getByText("Back to My Decisions")).toBeInTheDocument();
+    expect(screen.queryByText("Approve and reserve")).not.toBeInTheDocument();
+    expect(screen.queryByText("Reject")).not.toBeInTheDocument();
+  });
 });

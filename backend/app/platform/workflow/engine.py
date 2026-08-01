@@ -503,9 +503,16 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     context = context or {}
     requester_position_id = (context.get("requester_position_id")
                              or getattr(user, "active_position_id", None))
-    # The post the raiser is acting under decides the project where HCM fills that in;
-    # today it does not, so this falls through to the raiser's own project.
-    project_id, _project_name = await ladder.project_for(db, requester_position_id, user)
+    # The DOCUMENT's project chooses the ladder when the module knows it. An allocation
+    # is raised by inventory against somebody else's indent, and the person pressing the
+    # button belongs to another project or to none — reading the project off them sent
+    # every such document past its project's ladder and into the fallback.
+    project_id = context.get("project_id")
+    if project_id is None:
+        # The post the raiser is acting under decides the project where HCM fills that
+        # in; today it does not, so this falls through to the raiser's own project.
+        project_id, _project_name = await ladder.project_for(
+            db, requester_position_id, user)
     # No position means no reporting line to climb, and an empty climb reads as "top of
     # the ladder, self-approve". That would hand anyone without a post their own
     # approval, so they take the old path and land on the fallback's admin safety net.

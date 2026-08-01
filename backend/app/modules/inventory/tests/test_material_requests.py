@@ -19,6 +19,8 @@ from sqlalchemy import select
 
 from app.core.exceptions import ValidationError
 from app.modules.inventory import allocations
+from app.modules.warehouse import service as warehouse_service
+from app.modules.warehouse.models import Picking, PickingItem
 from app.modules.inventory.models import (
     NO_BIN, NO_PROJECT, Allocation, MaterialRequest, Reservation, Stock,
 )
@@ -227,6 +229,44 @@ async def test_one_line_can_be_split_across_two_warehouses(db, actor):
         select(Stock).where(Stock.item_id == stocked.id))).scalars().all()
     assert sum(r.reserved_qty for r in rows) == Decimal("60")
     assert all(r.available_qty == Decimal("0") for r in rows)
+
+
+async def test_approval_generates_one_fulfilment_draft_per_warehouse(db, actor):
+    stocked, _bare, main, lip, admin = await _world(db)
+    await _stock(db, stocked, main, 40)
+    await _stock(db, stocked, lip, 20)
+
+    alloc = await allocations.create(db, 55, "IND-55", [
+        _decision(1, stocked, 40, main, 60),
+        _decision(1, stocked, 20, lip, 0),
+    ], actor)
+    await allocations.act(
+        db,
+        alloc.id,
+        ApprovalAction.APPROVED.value,
+        admin,
+        "ok",
+        on_approved=warehouse_service.create_fulfilment_drafts_for_allocation,
+    )
+
+    drafts = (await db.execute(
+        select(Picking).where(Picking.ref_type == "INDENT", Picking.ref_id == 55)
+        .order_by(Picking.warehouse_id)
+    )).scalars().all()
+    assert len(drafts) == 2
+    assert {draft.warehouse_id for draft in drafts} == {main.id, lip.id}
+    assert all(draft.status == "DRAFT" for draft in drafts)
+
+    quantities = (await db.execute(
+        select(Picking.warehouse_id, PickingItem.required_qty)
+        .join(PickingItem, PickingItem.picking_id == Picking.id)
+        .where(Picking.ref_id == 55)
+    )).all()
+    assert {warehouse_id: qty for warehouse_id, qty in quantities} == {
+        main.id: Decimal("40"),
+        lip.id: Decimal("20"),
+    }
+    assert (await warehouse_service.dashboard(db))["open_picklists"] == 2
 
 
 async def test_rejecting_an_allocation_reserves_nothing(db, actor):

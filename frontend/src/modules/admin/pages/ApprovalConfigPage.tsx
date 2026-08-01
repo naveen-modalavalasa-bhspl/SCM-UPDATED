@@ -71,7 +71,8 @@ const positionDepartments = (positions: LadderPosition[]) => {
 function RungPositions({ projectId, roleId, selected, onToggle }: {
   projectId: number | null;
   roleId: number;
-  selected: number[];
+  /** null — nothing ticked — means the rung is the whole rank. */
+  selected: number[] | null;
   onToggle: (positionIds: number[], selected: boolean) => void;
 }) {
   const positions = useQuery({
@@ -80,7 +81,7 @@ function RungPositions({ projectId, roleId, selected, onToggle }: {
     enabled: projectId !== null,
     staleTime: HCM_STALE_MS,
   });
-  const selectedIds = new Set(selected);
+  const selectedIds = new Set(selected ?? []);
 
   return (
     <div className="mb-4">
@@ -88,8 +89,13 @@ function RungPositions({ projectId, roleId, selected, onToggle }: {
         Eligible approver positions
       </div>
       <p className="mb-3 text-xs text-muted">
-        Selecting a department selects every position in it. You can still
-        adjust individual positions afterwards.
+        {selected === null
+          ? "Nothing ticked means every position at this rank approves — including "
+            + "posts held by people outside this project, which a reporting line often "
+            + "climbs through. Tick positions only to narrow it."
+          : "Selecting a department selects every position in it. You can still "
+            + "adjust individual positions afterwards. Untick them all to go back to "
+            + "the whole rank."}
       </p>
       {positions.isLoading && <div className="text-sm text-muted">Loading positions…</div>}
       {positions.isError && (
@@ -247,6 +253,9 @@ export function ApprovalConfigPage() {
     setRungs((current) => current.map((rung, i) =>
       i === index ? { ...rung, ...values } : rung));
 
+  /** Untouched, a rung is the whole rank (null). Ticking a post narrows it to a list;
+   *  clearing the last tick hands it back to the rank rather than leaving a rung with
+   *  nobody eligible, which is not a state anyone means to save. */
   const togglePositions = (index: number, positionIds: number[], selected: boolean) =>
     setRungs((current) => current.map((rung, i) => {
       if (i !== index) return rung;
@@ -255,7 +264,7 @@ export function ApprovalConfigPage() {
         if (selected) next.add(positionId);
         else next.delete(positionId);
       }
-      return { ...rung, selected_position_ids: [...next] };
+      return { ...rung, selected_position_ids: next.size ? [...next] : null };
     }));
 
   const projectName = options.data?.projects.find((p) => p.id === projectId)?.name ?? "";
@@ -401,7 +410,9 @@ export function ApprovalConfigPage() {
                   className="min-h-11 rounded-lg px-3 text-xs font-semibold text-brand"
                   onClick={() => setAdvanced(advanced === index ? null : index)}
                 >
-                  {(rung.selected_position_ids ?? []).length} of {rung.position_count} positions
+                  {rung.selected_position_ids === null
+                    ? `All ${rung.position_count} positions`
+                    : `${rung.selected_position_ids.length} of ${rung.position_count} positions`}
                   {rung.conditions.length > 0
                     ? ` · ${rung.conditions.length} condition${rung.conditions.length > 1 ? "s" : ""}`
                     : ""}

@@ -15,9 +15,11 @@ const mockPost = api.post as unknown as ReturnType<typeof vi.fn>;
 
 // A rung carries the toggle and the counts; the holders' names come from the separate,
 // project-keyed ranks read, and the positions only when a rung is opened.
+// selected_position_ids null is the server's default: the rung is the whole rank, and
+// the climb may pass through any post at it.
 const rung = (level: number, name: string, enabled: boolean, dead = false) => ({
   sequence: level, name, position_role_id: level, is_enabled: enabled,
-  position_count: 4, holder_count: dead ? 0 : 1, selected_position_ids: [],
+  position_count: 4, holder_count: dead ? 0 : 1, selected_position_ids: null,
   is_dead: dead, conditions: [],
 });
 const rank = (level: number, name: string, holder: string) => ({
@@ -182,10 +184,54 @@ describe("ApprovalConfigPage", () => {
       .filter(([url]) => url === "/api/workflow/ladders/rank-positions");
     expect(positionCalls()).toHaveLength(0);
 
-    fireEvent.click(screen.getByText(/0 of 4 positions/));
+    fireEvent.click(screen.getByText(/All 4 positions/));
 
     await waitFor(() => expect(screen.getByText("RM Kadapa")).toBeInTheDocument());
     expect(positionCalls()[0][1].params).toMatchObject({ role_id: 3, project_id: 500 });
+  });
+
+  it("leaves a rung on the whole rank until a position is ticked", async () => {
+    // The rung must not arrive pre-narrowed: the reporting line a request climbs runs
+    // through posts this project's own people do not hold, and a pinned rung drops
+    // them silently while still showing as switched on.
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/api/workflow/ladders/options") {
+        return Promise.resolve({ data: OPTIONS });
+      }
+      if (url === "/api/workflow/ladders/ranks") {
+        return Promise.resolve({ data: { ranks: RANKS } });
+      }
+      if (url === "/api/workflow/ladders/rank-positions") {
+        return Promise.resolve({
+          data: {
+            positions: [{ id: 603, name: "RM Kadapa", department_id: 9,
+                          department_name: "Operations", holders: [] }],
+          },
+        });
+      }
+      return Promise.resolve({
+        data: {
+          workflow_id: 7, version: 1, project_id: 500, doc_type: "INDENT",
+          module: "Indents", is_new: false, in_flight: 0,
+          rungs: [rung(3, "Regional Manager", true)],
+        },
+      });
+    });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/All 4 positions/)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/All 4 positions/));
+    await waitFor(() => expect(screen.getByText("RM Kadapa")).toBeInTheDocument());
+
+    const post = screen.getByRole("checkbox", { name: /RM Kadapa/ });
+    fireEvent.click(post);
+    await waitFor(() =>
+      expect(screen.getByText(/1 of 4 positions/)).toBeInTheDocument());
+
+    // Clearing the last tick hands the rung back to the rank, never leaves it empty.
+    fireEvent.click(post);
+    await waitFor(() =>
+      expect(screen.getByText(/All 4 positions/)).toBeInTheDocument());
   });
 
   it("explains that an unsaved project starts from its own ranks", async () => {

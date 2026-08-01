@@ -633,9 +633,16 @@ async def project_for(db: AsyncSession, position_id: int | None,
 
 # ---------------- building and saving ----------------
 
-def build_stages(ranks: list[dict], position_ids: dict[int, list[int]],
+def build_stages(ranks: list[dict],
                  enabled_role_ids: set[int] | None = None) -> list[dict]:
-    """Turn a list of ranks into ladder rungs, everything on unless told otherwise."""
+    """Turn a list of ranks into ladder rungs, everything on unless told otherwise.
+
+    `selected_position_ids` is None — the rung is the whole RANK until an admin
+    deliberately narrows it. It used to be pre-filled with the rank's posts that this
+    project's own people hold, which silently made every rung a pinned list; the climb
+    then dropped any ancestor outside it, and one of the five live Regional Managers is
+    exactly that (his holder is on no project in the mirror).
+    """
     return [{
         "sequence": index + 1,
         "name": rank["role_name"],
@@ -645,7 +652,7 @@ def build_stages(ranks: list[dict], position_ids: dict[int, list[int]],
         "position_count": rank.get("position_count", 0),
         "holder_count": rank.get("holder_count", 0),
         "is_dead": not rank.get("holder_count"),
-        "selected_position_ids": position_ids.get(rank["role_id"], []),
+        "selected_position_ids": None,
         "conditions": [],
     } for index, rank in enumerate(ranks)]
 
@@ -657,7 +664,6 @@ async def autobuild(db: AsyncSession, project_id: int | None, doc_type: str) -> 
     what turns it into version 1.
     """
     ranks = await project_ranks(db, project_id)
-    position_ids = await project_position_ids(db, project_id)
     return {
         "workflow_id": None,
         "version": 0,
@@ -665,7 +671,7 @@ async def autobuild(db: AsyncSession, project_id: int | None, doc_type: str) -> 
         "doc_type": doc_type,
         "module": MODULE_BY_DOC_TYPE.get(doc_type, "Other"),
         "is_new": True,
-        "stages": build_stages(ranks, position_ids),
+        "stages": build_stages(ranks),
     }
 
 

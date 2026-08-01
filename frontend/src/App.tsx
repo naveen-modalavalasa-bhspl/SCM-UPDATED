@@ -19,6 +19,7 @@ import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPa
 import { ApprovalsPage, MyDecisionsPage, TeamQueuePage } from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
+import { PODetailPage } from "@/modules/procurement/pages/PODetailPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
 // sub-pages, so these paths hand the whole subtree to it.
 import { WarehouseModule } from "@/modules/warehouse";
@@ -94,6 +95,7 @@ function AppRoutes() {
             somewhere real instead of on a blank page. */}
         <Route path="approvals/delegations" element={<Navigate to="/approvals" replace />} />
         <Route path="pos" element={<POListPage />} />
+        <Route path="pos/:id" element={<PODetailPage />} />
         <Route path="grn/*" element={<WarehouseModule />} />
         <Route path="stock/*" element={<WarehouseModule />} />
         <Route path="issues/*" element={<WarehouseModule />} />

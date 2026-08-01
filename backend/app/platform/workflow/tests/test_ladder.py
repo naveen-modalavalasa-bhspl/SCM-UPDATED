@@ -174,6 +174,60 @@ async def test_role_rung_can_limit_approval_to_selected_positions(db):
     assert [link["position_id"] for link in other_branch.resolved_chain] == [601]
 
 
+async def test_the_screens_draft_does_not_pin_a_rank_to_this_projects_own_posts(db):
+    """A rung the admin never narrowed means ANY post at that rank.
+
+    The climb walks HCM's real tree, and that tree runs through posts whose holder HCM
+    tags to another project or to none at all — the live mirror does exactly that for
+    one of the five Regional Managers. A draft that quietly pinned each rung to the
+    posts this project's own people happen to hold dropped such an ancestor silently,
+    in the preview and again at submit, with the rung still showing as switched on.
+    """
+    holders = await _org(db, with_second_branch=True)
+    # Branch 1's Regional Manager: HCM has him on no project, so 603 is not among the
+    # posts project 500's people hold. Branch 2's RM (613) is, so the rank still shows.
+    holders[603].project_id = None
+    holders[603].project_name = None
+    await db.flush()
+
+    draft = await ladder_config.get_ladder(db, PROJECT, "INDENT")
+    await ladder_config.save_ladder(db, LadderIn(
+        project_id=PROJECT, doc_type="INDENT",
+        rungs=[{"position_role_id": rung["position_role_id"], "name": rung["name"],
+                "is_enabled": rung["is_enabled"],
+                "selected_position_ids": rung["selected_position_ids"],
+                "conditions": []}
+               for rung in draft["rungs"]],
+    ), holders[601])
+
+    instance = await engine.start(db, "INDENT", 1,
+                                  {"requester_position_id": 606}, holders[606])
+
+    assert "Regional Manager" in _chain_ranks(instance)
+
+
+async def test_the_documents_own_project_chooses_the_ladder(db):
+    """A ladder belongs to the document's project, not to whoever pressed the button.
+
+    Inventory raises the allocation for somebody else's indent, and the person doing it
+    is a storekeeper or an admin whose own HCM project is another one — or none. Reading
+    the project off the raiser sent every one of those straight past the project's
+    configured ladder and into the fallback.
+    """
+    holders = await _org(db)
+    await _save(db, holders[601], off={"OE", "District Manager"})
+    outsider = HcmEmployee(id=901, full_name="Central Stores", emp_code="E901",
+                           is_active=True, synced_at=utcnow())
+    db.add(outsider)
+    await db.flush()
+
+    instance = await engine.start(
+        db, "INDENT", 7,
+        {"requester_position_id": 606, "project_id": PROJECT}, outsider)
+
+    assert _chain_ranks(instance) == ["Regional Manager", "SPH", "COO"]
+
+
 async def test_a_rung_nobody_fills_is_skipped(db):
     """The Regional Manager's seat is vacant. The indent climbs past it rather than
     stalling — a vacant post must never strand a document."""

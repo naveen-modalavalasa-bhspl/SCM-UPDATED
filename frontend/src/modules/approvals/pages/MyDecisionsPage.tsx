@@ -7,7 +7,7 @@ import {
   Button, Card, Input, PageHeader, ResponsiveList, Select, StatusPill, type Column,
 } from "@/shared/components";
 import { approvalsApi } from "../api";
-import { approvalDocumentPath } from "../documentRoutes";
+import { approvalDecisionDocumentPath } from "../documentRoutes";
 import type { ApprovalDecisionRow } from "../types";
 import { ApprovalPager } from "../components/Pager";
 
@@ -41,7 +41,7 @@ export function MyDecisionsPage() {
       && (!term || [row.doc_no, row.requester, row.comments, row.doc_type]
         .some((value) => String(value ?? "").toLowerCase().includes(term))));
   }, [decision, query.data?.items, search]);
-  const openDecision = (row: ApprovalDecisionRow) => nav(approvalDocumentPath(row));
+  const openDecision = (row: ApprovalDecisionRow) => nav(approvalDecisionDocumentPath(row));
   const columns: Column<ApprovalDecisionRow>[] = [
     { key: "date", header: "Decision date", render: (row) => row.decision_at ? new Date(row.decision_at).toLocaleString() : "—" },
     { key: "document", header: "Document", render: (row) => <div><strong className="font-mono text-ink">{row.doc_no ?? `#${row.doc_id}`}</strong><p className="text-xs text-muted">{row.doc_type.replace(/_/g, " ")}</p></div> },

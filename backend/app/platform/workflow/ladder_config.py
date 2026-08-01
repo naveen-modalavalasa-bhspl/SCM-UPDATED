@@ -57,13 +57,18 @@ def _conditions_out(rows: list[StageCondition]) -> list[dict]:
                                     ladder.APPROVER_POSITION_FIELD}]
 
 
-def _selected_positions_out(rows: list[StageCondition],
-                            default_position_ids: list[int]) -> list[int]:
+def _selected_positions_out(rows: list[StageCondition]) -> list[int] | None:
+    """The posts an admin narrowed this rung to, or None for the whole rank.
+
+    None is not "nothing selected": it is the default, and it means any post at the
+    rank. Filling it in for the caller is what used to hide an ancestor the project's
+    own people do not hold.
+    """
     configured = any(
         row.field_name == ladder.APPROVER_SCOPE_FIELD for row in rows
     )
     if not configured:
-        return default_position_ids
+        return None
     return [
         int(row.field_value) for row in rows
         if row.field_name == ladder.APPROVER_POSITION_FIELD
@@ -121,21 +126,11 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
     summary = await ladder.project_rank_summary(db, project_id)
     conditions_by_stage = await _conditions_by_stage(db, [row.id for row in rows])
 
-    # Position ids are needed only where they are not already stored: a rung saved
-    # before positions could be pinned, and a rank HCM has added since. Normally both
-    # sets are empty and this is no query at all.
     known = {row.position_role_id for row in rows}
-    unpinned = {
-        row.position_role_id for row in rows
-        if not any(condition.field_name == ladder.APPROVER_SCOPE_FIELD
-                   for condition in conditions_by_stage.get(row.id, []))
-    }
     added = sorted(
         (rank for role_id, rank in summary.items() if role_id not in known),
         key=lambda rank: rank["role_name"] or "",
     )
-    position_ids = await ladder.project_position_ids(
-        db, project_id, unpinned | {rank["role_id"] for rank in added})
 
     rungs = []
     for row in rows:
@@ -148,8 +143,7 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
             "is_enabled": row.is_enabled,
             "position_count": rank.get("position_count", 0),
             "holder_count": rank.get("holder_count", 0),
-            "selected_position_ids": _selected_positions_out(
-                stored, position_ids.get(row.position_role_id, [])),
+            "selected_position_ids": _selected_positions_out(stored),
             # A rung nobody in this project fills any more: HCM removed or renamed the
             # positions under it. Flagged rather than silently skipped.
             "is_dead": not rank.get("holder_count"),
@@ -166,7 +160,7 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
             "is_enabled": False,
             "position_count": rank["position_count"],
             "holder_count": rank["holder_count"],
-            "selected_position_ids": position_ids.get(rank["role_id"], []),
+            "selected_position_ids": None,
             "is_dead": not rank["holder_count"],
             "is_new_rank": True,
             "conditions": [],
@@ -358,8 +352,7 @@ async def copy_ladder(db: AsyncSession, data: LadderCopyIn, user) -> dict:
         ranks = await ladder.project_ranks(db, project_id)
         if not ranks:
             continue
-        position_ids = await ladder.project_position_ids(db, project_id)
-        rungs = ladder.build_stages(ranks, position_ids, enabled)
+        rungs = ladder.build_stages(ranks, enabled)
         await save_ladder(db, LadderIn(
             project_id=project_id, doc_type=data.doc_type,
             rungs=[{"position_role_id": r["position_role_id"], "name": r["name"],

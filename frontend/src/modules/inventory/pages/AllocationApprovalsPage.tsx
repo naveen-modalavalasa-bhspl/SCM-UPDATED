@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader,
@@ -18,8 +18,10 @@ const fmt = (value: number) =>
 
 export function AllocationApprovalsPage() {
   const qc = useQueryClient();
+  const nav = useNavigate();
   const [searchParams] = useSearchParams();
   const reviewId = Number(searchParams.get("review"));
+  const decisionView = searchParams.get("decision") === "1";
   const openedFromInbox = useRef(false);
   const [selected, setSelected] = useState<Allocation | null>(null);
   const [comments, setComments] = useState("");
@@ -31,6 +33,14 @@ export function AllocationApprovalsPage() {
       const pending = await getPendingInventoryApprovals();
       return Promise.all(pending.map((item) => getAllocation(item.doc_id)));
     },
+  });
+
+  // Completed allocations are no longer present in the pending queue. My Decisions
+  // therefore loads the selected document directly and presents this dialog read-only.
+  const decidedAllocation = useQuery({
+    queryKey: ["inventory", "allocation-decision", reviewId],
+    queryFn: () => getAllocation(reviewId),
+    enabled: decisionView && Number.isFinite(reviewId) && reviewId > 0,
   });
 
   const act = useMutation({
@@ -49,13 +59,22 @@ export function AllocationApprovalsPage() {
   });
 
   useEffect(() => {
-    if (openedFromInbox.current || !Number.isFinite(reviewId) || reviewId <= 0 || !queue.data) return;
-    const selectedAllocation = queue.data.find((row) => row.id === reviewId);
+    if (openedFromInbox.current || !Number.isFinite(reviewId) || reviewId <= 0) return;
+    const selectedAllocation = decisionView
+      ? decidedAllocation.data
+      : queue.data?.find((row) => row.id === reviewId);
     if (selectedAllocation) {
       openedFromInbox.current = true;
       setSelected(selectedAllocation);
     }
-  }, [queue.data, reviewId]);
+  }, [decidedAllocation.data, decisionView, queue.data, reviewId]);
+
+  const closeSelected = () => {
+    setSelected(null);
+    setComments("");
+    setError(null);
+    if (decisionView) nav("/approvals/decisions");
+  };
 
   const columns: Column<Allocation>[] = [
     {
@@ -102,9 +121,9 @@ export function AllocationApprovalsPage() {
         that quantity; any shortage becomes one Material Request.
       </p>
 
-      {queue.error ? (
+      {queue.error || decidedAllocation.error ? (
         <div className="rounded-lg bg-bad-bg p-4 text-sm text-bad">
-          {(queue.error as Error).message}
+          {((decidedAllocation.error || queue.error) as Error).message}
         </div>
       ) : (
         <Card className="p-2">
@@ -140,7 +159,7 @@ export function AllocationApprovalsPage() {
 
       <Modal
         isOpen={selected !== null}
-        onOpenChange={() => setSelected(null)}
+        onOpenChange={(open) => { if (!open) closeSelected(); }}
         placement="center"
         scrollBehavior="inside"
         size="2xl"
@@ -190,29 +209,31 @@ export function AllocationApprovalsPage() {
                   </table>
                 </div>
 
-                <Field label="Comments">
+                {!decisionView && <Field label="Comments">
                   <Input
                     value={comments}
                     onChange={(event) => setComments(event.target.value)}
                     placeholder="Optional reason or instruction"
                   />
-                </Field>
+                </Field>}
               </ModalBody>
               <ModalFooter>
-                <Button variant="ghost" onClick={onClose}>Cancel</Button>
-                <Button
+                <Button variant="ghost" onClick={decisionView ? closeSelected : onClose}>
+                  {decisionView ? "Back to My Decisions" : "Cancel"}
+                </Button>
+                {!decisionView && <Button
                   variant="danger"
                   disabled={act.isPending}
                   onClick={() => act.mutate({ approve: false })}
                 >
                   <XCircle className="h-4 w-4" /> Reject
-                </Button>
-                <Button
+                </Button>}
+                {!decisionView && <Button
                   disabled={act.isPending}
                   onClick={() => act.mutate({ approve: true })}
                 >
                   <CheckCircle2 className="h-4 w-4" /> Approve and reserve
-                </Button>
+                </Button>}
               </ModalFooter>
             </>
           )}

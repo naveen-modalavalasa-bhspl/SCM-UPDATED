@@ -500,6 +500,10 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
             "doc_no": mr.mr_no,
             "doc_summary": f"Material request {mr.mr_no}",
             "department_id": mr.department_id,
+            # The indent's project, carried down through the allocation: the MR ladder
+            # belongs to the project being served, not to whoever approved the
+            # allocation that raised it.
+            "project_id": mr.project_id,
             "requester_position_id": ctx.get("requester_position_id"),
             "total_quantity": float(sum(_d(s["quantity"]) for s in shortfalls)),
         },

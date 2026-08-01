@@ -255,7 +255,9 @@ export interface LadderRung {
    *  themselves are loaded only when the rung is opened — a live project has ~3,400. */
   position_count: number;
   holder_count: number;
-  selected_position_ids: number[];
+  /** null — the default — is every post at this rank. A list narrows the rung to
+   *  exactly those posts, which also excludes any ancestor outside them. */
+  selected_position_ids: number[] | null;
   /** Nobody in this project holds a position at this rank any more. */
   is_dead?: boolean;
   /** HCM added this rank after the ladder was saved; offered switched off. */

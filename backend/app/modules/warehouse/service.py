@@ -2206,15 +2206,22 @@ async def list_pickings(db: AsyncSession, params: PageParams, *, status: str | N
 
 
 async def get_picking(db: AsyncSession, picking_id: int) -> m.Picking:
-    return await _load(db, m.Picking, picking_id, "Picklist", m.Picking.items)
+    return await _load(db, m.Picking, picking_id, "Material fulfilment", m.Picking.items)
 
 
-async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Picking:
+async def _build_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Picking:
+    """Build one material-fulfilment draft without committing it.
+
+    Keeping construction separate from the public create endpoint lets allocation
+    approval create every warehouse draft in the same transaction as its stock
+    reservations. A split allocation therefore either creates all of its drafts or
+    none of them.
+    """
     wh = await _warehouse(db, data.warehouse_id)
     if not data.items:
-        raise ValidationError("A picklist with no lines gives the picker nothing to do")
+        raise ValidationError("A material fulfilment with no lines gives the warehouse nothing to do")
     if data.ref_type == "INDENT" and not data.ref_id:
-        raise ValidationError("An indent picklist needs an indent reference")
+        raise ValidationError("An indent fulfilment needs an indent reference")
 
     if data.ref_type == "INDENT" and data.ref_id:
         requested_by_item: dict[int, Decimal] = {}
@@ -2232,7 +2239,7 @@ async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
             )
             if required > held:
                 raise ValidationError(
-                    f"Item {item_id}: picklist asks for {required}, but only {held} "
+                    f"Item {item_id}: fulfilment asks for {required}, but only {held} "
                     "is reserved for this indent in the warehouse."
                 )
 
@@ -2276,8 +2283,44 @@ async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
     await write_audit(db, entity="out_picking", entity_id=picking.id, entity_no=picking.pick_no,
                       action=AuditAction.CREATE, actor=user,
                       after={"status": picking.status, "lines": picking.total_lines})
+    return picking
+
+
+async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Picking:
+    picking = await _build_picking(db, data, user)
     await db.commit()
     return await get_picking(db, picking.id)
+
+
+async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user) -> list[m.Picking]:
+    """Create one warehouse fulfilment draft per warehouse in an approved allocation.
+
+    Allocation lines are combined by item within a warehouse. The underlying picking
+    tables and API names remain unchanged for compatibility; this is the automatic
+    Inventory -> Warehouse handoff exposed to users as Material Fulfilment.
+    """
+    by_warehouse: dict[int, dict[int, Decimal]] = {}
+    for line in alloc.items:
+        qty = _d(line.quantity)
+        if qty <= ZERO or not line.warehouse_id:
+            continue
+        by_item = by_warehouse.setdefault(line.warehouse_id, {})
+        by_item[line.item_id] = by_item.get(line.item_id, ZERO) + qty
+
+    drafts: list[m.Picking] = []
+    for warehouse_id, quantities in by_warehouse.items():
+        data = s.PickingWrite(
+            pick_date=date.today(),
+            warehouse_id=warehouse_id,
+            ref_type="INDENT",
+            ref_id=alloc.indent_id,
+            items=[
+                s.PickingItemWrite(item_id=item_id, required_qty=qty)
+                for item_id, qty in quantities.items()
+            ],
+        )
+        drafts.append(await _build_picking(db, data, user))
+    return drafts
 
 
 async def _warehouse_reference_no(
@@ -2300,7 +2343,7 @@ async def _warehouse_reference_no(
 
 async def release_picking(db: AsyncSession, picking_id: int, user) -> m.Picking:
     picking = await get_picking(db, picking_id)
-    _guard(picking.status, {PickingStatus.DRAFT.value}, "release", "picklist")
+    _guard(picking.status, {PickingStatus.DRAFT.value}, "release", "material fulfilment")
     picking.status = PickingStatus.RELEASED.value
 
     await write_audit(db, entity="out_picking", entity_id=picking.id, entity_no=picking.pick_no,
@@ -2321,7 +2364,7 @@ async def pick_line(db: AsyncSession, picking_id: int, line_id: int, data: s.Pic
     """
     picking = await get_picking(db, picking_id)
     _guard(picking.status, {PickingStatus.RELEASED.value, PickingStatus.IN_PROGRESS.value},
-           "pick against", "picklist")
+           "pick against", "material fulfilment")
 
     line = next((l for l in picking.items if l.id == line_id), None)
     if line is None:
@@ -2368,7 +2411,7 @@ async def pick_line(db: AsyncSession, picking_id: int, line_id: int, data: s.Pic
 async def complete_picking(db: AsyncSession, picking_id: int, user) -> m.Picking:
     picking = await get_picking(db, picking_id)
     _guard(picking.status, {PickingStatus.IN_PROGRESS.value, PickingStatus.RELEASED.value},
-           "complete", "picklist")
+           "complete", "material fulfilment")
     if picking.picked_lines == 0:
         raise ValidationError("Nothing has been picked yet")
 
@@ -2603,7 +2646,7 @@ async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     indent = await db.get(Indent, data.indent_id) if data.indent_id else None
     picking = await get_picking(db, data.picking_id) if data.picking_id else None
     if data.picking_id and picking is None:
-        raise NotFoundError(f"Picklist {data.picking_id} not found")
+        raise NotFoundError(f"Material fulfilment {data.picking_id} not found")
     if picking:
         if picking.warehouse_id != wh.id:
             raise ValidationError(
@@ -2612,7 +2655,7 @@ async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
         _guard(
             picking.status,
             {PickingStatus.PICKED.value, PickingStatus.COMPLETED.value},
-            "raise an issue from", "picklist",
+            "raise an issue from", "material fulfilment",
         )
         existing = await db.scalar(
             select(m.MaterialIssue.id).where(
@@ -4256,7 +4299,11 @@ async def dashboard(db: AsyncSession, warehouse_id: int | None = None) -> dict:
         m.PutawayTask.is_active.is_(True))
     open_picks = await count(
         m.Picking, m.Picking.warehouse_id,
-        m.Picking.status.in_([PickingStatus.RELEASED.value, PickingStatus.IN_PROGRESS.value]))
+        m.Picking.status.in_([
+            PickingStatus.DRAFT.value,
+            PickingStatus.RELEASED.value,
+            PickingStatus.IN_PROGRESS.value,
+        ]))
     pending_issues = await count(
         m.MaterialIssue, m.MaterialIssue.warehouse_id,
         m.MaterialIssue.status.in_([IssueStatus.PENDING_APPROVAL.value, IssueStatus.APPROVED.value]))
@@ -4787,7 +4834,7 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
     _guard(
         picking.status,
         {PickingStatus.PICKED.value, PickingStatus.COMPLETED.value},
-        "create an issue from", "picklist",
+        "create an issue from", "material fulfilment",
     )
     indent_id = picking.ref_id if picking.ref_type == "INDENT" else None
     indent = await db.get(Indent, indent_id) if indent_id else None

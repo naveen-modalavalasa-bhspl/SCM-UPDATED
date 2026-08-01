@@ -579,6 +579,14 @@ async def indent_access_condition(db: AsyncSession, user):
     )
     visible.append(Indent.id.in_(participant_instances))
 
+    # Inventory works the fulfilment queue for requests it neither raised nor approved,
+    # and the SCM department sits on posts with no children, so no branch above can ever
+    # show them one. Holding the SCM read permissions does — and only from the point the
+    # request reaches inventory, never before approval.
+    scm_statuses = await _scm_stage_statuses(db, user)
+    if scm_statuses:
+        visible.append(Indent.status.in_(scm_statuses))
+
     return or_(*visible)
 
 
@@ -871,6 +879,7 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         "doc_no": indent.indent_no,
         "doc_summary": f"Indent {indent.indent_no}",
         "department_id": indent.department_id,
+        "project_id": indent.project_id,
         "requester_position_id": indent.position_id,
         "requester_position_name": indent.position_name,
         "total_quantity": float(sum(i.quantity for i in indent.items)),
@@ -2871,6 +2880,7 @@ async def decide_allocation(db: AsyncSession, body, user):
         [d.model_dump() for d in body.decisions], user,
         ctx={
             "department_id": indent.department_id,
+            "project_id": indent.project_id,
             "remarks": body.remarks,
             # The code-level ALLOCATION fallback is the allocator's reporting
             # manager. Without this, a perfectly healthy hierarchy was skipped and
@@ -2896,7 +2906,20 @@ async def get_allocation(db: AsyncSession, allocation_id: int):
 async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, user,
                             comments: str = ""):
     """Approve or reject. Approval reserves the stock and updates the indent."""
-    alloc = await allocations.act(db, allocation_id, action, user, comments)
+    # Imported at the handoff rather than module load: Warehouse reads indent models
+    # for fulfilment sources, so a top-level import would make the dependency circular.
+    from app.modules.warehouse import service as warehouse_service
+
+    # Read the indent first: approval can raise a material request, and only this side
+    # of the chain can tell inventory which project that request belongs to.
+    existing = await allocations.get(db, allocation_id)
+    indent = await db.get(Indent, existing.indent_id)
+    alloc = await allocations.act(
+        db, allocation_id, action, user, comments,
+        ctx={"project_id": getattr(indent, "project_id", None),
+             "project_name": getattr(indent, "project_name", None)},
+        on_approved=warehouse_service.create_fulfilment_drafts_for_allocation,
+    )
 
     if alloc.status == AllocationStatus.APPROVED.value:
         indent = await db.get(Indent, alloc.indent_id)

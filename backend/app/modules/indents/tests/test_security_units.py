@@ -220,6 +220,7 @@ async def access_sql(
     descendants=None,
     project_id=900,
     employee_id=10,
+    permissions=None,
 ):
     monkeypatch.setattr(
         service,
@@ -239,7 +240,43 @@ async def access_sql(
         "get_user_roles",
         AsyncMock(return_value=[role(code) for code in role_codes or []]),
     )
+    monkeypatch.setattr(
+        service.rbac_service,
+        "get_user_permissions",
+        AsyncMock(return_value=set(permissions or [])),
+    )
     return sql_text(await service.indent_access_condition(None, user(employee_id=employee_id)))
+
+
+@pytest.mark.asyncio
+async def test_inventory_sees_requests_that_have_reached_the_scm_stages(monkeypatch):
+    """The fulfilment queue is worked by people who neither raised nor approved.
+
+    A warehouse manager is not the requester, has nobody reporting to him (the whole
+    SCM department sits on posts with no children) and never appears in the indent's
+    approval chain, so every other branch of this predicate excludes him and his queue
+    came back empty. Holding the SCM read permissions is what puts an approved request
+    in front of him — and only from the point it reaches inventory.
+    """
+    text = await access_sql(
+        monkeypatch,
+        role_name="MANAGER",
+        permissions=["allocation.view"],
+    )
+
+    assert "ind_indents.status IN ('APPROVED', 'AWAITING_ALLOCATION'" in text
+    # Never before approval: a draft or a request still climbing its ladder is not
+    # inventory's business.
+    assert "'DRAFT'" not in text
+    assert "'PENDING_APPROVAL'" not in text
+    assert "'REJECTED'" not in text
+
+
+@pytest.mark.asyncio
+async def test_indents_before_approval_stay_out_of_inventorys_view(monkeypatch):
+    text = await access_sql(monkeypatch, role_name="MANAGER")
+
+    assert "ind_indents.status IN" not in text
 
 
 @pytest.mark.asyncio

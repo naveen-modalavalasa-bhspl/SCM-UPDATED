@@ -29,7 +29,7 @@ export default function Picklist() {
   const columns: Column<Picking>[] = [
     {
       key: "no",
-      header: "Picklist",
+      header: "Fulfilment",
       render: (r) => (
         <div>
           <div className="font-mono text-xs font-semibold text-ink">{r.pick_no}</div>
@@ -81,19 +81,19 @@ export default function Picklist() {
 
   return (
     <DocumentList<Picking>
-      title="Picking"
+      title="Material fulfilment"
       queryKey="wh-pickings"
       fetch={listPickings}
       columns={columns}
       keyOf={(r) => r.id}
       searchIn={(r) => [r.pick_no, r.ref_no, r.warehouse_name, r.assigned_to_name]}
-      searchPlaceholder="Search picklist, reference or picker…"
+      searchPlaceholder="Search fulfilment, reference or picker…"
       statuses={STATUSES}
       createTo="new"
-      createLabel="New picklist"
+      createLabel="New fulfilment"
       createPermission="issue.create"
       onRowClick={(r) => nav(String(r.id))}
-      empty="No picklists match these filters."
+      empty="No material fulfilments match these filters."
       kpis={(rows) => [
         { label: "Released", value: rows.filter((r) => r.status === "RELEASED").length, tone: "text-warn" },
         { label: "In progress", value: rows.filter((r) => r.status === "IN_PROGRESS").length },

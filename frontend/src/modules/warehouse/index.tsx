@@ -68,6 +68,10 @@ export function WarehouseModule() {
         <Route path="stock-movements" element={<StockMovements />} />
         <Route path="stock-movements/new" element={<StockMovementForm />} />
 
+        <Route path="fulfilment" element={<Picklist />} />
+        <Route path="fulfilment/new" element={<PicklistForm />} />
+        <Route path="fulfilment/:id" element={<PicklistForm />} />
+        {/* Legacy URLs stay valid for bookmarks while the UI uses the clearer name. */}
         <Route path="picklist" element={<Picklist />} />
         <Route path="picklist/new" element={<PicklistForm />} />
         <Route path="picklist/:id" element={<PicklistForm />} />

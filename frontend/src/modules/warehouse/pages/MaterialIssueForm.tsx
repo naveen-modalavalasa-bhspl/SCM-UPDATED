@@ -528,7 +528,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
           <MetaRow label="Stock" value={doc.is_stock_posted ? `Posted ${fmtDateTime(doc.posted_at)}` : "Not posted"} />
           <MetaRow label="Against indent" value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
-          <MetaRow label="Picklist" value={<span className="font-mono">{doc.pick_no ?? "—"}</span>} />
+          <MetaRow label="Fulfilment" value={<span className="font-mono">{doc.pick_no ?? "—"}</span>} />
           <MetaRow label="Issued by" value={doc.issued_by_name} />
           <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name} />
           <MetaRow

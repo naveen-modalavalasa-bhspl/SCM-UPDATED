@@ -143,15 +143,20 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
     await db.flush()
 
     for d in decisions:
+        quantity = _d(d.get("quantity"))
         warehouse = (await db.get(Warehouse, d["warehouse_id"])
                      if d.get("warehouse_id") else None)
+        if d.get("warehouse_id") and warehouse is None:
+            raise ValidationError(f"Warehouse {d['warehouse_id']} not found")
+        if quantity > ZERO and warehouse is None:
+            raise ValidationError("A positive allocation quantity needs a warehouse")
         db.add(AllocationItem(
             allocation_id=alloc.id,
             indent_item_id=d["indent_item_id"], item_id=d["item_id"],
             item_code=d.get("item_code"), item_name=d.get("item_name"),
             uom_code=d.get("uom_code"),
             requested_qty=_d(d.get("requested_qty")),
-            quantity=_d(d.get("quantity")),
+            quantity=quantity,
             warehouse_id=d.get("warehouse_id"),
             warehouse_name=warehouse.name if warehouse else None,
             project_id=d.get("project_id") or NO_PROJECT,
@@ -166,6 +171,9 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
             "doc_summary": f"Stock allocation for {indent_no}",
             "department_id": alloc.department_id,
             "requester_position_id": ctx.get("requester_position_id"),
+            # The indent's project, not the allocator's: inventory allocates for every
+            # project, and its own people are rarely tagged to the one being served.
+            "project_id": ctx.get("project_id"),
         },
         user=user,
     )
@@ -210,8 +218,15 @@ async def list_allocations(db: AsyncSession, params: PageParams,
 
 
 async def act(db: AsyncSession, allocation_id: int, action: str, user,
-              comments: str = "") -> Allocation:
-    """Approve or reject the decision. Approval is what finally moves stock."""
+              comments: str = "", ctx: dict | None = None,
+              on_approved=None) -> Allocation:
+    """Approve or reject the decision. Approval is what finally moves stock.
+
+    `ctx` carries what only the indent knows — its project — down to the material
+    request approval raises. Inventory cannot read ind_indents itself (it is the base
+    module), so the caller in indents hands it over.
+    """
+    ctx = ctx or {}
     alloc = await get(db, allocation_id)
     if alloc.status != AllocationStatus.PENDING_APPROVAL.value:
         raise ValidationError(
@@ -227,7 +242,12 @@ async def act(db: AsyncSession, allocation_id: int, action: str, user,
         alloc.status = AllocationStatus.APPROVED.value
         alloc.approved_at = utcnow()
         alloc.current_approver_name = None
-        implied_indent_status = await apply_to_stock(db, alloc, user)
+        implied_indent_status = await apply_to_stock(db, alloc, user, ctx)
+        if on_approved is not None:
+            # The owning business module supplies its downstream handoff. Keeping the
+            # callback inside this transaction means approval, reservations and the
+            # generated warehouse drafts succeed or roll back together.
+            await on_approved(db, alloc, user)
         await rules.safe_fire(
             db,
             "ALLOCATION_APPROVED",
@@ -257,7 +277,8 @@ async def act(db: AsyncSession, allocation_id: int, action: str, user,
     return alloc
 
 
-async def apply_to_stock(db: AsyncSession, alloc: Allocation, user) -> str:
+async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
+                         ctx: dict | None = None) -> str:
     """Turn an approved decision into reservations, then one MR for the remainder.
 
     Returns the indent status this implies. Runs only on approval.
@@ -292,10 +313,15 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user) -> str:
             })
 
     if shortfalls:
+        ctx = ctx or {}
         await service.create_mr_from_shortfall(
             db, alloc.indent_id, alloc.indent_no, shortfalls, user,
             {
                 "department_id": alloc.department_id,
+                # From the indent, handed down by the caller: the MR belongs to the
+                # project that asked for the material, not to whoever approved.
+                "project_id": ctx.get("project_id"),
+                "project_name": ctx.get("project_name"),
                 "requester_position_id": getattr(user, "active_position_id", None),
             })
 
