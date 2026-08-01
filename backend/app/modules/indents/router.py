@@ -115,15 +115,27 @@ async def acknowledgments(params: PageParams = Depends(), search: str | None = N
 
 
 @indent_router.get("/notifications", response_model=Page[IndentNotificationRow])
-async def notifications(params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
+async def notifications(params: PageParams = Depends(), search: str | None = None,
+                        date_from: date | None = None, date_to: date | None = None,
+                        status: list[IndentStatus] | None = Query(None),
+                        db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission("indent.view"))):
-    return await service.list_notifications(db, params, user)
+    return await service.list_notifications(
+        db, params, user, search=search, date_from=date_from, date_to=date_to,
+        statuses=status,
+    )
 
 
 @indent_router.post("", response_model=IndentOut)
 async def create(data: IndentCreate, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.create"))):
     return await service.create_indent(db, data, user)
+
+
+@indent_router.get("/options/offices")
+async def office_options(db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission("indent.view"))):
+    return await service.list_office_options(db)
 
 
 @indent_router.get("/{indent_id}", response_model=IndentOut)
@@ -142,6 +154,12 @@ async def journey(indent_id: int, db: AsyncSession = Depends(get_db),
 async def update(indent_id: int, data: IndentUpdate, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.edit"))):
     return await service.update_indent(db, indent_id, data, user)
+
+
+@indent_router.delete("/{indent_id}", status_code=204)
+async def delete_draft(indent_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission("indent.view"))):
+    await service.delete_indent(db, indent_id, user)
 
 
 @indent_router.post("/{indent_id}/submit", response_model=IndentOut)

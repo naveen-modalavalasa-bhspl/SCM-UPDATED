@@ -1,11 +1,14 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ToastProvider } from "@/shared/components";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
-import { IndentFilterBar } from "../components/IndentFilterBar";
+import {
+  getRaisedDateRange,
+  getRequiredByDateRange,
+  IndentFilterBar,
+} from "../components/IndentFilterBar";
 import { IndentsNav } from "../components/IndentsNav";
 import { buildStatusBreakdownData } from "../components/StatusBreakdownChart";
 import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
@@ -20,9 +23,24 @@ import { IndentDetailPage } from "../pages/DetailPage";
 import { IndentJourneyPage } from "../pages/JourneyPage";
 import { groupJourneyHistory } from "../pages/JourneyPage";
 import { indentApi, indentKeys } from "../api";
-import { INDENT_STATUS_OPTIONS } from "../constants";
+import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
 import { formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
-import type { ActivityRow, Indent, IndentJourney, IndentStats } from "../types";
+import type { ActivityRow, Indent, IndentJourney, IndentNotification, IndentStats } from "../types";
+
+const EXPECTED_REQUEST_STATUS_FILTERS = [
+  ["Pending approvals", "PENDING_APPROVAL"],
+  ["Allocated", "ALLOCATED"],
+  ["Draft", "DRAFT"],
+  ["Rejected", "REJECTED"],
+  ["Awaiting allocation", "AWAITING_ALLOCATION"],
+] as const;
+
+const EXPECTED_ACTIVITY_EVENT_FILTERS = [
+  ["Stock allocated", "STOCK_ALLOCATED"],
+  ["Approval completed", "APPROVAL_COMPLETED"],
+  ["Request submitted", "REQUEST_SUBMITTED"],
+  ["Request created", "REQUEST_CREATED"],
+] as const;
 
 class ResizeObserverMock implements ResizeObserver {
   constructor(private readonly callback: ResizeObserverCallback) {}
@@ -52,11 +70,12 @@ vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 const mockAccount = vi.hoisted(() => ({
   employeeId: 1 as number | null,
   activePositionId: 10 as number | null,
+  canDeleteIndent: false,
 }));
 
 vi.mock("@/shared/auth/AuthContext", () => ({
   useAuth: () => ({
-    can: () => true,
+    can: (code: string) => code !== "indent.delete" || mockAccount.canDeleteIndent,
     me: {
       employee: { id: mockAccount.employeeId, name: "Test User" },
       active_position: mockAccount.activePositionId
@@ -81,7 +100,7 @@ vi.mock("../api", async () => {
     stats: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "stats", filters] as const,
     activity: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "activity", filters] as const,
     acknowledgments: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "acknowledgments", filters] as const,
-    notifications: (scope: { employeeId: number | null; activePositionId: number | null }) => [...scoped(scope), "notifications"] as const,
+    notifications: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown = {}) => [...scoped(scope), "notifications", filters] as const,
     pendingApprovals: (scope: { employeeId: number | null; activePositionId: number | null }) => [...scoped(scope), "pending-approvals"] as const,
     detail: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "detail", id] as const,
     journey: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "journey", id] as const,
@@ -92,6 +111,15 @@ vi.mock("../api", async () => {
     INDENT_QUERY_STALE_TIME: 45_000,
     INDENT_QUERY_GC_TIME: 5 * 60_000,
     INDENT_QUERY_ROOT: root,
+    normalizeIndentQueryParams: (params: Record<string, unknown>) => Object.fromEntries(
+      Object.entries(params)
+        .filter(([, value]) => value !== undefined && value !== null && value !== "")
+        .map(([key, value]) => [
+          key,
+          Array.isArray(value) ? [...value].filter(Boolean).sort() : value,
+        ])
+        .filter(([, value]) => !Array.isArray(value) || value.length > 0),
+    ),
     indentKeys: mockedKeys,
     isIndentModuleQuery,
     isIndentUnavailableError: (error: unknown) => {
@@ -150,6 +178,7 @@ vi.mock("../api", async () => {
     submit: vi.fn(),
     approve: vi.fn(),
     reject: vi.fn(),
+    delete: vi.fn(),
     bookmark: vi.fn(),
     unbookmark: vi.fn(),
     pendingApprovals: vi.fn(() => Promise.resolve([])),
@@ -163,10 +192,7 @@ function createTestQueryClient() {
 
 function renderWithProviders(ui: ReactElement, route = "/indents", client = createTestQueryClient()) {
   const result = render(
-    // ToastProvider mirrors App.tsx: screens now report success through it, and a
-    // page rendered without one throws rather than quietly losing its feedback.
     <QueryClientProvider client={client}>
-      <ToastProvider>
       <MemoryRouter initialEntries={[route]}>
         <Routes>
           <Route path="/indents/:id/journey" element={ui} />
@@ -175,7 +201,6 @@ function renderWithProviders(ui: ReactElement, route = "/indents", client = crea
           <Route path="*" element={ui} />
         </Routes>
       </MemoryRouter>
-      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -194,7 +219,66 @@ function FilterHarness() {
 
 function LocationProbe() {
   const location = useLocation();
-  return <output aria-label="location">{location.pathname}</output>;
+  return <output aria-label="location">{location.pathname}{location.search}</output>;
+}
+
+function BrowserBackButton() {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate(-1)}>Browser back test</button>;
+}
+
+function renderAllRequestsFlow(
+  route: string,
+  client = createTestQueryClient(),
+) {
+  const result = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[route]}>
+        <LocationProbe />
+        <Routes>
+          <Route path="/indents" element={<IndentListPage />} />
+          <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  return { client, ...result };
+}
+
+function renderActivityLedgerFlow(
+  route: string,
+  client = createTestQueryClient(),
+) {
+  const result = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[route]}>
+        <LocationProbe />
+        <Routes>
+          <Route path="/indents/reports" element={<IndentReportsPage />} />
+          <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  return { client, ...result };
+}
+
+function renderNotificationsFlow(
+  route: string,
+  client = createTestQueryClient(),
+) {
+  const result = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[route]}>
+        <LocationProbe />
+        <Routes>
+          <Route path="/indents/notifications" element={<IndentNotificationsPage />} />
+          <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  return { client, ...result };
 }
 
 function deferred<T>() {
@@ -214,6 +298,7 @@ function detailIndent(overrides: Partial<Indent> = {}): Indent {
   return {
     id: 42,
     indent_no: "IND/2026/0042",
+    requested_by_id: 1,
     status: "PENDING_APPROVAL",
     priority: "NORMAL",
     total_items: 1,
@@ -352,6 +437,20 @@ function overviewStats(byStatus: Record<string, number>): IndentStats {
   };
 }
 
+function listRow(id: number, indentNo: string, status = "DRAFT") {
+  return {
+    id,
+    indent_no: indentNo,
+    requested_by_name: "Status User",
+    department_name: "Operations",
+    status,
+    priority: "NORMAL",
+    total_items: 1,
+    is_bookmarked: "NO",
+    created_at: "2026-07-27T10:30:00Z",
+  };
+}
+
 function activityRow(overrides: Partial<ActivityRow> = {}): ActivityRow {
   return {
     event_id: "workflow:91",
@@ -380,9 +479,23 @@ function activityRow(overrides: Partial<ActivityRow> = {}): ActivityRow {
   };
 }
 
+function notificationRow(index: number, overrides: Partial<IndentNotification> = {}): IndentNotification {
+  return {
+    id: `indent:${index}:PENDING_APPROVAL`,
+    indent_id: 42,
+    indent_no: `IND/NOTIFICATION/${index}`,
+    title: `Notification ${index}`,
+    message: `Notification message ${index}`,
+    status: "PENDING_APPROVAL",
+    created_at: "2026-07-27T10:30:00Z",
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   mockAccount.employeeId = 1;
   mockAccount.activePositionId = 10;
+  mockAccount.canDeleteIndent = false;
   vi.mocked(indentApi.get).mockResolvedValue(detailIndent());
   vi.mocked(indentApi.journey).mockResolvedValue(journeyData());
   vi.mocked(indentApi.submit).mockResolvedValue(detailIndent({ status: "PENDING_APPROVAL", can_submit: false }));
@@ -396,6 +509,7 @@ beforeEach(() => {
     can_approve: false,
     can_reject: false,
   }));
+  vi.mocked(indentApi.delete).mockResolvedValue(undefined);
   vi.mocked(indentApi.bookmark).mockResolvedValue(detailIndent({ is_bookmarked: "YES" }));
   vi.mocked(indentApi.unbookmark).mockResolvedValue(detailIndent({ is_bookmarked: "NO" }));
 });
@@ -428,15 +542,20 @@ describe("indent UI shell", () => {
   });
 
   it.each([
-    ["Overview", <IndentDashboardPage />, "/indents/dashboard"],
-    ["All requests", <IndentListPage />, "/indents"],
-    ["Board", <IndentBoardPage />, "/indents/board"],
-    ["Acknowledgments", <IndentAcknowledgmentsPage />, "/indents/acknowledgments"],
-    ["Activity ledger", <IndentReportsPage />, "/indents/reports"],
-  ])("shows the common Indent toolbar on %s", async (_name, Page, route) => {
+    ["Overview", <IndentDashboardPage />, "/indents/dashboard", "Search by indent no., requester, department or status...", true],
+    ["All requests", <IndentListPage />, "/indents", "Search by indent no., requester, department or status...", true],
+    ["Board", <IndentBoardPage />, "/indents/board", "Search indents...", false],
+    ["Acknowledgments", <IndentAcknowledgmentsPage />, "/indents/acknowledgments", "Search indents...", false],
+  ])("shows the common Indent toolbar on %s", async (_name, Page, route, placeholder, separateDates) => {
     renderWithProviders(Page, route);
-    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toHaveAttribute("placeholder", "Search indents...");
-    expect(screen.getByRole("button", { name: /^Date/ })).toBeInTheDocument();
+    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toHaveAttribute("placeholder", placeholder);
+    if (separateDates) {
+      expect(screen.getByRole("button", { name: "Raised date" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Required by" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /^Date/ })).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByRole("button", { name: /^Date/ })).toBeInTheDocument();
+    }
     expect(screen.getByRole("button", { name: /^Status/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Priority/ })).toBeInTheDocument();
   });
@@ -447,15 +566,15 @@ describe("indent UI shell", () => {
       <IndentDashboardPage />,
       "/indents/dashboard",
       () => {
-        expect(indentApi.stats).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt" }));
-        expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", size: 6 }));
+        expect(indentApi.stats).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt" }), expect.anything());
+        expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", size: 6 }), expect.anything());
       },
     ],
     [
       "All requests",
       <IndentListPage />,
       "/indents",
-      () => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", page: 1, size: 20 })),
+      () => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", page: 1, size: 20 }), expect.anything()),
     ],
     [
       "Board",
@@ -476,7 +595,10 @@ describe("indent UI shell", () => {
       "Activity ledger",
       <IndentReportsPage />,
       "/indents/reports",
-      () => expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", page: 1, size: 20 })),
+      () => expect(indentApi.activity).toHaveBeenLastCalledWith(
+        expect.objectContaining({ search: "Bolt", page: 1, size: 20 }),
+        expect.anything(),
+      ),
     ],
   ])("sends trimmed search from the shared toolbar on %s", async (_name, Page, route, assertSearch) => {
     renderWithProviders(Page, route);
@@ -521,7 +643,7 @@ describe("indent UI shell", () => {
       recentIndents.slice(0, 5).map((indent) => indent.indent_no),
     );
     expect(screen.queryByText(recentIndents[5].indent_no)).not.toBeInTheDocument();
-    expect(indentApi.list).toHaveBeenCalledWith(expect.objectContaining({ size: 6 }));
+    expect(indentApi.list).toHaveBeenCalledWith(expect.objectContaining({ size: 6 }), expect.anything());
   });
 
   it("shows View all in the Recent Indents header and navigates to All Requests", async () => {
@@ -545,143 +667,166 @@ describe("indent UI shell", () => {
     await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(/^\/indents$/));
   });
 
-  it("renders a solid pseudo-3D pie and keeps the dynamic badge with a sorted, aligned legend", async () => {
+  it("renders a flat donut with its total, fixed workflow order, values and ERP colours", async () => {
     vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
       DRAFT: 1,
       CLOSED: 0,
-      APPROVED: 3,
+      REJECTED: 3,
+      ALLOCATED: 2,
       PENDING_APPROVAL: 4,
-      AWAITING_ALLOCATION: 7,
+      AWAITING_ALLOCATION: 5,
     }));
 
     const { container } = renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
+    expect(await screen.findByRole("heading", { name: "STATUS BREAKDOWN" })).toBeInTheDocument();
+    expect(screen.getByText("Current distribution by workflow status")).toBeInTheDocument();
     const chart = await screen.findByRole("img", {
-      name: "Status breakdown donut chart. 15 total indents.",
+      name: "Indent status donut chart. 15 total indents.",
     });
-    expect(within(chart).queryByTestId("status-donut-total")).not.toBeInTheDocument();
-    expect(within(chart).queryByText("Total Indents")).not.toBeInTheDocument();
-    expect(screen.getByTestId("status-total-badge")).toHaveTextContent(/^15 Indents$/);
-    expect(screen.getByTestId("status-total-badge")).toHaveClass(
-      "ml-auto",
-      "w-fit",
-      "md:absolute",
-      "md:right-5",
-      "md:top-4",
-    );
-    expect(container.querySelectorAll(".recharts-pie")).toHaveLength(2);
+    expect(screen.getByTestId("status-donut-total")).toHaveTextContent("15Total indents");
+    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("15 total indents");
+    expect(container.querySelectorAll(".recharts-pie")).toHaveLength(1);
+    expect(container.querySelector(".status-pie-depth")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId(/^status-pie-depth-/)).toHaveLength(0);
+    expect(screen.queryAllByTestId(/^status-pie-top-/)).toHaveLength(0);
 
-    const topColours = {
-      AWAITING_ALLOCATION: "var(--color-info)",
-      PENDING_APPROVAL: "var(--color-warn)",
-      APPROVED: "var(--color-ok)",
+    const colours = {
       DRAFT: "var(--color-neutral)",
+      PENDING_APPROVAL: "var(--color-warn)",
+      AWAITING_ALLOCATION: "var(--color-info)",
+      ALLOCATED: "var(--color-ok)",
+      REJECTED: "var(--color-bad)",
     };
-    for (const [status, colour] of Object.entries(topColours)) {
-      const top = within(chart).getByTestId(`status-pie-top-${status}`);
-      const depthLayers = within(chart).getAllByTestId(
-        new RegExp(`^status-pie-depth-${status}-\\d+$`),
-      );
-
-      expect(top).toHaveAttribute("data-layer", "top");
-      expect(top).toHaveAttribute("data-status", status);
-      expect(top).toHaveAttribute("data-base-color", colour);
-      expect(top).toHaveAttribute("data-inner-radius", "0");
-      expect(top).toHaveAttribute("fill", colour);
-      expect(top).not.toHaveAttribute("pointer-events", "none");
-      expect(depthLayers.length).toBeGreaterThan(0);
-
-      for (const depth of depthLayers) {
-        expect(depth).toHaveAttribute("data-layer", "depth");
-        expect(depth).toHaveAttribute("data-status", status);
-        expect(depth).toHaveAttribute("data-base-color", colour);
-        expect(depth).toHaveAttribute("data-inner-radius", "0");
-        expect(depth).toHaveAttribute("pointer-events", "none");
-        expect(depth.getAttribute("fill")).not.toBe(colour);
-        expect(depth.getAttribute("fill")).toMatch(
-          new RegExp(
-            `^color-mix\\(in srgb, ${colour.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\d+%, black \\d+%\\)$`,
-          ),
-        );
-        expect(
-          depth.compareDocumentPosition(top) & Node.DOCUMENT_POSITION_FOLLOWING,
-        ).toBeTruthy();
-      }
+    for (const [status, colour] of Object.entries(colours)) {
+      const slice = within(chart).getByTestId(`status-donut-slice-${status}`);
+      expect(slice).toHaveAttribute("data-color", colour);
+      expect(slice).toHaveAttribute("fill", colour);
+      expect(Number(slice.getAttribute("data-inner-radius")) / Number(slice.getAttribute("data-outer-radius")))
+        .toBeCloseTo(69 / 90, 2);
     }
-    expect(within(chart).queryByTestId("status-pie-top-CLOSED")).not.toBeInTheDocument();
 
     const legend = screen.getByTestId("status-breakdown-legend");
-    const awaitingAllocation = within(legend).getByRole("button", {
-      name: "Awaiting Allocation: 7 indents, 47%",
-    });
-    expect(within(awaitingAllocation).getByText("Awaiting Allocation")).toBeInTheDocument();
-    const count = screen.getByTestId("status-legend-count-AWAITING_ALLOCATION");
-    const percentage = screen.getByTestId("status-legend-percentage-AWAITING_ALLOCATION");
-    expect(awaitingAllocation).toHaveClass("grid-cols-[minmax(0,1fr)_2.5rem_3rem]");
-    expect(count).toHaveTextContent(/^7$/);
-    expect(count).toHaveClass("text-right", "font-semibold", "text-ink");
-    expect(percentage).toHaveTextContent(/^47%$/);
-    expect(percentage).toHaveClass("text-right", "text-muted");
-    expect(awaitingAllocation).not.toHaveTextContent(/7\s*·\s*47%/);
-
     expect(within(legend).getAllByRole("button").map((row) => row.getAttribute("aria-label"))).toEqual([
-      "Awaiting Allocation: 7 indents, 47%",
-      "In Approval: 4 indents, 27%",
-      "Approved: 3 indents, 20%",
-      "Draft: 1 indent, 7%",
+      "Pending approval: 4 indents, 27 percent",
+      "Awaiting allocation: 5 indents, 33 percent",
+      "Allocated: 2 indents, 13 percent",
+      "Rejected: 3 indents, 20 percent",
+      "Draft: 1 indent, 7 percent",
     ]);
+    expect(within(legend).getAllByRole("button")[0]).toHaveClass(
+      "grid-cols-[0.625rem_minmax(0,1fr)_2.5rem_3rem]",
+      "min-h-9",
+      "gap-x-2",
+    );
+    expect(screen.getByTestId("status-marker-DRAFT")).toHaveClass("bg-neutral");
+    expect(screen.getByTestId("status-marker-PENDING_APPROVAL")).toHaveClass("bg-warn");
+    expect(screen.getByTestId("status-marker-AWAITING_ALLOCATION")).toHaveClass("bg-info");
+    expect(screen.getByTestId("status-marker-ALLOCATED")).toHaveClass("bg-ok");
+    expect(screen.getByTestId("status-marker-REJECTED")).toHaveClass("bg-bad");
     expect(within(legend).queryByText("Closed")).not.toBeInTheDocument();
-    expect(screen.queryByText("AWAITING_ALLOCATION")).not.toBeInTheDocument();
     expect(container.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
-    expect(screen.queryAllByTestId(/^status-slice-label-/)).toHaveLength(0);
   });
 
-  it("sorts copied status data, calculates percentages, and removes zero counts", () => {
+  it("keeps only the five displayed statuses in order and handles zero safely", () => {
     const byStatus = {
       DRAFT: 1,
-      REJECTED: 0,
-      APPROVED: 3,
+      PENDING_APPROVAL: 2,
+      AWAITING_ALLOCATION: 2,
+      ALLOCATED: 2,
+      REJECTED: 1,
+      APPROVED: 1,
+      ORDERED: 1,
+      CLOSED: 0,
     };
     const original = { ...byStatus };
 
     const { entries, total } = buildStatusBreakdownData(byStatus);
 
-    expect(total).toBe(4);
-    expect(entries).toEqual([
-      expect.objectContaining({ status: "APPROVED", count: 3, percentage: 75 }),
-      expect.objectContaining({ status: "DRAFT", count: 1, percentage: 25 }),
+    expect(total).toBe(8);
+    expect(entries.map(({ status }) => status)).toEqual([
+      "PENDING_APPROVAL",
+      "AWAITING_ALLOCATION",
+      "ALLOCATED",
+      "REJECTED",
+      "DRAFT",
     ]);
-    expect(entries.some((entry) => entry.status === "REJECTED")).toBe(false);
+    expect(entries.some(({ status }) => status === "APPROVED" || status === "ORDERED")).toBe(false);
+    expect(entries.every(({ isSelectable }) => isSelectable)).toBe(true);
+    const zeroData = buildStatusBreakdownData({ DRAFT: 0, REJECTED: Number.NaN });
+    expect(zeroData.total).toBe(0);
+    expect(zeroData.entries.map(({ status }) => status)).toEqual([
+      "PENDING_APPROVAL",
+      "AWAITING_ALLOCATION",
+      "ALLOCATED",
+      "REJECTED",
+      "DRAFT",
+    ]);
+    expect(zeroData.entries.every(({ count, percentage }) => count === 0 && percentage === 0)).toBe(true);
     expect(byStatus).toEqual(original);
   });
 
-  it("shows the unchanged compact tooltip only for an active top pie surface", async () => {
-    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
+  it("keeps slice hover tooltips separate from row hover, focus and the existing filter action", async () => {
+    const interactiveStats = overviewStats({
       AWAITING_ALLOCATION: 7,
       PENDING_APPROVAL: 4,
       APPROVED: 2,
       DRAFT: 2,
-    }));
+    });
+    vi.mocked(indentApi.stats)
+      .mockResolvedValueOnce(interactiveStats)
+      .mockResolvedValueOnce(interactiveStats);
 
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
-    const firstTopSurface = await screen.findByTestId("status-pie-top-AWAITING_ALLOCATION");
+    const slice = await screen.findByTestId("status-donut-slice-AWAITING_ALLOCATION");
+    expect(slice).toHaveAccessibleName("Awaiting allocation: 7 indents, 54 percent");
+    expect(slice).toHaveAttribute("tabindex", "0");
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
-    fireEvent.mouseEnter(firstTopSurface);
+    fireEvent.mouseEnter(slice);
 
     const tooltip = await screen.findByRole("tooltip");
-    expect(within(tooltip).getByText("Awaiting Allocation")).toBeInTheDocument();
+    expect(within(tooltip).getByText("Awaiting allocation")).toBeInTheDocument();
     expect(within(tooltip).getByText("7 indents")).toBeInTheDocument();
-    expect(within(tooltip).getByText("47% of total")).toBeInTheDocument();
-    expect(tooltip).toHaveClass("pointer-events-none", "w-36");
+    expect(within(tooltip).getByText("54% of total")).toBeInTheDocument();
+    expect(tooltip).toHaveClass("pointer-events-none", "w-40", "shadow-sm");
     expect(screen.getByTestId("status-legend-row-AWAITING_ALLOCATION")).toHaveAttribute("data-active", "true");
 
-    fireEvent.mouseLeave(firstTopSurface);
+    fireEvent.mouseLeave(slice);
     await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
+
+    const row = screen.getByTestId("status-legend-row-AWAITING_ALLOCATION");
+    const statsCallsBeforeHover = vi.mocked(indentApi.stats).mock.calls.length;
+    fireEvent.mouseEnter(row);
+    expect(row).toHaveAttribute("data-hovered", "true");
+    expect(row).toHaveAttribute("data-selected", "false");
+    expect(row).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(indentApi.stats).toHaveBeenCalledTimes(statsCallsBeforeHover);
+    fireEvent.mouseLeave(row);
+
+    fireEvent.focus(row);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(slice).toHaveAttribute("data-active", "false");
+    expect(row).toHaveAttribute("data-hovered", "true");
+
+    const statsCallsBeforeKeyboard = vi.mocked(indentApi.stats).mock.calls.length;
+    fireEvent.keyDown(slice, { key: "Enter" });
+    await waitFor(() => expect(indentApi.stats).toHaveBeenCalledTimes(statsCallsBeforeKeyboard + 1));
+    await waitFor(() => expect(indentApi.stats).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: ["AWAITING_ALLOCATION"] }),
+      expect.anything(),
+    ));
+    expect(screen.getByTestId("status-legend-row-AWAITING_ALLOCATION")).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByTestId("status-legend-row-AWAITING_ALLOCATION"));
+    await waitFor(() => expect(
+      screen.getByTestId("status-legend-row-AWAITING_ALLOCATION"),
+    ).toHaveAttribute("aria-pressed", "false"));
   });
 
-  it("shows the status empty state instead of an empty donut", async () => {
+  it("shows a neutral empty donut, zero centre KPI and filtered empty-state message", async () => {
     vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
       DRAFT: 0,
       CLOSED: 0,
@@ -689,39 +834,43 @@ describe("indent UI shell", () => {
 
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
-    expect(await screen.findByText("No indent status data available")).toBeInTheDocument();
-    expect(screen.getByTestId("status-total-badge")).toHaveTextContent(/^0 Indents$/);
-    expect(screen.queryByRole("img", { name: /Status breakdown donut chart/i })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Status breakdown legend")).not.toBeInTheDocument();
+    expect(await screen.findByText("No status data available for the selected filters.")).toBeInTheDocument();
+    expect(screen.getByTestId("status-donut-total")).toHaveTextContent("0Total indents");
+    expect(screen.getByTestId("status-empty-donut-track")).toBeInTheDocument();
+    expect(screen.getByRole("img", {
+      name: "Indent status donut chart. 0 total indents.",
+    })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Status breakdown")).not.toBeInTheDocument();
+    expect(screen.queryByText(/NaN|Infinity/)).not.toBeInTheDocument();
   });
 
-  it("renders a single status as a complete solid pie with a 100 percent legend value", async () => {
-    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({ ORDERED: 6 }));
+  it("renders a selected single status as a complete flat ring with a 100 percent row", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({ ALLOCATED: 6 }));
 
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
     const chart = await screen.findByRole("img", {
-      name: "Status breakdown donut chart. 6 total indents.",
+      name: "Indent status donut chart. 6 total indents.",
     });
-    expect(within(chart).queryByTestId("status-donut-total")).not.toBeInTheDocument();
-    expect(within(chart).queryByText("Total Indents")).not.toBeInTheDocument();
-    expect(screen.getByTestId("status-total-badge")).toHaveTextContent(/^6 Indents$/);
+    expect(screen.getByTestId("status-donut-total")).toHaveTextContent("6Total indents");
 
-    const ordered = screen.getByRole("button", {
-      name: "Ordered: 6 indents, 100%",
-    });
-    expect(within(ordered).getByTestId("status-legend-count-ORDERED")).toHaveTextContent(/^6$/);
-    expect(within(ordered).getByTestId("status-legend-percentage-ORDERED")).toHaveTextContent(/^100%$/);
-    const orderedTop = within(chart).getByTestId("status-pie-top-ORDERED");
-    const orderedDepth = within(chart).getAllByTestId(/^status-pie-depth-ORDERED-\d+$/);
-    expect(orderedTop).toHaveAttribute("data-inner-radius", "0");
-    expect(orderedTop).toHaveAttribute("fill", "#2563eb");
-    expect(orderedDepth.length).toBeGreaterThan(0);
-    expect(orderedDepth.every((layer) => layer.getAttribute("pointer-events") === "none")).toBe(true);
+    const allocated = screen.getByTestId("status-legend-row-ALLOCATED");
+    expect(allocated).toHaveAccessibleName("Allocated: 6 indents, 100 percent");
+    expect(within(allocated).getByTestId("status-legend-count-ALLOCATED")).toHaveTextContent(/^6$/);
+    expect(within(allocated).getByTestId("status-legend-percentage-ALLOCATED")).toHaveTextContent(/^100%$/);
+    const allocatedSlice = within(chart).getByTestId("status-donut-slice-ALLOCATED");
+    const allocatedPath = allocatedSlice.querySelector("path");
+    expect(allocatedSlice).toHaveAttribute("fill", "var(--color-ok)");
+    expect(allocatedSlice).not.toHaveAttribute("stroke");
+    expect(allocatedPath).toHaveAttribute("stroke", "none");
+    expect(allocatedPath).toHaveAttribute("stroke-width", "0");
+    expect(Number(allocatedSlice.getAttribute("data-inner-radius"))).toBeGreaterThan(0);
+    fireEvent.click(allocated);
+    expect(allocated).toHaveAttribute("aria-pressed", "true");
     expect(chart.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
   });
 
-  it("keeps tiny percentages in the legend without adding permanent pie labels", async () => {
+  it("excludes unsupported statuses from the chart total, rows and segments", async () => {
     vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
       APPROVED: 99,
       REJECTED: 1,
@@ -730,14 +879,21 @@ describe("indent UI shell", () => {
     const { container } = renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
     const rejected = await screen.findByRole("button", {
-      name: "Rejected: 1 indent, 1%",
+      name: "Rejected: 1 indent, 100 percent",
     });
     expect(within(rejected).getByTestId("status-legend-count-REJECTED")).toHaveTextContent(/^1$/);
-    expect(within(rejected).getByTestId("status-legend-percentage-REJECTED")).toHaveTextContent(/^1%$/);
+    expect(within(rejected).getByTestId("status-legend-percentage-REJECTED")).toHaveTextContent(/^100%$/);
+    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("1 total indent");
+    expect(screen.queryByText("Other")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("status-legend-row-OTHER")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("status-marker-OTHER")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("status-donut-slice-OTHER")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("status-legend-row-APPROVED")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("status-donut-slice-APPROVED")).not.toBeInTheDocument();
     expect(container.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
   });
 
-  it("uses a balanced 40/60 desktop split with the legend beside the pie", async () => {
+  it("uses a larger balanced desktop donut with a compact scrollbar-free breakdown", async () => {
     vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
       DRAFT: 2,
       APPROVED: 1,
@@ -746,18 +902,29 @@ describe("indent UI shell", () => {
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
     const layout = await screen.findByTestId("status-breakdown-layout");
-    const chart = screen.getByRole("img", { name: /Status breakdown donut chart/i });
+    const chart = screen.getByRole("img", { name: /Indent status donut chart/i });
+    const donut = screen.getByTestId("status-donut-container");
     const legend = screen.getByTestId("status-breakdown-legend");
 
     expect(layout).toHaveClass(
       "grid",
-      "md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]",
+      "md:grid-cols-[minmax(280px,1.15fr)_minmax(260px,0.85fr)]",
       "md:items-center",
-      "md:gap-6",
+      "md:gap-4",
     );
-    expect(chart).toHaveClass("h-[250px]", "max-w-[300px]");
-    expect(legend).toHaveClass("md:max-h-[260px]", "md:overflow-y-auto");
-    expect(layout.children[0]).toBe(chart);
+    expect(donut).toHaveClass(
+      "h-[250px]",
+      "max-w-[250px]",
+      "sm:h-[290px]",
+      "sm:max-w-[290px]",
+      "md:h-[330px]",
+      "md:max-w-[330px]",
+    );
+    expect(chart).toHaveClass("absolute", "inset-0");
+    expect(legend).toHaveClass("max-w-[320px]", "gap-1");
+    expect(legend).not.toHaveClass("overflow-y-auto", "md:overflow-y-auto", "max-h-[260px]", "md:max-h-[260px]");
+    expect(within(legend).getAllByTestId(/^status-legend-row-/)).toHaveLength(5);
+    expect(layout.children[0]).toBe(donut);
     expect(layout.children[1]).toBe(legend);
   });
 
@@ -770,17 +937,16 @@ describe("indent UI shell", () => {
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
     const layout = await screen.findByTestId("status-breakdown-layout");
-    const chart = screen.getByRole("img", { name: /Status breakdown donut chart/i });
+    const donut = screen.getByTestId("status-donut-container");
     const legend = screen.getByTestId("status-breakdown-legend");
-    const badge = screen.getByTestId("status-total-badge");
+    const centre = screen.getByTestId("status-donut-total");
 
-    expect(layout).toHaveClass("grid", "min-w-0", "gap-4");
+    expect(layout).toHaveClass("grid", "min-w-0", "gap-3");
     expect(layout).not.toHaveClass("grid-cols-2");
-    expect(chart).toHaveClass("mx-auto", "h-[250px]", "w-full", "max-w-[300px]");
+    expect(donut).toHaveClass("mx-auto", "h-[250px]", "w-full", "max-w-[250px]");
     expect(legend).toHaveClass("min-w-0");
-    expect(badge).toHaveClass("ml-auto", "w-fit", "md:absolute");
-    expect(badge).not.toHaveClass("absolute");
-    expect(chart.compareDocumentPosition(legend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(centre).toHaveClass("absolute", "inset-0", "text-center");
+    expect(donut.compareDocumentPosition(legend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("keeps the other Overview cards unchanged", async () => {
@@ -793,17 +959,17 @@ describe("indent UI shell", () => {
 
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
     await screen.findByRole("img", {
-      name: "Status breakdown donut chart. 15 total indents.",
+      name: "Indent status donut chart. 12 total indents.",
     });
 
+    expect(screen.getAllByText("Total indents")).toHaveLength(2);
+    expect(screen.getAllByText("Rejected")).toHaveLength(2);
     for (const label of [
-      "Total indents",
       "Awaiting approval",
       "Approved active",
       "Raised this month",
       "In draft",
       "Units requested",
-      "Rejected",
       "Approval rate",
       "Recent Indents",
     ]) {
@@ -811,26 +977,325 @@ describe("indent UI shell", () => {
     }
   });
 
-  it("shows every lifecycle status and deselects a selected status", async () => {
-    renderWithProviders(<IndentListPage />, "/indents");
+  it.each([
+    ["Overview", <IndentDashboardPage />, "/indents/dashboard"],
+    ["All requests", <IndentListPage />, "/indents"],
+  ])("shows the same five ungrouped status options on %s", async (_name, Page, route) => {
+    renderWithProviders(Page, route);
 
     expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
-    for (const option of INDENT_STATUS_OPTIONS) {
-      expect(await screen.findByText(option.label)).toBeInTheDocument();
+    const menu = await screen.findByRole("menu");
+
+    expect(INDENT_REQUEST_STATUS_FILTER_OPTIONS).toEqual(
+      EXPECTED_REQUEST_STATUS_FILTERS.map(([label, value]) => ({ label, value })),
+    );
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(
+      EXPECTED_REQUEST_STATUS_FILTERS.map(([label]) => label),
+    );
+    for (const heading of ["Request", "Approved / Fulfilment", "Procurement", "Completed"]) {
+      expect(within(menu).queryByText(heading)).not.toBeInTheDocument();
+    }
+  });
+
+  it("maps every All Requests option to its existing enum, updates its chip, clears, and resets pagination", async () => {
+    vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+      items: [],
+      total: 45,
+      page: params.page ?? 1,
+      size: params.size ?? 20,
+    }));
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    expect(await screen.findByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("Page 2 of 3 (45 total)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
+    const menu = await screen.findByRole("menu");
+
+    for (const [label, value] of EXPECTED_REQUEST_STATUS_FILTERS) {
+      fireEvent.click(within(menu).getByText(label));
+      await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+        status: [value],
+        page: 1,
+      }), expect.anything()));
+      expect(screen.getByRole("button", { name: "Status (1)" })).toBeInTheDocument();
+      expect(screen.getByText(`Status: ${label}`)).toBeInTheDocument();
+
+      fireEvent.click(within(menu).getByText(label));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Status" })).toBeInTheDocument());
+      expect(screen.queryByText(`Status: ${label}`)).not.toBeInTheDocument();
     }
 
-    fireEvent.click(screen.getByText("Awaiting allocation"));
-    await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
-      status: ["AWAITING_ALLOCATION"],
-      page: 1,
-    })));
+    fireEvent.click(within(menu).getByText("Pending approvals"));
+    fireEvent.click(await screen.findByRole("button", { name: "close chip" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Status" })).toBeInTheDocument());
 
-    fireEvent.click(screen.getByText("Awaiting allocation"));
-    await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
-      status: undefined,
+    fireEvent.click(within(menu).getByText("Allocated"));
+    expect(await screen.findByRole("button", { name: "Clear all" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(screen.getByRole("button", { name: "Status" })).toBeInTheDocument();
+    expect(screen.queryByText("Status: Allocated")).not.toBeInTheDocument();
+  });
+
+  it("maps every Overview option to the same existing enum values", async () => {
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    await screen.findByRole("searchbox", { name: "Search indents" });
+    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
+    const menu = await screen.findByRole("menu");
+
+    for (const [label, value] of EXPECTED_REQUEST_STATUS_FILTERS) {
+      fireEvent.click(within(menu).getByText(label));
+      await waitFor(() => {
+        expect(indentApi.stats).toHaveBeenLastCalledWith(expect.objectContaining({ status: [value] }), expect.anything());
+        expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ status: [value], size: 6 }), expect.anything());
+      });
+      fireEvent.click(within(menu).getByText(label));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Status" })).toBeInTheDocument());
+    }
+  });
+
+  it("updates status and page in the selection event without the search debounce or a duplicate list request", async () => {
+    vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+      items: [listRow(params.page ?? 1, `IND/PAGE-${params.page ?? 1}`)],
+      total: 45,
+      page: params.page ?? 1,
+      size: params.size ?? 20,
+    }));
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    expect(await screen.findByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("Page 2 of 3 (45 total)")).toBeInTheDocument();
+    const requestCount = vi.mocked(indentApi.list).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
+    const menu = await screen.findByRole("menu");
+    fireEvent.click(within(menu).getByText("Draft"));
+
+    expect(screen.getByRole("button", { name: "Status (1)" })).toBeInTheDocument();
+    expect(screen.getByText("Status: Draft")).toBeInTheDocument();
+    expect(screen.getByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
+    expect(indentApi.list).toHaveBeenCalledTimes(requestCount + 1);
+    expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      status: ["DRAFT"],
       page: 1,
-    })));
+    }), expect.anything());
+  });
+
+  it("keeps All Requests content visible and accessible while status results refresh", async () => {
+    const draftResults = deferred<{
+      items: ReturnType<typeof listRow>[];
+      total: number;
+      page: number;
+      size: number;
+    }>();
+    vi.mocked(indentApi.list).mockImplementation((params = {}) => {
+      if (params.status?.includes("DRAFT")) return draftResults.promise;
+      return Promise.resolve({ items: [listRow(1, "IND/OLD", "ALLOCATED")], total: 1, page: 1, size: 20 });
+    });
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    expect((await screen.findAllByText("IND/OLD")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByText("Draft"));
+
+    const results = screen.getByRole("region", { name: "Indent results" });
+    expect(results).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("status")).toHaveTextContent("Updating results…");
+    expect(results.querySelector(".opacity-70")).toBeInTheDocument();
+    expect(screen.getAllByText("IND/OLD").length).toBeGreaterThan(0);
+
+    await act(async () => {
+      draftResults.resolve({ items: [listRow(2, "IND/DRAFT")], total: 1, page: 1, size: 20 });
+      await draftResults.promise;
+    });
+    expect((await screen.findAllByText("IND/DRAFT")).length).toBeGreaterThan(0);
+    await waitFor(() => expect(results).toHaveAttribute("aria-busy", "false"));
+    expect(screen.queryByText("IND/OLD")).not.toBeInTheDocument();
+  });
+
+  it("shows a recently selected status from cache immediately without another request", async () => {
+    vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+      items: params.status?.includes("DRAFT")
+        ? [listRow(2, "IND/CACHED-DRAFT")]
+        : [listRow(1, "IND/UNFILTERED", "ALLOCATED")],
+      total: 1,
+      page: 1,
+      size: 20,
+    }));
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    expect((await screen.findAllByText("IND/UNFILTERED")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
+    const menu = await screen.findByRole("menu");
+    fireEvent.click(within(menu).getByText("Draft"));
+    expect((await screen.findAllByText("IND/CACHED-DRAFT")).length).toBeGreaterThan(0);
+    expect(indentApi.list).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(within(menu).getByText("Draft"));
+    expect((await screen.findAllByText("IND/UNFILTERED")).length).toBeGreaterThan(0);
+    fireEvent.click(within(menu).getByText("Draft"));
+
+    expect(screen.getAllByText("IND/CACHED-DRAFT").length).toBeGreaterThan(0);
+    expect(indentApi.list).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("region", { name: "Indent results" })).toHaveAttribute("aria-busy", "false");
+  });
+
+  it("aborts a superseded status request and ignores its late result", async () => {
+    const draftResults = deferred<{ items: ReturnType<typeof listRow>[]; total: number; page: number; size: number }>();
+    const allocatedResults = deferred<{ items: ReturnType<typeof listRow>[]; total: number; page: number; size: number }>();
+    vi.mocked(indentApi.list).mockImplementation((params = {}) => {
+      if (params.status?.includes("DRAFT")) return draftResults.promise;
+      if (params.status?.includes("ALLOCATED")) return allocatedResults.promise;
+      return Promise.resolve({ items: [listRow(1, "IND/BASE")], total: 1, page: 1, size: 20 });
+    });
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    expect((await screen.findAllByText("IND/BASE")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
+    const menu = await screen.findByRole("menu");
+    fireEvent.click(within(menu).getByText("Draft"));
+    const draftSignal = vi.mocked(indentApi.list).mock.calls.at(-1)?.[1] as AbortSignal;
+    fireEvent.click(within(menu).getByText("Draft"));
+    fireEvent.click(within(menu).getByText("Allocated"));
+
+    expect(draftSignal.aborted).toBe(true);
+    await act(async () => {
+      allocatedResults.resolve({ items: [listRow(3, "IND/LATEST", "ALLOCATED")], total: 1, page: 1, size: 20 });
+      await allocatedResults.promise;
+    });
+    expect((await screen.findAllByText("IND/LATEST")).length).toBeGreaterThan(0);
+
+    await act(async () => {
+      draftResults.resolve({ items: [listRow(2, "IND/STALE")], total: 1, page: 1, size: 20 });
+      await draftResults.promise;
+    });
+    expect(screen.queryByText("IND/STALE")).not.toBeInTheDocument();
+    expect(screen.getAllByText("IND/LATEST").length).toBeGreaterThan(0);
+  });
+
+  it("starts the Overview stats and recent-list requests in parallel and refreshes them accessibly", async () => {
+    const initialStats = deferred<IndentStats>();
+    const initialRecent = deferred<{ items: ReturnType<typeof listRow>[]; total: number; page: number; size: number }>();
+    vi.mocked(indentApi.stats).mockReturnValueOnce(initialStats.promise);
+    vi.mocked(indentApi.list).mockReturnValueOnce(initialRecent.promise);
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+
+    expect(indentApi.stats).toHaveBeenCalledTimes(1);
+    expect(indentApi.list).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("region", { name: "Overview results" })).toHaveAttribute("aria-busy", "true");
+
+    await act(async () => {
+      initialStats.resolve(overviewStats({ ALLOCATED: 1 }));
+      initialRecent.resolve({ items: [listRow(1, "IND/OVERVIEW", "ALLOCATED")], total: 1, page: 1, size: 6 });
+      await Promise.all([initialStats.promise, initialRecent.promise]);
+    });
+    expect(await screen.findByText("IND/OVERVIEW")).toBeInTheDocument();
+    expect(screen.getByTestId("status-donut-total")).toHaveTextContent("1Total indents");
+
+    const nextStats = deferred<IndentStats>();
+    const nextRecent = deferred<{ items: ReturnType<typeof listRow>[]; total: number; page: number; size: number }>();
+    vi.mocked(indentApi.stats).mockReturnValueOnce(nextStats.promise);
+    vi.mocked(indentApi.list).mockReturnValueOnce(nextRecent.promise);
+    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByText("Draft"));
+
+    expect(indentApi.stats).toHaveBeenCalledTimes(2);
+    expect(indentApi.list).toHaveBeenCalledTimes(2);
+    const results = screen.getByRole("region", { name: "Overview results" });
+    expect(results).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("status")).toHaveTextContent("Updating results…");
+    expect(screen.getByText("IND/OVERVIEW")).toBeInTheDocument();
+    expect(screen.getByTestId("status-donut-total")).toHaveTextContent("1Total indents");
+    expect(screen.getByTestId("status-donut-slice-ALLOCATED")).toBeInTheDocument();
+    expect(screen.queryByText("Loading status breakdown...")).not.toBeInTheDocument();
+
+    await act(async () => {
+      nextStats.resolve(overviewStats({ DRAFT: 2 }));
+      nextRecent.resolve({ items: [listRow(2, "IND/OVERVIEW-DRAFT")], total: 1, page: 1, size: 6 });
+      await Promise.all([nextStats.promise, nextRecent.promise]);
+    });
+    expect(await screen.findByText("IND/OVERVIEW-DRAFT")).toBeInTheDocument();
+    expect(screen.getByTestId("status-donut-total")).toHaveTextContent("2Total indents");
+    expect(await screen.findByTestId("status-donut-slice-DRAFT")).toBeInTheDocument();
+    await waitFor(() => expect(results).toHaveAttribute("aria-busy", "false"));
+  });
+
+  it("keeps All Requests pagination stable through next-page refetch and Previous", async () => {
+    vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+      items: [{
+        id: params.page ?? 1,
+        indent_no: `IND/PAGE-${params.page ?? 1}`,
+        requested_by_name: "A Anil Kumar",
+        department_name: "Operations",
+        status: "DRAFT",
+        priority: "NORMAL",
+        total_items: 2,
+        is_bookmarked: "NO",
+        created_at: "2026-07-27T10:30:00Z",
+      }],
+      total: 45,
+      page: params.page ?? 1,
+      size: params.size ?? 20,
+    }));
+    const { client } = renderWithProviders(<IndentListPage />, "/indents");
+
+    expect(await screen.findByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("Page 2 of 3 (45 total)")).toBeInTheDocument();
+    await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      page: 2,
+      size: 20,
+    }), expect.anything()));
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      await client.invalidateQueries({
+        predicate: (query) => query.queryKey[3] === "list",
+      });
+    });
+    await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      page: 2,
+      size: 20,
+    }), expect.anything()));
+    expect(screen.getByText("Page 2 of 3 (45 total)")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(await screen.findByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
+    await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      page: 1,
+      size: 20,
+    }), expect.anything()));
+  });
+
+  it("resets All Requests to page 1 only when search actually changes", async () => {
+    vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+      items: [],
+      total: 45,
+      page: params.page ?? 1,
+      size: params.size ?? 20,
+    }));
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    expect(await screen.findByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("Page 2 of 3 (45 total)")).toBeInTheDocument();
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    });
+    expect(screen.getByText("Page 2 of 3 (45 total)")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search indents" }), {
+      target: { value: "  Bolt  " },
+    });
+    await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      page: 1,
+      size: 20,
+      search: "Bolt",
+    }), expect.anything()));
+    expect(screen.getByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
   });
 
   it("renders Acknowledgments with the common toolbar but without extra actions", async () => {
@@ -1141,71 +1606,412 @@ describe("indent UI shell", () => {
     })));
   });
 
-  it("keeps supported Activity filters in More filters and hides Movement", async () => {
+  it("shows exactly the four Activity ledger event options and maps each label", async () => {
     renderWithProviders(<IndentReportsPage />, "/indents/reports");
 
-    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Transaction" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /^More filters/ }));
-    expect(screen.getByRole("button", { name: "Transaction" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Movement" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Item ID")).toBeInTheDocument();
+    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toHaveAttribute(
+      "placeholder",
+      "Search by indent no., event, actor, department or result...",
+    );
+    expect(screen.getByRole("button", { name: "Activity date" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Event" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Priority/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^More filters/ })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
-    fireEvent.click(await screen.findByText("Rejected"));
-    await waitFor(() => expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
-      status: ["REJECTED"],
-    })));
+    fireEvent.click(screen.getByRole("button", { name: "Event" }));
+    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(
+      EXPECTED_ACTIVITY_EVENT_FILTERS.map(([label]) => label),
+    );
 
-    fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
-    fireEvent.click(await screen.findByText("Normal"));
-    await waitFor(() => expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
-      priority: ["NORMAL"],
-    })));
-
-    fireEvent.click(screen.getByRole("button", { name: "Transaction" }));
-    fireEvent.click(await screen.findByText("Approval completed"));
-    fireEvent.change(screen.getByLabelText("Item ID"), { target: { value: "123" } });
-
-    await waitFor(() => expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
-      transaction_type: "APPROVAL_COMPLETED",
-      item_id: 123,
-    })));
-    expect(indentApi.activity).toHaveBeenLastCalledWith(expect.not.objectContaining({
-      direction: expect.anything(),
-    }));
+    for (const [label, eventType] of EXPECTED_ACTIVITY_EVENT_FILTERS) {
+      const callsBeforeSelection = vi.mocked(indentApi.activity).mock.calls.length;
+      fireEvent.click(within(screen.getByRole("menu")).getByText(label));
+      await waitFor(() => expect(indentApi.activity).toHaveBeenCalledTimes(callsBeforeSelection + 1));
+      expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
+        transaction_type: eventType,
+        page: 1,
+      }), expect.anything());
+      expect(screen.getByText(`Event: ${label}`)).toBeInTheDocument();
+      expect(screen.getByRole("menu").querySelectorAll(".lucide-check")).toHaveLength(1);
+    }
   });
 
-  it("offers only persisted Activity transaction types", async () => {
-    renderWithProviders(<IndentReportsPage />, "/indents/reports");
+  it("applies an Activity event and pending search immediately with one Page 1 request", async () => {
+    const refresh = deferred<{
+      items: ActivityRow[];
+      total: number;
+      page: number;
+      size: number;
+    }>();
+    vi.mocked(indentApi.activity).mockImplementation((params = {}) => (
+      params.transaction_type === "APPROVAL_COMPLETED"
+        ? refresh.promise
+        : Promise.resolve({
+            items: [activityRow({ indent_no: "IND/ACTIVITY/OLD" })],
+            total: 60,
+            page: params.page ?? 1,
+            size: params.size ?? 20,
+          })
+    ));
+    renderActivityLedgerFlow("/indents/reports?page=3");
 
-    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /^More filters/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Transaction" }));
+    expect((await screen.findAllByText("IND/ACTIVITY/OLD")).length).toBeGreaterThan(0);
+    const callsBeforeEvent = vi.mocked(indentApi.activity).mock.calls.length;
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search indents" }), {
+      target: { value: "bolt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Event" }));
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Approval completed"));
 
-    for (const label of [
-      "Request created",
-      "Request submitted",
-      "Approval completed",
-      "Request rejected",
-      "Request returned",
-      "Approval routed automatically",
-      "Stock allocated",
-      "Procurement request created",
-      "Bookmark added",
-      "Bookmark removed",
-    ]) {
-      expect(await screen.findByText(label)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Event (1)" })).toBeInTheDocument();
+    expect(screen.getByText("Event: Approval completed")).toBeInTheDocument();
+    expect(indentApi.activity).toHaveBeenCalledTimes(callsBeforeEvent + 1);
+    expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
+      search: "bolt",
+      transaction_type: "APPROVAL_COMPLETED",
+      page: 1,
+    }), expect.anything());
+    const results = screen.getByRole("region", { name: "Activity ledger results" });
+    expect(results).toHaveAttribute("aria-busy", "true");
+    expect(within(results).getByRole("status")).toHaveTextContent("Updating results…");
+    expect(results.querySelector(".duration-150.opacity-70")).toBeInTheDocument();
+    expect(screen.getAllByText("IND/ACTIVITY/OLD").length).toBeGreaterThan(0);
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    });
+    expect(indentApi.activity).toHaveBeenCalledTimes(callsBeforeEvent + 1);
+
+    await act(async () => {
+      refresh.resolve({
+        items: [activityRow({ event_id: "indent:901", indent_no: "IND/ACTIVITY/NEW" })],
+        total: 1,
+        page: 1,
+        size: 20,
+      });
+      await refresh.promise;
+    });
+    expect((await screen.findAllByText("IND/ACTIVITY/NEW")).length).toBeGreaterThan(0);
+    expect(results).toHaveAttribute("aria-busy", "false");
+    expect(screen.queryByText("IND/ACTIVITY/OLD")).not.toBeInTheDocument();
+  });
+
+  it("applies Notification status and pending search immediately with one Page 1 request", async () => {
+    const refresh = deferred<{
+      items: IndentNotification[];
+      total: number;
+      page: number;
+      size: number;
+    }>();
+    vi.mocked(indentApi.notifications).mockImplementation((params = {}) => (
+      params.status?.includes("DRAFT")
+        ? refresh.promise
+        : Promise.resolve({
+            items: [notificationRow(1, { title: "Existing notification" })],
+            total: 60,
+            page: params.page ?? 1,
+            size: params.size ?? 20,
+          })
+    ));
+    renderNotificationsFlow("/indents/notifications?page=3");
+
+    expect(await screen.findByText("Existing notification")).toBeInTheDocument();
+    const callsBeforeStatus = vi.mocked(indentApi.notifications).mock.calls.length;
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search notifications" }), {
+      target: { value: "stock" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Indent status" }));
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Draft"));
+
+    expect(screen.getByRole("button", { name: "Indent status (1)" })).toBeInTheDocument();
+    expect(screen.getByText("Indent status: Draft")).toBeInTheDocument();
+    expect(indentApi.notifications).toHaveBeenCalledTimes(callsBeforeStatus + 1);
+    expect(indentApi.notifications).toHaveBeenLastCalledWith(expect.objectContaining({
+      search: "stock",
+      status: ["DRAFT"],
+      page: 1,
+    }), expect.anything());
+    const results = screen.getByRole("region", { name: "Notification results" });
+    expect(results).toHaveAttribute("aria-busy", "true");
+    expect(within(results).getByRole("status")).toHaveTextContent("Updating results…");
+    expect(results.querySelector(".duration-150.opacity-70")).toBeInTheDocument();
+    expect(screen.getByText("Existing notification")).toBeInTheDocument();
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    });
+    expect(indentApi.notifications).toHaveBeenCalledTimes(callsBeforeStatus + 1);
+
+    await act(async () => {
+      refresh.resolve({
+        items: [notificationRow(2, { title: "Updated notification", status: "DRAFT" })],
+        total: 1,
+        page: 1,
+        size: 20,
+      });
+      await refresh.promise;
+    });
+    expect(await screen.findByText("Updated notification")).toBeInTheDocument();
+    expect(results).toHaveAttribute("aria-busy", "false");
+    expect(screen.queryByText("Existing notification")).not.toBeInTheDocument();
+  });
+
+  it("aborts superseded Activity event work, ignores late rows, and reuses fresh cache", async () => {
+    const approval = deferred<{ items: ActivityRow[]; total: number; page: number; size: number }>();
+    const allocated = deferred<{ items: ActivityRow[]; total: number; page: number; size: number }>();
+    vi.mocked(indentApi.activity).mockImplementation((params = {}) => {
+      if (params.transaction_type === "APPROVAL_COMPLETED") return approval.promise;
+      if (params.transaction_type === "STOCK_ALLOCATED") return allocated.promise;
+      return Promise.resolve({
+        items: [activityRow({ indent_no: "IND/ACTIVITY/BASE" })],
+        total: 1,
+        page: 1,
+        size: 20,
+      });
+    });
+    renderActivityLedgerFlow("/indents/reports");
+    expect((await screen.findAllByText("IND/ACTIVITY/BASE")).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Event" }));
+    const menu = screen.getByRole("menu");
+    fireEvent.click(within(menu).getByText("Approval completed"));
+    const approvalSignal = vi.mocked(indentApi.activity).mock.calls.at(-1)?.[1] as AbortSignal;
+    fireEvent.click(within(menu).getByText("Stock allocated"));
+
+    expect(approvalSignal.aborted).toBe(true);
+    expect(indentApi.activity).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      allocated.resolve({
+        items: [activityRow({ event_id: "indent:902", indent_no: "IND/ACTIVITY/LATEST" })],
+        total: 1,
+        page: 1,
+        size: 20,
+      });
+      await allocated.promise;
+    });
+    expect((await screen.findAllByText("IND/ACTIVITY/LATEST")).length).toBeGreaterThan(0);
+
+    await act(async () => {
+      approval.resolve({
+        items: [activityRow({ event_id: "indent:903", indent_no: "IND/ACTIVITY/STALE" })],
+        total: 1,
+        page: 1,
+        size: 20,
+      });
+      await approval.promise;
+    });
+    expect(screen.queryByText("IND/ACTIVITY/STALE")).not.toBeInTheDocument();
+
+    fireEvent.click(within(menu).getByText("Stock allocated"));
+    expect(screen.getAllByText("IND/ACTIVITY/BASE").length).toBeGreaterThan(0);
+    fireEvent.click(within(menu).getByText("Stock allocated"));
+    expect(screen.getAllByText("IND/ACTIVITY/LATEST").length).toBeGreaterThan(0);
+    expect(indentApi.activity).toHaveBeenCalledTimes(3);
+  });
+
+  it("aborts superseded Notification status work and ignores its late result", async () => {
+    const draft = deferred<{ items: IndentNotification[]; total: number; page: number; size: number }>();
+    const allocated = deferred<{ items: IndentNotification[]; total: number; page: number; size: number }>();
+    vi.mocked(indentApi.notifications).mockImplementation((params = {}) => {
+      if (params.status?.includes("DRAFT")) return draft.promise;
+      if (params.status?.includes("ALLOCATED")) return allocated.promise;
+      return Promise.resolve({ items: [notificationRow(1)], total: 1, page: 1, size: 20 });
+    });
+    renderNotificationsFlow("/indents/notifications");
+    expect(await screen.findByText("Notification 1")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Indent status" }));
+    const menu = screen.getByRole("menu");
+    fireEvent.click(within(menu).getByText("Draft"));
+    const draftSignal = vi.mocked(indentApi.notifications).mock.calls.at(-1)?.[1] as AbortSignal;
+    fireEvent.click(within(menu).getByText("Draft"));
+    fireEvent.click(within(menu).getByText("Allocated"));
+
+    expect(draftSignal.aborted).toBe(true);
+    expect(indentApi.notifications).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      allocated.resolve({
+        items: [notificationRow(2, { title: "Latest notification", status: "ALLOCATED" })],
+        total: 1,
+        page: 1,
+        size: 20,
+      });
+      await allocated.promise;
+    });
+    expect(await screen.findByText("Latest notification")).toBeInTheDocument();
+
+    await act(async () => {
+      draft.resolve({
+        items: [notificationRow(3, { title: "Stale notification", status: "DRAFT" })],
+        total: 1,
+        page: 1,
+        size: 20,
+      });
+      await draft.promise;
+    });
+    expect(screen.queryByText("Stale notification")).not.toBeInTheDocument();
+    expect(screen.getByText("Latest notification")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["Activity", <IndentReportsPage />, "/indents/reports", "Activity date", indentApi.activity],
+    ["Notification", <IndentNotificationsPage />, "/indents/notifications", "Notification date", indentApi.notifications],
+  ])("keeps incomplete and invalid %s custom dates out of API state and chips", async (
+    _name,
+    Page,
+    route,
+    dateLabel,
+    request,
+  ) => {
+    const view = renderWithProviders(Page, route);
+    await screen.findByRole("button", { name: dateLabel });
+    const initialCalls = vi.mocked(request).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: dateLabel }));
+    const dialog = screen.getByRole("dialog", { name: `${dateLabel} filter` });
+    for (const option of ["All time", "Today", "This week", "This month", "Custom range"]) {
+      expect(within(dialog).getByRole("button", { name: option })).toBeInTheDocument();
     }
-    for (const unsupported of [
-      "Acknowledged",
-      "Fulfilled",
-      "Received",
-      "Ordered",
-      "Closed",
-    ]) {
-      expect(screen.queryByText(unsupported)).not.toBeInTheDocument();
-    }
+    fireEvent.click(within(dialog).getByRole("button", { name: "Custom range" }));
+    const from = within(dialog).getByLabelText(`${dateLabel} from`);
+    const to = within(dialog).getByLabelText(`${dateLabel} to`);
+    const apply = within(dialog).getByRole("button", { name: "Apply" });
+
+    fireEvent.change(from, { target: { value: "2026-07-10" } });
+    expect(apply).toBeDisabled();
+    expect(vi.mocked(request)).toHaveBeenCalledTimes(initialCalls);
+
+    fireEvent.change(to, { target: { value: "2026-07-09" } });
+    expect(screen.getByText("To date must be the same as or later than From date.")).toBeInTheDocument();
+    expect(apply).toBeDisabled();
+    expect(vi.mocked(request)).toHaveBeenCalledTimes(initialCalls);
+    expect(screen.queryByText(new RegExp(`^${dateLabel}:`))).not.toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("applies Activity presets immediately, resets pagination, and clears chips individually", async () => {
+    vi.mocked(indentApi.activity).mockImplementation((params = {}) => Promise.resolve({
+      items: [],
+      total: 80,
+      page: params.page ?? 1,
+      size: params.size ?? 20,
+    }));
+    renderActivityLedgerFlow("/indents/reports?page=4");
+    expect(await screen.findByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
+    const callsBeforePreset = vi.mocked(indentApi.activity).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Activity date" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Activity date filter" }))
+      .getByRole("button", { name: "Today" }));
+
+    await waitFor(() => expect(indentApi.activity).toHaveBeenCalledTimes(callsBeforePreset + 1));
+    expect(vi.mocked(indentApi.activity).mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+      date_from: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      date_to: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      page: 1,
+    }));
+    expect(screen.getByText("Activity date: Today")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Event" }));
+    fireEvent.click(await screen.findByText("Request created"));
+    await waitFor(() => expect(screen.getByText("Event: Request created")).toBeInTheDocument());
+    const closeButtons = screen.getAllByRole("button", { name: "close chip" });
+    fireEvent.click(closeButtons[closeButtons.length - 1]);
+    await waitFor(() => expect(screen.queryByText("Event: Request created"))
+      .not.toBeInTheDocument());
+    expect(screen.getByLabelText("location")).not.toHaveTextContent("transaction_type=");
+    expect(screen.getByText("Activity date: Today")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Event" }));
+    fireEvent.click(await screen.findByText("Stock allocated"));
+    await waitFor(() => expect(screen.getByText("Event: Stock allocated")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    await waitFor(() => expect(screen.queryByText("Activity date: Today")).not.toBeInTheDocument());
+    expect(screen.queryByText("Event: Stock allocated")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("location")).not.toHaveTextContent("transaction_type=");
+    expect(screen.queryByRole("button", { name: "Clear all" })).not.toBeInTheDocument();
+  });
+
+  it("applies Notification custom ranges and presets with Page 1 URL state", async () => {
+    vi.mocked(indentApi.notifications).mockImplementation((params = {}) => Promise.resolve({
+      items: [],
+      total: 80,
+      page: params.page ?? 1,
+      size: params.size ?? 20,
+    }));
+    renderNotificationsFlow("/indents/notifications?page=4");
+    expect(await screen.findByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Notification date" }));
+    let dialog = screen.getByRole("dialog", { name: "Notification date filter" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Custom range" }));
+    fireEvent.change(within(dialog).getByLabelText("Notification date from"), {
+      target: { value: "2026-07-31" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Notification date to"), {
+      target: { value: "2026-07-31" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => expect(indentApi.notifications).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        date_from: "2026-07-31",
+        date_to: "2026-07-31",
+        page: 1,
+      }),
+      expect.anything(),
+    ));
+    expect(screen.getByText("Notification date: 31 Jul 2026 – 31 Jul 2026"))
+      .toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Notification date" }));
+    dialog = screen.getByRole("dialog", { name: "Notification date filter" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "This week" }));
+    await waitFor(() => expect(screen.getByText("Notification date: This week"))
+      .toBeInTheDocument());
+    expect(screen.getByLabelText("location")).not.toHaveTextContent("page=");
+  });
+
+  it("debounces notification search while retaining rows and exposing quiet refresh state", async () => {
+    const update = deferred<{
+      items: IndentNotification[];
+      total: number;
+      page: number;
+      size: number;
+    }>();
+    vi.mocked(indentApi.notifications).mockImplementation((params = {}) => (
+      params.search
+        ? update.promise
+        : Promise.resolve({
+          items: [notificationRow(1, { title: "Existing notification" })],
+          total: 1,
+          page: 1,
+          size: 20,
+        })
+    ));
+    renderNotificationsFlow("/indents/notifications");
+    expect(await screen.findByText("Existing notification")).toBeInTheDocument();
+    const initialCalls = vi.mocked(indentApi.notifications).mock.calls.length;
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search notifications" }), {
+      target: { value: "stock" },
+    });
+    expect(indentApi.notifications).toHaveBeenCalledTimes(initialCalls);
+    await waitFor(() => expect(indentApi.notifications).toHaveBeenCalledTimes(initialCalls + 1));
+    expect(screen.getByText("Existing notification")).toBeInTheDocument();
+    expect(screen.getByText("Updating results…")).toHaveAttribute("role", "status");
+    expect(document.querySelector('[aria-busy="true"]')).toBeInTheDocument();
+    expect(screen.getByText('Search: “stock”')).toBeInTheDocument();
+
+    await act(async () => update.resolve({
+      items: [notificationRow(2, { title: "Updated notification" })],
+      total: 1,
+      page: 1,
+      size: 20,
+    }));
+    expect(await screen.findByText("Updated notification")).toBeInTheDocument();
+    expect(screen.queryByText("Updating results…")).not.toBeInTheDocument();
+    expect(document.querySelector('[aria-busy="true"]')).not.toBeInTheDocument();
   });
 
   it("renders the truthful Activity columns and matching desktop/mobile content", async () => {
@@ -1558,13 +2364,10 @@ describe("indent UI shell", () => {
     });
   });
 
-  // Waiting for me carries its own toolbar now: it lists every document type, so the
-  // indent module's Date/Status/Priority filters never applied to it.
   it("hides unsupported Date, Status and Priority filters on Waiting for me", async () => {
     renderWithProviders(<IndentApprovalsPage />, "/indents/approvals");
 
-    expect(await screen.findByRole("searchbox", { name: "Search approvals" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Past due only/ })).toBeInTheDocument();
+    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Date/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Status/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Priority/ })).not.toBeInTheDocument();
@@ -1575,27 +2378,29 @@ describe("indent UI shell", () => {
 
     const search = await screen.findByRole("searchbox", { name: "Search indents" });
     expect(search.closest("section")?.firstElementChild).toHaveClass("flex-wrap");
-    fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
-    expect(screen.getByText("Raised date").closest("div")?.parentElement).toHaveClass(
+    fireEvent.click(screen.getByRole("button", { name: "Raised date" }));
+    expect(screen.getByRole("dialog", { name: "Raised date filter" })).toHaveClass(
       "w-[calc(100vw-2rem)]",
-      "max-w-80",
+      "max-w-96",
       "overflow-y-auto",
     );
   });
 
   it.each([
-    ["Overview", <IndentDashboardPage />, "/indents/dashboard"],
-    ["All requests", <IndentListPage />, "/indents"],
-    ["Board", <IndentBoardPage />, "/indents/board"],
-    ["Acknowledgments", <IndentAcknowledgmentsPage />, "/indents/acknowledgments"],
-    ["Activity ledger", <IndentReportsPage />, "/indents/reports"],
-  ])("shows required-by control on %s", async (_name, Page, route) => {
+    ["Overview", <IndentDashboardPage />, "/indents/dashboard", true],
+    ["All requests", <IndentListPage />, "/indents", true],
+    ["Board", <IndentBoardPage />, "/indents/board", false],
+    ["Acknowledgments", <IndentAcknowledgmentsPage />, "/indents/acknowledgments", false],
+  ])("shows required-by control on %s", async (_name, Page, route, separateDates) => {
     const view = renderWithProviders(Page, route);
 
     await screen.findByRole("searchbox", { name: "Search indents" });
-    fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
-
-    expect(screen.getByRole("button", { name: "Add required-by filter" })).toBeInTheDocument();
+    if (separateDates) {
+      expect(screen.getByRole("button", { name: "Required by" })).toBeInTheDocument();
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
+      expect(screen.getByRole("button", { name: "Add required-by filter" })).toBeInTheDocument();
+    }
     view.unmount();
   });
 
@@ -1667,23 +2472,218 @@ describe("indent UI shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
       page: 2,
-    })));
+    }), expect.anything()));
 
-    fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Today" }));
+    fireEvent.click(screen.getByRole("button", { name: "Raised date" }));
+    let raisedDialog = screen.getByRole("dialog", { name: "Raised date filter" });
+    fireEvent.click(within(raisedDialog).getByRole("button", { name: "Today" }));
+    fireEvent.click(within(raisedDialog).getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
       page: 1,
       created_date_from: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
       created_date_to: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
-    })));
+    }), expect.anything()));
 
-    fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Today" }));
-    await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+    fireEvent.click(screen.getByRole("button", { name: "Raised date" }));
+    raisedDialog = screen.getByRole("dialog", { name: "Raised date filter" });
+    fireEvent.click(within(raisedDialog).getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(screen.queryByText("Raised: Today")).not.toBeInTheDocument());
+    expect(screen.getByText("Page 1 of 2 (25 total)")).toBeInTheDocument();
+  });
+
+  it("calculates Raised and Required-by presets from the local calendar", () => {
+    const localNow = new Date(2026, 6, 28, 23, 45);
+
+    expect(getRaisedDateRange("today", localNow)).toEqual({
+      from: "2026-07-28",
+      to: "2026-07-28",
+    });
+    expect(getRaisedDateRange("this_week", localNow)).toEqual({
+      from: "2026-07-27",
+      to: "2026-07-28",
+    });
+    expect(getRaisedDateRange("this_month", localNow)).toEqual({
+      from: "2026-07-01",
+      to: "2026-07-28",
+    });
+    expect(getRequiredByDateRange("next_7_days", localNow)).toEqual({
+      from: "2026-07-28",
+      to: "2026-08-04",
+    });
+    expect(getRequiredByDateRange("next_30_days", localNow)).toEqual({
+      from: "2026-07-28",
+      to: "2026-08-27",
+    });
+  });
+
+  it("keeps incomplete and invalid custom dates in the popup without requesting data", async () => {
+    renderWithProviders(<IndentListPage />, "/indents");
+    await screen.findByRole("button", { name: "Raised date" });
+    const initialCalls = vi.mocked(indentApi.list).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Raised date" }));
+    const dialog = screen.getByRole("dialog", { name: "Raised date filter" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Custom range" }));
+    expect(within(dialog).getByTestId("raised-date-grid")).toHaveClass(
+      "grid-cols-1",
+      "sm:grid-cols-2",
+    );
+    const from = within(dialog).getByLabelText("Raised date from");
+    const to = within(dialog).getByLabelText("Raised date to");
+    const apply = within(dialog).getByRole("button", { name: "Apply" });
+
+    expect(screen.queryByText("When the requester needs the items.")).not.toBeInTheDocument();
+    expect(apply).toBeDisabled();
+    fireEvent.change(from, { target: { value: "2026-07-10" } });
+    expect(to).toHaveAttribute("min", "2026-07-10");
+    expect(apply).toBeDisabled();
+    fireEvent.click(apply);
+    expect(indentApi.list).toHaveBeenCalledTimes(initialCalls);
+
+    fireEvent.change(to, { target: { value: "2026-07-09" } });
+    const error = screen.getByText("To date must be the same as or later than From date.");
+    expect(to).toHaveAttribute("aria-invalid", "true");
+    expect(to).toHaveAttribute("aria-describedby", error.id);
+    expect(from).toHaveAttribute("max", "2026-07-09");
+    expect(apply).toBeDisabled();
+    expect(indentApi.list).toHaveBeenCalledTimes(initialCalls);
+
+    fireEvent.change(to, { target: { value: "2026-07-20" } });
+    fireEvent.change(from, { target: { value: "2026-07-21" } });
+    expect(to).toHaveValue("");
+    expect(to).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("dialog", { name: "Raised date filter" })).toBeInTheDocument();
+    expect(apply).toBeDisabled();
+    expect(indentApi.list).toHaveBeenCalledTimes(initialCalls);
+  });
+
+  it("applies one valid same-day Raised range and resets pagination once", async () => {
+    vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+      items: [],
+      total: 45,
+      page: params.page ?? 1,
+      size: params.size ?? 20,
+    }));
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    expect(await screen.findByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("Page 2 of 3 (45 total)")).toBeInTheDocument();
+    const callsBeforeDraft = vi.mocked(indentApi.list).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Raised date" }));
+    const dialog = screen.getByRole("dialog", { name: "Raised date filter" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Custom range" }));
+    fireEvent.change(within(dialog).getByLabelText("Raised date from"), {
+      target: { value: "2026-07-31" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Raised date to"), {
+      target: { value: "2026-07-31" },
+    });
+
+    expect(indentApi.list).toHaveBeenCalledTimes(callsBeforeDraft);
+    const apply = within(dialog).getByRole("button", { name: "Apply" });
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+
+    expect(indentApi.list).toHaveBeenCalledTimes(callsBeforeDraft + 1);
+    expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      created_date_from: "2026-07-31",
+      created_date_to: "2026-07-31",
       page: 1,
-      created_date_from: undefined,
-      created_date_to: undefined,
-    })));
+    }), expect.anything());
+    expect(screen.getByText("Raised: 31 Jul 2026 – 31 Jul 2026")).toBeInTheDocument();
+    expect(screen.getByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
+  });
+
+  it("combines Raised and Required-by ranges, formats chips, and clears each independently", async () => {
+    renderWithProviders(<IndentListPage />, "/indents");
+    await screen.findByRole("button", { name: "Raised date" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Raised date" }));
+    let dialog = screen.getByRole("dialog", { name: "Raised date filter" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Custom range" }));
+    fireEvent.change(within(dialog).getByLabelText("Raised date from"), { target: { value: "2026-07-01" } });
+    fireEvent.change(within(dialog).getByLabelText("Raised date to"), { target: { value: "2026-07-31" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Required by" }));
+    dialog = screen.getByRole("dialog", { name: "Required by filter" });
+    expect(within(dialog).getByText("When the requester needs the items.")).toBeInTheDocument();
+    expect(within(dialog).queryByText("When the indent was created or raised.")).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Custom range" }));
+    fireEvent.change(within(dialog).getByLabelText("Required by from"), { target: { value: "2026-08-01" } });
+    fireEvent.change(within(dialog).getByLabelText("Required by to"), { target: { value: "2026-08-10" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      created_date_from: "2026-07-01",
+      created_date_to: "2026-07-31",
+      required_by_from: "2026-08-01",
+      required_by_to: "2026-08-10",
+      page: 1,
+    }), expect.anything()));
+    expect(screen.getByText("Raised: 01 Jul 2026 – 31 Jul 2026")).toBeInTheDocument();
+    expect(screen.getByText("Required by: 01 Aug 2026 – 10 Aug 2026")).toBeInTheDocument();
+    expect(screen.queryByText(/2026-07-01 –/)).not.toBeInTheDocument();
+
+    const chipCloseButtons = screen.getAllByRole("button", { name: "close chip" });
+    expect(chipCloseButtons).toHaveLength(2);
+    fireEvent.click(chipCloseButtons[0]);
+    await waitFor(() => {
+      const params = vi.mocked(indentApi.list).mock.calls.at(-1)?.[0];
+      expect(params).not.toHaveProperty("created_date_from");
+      expect(params).not.toHaveProperty("created_date_to");
+      expect(params).toEqual(expect.objectContaining({
+        required_by_from: "2026-08-01",
+        required_by_to: "2026-08-10",
+      }));
+    });
+    expect(screen.queryByText(/Raised:/)).not.toBeInTheDocument();
+    expect(screen.getByText("Required by: 01 Aug 2026 – 10 Aug 2026")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(screen.queryByText(/Required by:/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Raised date" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Required by" })).toBeInTheDocument();
+  });
+
+  it("applies the same date presets to Overview stats and recent indents once", async () => {
+    renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
+    await screen.findByRole("button", { name: "Raised date" });
+    const initialStatsCalls = vi.mocked(indentApi.stats).mock.calls.length;
+    const initialListCalls = vi.mocked(indentApi.list).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Raised date" }));
+    let dialog = screen.getByRole("dialog", { name: "Raised date filter" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "This month" }));
+    expect(indentApi.stats).toHaveBeenCalledTimes(initialStatsCalls);
+    expect(indentApi.list).toHaveBeenCalledTimes(initialListCalls);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(indentApi.stats).toHaveBeenCalledTimes(initialStatsCalls + 1);
+    expect(indentApi.list).toHaveBeenCalledTimes(initialListCalls + 1);
+    expect(screen.getByText("Raised: This month")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Required by" }));
+    dialog = screen.getByRole("dialog", { name: "Required by filter" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Next 7 days" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => {
+      expect(indentApi.stats).toHaveBeenCalledTimes(initialStatsCalls + 2);
+      expect(indentApi.list).toHaveBeenCalledTimes(initialListCalls + 2);
+    });
+    const statsParams = vi.mocked(indentApi.stats).mock.calls.at(-1)?.[0];
+    const listParams = vi.mocked(indentApi.list).mock.calls.at(-1)?.[0];
+    expect(statsParams).toEqual(expect.objectContaining({
+      created_date_from: expect.any(String),
+      created_date_to: expect.any(String),
+      required_by_from: expect.any(String),
+      required_by_to: expect.any(String),
+    }));
+    expect(listParams).toEqual(expect.objectContaining({ ...statsParams, size: 6 }));
+    expect(screen.getByText("Required by: Next 7 days")).toBeInTheDocument();
   });
 
   it("required-by expands, applies, clears and collapses on acknowledgments", async () => {
@@ -1734,21 +2734,6 @@ describe("indent UI shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add required-by filter" }));
     expect(screen.getByLabelText("Required by from")).toHaveValue("");
     expect(screen.getByLabelText("Required by to")).toHaveValue("");
-  });
-
-  it("sends required-by filters to the activity API", async () => {
-    renderWithProviders(<IndentReportsPage />, "/indents/reports");
-
-    expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Add required-by filter" }));
-    fireEvent.change(screen.getByLabelText("Required by from"), { target: { value: "2026-08-01" } });
-    fireEvent.change(screen.getByLabelText("Required by to"), { target: { value: "2026-08-15" } });
-
-    await waitFor(() => expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
-      required_from: "2026-08-01",
-      required_to: "2026-08-15",
-    })));
   });
 
   it("does not duplicate API requests when a date preset is selected", async () => {
@@ -1829,10 +2814,21 @@ describe("indent UI shell", () => {
     expect(await screen.findByText("No fulfilment acknowledgments found")).toBeInTheDocument();
   });
 
-  it("does not show search controls on Notifications", async () => {
+  it("shows the approved notification filter bar without advanced filters", async () => {
     renderWithProviders(<IndentNotificationsPage />, "/indents/notifications");
     await waitFor(() => expect(screen.queryByText("Loading notifications...")).not.toBeInTheDocument());
-    expect(screen.queryByRole("searchbox", { name: "Search indents" })).not.toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "Search notifications" })).toHaveAttribute(
+      "placeholder",
+      "Search by indent no., title or message...",
+    );
+    expect(screen.getByRole("button", { name: "Notification date" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Indent status" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Priority/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^More filters/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Indent status" }));
+    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(
+      EXPECTED_REQUEST_STATUS_FILTERS.map(([label]) => label),
+    );
   });
 
   it("uses final pre-UAT page headings", async () => {
@@ -2222,6 +3218,37 @@ describe("indent UI shell", () => {
 
     act(() => vi.advanceTimersByTime(1));
     expect(screen.getByLabelText("filter state")).toHaveTextContent("1:IND-100");
+
+    fireEvent.click(screen.getByRole("button", { name: "Set page" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search indents" }), {
+      target: { value: "  IND-100  " },
+    });
+    act(() => vi.advanceTimersByTime(300));
+    expect(screen.getByLabelText("filter state")).toHaveTextContent("3:IND-100");
+  });
+
+  it("hides the native search cancel while the custom clear resets pagination", () => {
+    vi.useFakeTimers();
+    render(
+      <IndentFilterProvider>
+        <FilterHarness />
+      </IndentFilterProvider>,
+    );
+
+    const search = screen.getByRole("searchbox", { name: "Search indents" });
+    expect(search).toHaveClass("[&::-webkit-search-cancel-button]:hidden");
+
+    fireEvent.change(search, { target: { value: "IND-100" } });
+    act(() => vi.advanceTimersByTime(300));
+    fireEvent.click(screen.getByRole("button", { name: "Set page" }));
+    expect(screen.getByLabelText("filter state")).toHaveTextContent("3:IND-100");
+
+    const clear = screen.getByRole("button", { name: "Clear search" });
+    expect(clear).toHaveClass("text-muted");
+    fireEvent.click(clear);
+
+    expect(search).toHaveValue("");
+    expect(screen.getByLabelText("filter state")).toHaveTextContent("1::");
   });
 
   it("keeps required-by dates collapsed and resets pagination on raised date changes", () => {
@@ -2273,6 +3300,216 @@ describe("indent UI shell", () => {
     expect(screen.getByRole("button", { name: /Reject/i })).toBeInTheDocument();
   });
 
+  it("requires a real rejection reason and sends one trimmed reject request", async () => {
+    const rejection = deferred<Indent>();
+    const nextIndent = detailIndent({
+      status: "REJECTED",
+      can_approve: false,
+      can_reject: false,
+    });
+    vi.mocked(indentApi.get)
+      .mockResolvedValueOnce(detailIndent({
+        can_approve: true,
+        can_reject: true,
+      }))
+      .mockResolvedValueOnce(nextIndent);
+    vi.mocked(indentApi.reject).mockReturnValueOnce(rejection.promise);
+    const { client } = renderWithProviders(<IndentDetailPage />, "/indents/42");
+    const scope = { employeeId: 1, activePositionId: 10 };
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reject" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAccessibleName("Reject indent");
+    expect(within(dialog).getByText("Please enter the reason for rejecting this indent.")).toBeInTheDocument();
+    const reason = within(dialog).getByLabelText("Reason for rejection");
+    expect(reason).toHaveAttribute("placeholder", "Example: Incorrect quantity or item not required");
+    expect(reason).toHaveAttribute("maxlength", "250");
+    expect(reason).toHaveAttribute("wrap", "soft");
+    expect(reason).toHaveClass(
+      "h-[120px]",
+      "resize-none",
+      "overflow-x-hidden",
+      "whitespace-pre-wrap",
+      "break-words",
+      "[overflow-wrap:anywhere]",
+    );
+    expect(within(dialog).getByText("Enter a short reason. This will be visible in the approval journey.")).toBeInTheDocument();
+    expect(within(dialog).getByText("0/250")).toBeInTheDocument();
+    expect(within(dialog).getByText("Rejection reason is required.")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Reject indent" })).toBeDisabled();
+
+    fireEvent.change(reason, { target: { value: "   " } });
+    expect(within(dialog).getByText("3/250")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Reject indent" })).toBeDisabled();
+    expect(indentApi.reject).not.toHaveBeenCalled();
+
+    fireEvent.change(reason, { target: { value: "  Incorrect quantity  " } });
+    expect(within(dialog).getByText("22/250")).toBeInTheDocument();
+    const confirm = within(dialog).getByRole("button", { name: "Reject indent" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+
+    const pending = await within(dialog).findByRole("button", { name: "Rejecting..." });
+    expect(pending).toBeDisabled();
+    expect(screen.getByText("IND/2026/0042")).toBeInTheDocument();
+    fireEvent.click(pending);
+    expect(indentApi.reject).toHaveBeenCalledTimes(1);
+    expect(indentApi.reject).toHaveBeenCalledWith(42, "Incorrect quantity");
+
+    await act(async () => {
+      rejection.resolve(nextIndent);
+      await rejection.promise;
+    });
+
+    await waitFor(() => {
+      expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))?.status).toBe("REJECTED");
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(indentApi.journey).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps the rejection modal open and shows the existing error pattern on failure", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      can_approve: true,
+      can_reject: true,
+    }));
+    vi.mocked(indentApi.reject).mockRejectedValueOnce(new Error("Server error"));
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reject" }));
+    const dialog = await screen.findByRole("dialog");
+    const reason = within(dialog).getByLabelText("Reason for rejection");
+    fireEvent.change(reason, { target: { value: "Incorrect quantity" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reject indent" }));
+
+    expect(await within(dialog).findByText("Server error")).toBeInTheDocument();
+    expect(reason).toHaveValue("Incorrect quantity");
+    expect(within(dialog).getByRole("button", { name: "Reject indent" })).toBeEnabled();
+  });
+
+  it.each([
+    ["OE Review", null, "Rejected by OE"],
+    ["District Manager Review", null, "Rejected by District Manager"],
+    ["Regional Manager Review", null, "Rejected by Regional Manager"],
+    ["DM Review", "DISTRICT MANAGER-AP-104", "Rejected by District Manager"],
+    ["Final Approval - COO", "COO", "Rejected by SPH/COO"],
+    ["Finance Controller Review", null, "Rejected by Finance Controller"],
+  ])("shows the rejected stage %s in the detail badge", async (title, positionName, label) => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      status: "REJECTED",
+      can_approve: false,
+      can_reject: false,
+    }));
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "REJECTED",
+      current_stage: "Request rejected",
+      current_stage_message: "Request rejected",
+      stages: [{
+        sequence: 2,
+        title,
+        status: "REJECTED",
+        approver_name: "Rejecting Approver",
+        position_name: positionName,
+        timestamp: "2026-07-27T10:20:00Z",
+        comments: "Incorrect quantity",
+        stage_type: "approval",
+      }],
+      history: [],
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+  });
+
+  it("shows Draft actions in the detail header and navigates Edit Indent to edit mode", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      status: "DRAFT",
+      can_submit: true,
+    }));
+
+    renderWithProviders(
+      <>
+        <IndentDetailPage />
+        <LocationProbe />
+      </>,
+      "/indents/42",
+    );
+
+    const edit = await screen.findByRole("button", { name: "Edit Indent" });
+    expect(screen.getByRole("button", { name: "Delete Draft" })).toBeInTheDocument();
+
+    fireEvent.click(edit);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("location")).toHaveTextContent("/indents/new?edit=42");
+    });
+  });
+
+  it("hides Draft actions from a non-owner without delete permission", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      status: "DRAFT",
+      requested_by_id: 2,
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit Indent" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete Draft" })).not.toBeInTheDocument();
+  });
+
+  it("shows Delete Draft to a permitted non-owner without exposing Edit Indent", async () => {
+    mockAccount.canDeleteIndent = true;
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      status: "DRAFT",
+      requested_by_id: 2,
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByRole("button", { name: "Delete Draft" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit Indent" })).not.toBeInTheDocument();
+  });
+
+  it("deletes a confirmed Draft and returns to All Requests", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      status: "DRAFT",
+      can_submit: true,
+    }));
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+
+    renderWithProviders(
+      <>
+        <IndentDetailPage />
+        <LocationProbe />
+      </>,
+      "/indents/42",
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete Draft" }));
+
+    await waitFor(() => expect(indentApi.delete).toHaveBeenCalledWith(42));
+    await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents"));
+  });
+
+  it.each([
+    "SUBMITTED",
+    "PENDING_APPROVAL",
+    "APPROVED",
+    "REJECTED",
+    "AWAITING_ALLOCATION",
+  ])("hides Draft actions for %s indents", async (status) => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ status }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit Indent" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete Draft" })).not.toBeInTheDocument();
+  });
+
   it("keeps All Requests without an eye action column and opens detail on row click", async () => {
     vi.mocked(indentApi.list).mockResolvedValueOnce({
       items: [{
@@ -2305,98 +3542,138 @@ describe("indent UI shell", () => {
     await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents/42"));
   });
 
-  it("pins an indent without opening the row and adds it to the Board cache", async () => {
-    const bookmark = deferred<Indent>();
-    const scope = { employeeId: mockAccount.employeeId, activePositionId: mockAccount.activePositionId };
-    const row = {
-      id: 42,
-      indent_no: "IND/2026/0042",
-      requested_by_name: "A Anil Kumar",
-      department_name: "Operations",
-      status: "DRAFT",
-      priority: "NORMAL",
-      total_items: 2,
-      is_bookmarked: "NO",
-      created_at: "2026-07-27T10:30:00Z",
-    };
-    const client = createTestQueryClient();
-    client.setQueryData(indentKeys.board(scope, { is_bookmarked: "YES" }), {
-      items: [],
-      total: 0,
-      page: 1,
-      size: 50,
-    });
+  it("uses one fixed, aligned column layout for the All Requests header and rows", async () => {
+    const requester = "A requester name long enough to test fixed table alignment";
+    const department = "A department name long enough to test fixed table alignment";
     vi.mocked(indentApi.list).mockResolvedValueOnce({
-      items: [row],
+      items: [{
+        id: 42,
+        indent_no: "IND/2026/0042",
+        requested_by_name: requester,
+        department_name: department,
+        status: "AWAITING_ALLOCATION",
+        priority: "NORMAL",
+        total_items: 17,
+        is_bookmarked: "NO",
+        created_at: "2026-07-27T10:30:00Z",
+      }],
       total: 1,
       page: 1,
       size: 20,
     });
-    vi.mocked(indentApi.bookmark).mockReturnValueOnce(bookmark.promise);
 
-    renderWithProviders(
-      <>
-        <IndentListPage />
-        <LocationProbe />
-      </>,
-      "/indents",
-      client,
-    );
+    renderWithProviders(<IndentListPage />, "/indents");
 
-    const pin = (await screen.findAllByRole("button", { name: "Add to Board" }))
-      .find((button) => button.getAttribute("aria-pressed") === "false");
-    expect(pin).toBeTruthy();
-    fireEvent.click(pin!);
+    const table = await screen.findByLabelText("List");
+    await within(table).findByText(requester);
+    const headers = within(table).getAllByRole("columnheader");
+    const row = within(table).getByRole("row", { name: /IND\/2026\/0042/ });
+    const cells = Array.from(row.querySelectorAll("td"));
+    const columnClasses = [
+      ["w-[26%]", "lg:w-[18%]", "text-left"],
+      ["w-0", "lg:w-[20%]", "text-left"],
+      ["w-[30%]", "lg:w-[20%]", "text-left"],
+      ["w-[12%]", "lg:w-[10%]", "text-center"],
+      ["w-[32%]", "lg:w-[18%]", "text-left"],
+      ["w-0", "lg:w-[14%]", "text-left"],
+    ];
 
-    await waitFor(() => expect(indentApi.bookmark).toHaveBeenCalledWith(42));
-    expect(screen.getByLabelText("location")).toHaveTextContent("/indents");
-    expect(client.getQueryData<{ items: typeof row[] }>(indentKeys.board(scope, { is_bookmarked: "YES" }))?.items[0]).toMatchObject({
-      id: 42,
-      is_bookmarked: "YES",
+    expect(table).toHaveClass("table-fixed");
+    expect(headers).toHaveLength(columnClasses.length);
+    expect(cells).toHaveLength(columnClasses.length);
+    columnClasses.forEach((classes, index) => {
+      expect(headers[index]).toHaveClass("px-4", "align-middle", ...classes);
+      expect(cells[index]).toHaveClass("px-4", "align-middle", ...classes);
     });
-    await act(async () => {
-      bookmark.resolve(detailIndent({ is_bookmarked: "YES" }));
-      await bookmark.promise;
-    });
+    expect(within(cells[1]).getByText(requester)).toHaveClass("block", "truncate");
+    expect(within(cells[2]).getByText(department)).toHaveClass("block", "truncate");
+    expect(within(cells[3]).getByText("17")).toHaveClass("block", "tabular-nums");
+    expect(within(cells[4]).getByText("AWAITING ALLOCATION")).toHaveClass("inline-flex");
   });
 
-  it("rolls back and shows an error when pinning fails", async () => {
-    const scope = { employeeId: mockAccount.employeeId, activePositionId: mockAccount.activePositionId };
-    const row = {
-      id: 42,
-      indent_no: "IND/2026/0042",
-      requested_by_name: "A Anil Kumar",
-      department_name: "Operations",
-      status: "DRAFT",
-      priority: "NORMAL",
-      total_items: 2,
-      is_bookmarked: "NO",
-      created_at: "2026-07-27T10:30:00Z",
-    };
-    const client = createTestQueryClient();
-    client.setQueryData(indentKeys.board(scope, { is_bookmarked: "YES" }), {
-      items: [],
-      total: 0,
-      page: 1,
-      size: 50,
-    });
+  it("does not render pin controls for any indent in All Requests", async () => {
     vi.mocked(indentApi.list).mockResolvedValueOnce({
-      items: [row],
-      total: 1,
+      items: [
+        {
+          id: 42,
+          indent_no: "IND/2026/0042",
+          requested_by_name: "A Anil Kumar",
+          department_name: "Operations",
+          status: "DRAFT",
+          priority: "NORMAL",
+          total_items: 2,
+          is_bookmarked: "NO",
+          created_at: "2026-07-27T10:30:00Z",
+        },
+        {
+          id: 43,
+          indent_no: "IND/2026/0043",
+          requested_by_name: "B Bala Kumar",
+          department_name: "Operations",
+          status: "ALLOCATED",
+          priority: "NORMAL",
+          total_items: 1,
+          is_bookmarked: "YES",
+          created_at: "2026-07-27T11:30:00Z",
+        },
+      ],
+      total: 2,
       page: 1,
       size: 20,
     });
-    vi.mocked(indentApi.bookmark).mockRejectedValueOnce(new Error("nope"));
 
-    renderWithProviders(<IndentListPage />, "/indents", client);
+    renderWithProviders(<IndentListPage />, "/indents");
 
-    const pin = (await screen.findAllByRole("button", { name: "Add to Board" }))
-      .find((button) => button.getAttribute("aria-pressed") === "false");
-    expect(pin).toBeTruthy();
-    fireEvent.click(pin!);
+    expect(await screen.findAllByText("IND/2026/0042")).not.toHaveLength(0);
+    expect(screen.getAllByText("IND/2026/0043")).not.toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "Add to Board" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove from Board" })).not.toBeInTheDocument();
+    expect(indentApi.bookmark).not.toHaveBeenCalled();
+    expect(indentApi.unbookmark).not.toHaveBeenCalled();
+  });
 
-    expect(await screen.findByText("Could not update board bookmark. Please try again.")).toBeInTheDocument();
-    expect(client.getQueryData<{ items: typeof row[] }>(indentKeys.board(scope, { is_bookmarked: "YES" }))?.items).toEqual([]);
+  it("uses local success and info badge colors only for allocation statuses in All Requests", async () => {
+    const statuses = [
+      "ALLOCATED",
+      "AWAITING_ALLOCATION",
+      "DRAFT",
+      "PENDING_APPROVAL",
+      "REJECTED",
+      "APPROVED",
+    ];
+    vi.mocked(indentApi.list).mockResolvedValueOnce({
+      items: statuses.map((status, index) => ({
+        id: 100 + index,
+        indent_no: `IND/2026/${String(100 + index).padStart(4, "0")}`,
+        requested_by_name: "Allocation User",
+        department_name: "Operations",
+        status,
+        priority: "NORMAL",
+        total_items: 1,
+        is_bookmarked: "NO",
+        created_at: "2026-07-27T10:30:00Z",
+      })),
+      total: statuses.length,
+      page: 1,
+      size: 20,
+    });
+
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    for (const badge of await screen.findAllByText("ALLOCATED")) {
+      expect(badge).toHaveClass("bg-ok-bg", "text-ok");
+      expect(badge).not.toHaveClass("bg-info-bg", "text-info");
+    }
+    for (const badge of screen.getAllByText("AWAITING ALLOCATION")) {
+      expect(badge).toHaveClass("bg-info-bg", "text-info");
+      expect(badge).not.toHaveClass("bg-ok-bg", "text-ok");
+    }
+    for (const label of ["DRAFT", "PENDING APPROVAL", "REJECTED", "APPROVED"]) {
+      for (const badgeContent of screen.getAllByText(label)) {
+        expect(badgeContent).not.toHaveClass("bg-ok-bg", "text-ok", "bg-info-bg", "text-info");
+        expect(badgeContent.parentElement).not.toHaveClass("bg-ok-bg", "text-ok", "bg-info-bg", "text-info");
+      }
+    }
   });
 
   it("opens the approval journey from the progress card by click and keyboard", async () => {
@@ -2443,6 +3720,116 @@ describe("indent UI shell", () => {
     expect(indentApi.journey).toHaveBeenCalledWith(42);
   });
 
+  it.each([
+    ["OE Review", "Pending at OE"],
+    ["DISTRICT MANAGER Review", "Pending at District Manager"],
+    ["REGIONAL Manager Review", "Pending at Regional Manager"],
+    ["Final Approval - SPH", "Pending at SPH/COO"],
+    ["Final Approval - COO", "Pending at SPH/COO"],
+    ["Final Approval - SPH/COO", "Pending at SPH/COO"],
+    ["Final Approval", "Pending at SPH/COO"],
+  ])("uses current journey stage %s in the pending detail badge", async (stageTitle, badgeLabel) => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "PENDING_APPROVAL",
+      stages: [
+        {
+          sequence: 1,
+          title: "OE Review",
+          status: "APPROVED",
+          stage_type: "approval",
+        },
+        {
+          sequence: 2,
+          title: stageTitle,
+          status: "PENDING",
+          is_current: true,
+          stage_type: "approval",
+        },
+      ],
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText(badgeLabel)).toBeInTheDocument();
+    expect(screen.queryByText("Pending Approval")).not.toBeInTheDocument();
+  });
+
+  it("keeps the pending detail badge fallback when no journey stage is current", async () => {
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("Pending Approval")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["DRAFT", "DRAFT"],
+    ["APPROVED", "APPROVED"],
+    ["REJECTED", "REJECTED"],
+    ["AWAITING_ALLOCATION", "AWAITING ALLOCATION"],
+  ])("keeps the %s detail badge unchanged", async (status, label) => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ status }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+  });
+
+  it("shows progress loading on first detail open, then renders journey stages", async () => {
+    const journeyRequest = deferred<IndentJourney>();
+    vi.mocked(indentApi.journey).mockReturnValueOnce(journeyRequest.promise);
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Loading approval progress" })).toBeInTheDocument();
+    expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
+
+    await act(async () => {
+      journeyRequest.resolve(journeyData());
+      await journeyRequest.promise;
+    });
+
+    expect(await screen.findByText("OE Review")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
+  });
+
+  it("keeps cached detail progress visible during a journey refetch", async () => {
+    const client = createTestQueryClient();
+    const refresh = deferred<IndentJourney>();
+    const scope = { employeeId: 1, activePositionId: 10 };
+    client.setQueryData(indentKeys.journey(scope, 42), journeyData());
+    await client.invalidateQueries({ queryKey: indentKeys.journey(scope, 42), refetchType: "none" });
+    vi.mocked(indentApi.journey).mockReturnValueOnce(refresh.promise);
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
+
+    expect(await screen.findByText("OE Review")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
+
+    await act(async () => {
+      refresh.resolve(journeyData({ current_stage_message: "Approval completed" }));
+      await refresh.promise;
+    });
+  });
+
+  it("shows unavailable after the detail journey request fails", async () => {
+    vi.mocked(indentApi.journey).mockRejectedValueOnce(new Error("Journey request failed"));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("Status unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
+  });
+
+  it("shows unavailable after the detail journey response is unusable", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({ stages: [] }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("Status unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
+  });
+
   it("reuses the prefetched journey cache on the journey page", async () => {
     const client = createTestQueryClient();
     const first = renderWithProviders(<IndentDetailPage />, "/indents/42", client);
@@ -2472,7 +3859,7 @@ describe("indent UI shell", () => {
     await waitFor(() => expect(indentApi.journey).toHaveBeenCalledTimes(1));
   });
 
-  it("updates the detail cache from approval response and invalidates journey", async () => {
+  it("updates the detail cache from approval response and triggers background journey refetch", async () => {
     const client = createTestQueryClient();
     const nextIndent = detailIndent({
       status: "AWAITING_ALLOCATION",
@@ -2481,21 +3868,163 @@ describe("indent UI shell", () => {
       current_approver_name: null,
     });
     const approval = deferred<Indent>();
-    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }));
+    const detailRefresh = deferred<Indent>();
+    const journeyRefresh = deferred<IndentJourney>();
+    vi.mocked(indentApi.get)
+      .mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }))
+      .mockReturnValueOnce(detailRefresh.promise);
     vi.mocked(indentApi.approve).mockReturnValueOnce(approval.promise);
+    vi.mocked(indentApi.journey).mockReturnValueOnce(journeyRefresh.promise);
     const scope = { employeeId: 1, activePositionId: 10 };
     client.setQueryData(indentKeys.journey(scope, 42), journeyData());
 
     renderWithProviders(<IndentDetailPage />, "/indents/42", client);
 
-    fireEvent.click(await screen.findByRole("button", { name: /Approve/i }));
-    expect(await screen.findByRole("button", { name: /Approving/i })).toBeDisabled();
+    const approveButton = await screen.findByRole("button", { name: /Approve/i });
+    await waitFor(() => {
+      expect(client.getQueryCache().find({
+        queryKey: indentKeys.journey(scope, 42),
+      })?.getObserversCount()).toBe(1);
+    });
+    expect(indentApi.journey).not.toHaveBeenCalled();
 
-    approval.resolve(nextIndent);
+    fireEvent.click(approveButton);
+    const pendingButton = await screen.findByRole("button", { name: /Approving/i });
+    expect(pendingButton).toBeDisabled();
+    fireEvent.click(pendingButton);
+    expect(indentApi.approve).toHaveBeenCalledTimes(1);
+    expect(indentApi.approve).toHaveBeenCalledWith(42, "");
+
+    await act(async () => {
+      approval.resolve(nextIndent);
+      await approval.promise;
+    });
     await waitFor(() => {
       expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))?.status).toBe("AWAITING_ALLOCATION");
     });
+    expect(screen.getByText("AWAITING ALLOCATION")).toBeInTheDocument();
+    expect(screen.getByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.getByText("OE Review")).toBeInTheDocument();
+
     expect(client.getQueryState(indentKeys.journey(scope, 42))?.isInvalidated).toBe(true);
+    expect(indentApi.journey).toHaveBeenCalledTimes(1);
+    expect(indentApi.journey).toHaveBeenCalledWith(42);
+
+    await act(async () => {
+      detailRefresh.resolve(nextIndent);
+      journeyRefresh.resolve(journeyData({ status: "AWAITING_ALLOCATION" }));
+      await Promise.all([detailRefresh.promise, journeyRefresh.promise]);
+    });
+  });
+
+  it("updates the detail cache from submit response and triggers background journey refetch", async () => {
+    const client = createTestQueryClient();
+    const nextIndent = detailIndent({ status: "PENDING_APPROVAL", can_submit: false });
+    const submission = deferred<Indent>();
+    const detailRefresh = deferred<Indent>();
+    const journeyRefresh = deferred<IndentJourney>();
+    vi.mocked(indentApi.get)
+      .mockResolvedValueOnce(detailIndent({ status: "DRAFT", can_submit: true }))
+      .mockReturnValueOnce(detailRefresh.promise);
+    vi.mocked(indentApi.submit).mockReturnValueOnce(submission.promise);
+    vi.mocked(indentApi.journey).mockReturnValueOnce(journeyRefresh.promise);
+    const scope = { employeeId: 1, activePositionId: 10 };
+    client.setQueryData(indentKeys.journey(scope, 42), journeyData({ status: "DRAFT" }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
+
+    const submitButton = await screen.findByRole("button", { name: /Submit for approval/i });
+    await waitFor(() => {
+      expect(client.getQueryCache().find({
+        queryKey: indentKeys.journey(scope, 42),
+      })?.getObserversCount()).toBe(1);
+    });
+    expect(indentApi.journey).not.toHaveBeenCalled();
+
+    fireEvent.click(submitButton);
+    const pendingButton = await screen.findByRole("button", { name: /Submitting/i });
+    expect(pendingButton).toBeDisabled();
+    fireEvent.click(pendingButton);
+    expect(indentApi.submit).toHaveBeenCalledTimes(1);
+    expect(indentApi.submit).toHaveBeenCalledWith(42);
+
+    await act(async () => {
+      submission.resolve(nextIndent);
+      await submission.promise;
+    });
+    await waitFor(() => {
+      expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))?.status).toBe("PENDING_APPROVAL");
+    });
+    expect(screen.getByText("Pending Approval")).toBeInTheDocument();
+    expect(screen.getByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.getByText("OE Review")).toBeInTheDocument();
+
+    expect(client.getQueryState(indentKeys.journey(scope, 42))?.isInvalidated).toBe(true);
+    expect(indentApi.journey).toHaveBeenCalledTimes(1);
+    expect(indentApi.journey).toHaveBeenCalledWith(42);
+    await act(async () => {
+      detailRefresh.resolve(nextIndent);
+      journeyRefresh.resolve(journeyData({ status: "PENDING_APPROVAL" }));
+      await Promise.all([detailRefresh.promise, journeyRefresh.promise]);
+    });
+  });
+
+  it("prevents double-click duplicate approve requests", async () => {
+    const approval = deferred<Indent>();
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }));
+    vi.mocked(indentApi.approve).mockReturnValueOnce(approval.promise);
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    // First click fires the request
+    fireEvent.click(await screen.findByRole("button", { name: /Approve/i }));
+
+    // Wait for the button to enter the loading/disabled state
+    const pendingBtn = await screen.findByRole("button", { name: /Approving/i });
+    expect(pendingBtn).toBeDisabled();
+
+    // Second click on the disabled/pending button must not fire a duplicate request
+    fireEvent.click(pendingBtn);
+
+    expect(indentApi.approve).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      approval.resolve(detailIndent({ status: "AWAITING_ALLOCATION", can_approve: false, can_reject: false }));
+      await approval.promise;
+    });
+  });
+
+  it("keeps existing page content visible while the approve request is in flight", async () => {
+    const approval = deferred<Indent>();
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }));
+    vi.mocked(indentApi.approve).mockReturnValue(approval.promise);
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    // Page content is present before click
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Approve/i }));
+
+    // During the in-flight request, indent details remain visible (no full-page skeleton)
+    expect(screen.getByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+
+    await act(async () => {
+      approval.resolve(detailIndent({ status: "AWAITING_ALLOCATION", can_approve: false, can_reject: false }));
+      await approval.promise;
+    });
+  });
+
+  it("shows error and does not update status when approve API fails", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }));
+    vi.mocked(indentApi.approve).mockRejectedValueOnce(new Error("Server error"));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    fireEvent.click(await screen.findByRole("button", { name: /Approve/i }));
+
+    // Error message shown, status not advanced
+    expect(await screen.findByText("Server error")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Approving/i })).not.toBeInTheDocument();
   });
 
   it("keeps cached journey content visible during background refetch", async () => {
@@ -2525,16 +4054,12 @@ describe("indent UI shell", () => {
     mockAccount.employeeId = 2;
     mockAccount.activePositionId = 20;
     view.rerender(
-      // Same provider stack as renderWithProviders — a rerender that drops one
-      // unmounts and remounts the tree, which is not what this test is about.
       <QueryClientProvider client={client}>
-        <ToastProvider>
-          <MemoryRouter initialEntries={["/indents/42"]}>
-            <Routes>
-              <Route path="/indents/:id" element={<IndentDetailPage />} />
-            </Routes>
-          </MemoryRouter>
-        </ToastProvider>
+        <MemoryRouter initialEntries={["/indents/42"]}>
+          <Routes>
+            <Route path="/indents/:id" element={<IndentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
       </QueryClientProvider>,
     );
 
@@ -2572,6 +4097,165 @@ describe("indent UI shell", () => {
     expect(screen.getAllByText("Ready for Allocation").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("OE approval completed")).toBeInTheDocument();
     expect(screen.getByText("Approved by C Ramakrishna")).toBeInTheDocument();
+  });
+
+  it("uses the same dynamic stage payload on detail progress and complete journey", async () => {
+    const client = createTestQueryClient();
+    const dynamicJourney = journeyData({
+      status: "PENDING_APPROVAL",
+      current_stage: "Waiting for final approval",
+      current_stage_message: "Waiting for final approval",
+      stages: [
+        {
+          sequence: 1,
+          title: "Request Raised",
+          status: "SUBMITTED",
+          approver_name: "A Anil Kumar",
+          timestamp: "2026-07-27T09:30:00Z",
+          stage_type: "request",
+          is_current: false,
+        },
+        {
+          sequence: 2,
+          title: "OE Review",
+          status: "APPROVED",
+          approver_name: "C Ramakrishna",
+          position_name: "OE-AP-104-MMU-Hindupur",
+          timestamp: "2026-07-27T10:00:00Z",
+          stage_type: "approval",
+          is_current: false,
+        },
+        {
+          sequence: 3,
+          title: "Final Approval - SPH/COO",
+          status: "PENDING",
+          approver_name: "SPH / COO",
+          stage_type: "final",
+          is_current: true,
+        },
+      ],
+    });
+    vi.mocked(indentApi.journey).mockResolvedValue(dynamicJourney);
+
+    const detail = renderWithProviders(
+      <IndentDetailPage />,
+      "/indents/42",
+      client,
+    );
+
+    expect(await screen.findByText("OE Review")).toBeInTheDocument();
+    expect(screen.getByText("Final Approval - SPH/COO")).toBeInTheDocument();
+    expect(screen.getByText("Pending at SPH/COO")).toBeInTheDocument();
+    expect(screen.queryByText("Pending Approval")).not.toBeInTheDocument();
+    expect(screen.queryByText("DM Review")).not.toBeInTheDocument();
+    expect(screen.queryByText("RM Review")).not.toBeInTheDocument();
+    detail.unmount();
+
+    renderWithProviders(
+      <IndentJourneyPage />,
+      "/indents/42/journey",
+      client,
+    );
+
+    expect(await screen.findByText("OE Review")).toBeInTheDocument();
+    expect(screen.getByText("Final Approval - SPH/COO")).toBeInTheDocument();
+    expect(screen.getByText("Pending at SPH/COO")).toBeInTheDocument();
+    expect(screen.queryByText("Pending Approval")).not.toBeInTheDocument();
+    expect(screen.queryByText("DM Review")).not.toBeInTheDocument();
+    expect(screen.queryByText("RM Review")).not.toBeInTheDocument();
+    expect(indentApi.journey).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Pending Approval in the complete journey header when no stage is current", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "PENDING_APPROVAL",
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    expect(await screen.findByText("Pending Approval")).toBeInTheDocument();
+  });
+
+  it("shows the saved reason only inside the actual rejected journey stage", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "REJECTED",
+      current_stage: "Request rejected",
+      current_stage_message: "Request rejected",
+      stages: [
+        {
+          sequence: 1,
+          title: "OE Review",
+          status: "APPROVED",
+          approver_name: "OE Approver",
+          timestamp: "2026-07-27T10:00:00Z",
+          comments: "Approved after review",
+          stage_type: "approval",
+        },
+        {
+          sequence: 2,
+          title: "Regional Manager Review",
+          status: "REJECTED",
+          approver_name: "RM Approver",
+          timestamp: "2026-07-27T10:20:00Z",
+          comments: "Incorrect quantity",
+          stage_type: "approval",
+        },
+      ],
+      history: [{
+        id: "workflow:rejected",
+        event_type: "REJECTED",
+        title: "Regional Manager rejected",
+        description: "Rejected by RM Approver",
+        actor_name: "RM Approver",
+        position_name: "Regional Manager",
+        timestamp: "2026-07-27T10:20:00Z",
+        comments: "Incorrect quantity",
+      }],
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    const rejectedCard = (await screen.findByText("Regional Manager Review")).closest("article");
+    const approvedCard = screen.getByText("OE Review").closest("article");
+    expect(rejectedCard).not.toBeNull();
+    expect(approvedCard).not.toBeNull();
+    expect(within(rejectedCard!).getByText("RM Approver")).toBeInTheDocument();
+    expect(within(rejectedCard!).getByText("Rejected")).toBeInTheDocument();
+    const reasonLabel = within(rejectedCard!).getByText("Rejection reason");
+    const reasonText = within(rejectedCard!).getByText("Incorrect quantity");
+    expect(reasonLabel).toHaveClass("font-semibold", "uppercase", "text-bad");
+    expect(reasonText).toHaveClass("break-words", "font-medium", "leading-5", "text-body");
+    expect(within(approvedCard!).queryByText("Rejection reason")).not.toBeInTheDocument();
+    const historyCard = screen.getByText("Regional Manager rejected").closest("article");
+    expect(historyCard).not.toBeNull();
+    expect(within(historyCard!).queryByText("Incorrect quantity")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Incorrect quantity")).toHaveLength(1);
+    expect(screen.queryByText("Approved after review")).not.toBeInTheDocument();
+  });
+
+  it("shows a fallback reason for older rejected journey stages", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "REJECTED",
+      current_stage: "Request rejected",
+      current_stage_message: "Request rejected",
+      stages: [{
+        sequence: 1,
+        title: "Dynamic Approval Stage",
+        status: "REJECTED",
+        approver_name: "Approver",
+        timestamp: "2026-07-27T10:20:00Z",
+        comments: "   ",
+        stage_type: "approval",
+      }],
+      history: [],
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    const rejectedCard = (await screen.findByText("Dynamic Approval Stage")).closest("article");
+    expect(rejectedCard).not.toBeNull();
+    expect(within(rejectedCard!).getByText("Rejection reason")).toBeInTheDocument();
+    expect(within(rejectedCard!).getByText("Not provided")).toBeInTheDocument();
   });
 
   it("uses a vertical mobile-safe journey timeline", async () => {
@@ -2662,5 +4346,619 @@ describe("indent UI shell", () => {
     expect(current).toHaveClass("border-brand/40");
     expect(future).toHaveClass("border-line");
     expect(future).not.toHaveClass("border-brand/40");
+  });
+
+  describe("All Requests restoration", () => {
+    const restoredRoute = "/indents?search=anil&status=REJECTED&priority=URGENT"
+      + "&raised_preset=custom&created_date_from=2026-07-01&created_date_to=2026-07-31"
+      + "&required_by_preset=custom&required_by_from=2026-08-01&required_by_to=2026-08-10"
+      + "&size=10&page=4";
+
+    afterEach(() => {
+      window.sessionStorage.clear();
+      Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
+      vi.restoreAllMocks();
+    });
+
+    it("restores Page 4, every URL filter, cached rows, and scroll through All indents", async () => {
+      const client = createTestQueryClient();
+      const scope = { employeeId: 1, activePositionId: 10 };
+      const pageFour = {
+        items: [listRow(42, "IND/PAGE-4", "REJECTED")],
+        total: 40,
+        page: 4,
+        size: 10,
+      };
+      client.setQueryData(indentKeys.list(scope, {
+        search: "anil",
+        created_date_from: "2026-07-01",
+        created_date_to: "2026-07-31",
+        required_by_from: "2026-08-01",
+        required_by_to: "2026-08-10",
+        status: ["REJECTED"],
+        priority: ["URGENT"],
+        sort_by: "created_at",
+        sort_dir: "desc",
+        page: 4,
+        size: 10,
+      }), pageFour);
+      Object.defineProperty(window, "scrollY", { configurable: true, value: 640 });
+      const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+
+      renderAllRequestsFlow(restoredRoute, client);
+
+      expect(screen.getAllByText("IND/PAGE-4").length).toBeGreaterThan(0);
+      expect(screen.getByText("Page 4 of 4 (40 total)")).toBeInTheDocument();
+      expect(screen.getByRole("searchbox", { name: "Search indents" })).toHaveValue("anil");
+      expect(screen.getByRole("button", { name: "Status (1)" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Priority (1)" })).toBeInTheDocument();
+      expect(indentApi.list).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getAllByText("IND/PAGE-4")[0]);
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents/42"));
+      fireEvent.click(await screen.findByRole("button", { name: "All indents" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(restoredRoute));
+      expect(screen.getAllByText("IND/PAGE-4").length).toBeGreaterThan(0);
+      expect(screen.getByText("Page 4 of 4 (40 total)")).toBeInTheDocument();
+      expect(indentApi.list).not.toHaveBeenCalled();
+      await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(0, 640));
+    });
+
+    it("returns Browser Back to the same cached Page 4 URL without a Page 1 request", async () => {
+      vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+        items: [listRow(42, `IND/PAGE-${params.page ?? 1}`)],
+        total: 80,
+        page: params.page ?? 1,
+        size: params.size ?? 20,
+      }));
+      renderAllRequestsFlow("/indents?status=DRAFT&page=4");
+
+      expect(await screen.findByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
+      fireEvent.click(screen.getAllByText("IND/PAGE-4")[0]);
+      await screen.findByRole("button", { name: "Browser back test" });
+      fireEvent.click(screen.getByRole("button", { name: "Browser back test" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents?status=DRAFT&page=4",
+      ));
+      expect(screen.getByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
+      expect(vi.mocked(indentApi.list).mock.calls.every(([params]) => params?.page === 4)).toBe(true);
+    });
+
+    it("falls back from a directly opened Detail to default All Requests", async () => {
+      renderAllRequestsFlow("/indents/42");
+
+      fireEvent.click(await screen.findByRole("button", { name: "All indents" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(/^\/indents$/));
+    });
+
+    it("sanitizes malformed and unsupported URL state before querying", async () => {
+      renderAllRequestsFlow(
+        "/indents?page=zero&size=9999&status=UNKNOWN&priority=LOW"
+          + "&created_date_from=2026-02-30&created_date_to=2026-03-01&extra=ignored",
+      );
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(/^\/indents$/));
+      await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+        page: 1,
+        size: 20,
+      }), expect.anything()));
+      const params = vi.mocked(indentApi.list).mock.calls.at(-1)?.[0];
+      expect(params).not.toHaveProperty("status");
+      expect(params).not.toHaveProperty("priority");
+      expect(params).not.toHaveProperty("created_date_from");
+      expect(params).not.toHaveProperty("created_date_to");
+    });
+
+    it("clamps an out-of-range restored page to the nearest last page with replace", async () => {
+      vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+        items: params.page === 3 ? [listRow(3, "IND/LAST-PAGE")] : [],
+        total: 25,
+        page: params.page ?? 1,
+        size: params.size ?? 20,
+      }));
+      renderAllRequestsFlow("/indents?size=10&page=9");
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents?size=10&page=3",
+      ));
+      expect(await screen.findByText("Page 3 of 3 (25 total)")).toBeInTheDocument();
+      expect(screen.getAllByText("IND/LAST-PAGE").length).toBeGreaterThan(0);
+      expect(vi.mocked(indentApi.list).mock.calls.some(([params]) => params?.page === 1)).toBe(false);
+    });
+
+    it("Clear all removes restored URL filters and resets to Page 1", async () => {
+      vi.mocked(indentApi.list).mockImplementation((params = {}) => Promise.resolve({
+        items: [],
+        total: 100,
+        page: params.page ?? 1,
+        size: params.size ?? 20,
+      }));
+      renderAllRequestsFlow(restoredRoute);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Clear all" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(/^\/indents$/));
+      await waitFor(() => expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+        page: 1,
+        size: 20,
+      }), expect.anything()));
+    });
+  });
+
+  describe("Activity ledger restoration", () => {
+    const restoredRoute = "/indents/reports?search=bolt&transaction_type=APPROVAL_COMPLETED"
+      + "&date_preset=custom&date_from=2026-07-01&date_to=2026-07-31"
+      + "&size=10&page=4";
+
+    afterEach(() => {
+      window.sessionStorage.clear();
+      Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
+      vi.restoreAllMocks();
+    });
+
+    it("restores Page 4, every ledger filter, cached rows, and scroll through Activity ledger", async () => {
+      const client = createTestQueryClient();
+      const scope = { employeeId: 1, activePositionId: 10 };
+      client.setQueryData(indentKeys.activity(scope, {
+        search: "bolt",
+        date_from: "2026-07-01",
+        date_to: "2026-07-31",
+        transaction_type: "APPROVAL_COMPLETED",
+        page: 4,
+        size: 10,
+      }), {
+        items: [activityRow({ indent_no: "IND/ACTIVITY-PAGE-4" })],
+        total: 40,
+        page: 4,
+        size: 10,
+      });
+      Object.defineProperty(window, "scrollY", { configurable: true, value: 720 });
+      const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+
+      renderActivityLedgerFlow(restoredRoute, client);
+
+      expect(screen.getAllByText("IND/ACTIVITY-PAGE-4").length).toBeGreaterThan(0);
+      expect(screen.getByText("Page 4 of 4 (40 total)")).toBeInTheDocument();
+      expect(screen.getByRole("searchbox", { name: "Search indents" })).toHaveValue("bolt");
+      expect(screen.getByRole("button", { name: "Event (1)" })).toBeInTheDocument();
+      expect(indentApi.activity).not.toHaveBeenCalled();
+
+      const mobileCard = screen.getAllByText("IND/ACTIVITY-PAGE-4")
+        .map((element) => element.closest("button"))
+        .find((element): element is HTMLButtonElement => element !== null);
+      expect(mobileCard).toBeDefined();
+      fireEvent.click(mobileCard!);
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents/42"));
+      fireEvent.click(await screen.findByRole("button", { name: "Activity ledger" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(restoredRoute));
+      expect(screen.getAllByText("IND/ACTIVITY-PAGE-4").length).toBeGreaterThan(0);
+      expect(screen.getByText("Page 4 of 4 (40 total)")).toBeInTheDocument();
+      expect(indentApi.activity).not.toHaveBeenCalled();
+      await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(0, 720));
+    });
+
+    it("returns Browser Back to the same cached ledger Page 4 without a Page 1 request", async () => {
+      vi.mocked(indentApi.activity).mockImplementation((params = {}) => Promise.resolve({
+        items: [activityRow({ indent_no: `IND/ACTIVITY-PAGE-${params.page ?? 1}` })],
+        total: 80,
+        page: params.page ?? 1,
+        size: params.size ?? 20,
+      }));
+      renderActivityLedgerFlow("/indents/reports?transaction_type=REQUEST_CREATED&page=4");
+
+      expect(await screen.findByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
+      const mobileCard = screen.getAllByText("IND/ACTIVITY-PAGE-4")
+        .map((element) => element.closest("button"))
+        .find((element): element is HTMLButtonElement => element !== null);
+      fireEvent.click(mobileCard!);
+      await screen.findByRole("button", { name: "Browser back test" });
+      fireEvent.click(screen.getByRole("button", { name: "Browser back test" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents/reports?transaction_type=REQUEST_CREATED&page=4",
+      ));
+      expect(screen.getByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
+      expect(vi.mocked(indentApi.activity).mock.calls.every(([params]) => params?.page === 4)).toBe(true);
+    });
+
+    it("sanitizes malformed and unsupported ledger URL state before querying", async () => {
+      renderActivityLedgerFlow(
+        "/indents/reports?page=zero&size=9999&status=UNKNOWN&priority=LOW"
+          + "&date_from=2026-02-30&date_to=2026-13-01"
+          + "&transaction_type=UNSUPPORTED&item_id=-12&extra=ignored",
+      );
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        /^\/indents\/reports$/,
+      ));
+      await waitFor(() => expect(vi.mocked(indentApi.activity).mock.calls.some(([params]) => (
+        params?.page === 1 && params.size === 20
+      ))).toBe(true));
+      const params = vi.mocked(indentApi.activity).mock.calls.at(-1)?.[0];
+      expect(params?.status).toBeUndefined();
+      expect(params?.priority).toBeUndefined();
+      expect(params?.date_from).toBeUndefined();
+      expect(params?.date_to).toBeUndefined();
+      expect(params?.transaction_type).toBeUndefined();
+      expect(params?.item_id).toBeUndefined();
+    });
+
+    it("clamps an out-of-range restored ledger page to the last valid page with replace", async () => {
+      vi.mocked(indentApi.activity).mockImplementation((params = {}) => Promise.resolve({
+        items: params.page === 3
+          ? [activityRow({ indent_no: "IND/ACTIVITY-LAST-PAGE" })]
+          : [],
+        total: 25,
+        page: params.page ?? 1,
+        size: params.size ?? 20,
+      }));
+      renderActivityLedgerFlow("/indents/reports?size=10&page=9");
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents/reports?size=10&page=3",
+      ));
+      expect(await screen.findByText("Page 3 of 3 (25 total)")).toBeInTheDocument();
+      expect(screen.getAllByText("IND/ACTIVITY-LAST-PAGE").length).toBeGreaterThan(0);
+      expect(vi.mocked(indentApi.activity).mock.calls.some(([params]) => params?.page === 1)).toBe(false);
+    });
+
+    it("resets the ledger to Page 1 when search changes", async () => {
+      vi.mocked(indentApi.activity).mockImplementation((params = {}) => Promise.resolve({
+        items: [],
+        total: 80,
+        page: params.page ?? 1,
+        size: params.size ?? 20,
+      }));
+      renderActivityLedgerFlow("/indents/reports?page=4");
+
+      const search = await screen.findByRole("searchbox", { name: "Search indents" });
+      fireEvent.change(search, { target: { value: "new search" } });
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents/reports?search=new+search",
+      ));
+      await waitFor(() => expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
+        search: "new search",
+        page: 1,
+      }), expect.anything()));
+    });
+
+    it("Clear all removes restored ledger URL filters and resets to Page 1", async () => {
+      vi.mocked(indentApi.activity).mockImplementation((params = {}) => Promise.resolve({
+        items: [],
+        total: 100,
+        page: params.page ?? 1,
+        size: params.size ?? 20,
+      }));
+      renderActivityLedgerFlow(restoredRoute);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Clear all" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        /^\/indents\/reports$/,
+      ));
+      await waitFor(() => expect(vi.mocked(indentApi.activity).mock.calls.some(([params]) => (
+        params?.page === 1 && params.size === 20
+      ))).toBe(true));
+    });
+  });
+
+  describe("Alerts and Notifications pagination restoration", () => {
+    afterEach(() => {
+      window.sessionStorage.clear();
+      Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
+      vi.restoreAllMocks();
+    });
+
+    it("shows 20 notifications per page and loads the remainder with Next", async () => {
+      vi.mocked(indentApi.notifications).mockImplementation(({ page = 1, size = 20 } = {}) => {
+        const start = (page - 1) * size + 1;
+        const count = page === 1 ? 20 : 5;
+        return Promise.resolve({
+          items: Array.from({ length: count }, (_, index) => notificationRow(start + index)),
+          total: 25,
+          page,
+          size,
+        });
+      });
+      renderNotificationsFlow("/indents/notifications");
+
+      expect(await screen.findByText("Page 1 of 2 (25 total)")).toBeInTheDocument();
+      expect(screen.getAllByText(/^Notification \d+$/)).toHaveLength(20);
+      expect(vi.mocked(indentApi.notifications).mock.calls.some(([params]) => (
+        params?.page === 1 && params.size === 20
+      ))).toBe(true);
+
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents/notifications?page=2",
+      ));
+      expect(await screen.findByText("Notification 21")).toBeInTheDocument();
+      expect(screen.getAllByText(/^Notification \d+$/)).toHaveLength(5);
+      expect(indentApi.notifications).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 2, size: 20 }),
+        expect.anything(),
+      );
+    });
+
+    it("restores a cached notification page and scroll through its Detail return link", async () => {
+      const client = createTestQueryClient();
+      const scope = { employeeId: 1, activePositionId: 10 };
+      client.setQueryData(indentKeys.notifications(scope, { page: 4, size: 20 }), {
+        items: [notificationRow(61, { title: "Cached notification page 4" })],
+        total: 80,
+        page: 4,
+        size: 20,
+      });
+      Object.defineProperty(window, "scrollY", { configurable: true, value: 680 });
+      const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+
+      renderNotificationsFlow("/indents/notifications?page=4", client);
+
+      expect(screen.getByText("Cached notification page 4")).toBeInTheDocument();
+      expect(screen.getByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
+      expect(indentApi.notifications).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByText("Cached notification page 4").closest("button")!);
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents/42"));
+      fireEvent.click(await screen.findByRole("button", { name: "Alert & Notification" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents/notifications?page=4",
+      ));
+      expect(screen.getByText("Cached notification page 4")).toBeInTheDocument();
+      expect(indentApi.notifications).not.toHaveBeenCalled();
+      await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(0, 680));
+    });
+
+    it("returns Browser Back to the same notification page without requesting Page 1", async () => {
+      vi.mocked(indentApi.notifications).mockImplementation(({ page = 1, size = 20 } = {}) => Promise.resolve({
+        items: [notificationRow((page - 1) * size + 1)],
+        total: 80,
+        page,
+        size,
+      }));
+      renderNotificationsFlow("/indents/notifications?page=3");
+
+      const title = await screen.findByText("Notification 41");
+      fireEvent.click(title.closest("button")!);
+      await screen.findByRole("button", { name: "Browser back test" });
+      fireEvent.click(screen.getByRole("button", { name: "Browser back test" }));
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents/notifications?page=3",
+      ));
+      expect(screen.getByText("Page 3 of 4 (80 total)")).toBeInTheDocument();
+      expect(vi.mocked(indentApi.notifications).mock.calls.filter(([params]) => params?.page === 3)).toHaveLength(1);
+      expect(vi.mocked(indentApi.notifications).mock.calls.some(([params]) => params?.page === 1)).toBe(false);
+    });
+
+    it("sanitizes malformed notification pagination parameters", async () => {
+      renderNotificationsFlow("/indents/notifications?page=invalid&size=100&extra=ignored");
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        /^\/indents\/notifications$/,
+      ));
+      await waitFor(() => expect(indentApi.notifications).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1, size: 20 }),
+        expect.anything(),
+      ));
+    });
+
+    it("clamps an out-of-range notification page to the nearest valid last page", async () => {
+      vi.mocked(indentApi.notifications).mockImplementation(({ page = 1, size = 20 } = {}) => Promise.resolve({
+        items: page === 3 ? [notificationRow(41, { title: "Last notification page" })] : [],
+        total: 41,
+        page,
+        size,
+      }));
+      renderNotificationsFlow("/indents/notifications?page=9");
+
+      await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent(
+        "/indents/notifications?page=3",
+      ));
+      expect(await screen.findByText("Last notification page")).toBeInTheDocument();
+      expect(screen.getByText("Page 3 of 3 (41 total)")).toBeInTheDocument();
+      expect(vi.mocked(indentApi.notifications).mock.calls.some(([params]) => params?.page === 1)).toBe(false);
+    });
+  });
+
+  describe("Activity and Notification pagination smoothness", () => {
+    it("retains Activity rows, preserves filters, prefetches one adjacent page, and reuses fresh cache", async () => {
+      const pageTwo = deferred<{ items: ActivityRow[]; total: number; page: number; size: number }>();
+      vi.mocked(indentApi.activity).mockImplementation((params = {}) => {
+        if (params.page === 2) return pageTwo.promise;
+        return Promise.resolve({
+          items: [activityRow({
+            event_id: `activity:${params.page ?? 1}`,
+            indent_no: `IND/ACTIVITY/PAGE-${params.page ?? 1}`,
+          })],
+          total: 60,
+          page: params.page ?? 1,
+          size: params.size ?? 20,
+        });
+      });
+      const heightSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+        .mockImplementation(function measuredActivityResults(this: HTMLElement) {
+          const height = this.textContent?.includes("IND/ACTIVITY/PAGE-2") ? 520 : 260;
+          return { width: 800, height } as DOMRect;
+        });
+      renderActivityLedgerFlow(
+        "/indents/reports?search=bolt&transaction_type=APPROVAL_COMPLETED"
+          + "&date_preset=custom&date_from=2026-07-01&date_to=2026-07-31",
+      );
+
+      expect((await screen.findAllByText("IND/ACTIVITY/PAGE-1")).length).toBeGreaterThan(0);
+      await waitFor(() => expect(
+        vi.mocked(indentApi.activity).mock.calls.filter(([params]) => params?.page === 2),
+      ).toHaveLength(1));
+
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+      const results = screen.getByRole("region", { name: "Activity ledger results" });
+      const shell = within(results).getByTestId("paginated-results-shell");
+      const content = within(results).getByTestId("paginated-results-content");
+      const footer = within(results).getByTestId("activity-pagination-footer");
+      expect(results).toHaveAttribute("aria-busy", "true");
+      expect(within(results).getByRole("status")).toHaveTextContent("Updating results…");
+      expect(content).toHaveClass("duration-150", "opacity-70");
+      expect(shell).toHaveStyle({ height: "260px", overflow: "hidden" });
+      expect(shell.style.minHeight).toBe("");
+      expect(content).not.toContainElement(footer);
+      expect(screen.getByText("Page 2 of 3 (60 total)")).toBeInTheDocument();
+      expect(screen.getAllByText("IND/ACTIVITY/PAGE-1").length).toBeGreaterThan(0);
+      expect(vi.mocked(indentApi.activity).mock.calls.filter(([params]) => params?.page === 2)).toHaveLength(1);
+      expect(vi.mocked(indentApi.activity).mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+        search: "bolt",
+        transaction_type: "APPROVAL_COMPLETED",
+        date_from: "2026-07-01",
+        date_to: "2026-07-31",
+      }));
+
+      await act(async () => {
+        pageTwo.resolve({
+          items: [activityRow({ event_id: "activity:2", indent_no: "IND/ACTIVITY/PAGE-2" })],
+          total: 60,
+          page: 2,
+          size: 20,
+        });
+        await pageTwo.promise;
+      });
+      expect((await screen.findAllByText("IND/ACTIVITY/PAGE-2")).length).toBeGreaterThan(0);
+      expect(shell).toHaveStyle({ height: "520px", transition: "height 180ms ease" });
+      fireEvent.transitionEnd(shell, { propertyName: "height" });
+      expect(shell.style.height).toBe("");
+      await waitFor(() => expect(
+        vi.mocked(indentApi.activity).mock.calls.filter(([params]) => params?.page === 3),
+      ).toHaveLength(1));
+
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      expect(screen.getAllByText("IND/ACTIVITY/PAGE-1").length).toBeGreaterThan(0);
+      expect(vi.mocked(indentApi.activity).mock.calls.filter(([params]) => params?.page === 1)).toHaveLength(1);
+      heightSpy.mockRestore();
+    });
+
+    it("keeps Notification rows while loading and ends a 13-row last page without blank space", async () => {
+      const pageTwo = deferred<{ items: IndentNotification[]; total: number; page: number; size: number }>();
+      vi.mocked(indentApi.notifications).mockImplementation((params = {}) => {
+        if (params.page === 2) return pageTwo.promise;
+        return Promise.resolve({
+          items: Array.from({ length: 20 }, (_, index) => notificationRow(index + 1)),
+          total: 33,
+          page: params.page ?? 1,
+          size: params.size ?? 20,
+        });
+      });
+      const heightSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+        .mockImplementation(function measuredResults(this: HTMLElement) {
+          const height = this.textContent?.includes("Last page notification") ? 416 : 640;
+          return { width: 800, height } as DOMRect;
+        });
+      renderNotificationsFlow(
+        "/indents/notifications?search=stock&status=DRAFT"
+          + "&date_preset=custom&date_from=2026-07-01&date_to=2026-07-31",
+      );
+
+      expect(await screen.findByText("Notification 1")).toBeInTheDocument();
+      await waitFor(() => expect(
+        vi.mocked(indentApi.notifications).mock.calls.filter(([params]) => params?.page === 2),
+      ).toHaveLength(1));
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+      const results = screen.getByRole("region", { name: "Notification results" });
+      const shell = within(results).getByTestId("paginated-results-shell");
+      const content = within(results).getByTestId("paginated-results-content");
+      const footer = within(results).getByTestId("notification-pagination-footer");
+      expect(results).toHaveAttribute("aria-busy", "true");
+      expect(content).toHaveClass("duration-150", "opacity-70");
+      expect(shell).toHaveStyle({ height: "640px", overflow: "hidden" });
+      expect(shell.style.minHeight).toBe("");
+      expect(content).not.toContainElement(footer);
+      expect(screen.getByText("Page 2 of 2 (33 total)")).toBeInTheDocument();
+      expect(screen.getByText("Notification 1")).toBeInTheDocument();
+      expect(vi.mocked(indentApi.notifications).mock.calls.filter(([params]) => params?.page === 2)).toHaveLength(1);
+      expect(vi.mocked(indentApi.notifications).mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+        search: "stock",
+        status: ["DRAFT"],
+        date_from: "2026-07-01",
+        date_to: "2026-07-31",
+      }));
+
+      await act(async () => {
+        pageTwo.resolve({
+          items: Array.from({ length: 13 }, (_, index) => notificationRow(21 + index, {
+            title: `Last page notification ${21 + index}`,
+          })),
+          total: 33,
+          page: 2,
+          size: 20,
+        });
+        await pageTwo.promise;
+      });
+      expect(await screen.findByText("Last page notification 21")).toBeInTheDocument();
+      expect(screen.getAllByText(/^Last page notification \d+$/)).toHaveLength(13);
+      expect(shell).toHaveStyle({ height: "416px", transition: "height 180ms ease" });
+      fireEvent.transitionEnd(shell, { propertyName: "height" });
+      expect(shell.style.height).toBe("");
+      expect(shell.style.minHeight).toBe("");
+      expect(shell.style.overflow).toBe("");
+      expect(shell.nextElementSibling).toContainElement(footer);
+      expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+      heightSpy.mockRestore();
+    });
+
+    it("shows only the latest Activity page after rapid Next actions and a late stale response", async () => {
+      const pageTwo = deferred<{ items: ActivityRow[]; total: number; page: number; size: number }>();
+      const pageThree = deferred<{ items: ActivityRow[]; total: number; page: number; size: number }>();
+      vi.mocked(indentApi.activity).mockImplementation((params = {}) => {
+        if (params.page === 2) return pageTwo.promise;
+        if (params.page === 3) return pageThree.promise;
+        return Promise.resolve({
+          items: [activityRow({ indent_no: "IND/ACTIVITY/PAGE-1" })],
+          total: 60,
+          page: 1,
+          size: 20,
+        });
+      });
+      renderActivityLedgerFlow("/indents/reports");
+
+      expect((await screen.findAllByText("IND/ACTIVITY/PAGE-1")).length).toBeGreaterThan(0);
+      await waitFor(() => expect(
+        vi.mocked(indentApi.activity).mock.calls.filter(([params]) => params?.page === 2),
+      ).toHaveLength(1));
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      expect(screen.getByText("Page 3 of 3 (60 total)")).toBeInTheDocument();
+
+      await act(async () => {
+        pageThree.resolve({
+          items: [activityRow({ event_id: "activity:latest", indent_no: "IND/ACTIVITY/LATEST" })],
+          total: 60,
+          page: 3,
+          size: 20,
+        });
+        await pageThree.promise;
+      });
+      expect((await screen.findAllByText("IND/ACTIVITY/LATEST")).length).toBeGreaterThan(0);
+
+      await act(async () => {
+        pageTwo.resolve({
+          items: [activityRow({ event_id: "activity:stale", indent_no: "IND/ACTIVITY/STALE" })],
+          total: 60,
+          page: 2,
+          size: 20,
+        });
+        await pageTwo.promise;
+      });
+      expect(screen.queryByText("IND/ACTIVITY/STALE")).not.toBeInTheDocument();
+      expect(screen.getAllByText("IND/ACTIVITY/LATEST").length).toBeGreaterThan(0);
+      expect(vi.mocked(indentApi.activity).mock.calls.filter(([params]) => params?.page === 2)).toHaveLength(1);
+      expect(vi.mocked(indentApi.activity).mock.calls.filter(([params]) => params?.page === 3)).toHaveLength(1);
+    });
   });
 });

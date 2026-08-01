@@ -1,24 +1,28 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
-import { CardBody } from "@heroui/react";
-import {
-  PageHeader, Button, Card, ErrorBanner, Field, Input, Select, useAction,
-} from "@/shared/components";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { LibraryBig, Plus, Trash2 } from "lucide-react";
+import { CardBody, Skeleton } from "@heroui/react";
+import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import {
   indentApi, indentKeys, isIndentModuleQuery, masterApi,
   useIndentAccountCacheIsolation, useIndentAccountScope,
 } from "../api";
 import { ItemCombobox } from "../components/ItemCombobox";
+import { ChooseBomModal } from "../components/ChooseBomModal";
+import type { IndentCreate, IndentUpdate, TemplateLineItem } from "../types";
 
 interface Line {
   item_id: number | "";
   quantity: number | "";
+  duplicateItemId?: number;
 }
 
 const PAST_REQUIRED_DATE_ERROR = "Required date cannot be earlier than today";
+const REQUIRED_DATE_MANDATORY_ERROR = "Required date is mandatory.";
+const DUPLICATE_ITEM_ERROR = "This item is already added to the indent.";
+const MISSING_QTY_ERROR = "Quantity is required for this item.";
 const UOM_UNAVAILABLE = "UOM unavailable";
 
 function localDateString(date = new Date()) {
@@ -28,54 +32,253 @@ function localDateString(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+function duplicateItemRows(lines: Line[]) {
+  const seen = new Set<number>();
+  const duplicates = new Map<number, number>();
+  lines.forEach((line, index) => {
+    if (line.item_id === "") return;
+    const itemId = Number(line.item_id);
+    if (seen.has(itemId)) duplicates.set(index, itemId);
+    seen.add(itemId);
+  });
+  return duplicates;
+}
+
+function clearResolvedDuplicateErrors(lines: Line[]) {
+  return lines.map((line, index) => {
+    if (
+      line.duplicateItemId === undefined
+      || lines.some((other, otherIndex) =>
+        otherIndex !== index && other.item_id === line.duplicateItemId)
+    ) {
+      return line;
+    }
+    const validLine = { ...line };
+    delete validLine.duplicateItemId;
+    return validLine;
+  });
+}
+
 export function IndentFormPage() {
   const nav = useNavigate();
+  const [searchParams] = useSearchParams();
+  const editParam = searchParams.get("edit");
+  const editId = editParam === null ? null : Number(editParam);
+  const isEditing = editId !== null && Number.isFinite(editId);
   const { me } = useAuth();
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
   const qc = useQueryClient();
+  const initializedDraftId = useRef<number | null>(null);
   const [priority, setPriority] = useState("NORMAL");
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
+  const [deliveryOfficeId, setDeliveryOfficeId] = useState<number | "">(
+    me?.active_position?.office_id ?? me?.employee.office_id ?? "",
+  );
   const [lines, setLines] = useState<Line[]>([{ item_id: "", quantity: "" }]);
+  const [error, setError] = useState<string | null>(null);
+  const [bomPickerOpen, setBomPickerOpen] = useState(false);
+  const [bomNotice, setBomNotice] = useState<string | null>(null);
+  const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
   const today = localDateString();
-  const requiredDateError = requiredDate && requiredDate < today
-    ? PAST_REQUIRED_DATE_ERROR
-    : null;
+  const requiredDateError = !requiredDate
+    ? REQUIRED_DATE_MANDATORY_ERROR
+    : requiredDate < today
+      ? PAST_REQUIRED_DATE_ERROR
+      : null;
+  const visibleRequiredDateError = hasAttemptedSubmit ? requiredDateError : null;
 
-  const { data: items = [] } = useQuery({
+  const { data: items = [], error: itemCatalogError } = useQuery({
     queryKey: indentKeys.items(accountScope, "form"),
     queryFn: () => masterApi.items(),
   });
 
-  const create = useAction({
-    run: () =>
-      indentApi.create({
-        priority,
-        required_date: requiredDate || null,
-        remarks: remarks || null,
-        items: lines
-          .filter((l) => l.item_id !== "" && l.quantity !== "")
-          .map((l) => ({ item_id: Number(l.item_id), quantity: Number(l.quantity) })),
-    }),
-    // Names the document, because the screen navigates away the moment it saves and
-    // the number is the only thing the raiser can quote afterwards.
-    success: (indent) => `${indent.indent_no} raised`,
-    onDone: (indent) => {
+  const { data: offices = [] } = useQuery({
+    queryKey: indentKeys.offices(accountScope),
+    queryFn: () => indentApi.offices(),
+    enabled: isEditing,
+  });
+
+  const {
+    data: draft,
+    isLoading: isDraftLoading,
+    error: draftLoadError,
+  } = useQuery({
+    queryKey: indentKeys.detail(accountScope, editId ?? 0),
+    queryFn: () => indentApi.get(editId!),
+    enabled: isEditing,
+  });
+
+  useEffect(() => {
+    if (!draft || draft.status !== "DRAFT" || initializedDraftId.current === draft.id) return;
+    initializedDraftId.current = draft.id;
+    setPriority(draft.priority || "NORMAL");
+    setRequiredDate(draft.required_date ?? "");
+    setRemarks(draft.remarks ?? "");
+    setDeliveryOfficeId(draft.office_id ?? "");
+    setLines(draft.items.map((item) => ({
+      item_id: item.item_id,
+      quantity: Number(item.quantity),
+    })));
+  }, [draft]);
+
+  const payload = (): IndentCreate => ({
+    priority,
+    required_date: requiredDate || null,
+    remarks: remarks || null,
+    items: lines
+      .filter((l) => l.item_id !== "" && l.quantity !== "" && Number(l.quantity) > 0)
+      .map((l) => ({ item_id: Number(l.item_id), quantity: Number(l.quantity) })),
+  });
+
+  const updatePayload = (): IndentUpdate => ({
+    ...payload(),
+    office_id: deliveryOfficeId === "" ? null : Number(deliveryOfficeId),
+  });
+
+  const save = useMutation({
+    mutationFn: () => isEditing
+      ? indentApi.update(editId!, updatePayload())
+      : indentApi.create(payload()),
+    onSuccess: (indent) => {
       qc.invalidateQueries({ predicate: isIndentModuleQuery });
       nav(`/indents/${indent.id}`);
     },
+    onError: (e: Error) => setError(e.message),
   });
 
   const setLine = (i: number, patch: Partial<Line>) =>
-    setLines((ls) => ls.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
-  const validLines = lines.filter((l) => l.item_id !== "" && l.quantity !== "");
+    setLines((current) => clearResolvedDuplicateErrors(
+      current.map((line, index) => (index === i ? { ...line, ...patch } : line)),
+    ));
+  const setLineItem = (i: number, value: number | "") =>
+    setLines((current) => {
+      if (
+        value !== ""
+        && current.some((line, index) => index !== i && line.item_id === value)
+      ) {
+        return current.map((line, index) =>
+          index === i ? { ...line, duplicateItemId: value } : line);
+      }
+      const updated: Line[] = current.map((line, index) => {
+        if (index !== i) return line;
+        const validLine = { ...line };
+        delete validLine.duplicateItemId;
+        return value === ""
+          ? { ...validLine, item_id: "", quantity: "" }
+          : { ...validLine, item_id: value };
+      });
+      return clearResolvedDuplicateErrors(updated);
+    });
+  const rejectDuplicateItem = (i: number, itemId: number) =>
+    setLines((current) => current.map((line, index) =>
+      index === i ? { ...line, duplicateItemId: itemId } : line));
+  const removeLine = (i: number) =>
+    setLines((current) => clearResolvedDuplicateErrors(
+      current.filter((_, index) => index !== i),
+    ));
+  const addTemplateItems = (templateItems: TemplateLineItem[], unavailableCount: number) => {
+    const existingIds = new Set(
+      lines.filter((line) => line.item_id !== "").map((line) => Number(line.item_id)),
+    );
+    const newItems = templateItems.filter((item) => !existingIds.has(item.item_id));
+    const duplicateCount = templateItems.length - newItems.length;
+
+    if (newItems.length > 0) {
+      setLines((current) => {
+        const retained = current.filter((line) => line.item_id !== "");
+        const imported: Line[] = newItems.map((item) => ({
+          item_id: item.item_id,
+          quantity: item.quantity != null && Number(item.quantity) > 0
+            ? Number(item.quantity)
+            : "",
+        }));
+        return clearResolvedDuplicateErrors([
+          ...retained,
+          ...imported,
+        ]);
+      });
+    }
+
+    const notices = [];
+    if (duplicateCount > 0) notices.push("Some items were already added and were skipped.");
+    if (unavailableCount > 0) {
+      notices.push(
+        `${unavailableCount} unavailable ${unavailableCount === 1 ? "item was" : "items were"} skipped.`,
+      );
+    }
+    setBomNotice(notices.join(" ") || `${newItems.length} ${newItems.length === 1 ? "item" : "items"} added.`);
+  };
+  const hasSelectedItems = lines.some((line) => line.item_id !== "");
+  const duplicateRows = duplicateItemRows(lines);
+  const hasDuplicateError = duplicateRows.size > 0
+    || lines.some((line) => line.duplicateItemId !== undefined);
+  // A row is missing its quantity when an item is selected but qty is empty, zero, or negative.
+  const missingQtyRows = new Set<number>(
+    lines
+      .map((line, i) => ({ line, i }))
+      .filter(({ line }) => line.item_id !== "" && (line.quantity === "" || Number(line.quantity) <= 0))
+      .map(({ i }) => i),
+  );
+  const hasMissingQtyError = missingQtyRows.size > 0;
 
   const itemOptions = items.map((it) => ({ value: it.id, label: `${it.code} — ${it.name}` }));
+  const deliveryOptions = isEditing
+    ? [
+        ...(draft?.office_id && !offices.some((office) => office.id === draft.office_id)
+          ? [{ id: draft.office_id, name: draft.office_name ?? "Current office" }]
+          : []),
+        ...offices,
+      ].map((office) => ({ value: office.id, label: office.name }))
+    : deliveryOfficeId ? [{
+        value: deliveryOfficeId,
+        label: me?.active_position?.office_name ?? me?.employee.office_name ?? "Tagged office",
+      }] : [];
+
+  if (isEditing && isDraftLoading) return <Skeleton className="h-40 rounded-2xl" />;
+
+  if (isEditing && (draftLoadError || !draft)) {
+    return (
+      <Card>
+        <CardBody className="gap-4 p-5">
+          <p className="text-sm font-semibold text-bad">
+            {draftLoadError instanceof Error ? draftLoadError.message : "Could not load this indent."}
+          </p>
+          <Button variant="secondary" onClick={() => nav(`/indents/${editId}`)}>Back to indent</Button>
+        </CardBody>
+      </Card>
+    );
+  }
+
+  if (isEditing && draft?.status !== "DRAFT") {
+    return (
+      <Card>
+        <CardBody className="gap-4 p-5">
+          <p className="text-sm font-semibold text-body">Only Draft indents can be edited.</p>
+          <Button variant="secondary" onClick={() => nav(`/indents/${editId}`)}>Back to indent</Button>
+        </CardBody>
+      </Card>
+    );
+  }
 
   return (
     <>
-      <PageHeader eyebrow="Indents" title="New request" />
+      <PageHeader
+        eyebrow="Indents"
+        title={isEditing ? `Edit ${draft?.indent_no ?? "indent"}` : "New request"}
+        actions={!isEditing ? (
+          <Button variant="primary" onClick={() => setBomPickerOpen(true)}>
+            <LibraryBig className="h-4 w-4" /> Choose BOM
+          </Button>
+        ) : undefined}
+      />
+
+      {bomNotice && (
+        <div className="mb-4 rounded-xl bg-ok-bg px-4 py-3 text-sm font-medium text-ok" role="status">
+          {bomNotice}
+        </div>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -84,48 +287,90 @@ export function IndentFormPage() {
             <div className="space-y-3">
               {lines.map((line, i) => {
                 const selectedItem = items.find((it) => Number(it.id) === Number(line.item_id));
+                const duplicateItemId = line.duplicateItemId ?? duplicateRows.get(i);
+                const duplicateErrorId = `indent-item-${i}-duplicate-error`;
+                const missingQtyErrorId = `indent-item-${i}-qty-error`;
+                const showMissingQtyError = hasAttemptedSubmit && missingQtyRows.has(i);
                 const uom = selectedItem?.uom_code?.trim() || (selectedItem ? UOM_UNAVAILABLE : "");
                 const quantityLabel = selectedItem
                   ? `Quantity (${uom})`
                   : "Quantity";
+                const rowItemOptions = itemOptions.map((option) => ({
+                  ...option,
+                  isDisabled: option.value !== line.item_id
+                    && lines.some((other, otherIndex) =>
+                      otherIndex !== i && other.item_id === option.value),
+                }));
                 return (
-                  <div key={i} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px] sm:items-end">
-                    <Field label={i === 0 ? "Item" : ""}>
-                      <ItemCombobox
-                        placeholder="Type item code or name…"
-                        value={line.item_id}
-                        onChange={(value) => setLine(i, { item_id: value })}
-                        options={itemOptions}
-                      />
-                    </Field>
-                    <Field label={i === 0 ? "Qty" : ""}>
-                      <Input
-                        type="number"
-                        min={0}
-                        step="0.001"
-                        aria-label={quantityLabel}
-                        value={String(line.quantity)}
-                        onChange={(e) => setLine(i, { quantity: e.target.value ? Number(e.target.value) : "" })}
-                        {...(uom ? {
-                          endContent: (
-                            <span
-                              className="pointer-events-none inline-flex min-w-[2.5rem] shrink-0 items-center justify-end whitespace-nowrap pl-2 text-xs font-medium text-muted"
-                              title={uom}
-                            >
-                              {uom}
-                            </span>
-                          ),
-                        } : {})}
-                      />
-                    </Field>
-                    <button
-                      onClick={() => setLines((ls) => ls.filter((_, idx) => idx !== i))}
-                      disabled={lines.length === 1}
-                      className="grid h-11 w-11 place-items-center rounded-xl text-muted hover:bg-bad-bg hover:text-bad disabled:opacity-30"
-                      aria-label="Remove line"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+                  <div key={i}>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px] sm:items-end">
+                      <Field label={i === 0 ? "Item" : ""}>
+                        <ItemCombobox
+                          placeholder="Type item code or name…"
+                          value={line.item_id}
+                          onChange={(value) => setLineItem(i, value)}
+                          onDisabledSelect={(itemId) => rejectDuplicateItem(i, itemId)}
+                          options={rowItemOptions}
+                          isInvalid={duplicateItemId !== undefined}
+                          errorId={duplicateErrorId}
+                        />
+                      </Field>
+                      <Field label={i === 0 ? "Qty" : ""}>
+                        <Input
+                          type="number"
+                          min={0}
+                          step="0.001"
+                          aria-label={quantityLabel}
+                          aria-invalid={showMissingQtyError ? "true" : undefined}
+                          aria-describedby={showMissingQtyError ? missingQtyErrorId : undefined}
+                          disabled={line.item_id === ""}
+                          placeholder={line.item_id === "" ? "—" : undefined}
+                          className={line.item_id === "" ? "[&_input]:text-center" : undefined}
+                          value={String(line.quantity)}
+                          onChange={(e) => setLine(i, { quantity: e.target.value ? Number(e.target.value) : "" })}
+                          isInvalid={showMissingQtyError}
+                          {...(uom ? {
+                            endContent: (
+                              <span
+                                className="pointer-events-none inline-flex min-w-[2.5rem] shrink-0 items-center justify-end whitespace-nowrap pl-2 text-xs font-medium text-muted"
+                                title={uom}
+                              >
+                                {uom}
+                              </span>
+                            ),
+                          } : {})}
+                        />
+                      </Field>
+                      <button
+                        onClick={() => removeLine(i)}
+                        disabled={lines.length === 1}
+                        className="grid h-11 w-11 place-items-center rounded-xl text-muted hover:bg-bad-bg hover:text-bad disabled:opacity-30"
+                        aria-label="Remove line"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                    {duplicateItemId !== undefined && (
+                      <div className="mt-1 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px]">
+                        <span
+                          id={duplicateErrorId}
+                          className="block text-xs font-medium text-bad"
+                        >
+                          {DUPLICATE_ITEM_ERROR}
+                        </span>
+                      </div>
+                    )}
+                    {showMissingQtyError && (
+                      <div className="mt-1 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px]">
+                        <div />
+                        <span
+                          id={missingQtyErrorId}
+                          className="block text-xs font-medium text-bad"
+                        >
+                          {MISSING_QTY_ERROR}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -154,13 +399,16 @@ export function IndentFormPage() {
                 type="date"
                 min={today}
                 value={requiredDate}
-                aria-invalid={requiredDateError ? "true" : undefined}
-                aria-describedby={requiredDateError ? "required-date-error" : undefined}
+                required
+                aria-label="Required date"
+                aria-invalid={visibleRequiredDateError ? "true" : undefined}
+                aria-describedby={visibleRequiredDateError ? "required-date-error" : undefined}
+                isInvalid={Boolean(visibleRequiredDateError)}
                 onChange={(e) => setRequiredDate(e.target.value)}
               />
-              {requiredDateError && (
+              {visibleRequiredDateError && (
                 <span id="required-date-error" className="mt-1 block text-xs font-medium text-bad">
-                  {requiredDateError}
+                  {visibleRequiredDateError}
                 </span>
               )}
             </Field>
@@ -170,15 +418,10 @@ export function IndentFormPage() {
             <Field label="Delivery location">
               <Select
                 placeholder="Office is assigned from your position"
-                value={me?.active_position?.office_id ?? me?.employee.office_id ?? ""}
-                onChange={() => undefined}
-                isDisabled
-                options={(me?.active_position?.office_id ?? me?.employee.office_id) ? [{
-                  value: me?.active_position?.office_id ?? me!.employee.office_id!,
-                  label: me?.active_position?.office_name
-                    ?? me?.employee.office_name
-                    ?? "Tagged office",
-                }] : []}
+                value={deliveryOfficeId}
+                onChange={(value) => setDeliveryOfficeId(value === "" ? "" : Number(value))}
+                isDisabled={!isEditing}
+                options={deliveryOptions}
               />
             </Field>
             <Field label="Remarks">
@@ -188,25 +431,59 @@ export function IndentFormPage() {
         </Card>
       </div>
 
-      {/* The toast confirms success; a failure stays pinned here, next to the form
-          the person still has to fix. */}
-      <div className="mt-4"><ErrorBanner error={create.error} /></div>
+      {error && (
+        <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>
+      )}
 
       <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
-        <Button variant="subtle" className="flex-1 md:flex-none" onClick={() => nav("/indents")}>
+        <Button
+          variant="subtle"
+          className="flex-1 md:flex-none"
+          onClick={() => nav(isEditing ? `/indents/${editId}` : "/indents")}
+        >
           Cancel
         </Button>
         <Button
           className="flex-1 md:flex-none"
-          disabled={validLines.length === 0 || Boolean(requiredDateError) || create.isPending}
+          disabled={
+            !hasSelectedItems
+            || hasDuplicateError
+            || save.isPending
+          }
           onClick={() => {
+            setError(null);
+            setHasAttemptedSubmit(true);
             if (requiredDateError) return;
-            create.mutate();
+            if (hasMissingQtyError) return;
+            const duplicates = duplicateItemRows(lines);
+            if (duplicates.size) {
+              setLines((current) => current.map((line, index) => {
+                const duplicateItemId = duplicates.get(index);
+                return duplicateItemId === undefined
+                  ? line
+                  : { ...line, item_id: "", duplicateItemId };
+              }));
+              return;
+            }
+            save.mutate();
           }}
         >
-          {create.isPending ? "Creating…" : "Create indent"}
+          {save.isPending
+            ? (isEditing ? "Saving…" : "Creating…")
+            : (isEditing ? "Save changes" : "Create indent")}
         </Button>
       </div>
+
+      {!isEditing && (
+        <ChooseBomModal
+          isOpen={bomPickerOpen}
+          accountScope={accountScope}
+          availableItems={items}
+          itemCatalogError={itemCatalogError}
+          onClose={() => setBomPickerOpen(false)}
+          onUse={addTemplateItems}
+        />
+      )}
     </>
   );
 }

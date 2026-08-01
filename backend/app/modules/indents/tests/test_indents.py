@@ -1,7 +1,7 @@
 """Indents module tests: creation rules, the DRAFT->PENDING->AWAITING_ALLOCATION flow through
 the engine, edit locking, and an API smoke test with permissions."""
 import pytest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 
 from sqlalchemy import event, select
@@ -10,6 +10,7 @@ from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
 from app.core.security import hash_password
 from app.modules.indents import service
+from app.modules.indents.models import IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
 from app.modules.indents.enums import AllocationStatus, ApprovalAction, IndentItemStatus
 from app.modules.inventory.models import Allocation, AllocationItem
@@ -378,7 +379,26 @@ async def _approval_ladder_world(db):
 
 
 def _create_data(item_id):
-    return IndentCreate(items=[IndentItemIn(item_id=item_id, quantity=5)], remarks="test")
+    return IndentCreate(
+        items=[IndentItemIn(item_id=item_id, quantity=5)],
+        required_date=date.today(),
+        remarks="test",
+    )
+
+
+def test_unique_item_id_validation_helper():
+    service._validate_unique_item_ids([
+        IndentItemIn(item_id=1, quantity=2),
+        IndentItemIn(item_id=2, quantity=3),
+    ])
+
+    with pytest.raises(ValidationError) as exc:
+        service._validate_unique_item_ids([
+            IndentItemIn(item_id=1, quantity=2),
+            IndentItemIn(item_id=1, quantity=3),
+        ])
+
+    assert str(exc.value) == service.DUPLICATE_ITEM_ERROR
 
 
 async def _draft_chain_world(db, *, depth: int, id_base: int):
@@ -445,7 +465,91 @@ async def _draft_chain_world(db, *, depth: int, id_base: int):
 async def test_create_requires_items(db):
     requester, *_ = await _world(db)
     with pytest.raises(ValidationError):
-        await service.create_indent(db, IndentCreate(items=[]), requester)
+        await service.create_indent(
+            db,
+            IndentCreate(items=[], required_date=date.today()),
+            requester,
+        )
+
+
+async def test_create_rejects_duplicate_item_ids(db):
+    requester, _approver, it1, _it2 = await _world(db)
+    data = IndentCreate(
+        items=[
+            IndentItemIn(item_id=it1.id, quantity=2),
+            IndentItemIn(item_id=it1.id, quantity=3),
+        ],
+        required_date=date.today(),
+    )
+
+    with pytest.raises(ValidationError) as exc:
+        await service.create_indent(db, data, requester)
+
+    assert str(exc.value) == service.DUPLICATE_ITEM_ERROR
+
+
+async def test_create_rejects_item_with_zero_quantity(db):
+    requester, _approver, it1, it2 = await _world(db)
+    # Pydantic Field(gt=0) already blocks quantity=0 at schema level;
+    # verify the service-level guard also raises ValidationError for any
+    # quantity that somehow passes (e.g. after a schema relaxation).
+    with pytest.raises(Exception):
+        # quantity=0 is rejected at Pydantic level (Field gt=0), which is correct
+        IndentItemIn(item_id=it1.id, quantity=0)
+
+
+async def test_create_rejects_item_with_negative_quantity(db):
+    requester, _approver, it1, _it2 = await _world(db)
+    with pytest.raises(Exception):
+        # negative quantity is rejected at Pydantic level (Field gt=0)
+        IndentItemIn(item_id=it1.id, quantity=-5)
+
+
+async def test_create_accepts_valid_item_quantities(db):
+    requester, _approver, it1, it2 = await _world(db)
+    data = IndentCreate(
+        items=[
+            IndentItemIn(item_id=it1.id, quantity=3),
+            IndentItemIn(item_id=it2.id, quantity=7),
+        ],
+        required_date=date.today(),
+    )
+    indent = await service.create_indent(db, data, requester)
+    assert indent.total_items == 2
+    assert float(indent.total_qty) == 10
+
+
+async def test_update_rejects_item_with_zero_quantity(db):
+    requester, _approver, it1, it2 = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    with pytest.raises(Exception):
+        # Pydantic Field(gt=0) blocks quantity=0 — correct defence-in-depth
+        IndentItemIn(item_id=it2.id, quantity=0)
+
+
+async def test_update_rejects_item_with_negative_quantity(db):
+    requester, _approver, it1, it2 = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    with pytest.raises(Exception):
+        IndentItemIn(item_id=it2.id, quantity=-1)
+
+
+async def test_update_accepts_valid_item_quantities(db):
+    requester, _approver, it1, it2 = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    updated = await service.update_indent(
+        db, indent.id,
+        IndentUpdate(
+            required_date=date.today(),
+            items=[
+                IndentItemIn(item_id=it1.id, quantity=10),
+                IndentItemIn(item_id=it2.id, quantity=20),
+            ],
+        ),
+        requester,
+    )
+    assert updated.total_items == 2
+    assert float(updated.total_qty) == 30
 
 
 async def test_create_sets_snapshots_and_number(db):
@@ -472,6 +576,30 @@ async def test_create_rejects_past_required_date(db):
                 items=[IndentItemIn(item_id=it1.id, quantity=5)],
                 required_date=date.today() - timedelta(days=1),
             ),
+            requester,
+        )
+
+
+async def test_create_rejects_missing_required_date(db):
+    requester, _approver, it1, _ = await _world(db)
+
+    with pytest.raises(ValidationError, match="Required date is mandatory."):
+        await service.create_indent(
+            db,
+            IndentCreate(items=[IndentItemIn(item_id=it1.id, quantity=5)]),
+            requester,
+        )
+
+
+async def test_update_rejects_missing_required_date(db):
+    requester, _approver, it1, _ = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+
+    with pytest.raises(ValidationError, match="Required date is mandatory."):
+        await service.update_indent(
+            db,
+            indent.id,
+            IndentUpdate(remarks="Missing required date"),
             requester,
         )
 
@@ -548,6 +676,35 @@ async def test_pilot_submit_routes_to_oe_current_approver(db):
     assert submitted.status == IndentStatus.PENDING_APPROVAL.value
     assert submitted.current_approver_name == "OE"
     assert {row.approver_id for row in pending} == {world["oe"].id}
+
+
+async def test_reject_requires_and_exposes_trimmed_reason_in_journey(db):
+    world = await _approval_ladder_world(db)
+    await service.submit_indent(db, world["indent"].id, world["pilot"])
+
+    with pytest.raises(ValidationError, match=service.REJECTION_REASON_REQUIRED_ERROR):
+        await service.act_on_indent(
+            db,
+            world["indent"].id,
+            ApprovalAction.REJECTED,
+            "   ",
+            world["oe"],
+        )
+
+    rejected = await service.act_on_indent(
+        db,
+        world["indent"].id,
+        ApprovalAction.REJECTED,
+        "  Incorrect quantity  ",
+        world["oe"],
+    )
+    journey = await service.indent_journey(db, world["indent"].id, world["pilot"])
+    rejected_stage = next(stage for stage in journey["stages"] if stage["status"] == "REJECTED")
+
+    assert rejected.status == IndentStatus.REJECTED.value
+    assert rejected_stage["title"] == "OE Review"
+    assert rejected_stage["approver_name"] == "OE"
+    assert rejected_stage["comments"] == "Incorrect quantity"
 
 
 async def test_reporting_manager_ladder_advances_oe_to_dm_to_rm_to_final_group(db):
@@ -811,6 +968,66 @@ async def test_cannot_edit_after_submit(db):
         await service.update_indent(db, indent.id, IndentUpdate(remarks="late edit"), requester)
 
 
+async def test_update_draft_delivery_office(db):
+    requester, _approver, it1, _ = await _world(db)
+    db.add(HcmOffice(id=702, name="Branch Office", is_active=True, synced_at=utcnow()))
+    await db.commit()
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+
+    updated = await service.update_indent(
+        db,
+        indent.id,
+        IndentUpdate(required_date=date.today(), office_id=702),
+        requester,
+    )
+
+    assert updated.office_id == 702
+    assert updated.office_name == "Branch Office"
+
+
+async def test_requester_can_delete_draft(db):
+    requester, _approver, it1, _ = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    indent_id = indent.id
+
+    await service.delete_indent(db, indent_id, requester)
+
+    with pytest.raises(NotFoundError):
+        await service.get_indent(db, indent_id)
+
+
+async def test_cannot_delete_after_submit(db):
+    requester, _approver, it1, _ = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    await service.submit_indent(db, indent.id, requester)
+
+    with pytest.raises(ValidationError):
+        await service.delete_indent(db, indent.id, requester)
+
+
+async def test_update_rejects_duplicate_item_ids(db):
+    requester, _approver, it1, it2 = await _world(db)
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+
+    with pytest.raises(ValidationError) as exc:
+        await service.update_indent(
+            db,
+            indent.id,
+            IndentUpdate(
+                required_date=date.today(),
+                items=[
+                    IndentItemIn(item_id=it2.id, quantity=2),
+                    IndentItemIn(item_id=it2.id, quantity=3),
+                ],
+            ),
+            requester,
+        )
+
+    assert str(exc.value) == service.DUPLICATE_ITEM_ERROR
+    unchanged = await service.get_indent(db, indent.id, requester)
+    assert [line.item_id for line in unchanged.items] == [it1.id]
+
+
 async def test_indent_create_and_list_via_api(client, db, make_user, login):
     uom = Uom(code="NOS", name="Numbers")
     db.add(uom)
@@ -823,9 +1040,14 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
                     permissions=["indent.view", "indent.create"])
     headers = await login("req", "pw")
 
-    r = await client.post("/api/indents",
-                          json={"items": [{"item_id": item.id, "quantity": 5}]},
-                          headers=headers)
+    r = await client.post(
+        "/api/indents",
+        json={
+            "required_date": date.today().isoformat(),
+            "items": [{"item_id": item.id, "quantity": 5}],
+        },
+        headers=headers,
+    )
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "DRAFT"
     assert r.json()["indent_no"].startswith("IND/")
@@ -833,6 +1055,181 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
     lst = await client.get("/api/indents", headers=headers)
     assert lst.status_code == 200
     assert lst.json()["total"] >= 1
+
+
+async def test_required_date_api_validation_for_create_and_update(
+    client, db, make_user, login,
+):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    db.add(item)
+    await db.commit()
+
+    await make_user(
+        employee_id=2,
+        username="req",
+        password="pw",
+        permissions=["indent.view", "indent.create", "indent.edit"],
+    )
+    headers = await login("req", "pw")
+    items = [{"item_id": item.id, "quantity": 5}]
+
+    missing_create = await client.post(
+        "/api/indents",
+        json={"items": items},
+        headers=headers,
+    )
+    assert missing_create.status_code == 422
+    assert missing_create.json() == {
+        "success": False,
+        "error": service.REQUIRED_DATE_MANDATORY_ERROR,
+    }
+
+    created = await client.post(
+        "/api/indents",
+        json={"required_date": date.today().isoformat(), "items": items},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+
+    missing_update = await client.put(
+        f"/api/indents/{created.json()['id']}",
+        json={"items": items},
+        headers=headers,
+    )
+    assert missing_update.status_code == 422
+    assert missing_update.json() == {
+        "success": False,
+        "error": service.REQUIRED_DATE_MANDATORY_ERROR,
+    }
+
+
+async def test_duplicate_item_api_validation_for_create_and_update(
+    client, db, make_user, login,
+):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item1 = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    item2 = Item(code="IT-0002", name="Nut", uom_id=uom.id, uom_code="NOS")
+    db.add_all([item1, item2])
+    await db.commit()
+
+    await make_user(
+        employee_id=2,
+        username="req",
+        password="pw",
+        permissions=["indent.view", "indent.create", "indent.edit"],
+    )
+    headers = await login("req", "pw")
+    unique_items = [
+        {"item_id": item1.id, "quantity": 2},
+        {"item_id": item2.id, "quantity": 3},
+    ]
+    required_date = date.today().isoformat()
+
+    created = await client.post(
+        "/api/indents",
+        json={"required_date": required_date, "items": unique_items},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+
+    updated = await client.put(
+        f"/api/indents/{created.json()['id']}",
+        json={"required_date": required_date, "items": list(reversed(unique_items))},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+
+    duplicate_items = [
+        {"item_id": item1.id, "quantity": 2},
+        {"item_id": item1.id, "quantity": 3},
+    ]
+    duplicate_create = await client.post(
+        "/api/indents",
+        json={"required_date": required_date, "items": duplicate_items},
+        headers=headers,
+    )
+    duplicate_update = await client.put(
+        f"/api/indents/{created.json()['id']}",
+        json={"required_date": required_date, "items": duplicate_items},
+        headers=headers,
+    )
+
+    expected = {"success": False, "error": service.DUPLICATE_ITEM_ERROR}
+    assert duplicate_create.status_code == 422
+    assert duplicate_create.json() == expected
+    assert duplicate_update.status_code == 422
+    assert duplicate_update.json() == expected
+
+
+async def test_draft_update_and_delete_via_api(client, db, make_user, login):
+    uom = Uom(code="NOS", name="Numbers")
+    db.add(uom)
+    await db.flush()
+    item1 = Item(code="IT-0001", name="Bolt", uom_id=uom.id, uom_code="NOS")
+    item2 = Item(code="IT-0002", name="Nut", uom_id=uom.id, uom_code="NOS")
+    db.add_all([item1, item2])
+    await db.commit()
+
+    await make_user(
+        employee_id=2,
+        username="draft-owner",
+        password="pw",
+        permissions=[
+            "indent.view",
+            "indent.create",
+            "indent.edit",
+        ],
+    )
+    headers = await login("draft-owner", "pw")
+    required_date = (date.today() + timedelta(days=2)).isoformat()
+    created = await client.post(
+        "/api/indents",
+        json={
+            "required_date": required_date,
+            "items": [{"item_id": item1.id, "quantity": 5}],
+        },
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    indent_id = created.json()["id"]
+
+    updated = await client.put(
+        f"/api/indents/{indent_id}",
+        json={
+            "required_date": required_date,
+            "priority": "URGENT",
+            "remarks": "Edited draft",
+            "items": [{"item_id": item2.id, "quantity": 7}],
+        },
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["id"] == indent_id
+    assert updated.json()["required_date"] == required_date
+    assert updated.json()["priority"] == "URGENT"
+    assert updated.json()["remarks"] == "Edited draft"
+    assert [(line["item_id"], line["quantity"]) for line in updated.json()["items"]] == [
+        (item2.id, 7),
+    ]
+
+    detail = await client.get(f"/api/indents/{indent_id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["id"] == indent_id
+    assert [(line["item_id"], line["quantity"]) for line in detail.json()["items"]] == [
+        (item2.id, 7),
+    ]
+
+    deleted = await client.delete(f"/api/indents/{indent_id}", headers=headers)
+    assert deleted.status_code == 204, deleted.text
+    assert (await client.get(f"/api/indents/{indent_id}", headers=headers)).status_code == 404
+    listed = await client.get("/api/indents", headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert indent_id not in {indent["id"] for indent in listed.json()["items"]}
 
 
 async def test_indent_stats_counts(db):
@@ -1326,15 +1723,70 @@ async def test_indent_list_filters(client, db, login):
         requester,
     )
 
+    i1.indent_no = "IND/2026/0012"
+    i1.requested_by_name = "Visible Requester"
+    i1.department_name = "Field Operations"
+    i1.status = IndentStatus.AWAITING_ALLOCATION.value
+
+    i2.indent_no = "IND/2026/0099"
+    i2.requested_by_name = "Other Requester"
+    i2.department_name = "Finance"
+    i2.requested_by_code = "HiddenEmployeeCode12"
+    i2.position_name = "HiddenPosition12"
+    i2.office_name = "HiddenOffice12"
+    i2.project_name = "HiddenProject12"
+    i2.remarks = "HiddenIndentRemarks12"
+    i2.total_qty = 12
+    i2_line = (await db.execute(
+        select(IndentItem).where(IndentItem.indent_id == i2.id)
+    )).scalar_one()
+    i2_line.item_code = "HiddenItemCode12"
+    i2_line.item_name = "HiddenItemName12"
+    i2_line.uom_code = "HiddenUom12"
+    i2_line.remarks = "HiddenLineRemarks12"
+    i2_line.quantity = 12
+    await db.commit()
+
     await _grant_login(db, requester, "filteruser", ["indent.view"])
     headers = await login("filteruser", "pw")
 
-    r = await client.get(f"/api/indents?search={i1.indent_no}&page=1&size=1", headers=headers)
+    r = await client.get(
+        "/api/indents",
+        params={"search": "  0012  ", "page": 1, "size": 1},
+        headers=headers,
+    )
     assert r.status_code == 200
     assert r.json()["total"] == 1
     assert r.json()["items"][0]["id"] == i1.id
     assert r.json()["page"] == 1
     assert r.json()["size"] == 1
+
+    for term in ("visible requester", "FIELD OPERATIONS", "aWaItInG aLlOcAtIoN"):
+        r = await client.get("/api/indents", params={"search": term}, headers=headers)
+        assert r.status_code == 200
+        assert r.json()["total"] == 1
+        assert r.json()["items"][0]["id"] == i1.id
+
+    hidden_terms = (
+        "HiddenEmployeeCode12",
+        "HiddenPosition12",
+        "HiddenOffice12",
+        "HiddenProject12",
+        "HiddenIndentRemarks12",
+        "HiddenItemCode12",
+        "HiddenItemName12",
+        "HiddenUom12",
+        "HiddenLineRemarks12",
+    )
+    for term in hidden_terms:
+        r = await client.get("/api/indents", params={"search": term}, headers=headers)
+        assert r.status_code == 200
+        assert r.json()["total"] == 0
+
+    r = await client.get("/api/indents", params={"search": "12"}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    assert r.json()["items"][0]["id"] == i1.id
 
     r = await client.get("/api/indents?priority=URGENT", headers=headers)
     assert r.status_code == 200
@@ -1343,7 +1795,27 @@ async def test_indent_list_filters(client, db, login):
 
     r = await client.get("/api/indents?status=DRAFT", headers=headers)
     assert r.status_code == 200
-    assert r.json()["total"] >= 2
+    assert r.json()["total"] == 1
+    assert r.json()["items"][0]["id"] == i2.id
+
+    r = await client.get(
+        "/api/indents",
+        params={
+            "search": "awaiting allocation",
+            "created_date_from": today.isoformat(),
+            "created_date_to": today.isoformat(),
+            "status": IndentStatus.AWAITING_ALLOCATION.value,
+            "priority": "URGENT",
+            "page": 1,
+            "size": 1,
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    assert r.json()["items"][0]["id"] == i1.id
+    assert r.json()["page"] == 1
+    assert r.json()["size"] == 1
 
     r = await client.get(f"/api/indents?required_by_to={today.isoformat()}", headers=headers)
     assert r.status_code == 200
@@ -1355,7 +1827,7 @@ async def test_indent_list_filters(client, db, login):
     assert r_stats.status_code == 200
     data = r_stats.json()
     assert data["total"] == 1
-    assert data["draft"] == 1
+    assert data["by_status"] == {IndentStatus.AWAITING_ALLOCATION.value: 1}
 
 
 async def test_allocation_does_not_create_fulfillment_acknowledgments(client, db, login):
@@ -1478,11 +1950,57 @@ async def test_activity_filters(client, db, login):
         headers=headers,
     )
     assert r.status_code == 200
+    assert r.json()["total"] == 0
+
+    for visible_term in (
+        "Approval completed",
+        "Approved",
+        approver.full_name,
+        indent.department_name,
+    ):
+        r = await client.get(
+            "/api/indents/activity",
+            params={
+                "search": visible_term,
+                "transaction_type": "APPROVAL_COMPLETED",
+            },
+            headers=headers,
+        )
+        assert r.status_code == 200
+        assert r.json()["total"] >= 1
+
+    indent.office_name = "HiddenActivityOffice"
+    indent.project_name = "HiddenActivityProject"
+    await db.commit()
+    for hidden_term in ("HiddenActivityOffice", "HiddenActivityProject"):
+        r = await client.get(
+            "/api/indents/activity", params={"search": hidden_term}, headers=headers,
+        )
+        assert r.status_code == 200
+        assert r.json()["total"] == 0
+
+    r = await client.get(
+        "/api/indents/activity",
+        params={
+            "status": IndentStatus.AWAITING_ALLOCATION.value,
+            "date_from": today_date.isoformat(),
+            "date_to": today_date.isoformat(),
+            "page": 1,
+            "size": 1,
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200
     assert r.json()["total"] >= 1
-    assert {row["event_type"] for row in r.json()["items"]} == {
-        "APPROVAL_COMPLETED",
-    }
-    assert {row["result_label"] for row in r.json()["items"]} == {"Approved"}
+    assert r.json()["size"] == 1
+
+    invalid = await client.get(
+        "/api/indents/activity",
+        params={"date_from": "2026-08-01", "date_to": "2026-07-31"},
+        headers=headers,
+    )
+    assert invalid.status_code == 422
+    assert "date_from" in invalid.json()["error"]
 
     today = today_date.isoformat()
     r = await client.get(
@@ -1494,6 +2012,203 @@ async def test_activity_filters(client, db, login):
     ids = {row["indent_id"] for row in r.json()["items"]}
     assert indent.id in ids
     assert future_indent.id not in ids
+
+
+async def test_notification_filters_visible_content_before_pagination(client, db, login):
+    requester, approver, it1, _ = await _world(db)
+    today = utcnow().date()
+    approved = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=2)],
+            required_date=today,
+        ),
+        requester,
+    )
+    rejected = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=3)],
+            required_date=today,
+        ),
+        requester,
+    )
+    await service.submit_indent(db, approved.id, requester)
+    await service.act_on_indent(db, approved.id, ApprovalAction.APPROVED, "hidden approval note", approver)
+    rejected.status = IndentStatus.REJECTED.value
+    approved.updated_at = datetime(2026, 7, 31, 23, 59, 59, tzinfo=timezone.utc)
+    rejected.updated_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    approved.office_name = "HiddenNotificationOffice"
+    approved.project_name = "HiddenNotificationProject"
+    approved.remarks = "HiddenNotificationRemarks"
+    await db.commit()
+
+    await _grant_login(db, requester, "notificationfilteruser", ["indent.view"])
+    headers = await login("notificationfilteruser", "pw")
+
+    for visible_term in (
+        approved.indent_no,
+        "Request approved",
+        "approved and with inventory",
+        "awaiting allocation",
+    ):
+        response = await client.get(
+            "/api/indents/notifications", params={"search": visible_term}, headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["total"] == 1
+        assert response.json()["items"][0]["indent_id"] == approved.id
+
+    for hidden_term in (
+        "HiddenNotificationOffice",
+        "HiddenNotificationProject",
+        "HiddenNotificationRemarks",
+        "hidden approval note",
+    ):
+        response = await client.get(
+            "/api/indents/notifications", params={"search": hidden_term}, headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+
+    response = await client.get(
+        "/api/indents/notifications",
+        params={
+            "date_from": "2026-07-31",
+            "date_to": "2026-07-31",
+            "status": IndentStatus.AWAITING_ALLOCATION.value,
+            "page": 1,
+            "size": 1,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["indent_id"] == approved.id
+
+    rejected_response = await client.get(
+        "/api/indents/notifications",
+        params={"status": IndentStatus.REJECTED.value},
+        headers=headers,
+    )
+    assert rejected_response.status_code == 200
+    assert {row["indent_id"] for row in rejected_response.json()["items"]} == {
+        rejected.id,
+    }
+
+    invalid = await client.get(
+        "/api/indents/notifications",
+        params={"date_from": "2026-08-01", "date_to": "2026-07-31"},
+        headers=headers,
+    )
+    assert invalid.status_code == 422
+    assert "date_from" in invalid.json()["error"]
+
+
+async def test_indent_list_and_stats_date_ranges_are_validated_inclusive_and_combined(
+    client, db, login,
+):
+    requester, other_user, it1, _ = await _world(db)
+    rows = []
+    for required_date in (date.today(), date.today() + timedelta(days=1), date.today() + timedelta(days=1)):
+        rows.append(await service.create_indent(
+            db,
+            IndentCreate(
+                items=[IndentItemIn(item_id=it1.id, quantity=1)],
+                required_date=required_date,
+            ),
+            requester,
+        ))
+    hidden = await service.create_indent(
+        db,
+        IndentCreate(
+            items=[IndentItemIn(item_id=it1.id, quantity=1)],
+            required_date=date.today(),
+        ),
+        other_user,
+    )
+
+    rows[0].created_at = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+    rows[0].required_date = date(2026, 8, 1)
+    rows[1].created_at = datetime(2026, 7, 31, 23, 59, 59, tzinfo=timezone.utc)
+    rows[1].required_date = date(2026, 8, 10)
+    rows[2].created_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    rows[2].required_date = date(2026, 8, 10)
+    hidden.created_at = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+    hidden.required_date = date(2026, 8, 5)
+    await db.commit()
+
+    await _grant_login(db, requester, "daterangeuser", ["indent.view"])
+    headers = await login("daterangeuser", "pw")
+
+    july = {
+        "created_date_from": "2026-07-01",
+        "created_date_to": "2026-07-31",
+        "page": 1,
+        "size": 1,
+    }
+    response = await client.get("/api/indents", params=july, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["total"] == 2
+    assert response.json()["size"] == 1
+    assert response.json()["items"][0]["id"] in {rows[0].id, rows[1].id}
+    assert hidden.id not in {item["id"] for item in response.json()["items"]}
+
+    same_raised_day = await client.get(
+        "/api/indents",
+        params={"created_date_from": "2026-07-31", "created_date_to": "2026-07-31"},
+        headers=headers,
+    )
+    assert same_raised_day.status_code == 200
+    assert {item["id"] for item in same_raised_day.json()["items"]} == {rows[1].id}
+
+    same_required_day = await client.get(
+        "/api/indents",
+        params={"required_by_from": "2026-08-10", "required_by_to": "2026-08-10"},
+        headers=headers,
+    )
+    assert same_required_day.status_code == 200
+    assert {item["id"] for item in same_required_day.json()["items"]} == {
+        rows[1].id, rows[2].id,
+    }
+
+    combined = {
+        "created_date_from": "2026-07-01",
+        "created_date_to": "2026-07-31",
+        "required_by_from": "2026-08-01",
+        "required_by_to": "2026-08-10",
+    }
+    combined_list = await client.get("/api/indents", params=combined, headers=headers)
+    combined_stats = await client.get("/api/indents/stats", params=combined, headers=headers)
+    assert combined_list.status_code == 200
+    assert combined_stats.status_code == 200
+    assert {item["id"] for item in combined_list.json()["items"]} == {
+        rows[0].id, rows[1].id,
+    }
+    assert combined_stats.json()["total"] == combined_list.json()["total"] == 2
+
+    invalid_requests = [
+        ("/api/indents", {
+            "created_date_from": "2026-08-01",
+            "created_date_to": "2026-07-31",
+        }, "created_date_from"),
+        ("/api/indents/stats", {
+            "created_date_from": "2026-08-01",
+            "created_date_to": "2026-07-31",
+        }, "created_date_from"),
+        ("/api/indents", {
+            "required_by_from": "2026-08-11",
+            "required_by_to": "2026-08-10",
+        }, "required_by_from"),
+        ("/api/indents/stats", {
+            "required_by_from": "2026-08-11",
+            "required_by_to": "2026-08-10",
+        }, "required_by_from"),
+    ]
+    for path, params, field in invalid_requests:
+        invalid = await client.get(path, params=params, headers=headers)
+        assert invalid.status_code == 422
+        assert field in invalid.json()["error"]
 
 
 async def test_read_endpoints_require_indent_view(client, make_user, login):

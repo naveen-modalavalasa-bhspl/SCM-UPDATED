@@ -4,6 +4,7 @@ import { ChevronDown } from "lucide-react";
 export interface ItemOption {
   value: number;
   label: string;
+  isDisabled?: boolean;
 }
 
 export function filterItemOptions(options: ItemOption[], query: string): ItemOption[] {
@@ -18,14 +19,20 @@ export function ItemCombobox({
   onChange,
   options,
   onQueryChange,
+  onDisabledSelect,
   isLoading = false,
+  isInvalid = false,
+  errorId,
   placeholder = "Type or select an item…",
 }: {
   value: number | "";
   onChange: (value: number | "") => void;
   options: ItemOption[];
   onQueryChange?: (query: string) => void;
+  onDisabledSelect?: (value: number) => void;
   isLoading?: boolean;
+  isInvalid?: boolean;
+  errorId?: string;
   placeholder?: string;
 }) {
   const selectedLabel = options.find((option) => option.value === value)?.label ?? "";
@@ -46,6 +53,12 @@ export function ItemCombobox({
   }, [onQueryChange, query, selectedLabel]);
 
   const select = (option: ItemOption) => {
+    if (option.isDisabled) {
+      onDisabledSelect?.(option.value);
+      setQuery(selectedLabel);
+      setOpen(false);
+      return;
+    }
     onChange(option.value);
     setQuery(option.label);
     setOpen(false);
@@ -53,13 +66,19 @@ export function ItemCombobox({
 
   return (
     <div className="relative">
-      <div className="flex min-h-11 items-center rounded-xl border border-line bg-content1 focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20">
+      <div className={`flex min-h-11 items-center rounded-xl border bg-content1 focus-within:ring-2 ${
+        isInvalid
+          ? "border-bad focus-within:border-bad focus-within:ring-bad/20"
+          : "border-line focus-within:border-brand focus-within:ring-brand/20"
+      }`}>
         <input
           role="combobox"
           aria-label="Item"
           aria-autocomplete="list"
           aria-expanded={open}
           aria-controls={listboxId}
+          aria-invalid={isInvalid || undefined}
+          aria-describedby={isInvalid ? errorId : undefined}
           value={query}
           placeholder={placeholder}
           onFocus={() => setOpen(true)}
@@ -68,7 +87,9 @@ export function ItemCombobox({
             if (query !== selectedLabel) setQuery(selectedLabel);
           }, 100)}
           onChange={(event) => {
-            setQuery(event.target.value);
+            const nextQuery = event.target.value;
+            setQuery(nextQuery);
+            if (nextQuery === "" && value !== "") onChange("");
             setOpen(true);
           }}
           className="h-11 min-w-0 flex-1 rounded-l-xl bg-transparent px-3 text-sm text-ink outline-none placeholder:text-muted"
@@ -96,10 +117,13 @@ export function ItemCombobox({
               type="button"
               role="option"
               aria-selected={option.value === value}
+              aria-disabled={option.isDisabled || undefined}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => select(option)}
               className={`block w-full rounded-lg px-3 py-2 text-left text-sm ${
-                option.value === value
+                option.isDisabled
+                  ? "cursor-not-allowed text-muted opacity-50"
+                  : option.value === value
                   ? "bg-brand/10 font-medium text-brand"
                   : "text-body hover:bg-content2"
               }`}

@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
-import { ClipboardList, Loader2, Pin } from "lucide-react";
+import { ClipboardList, Loader2, Pin, PinOff } from "lucide-react";
 import type { Paginated } from "@/shared/types";
 import {
   INDENT_QUERY_ROOT,
   indentApi,
   indentKeys,
   type IndentAccountScope,
+  type IndentQueryParams,
   useIndentAccountCacheIsolation,
   useIndentAccountScope,
 } from "../api";
@@ -27,9 +28,42 @@ const COLUMNS: { title: string; statuses: string[]; dot: string }[] = [
 
 const BOARD_PREVIEW_SIZE = 50;
 const UNPIN_ANIMATION_MS = 200;
+const UNPIN_ALL_PAGE_SIZE = 500;
+const UNPIN_ALL_BATCH_SIZE = 10;
 
 function waitForUnpinAnimation() {
   return new Promise((resolve) => window.setTimeout(resolve, UNPIN_ANIMATION_MS));
+}
+
+async function getAllPinnedRows(params: IndentQueryParams) {
+  const first = await indentApi.list({ ...params, page: 1, size: UNPIN_ALL_PAGE_SIZE });
+  const pageCount = Math.ceil(first.total / UNPIN_ALL_PAGE_SIZE);
+  if (pageCount <= 1) return first.items;
+
+  const remainingPages = await Promise.all(
+    Array.from({ length: pageCount - 1 }, (_, index) =>
+      indentApi.list({ ...params, page: index + 2, size: UNPIN_ALL_PAGE_SIZE })
+    ),
+  );
+  return [first.items, ...remainingPages.map((page) => page.items)].flat();
+}
+
+async function unpinRowsInBatches(rows: IndentListRow[]) {
+  const unpinned: IndentListRow[] = [];
+  let failed = 0;
+
+  for (let offset = 0; offset < rows.length; offset += UNPIN_ALL_BATCH_SIZE) {
+    const batch = rows.slice(offset, offset + UNPIN_ALL_BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map((row) => indentApi.unbookmark(row.id)),
+    );
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") unpinned.push(batch[index]);
+      else failed += 1;
+    });
+  }
+
+  return { unpinned, failed };
 }
 
 function formatStatus(status: string) {
@@ -187,11 +221,94 @@ function IndentBoardContent() {
     },
   });
 
+  const unpinAll = useMutation({
+    mutationFn: async () => {
+      const pinnedRows = await getAllPinnedRows(filterParams);
+      const [result] = await Promise.all([
+        unpinRowsInBatches(pinnedRows),
+        waitForUnpinAnimation(),
+      ]);
+      return result;
+    },
+    onMutate: () => {
+      setBookmarkError("");
+      setRemovingIds(Object.fromEntries(rows.map((row) => [row.id, true])));
+    },
+    onSuccess: ({ unpinned, failed }) => {
+      const unpinnedIds = new Set(unpinned.map((row) => row.id));
+
+      qc.getQueriesData<Paginated<IndentListRow>>({
+        predicate: (query) => isScopedIndentQuery(query, accountScope, "list"),
+      }).forEach(([key, value]) => {
+        if (!value) return;
+        qc.setQueryData(key, {
+          ...value,
+          items: value.items.map((item) =>
+            unpinnedIds.has(item.id) ? { ...item, is_bookmarked: "NO" } : item
+          ),
+        });
+      });
+
+      qc.setQueryData<Paginated<IndentListRow>>(
+        indentKeys.board(accountScope, filterParams),
+        (value) => {
+          if (!value) return value;
+          return {
+            ...value,
+            items: value.items.filter((item) => !unpinnedIds.has(item.id)),
+            total: Math.max(0, value.total - unpinned.length),
+          };
+        },
+      );
+
+      qc.setQueryData<IndentStats>(
+        indentKeys.stats(accountScope, ["board", statsParams]),
+        (value) => unpinned.reduce(
+          (current, row) => decrementBoardStats(current, row),
+          value,
+        ),
+      );
+
+      setRemovingIds({});
+      if (failed > 0) {
+        setBookmarkError(
+          `${failed} pinned ${failed === 1 ? "request" : "requests"} could not be removed. Please try again.`,
+        );
+      }
+
+      void qc.invalidateQueries({
+        predicate: (query) =>
+          isScopedIndentQuery(query, accountScope, "board")
+          || isScopedBoardStatsQuery(query, accountScope),
+      });
+    },
+    onError: () => {
+      setRemovingIds({});
+      setBookmarkError("Could not clear the Board bookmarks. Please try again.");
+    },
+  });
+
   const openIndent = (id: number) => nav(`/indents/${id}`);
 
   return (
     <>
-      <IndentModuleHeader title="Board" showCreate={false} />
+      <div className="relative">
+        <IndentModuleHeader title="Board" showCreate={false} />
+        <button
+          type="button"
+          title="Remove all matching pinned requests from Board"
+          disabled={boardTotal === 0 || isLoading || unpin.isPending || unpinAll.isPending}
+          onClick={() => unpinAll.mutate()}
+          className="absolute right-0 top-0 inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white shadow-sm transition duration-200 hover:-translate-y-0.5 hover:brightness-95 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:shadow-sm"
+        >
+          {unpinAll.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <PinOff className="h-4 w-4" aria-hidden="true" />
+          )}
+          {unpinAll.isPending ? "Unpinning..." : "Unpin all"}
+        </button>
+      </div>
 
       {bookmarkError && <p className="mb-4 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{bookmarkError}</p>}
       {isLoading && <p className="py-12 text-center text-sm text-muted">Loading board...</p>}
@@ -268,7 +385,7 @@ function IndentBoardContent() {
                           aria-label="Remove from Board"
                           aria-pressed="true"
                           title="Remove from Board"
-                          disabled={removingIds[row.id] || unpin.isPending}
+                          disabled={removingIds[row.id] || unpin.isPending || unpinAll.isPending}
                           onClick={(event) => {
                             event.preventDefault();
                             event.stopPropagation();

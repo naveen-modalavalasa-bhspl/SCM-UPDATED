@@ -35,6 +35,34 @@ const submitted = stage({
 });
 
 describe("FlowStepper", () => {
+  it("shows a progress skeleton instead of unavailable status during initial loading", () => {
+    render(<FlowStepper status="PENDING_APPROVAL" isLoading />);
+
+    expect(screen.getByRole("status", { name: "Loading approval progress" })).toBeInTheDocument();
+    expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
+  });
+
+  it("keeps a cached journey visible while it is being refetched", () => {
+    render(<FlowStepper status="PENDING_APPROVAL" journey={journey([
+      submitted,
+      stage({ sequence: 2, title: "OE Review", status: "PENDING", is_current: true }),
+    ])} isLoading />);
+
+    expect(screen.getByText("OE Review")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
+  });
+
+  it("shows unavailable only after loading completes with unusable journey data", () => {
+    const view = render(<FlowStepper status="PENDING_APPROVAL" isLoading />);
+
+    expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
+
+    view.rerender(<FlowStepper status="PENDING_APPROVAL" journey={journey([])} />);
+
+    expect(screen.getByText("Status unavailable")).toBeInTheDocument();
+  });
+
   it("uses requester information for draft indents when journey is available", () => {
     render(<FlowStepper status="DRAFT" journey={journey([
       stage({
@@ -66,6 +94,63 @@ describe("FlowStepper", () => {
     expect(screen.getByLabelText("Final Approval - CEO: Pending")).toHaveClass("border-line");
     expect(screen.queryByText("OE Review")).not.toBeInTheDocument();
     expect(screen.queryByText("DM Review")).not.toBeInTheDocument();
+    expect(screen.queryByText("RM Review")).not.toBeInTheDocument();
+  });
+
+  it("renders every stage in a returned full approval chain", () => {
+    render(<FlowStepper status="PENDING_APPROVAL" journey={journey([
+      submitted,
+      stage({ sequence: 2, title: "OE Review", status: "APPROVED" }),
+      stage({ sequence: 3, title: "DM Review", status: "APPROVED" }),
+      stage({ sequence: 4, title: "RM Review", status: "PENDING", is_current: true }),
+      stage({
+        sequence: 5,
+        title: "Final Approval - SPH/COO",
+        status: "PENDING",
+        stage_type: "final",
+      }),
+    ])} />);
+
+    expect(screen.getByText("OE Review")).toBeInTheDocument();
+    expect(screen.getByText("DM Review")).toBeInTheDocument();
+    expect(screen.getByText("RM Review")).toBeInTheDocument();
+    expect(screen.getByText("Final Approval - SPH/COO")).toBeInTheDocument();
+  });
+
+  it("omits absent roles and shows a skipped role only when returned explicitly", () => {
+    const withoutUnavailableRoles = journey([
+      submitted,
+      stage({ sequence: 2, title: "OE Review", status: "APPROVED" }),
+      stage({
+        sequence: 3,
+        title: "Final Approval - SPH/COO",
+        status: "PENDING",
+        stage_type: "final",
+        is_current: true,
+      }),
+    ]);
+    const view = render(
+      <FlowStepper status="PENDING_APPROVAL" journey={withoutUnavailableRoles} />,
+    );
+
+    expect(screen.queryByText("DM Review")).not.toBeInTheDocument();
+    expect(screen.queryByText("RM Review")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Final Approval - SPH/COO: Current")).toHaveClass("bg-brand");
+
+    view.rerender(<FlowStepper status="PENDING_APPROVAL" journey={journey([
+      submitted,
+      stage({ sequence: 2, title: "OE Review", status: "APPROVED" }),
+      stage({ sequence: 3, title: "DM Review", status: "NOT_REQUIRED" }),
+      stage({
+        sequence: 4,
+        title: "Final Approval - SPH/COO",
+        status: "PENDING",
+        stage_type: "final",
+        is_current: true,
+      }),
+    ])} />);
+
+    expect(screen.getByLabelText("DM Review: Not required")).toHaveClass("bg-content2");
     expect(screen.queryByText("RM Review")).not.toBeInTheDocument();
   });
 

@@ -1,12 +1,28 @@
-import { useMemo } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ResponsiveList, StatusPill, type Column } from "@/shared/components";
-import { indentApi, indentKeys, useIndentAccountCacheIsolation, useIndentAccountScope } from "../api";
+import {
+  INDENT_QUERY_GC_TIME,
+  INDENT_QUERY_STALE_TIME,
+  indentApi,
+  indentKeys,
+  normalizeIndentQueryParams,
+  useIndentAccountCacheIsolation,
+  useIndentAccountScope,
+} from "../api";
 import type { ActivityRow } from "../types";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
-import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
-import { formatIndentDateTime } from "../dateTime";
+import { PaginatedResults, useAdjacentPagePrefetch } from "../components/PaginatedResults";
+import { IndentFilterValueProvider, useIndentFilters } from "../context/IndentFilterContext";
+import {
+  activityLedgerReturnState,
+  readActivityLedgerScroll,
+  saveActivityLedgerScroll,
+  useActivityLedgerUrlState,
+} from "../context/ActivityLedgerUrlState";
+import { formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
+import { INDENT_ACTIVITY_EVENT_FILTER_OPTIONS } from "../constants";
 
 const EVENT_LABELS: Record<string, string> = {
   REQUEST_CREATED: "Request created",
@@ -60,6 +76,15 @@ const LEGACY_EVENT_RESULTS: Record<string, string> = {
 };
 
 const HEADER_CURSOR_CLASS = "[&:is(th)]:cursor-default";
+const ACTIVITY_DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+});
+const ACTIVITY_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+});
 
 function nonEmptyText(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -187,11 +212,31 @@ function occurredAtLabel(row: ActivityRow) {
   return timestamp ? (formatIndentDateTime(timestamp) ?? "Time unavailable") : "Time unavailable";
 }
 
+function OccurredAtCell({ row }: { row: ActivityRow }) {
+  const timestamp = nonEmptyText(row.occurred_at) ?? nonEmptyText(row.event_at);
+  const parsed = parseIndentTimestamp(timestamp);
+  if (!parsed) return <span className="text-muted">Time unavailable</span>;
+  return (
+    <span className="tabular-nums text-muted">
+      <span className="block whitespace-nowrap">{ACTIVITY_DATE_FORMATTER.format(parsed)},</span>
+      <span className="block whitespace-nowrap">{ACTIVITY_TIME_FORMATTER.format(parsed)}</span>
+    </span>
+  );
+}
+
 function requestLabel(row: ActivityRow) {
   return nonEmptyText(row.indent_no) ?? "Request unavailable";
 }
 
-function IndentReportsContent() {
+function IndentReportsContent({
+  listUrl,
+  size,
+  replacePage,
+}: {
+  listUrl: string;
+  size: number;
+  replacePage: (page: number) => void;
+}) {
   const nav = useNavigate();
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
@@ -199,58 +244,94 @@ function IndentReportsContent() {
     search,
     startDate,
     endDate,
-    requiredByFrom,
-    requiredByTo,
     selectedStatuses,
-    selectedPriorities,
-    transactionType,
-    itemId,
     page,
     setPage,
   } = useIndentFilters();
 
-  const size = 20;
-  const filters = useMemo(() => ({
+  const filters = useMemo(() => normalizeIndentQueryParams({
     search: search || undefined,
     date_from: startDate || undefined,
     date_to: endDate || undefined,
-    required_from: requiredByFrom || undefined,
-    required_to: requiredByTo || undefined,
-    status: selectedStatuses.length ? selectedStatuses : undefined,
-    priority: selectedPriorities.length ? selectedPriorities : undefined,
-    transaction_type: transactionType || undefined,
-    item_id: itemId ? Number(itemId) : undefined,
+    transaction_type: selectedStatuses[0] || undefined,
     page,
     size,
   }), [
     endDate,
-    itemId,
     page,
-    requiredByFrom,
-    requiredByTo,
     search,
-    selectedPriorities,
     selectedStatuses,
     size,
     startDate,
-    transactionType,
   ]);
 
   const {
     data,
     isLoading,
     isFetching,
+    isPlaceholderData,
     error,
     refetch,
   } = useQuery({
     queryKey: indentKeys.activity(accountScope, filters),
-    queryFn: () => indentApi.activity(filters),
+    queryFn: ({ signal }) => indentApi.activity(filters, signal),
     placeholderData: (previousData) => previousData,
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
   });
 
   const rows = Array.isArray(data?.items) ? data.items : [];
+  const restoredScroll = useRef(false);
+  const total = typeof data?.total === "number" && Number.isFinite(data.total)
+    ? data.total
+    : rows.length;
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const prefetchSequenceKey = JSON.stringify([
+    accountScope.employeeId,
+    accountScope.activePositionId,
+    { ...filters, page: null },
+  ]);
+  useAdjacentPagePrefetch({
+    sequenceKey: prefetchSequenceKey,
+    page,
+    size,
+    total,
+    enabled: Boolean(data) && !isPlaceholderData && !error,
+    queryKey: (adjacentPage) => indentKeys.activity(accountScope, {
+      ...filters,
+      page: adjacentPage,
+    }),
+    queryFn: (adjacentPage, signal) => indentApi.activity({
+      ...filters,
+      page: adjacentPage,
+    }, signal),
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
+  });
+
+  useLayoutEffect(() => {
+    if (!data || page <= totalPages) return;
+    replacePage(totalPages);
+  }, [data, page, replacePage, totalPages]);
+
+  useEffect(() => {
+    if (!data || restoredScroll.current) return;
+    restoredScroll.current = true;
+    const scrollY = readActivityLedgerScroll(listUrl);
+    if (scrollY === null) return;
+    const frame = window.requestAnimationFrame(() => window.scrollTo(0, scrollY));
+    return () => window.cancelAnimationFrame(frame);
+  }, [data, listUrl]);
+
+  useEffect(() => () => saveActivityLedgerScroll(listUrl), [listUrl]);
+
+  const openIndent = useCallback((indentId: number) => {
+    saveActivityLedgerScroll(listUrl);
+    nav(`/indents/${indentId}`, { state: activityLedgerReturnState(listUrl) });
+  }, [listUrl, nav]);
+
   const columns: Column<ActivityRow>[] = [
-    { key: "when", header: "WHEN", className: HEADER_CURSOR_CLASS, render: (row) => <span className="text-muted">{occurredAtLabel(row)}</span> },
+    { key: "when", header: "WHEN", className: `${HEADER_CURSOR_CLASS} w-40 min-w-40`, render: (row) => <OccurredAtCell row={row} /> },
     { key: "no", header: "REQUEST", className: HEADER_CURSOR_CLASS, render: (row) => <span className="mono font-semibold text-ink">{requestLabel(row)}</span> },
     { key: "event", header: "EVENT", className: HEADER_CURSOR_CLASS, render: (row) => eventLabel(row) },
     { key: "details", header: "DETAILS", className: HEADER_CURSOR_CLASS, render: (row) => <DetailCell row={row} /> },
@@ -259,10 +340,6 @@ function IndentReportsContent() {
     { key: "result", header: "RESULT", className: HEADER_CURSOR_CLASS, render: (row) => <StatusPill status={resultLabel(row)} /> },
   ];
 
-  const total = typeof data?.total === "number" && Number.isFinite(data.total)
-    ? data.total
-    : rows.length;
-  const totalPages = Math.max(1, Math.ceil(total / size));
   const hasBlockingError = Boolean(error && !data);
 
   return (
@@ -271,68 +348,83 @@ function IndentReportsContent() {
         title="Activity ledger"
         showCreate={false}
         filterMode="activity"
-        showTransaction
+        statusFilterOptions={INDENT_ACTIVITY_EVENT_FILTER_OPTIONS}
+        statusFilterLabel="Event"
+        singleStatusSelection
+        separateDateFilters
+        showRequiredBy={false}
+        showPriority={false}
+        showTransaction={false}
         showMovement={false}
-        showItem
+        showItem={false}
+        searchPlaceholder="Search by indent no., event, actor, department or result..."
       />
 
-      {error && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3">
-          <p className="text-sm font-medium text-bad">Unable to load activity ledger</p>
-          <button
-            type="button"
-            disabled={isFetching}
-            onClick={() => void refetch()}
-            className="rounded-lg border border-bad/30 px-3 py-1.5 text-sm font-semibold text-bad disabled:opacity-50"
-          >
-            Retry
-          </button>
-        </div>
-      )}
-      {!hasBlockingError && (
-        <div className="[&_th]:cursor-default [&_th]:select-none">
-          <ResponsiveList
-            data={rows}
-            loading={isLoading}
-            keyOf={(row) => row.event_id}
-            onRowClick={(row) => nav(`/indents/${row.indent_id}`)}
-            columns={columns}
-            empty="No activity matches active filters."
-            renderCard={(row) => (
-              <div className="space-y-1 text-xs">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="mono text-sm font-semibold text-ink">{requestLabel(row)}</span>
-                  <StatusPill status={resultLabel(row)} />
-                </div>
-                <p className="font-medium text-body">{eventLabel(row)}</p>
-                <DetailCell row={row} />
-                <p className="tabular-nums text-body">{formatQuantity(row)}</p>
-                <div className="flex justify-between gap-3 pt-1 text-muted">
-                  <DepartmentCell row={row} />
-                  <span className="tabular-nums">{occurredAtLabel(row)}</span>
-                </div>
-              </div>
-            )}
-          />
-        </div>
-      )}
-      {data && (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-muted">
-          <span>Page {page} of {totalPages} ({total} total)</span>
-          <span className="flex gap-2">
-            <button type="button" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded-lg border border-line px-3 py-1.5 font-medium text-body disabled:opacity-40">Previous</button>
-            <button type="button" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded-lg border border-line px-3 py-1.5 font-medium text-body disabled:opacity-40">Next</button>
-          </span>
-        </div>
-      )}
+      <PaginatedResults
+        ariaLabel="Activity ledger results"
+        isFetching={isFetching}
+        hasData={Boolean(data)}
+        pageKey={page}
+        footer={data && (
+          <div data-testid="activity-pagination-footer" className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-muted">
+            <span>Page {page} of {totalPages} ({total} total)</span>
+            <span className="flex gap-2">
+              <button type="button" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded-lg border border-line px-3 py-1.5 font-medium text-body disabled:opacity-40">Previous</button>
+              <button type="button" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded-lg border border-line px-3 py-1.5 font-medium text-body disabled:opacity-40">Next</button>
+            </span>
+          </div>
+        )}
+      >
+          {error && (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3">
+              <p className="text-sm font-medium text-bad">Unable to load activity ledger</p>
+              <button
+                type="button"
+                disabled={isFetching}
+                onClick={() => void refetch()}
+                className="rounded-lg border border-bad/30 px-3 py-1.5 text-sm font-semibold text-bad disabled:opacity-50"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {!hasBlockingError && (
+            <div className="[&_th]:cursor-default [&_th]:select-none">
+              <ResponsiveList
+                data={rows}
+                loading={isLoading}
+                keyOf={(row) => row.event_id}
+                onRowClick={(row) => openIndent(row.indent_id)}
+                columns={columns}
+                empty="No activity matches active filters."
+                renderCard={(row) => (
+                  <div className="space-y-1 text-xs">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="mono text-sm font-semibold text-ink">{requestLabel(row)}</span>
+                      <StatusPill status={resultLabel(row)} />
+                    </div>
+                    <p className="font-medium text-body">{eventLabel(row)}</p>
+                    <DetailCell row={row} />
+                    <p className="tabular-nums text-body">{formatQuantity(row)}</p>
+                    <div className="flex justify-between gap-3 pt-1 text-muted">
+                      <DepartmentCell row={row} />
+                      <span className="tabular-nums">{occurredAtLabel(row)}</span>
+                    </div>
+                  </div>
+                )}
+              />
+            </div>
+          )}
+      </PaginatedResults>
     </>
   );
 }
 
 export function IndentReportsPage() {
+  const { filters, listUrl, replacePage, size } = useActivityLedgerUrlState();
   return (
-    <IndentFilterProvider>
-      <IndentReportsContent />
-    </IndentFilterProvider>
+    <IndentFilterValueProvider value={filters}>
+      <IndentReportsContent listUrl={listUrl} size={size} replacePage={replacePage} />
+    </IndentFilterValueProvider>
   );
 }

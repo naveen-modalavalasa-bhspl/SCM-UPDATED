@@ -4,6 +4,7 @@ These tests intentionally avoid the shared DB fixtures in backend/conftest.py.
 They do not create schemas, open database connections, or commit data.
 """
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -13,7 +14,7 @@ from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
 from app.modules.indents import service
 from app.modules.indents.enums import AcknowledgmentStatus, ApprovalAction
-from app.modules.indents.schemas import IndentUpdate
+from app.modules.indents.schemas import IndentCreate, IndentUpdate
 from app.shared.enums import IndentStatus, InstanceStatus, Priority
 
 
@@ -25,6 +26,86 @@ def user(employee_id=10, position_id=100, project_id=900):
         project_id=project_id,
         office_id=700,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_missing_required_date_before_database_work():
+    with pytest.raises(ValidationError, match="Required date is mandatory."):
+        await service.create_indent(
+            SimpleNamespace(),
+            IndentCreate(items=[]),
+            user(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_missing_required_date(monkeypatch):
+    requester = user(employee_id=10)
+    draft = SimpleNamespace(
+        id=77,
+        requested_by_id=10,
+        status=IndentStatus.DRAFT.value,
+    )
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=draft))
+
+    with pytest.raises(ValidationError, match="Required date is mandatory."):
+        await service.update_indent(
+            SimpleNamespace(),
+            77,
+            IndentUpdate(remarks="Missing required date"),
+            requester,
+        )
+
+
+def test_required_date_validation_accepts_today():
+    service._validate_required_date(date.today())
+
+
+def test_indent_filter_range_validation_accepts_same_day_and_rejects_reversed_ranges():
+    same_day = date(2026, 7, 31)
+    service._validate_indent_date_ranges(same_day, same_day, same_day, same_day)
+
+    with pytest.raises(ValidationError, match="created_date_from.*created_date_to"):
+        service._validate_indent_date_ranges(
+            date(2026, 8, 1), date(2026, 7, 31), None, None,
+        )
+    with pytest.raises(ValidationError, match="required_by_from.*required_by_to"):
+        service._validate_indent_date_ranges(
+            None, None, date(2026, 8, 11), date(2026, 8, 10),
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_indent_ranges_fail_before_database_work():
+    with pytest.raises(ValidationError, match="created_date_from"):
+        await service.list_indents(
+            SimpleNamespace(),
+            PageParams(page=1, size=20),
+            date_from=date(2026, 8, 2),
+            date_to=date(2026, 8, 1),
+        )
+    with pytest.raises(ValidationError, match="required_by_from"):
+        await service.indent_stats(
+            SimpleNamespace(),
+            required_by_from=date(2026, 8, 2),
+            required_by_to=date(2026, 8, 1),
+        )
+
+    with pytest.raises(ValidationError, match="date_from.*date_to"):
+        await service.activity_ledger(
+            SimpleNamespace(),
+            PageParams(page=1, size=20),
+            date_from=date(2026, 8, 2),
+            date_to=date(2026, 8, 1),
+        )
+    with pytest.raises(ValidationError, match="date_from.*date_to"):
+        await service.list_notifications(
+            SimpleNamespace(),
+            PageParams(page=1, size=20),
+            user(),
+            date_from=date(2026, 8, 2),
+            date_to=date(2026, 8, 1),
+        )
 
 
 def assignment(name="PILOT-AP-104-MMU", position_id=100):
@@ -67,24 +148,57 @@ def test_unknown_indent_status_detection_reports_only_non_enum_values():
     ]) == {"LEGACY_UNKNOWN"}
 
 
-def test_indent_search_uses_snapshot_fields_exists_and_escaped_like():
+def test_main_indent_search_uses_only_visible_fields_and_escaped_like():
     stmt = service._apply_indent_filters(
         service.select(service.Indent),
         search=" ACME_% ",
     )
-    text = sql_text(stmt)
+    text = sql_text(stmt.whereclause)
 
     assert "ind_indents.indent_no" in text
     assert "ind_indents.requested_by_name" in text
-    assert "ind_indents.position_name" in text
     assert "ind_indents.department_name" in text
-    assert "ind_indents.project_name" in text
-    assert "ind_indents.office_name" in text
-    assert "EXISTS" in text
-    assert "ind_indent_items.item_code" in text
-    assert "ind_indent_items.item_name" in text
+    assert "replace(ind_indents.status" in text
+    assert "ind_indents.requested_by_code" not in text
+    assert "ind_indents.position_name" not in text
+    assert "ind_indents.project_name" not in text
+    assert "ind_indents.office_name" not in text
+    assert "ind_indents.remarks" not in text
+    assert "ind_indent_items" not in text
+    assert "EXISTS" not in text
     assert "ACME\\_\\%" in text
     assert "ESCAPE '\\'" in text
+
+
+def test_main_indent_date_predicates_use_inclusive_dates_and_next_day_timestamp_boundary():
+    stmt = service._apply_indent_filters(
+        service.select(service.Indent),
+        date_from=date(2026, 7, 1),
+        date_to=date(2026, 7, 31),
+        required_by_from=date(2026, 8, 1),
+        required_by_to=date(2026, 8, 10),
+    )
+    text = sql_text(stmt.whereclause)
+
+    assert "date(ind_indents.created_at)" not in text.lower()
+    assert "ind_indents.created_at >= '2026-07-01" in text
+    assert "ind_indents.created_at < '2026-08-01" in text
+    assert "ind_indents.required_date >= '2026-08-01'" in text
+    assert "ind_indents.required_date <= '2026-08-10'" in text
+
+
+def test_numeric_main_indent_search_uses_only_indent_number():
+    stmt = service._apply_indent_filters(
+        service.select(service.Indent),
+        search=" 12 ",
+    )
+    text = sql_text(stmt.whereclause)
+
+    assert "ind_indents.indent_no" in text
+    assert "ind_indents.requested_by_name" not in text
+    assert "ind_indents.department_name" not in text
+    assert "ind_indents.status" not in text
+    assert "ind_indent_items" not in text
 
 
 def test_indent_search_ignores_blank_terms():
@@ -394,6 +508,75 @@ async def test_active_workflow_assignee_can_approve(monkeypatch):
     db.commit.assert_awaited_once()
 
 
+@pytest.mark.parametrize("comments", ["", "   "])
+@pytest.mark.asyncio
+async def test_reject_requires_reason_before_workflow_action(monkeypatch, comments):
+    approver = user(employee_id=20)
+    db = SimpleNamespace()
+    indent = SimpleNamespace(
+        id=77,
+        status=IndentStatus.PENDING_APPROVAL.value,
+        requested_by_id=10,
+    )
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=indent))
+    active_task = AsyncMock()
+    monkeypatch.setattr(service, "_assert_active_workflow_task", active_task)
+    monkeypatch.setattr(service.engine, "act", AsyncMock())
+
+    with pytest.raises(ValidationError, match=service.REJECTION_REASON_REQUIRED_ERROR):
+        await service.act_on_indent(
+            db,
+            77,
+            ApprovalAction.REJECTED,
+            comments,
+            approver,
+        )
+
+    active_task.assert_awaited_once_with(db, 77, 20)
+    service.engine.act.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reject_trims_reason_before_workflow_action(monkeypatch):
+    approver = user(employee_id=20)
+    indent = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        status=IndentStatus.PENDING_APPROVAL.value,
+        requested_by_id=10,
+        department_id=1,
+        position_id=101,
+        position_name="OE",
+        total_qty=5,
+        current_approver_name="OE",
+    )
+    db = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=indent))
+    monkeypatch.setattr(service, "_assert_active_workflow_task", AsyncMock())
+    monkeypatch.setattr(
+        service.engine,
+        "act",
+        AsyncMock(return_value=SimpleNamespace(status=InstanceStatus.REJECTED.value)),
+    )
+    release = AsyncMock()
+    monkeypatch.setattr(service.inventory_service, "release_for_indent", release)
+    monkeypatch.setattr(service, "write_audit", AsyncMock())
+    monkeypatch.setattr(service, "_attach_capabilities", AsyncMock(return_value=indent))
+
+    result = await service.act_on_indent(
+        db,
+        77,
+        ApprovalAction.REJECTED,
+        "  Incorrect quantity  ",
+        approver,
+    )
+
+    assert result.status == IndentStatus.REJECTED.value
+    assert service.engine.act.await_args.args[5] == "Incorrect quantity"
+    release.assert_awaited_once_with(db, 77)
+    db.commit.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_self_approval_is_rejected_before_workflow_action(monkeypatch):
     requester = user(employee_id=10)
@@ -429,6 +612,120 @@ async def test_requester_only_update_and_submit(monkeypatch):
         await service.submit_indent(SimpleNamespace(), 77, manager)
 
     service.engine.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_audit_values_are_json_safe(monkeypatch):
+    requester = user(employee_id=10)
+    original_date = date.today()
+    updated_date = date.fromordinal(original_date.toordinal() + 2)
+    draft = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        requested_by_id=10,
+        status=IndentStatus.DRAFT.value,
+        required_date=original_date,
+        priority=Priority.NORMAL.value,
+        office_id=700,
+        office_name="Main Office",
+        remarks="Original",
+        total_items=1,
+        total_qty=Decimal("5.000"),
+        items=[],
+    )
+    db = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=draft))
+    monkeypatch.setattr(service, "write_audit", AsyncMock())
+    monkeypatch.setattr(service, "_attach_capabilities", AsyncMock(return_value=draft))
+
+    await service.update_indent(
+        db,
+        77,
+        IndentUpdate(required_date=updated_date, remarks="Edited"),
+        requester,
+    )
+
+    audit = service.write_audit.await_args.kwargs
+    assert audit["before"]["required_date"] == original_date.isoformat()
+    assert audit["before"]["total_qty"] == 5.0
+    assert audit["after"]["required_date"] == updated_date.isoformat()
+    assert audit["after"]["total_qty"] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_requester_can_delete_only_a_draft(monkeypatch):
+    requester = user(employee_id=10)
+    draft = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        requested_by_id=10,
+        status=IndentStatus.DRAFT.value,
+        total_items=1,
+        total_qty=Decimal("5.000"),
+    )
+    db = SimpleNamespace(delete=AsyncMock(), commit=AsyncMock())
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=draft))
+    monkeypatch.setattr(service, "write_audit", AsyncMock())
+
+    await service.delete_indent(db, 77, requester)
+
+    assert service.write_audit.await_args.kwargs["before"]["total_qty"] == 5.0
+    db.delete.assert_awaited_once_with(draft)
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_non_draft_and_non_requester(monkeypatch):
+    requester = user(employee_id=10)
+    manager = user(employee_id=20)
+    indent = SimpleNamespace(
+        id=77,
+        requested_by_id=10,
+        status=IndentStatus.SUBMITTED.value,
+    )
+    db = SimpleNamespace(delete=AsyncMock(), commit=AsyncMock())
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service.rbac_service,
+        "get_user_permissions",
+        AsyncMock(return_value=set()),
+    )
+
+    with pytest.raises(ValidationError):
+        await service.delete_indent(db, 77, requester)
+
+    indent.status = IndentStatus.DRAFT.value
+    with pytest.raises(PermissionError_):
+        await service.delete_indent(db, 77, manager)
+
+    db.delete.assert_not_awaited()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_permission_allows_deleting_another_requesters_draft(monkeypatch):
+    permitted_user = user(employee_id=20)
+    draft = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        requested_by_id=10,
+        status=IndentStatus.DRAFT.value,
+        total_items=1,
+        total_qty=Decimal("5.000"),
+    )
+    db = SimpleNamespace(delete=AsyncMock(), commit=AsyncMock())
+    monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=draft))
+    monkeypatch.setattr(service, "write_audit", AsyncMock())
+    monkeypatch.setattr(
+        service.rbac_service,
+        "get_user_permissions",
+        AsyncMock(return_value={service.perms.INDENT_DELETE}),
+    )
+
+    await service.delete_indent(db, 77, permitted_user)
+
+    db.delete.assert_awaited_once_with(draft)
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -657,6 +954,26 @@ def captured_sql(db: CapturingDb) -> str:
 
 
 @pytest.mark.asyncio
+async def test_list_indents_uses_id_as_a_stable_pagination_tie_breaker():
+    descending = CapturingDb()
+    await service.list_indents(descending, PageParams(page=4, size=20))
+    assert "ORDER BY ind_indents.created_at DESC, ind_indents.id DESC" in sql_text(
+        descending.result_stmt,
+    )
+
+    ascending = CapturingDb()
+    await service.list_indents(
+        ascending,
+        PageParams(page=4, size=20),
+        sort_by="status",
+        sort_dir="asc",
+    )
+    assert "ORDER BY ind_indents.status ASC, ind_indents.id ASC" in sql_text(
+        ascending.result_stmt,
+    )
+
+
+@pytest.mark.asyncio
 async def test_global_visibility_applies_to_all_indent_read_surfaces(monkeypatch):
     indent = SimpleNamespace(id=77, indent_no="IND/77")
     monkeypatch.setattr(
@@ -870,7 +1187,16 @@ async def test_activity_filters_use_visibility_status_priority_and_search(monkey
 
 
 @pytest.mark.asyncio
-async def test_activity_transaction_filter_matches_real_workflow_action(monkeypatch):
+@pytest.mark.parametrize("event_type", [
+    service.IndentActivityType.STOCK_ALLOCATED,
+    service.IndentActivityType.APPROVAL_COMPLETED,
+    service.IndentActivityType.REQUEST_SUBMITTED,
+    service.IndentActivityType.REQUEST_CREATED,
+])
+async def test_activity_transaction_filter_matches_event_before_count_and_pagination(
+    monkeypatch,
+    event_type,
+):
     db = CapturingDb()
     monkeypatch.setattr(
         service,
@@ -882,12 +1208,15 @@ async def test_activity_transaction_filter_matches_real_workflow_action(monkeypa
         db,
         PageParams(page=1, size=20),
         user=user(),
-        transaction_type=service.IndentActivityType.APPROVAL_COMPLETED,
+        transaction_type=event_type,
     )
+    count_sql = sql_text(db.count_stmt)
     result_sql = sql_text(db.result_stmt)
 
-    assert "activity_events.event_type = 'APPROVAL_COMPLETED'" in result_sql
-    assert "WHEN 'APPROVED' THEN 'APPROVAL_COMPLETED'" in result_sql
+    predicate = f"activity_events.event_type = '{event_type.value}'"
+    assert predicate in count_sql
+    assert predicate in result_sql
+    assert result_sql.index(predicate) < result_sql.index("LIMIT 20 OFFSET 0")
 
 
 @pytest.mark.asyncio
@@ -1064,6 +1393,147 @@ async def test_activity_one_sided_dates_use_timestamp_ranges_without_date_functi
     assert "activity_events.occurred_at >=" not in to_sql
     assert "date(activity_events.occurred_at)" not in from_sql.lower()
     assert "date(activity_events.occurred_at)" not in to_sql.lower()
+
+
+@pytest.mark.asyncio
+async def test_notification_filters_visible_content_before_stable_pagination(monkeypatch):
+    db = CapturingDb()
+    monkeypatch.setattr(
+        service,
+        "indent_access_condition",
+        AsyncMock(return_value=service.Indent.requested_by_id == 10),
+    )
+
+    await service.list_notifications(
+        db,
+        PageParams(page=2, size=5),
+        user(),
+        search="approved",
+        date_from=date(2026, 7, 1),
+        date_to=date(2026, 7, 31),
+        statuses=[IndentStatus.AWAITING_ALLOCATION],
+    )
+
+    sql = sql_text(db.result_stmt)
+    assert "ind_indents.requested_by_id = 10" in sql
+    assert "lower(ind_indents.indent_no)" in sql
+    assert "Request approved" in sql
+    assert "approved and with inventory" in sql
+    assert "replace(ind_indents.status, '_', ' ')" in sql
+    assert "ind_indents.updated_at >= '2026-07-01 00:00:00+00:00'" in sql
+    assert "ind_indents.updated_at < '2026-08-01 00:00:00+00:00'" in sql
+    assert "ind_indents.status IN ('AWAITING_ALLOCATION')" in sql
+    assert "ORDER BY ind_indents.updated_at DESC, ind_indents.id DESC" in sql
+    assert sql.rfind("WHERE") < sql.rfind("LIMIT 5 OFFSET 5")
+    for hidden_field in (
+        "requested_by_code",
+        "position_name",
+        "department_name",
+        "office_name",
+        "project_name",
+        "remarks",
+    ):
+        assert hidden_field not in sql
+
+
+@pytest.mark.asyncio
+async def test_journey_uses_frozen_dynamic_chain_and_omits_unavailable_roles(monkeypatch):
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+    submitted_at = datetime(2026, 7, 27, 9, 5, tzinfo=timezone.utc)
+    approved_at = datetime(2026, 7, 27, 9, 30, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        status=IndentStatus.PENDING_APPROVAL.value,
+        requested_by_name="Pilot",
+        position_id=101,
+        position_name="PILOT-AP-104-MMU",
+        created_at=datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc),
+        approved_at=None,
+        remarks=None,
+    )
+    instance = SimpleNamespace(
+        id=1,
+        status=InstanceStatus.IN_PROGRESS.value,
+        current_sequence=2,
+        current_stage_name="SPH",
+        resolved_chain=[
+            {
+                "sequence": 1,
+                "position_id": 201,
+                "position_name": "OE-AP-104-MMU",
+                "role_name": "OE",
+                "approver_ids": [20],
+                "approver_names": ["OE One"],
+            },
+            {
+                "sequence": 2,
+                "position_id": 501,
+                "position_name": "SPH-AP",
+                "role_name": "SPH",
+                "approver_ids": [50],
+                "approver_names": ["SPH One"],
+            },
+        ],
+    )
+    actions = [
+        SimpleNamespace(
+            id=1,
+            stage_sequence=0,
+            actor_id=10,
+            actor_name="Pilot",
+            actor_position="PILOT-AP-104-MMU",
+            action=ApprovalAction.SUBMITTED.value,
+            stage_name="Submitted",
+            comments=None,
+            acted_at=submitted_at,
+        ),
+        SimpleNamespace(
+            id=2,
+            stage_sequence=1,
+            actor_id=20,
+            actor_name="OE One",
+            actor_position="OE-AP-104-MMU",
+            action=ApprovalAction.APPROVED.value,
+            stage_name="OE",
+            comments="Approved",
+            acted_at=approved_at,
+        ),
+    ]
+    pending = [
+        SimpleNamespace(
+            id=1,
+            approver_id=50,
+            stage_sequence=2,
+            created_at=approved_at,
+        ),
+    ]
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service,
+        "_workflow_rows",
+        AsyncMock(return_value=(instance, actions, pending)),
+    )
+    approval_positions = AsyncMock(side_effect=AssertionError(
+        "Frozen workflow chain must be authoritative",
+    ))
+    monkeypatch.setattr(service, "_approval_positions", approval_positions)
+
+    journey = await service.indent_journey(db, 77, user())
+
+    assert [stage["title"] for stage in journey["stages"]] == [
+        "Request Raised",
+        "OE Review",
+        "Final Approval - SPH",
+    ]
+    assert not any(
+        "DM" in stage["title"] or "RM" in stage["title"]
+        for stage in journey["stages"]
+    )
+    assert journey["stages"][1]["status"] == "APPROVED"
+    assert journey["stages"][2]["status"] == "PENDING"
+    assert journey["stages"][2]["is_current"] is True
+    approval_positions.assert_not_awaited()
 
 
 @pytest.mark.asyncio

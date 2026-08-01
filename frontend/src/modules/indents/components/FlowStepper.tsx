@@ -1,3 +1,4 @@
+import { Skeleton } from "@heroui/react";
 import { Check, Circle, Clock, Minus, X } from "lucide-react";
 import type { IndentJourney, IndentJourneyStage } from "../types";
 
@@ -10,16 +11,11 @@ interface SummaryStep {
   caption?: string;
 }
 
-const POST_APPROVAL_STATUSES = new Set([
-  "APPROVED",
-  "AWAITING_ALLOCATION",
-  "ALLOCATED",
-  "PARTIALLY_FULFILLED",
-  "PENDING_PROCUREMENT",
-  "PARTIALLY_ORDERED",
-  "ORDERED",
-  "CLOSED",
-]);
+interface FlowStepperProps {
+  status: string;
+  journey?: IndentJourney;
+  isLoading?: boolean;
+}
 
 function statusCaption(state: StepState) {
   const captions: Record<StepState, string> = {
@@ -45,10 +41,6 @@ function stateFromStage(stage?: IndentJourneyStage): StepState {
   return "unknown";
 }
 
-function isKnownStatus(status: string) {
-  return status === "DRAFT" || status === "PENDING_APPROVAL" || status === "REJECTED" || POST_APPROVAL_STATUSES.has(status);
-}
-
 function compactFinalLabel(title?: string | null) {
   if (!title) return "Final Approval";
   return title
@@ -69,12 +61,7 @@ function stageCaption(stage: IndentJourneyStage, state: StepState) {
 }
 
 function buildSteps(status: string, journey?: IndentJourney): SummaryStep[] | null {
-  if (!journey) {
-    if (status === "DRAFT") {
-      return [{ key: "draft", label: "Draft", state: "current", caption: "Current" }];
-    }
-    return isKnownStatus(status) ? null : null;
-  }
+  if (!journey || !Array.isArray(journey.stages) || journey.stages.length === 0) return null;
 
   const sortedStages = [...journey.stages].sort((a, b) => a.sequence - b.sequence);
   const requestStage = sortedStages.find((stage) => stage.stage_type === "request");
@@ -151,8 +138,30 @@ function connectorClass(left: StepState, right: StepState) {
   return "bg-line";
 }
 
-export function FlowStepper({ status, journey }: { status: string; journey?: IndentJourney }) {
+function FlowStepperSkeleton() {
+  return (
+    <div
+      className="-mx-1 min-h-20 overflow-hidden px-1 pb-1"
+      role="status"
+      aria-label="Loading approval progress"
+    >
+      <div className="grid grid-cols-4 items-start gap-2" data-testid="approval-progress-skeleton">
+        {[0, 1, 2, 3].map((step) => (
+          <div key={step} className="flex min-w-0 flex-col items-center px-1">
+            <Skeleton className="h-8 w-8 rounded-full" />
+            <Skeleton className="mt-2 h-3 w-full max-w-20 rounded" />
+            <Skeleton className="mt-1 h-2.5 w-full max-w-14 rounded" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function FlowStepper({ status, journey, isLoading = false }: FlowStepperProps) {
   const steps = buildSteps(status, journey);
+  if (isLoading && !steps) return <FlowStepperSkeleton />;
+
   if (!steps) {
     return (
       <div className="rounded-md border border-bad/30 bg-bad-bg px-3 py-2 text-sm font-medium text-bad">

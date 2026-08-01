@@ -1,18 +1,26 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronRight, Loader2, Send, X } from "lucide-react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Check, ChevronRight, Loader2, Pencil, Send, Trash2, X } from "lucide-react";
 import {
-  Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Skeleton, CardBody,
+  CardBody, Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Skeleton,
+  Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { PageHeader, Button, Card, StatusPill, useAction } from "@/shared/components";
+import { PageHeader, Button, Can, Card } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
+import { IndentStatusBadge } from "../components/IndentStatusBadge";
+import { activityLedgerReturnUrlFromState } from "../context/ActivityLedgerUrlState";
+import { allRequestsReturnUrlFromState } from "../context/AllRequestsUrlState";
+import { notificationsReturnUrlFromState } from "../context/NotificationsUrlState";
 import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
   isIndentModuleQuery, isIndentUnavailableError, useIndentAccountCacheIsolation,
   useIndentAccountScope,
 } from "../api";
 import type { Indent } from "../types";
+
+const REJECTION_REASON_MAX_LENGTH = 250;
 
 function Detail({ label, value }: { label: string; value: ReactNode }) {
   return (
@@ -31,10 +39,24 @@ export function IndentDetailPage() {
   const { id } = useParams();
   const indentId = Number(id);
   const nav = useNavigate();
+  const location = useLocation();
+  const allRequestsReturnUrl = allRequestsReturnUrlFromState(location.state);
+  const activityLedgerReturnUrl = activityLedgerReturnUrlFromState(location.state);
+  const notificationsReturnUrl = notificationsReturnUrlFromState(location.state);
+  const returnUrl = notificationsReturnUrl ?? activityLedgerReturnUrl ?? allRequestsReturnUrl;
+  const returnLabel = notificationsReturnUrl
+    ? "Alert & Notification"
+    : activityLedgerReturnUrl ? "Activity ledger" : "All indents";
+  const unavailableReturnLabel = notificationsReturnUrl
+    ? "Back to Alert & Notification"
+    : activityLedgerReturnUrl ? "Back to Activity ledger" : "Back to All requests";
   const qc = useQueryClient();
+  const { can, me } = useAuth();
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
   const [error, setError] = useState<string | null>(null);
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [rejectionReason, setRejectionReason] = useState("");
 
   const { data: indent, isLoading, error: loadError } = useQuery({
     queryKey: indentKeys.detail(accountScope, indentId),
@@ -45,7 +67,7 @@ export function IndentDetailPage() {
     refetchOnWindowFocus: false,
   });
 
-  const { data: journey } = useQuery({
+  const { data: journey, isLoading: isJourneyLoading } = useQuery({
     queryKey: indentKeys.journey(accountScope, indentId),
     queryFn: () => indentApi.journey(indentId),
     enabled: Number.isFinite(indentId) && Boolean(indent),
@@ -64,32 +86,50 @@ export function IndentDetailPage() {
     });
   }, [accountScope, indentId, qc]);
 
-  const refreshAfterAction = (updated: Indent) => {
+  const refreshAfterAction = (updated: Indent, refetchJourney: boolean) => {
     setError(null);
+    // Write the mutation response immediately so status and actions update at once.
     qc.setQueryData(indentKeys.detail(accountScope, indentId), updated);
+    // Actions actively refresh the mounted journey without hiding cached data.
+    qc.invalidateQueries({
+      queryKey: indentKeys.journey(accountScope, indentId),
+      refetchType: refetchJourney ? "active" : "none",
+    });
     qc.invalidateQueries({
       predicate: (query) => isIndentModuleQuery(query) && query.queryKey[3] !== "journey",
     });
-    qc.invalidateQueries({ queryKey: indentKeys.journey(accountScope, indentId), refetchType: "none" });
   };
+  const onErr = (e: Error) => setError(e.message);
 
-  // The document status changes under you on all three, which is easy to miss on a
-  // long detail page — the toast says which way it went. The error banner already on
-  // this screen still catches failures.
-  const submit = useAction({
-    run: () => indentApi.submit(indentId),
-    success: (updated) => `${updated.indent_no} sent for approval`,
-    onDone: refreshAfterAction,
+  const submit = useMutation({
+    mutationFn: () => indentApi.submit(indentId),
+    onSuccess: (updated) => refreshAfterAction(updated, true),
+    onError: onErr,
   });
-  const approve = useAction({
-    run: () => indentApi.approve(indentId, ""),
-    success: (updated) => `${updated.indent_no} approved`,
-    onDone: refreshAfterAction,
+  const approve = useMutation({
+    mutationFn: () => indentApi.approve(indentId, ""),
+    onSuccess: (updated) => refreshAfterAction(updated, true),
+    onError: onErr,
   });
-  const reject = useAction({
-    run: () => indentApi.reject(indentId, ""),
-    success: (updated) => `${updated.indent_no} rejected`,
-    onDone: refreshAfterAction,
+  const reject = useMutation({
+    mutationFn: (reason: string) => indentApi.reject(indentId, reason),
+    onSuccess: (updated) => {
+      setRejectOpen(false);
+      setRejectionReason("");
+      refreshAfterAction(updated, true);
+    },
+    onError: onErr,
+  });
+  const deleteDraft = useMutation({
+    mutationFn: () => indentApi.delete(indentId),
+    onSuccess: () => {
+      setError(null);
+      qc.removeQueries({ queryKey: indentKeys.detail(accountScope, indentId) });
+      qc.removeQueries({ queryKey: indentKeys.journey(accountScope, indentId) });
+      qc.invalidateQueries({ predicate: isIndentModuleQuery });
+      nav("/indents");
+    },
+    onError: onErr,
   });
 
   const unavailable = isIndentUnavailableError(loadError);
@@ -104,8 +144,8 @@ export function IndentDetailPage() {
     return (
       <div className="space-y-4 rounded-xl border border-line bg-content1 p-5">
         <p className="text-sm font-semibold text-body">This indent is not available to your current account</p>
-        <Button variant="secondary" onClick={() => nav("/indents")}>
-          <ArrowLeft className="h-4 w-4" /> Back to All requests
+        <Button variant="secondary" onClick={() => nav(returnUrl)}>
+          <ArrowLeft className="h-4 w-4" /> {unavailableReturnLabel}
         </Button>
       </div>
     );
@@ -113,17 +153,63 @@ export function IndentDetailPage() {
 
   if (isLoading || !indent) return <Skeleton className="h-40 rounded-2xl" />;
 
+  const isDraft = indent.status === "DRAFT";
+  const isDraftOwner = isDraft && indent.requested_by_id === me?.employee.id;
+  const showDeleteDraft = isDraft && (isDraftOwner || can("indent.delete"));
   const isPending = indent.status === "PENDING_APPROVAL";
   const showActions = indent.can_submit || indent.can_approve || indent.can_reject;
-  const actionPending = submit.isPending || approve.isPending || reject.isPending;
+  const actionPending = submit.isPending || approve.isPending || reject.isPending || deleteDraft.isPending;
+  const trimmedRejectionReason = rejectionReason.trim();
+  const closeRejectModal = () => {
+    if (reject.isPending) return;
+    setRejectOpen(false);
+    setRejectionReason("");
+  };
+  const confirmReject = () => {
+    if (!trimmedRejectionReason || reject.isPending) return;
+    reject.mutate(trimmedRejectionReason);
+  };
 
   return (
     <>
-      <button onClick={() => nav("/indents")} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-muted hover:text-body">
-        <ArrowLeft className="h-4 w-4" /> All indents
+      <button onClick={() => nav(returnUrl)} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-muted hover:text-body">
+        <ArrowLeft className="h-4 w-4" /> {returnLabel}
       </button>
 
-      <PageHeader eyebrow="Indent" title={indent.indent_no} actions={<StatusPill status={indent.status} />} />
+      <PageHeader
+        eyebrow="Indent"
+        title={indent.indent_no}
+        actions={(
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <IndentStatusBadge status={indent.status} journey={journey} />
+            {isDraftOwner && (
+              <Can do="indent.edit">
+                <Button
+                  variant="primary"
+                  disabled={actionPending}
+                  onClick={() => nav(`/indents/new?edit=${indent.id}`)}
+                >
+                  <Pencil className="h-4 w-4" /> Edit Indent
+                </Button>
+              </Can>
+            )}
+            {showDeleteDraft && (
+              <Button
+                variant="danger"
+                disabled={actionPending}
+                onClick={() => {
+                  if (window.confirm(`Delete draft ${indent.indent_no}? This cannot be undone.`)) {
+                    deleteDraft.mutate();
+                  }
+                }}
+              >
+                {deleteDraft.isPending ? <InlineSpinner /> : <Trash2 className="h-4 w-4" />}
+                {deleteDraft.isPending ? "Deleting..." : "Delete Draft"}
+              </Button>
+            )}
+          </div>
+        )}
+      />
 
       <button
         type="button"
@@ -142,7 +228,11 @@ export function IndentDetailPage() {
       >
         <Card className="transition-colors duration-150 group-hover:border-brand/40 group-hover:bg-content2 motion-reduce:transition-none">
           <CardBody className="p-5">
-            <FlowStepper status={indent.status} journey={journey} />
+            <FlowStepper
+              status={indent.status}
+              journey={journey}
+              isLoading={isJourneyLoading}
+            />
             <div className="mt-4 flex min-h-11 items-center justify-between gap-3 border-t border-line pt-3 text-sm font-semibold text-brand">
               <span>View complete approval journey</span>
               <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
@@ -192,7 +282,9 @@ export function IndentDetailPage() {
         </Card>
       </div>
 
-      {error && <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>}
+      {error && !rejectOpen && (
+        <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>
+      )}
 
       {showActions && (
         <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
@@ -204,8 +296,18 @@ export function IndentDetailPage() {
           {(indent.can_reject || indent.can_approve) && (
             <>
               {indent.can_reject && (
-                <Button variant="danger" className="flex-1 md:flex-none" disabled={actionPending} onClick={() => !actionPending && reject.mutate()}>
-                  {reject.isPending ? <InlineSpinner /> : <X className="h-4 w-4" />} {reject.isPending ? "Rejecting..." : "Reject"}
+                <Button
+                  variant="danger"
+                  className="flex-1 md:flex-none"
+                  disabled={actionPending}
+                  onClick={() => {
+                    if (actionPending) return;
+                    setError(null);
+                    setRejectionReason("");
+                    setRejectOpen(true);
+                  }}
+                >
+                  <X className="h-4 w-4" /> Reject
                 </Button>
               )}
               {indent.can_approve && (
@@ -217,6 +319,74 @@ export function IndentDetailPage() {
           )}
         </div>
       )}
+
+      <Modal
+        isOpen={rejectOpen}
+        onOpenChange={(open) => {
+          if (!open) closeRejectModal();
+        }}
+        placement="center"
+      >
+        <ModalContent>
+          {() => (
+            <>
+              <ModalHeader>Reject indent</ModalHeader>
+              <ModalBody className="gap-3">
+                <p className="text-sm text-body">
+                  Please enter the reason for rejecting this indent.
+                </p>
+                <label htmlFor="indent-rejection-reason" className="text-sm font-semibold text-body">
+                  Reason for rejection
+                </label>
+                <textarea
+                  id="indent-rejection-reason"
+                  autoFocus
+                  maxLength={REJECTION_REASON_MAX_LENGTH}
+                  value={rejectionReason}
+                  disabled={reject.isPending}
+                  aria-invalid={!trimmedRejectionReason}
+                  aria-describedby="indent-rejection-reason-helper indent-rejection-reason-error"
+                  placeholder="Example: Incorrect quantity or item not required"
+                  wrap="soft"
+                  className="h-[120px] w-full resize-none overflow-x-hidden whitespace-pre-wrap break-words rounded-lg border border-line bg-content1 px-3 py-2 text-sm leading-5 text-body [overflow-wrap:anywhere] outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  onChange={(event) => setRejectionReason(event.target.value)}
+                />
+                <div className="flex items-start justify-between gap-3 text-xs text-muted">
+                  <p id="indent-rejection-reason-helper">
+                    Enter a short reason. This will be visible in the approval journey.
+                  </p>
+                  <span className="shrink-0 tabular-nums" aria-live="polite">
+                    {rejectionReason.length}/{REJECTION_REASON_MAX_LENGTH}
+                  </span>
+                </div>
+                {!trimmedRejectionReason && (
+                  <p id="indent-rejection-reason-error" className="text-sm font-medium text-bad">
+                    Rejection reason is required.
+                  </p>
+                )}
+                {error && (
+                  <div className="rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">
+                    {error}
+                  </div>
+                )}
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="ghost" disabled={reject.isPending} onClick={closeRejectModal}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="danger"
+                  disabled={!trimmedRejectionReason || reject.isPending}
+                  onClick={confirmReject}
+                >
+                  {reject.isPending ? <InlineSpinner /> : <X className="h-4 w-4" />}
+                  {reject.isPending ? "Rejecting..." : "Reject indent"}
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
     </>
   );
 }

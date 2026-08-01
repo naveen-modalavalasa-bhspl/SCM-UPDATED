@@ -27,7 +27,7 @@ from app.platform.hcm.models import (
 )
 from app.platform.rules import evaluator as rules
 from app.platform.workflow import engine
-from app.platform.workflow.models import Action, Instance
+from app.platform.workflow.models import Action, Instance, Stage
 from app.platform.workflow.models import Pending
 from app.platform.settings.service import write_audit
 from app.platform.settings.models import AuditLog
@@ -46,11 +46,40 @@ from app.modules.indents.schemas import IndentCreate, IndentUpdate
 
 
 PAST_REQUIRED_DATE_ERROR = "Required date cannot be earlier than today"
+REQUIRED_DATE_MANDATORY_ERROR = "Required date is mandatory."
+DUPLICATE_ITEM_ERROR = "The same item cannot be added more than once in a single indent."
+REJECTION_REASON_REQUIRED_ERROR = "Rejection reason is required."
+RAISED_DATE_RANGE_ERROR = (
+    "created_date_from must be the same as or earlier than created_date_to."
+)
+REQUIRED_BY_DATE_RANGE_ERROR = (
+    "required_by_from must be the same as or earlier than required_by_to."
+)
+FILTER_DATE_RANGE_ERROR = "date_from must be the same as or earlier than date_to."
 
 
-def _validate_required_date_not_past(required_date: date | None) -> None:
-    if required_date is not None and required_date < date.today():
+def _validate_required_date(required_date: date | None) -> None:
+    if required_date is None:
+        raise ValidationError(REQUIRED_DATE_MANDATORY_ERROR)
+    if required_date < date.today():
         raise ValidationError(PAST_REQUIRED_DATE_ERROR)
+
+
+def _validate_indent_date_ranges(
+    date_from: date | None,
+    date_to: date | None,
+    required_by_from: date | None,
+    required_by_to: date | None,
+) -> None:
+    if date_from and date_to and date_from > date_to:
+        raise ValidationError(RAISED_DATE_RANGE_ERROR)
+    if required_by_from and required_by_to and required_by_from > required_by_to:
+        raise ValidationError(REQUIRED_BY_DATE_RANGE_ERROR)
+
+
+def _validate_filter_date_range(date_from: date | None, date_to: date | None) -> None:
+    if date_from and date_to and date_from > date_to:
+        raise ValidationError(FILTER_DATE_RANGE_ERROR)
 
 
 def _validate_priority(priority: str | None) -> str | None:
@@ -62,11 +91,34 @@ def _validate_priority(priority: str | None) -> str | None:
     return priority
 
 
+def _validate_unique_item_ids(items) -> None:
+    item_ids = [line.item_id for line in items]
+    if len(item_ids) != len(set(item_ids)):
+        raise ValidationError(DUPLICATE_ITEM_ERROR)
+
+
+MISSING_QTY_ERROR = "Quantity is required for every selected item."
+
+
+def _validate_item_quantities(items) -> None:
+    """Reject any line where quantity is missing, zero, or negative."""
+    for line in items:
+        if not line.quantity or line.quantity <= 0:
+            raise ValidationError(MISSING_QTY_ERROR)
+
+
 async def _items_by_id(db: AsyncSession, item_ids: list[int]) -> dict[int, Item]:
     if not item_ids:
         return {}
     rows = (await db.execute(select(Item).where(Item.id.in_(item_ids)))).scalars().all()
     return {i.id: i for i in rows}
+
+
+async def list_office_options(db: AsyncSession) -> dict:
+    rows = (await db.execute(
+        select(HcmOffice).where(HcmOffice.is_active.is_(True)).order_by(HcmOffice.name)
+    )).scalars().all()
+    return {"items": [{"id": office.id, "name": office.name} for office in rows]}
 
 
 async def _name(db: AsyncSession, model, pk) -> str | None:
@@ -114,11 +166,13 @@ async def _requester_context(db: AsyncSession, user) -> dict:
 
 
 async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
-    _validate_required_date_not_past(data.required_date)
+    _validate_required_date(data.required_date)
     priority = _validate_priority(data.priority) or Priority.NORMAL.value
 
     if not data.items:
         raise ValidationError("Indent must have at least one item")
+    _validate_item_quantities(data.items)
+    _validate_unique_item_ids(data.items)
 
     items_map = await _items_by_id(db, [line.item_id for line in data.items])
     missing = {line.item_id for line in data.items} - set(items_map)
@@ -220,6 +274,18 @@ def _indent_search_conditions(pattern: str):
         _matches(Indent.project_name, pattern),
         _matches(Indent.office_name, pattern),
         _matches(Indent.remarks, pattern),
+    ]
+
+
+def _main_indent_search_conditions(term: str, pattern: str):
+    """Search only fields displayed by the main Indents list/overview."""
+    if term.isdigit():
+        return [_matches(Indent.indent_no, pattern)]
+    return [
+        _matches(Indent.indent_no, pattern),
+        _matches(Indent.requested_by_name, pattern),
+        _matches(Indent.department_name, pattern),
+        _matches(func.replace(Indent.status, "_", " "), pattern),
     ]
 
 
@@ -617,14 +683,16 @@ def _apply_indent_filters(
     term = _clean_search(search)
     if term:
         pattern = _like_pattern(term)
-        stmt = stmt.where(or_(
-            *_indent_search_conditions(pattern),
-            _indent_item_exists(pattern),
-        ))
+        stmt = stmt.where(or_(*_main_indent_search_conditions(term, pattern)))
     if date_from:
-        stmt = stmt.where(func.date(Indent.created_at) >= date_from)
+        stmt = stmt.where(
+            Indent.created_at >= datetime.combine(date_from, time.min, timezone.utc)
+        )
     if date_to:
-        stmt = stmt.where(func.date(Indent.created_at) <= date_to)
+        stmt = stmt.where(
+            Indent.created_at
+            < datetime.combine(date_to + timedelta(days=1), time.min, timezone.utc)
+        )
     if required_by_from:
         stmt = stmt.where(Indent.required_date >= required_by_from)
     if required_by_to:
@@ -660,6 +728,9 @@ async def list_indents(
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ) -> dict:
+    _validate_indent_date_ranges(
+        date_from, date_to, required_by_from, required_by_to,
+    )
     stmt = select(Indent).options(selectinload(Indent.items))
     if user is not None:
         stmt = stmt.where(await indent_access_condition(db, user))
@@ -669,7 +740,8 @@ async def list_indents(
         statuses=statuses, priorities=priorities, department_ids=department_ids,
         is_bookmarked=is_bookmarked,
     )
-    stmt = stmt.order_by(_indent_sort(sort_by, sort_dir))
+    id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
+    stmt = stmt.order_by(_indent_sort(sort_by, sort_dir), id_tie_breaker)
     return await paginate(db, stmt, params)
 
 
@@ -705,24 +777,34 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot edit an indent in {indent.status} status")
 
+    _validate_required_date(data.required_date)
+
     before = {
-        "required_date": indent.required_date,
+        "required_date": indent.required_date.isoformat() if indent.required_date else None,
         "priority": indent.priority,
+        "office_id": indent.office_id,
+        "office_name": indent.office_name,
         "remarks": indent.remarks,
         "total_items": indent.total_items,
-        "total_qty": indent.total_qty,
+        "total_qty": float(indent.total_qty or 0),
     }
-    if data.required_date is not None:
-        _validate_required_date_not_past(data.required_date)
-        indent.required_date = data.required_date
+    indent.required_date = data.required_date
     if data.priority is not None:
         indent.priority = _validate_priority(data.priority)
-    if data.remarks is not None:
+    if "office_id" in data.model_fields_set:
+        office = await db.get(HcmOffice, data.office_id) if data.office_id is not None else None
+        if data.office_id is not None and (office is None or not office.is_active):
+            raise ValidationError(f"Unknown or inactive office id: {data.office_id}")
+        indent.office_id = office.id if office else None
+        indent.office_name = office.name if office else None
+    if "remarks" in data.model_fields_set:
         indent.remarks = data.remarks
 
     if data.items is not None:
         if not data.items:
             raise ValidationError("Indent must have at least one item")
+        _validate_item_quantities(data.items)
+        _validate_unique_item_ids(data.items)
         items_map = await _items_by_id(db, [l.item_id for l in data.items])
         indent.items.clear()
         for line_no, line in enumerate(data.items, start=1):
@@ -740,16 +822,42 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
         action=AuditAction.UPDATE, actor=user, before=before,
         after={
-            "required_date": indent.required_date,
+            "required_date": indent.required_date.isoformat() if indent.required_date else None,
             "priority": indent.priority,
+            "office_id": indent.office_id,
+            "office_name": indent.office_name,
             "remarks": indent.remarks,
             "total_items": indent.total_items,
-            "total_qty": indent.total_qty,
+            "total_qty": float(indent.total_qty or 0),
         },
     )
     await db.commit()
     await db.refresh(indent)
     return await _attach_capabilities(db, indent, user)
+
+
+async def delete_indent(db: AsyncSession, indent_id: int, user) -> None:
+    indent = await get_indent(db, indent_id, user)
+    if indent.status != IndentStatus.DRAFT.value:
+        raise ValidationError(f"Cannot delete an indent in {indent.status} status")
+    if indent.requested_by_id != user.id:
+        user_perms = await rbac_service.get_user_permissions(
+            db, user, getattr(user, "active_position_id", None),
+        )
+        if perms.INDENT_DELETE not in user_perms:
+            raise PermissionError_("Only the requester can delete this indent")
+
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.DEACTIVATE, actor=user,
+        before={
+            "status": indent.status,
+            "total_items": indent.total_items,
+            "total_qty": float(indent.total_qty or 0),
+        },
+    )
+    await db.delete(indent)
+    await db.commit()
 
 
 async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
@@ -808,6 +916,10 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
     if indent.requested_by_id == user.id:
         raise ValidationError("Requester cannot approve or reject their own indent")
     await _assert_active_workflow_task(db, indent.id, user.id)
+    if action == ApprovalAction.REJECTED:
+        comments = (comments or "").strip()
+        if not comments:
+            raise ValidationError(REJECTION_REASON_REQUIRED_ERROR)
 
     before_status = indent.status
     context = {
@@ -1242,7 +1354,10 @@ def _final_any_one_actions(
 async def _workflow_rows(db: AsyncSession, indent_id: int) -> tuple[Instance | None, list[Action], list[Pending]]:
     instance = (await db.execute(
         select(Instance)
-        .options(load_only(Instance.id, Instance.status))
+        .options(load_only(
+            Instance.id, Instance.status, Instance.resolved_chain,
+            Instance.current_sequence, Instance.current_stage_name,
+        ))
         .where(Instance.doc_type == DocType.INDENT.value, Instance.doc_id == indent_id)
         .order_by(Instance.id.desc())
     )).scalars().first()
@@ -1396,6 +1511,29 @@ def _fallback_stage_title(positions: list[dict], *, final: bool) -> str:
     return "Approval"
 
 
+def _resolved_stage_title(link: dict, action: Action | None, *, final: bool) -> str:
+    """Format a frozen workflow rung without inventing a role not present in it."""
+    action_title = action.stage_name if action and action.stage_name else None
+    source_title = action_title or link.get("role_name") or link.get("position_name")
+    if not source_title:
+        return "Final Approval" if final else "Approval"
+    normalized = _normalised_scope_text(source_title)
+    if final:
+        if "FINAL" in normalized:
+            return source_title
+        return f"Final Approval - {_position_label(source_title)}"
+    if "REVIEW" in normalized or "APPROVAL" in normalized:
+        return source_title
+    return f"{_position_label(source_title)} Review"
+
+
+def _resolved_approver_names(link: dict) -> str | None:
+    names = link.get("approver_names")
+    if not isinstance(names, list):
+        return None
+    return ", ".join(str(name) for name in names if name) or None
+
+
 def _split_reporting_ladder(positions: list[dict]) -> tuple[list[dict], list[dict]]:
     if not positions:
         return [], []
@@ -1423,7 +1561,11 @@ def _holder_names_for_ids(positions: list[dict], holder_ids: set[int]) -> str | 
 async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
     indent = await _get_indent_for_journey(db, indent_id, user)
     instance, actions, pending = await _workflow_rows(db, indent.id)
-    positions = await _approval_positions(db, indent.position_id)
+    resolved_chain = getattr(instance, "resolved_chain", None) if instance else None
+    positions = (
+        await _approval_positions(db, indent.position_id)
+        if resolved_chain is None else []
+    )
     audits = list((await db.execute(
         select(AuditLog)
         .options(load_only(
@@ -1475,7 +1617,97 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         pending_by_sequence[_workflow_stage_sequence(row)].append(row)
 
     pending_approver_ids = {row.approver_id for rows in pending_by_sequence.values() for row in rows}
-    if positions:
+    if resolved_chain is not None:
+        chain = sorted(
+            (link for link in resolved_chain if isinstance(link, dict)),
+            key=lambda link: int(link.get("sequence", 0)),
+        )
+        for index, link in enumerate(chain):
+            workflow_sequence = int(link.get("sequence", index + 1))
+            actions_for_sequence = stage_actions.get(workflow_sequence, [])
+            action = (
+                _display_action_for_stage(actions_for_sequence)
+                if actions_for_sequence else None
+            )
+            pending_for_sequence = pending_by_sequence.get(workflow_sequence, [])
+            is_final = index == len(chain) - 1
+            explicit_status = str(link.get("status") or "").upper()
+            status = (
+                _stage_status_from_action(action)
+                if action else "NOT_REQUIRED"
+                if explicit_status == "NOT_REQUIRED" else "PENDING"
+            )
+            is_current = (
+                status != "NOT_REQUIRED"
+                and (
+                    bool(pending_for_sequence)
+                    or (
+                        instance.status == InstanceStatus.IN_PROGRESS.value
+                        and instance.current_sequence == workflow_sequence
+                    )
+                )
+            )
+            title = _resolved_stage_title(link, action, final=is_final)
+            timestamp = _utc_datetime(action.acted_at) if action else None
+            if current_stage is None and is_current:
+                current_stage = (
+                    "Waiting for final approval"
+                    if is_final else f"Waiting for {title}"
+                )
+            if is_final:
+                has_final_stage = True
+                if status == "APPROVED" and action:
+                    final_any_one_outcome = f"Approved by {action.actor_name}"
+            stages.append({
+                "sequence": len(stages) + 1,
+                "title": title,
+                "status": status,
+                "is_current": is_current,
+                "approver_name": (
+                    action.actor_name if action else _resolved_approver_names(link)
+                ),
+                "position_name": (
+                    action.actor_position if action else link.get("position_name")
+                ),
+                "timestamp": timestamp,
+                "comments": action.comments if action else None,
+                "duration_seconds": _duration_seconds(previous_at, timestamp),
+                "stage_type": "final" if is_final else "approval",
+            })
+            if timestamp:
+                previous_at = timestamp
+
+        if not chain:
+            self_actions = [
+                action for action in stage_actions.get(0, [])
+                if action.action in {
+                    ApprovalAction.APPROVED.value,
+                    ApprovalAction.REJECTED.value,
+                    ApprovalAction.RETURNED.value,
+                }
+            ]
+            if self_actions:
+                action = self_actions[-1]
+                timestamp = _utc_datetime(action.acted_at)
+                status = _stage_status_from_action(action)
+                has_final_stage = True
+                if status == "APPROVED":
+                    final_any_one_outcome = f"Approved by {action.actor_name}"
+                stages.append({
+                    "sequence": len(stages) + 1,
+                    "title": action.stage_name or "Final Approval",
+                    "status": status,
+                    "is_current": False,
+                    "approver_name": action.actor_name,
+                    "position_name": action.actor_position,
+                    "timestamp": timestamp,
+                    "comments": action.comments,
+                    "duration_seconds": _duration_seconds(previous_at, timestamp),
+                    "stage_type": "final",
+                })
+                if timestamp:
+                    previous_at = timestamp
+    elif positions:
         approval_positions, final_positions = _split_reporting_ladder(positions)
         for position in approval_positions:
             holder_ids = _holder_ids([position])
@@ -1672,6 +1904,9 @@ async def indent_stats(
     is_bookmarked: str | None = None,
 ) -> dict:
     """KPIs for the indent dashboard: counts by status + a few derived numbers."""
+    _validate_indent_date_ranges(
+        date_from, date_to, required_by_from, required_by_to,
+    )
     base = select(Indent.id)
     if user is not None:
         base = base.where(await indent_access_condition(db, user))
@@ -1882,6 +2117,7 @@ async def activity_ledger(
     direction: MaterialDirection | None = None,
 ) -> dict:
     """Read-only, source-normalized audit trail over visible indents."""
+    _validate_filter_date_range(date_from, date_to)
     visible_stmt = select(
         Indent.id.label("indent_id"),
         Indent.indent_no,
@@ -2240,19 +2476,14 @@ async def activity_ledger(
         pattern = _like_pattern(term)
         filtered = filtered.where(or_(
             _matches(combined_rows.c.indent_no, pattern),
-            _matches(combined_rows.c._requester_name, pattern),
             _matches(combined_rows.c.actor_name, pattern),
             _matches(combined_rows.c.actor_position, pattern),
-            _matches(combined_rows.c._search_position, pattern),
-            _matches(combined_rows.c._search_stage, pattern),
             _matches(combined_rows.c.item_code, pattern),
             _matches(combined_rows.c.item_name, pattern),
             _matches(combined_rows.c.event_label, pattern),
             _matches(combined_rows.c.result_label, pattern),
             _matches(combined_rows.c.department_name, pattern),
-            _matches(combined_rows.c.office_name, pattern),
-            _matches(combined_rows.c._project_name, pattern),
-            _matches(combined_rows.c._search_remarks, pattern),
+            _matches(combined_rows.c.remarks, pattern),
         ))
     if date_from:
         filtered = filtered.where(
@@ -2378,77 +2609,195 @@ async def list_acknowledgments(
     return {"items": rows, "total": total or 0, "page": params.page, "size": params.size}
 
 
-async def list_notifications(db: AsyncSession, params: PageParams, user) -> dict:
-    stmt = (
-        select(Indent)
-        .options(selectinload(Indent.items))
-        .where(await indent_access_condition(db, user))
-        .where(Indent.status.in_([
-            IndentStatus.PENDING_APPROVAL.value, IndentStatus.APPROVED.value,
-            IndentStatus.AWAITING_ALLOCATION.value, IndentStatus.ALLOCATED.value,
-            IndentStatus.PARTIALLY_FULFILLED.value,
-            IndentStatus.PENDING_PROCUREMENT.value,
-            IndentStatus.REJECTED.value, IndentStatus.PARTIALLY_ORDERED.value,
-            IndentStatus.ORDERED.value, IndentStatus.CLOSED.value,
-        ]))
-        .order_by(Indent.updated_at.desc())
-    )
-    page = await paginate(db, stmt, params)
-    messages = {
-        IndentStatus.PENDING_APPROVAL: (
-            "Awaiting approval",
-            lambda row: f"{row.indent_no} is awaiting approval"
-            + (f" from {row.current_approver_name}." if row.current_approver_name else "."),
-        ),
-        IndentStatus.APPROVED: (
-            "Request approved", lambda row: f"{row.indent_no} has been approved."
-        ),
-        IndentStatus.AWAITING_ALLOCATION: (
-            "Request approved",
-            lambda row: f"{row.indent_no} is approved and with inventory.",
-        ),
-        IndentStatus.ALLOCATED: (
-            "Stock set aside",
-            lambda row: f"Stock for {row.indent_no} has been set aside.",
-        ),
-        IndentStatus.PARTIALLY_FULFILLED: (
+async def list_notifications(
+    db: AsyncSession,
+    params: PageParams,
+    user,
+    *,
+    search: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    statuses: list[IndentStatus] | None = None,
+) -> dict:
+    _validate_filter_date_range(date_from, date_to)
+
+    supported_statuses = [
+        IndentStatus.PENDING_APPROVAL.value, IndentStatus.APPROVED.value,
+        IndentStatus.AWAITING_ALLOCATION.value, IndentStatus.ALLOCATED.value,
+        IndentStatus.PARTIALLY_FULFILLED.value,
+        IndentStatus.PENDING_PROCUREMENT.value,
+        IndentStatus.REJECTED.value, IndentStatus.PARTIALLY_ORDERED.value,
+        IndentStatus.ORDERED.value, IndentStatus.CLOSED.value,
+    ]
+    title = case(
+        (Indent.status == IndentStatus.PENDING_APPROVAL.value, "Awaiting approval"),
+        (Indent.status == IndentStatus.APPROVED.value, "Request approved"),
+        (Indent.status == IndentStatus.AWAITING_ALLOCATION.value, "Request approved"),
+        (Indent.status == IndentStatus.ALLOCATED.value, "Stock set aside"),
+        (
+            Indent.status == IndentStatus.PARTIALLY_FULFILLED.value,
             "Part of it is coming from stock",
-            lambda row: f"Some of {row.indent_no} is from stock; the rest is on order.",
         ),
-        IndentStatus.PENDING_PROCUREMENT: (
-            "Going to procurement",
-            lambda row: f"{row.indent_no} is being bought in.",
+        (Indent.status == IndentStatus.PENDING_PROCUREMENT.value, "Going to procurement"),
+        (Indent.status == IndentStatus.REJECTED.value, "Request rejected"),
+        (Indent.status == IndentStatus.PARTIALLY_ORDERED.value, "Ordering started"),
+        (Indent.status == IndentStatus.ORDERED.value, "Items ordered"),
+        (Indent.status == IndentStatus.CLOSED.value, "Request completed"),
+        else_="",
+    )
+    pending_message = (
+        Indent.indent_no
+        + literal(" is awaiting approval")
+        + case(
+            (
+                Indent.current_approver_name.is_not(None),
+                literal(" from ") + Indent.current_approver_name + literal("."),
+            ),
+            else_=literal("."),
+        )
+    )
+    message = case(
+        (Indent.status == IndentStatus.PENDING_APPROVAL.value, pending_message),
+        (
+            Indent.status == IndentStatus.APPROVED.value,
+            Indent.indent_no + literal(" has been approved."),
         ),
-        IndentStatus.REJECTED: (
-            "Request rejected", lambda row: f"{row.indent_no} has been rejected."
+        (
+            Indent.status == IndentStatus.AWAITING_ALLOCATION.value,
+            Indent.indent_no + literal(" is approved and with inventory."),
         ),
-        IndentStatus.PARTIALLY_ORDERED: (
-            "Ordering started", lambda row: f"Items for {row.indent_no} are being ordered."
+        (
+            Indent.status == IndentStatus.ALLOCATED.value,
+            literal("Stock for ") + Indent.indent_no + literal(" has been set aside."),
         ),
-        IndentStatus.ORDERED: (
-            "Items ordered", lambda row: f"All items for {row.indent_no} have been ordered."
+        (
+            Indent.status == IndentStatus.PARTIALLY_FULFILLED.value,
+            literal("Some of ") + Indent.indent_no
+            + literal(" is from stock; the rest is on order."),
         ),
-        IndentStatus.CLOSED: (
-            "Request completed", lambda row: f"{row.indent_no} is complete."
+        (
+            Indent.status == IndentStatus.PENDING_PROCUREMENT.value,
+            Indent.indent_no + literal(" is being bought in."),
         ),
+        (
+            Indent.status == IndentStatus.REJECTED.value,
+            Indent.indent_no + literal(" has been rejected."),
+        ),
+        (
+            Indent.status == IndentStatus.PARTIALLY_ORDERED.value,
+            literal("Items for ") + Indent.indent_no + literal(" are being ordered."),
+        ),
+        (
+            Indent.status == IndentStatus.ORDERED.value,
+            literal("All items for ") + Indent.indent_no + literal(" have been ordered."),
+        ),
+        (
+            Indent.status == IndentStatus.CLOSED.value,
+            Indent.indent_no + literal(" is complete."),
+        ),
+        else_="",
+    )
+    stmt = (
+        select(
+            (
+                literal("indent:") + cast(Indent.id, String)
+                + literal(":") + Indent.status
+            ).label("id"),
+            Indent.id.label("indent_id"),
+            Indent.indent_no,
+            title.label("title"),
+            message.label("message"),
+            Indent.current_approver_name.label("_approver_name"),
+            Indent.status,
+            Indent.updated_at.label("created_at"),
+        )
+        .where(await indent_access_condition(db, user))
+        .where(Indent.status.in_(supported_statuses))
+    )
+    term = _clean_search(search)
+    if term:
+        pattern = _like_pattern(term)
+        stmt = stmt.where(or_(
+            _matches(Indent.indent_no, pattern),
+            _matches(title, pattern),
+            _matches(message, pattern),
+            _matches(func.replace(Indent.status, "_", " "), pattern),
+        ))
+    if date_from:
+        stmt = stmt.where(
+            Indent.updated_at >= datetime.combine(date_from, time.min, timezone.utc)
+        )
+    if date_to:
+        stmt = stmt.where(
+            Indent.updated_at
+            < datetime.combine(date_to + timedelta(days=1), time.min, timezone.utc)
+        )
+    if statuses:
+        stmt = stmt.where(Indent.status.in_(_values(statuses)))
+    stmt = stmt.order_by(Indent.updated_at.desc(), Indent.id.desc())
+
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
+    rows = (
+        await db.execute(stmt.offset(params.offset).limit(params.size))
+    ).mappings().all()
+
+    items = [dict(row) for row in rows]
+    pending_items = {
+        row["indent_id"]: row
+        for row in items
+        if row["status"] == IndentStatus.PENDING_APPROVAL.value
+        and row["_approver_name"]
     }
-    items = []
-    for row in page["items"]:
-        config = messages.get(IndentStatus(row.status))
-        if not config:
-            continue
-        title, message = config
-        items.append({
-            "id": f"indent:{row.id}:{row.status}",
-            "indent_id": row.id,
-            "indent_no": row.indent_no,
-            "title": title,
-            "message": message(row),
-            "status": row.status,
-            "created_at": row.updated_at,
-        })
-    page["items"] = items
-    return page
+    if pending_items:
+        instance_rows = (await db.execute(
+            select(
+                Instance.doc_id,
+                Instance.id,
+                Instance.current_sequence,
+                Instance.resolved_chain,
+                HcmPosition.name.label("configured_position_name"),
+            )
+            .outerjoin(
+                Stage,
+                and_(
+                    Stage.workflow_id == Instance.workflow_id,
+                    Stage.sequence == Instance.current_sequence,
+                ),
+            )
+            .outerjoin(HcmPosition, HcmPosition.id == Stage.position_id)
+            .where(
+                Instance.doc_type == DocType.INDENT.value,
+                Instance.doc_id.in_(pending_items),
+                Instance.status == InstanceStatus.IN_PROGRESS.value,
+            )
+            .order_by(Instance.doc_id, Instance.id.desc())
+        )).mappings().all()
+        positioned: set[int] = set()
+        for instance_row in instance_rows:
+            indent_id = instance_row["doc_id"]
+            if indent_id in positioned:
+                continue
+            positioned.add(indent_id)
+            position_name = instance_row["configured_position_name"]
+            for link in instance_row["resolved_chain"] or []:
+                if int(link.get("sequence", 0)) == instance_row["current_sequence"]:
+                    position_name = link.get("position_name") or position_name
+                    break
+            if not position_name:
+                continue
+            row = pending_items[indent_id]
+            row["message"] = (
+                f"{row['indent_no']} is awaiting approval from "
+                f"{position_name} - {row['_approver_name']}."
+            )
+    for row in items:
+        row.pop("_approver_name", None)
+    return {
+        "items": items,
+        "total": total or 0,
+        "page": params.page,
+        "size": params.size,
+    }
 
 
 # ---------------- allocation endpoints' service layer ----------------
