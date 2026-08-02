@@ -163,6 +163,56 @@ class AcknowledgmentRow(BaseModel):
         return _utc_iso(value)
 
 
+class FulfilmentStep(BaseModel):
+    """One stage of what physically happened to the goods, for the indent stepper.
+
+    Sits after the approval stages, which stop at "Ready for Allocation" — everything
+    the warehouse then did to the order was invisible on the indent until now.
+    """
+    key: str
+    label: str
+    state: str
+    caption: str | None = None
+
+
+class AcknowledgeLineIn(BaseModel):
+    indent_item_id: int
+    # What arrived in THIS delivery, not the running total. The service adds it to what
+    # was already acknowledged, so the caller never has to know the previous figure.
+    received_quantity: float = Field(gt=0)
+
+
+class AcknowledgeIn(BaseModel):
+    lines: list[AcknowledgeLineIn] = Field(min_length=1)
+
+
+class DeliveryLineRow(BaseModel):
+    """One indent line on the "what is owed to me" screen."""
+    indent_item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    approved_quantity: float
+    issued_quantity: float
+    dispatched_quantity: float
+    received_quantity: float
+    # Plain-English answer to "why hasn't my stuff come yet", derived at read time from
+    # the issue and dispatch state — never stored, so it cannot go stale.
+    pending_with: str | None = None
+
+
+class DeliveryRow(BaseModel):
+    indent_id: int
+    indent_no: str
+    indent_date: date | None = None
+    required_date: date | None = None
+    status: str
+    priority: str | None = None
+    project_name: str | None = None
+    can_acknowledge: bool = False
+    lines: list[DeliveryLineRow] = []
+
+
 class IndentNotificationRow(BaseModel):
     id: str
     indent_id: int

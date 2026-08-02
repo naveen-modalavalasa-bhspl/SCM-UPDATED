@@ -4,6 +4,7 @@ import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@herou
 import { ArrowRight, Plus, Trash2 } from "lucide-react";
 import {
   Button, Can, Card, Field, Input, PageHeader, ResponsiveList, Select, StatCard, StatusPill, type Column,
+  ResponsiveGrid,
 } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
@@ -171,11 +172,11 @@ export function StockTransferView() {
         }
       />
 
-      <div className="mb-4 grid grid-cols-3 gap-3">
+      <ResponsiveGrid cols={3} className="mb-4">
         <StatCard label="Awaiting Approval" value={counts.pending} tone={counts.pending ? "text-warning" : "text-muted"} />
         <StatCard label="In Transit" value={counts.inTransit} tone={counts.inTransit ? "text-brand" : "text-muted"} />
         <StatCard label="Received" value={counts.done} tone="text-success" />
-      </div>
+      </ResponsiveGrid>
 
       {error && (
         <div className="mb-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>

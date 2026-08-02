@@ -401,6 +401,7 @@ export function PoliciesPage() {
                   <div className="rounded-lg bg-bad-bg px-3 py-2 text-sm text-bad">{error}</div>
                 )}
 
+                {/* mobile-ok: three one-word step labels at text-xs, ~110px each at 375px. */}
                 <div className="grid grid-cols-3 gap-2 text-xs">
                   {["Choose", "Answer", "Review"].map((label, index) => (
                     <div key={label} className="rounded-lg bg-brand-050 px-3 py-2 text-center font-semibold text-brand">

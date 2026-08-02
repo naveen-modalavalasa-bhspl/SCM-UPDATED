@@ -2,9 +2,8 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { DispatchFlowNav } from "../components/DispatchFlowNav";
 import { listConsignments } from "../api";
-import { fmtDate, fmtQty, humanise } from "../format";
+import { fmtDate, fmtQty, humanise, num } from "../format";
 import type { Dispatch } from "../types";
 
 const STATUSES = [
@@ -85,7 +84,6 @@ export default function Consignments() {
 
   return (
     <>
-      <DispatchFlowNav />
       <DocumentList<Dispatch>
         title="Consignments"
         queryKey="wh-consignments"
@@ -109,8 +107,10 @@ export default function Consignments() {
         empty="No consignments match these filters."
         kpis={(rows) => [
           { label: "Ready", value: rows.filter((row) => row.status === "PACKED").length, tone: "text-ok" },
-          { label: "Packages", value: rows.reduce((sum, row) => sum + (row.total_packages ?? 0), 0) },
-          { label: "Quantity", value: fmtQty(rows.reduce((sum, row) => sum + (row.total_qty ?? 0), 0)) },
+          // num(), not `?? 0`: MySQL DECIMALs arrive as strings, so a bare `+` built
+          // "03.00020.000" and fmtQty turned that into "0".
+          { label: "Packages", value: rows.reduce((sum, row) => sum + num(row.total_packages), 0) },
+          { label: "Quantity", value: fmtQty(rows.reduce((sum, row) => sum + num(row.total_qty), 0)) },
           { label: "Dispatched", value: rows.filter((row) => ["DISPATCHED", "IN_TRANSIT"].includes(row.status)).length },
         ]}
         renderCard={(row) => (

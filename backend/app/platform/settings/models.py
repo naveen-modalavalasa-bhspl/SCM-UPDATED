@@ -147,6 +147,29 @@ class Notification(Base):
     created_at = Column(DateTime, nullable=False, default=utcnow)
 
 
+class Attachment(Base):
+    """`sys_attachments`, keyed by `(entity_type, entity_id)` so one panel serves every
+    document without per-document wiring.
+
+    Lives here rather than in the warehouse module for the same reason `sys_notifications`
+    does: indents needs it too, to hold the receipt photo and bill a requester attaches
+    when acknowledging a delivery, and indents may not import a module further down the
+    chain (rule 5).
+    """
+    __tablename__ = "sys_attachments"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    entity_type = Column(String(50), index=True, nullable=False)
+    entity_id = Column(BigInteger, index=True, nullable=False)
+    file_name = Column(String(300), nullable=False)
+    file_path = Column(String(500), nullable=False)
+    file_size = Column(BigInteger, nullable=True)
+    mime_type = Column(String(100), nullable=True)
+    doc_category = Column(String(50), nullable=True)
+    uploaded_by_id = Column(BigInteger, index=True, nullable=True)
+    uploaded_by_name = Column(String(200), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+
+
 class UserSession(Base):
     __tablename__ = "sys_sessions"
     id = Column(BigInteger, primary_key=True, autoincrement=True)

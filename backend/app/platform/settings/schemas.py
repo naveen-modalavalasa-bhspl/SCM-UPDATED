@@ -3,7 +3,27 @@
 The values are stored as rows in sys_settings; this file only gives the UI a stable
 grouped contract so the screen does not know about individual setting keys.
 """
-from pydantic import BaseModel, Field
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AttachmentRead(BaseModel):
+    """One stored document. Lives here because `sys_attachments` does — the warehouse
+    and indents both read it, and neither may import the other."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    entity_type: str
+    entity_id: int
+    file_name: str
+    file_path: str
+    file_size: int | None = None
+    mime_type: str | None = None
+    doc_category: str | None = None
+    uploaded_by_id: int | None = None
+    uploaded_by_name: str | None = None
+    created_at: datetime | None = None
 
 
 class CompanySettings(BaseModel):

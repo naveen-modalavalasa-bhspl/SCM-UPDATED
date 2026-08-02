@@ -103,6 +103,7 @@ PAGE_TREE = [
     # Parked (rbac_pages.is_active = 0); route and BoardPage still exist. Leaving the
     # row here would put it back on the menu at the next seed.
     # ("ind_board", "/indents/board", "Status Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
+    ("ind_deliveries", "/indents/deliveries", "My Deliveries", "package-check", P.INDENT_VIEW, 13, "grp_indents"),
     ("ind_ack", "/indents/acknowledgments", "Acknowledgments", "check-circle", P.INDENT_VIEW, 14, "grp_indents"),
     ("ind_reports", "/indents/reports", "Activity Ledger", "bar-chart", P.INDENT_VIEW, 15, "grp_indents"),
     ("ind_notifications", "/indents/notifications", "Notifications", "bell", P.INDENT_VIEW, 16, "grp_indents"),

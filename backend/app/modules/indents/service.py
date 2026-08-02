@@ -29,6 +29,7 @@ from app.platform.rules import evaluator as rules
 from app.platform.workflow import engine
 from app.platform.workflow.models import Action, Instance, Stage
 from app.platform.workflow.models import Pending
+from app.platform.settings import attachments
 from app.platform.settings.service import write_audit
 from app.platform.settings.models import AuditLog
 from app.platform.rbac import service as rbac_service
@@ -910,6 +911,141 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         action=AuditAction.UPDATE, actor=user,
         before={"status": IndentStatus.DRAFT.value},
         after={"status": indent.status},
+    )
+    await db.commit()
+    await db.refresh(indent)
+    return await _attach_capabilities(db, indent, user)
+
+
+def _d(value) -> Decimal:
+    """Decimal or zero. MySQL DECIMALs arrive as strings and a bad one must not 500."""
+    try:
+        return Decimal(str(value or 0))
+    except (ArithmeticError, ValueError):
+        return Decimal("0")
+
+
+# Statuses an indent may still be receiving goods in. Anything else is either not yet
+# approved or already finished, and has nothing to acknowledge.
+_RECEIVABLE_STATUSES = frozenset({
+    IndentStatus.ALLOCATED.value,
+    IndentStatus.PARTIALLY_FULFILLED.value,
+    IndentStatus.PARTIALLY_ORDERED.value,
+    IndentStatus.ORDERED.value,
+    IndentStatus.PENDING_PROCUREMENT.value,
+})
+
+# The photo is the proof the goods landed, which is the whole point of the step. The
+# bill is uploaded only when the requester was handed one.
+ACK_PHOTO_CATEGORY = "RECEIPT_PHOTO"
+ACK_BILL_CATEGORY = "RECEIPT_BILL"
+ACK_ENTITY_TYPE = "INDENT_RECEIPT"
+
+
+def owed_quantity(item) -> Decimal:
+    """What the requester is entitled to on this line.
+
+    What the approver granted, falling back to what was asked for. The fallback is not
+    cosmetic: most live indent lines predate the approval flow and carry `approved_qty`
+    0, and treating that as "owed nothing" would close an indent the moment anyone
+    acknowledged it. Same rule the allocation code already uses.
+    """
+    return _d(item.approved_quantity) or _d(item.quantity)
+
+
+def _fulfilment_status(items) -> str:
+    """CLOSED once every line is fully received, else PARTIALLY_FULFILLED."""
+    if all(_d(i.received_quantity) >= owed_quantity(i) for i in items):
+        return IndentStatus.CLOSED.value
+    return IndentStatus.PARTIALLY_FULFILLED.value
+
+
+async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
+                                 doc_category: str, user):
+    """Store a delivery photo or bill against an indent.
+
+    Gated the same way as the acknowledgement itself: only the requester, and only while
+    the indent is still expecting goods. Otherwise anyone with view rights could attach
+    "proof" to somebody else's receipt.
+    """
+    # Loaded unscoped, then gated on the raiser alone. The usual visibility scope also
+    # matches on the position the indent was raised in, which would stop somebody who
+    # has since changed posts from confirming goods they themselves asked for.
+    indent = await get_indent(db, indent_id)
+    if indent.requested_by_id != user.id:
+        raise PermissionError_(
+            "Only the person who raised this indent can attach its delivery proof")
+    if indent.status not in _RECEIVABLE_STATUSES:
+        raise ValidationError(
+            f"{indent.indent_no} is not awaiting delivery (status {indent.status})")
+    if doc_category not in {ACK_PHOTO_CATEGORY, ACK_BILL_CATEGORY}:
+        raise ValidationError("A delivery attachment is either a photo or a bill")
+    return await attachments.add_attachment(
+        db, entity_type=ACK_ENTITY_TYPE, entity_id=indent.id,
+        upload=upload, doc_category=doc_category, user=user)
+
+
+async def acknowledge_receipt(db: AsyncSession, indent_id: int,
+                              lines: dict[int, Decimal], user) -> Indent:
+    """The requester confirms what physically reached them.
+
+    This is the only thing that closes an indent. The warehouse issuing and dispatching
+    stock says the goods left; only the person who asked for them can say they arrived,
+    so `received_qty` is written here and nowhere else.
+
+    Receipts accumulate: 6 of 10 today and 4 next week are two acknowledgements against
+    the same line, which is how goods actually turn up. The status is recomputed from
+    the totals every time rather than stepped forward, so a correction cannot strand an
+    indent in the wrong state.
+    """
+    # Unscoped load, raiser-only gate — see add_receipt_attachment. Changing post must
+    # not orphan the goods you are still waiting for.
+    indent = await get_indent(db, indent_id)
+    if indent.requested_by_id != user.id:
+        raise PermissionError_(
+            "Only the person who raised this indent can acknowledge its delivery")
+    if indent.status not in _RECEIVABLE_STATUSES:
+        raise ValidationError(
+            f"{indent.indent_no} is not awaiting delivery (status {indent.status})")
+    if not lines:
+        raise ValidationError("Enter what you received on at least one line")
+
+    photos = [
+        row for row in await attachments.list_attachments(db, ACK_ENTITY_TYPE, indent.id)
+        if row.doc_category == ACK_PHOTO_CATEGORY
+    ]
+    if not photos:
+        raise ValidationError(
+            "Attach a photo of the goods you received before acknowledging")
+
+    by_id = {item.id: item for item in indent.items}
+    before = {str(i.id): float(_d(i.received_quantity)) for i in indent.items}
+    for line_id, quantity in lines.items():
+        item = by_id.get(line_id)
+        if item is None:
+            raise ValidationError(f"Line {line_id} is not on {indent.indent_no}")
+        received = _d(quantity)
+        if received <= 0:
+            raise ValidationError(
+                f"{item.item_name or item.item_code}: received quantity must be more "
+                "than zero")
+        running = _d(item.received_quantity) + received
+        owed = owed_quantity(item)
+        if running > owed:
+            raise ValidationError(
+                f"{item.item_name or item.item_code}: {running} received is more than "
+                f"the {owed} approved. Acknowledge only what you were given.")
+        item.received_quantity = running
+        if running >= owed:
+            item.status = IndentItemStatus.ISSUED.value
+
+    indent.status = _fulfilment_status(indent.items)
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.UPDATE, actor=user,
+        before=before,
+        after={"status": indent.status,
+               **{str(i.id): float(_d(i.received_quantity)) for i in indent.items}},
     )
     await db.commit()
     await db.refresh(indent)

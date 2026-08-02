@@ -1,18 +1,22 @@
 """Indents endpoints. No logic here — every route calls the service."""
-from fastapi import APIRouter, Depends, Query
+from decimal import Decimal
+
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
 from app.platform.rbac import permissions as perms
+from app.platform.settings import attachments
+from app.platform.settings.schemas import AttachmentRead
 from app.modules.indents import service
 from app.modules.indents.enums import (
     AcknowledgmentStatus, ApprovalAction, IndentActivityType, IndentStatus,
     MaterialDirection, Priority,
 )
 from app.modules.indents.schemas import (
-    AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
+    AcknowledgeIn, AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
     IndentJourneyOut, IndentNotificationRow, IndentOut, IndentStatsOut, IndentUpdate,
 )
 # Allocation is a decision about an indent, so its endpoints live here. The
@@ -166,6 +170,41 @@ async def delete_draft(indent_id: int, db: AsyncSession = Depends(get_db),
 async def submit(indent_id: int, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.submit"))):
     return await service.submit_indent(db, indent_id, user)
+
+
+@indent_router.post("/{indent_id}/acknowledge", response_model=IndentOut)
+async def acknowledge(indent_id: int, body: AcknowledgeIn,
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.INDENT_ACKNOWLEDGE))):
+    lines = {line.indent_item_id: Decimal(str(line.received_quantity))
+             for line in body.lines}
+    return await service.acknowledge_receipt(db, indent_id, lines, user)
+
+
+@indent_router.get("/{indent_id}/receipt-attachments", response_model=list[AttachmentRead])
+async def receipt_attachments(indent_id: int, db: AsyncSession = Depends(get_db),
+                              _=Depends(require_permission(perms.INDENT_VIEW))):
+    return await attachments.list_attachments(db, service.ACK_ENTITY_TYPE, indent_id)
+
+
+@indent_router.post("/{indent_id}/receipt-attachments", response_model=AttachmentRead,
+                    status_code=201)
+async def upload_receipt_attachment(
+    indent_id: int, file: UploadFile = File(...),
+    doc_category: str = Query(service.ACK_PHOTO_CATEGORY),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.INDENT_ACKNOWLEDGE)),
+):
+    return await service.add_receipt_attachment(
+        db, indent_id, file, doc_category=doc_category, user=user)
+
+
+@indent_router.delete("/receipt-attachments/{attachment_id}", status_code=204)
+async def delete_receipt_attachment(
+    attachment_id: int, db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.INDENT_ACKNOWLEDGE)),
+):
+    await attachments.delete_attachment(db, attachment_id, user)
 
 
 @indent_router.post("/{indent_id}/bookmark", response_model=IndentOut)

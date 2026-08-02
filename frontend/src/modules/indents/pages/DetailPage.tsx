@@ -78,6 +78,17 @@ export function IndentDetailPage() {
     refetchOnWindowFocus: false,
   });
 
+  // The delivery half of the journey. Served by the warehouse module, which owns the
+  // issue and dispatch rows the indents module may not read (rule 5).
+  const { data: fulfilment } = useQuery({
+    queryKey: ["indent-fulfilment", accountScope, indentId],
+    queryFn: () => indentApi.fulfilment(indentId),
+    enabled: Number.isFinite(indentId) && Boolean(indent),
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
+    refetchOnWindowFocus: false,
+  });
+
   const prefetchJourney = useCallback(() => {
     if (!Number.isFinite(indentId)) return;
     qc.prefetchQuery({
@@ -210,6 +221,7 @@ export function IndentDetailPage() {
               status={indent.status}
               journey={journey}
               isLoading={isJourneyLoading}
+              fulfilment={fulfilment}
             />
             <div className="mt-4 flex min-h-11 items-center justify-between gap-3 border-t border-line pt-3 text-sm font-semibold text-brand">
               <span>View complete approval journey</span>

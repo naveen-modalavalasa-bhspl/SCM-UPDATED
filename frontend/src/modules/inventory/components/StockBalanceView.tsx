@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon } from "lucide-react";
-import { Button, Card, PageHeader, ResponsiveList, StatCard, type Column } from "@/shared/components";
+import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect, FilterToggle } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { getStockBalances, getStockDetail, getWarehouses } from "../api";
@@ -327,7 +327,7 @@ export function StockBalanceView() {
         {selected && (
           <>
             <SheetSection title="Quantities">
-              <div className="grid grid-cols-3 gap-2">
+              <ResponsiveGrid cols={3} gap="gap-2">
                 {([
                   ["Available", selected.available_qty, "text-brand"],
                   ["Reserved", selected.reserved_qty, "text-warning"],
@@ -339,7 +339,7 @@ export function StockBalanceView() {
                     <div className="text-[10px] text-muted">{selected.uom_code}</div>
                   </div>
                 ))}
-              </div>
+              </ResponsiveGrid>
               {(selected.transit_qty ?? 0) > 0 && (
                 <p className="mt-2 text-xs text-muted">
                   In transit: {selected.transit_qty} {selected.uom_code}

@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { AlarmClock, BarChart3, Inbox, RefreshCw, Search, TriangleAlert, X } from "lucide-react";
 import {
   Button, Card, PageHeader, ResponsiveList, StatCard, StatusPill, type Column,
+  ResponsiveGrid,
 } from "@/shared/components";
 import { approvalsApi } from "../api";
 import { approvalDocumentPath } from "../documentRoutes";
@@ -110,7 +111,7 @@ export function ApprovalsPage() {
 
   return <>
     <PageHeader eyebrow="Approvals" title="Waiting for me" actions={<div className="flex gap-2"><Button variant="ghost" onClick={() => setParams({ view: "reports" })}><BarChart3 className="h-4 w-4" /> Reports</Button><Button variant="ghost" disabled={query.isFetching} onClick={() => query.refetch()}><RefreshCw className={`h-4 w-4 ${query.isFetching ? "animate-spin" : ""}`} /> Refresh</Button></div>} />
-    <div className="mb-4 grid grid-cols-3 gap-3"><StatCard label="Waiting on you" value={all.length} icon={<Inbox size={16} />} /><StatCard label="Past due" value={pastDue} icon={<TriangleAlert size={16} />} tone={pastDue ? "text-danger" : "text-muted"} /><StatCard label="Longest wait" value={all.length ? `${oldest}d` : "—"} icon={<AlarmClock size={16} />} tone={oldest > 3 ? "text-warning" : "text-muted"} /></div>
+    <ResponsiveGrid cols={3} className="mb-4"><StatCard label="Waiting on you" value={all.length} icon={<Inbox size={16} />} /><StatCard label="Past due" value={pastDue} icon={<TriangleAlert size={16} />} tone={pastDue ? "text-danger" : "text-muted"} /><StatCard label="Longest wait" value={all.length ? `${oldest}d` : "—"} icon={<AlarmClock size={16} />} tone={oldest > 3 ? "text-warning" : "text-muted"} /></ResponsiveGrid>
     <Card className="mb-4 space-y-3 p-4">
       <div className="flex flex-wrap gap-2">
         <div className="relative min-w-60 flex-1"><Search className="absolute left-3 top-3.5 h-4 w-4 text-muted" /><input className="h-11 w-full rounded-lg border border-line bg-content1 pl-9 pr-3 text-sm text-ink" aria-label="Search approvals" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search document, requester or stage" /></div>

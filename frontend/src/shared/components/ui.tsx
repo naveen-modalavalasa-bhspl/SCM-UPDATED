@@ -59,7 +59,10 @@ export function PageHeader({ eyebrow, title, actions }: { eyebrow?: string; titl
         )}
         <h1 className="font-display text-[26px] font-bold text-ink">{title}</h1>
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {/* flex-wrap, not nowrap: a document form puts up to six buttons here (Back,
+       * Save, Submit, Approve, Reject, Cancel), which overflows a 375px screen
+       * sideways without it. The outer div already wraps; this one has to as well. */}
+      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>
   );
 }

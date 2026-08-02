@@ -126,6 +126,56 @@ export interface AcknowledgmentRow {
   acted_at: string;
 }
 
+/** One stage of what physically happened to the goods, after the approval stages. */
+export interface FulfilmentStep {
+  key: string;
+  label: string;
+  state: "completed" | "current" | "pending" | string;
+  caption?: string | null;
+}
+
+/** One line of an indent on the "what am I still owed" screen. */
+export interface DeliveryLine {
+  indent_item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  approved_quantity: number;
+  issued_quantity: number;
+  dispatched_quantity: number;
+  received_quantity: number;
+  /** Derived server-side: "On the way to you", "With procurement", … */
+  pending_with?: string | null;
+}
+
+export interface Delivery {
+  indent_id: number;
+  indent_no: string;
+  indent_date?: string | null;
+  required_date?: string | null;
+  status: string;
+  priority?: string | null;
+  project_name?: string | null;
+  can_acknowledge: boolean;
+  lines: DeliveryLine[];
+}
+
+/** What arrived in THIS delivery, not the running total. */
+export interface AcknowledgeLine {
+  indent_item_id: number;
+  received_quantity: number;
+}
+
+export interface ReceiptAttachment {
+  id: number;
+  file_name: string;
+  file_path: string;
+  mime_type?: string | null;
+  doc_category?: string | null;
+  uploaded_by_name?: string | null;
+  created_at?: string | null;
+}
+
 export interface IndentNotification {
   id: string;
   indent_id: number;

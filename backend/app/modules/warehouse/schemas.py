@@ -1091,6 +1091,9 @@ class IndentIssueSource(BaseModel):
     warehouse_id: int
     department_id: int | None = None
     project_id: int | None = None
+    # True when some reserved stock was received for a different project (or for
+    # none). Informational: the screen says so, nothing blocks the issue.
+    mixed_projects: bool = False
     issued_to_id: int | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None
@@ -1103,6 +1106,7 @@ class PickingIssueSource(BaseModel):
     indent_id: int | None = None
     department_id: int | None = None
     project_id: int | None = None
+    mixed_projects: bool = False
     items: list[IssueItemWrite] = []
 
 

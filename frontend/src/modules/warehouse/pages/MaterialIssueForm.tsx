@@ -2,7 +2,7 @@ import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Selec
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ScanLine } from "lucide-react";
+import { ArrowLeft, Info, ScanLine } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -82,6 +82,9 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const [reason, setReason] = useState("");
   const [serialLine, setSerialLine] = useState<number | null>(null);
   const [destination, setDestination] = useState("");
+  // Some of the reserved stock was received for another project, or for none.
+  // Worth saying out loud — the issue still goes through.
+  const [mixedProjects, setMixedProjects] = useState(false);
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-issue", id],
@@ -132,6 +135,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   useEffect(() => {
     if (!pickingSource.data) return;
     const source = pickingSource.data;
+    setMixedProjects(!!source.mixed_projects);
     setForm((current) => ({
       ...current,
       picking_id: source.picking_id,
@@ -211,6 +215,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     mutationFn: (indentId: number) => getIndentIssueSource(indentId, form.warehouse_id),
     onSuccess: (source) => {
       setDestination(source.destination_office_name ?? "");
+      setMixedProjects(!!source.mixed_projects);
       setForm((current) => ({
         ...current,
         indent_id: source.indent_id,
@@ -522,6 +527,15 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       />
 
       <ErrorBanner error={save.error ?? pullIndent.error ?? pickingSource.error} />
+      {mixedProjects && (
+        <div className="mb-4 flex items-start gap-2 rounded-xl border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            Some lines draw on stock received for another project, or for none. That is
+            allowed — stock is one pool. Each line keeps its source project in the ledger.
+          </span>
+        </div>
+      )}
       {touched && !form.warehouse_id && <ErrorBanner error="Pick the issuing warehouse." />}
       {touched && form.items.length === 0 && <ErrorBanner error="Add at least one line." />}
 

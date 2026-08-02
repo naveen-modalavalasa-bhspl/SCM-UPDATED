@@ -1,6 +1,6 @@
 import { Skeleton } from "@heroui/react";
 import { Check, Circle, Clock, Minus, X } from "lucide-react";
-import type { IndentJourney, IndentJourneyStage } from "../types";
+import type { FulfilmentStep, IndentJourney, IndentJourneyStage } from "../types";
 
 type StepState = "completed" | "current" | "pending" | "rejected" | "returned" | "skipped" | "unknown";
 
@@ -15,6 +15,12 @@ interface FlowStepperProps {
   status: string;
   journey?: IndentJourney;
   isLoading?: boolean;
+  /**
+   * What physically happened to the goods, appended after the approval stages.
+   * The approval journey ends at "Ready for Allocation"; everything the warehouse then
+   * did to the order used to be invisible here.
+   */
+  fulfilment?: FulfilmentStep[];
 }
 
 function statusCaption(state: StepState) {
@@ -145,6 +151,7 @@ function FlowStepperSkeleton() {
       role="status"
       aria-label="Loading approval progress"
     >
+      {/* mobile-ok: loading placeholder — four 8px dots, no content to squash. */}
       <div className="grid grid-cols-4 items-start gap-2" data-testid="approval-progress-skeleton">
         {[0, 1, 2, 3].map((step) => (
           <div key={step} className="flex min-w-0 flex-col items-center px-1">
@@ -158,8 +165,24 @@ function FlowStepperSkeleton() {
   );
 }
 
-export function FlowStepper({ status, journey, isLoading = false }: FlowStepperProps) {
-  const steps = buildSteps(status, journey);
+export function FlowStepper({
+  status, journey, isLoading = false, fulfilment,
+}: FlowStepperProps) {
+  const approvalSteps = buildSteps(status, journey);
+  // Only once approval is genuinely done. Showing "Issued from store" beside a request
+  // that was rejected, or is still with an approver, would promise a delivery that is
+  // not coming.
+  const approvalSettled = !!approvalSteps?.length
+    && approvalSteps.every((step) => step.state === "completed" || step.state === "skipped");
+  const steps = approvalSteps && approvalSettled && fulfilment?.length
+    ? [...approvalSteps, ...fulfilment.map((step) => ({
+        key: `fulfilment-${step.key}`,
+        label: step.label,
+        state: step.state as StepState,
+        caption: step.caption ?? undefined,
+      }))]
+    : approvalSteps;
+
   if (isLoading && !steps) return <FlowStepperSkeleton />;
 
   if (!steps) {

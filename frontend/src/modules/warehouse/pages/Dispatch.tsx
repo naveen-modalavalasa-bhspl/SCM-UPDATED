@@ -2,7 +2,6 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { DispatchFlowNav } from "../components/DispatchFlowNav";
 import { listDispatches } from "../api";
 import { daysUntil, fmtDate, fmtQty, humanise } from "../format";
 import type { Dispatch as DispatchDoc } from "../types";
@@ -104,7 +103,6 @@ export default function Dispatch() {
 
   return (
     <>
-      <DispatchFlowNav />
       <DocumentList<DispatchDoc>
         title="Dispatches"
         queryKey="wh-dispatches"

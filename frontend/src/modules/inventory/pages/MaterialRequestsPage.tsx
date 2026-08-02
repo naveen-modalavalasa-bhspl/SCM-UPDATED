@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { PageHeader, Card, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
+import { PageHeader, Card, ResponsiveGrid, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { listMaterialRequests } from "../api";
 import type { MaterialRequestListRow } from "../types";
@@ -122,11 +122,11 @@ export function MaterialRequestsPage() {
         Raised automatically when an approved indent runs short of stock. Procurement picks them up from here.
       </p>
 
-      <div className="mb-4 grid grid-cols-3 gap-3">
+      <ResponsiveGrid cols={3} className="mb-4">
         <StatCard label="In Approval" value={kpis.pending} tone={kpis.pending ? "text-warning" : "text-muted"} />
         <StatCard label="Urgent" value={kpis.urgent} tone={kpis.urgent ? "text-danger" : "text-muted"} />
         <StatCard label="Past Needed-By" value={kpis.overdue} tone={kpis.overdue ? "text-danger" : "text-muted"} />
-      </div>
+      </ResponsiveGrid>
 
       <FilterBar
         search={search}

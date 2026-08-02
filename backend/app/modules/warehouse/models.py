@@ -743,23 +743,10 @@ class StorageType(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
-class Attachment(Base):
-    """`sys_attachments`, keyed by `(entity_type, entity_id)` so one panel serves
-    every document without per-document wiring."""
-    __tablename__ = "sys_attachments"
-
-    id = pk()
-    entity_type = Column(String(50), index=True, nullable=False)
-    entity_id = Column(BigInteger, index=True, nullable=False)
-    file_name = Column(String(300), nullable=False)
-    file_path = Column(String(500), nullable=False)
-    file_size = Column(BigInteger, nullable=True)
-    mime_type = Column(String(100), nullable=True)
-    doc_category = Column(String(50), nullable=True)
-    uploaded_by_id = soft_fk()
-    uploaded_by_name = Column(String(200), nullable=True)
-    created_at = created_at_col()
-
+# `sys_attachments` moved to platform/settings/models.py — indents needs it for the
+# receipt photo and bill a requester attaches when acknowledging a delivery, and it may
+# not import this module (rule 5). Re-exported so `m.Attachment` keeps working here.
+from app.platform.settings.models import Attachment  # noqa: E402,F401
 
 # `sys_notifications` moved to platform/settings/models.py — the app shell's bell and
 # inventory both need it, and neither may import this module (rule 5). Re-exported so

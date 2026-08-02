@@ -15,14 +15,11 @@ creation from the masters and never refreshed, so a document keeps saying what t
 were called when it was raised.
 """
 import logging
-import os
 import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
-from uuid import uuid4
 
-from sqlalchemy import String, func, or_, select
+from sqlalchemy import String, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -38,10 +35,11 @@ from app.modules.warehouse.enums import (
     PickingStatus, PutawayStatus, PutawayType, QcStatus, ReceiptStatus, ReceiptType,
     ReturnStatus, SerialStatus, WarehouseDocType,
 )
+from app.platform.settings import attachments
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.shared.enums import (
-    AuditAction, InstanceStatus, POStatus, ReservationStatus,
+    AuditAction, IndentStatus, InstanceStatus, POStatus, ReservationStatus,
     RefType as InventoryRefType, StockDirection,
 )
 from app.shared.models.base import utcnow
@@ -52,18 +50,6 @@ from app.shared.numbering import next_number
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
-
-# Where uploaded documents are stored. The location is deployment configuration, so it
-# comes from the environment; the default sits beside the app so a fresh checkout works
-# without one more required key. Nothing but this constant knows the path.
-_UPLOAD_ROOT = Path(os.getenv("UPLOAD_DIR")
-                    or Path(__file__).resolve().parents[3] / "var" / "uploads")
-MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
-
-
-def _slug(value: str) -> str:
-    """A folder name that cannot climb out of the store."""
-    return re.sub(r"[^a-z0-9_-]+", "_", (value or "other").lower()) or "other"
 
 
 def _d(value) -> Decimal:
@@ -4578,79 +4564,13 @@ async def scan(db: AsyncSession, code: str) -> s.ScanResult:
 # Attachments and notifications
 # ---------------------------------------------------------------------------
 
-async def list_attachments(db: AsyncSession, entity_type: str,
-                           entity_id: int) -> list[m.Attachment]:
-    return (await db.execute(
-        select(m.Attachment)
-        .where(m.Attachment.entity_type == entity_type, m.Attachment.entity_id == entity_id)
-        .order_by(m.Attachment.id.desc())
-    )).scalars().all()
-
-
-async def add_attachment(db: AsyncSession, *, entity_type: str, entity_id: int,
-                         upload, doc_category: str | None, user) -> m.Attachment:
-    """Writes the bytes, then the row.
-
-    The row used to be written on its own, with a `file_path` pointing at an
-    `/uploads/...` URL nothing served: every upload reported success and every link was
-    dead. The file is stored under a generated name so two invoices called `scan.pdf`
-    cannot overwrite each other, and `file_path` is kept relative to the store so the
-    directory can move without rewriting the table.
-    """
-    payload = await upload.read()
-    if not payload:
-        raise ValidationError("That file is empty — nothing was uploaded.")
-    if len(payload) > MAX_ATTACHMENT_BYTES:
-        raise ValidationError(
-            f"A document must be {MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB or smaller.")
-
-    # Only the last segment: a browser may send a full path, and a crafted one must not
-    # be able to write outside the store.
-    file_name = Path(upload.filename or "file").name
-    folder = _UPLOAD_ROOT / _slug(entity_type) / str(entity_id)
-    folder.mkdir(parents=True, exist_ok=True)
-    stored = folder / f"{uuid4().hex}{Path(file_name).suffix.lower()}"
-    stored.write_bytes(payload)
-
-    row = m.Attachment(
-        entity_type=entity_type, entity_id=entity_id,
-        file_name=file_name,
-        file_path=stored.relative_to(_UPLOAD_ROOT).as_posix(),
-        file_size=len(payload),
-        mime_type=upload.content_type, doc_category=doc_category,
-        uploaded_by_id=getattr(user, "id", None), uploaded_by_name=_name(user),
-    )
-    db.add(row)
-    await db.flush()
-    await write_audit(db, entity="sys_attachments", entity_id=row.id, entity_no=file_name,
-                      action=AuditAction.CREATE, actor=user,
-                      after={"entity_type": entity_type, "entity_id": entity_id})
-    await db.commit()
-    await db.refresh(row)
-    return row
-
-
-async def attachment_file(db: AsyncSession, attachment_id: int) -> tuple[Path, str, str]:
-    """The path, download name and type of a stored document."""
-    row = await _get(db, m.Attachment, attachment_id, "Attachment")
-    path = _UPLOAD_ROOT / (row.file_path or "").lstrip("/")
-    if not path.is_file():
-        raise NotFoundError(
-            f"{row.file_name} is recorded but its file is not on the server. "
-            "Upload it again.")
-    return path, row.file_name, row.mime_type or "application/octet-stream"
-
-
-async def delete_attachment(db: AsyncSession, attachment_id: int, user) -> None:
-    row = await _get(db, m.Attachment, attachment_id, "Attachment")
-    await write_audit(db, entity="sys_attachments", entity_id=row.id, entity_no=row.file_name,
-                      action=AuditAction.DEACTIVATE, actor=user, before={"file": row.file_name})
-    stored = _UPLOAD_ROOT / (row.file_path or "").lstrip("/")
-    await db.delete(row)
-    await db.commit()
-    # After the commit: a file left behind is tidy-up, a row pointing at a deleted file
-    # is a broken document.
-    stored.unlink(missing_ok=True)
+# The implementation moved to platform/settings/attachments.py so indents can use the
+# same store for delivery photos and bills. Re-exported under the names the warehouse
+# router already calls, so its endpoints are unchanged.
+list_attachments = attachments.list_attachments
+add_attachment = attachments.add_attachment
+attachment_file = attachments.attachment_file
+delete_attachment = attachments.delete_attachment
 
 
 async def list_notifications(db: AsyncSession, params: PageParams, user, *,
@@ -4682,6 +4602,225 @@ async def mark_all_notifications_read(db: AsyncSession, user) -> dict:
         row.is_read = True
     await db.commit()
     return {"updated": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# Deliveries owed to a requester
+# ---------------------------------------------------------------------------
+
+# Statuses at which a consignment has physically left the warehouse. Before these it is
+# still on site however finished the paperwork looks.
+_ON_THE_ROAD = (
+    DispatchStatus.DISPATCHED.value,
+    DispatchStatus.IN_TRANSIT.value,
+    DispatchStatus.DELIVERED.value,
+    DispatchStatus.ACKNOWLEDGED.value,
+)
+
+
+def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
+                  received: Decimal, indent_status: str) -> str | None:
+    """Plain-English answer to "where is the rest of my stuff".
+
+    Read top-down: the nearest place the goods have got to is the honest answer. Derived
+    at read time from the issue and dispatch state, never stored, so it cannot go stale
+    behind the documents it describes.
+    """
+    if received >= approved:
+        return None
+    if dispatched > received:
+        return "On the way to you"
+    if issued > dispatched:
+        return "Issued, waiting to be dispatched"
+    if indent_status in (IndentStatus.PENDING_PROCUREMENT.value,
+                         IndentStatus.PARTIALLY_ORDERED.value,
+                         IndentStatus.ORDERED.value):
+        return "With procurement"
+    return "In the warehouse, not yet issued"
+
+
+async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
+    """Approved / issued / dispatched / received per line, for a set of indents.
+
+    Shared by the requester's delivery list and by one indent's fulfilment trail, so the
+    two can never disagree about how far an order has got.
+    """
+    from app.modules.indents.service import owed_quantity
+
+    if not indents:
+        return []
+
+    indent_ids = [indent.id for indent in indents]
+    # Posted issues only: a draft or in-approval issue has moved nothing, and showing it
+    # as "issued" would tell the requester their goods are on the way when they are not.
+    issued_rows = (await db.execute(
+        select(m.MaterialIssueLine.indent_item_id,
+               func.sum(m.MaterialIssueLine.issued_qty - func.coalesce(m.MaterialIssueLine.returned_qty, 0)))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .where(m.MaterialIssue.indent_id.in_(indent_ids),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.MaterialIssueLine.indent_item_id.isnot(None))
+        .group_by(m.MaterialIssueLine.indent_item_id)
+    )).all()
+    issued_by_line = {row[0]: _d(row[1]) for row in issued_rows}
+
+    dispatched_rows = (await db.execute(
+        select(m.MaterialIssueLine.indent_item_id,
+               func.sum(m.MaterialIssueLine.issued_qty - func.coalesce(m.MaterialIssueLine.returned_qty, 0)))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .join(m.Dispatch, and_(
+            m.Dispatch.ref_id == m.MaterialIssue.id,
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .where(m.MaterialIssue.indent_id.in_(indent_ids),
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.Dispatch.status.in_(_ON_THE_ROAD),
+               m.MaterialIssueLine.indent_item_id.isnot(None))
+        .group_by(m.MaterialIssueLine.indent_item_id)
+    )).all()
+    dispatched_by_line = {row[0]: _d(row[1]) for row in dispatched_rows}
+
+    out = []
+    for indent in indents:
+        lines = []
+        for item in sorted(indent.items, key=lambda i: i.line_no or 0):
+            approved = owed_quantity(item)
+            received = _d(item.received_quantity)
+            issued = issued_by_line.get(item.id, ZERO)
+            dispatched = dispatched_by_line.get(item.id, ZERO)
+            lines.append({
+                "indent_item_id": item.id,
+                "item_code": item.item_code,
+                "item_name": item.item_name,
+                "uom_code": item.uom_code,
+                "approved_quantity": float(approved),
+                "issued_quantity": float(issued),
+                "dispatched_quantity": float(dispatched),
+                "received_quantity": float(received),
+                "pending_with": _pending_with(approved, issued, dispatched, received,
+                                              indent.status),
+            })
+        out.append({
+            "indent_id": indent.id,
+            "indent_no": indent.indent_no,
+            "indent_date": indent.indent_date,
+            "required_date": indent.required_date,
+            "status": indent.status,
+            "priority": indent.priority,
+            "project_name": indent.project_name,
+            # Nothing has reached the requester yet, so there is nothing to confirm. The
+            # row still shows, because "where is my stuff" is the other half of the job.
+            "can_acknowledge": any(line["dispatched_quantity"] > line["received_quantity"]
+                                   for line in lines),
+            "lines": lines,
+        })
+    return out
+
+
+async def deliveries_for_requester(db: AsyncSession, user, *, search: str | None = None,
+                                   status: str | None = None,
+                                   only_actionable: bool = False) -> list[dict]:
+    """Every indent this person raised that is still owed something.
+
+    Served from the warehouse module because the evidence — what was issued, what was
+    dispatched — lives in `out_issues` and `out_dispatches`. Indents may not import this
+    module (rule 5), so the join happens on this side of the line and indents keeps
+    ownership of the acknowledgement itself.
+    """
+    from app.modules.indents.models import Indent, IndentItem
+    from app.modules.indents.service import _RECEIVABLE_STATUSES
+
+    stmt = (
+        select(Indent)
+        .options(selectinload(Indent.items))
+        .where(Indent.requested_by_id == getattr(user, "id", 0),
+               Indent.status.in_(tuple(_RECEIVABLE_STATUSES)))
+    )
+    if status:
+        stmt = stmt.where(Indent.status == status)
+    if search:
+        like = f"%{search.strip()}%"
+        # Item text as well as the indent number: people look for "the masks", not for
+        # a document number they never memorised.
+        stmt = stmt.where(or_(
+            Indent.indent_no.ilike(like),
+            Indent.project_name.ilike(like),
+            select(IndentItem.id).where(
+                IndentItem.indent_id == Indent.id,
+                or_(IndentItem.item_code.ilike(like), IndentItem.item_name.ilike(like)),
+            ).exists(),
+        ))
+    indents = list((await db.execute(stmt.order_by(Indent.id.desc()))).scalars().all())
+
+    rows = await _delivery_rows(db, indents)
+    if only_actionable:
+        rows = [row for row in rows if row["can_acknowledge"]]
+    return rows
+
+
+async def indent_fulfilment(db: AsyncSession, indent_id: int) -> list[dict]:
+    """The delivery half of an indent's journey, as stepper stages.
+
+    The approval journey stops at "Ready for Allocation" — everything that physically
+    happens to the goods after that lived only in the warehouse module and never showed
+    on the indent. These are the missing steps.
+    """
+    from app.modules.indents.models import Indent
+
+    indent = (await db.execute(
+        select(Indent).options(selectinload(Indent.items)).where(Indent.id == indent_id)
+    )).scalar_one_or_none()
+    if indent is None:
+        raise NotFoundError(f"Indent {indent_id} not found")
+
+    rows = await _delivery_rows(db, [indent])
+    if not rows:
+        return []
+    lines = rows[0]["lines"]
+
+    owed = sum(line["approved_quantity"] for line in lines)
+    issued = sum(line["issued_quantity"] for line in lines)
+    dispatched = sum(line["dispatched_quantity"] for line in lines)
+    received = sum(line["received_quantity"] for line in lines)
+
+    # Delivered is a stronger claim than dispatched: the consignment has to have been
+    # marked as arrived, not merely sent.
+    delivered_docs = list((await db.execute(
+        select(m.Dispatch.dispatch_no, m.Dispatch.status)
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.Dispatch.ref_id)
+        .where(m.MaterialIssue.indent_id == indent_id,
+               m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+               m.Dispatch.status.in_(_ON_THE_ROAD))
+        .order_by(m.Dispatch.id.desc())
+    )).all())
+    delivered = any(row[1] in (DispatchStatus.DELIVERED.value,
+                               DispatchStatus.ACKNOWLEDGED.value)
+                    for row in delivered_docs)
+    dispatch_label = ", ".join(row[0] for row in delivered_docs[:2]) or None
+
+    def step(key, label, done, started, caption):
+        # "current" means started but not finished — the stage somebody is waiting on.
+        return {"key": key, "label": label, "caption": caption,
+                "state": "completed" if done else "current" if started else "pending"}
+
+    def part(moved: float) -> str:
+        return f"{moved:g} of {owed:g}"
+
+    return [
+        step("allocated", "Stock allocated",
+             indent.status != IndentStatus.AWAITING_ALLOCATION.value,
+             True,
+             indent.status.replace("_", " ").title()),
+        step("issued", "Issued from store", issued >= owed and owed > 0, issued > 0,
+             part(issued) if issued else "Not yet issued"),
+        step("dispatched", "Dispatched", dispatched >= owed and owed > 0, dispatched > 0,
+             dispatch_label or (part(dispatched) if dispatched else "Not yet sent")),
+        step("delivered", "Delivered", delivered, dispatched > 0,
+             "Arrived" if delivered else "In transit" if dispatched else "Not yet sent"),
+        step("received", "Confirmed by requester",
+             indent.status == IndentStatus.CLOSED.value, received > 0,
+             part(received) if received else "Awaiting confirmation"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -5212,12 +5351,16 @@ async def indent_issue_source(
             f"{indent.indent_no} has no active reservation in this warehouse"
         )
 
-    projects = {row.project_id for row in rows}
-    if len(projects) > 1:
-        raise ValidationError(
-            f"{indent.indent_no} reserves more than one project in this warehouse; "
-            "raise a separate issue for each project."
-        )
+    # Stock is one shared pool: inventory allocates by availability, not by project
+    # (see inventory/availability.candidate_stock), so one indent legitimately draws
+    # from rows received for other projects — or for none at all. The project on a
+    # stock row is history, not a fence, so a mixed draw is reported, never blocked.
+    # The consuming project is the indent's; the source project stays on each ledger
+    # row written at posting.
+    mixed_projects = any(
+        (row.project_id or 0) != (getattr(indent, "project_id", None) or 0)
+        for row in rows
+    )
 
     item_ids = {row.item_id for row in rows}
     item_by_id = {
@@ -5230,7 +5373,8 @@ async def indent_issue_source(
         "indent_no": indent.indent_no,
         "warehouse_id": warehouse_id,
         "department_id": getattr(indent, "department_id", None),
-        "project_id": getattr(indent, "project_id", None) or next(iter(projects), 0) or None,
+        "project_id": getattr(indent, "project_id", None) or None,
+        "mixed_projects": mixed_projects,
         "issued_to_id": requested_by_id,
         "destination_office_id": requested_by.office_id if requested_by else None,
         "destination_office_name": requested_by.office_name if requested_by else None,
@@ -5279,11 +5423,10 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
             ).order_by(Reservation.id)
         )).scalars().all())
 
-    projects = {row.project_id for row in reservations}
-    if len(projects) > 1:
-        raise ValidationError(
-            f"{picking.pick_no} contains stock for more than one project"
-        )
+    # Same rule as indent_issue_source: a pick that spans projects is reported, not
+    # refused. The pick already happened — the goods are off the shelf.
+    indent_project = (getattr(indent, "project_id", None) if indent else None) or 0
+    mixed_projects = any((row.project_id or 0) != indent_project for row in reservations)
 
     items = []
     item_ids = {line.item_id for line in picking.items}
@@ -5326,7 +5469,8 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
         "warehouse_id": picking.warehouse_id,
         "indent_id": indent_id,
         "department_id": getattr(indent, "department_id", None) if indent else None,
-        "project_id": next(iter(projects), 0) or None,
+        "project_id": indent_project or None,
+        "mixed_projects": mixed_projects,
         "items": items,
     }
 

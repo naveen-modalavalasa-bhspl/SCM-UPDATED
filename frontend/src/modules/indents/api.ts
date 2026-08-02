@@ -4,9 +4,9 @@ import { useQueryClient, type Query } from "@tanstack/react-query";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type { Paginated, Option } from "@/shared/types";
 import type {
-  AcknowledgmentRow, ActivityRow,
-  BomChoice, BomChoiceItem, Indent, IndentCreate, IndentListRow, IndentJourney,
-  IndentNotification, IndentStats, IndentUpdate,
+  AcknowledgeLine, AcknowledgmentRow, ActivityRow,
+  BomChoice, BomChoiceItem, Delivery, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
+  IndentNotification, IndentStats, IndentUpdate, ReceiptAttachment,
 } from "./types";
 
 export interface IndentQueryParams {
@@ -212,6 +212,40 @@ export const indentApi = {
     api.post<Indent>(`/api/indents/${id}/reject`, { comments }).then((r) => r.data),
   bookmark: (id: number) => api.post<Indent>(`/api/indents/${id}/bookmark`).then((r) => r.data),
   unbookmark: (id: number) => api.post<Indent>(`/api/indents/${id}/unbookmark`).then((r) => r.data),
+
+  /**
+   * What the requester is still owed, and how far it has got.
+   *
+   * Served by the warehouse module because the issue and dispatch evidence lives
+   * there; the screen is an indents screen all the same.
+   */
+  myDeliveries: (params: { search?: string; status?: string; only_actionable?: boolean } = {}) =>
+    api.get<Delivery[]>("/api/warehouse/deliveries/mine", { params }).then((r) => r.data),
+
+  /** The issued / dispatched / delivered stages for one indent's stepper. */
+  fulfilment: (id: number) =>
+    api.get<FulfilmentStep[]>(`/api/warehouse/indents/${id}/fulfilment`).then((r) => r.data),
+
+  acknowledge: (id: number, lines: AcknowledgeLine[]) =>
+    api.post<Indent>(`/api/indents/${id}/acknowledge`, { lines }).then((r) => r.data),
+
+  receiptAttachments: (id: number) =>
+    api.get<ReceiptAttachment[]>(`/api/indents/${id}/receipt-attachments`)
+      .then((r) => r.data),
+
+  uploadReceiptAttachment: (id: number, file: File, docCategory: string) => {
+    const body = new FormData();
+    body.append("file", file);
+    return api
+      .post<ReceiptAttachment>(
+        `/api/indents/${id}/receipt-attachments?doc_category=${docCategory}`,
+        body,
+      )
+      .then((r) => r.data);
+  },
+
+  deleteReceiptAttachment: (attachmentId: number) =>
+    api.delete<void>(`/api/indents/receipt-attachments/${attachmentId}`).then((r) => r.data),
 };
 
 export const masterApi = {

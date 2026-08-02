@@ -52,11 +52,16 @@ logger = logging.getLogger(__name__)
 
 # Which module owns each document type. Drives the grouping in the Approvals Config
 # screen; it is presentation, not routing.
+#
+# WH_ISSUE, not ISSUE: the warehouse module submits every material issue under
+# WH_ISSUE (modules/warehouse/service.py). DocType.ISSUE is the older value and
+# nothing starts a workflow with it, so a ladder saved against ISSUE was written,
+# never read, and the document fell through to the reporting-line fallback.
 MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.INDENT.value: "Indents",
     DocType.ALLOCATION.value: "Inventory",
     DocType.MR.value: "Inventory",
-    DocType.ISSUE.value: "Warehouse",
+    DocType.WH_ISSUE.value: "Warehouse",
     DocType.GRN.value: "Warehouse",
     DocType.PO.value: "Procurement",
 }
@@ -65,7 +70,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
     DocType.INDENT.value: "Indent",
     DocType.ALLOCATION.value: "Stock Allocation",
     DocType.MR.value: "Material Request",
-    DocType.ISSUE.value: "Material Issue",
+    DocType.WH_ISSUE.value: "Material Issue",
     DocType.GRN.value: "Goods Receipt",
     DocType.PO.value: "Purchase Order",
 }

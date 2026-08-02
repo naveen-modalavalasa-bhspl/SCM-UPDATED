@@ -7,7 +7,6 @@ import { QRCodeSVG } from "qrcode.react";
 import { AlertCircle, ArrowLeft, CheckCircle2, Package, Lock, PackagePlus, Printer, QrCode, Trash2, Truck, Unlock } from "lucide-react";
 import { Button, Can, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { DispatchFlowNav } from "../components/DispatchFlowNav";
 import { Lookup } from "../components/Lookup";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
@@ -524,7 +523,6 @@ export default function ConsignmentForm() {
 
   return (
     <div>
-      <DispatchFlowNav />
       <PageHeader
         eyebrow="Warehouse"
         title={editing ? `Consignment ${doc?.dispatch_no ?? ""}` : "New consignment"}

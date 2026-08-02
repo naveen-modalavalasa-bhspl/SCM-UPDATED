@@ -6,6 +6,7 @@ import { TrendingDown, Clock, FilePlus2, Info, Trash2, Plus } from "lucide-react
 import {
   Button, Card, ConfirmModal, Field, Input, PageHeader, ResponsiveList, Select,
   StatCard, useAction, type Column,
+  ResponsiveGrid,
 } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import {
@@ -387,11 +388,11 @@ export function StockReplenishmentView() {
         <RulesPanel warehouses={warehouses} />
       ) : (
       <>
-      <div className="mb-4 grid grid-cols-3 gap-3">
+      <ResponsiveGrid cols={3} className="mb-4">
         <StatCard label="Items Below Reorder" value={rows.length} icon={<TrendingDown size={16} />} tone={rows.length ? "text-danger" : "text-muted"} />
         <StatCard label="Critical / High" value={kpis.critical} tone={kpis.critical ? "text-danger" : "text-muted"} />
         <StatCard label="Lead Time > 14 days" value={kpis.longLead} icon={<Clock size={16} />} />
-      </div>
+      </ResponsiveGrid>
 
       <FilterBar
         search={search}

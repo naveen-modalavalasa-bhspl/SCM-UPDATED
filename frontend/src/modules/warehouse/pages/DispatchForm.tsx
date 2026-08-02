@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { DispatchFlowNav } from "../components/DispatchFlowNav";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, toTimeline } from "../components/Timeline";
@@ -149,8 +148,7 @@ export default function DispatchForm() {
   if (!editing) {
     return (
       <div>
-        <DispatchFlowNav />
-        <PageHeader
+          <PageHeader
           eyebrow="Warehouse"
           title="Confirm dispatch"
           actions={
@@ -202,7 +200,6 @@ export default function DispatchForm() {
 
   return (
     <div>
-      <DispatchFlowNav />
       <PageHeader
         eyebrow="Warehouse"
         title={`Dispatch ${doc.dispatch_no}`}

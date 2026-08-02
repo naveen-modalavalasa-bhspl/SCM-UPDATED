@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { ArrowDownLeft, ArrowUpRight, FileSpreadsheet } from "lucide-react";
-import { Button, Card, PageHeader, ResponsiveList, StatCard, type Column } from "@/shared/components";
+import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { getStockLedger, getWarehouses } from "../api";
@@ -176,11 +176,11 @@ export function StockLedgerView() {
         }
       />
 
-      <div className="mb-4 grid grid-cols-3 gap-3">
+      <ResponsiveGrid cols={3} className="mb-4">
         <StatCard label="Movements" value={rows.length} />
         <StatCard label="Total In" value={`+${totals.inQty.toLocaleString("en-IN")}`} icon={<ArrowDownLeft size={16} />} tone="text-success" />
         <StatCard label="Total Out" value={`−${totals.outQty.toLocaleString("en-IN")}`} icon={<ArrowUpRight size={16} />} tone="text-danger" />
-      </div>
+      </ResponsiveGrid>
 
       <FilterBar
         search={search}

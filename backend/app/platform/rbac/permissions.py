@@ -24,6 +24,10 @@ INDENT_DELETE = "indent.delete"
 INDENT_SUBMIT = "indent.submit"
 INDENT_APPROVE = "indent.approve"
 INDENT_REJECT = "indent.reject"
+# Confirming the goods physically arrived. Held by requesters, not approvers — the
+# service also checks the actor raised the indent, because this is the one step nobody
+# else can perform on their behalf.
+INDENT_ACKNOWLEDGE = "indent.acknowledge"
 
 # --- Purchase Orders ---
 PO_VIEW = "po.view"
@@ -123,6 +127,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(INDENT_SUBMIT, "indents", "indent", "submit", "Submit indents for approval"),
     Perm(INDENT_APPROVE, "indents", "indent", "approve", "Approve indents"),
     Perm(INDENT_REJECT, "indents", "indent", "reject", "Reject indents"),
+    Perm(INDENT_ACKNOWLEDGE, "indents", "indent", "acknowledge",
+         "Acknowledge receipt of indent goods"),
     Perm(PO_VIEW, "procurement", "po", "view", "View purchase orders"),
     Perm(PO_CREATE, "procurement", "po", "create", "Create purchase orders"),
     Perm(PO_EDIT, "procurement", "po", "edit", "Edit purchase orders"),
