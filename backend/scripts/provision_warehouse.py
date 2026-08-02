@@ -38,15 +38,18 @@ PAGES = [
     ("wh_putaway", "/warehouse/putaway", "Put-away", "package", P.PUTAWAY_VIEW, 45),
     ("wh_picklist", "/warehouse/picklist", "Picklists", "list-checks", P.PICKING_VIEW, 46),
     ("wh_issues", "/warehouse/material-issues", "Material Issues", "send", P.ISSUE_VIEW, 47),
-    ("wh_dispatch", "/warehouse/dispatch", "Dispatch", "truck", P.DISPATCH_VIEW, 48),
+    # Packing sits between the issue and the vehicle, so it lists before Dispatch.
+    ("wh_consignments", "/warehouse/dispatch/consignments", "Consignments", "boxes",
+     P.DISPATCH_VIEW, 48),
+    ("wh_dispatch", "/warehouse/dispatch", "Dispatch", "truck", P.DISPATCH_VIEW, 49),
     ("wh_returns", "/warehouse/purchase-returns", "Purchase Returns", "rotate-ccw",
-     P.RETURN_VIEW, 49),
+     P.RETURN_VIEW, 50),
     ("wh_notifications", "/warehouse/notifications", "Notifications", "bell",
-     P.STOCK_VIEW, 50),
+     P.STOCK_VIEW, 51),
     ("wh_reports", "/warehouse/reports", "Reports", "bar-chart",
-     P.WAREHOUSE_REPORT_VIEW, 51),
+     P.WAREHOUSE_REPORT_VIEW, 52),
     ("wh_masters", "/warehouse/masters", "Warehouse Masters", "settings",
-     P.MASTER_LOCATION_MANAGE, 52),
+     P.MASTER_LOCATION_MANAGE, 53),
 ]
 
 GROUP = ("grp_warehouse", "/warehouse", "Warehouse", "truck", P.STOCK_VIEW, 40)

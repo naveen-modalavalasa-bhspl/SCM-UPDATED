@@ -121,6 +121,15 @@ export function WarehouseModule() {
       <Route path="stock-movements" element={<StockMovements />} />
       <Route path="stock-movements/new" element={<StockMovementForm />} />
 
+      {/* The RBAC menu still points at /warehouse/picklist; without these the link
+       * hit the catch-all below and bounced to the dashboard. */}
+      <Route path="fulfilment" element={<Picklist />} />
+      <Route path="fulfilment/new" element={<PicklistForm />} />
+      <Route path="fulfilment/:id" element={<PicklistForm />} />
+      <Route path="picklist" element={<Picklist />} />
+      <Route path="picklist/new" element={<PicklistForm />} />
+      <Route path="picklist/:id" element={<PicklistForm />} />
+
       <Route path="purchase-returns" element={<PurchaseReturns />} />
       <Route path="purchase-returns/new" element={<PurchaseReturnForm />} />
       <Route path="purchase-returns/:id" element={<PurchaseReturnForm />} />
