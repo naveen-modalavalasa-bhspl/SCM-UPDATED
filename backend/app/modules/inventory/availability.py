@@ -52,14 +52,13 @@ async def candidate_stock(db: AsyncSession, item_id: int,
     Locked FOR UPDATE: two indents approved at the same moment must not both read the
     same availability and both believe they can have it.
     """
+    # project_id is deliberately NOT filtered on. Stock is one shared pool: if a
+    # project is sitting on masks it is not using, another project draws them
+    # instead of buying more and letting the first lot expire. The column stays on
+    # stk_balance and stk_ledger as the record of which project the goods were
+    # received for — history, not a fence. The parameter is kept so callers reading
+    # like "availability for project N" still compile.
     stmt = select(Stock).where(Stock.item_id == item_id, Stock.available_qty > 0)
-    if project_id is not None:
-        # A project draws on its own earmarked stock AND the general pool. Matching the
-        # project alone hid every unearmarked row: live stock sits at NO_PROJECT, so a
-        # project's indent saw "0 available" with a full shelf behind it, and the
-        # allocation screen had no warehouse to offer. Stock earmarked for ANOTHER
-        # project is still excluded, which is the whole point of the dimension.
-        stmt = stmt.where(Stock.project_id.in_({project_id, NO_PROJECT}))
     if warehouse_ids:
         # An allocator picked these warehouses explicitly. That choice wins over any
         # type filter a rule suggested — a person looked at the shelf and decided.

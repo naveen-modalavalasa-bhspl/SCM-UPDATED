@@ -1,0 +1,157 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\SUBRAMANYAM\\Downloads\\scm-erp\\backend\\app']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [31432] using WatchFiles
+INFO:     Started server process [50052]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+(trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+ERROR:    Traceback (most recent call last):
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 637, in run_until_complete
+    self.run_forever()
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 604, in run_forever
+    self._run_once()
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1873, in _run_once
+    event_list = self._selector.select(timeout)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\selectors.py", line 323, in select
+    r, w, _ = self._select(self._readers, self._writers, [], timeout)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\selectors.py", line 314, in _select
+    r, w, x = select.select(r, w, w, timeout)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+OSError: [WinError 10055] An operation on a socket could not be performed because the system lacked sufficient buffer space or because a queue was full
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  [Previous line repeated 14 more times]
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\app\main.py", line 34, in lifespan
+    yield
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  [Previous line repeated 6 more times]
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  [Previous line repeated 1 more time]
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  [Previous line repeated 1 more time]
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  [Previous line repeated 2 more times]
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\contextlib.py", line 222, in __aexit__
+    await self.gen.athrow(typ, value, traceback)
+  [Previous line repeated 2 more times]
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\fastapi\routing.py", line 136, in merged_lifespan
+    yield None  # old ASGI compatibility
+    ^^^^^^^^^^
+  [Previous line repeated 3 more times]
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\starlette\routing.py", line 700, in lifespan
+    await receive()
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\uvicorn\lifespan\on.py", line 137, in receive
+    return await self.receive_queue.get()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\queues.py", line 158, in get
+    await getter
+asyncio.exceptions.CancelledError
+
+Process SpawnProcess-1:
+Traceback (most recent call last):
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\multiprocessing\process.py", line 314, in _bootstrap
+    self.run()
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\multiprocessing\process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\uvicorn\_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "C:\Users\SUBRAMANYAM\Downloads\scm-erp\backend\.venv\Lib\site-packages\uvicorn\server.py", line 66, in run
+    return asyncio.run(self.serve(sockets=sockets))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 637, in run_until_complete
+    self.run_forever()
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 604, in run_forever
+    self._run_once()
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1873, in _run_once
+    event_list = self._selector.select(timeout)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\selectors.py", line 323, in select
+    r, w, _ = self._select(self._readers, self._writers, [], timeout)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\SUBRAMANYAM\AppData\Local\Programs\Python\Python311\Lib\selectors.py", line 314, in _select
+    r, w, x = select.select(r, w, w, timeout)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+OSError: [WinError 10055] An operation on a socket could not be performed because the system lacked sufficient buffer space or because a queue was full

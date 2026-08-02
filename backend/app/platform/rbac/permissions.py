@@ -41,6 +41,9 @@ GRN_QC = "grn.qc"
 
 # --- Stock ---
 STOCK_VIEW = "stock.view"
+# Stock is normally scoped to the login's own office. Inventory runs the whole
+# network — they choose which warehouse fills an indent — so they see every one.
+STOCK_VIEW_ALL = "stock.view.all"
 STOCK_ADJUST = "stock.adjust"
 STOCK_RESERVE = "stock.reserve"
 # Valuation exposes purchase cost, so it is separate from plain stock visibility.
@@ -132,6 +135,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(GRN_QC, "logistics", "grn", "qc", "QC pass/fail a GRN"),
     # module is "inventory": stk_* moved there when Inventory became the base module.
     Perm(STOCK_VIEW, "inventory", "stock", "view", "View stock"),
+    Perm(STOCK_VIEW_ALL, "inventory", "stock", "view_all",
+         "View stock in every warehouse, not just your own office"),
     Perm(STOCK_ADJUST, "inventory", "stock", "adjust", "Adjust stock"),
     Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
     Perm(STOCK_VALUATION_VIEW, "inventory", "stock_valuation", "view",

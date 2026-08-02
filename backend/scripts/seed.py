@@ -68,6 +68,7 @@ ROLE_PERMS = {
     # that cost money — approving a dispatch and approving a purchase return — stay
     # off this list; those belong to a role that sits above the store.
     RoleCode.STORE.value: [P.GRN_VIEW, P.GRN_CREATE, P.GRN_QC, P.STOCK_VIEW,
+                           P.STOCK_VIEW_ALL,
                            P.STOCK_ADJUST, P.STOCK_RESERVE, P.STOCK_TRANSFER,
                            P.ISSUE_VIEW, P.ISSUE_CREATE, P.ISSUE_ISSUE,
                            P.MASTER_LOCATION_MANAGE,

@@ -77,6 +77,10 @@ async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     )
     if perms.ADMIN_SETTINGS_MANAGE in user_permissions:
         return None
+    # Inventory decides which warehouse fills an indent, so it needs the whole
+    # network, not the one office the login sits in.
+    if perms.STOCK_VIEW_ALL in user_permissions:
+        return None
 
     office_id = getattr(user, "office_id", None)
     conditions = [Warehouse.incharge_id == user.id]
