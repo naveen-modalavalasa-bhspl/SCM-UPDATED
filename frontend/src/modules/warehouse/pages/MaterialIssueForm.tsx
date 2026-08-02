@@ -81,6 +81,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   >(null);
   const [reason, setReason] = useState("");
   const [serialLine, setSerialLine] = useState<number | null>(null);
+  const [destination, setDestination] = useState("");
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-issue", id],
@@ -96,6 +97,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
 
   useEffect(() => {
     if (!doc) return;
+    setDestination(doc.destination_office_name ?? "");
     setForm({
       issue_type: doc.issue_type,
       issue_date: doc.issue_date,
@@ -208,6 +210,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const pullIndent = useMutation({
     mutationFn: (indentId: number) => getIndentIssueSource(indentId, form.warehouse_id),
     onSuccess: (source) => {
+      setDestination(source.destination_office_name ?? "");
       setForm((current) => ({
         ...current,
         indent_id: source.indent_id,
@@ -504,7 +507,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 <Button onClick={() => setConfirming("post")}>Issue from stock</Button>
               </Can>
             )}
-            {editing && doc?.status === "ISSUED" && (
+            {editing && ["ISSUED", "DISPATCHED"].includes(doc?.status ?? "") && (
               <Can do="issue.view">
                 <Button variant="subtle" onClick={() => setConfirming("ack")}>Acknowledge</Button>
               </Can>
@@ -558,10 +561,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                     load={(search) => indentOptions(search, form.warehouse_id || undefined)}
                     value={form.indent_id ?? ""} isDisabled={locked || !form.warehouse_id}
                     onChange={(v) => {
-                      const indentId = v === "" ? null : v;
-                      set("indent_id", indentId);
-                      if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
-                    }} placeholder={form.warehouse_id ? "Indent" : "Pick warehouse first"} />
+                const indentId = v === "" ? null : v;
+                set("indent_id", indentId);
+                if (!indentId) setDestination("");
+                if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
+              }} placeholder={form.warehouse_id ? "Indent" : "Pick warehouse first"} />
           </Field>
           <Field label="Department">
             <Lookup name="departments" load={departmentOptions} value={form.department_id ?? ""}
@@ -575,6 +579,9 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           <Field label="Issued to">
             <Lookup name="employees" load={employeeOptions} value={form.issued_to_id ?? ""} isDisabled={locked}
                     onChange={(v) => set("issued_to_id", v === "" ? null : v)} placeholder="Person" />
+          </Field>
+          <Field label="Destination" hint="Office of the issued-to employee from the selected indent.">
+            <Input value={destination || "—"} disabled />
           </Field>
         </div>
       </Section>

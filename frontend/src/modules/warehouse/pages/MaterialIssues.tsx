@@ -24,6 +24,7 @@ const STATUSES = [
   { value: "APPROVED", label: "Approved" },
   { value: "REJECTED", label: "Rejected" },
   { value: "ISSUED", label: "Issued" },
+  { value: "DISPATCHED", label: "Dispatched" },
   { value: "ACKNOWLEDGED", label: "Acknowledged" },
   { value: "CANCELLED", label: "Cancelled" },
 ];
@@ -123,7 +124,7 @@ export default function MaterialIssues({
         { label: "Qty issued", value: fmtQty(rows.filter((r) => r.is_stock_posted).reduce((s, r) => s + Number(r.total_qty ?? 0), 0)) },
         {
           label: "Awaiting acknowledgement",
-          value: rows.filter((r) => r.status === "ISSUED").length,
+          value: rows.filter((r) => ["ISSUED", "DISPATCHED"].includes(r.status)).length,
         },
       ]}
       renderCard={(r) => (

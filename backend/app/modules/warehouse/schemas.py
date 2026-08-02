@@ -647,6 +647,8 @@ class IssueRead(_Read):
     vehicle_number: str | None = None
     issued_to_id: int | None = None
     issued_to_name: str | None = None
+    destination_office_id: int | None = None
+    destination_office_name: str | None = None
     direction: str
     original_issue_id: int | None = None
     original_issue_no: str | None = None
@@ -717,7 +719,9 @@ class DispatchWrite(BaseModel):
 
 
 class PackageWrite(BaseModel):
+    package_no: str | None = Field(default=None, max_length=50)
     package_type: str | None = None
+    barcode: str | None = Field(default=None, max_length=100)
     weight_kg: Decimal | None = None
     length_cm: Decimal | None = None
     width_cm: Decimal | None = None
@@ -725,6 +729,59 @@ class PackageWrite(BaseModel):
     is_fragile: bool = False
     is_temp_controlled: bool = False
     item_ids: list[int] = []
+
+
+class ConsignmentPackageItemWrite(BaseModel):
+    indent_id: int | None = None
+    item_id: int
+    batch_id: int | None = None
+    serial_no: str | None = None
+    serial_numbers: list[str] = []
+    quantity: Decimal
+    rate: Decimal | None = None
+    remarks: str | None = None
+
+
+class ConsignmentPackageWrite(BaseModel):
+    package_no: str | None = Field(default=None, max_length=50)
+    package_type: str | None = Field(default="BOX", max_length=30)
+    barcode: str | None = Field(default=None, max_length=100)
+    weight_kg: Decimal | None = None
+    length_cm: Decimal | None = None
+    width_cm: Decimal | None = None
+    height_cm: Decimal | None = None
+    is_fragile: bool = False
+    is_temp_controlled: bool = False
+    items: list[ConsignmentPackageItemWrite] = []
+
+    @field_validator("package_no", "package_type", "barcode", mode="before")
+    @classmethod
+    def blank_to_none(cls, value):
+        return None if value == "" else value
+
+
+class ConsignmentWrite(BaseModel):
+    issue_id: int
+    dispatch_type: DispatchType = DispatchType.TRANSFER
+    dispatch_date: date
+    to_warehouse_id: int | None = None
+    customer_id: int | None = None
+    vendor_id: int | None = None
+    project_id: int | None = None
+    delivery_address: str | None = None
+    contact_person: str | None = None
+    contact_phone: str | None = None
+    transport_mode: str | None = "ROAD"
+    carrier_id: int | None = None
+    vehicle_id: int | None = None
+    driver_name: str | None = None
+    driver_phone: str | None = None
+    lr_no: str | None = None
+    eway_bill_no: str | None = None
+    freight_amount: Decimal | None = None
+    expected_delivery: date | None = None
+    remarks: str | None = None
+    packages: list[ConsignmentPackageWrite] = []
 
 
 class DispatchEventWrite(BaseModel):
@@ -818,6 +875,8 @@ class DispatchRead(_Read):
     vendor_name: str | None = None
     project_id: int | None = None
     project_name: str | None = None
+    destination_office_id: int | None = None
+    destination_office_name: str | None = None
     delivery_address: str | None = None
     contact_person: str | None = None
     contact_phone: str | None = None
@@ -1033,6 +1092,8 @@ class IndentIssueSource(BaseModel):
     department_id: int | None = None
     project_id: int | None = None
     issued_to_id: int | None = None
+    destination_office_id: int | None = None
+    destination_office_name: str | None = None
     items: list[IssueItemWrite] = []
 
 
@@ -1045,12 +1106,23 @@ class PickingIssueSource(BaseModel):
     items: list[IssueItemWrite] = []
 
 
+class IssueDispatchSourceItem(DispatchItemWrite):
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    is_serial_tracked: bool = False
+    serial_numbers: list[str] = []
+
+
 class IssueDispatchSource(BaseModel):
     issue_id: int
     issue_no: str
     warehouse_id: int
     project_id: int | None = None
-    items: list[DispatchItemWrite] = []
+    destination_office_id: int | None = None
+    destination_office_name: str | None = None
+    items: list[IssueDispatchSourceItem] = []
 
 
 class ReasonIn(BaseModel):

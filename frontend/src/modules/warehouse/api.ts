@@ -8,9 +8,11 @@ import type {
   Dispatch,
   DispatchEventWrite,
   DispatchWrite,
+  ConsignmentWrite,
   Inspection,
   InspectionWrite,
   Issue,
+  IssueDispatchSource,
   IssueWrite,
   ItemOption,
   ListParams,
@@ -253,6 +255,17 @@ export const listDispatches = (params: ListParams = {}) =>
 
 export const getDispatch = (id: number) => get<Dispatch>(`${BASE}/dispatches/${id}`);
 
+export const listConsignments = (params: ListParams = {}) =>
+  get<Page<Dispatch>>(`${BASE}/consignments`, params);
+
+export const getConsignment = (id: number) => get<Dispatch>(`${BASE}/consignments/${id}`);
+
+export const createConsignment = (body: ConsignmentWrite) =>
+  post<Dispatch>(`${BASE}/consignments`, body);
+
+export const updateConsignment = (id: number, body: ConsignmentWrite) =>
+  put<Dispatch>(`${BASE}/consignments/${id}`, body);
+
 export const createDispatch = (body: DispatchWrite) => post<Dispatch>(`${BASE}/dispatches`, body);
 
 export const updateDispatch = (id: number, body: DispatchWrite) =>
@@ -430,6 +443,8 @@ export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
     department_id?: number | null;
     project_id?: number | null;
     issued_to_id?: number | null;
+    destination_office_id?: number | null;
+    destination_office_name?: string | null;
     items: IssueWrite["items"];
   }>(`${BASE}/options/indent-issue-source`, { indent_id, warehouse_id });
 
@@ -450,13 +465,7 @@ export const returnableIssueOptions = (search?: string) =>
   get<Option[]>(`${BASE}/options/returnable-issues`, { search });
 
 export const getIssueDispatchSource = (issue_id: number) =>
-  get<{
-    issue_id: number;
-    issue_no: string;
-    warehouse_id: number;
-    project_id?: number | null;
-    items: DispatchWrite["items"];
-  }>(`${BASE}/options/issue-dispatch-source`, { issue_id });
+  get<IssueDispatchSource>(`${BASE}/options/issue-dispatch-source`, { issue_id });
 
 export const employeeOptions = (search?: string) => get<Option[]>(`${BASE}/options/employees`, { search });
 

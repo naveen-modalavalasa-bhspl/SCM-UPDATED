@@ -123,11 +123,13 @@ export function SerialNumbersModal({
 
             <div className="mb-3 flex items-center justify-between text-sm">
               <span className="text-muted">
-                {selectMode ? "Tick the units being issued." : "Tick the units you are rejecting."}
+                {selectMode
+                  ? `Select exactly ${required} serial${required === 1 ? "" : "s"} for this package.`
+                  : "Tick the units you are rejecting."}
               </span>
               <span className="font-semibold text-ink">
                 {selectMode ? (
-                  <>{selected.size} selected</>
+                  <>{selected.size} / {required} selected</>
                 ) : (
                   <>{selected.size} accepted · <span className="text-bad">{rejected.length} rejected</span></>
                 )}
@@ -136,7 +138,7 @@ export function SerialNumbersModal({
 
             {(available ?? []).length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">
-                {selectMode ? "No available serials found for this item, batch and bin." : "No serials were captured on the GRN for this line."}
+                {selectMode ? "No unpacked serials are available for this item." : "No serials were captured on the GRN for this line."}
               </div>
             ) : visible.length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">

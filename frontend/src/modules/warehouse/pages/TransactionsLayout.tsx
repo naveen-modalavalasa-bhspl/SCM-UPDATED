@@ -1,5 +1,5 @@
 import { Outlet } from "react-router-dom";
-import { ArrowLeftRight, ClipboardCheck, PackageCheck, PackageOpen, Send, Truck, Undo2 } from "lucide-react";
+import { ArrowLeftRight, ClipboardCheck, PackageCheck, PackageOpen, Send, Boxes, Truck, Undo2 } from "lucide-react";
 import { PageHeader, SubNav } from "@/shared/components";
 
 /**
@@ -19,6 +19,7 @@ const ITEMS = [
   { key: "fulfilment", label: "Material fulfilment", icon: ClipboardCheck },
   { key: "material-issues", label: "Issues", icon: Send },
   { key: "material-returns", label: "Issue returns", icon: Undo2 },
+  { key: "consignments", label: "Consignments", icon: Boxes },
   { key: "dispatch", label: "Dispatch", icon: Truck },
   { key: "purchase-returns", label: "Returns", icon: Undo2 },
 ];
