@@ -7,13 +7,13 @@ import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
-import { Timeline, type TimelineEntry } from "../components/Timeline";
+import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components/Timeline";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   acknowledgeIssue, approveIssue, batchOptions, binOptions, cancelIssue, createIssue, departmentOptions,
   employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
-  itemOptions, listSerials, postIssue, projectOptions, returnableIssueOptions,
-  rejectIssue, submitIssue, updateIssue,
+  issueApprovalHistory, itemOptions, listSerials, postIssue, projectOptions,
+  returnableIssueOptions, rejectIssue, submitIssue, updateIssue,
   warehouseOptions,
 } from "../api";
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
@@ -89,6 +89,13 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-issue", id],
     queryFn: () => getIssue(Number(id)),
+    enabled: editing,
+  });
+
+  // The rungs already passed. Only the engine has them — see issueApprovalHistory.
+  const { data: approvals } = useQuery({
+    queryKey: ["wh-issue-approvals", id],
+    queryFn: () => issueApprovalHistory(Number(id)),
     enabled: editing,
   });
 
@@ -268,20 +275,30 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      qc.invalidateQueries({ queryKey: ["wh-issue-approvals", id] });
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       setConfirming(null);
       setReason("");
     },
   });
 
+  // Raised, then every rung the engine recorded, then where it is waiting now, then
+  // what happened to the stock. The approvals come from wf_actions rather than the
+  // document's own approved_at/approved_by_name: those are written only when the whole
+  // ladder completes, so on a multi-rung ladder they hide every approval but the last.
   const trail: TimelineEntry[] = doc
     ? [
         { id: "created", title: "Raised", at: doc.created_at, by: doc.created_by_name, tone: "done" as const },
-        doc.approved_at
+        ...approvalsToTimeline(approvals),
+        // A document approved without an engine instance behind it — nothing to read
+        // from wf_actions, so fall back to the document's own stamp rather than
+        // showing an approved issue with no approval on it at all.
+        approvals?.length === 0 && doc.approved_at
           ? { id: "approved", title: "Approved", at: doc.approved_at, by: doc.approved_by_name, tone: "done" as const }
-          : doc.status === "PENDING_APPROVAL"
-            ? { id: "pending", title: "Awaiting approval", by: doc.current_approver_name ?? "unassigned" }
-            : null,
+          : null,
+        doc.status === "PENDING_APPROVAL"
+          ? { id: "pending", title: "Awaiting approval", by: doc.current_approver_name ?? "unassigned" }
+          : null,
         doc.posted_at
           ? { id: "issued", title: "Issued from stock", at: doc.posted_at, by: doc.issued_by_name, tone: "done" as const }
           : null,

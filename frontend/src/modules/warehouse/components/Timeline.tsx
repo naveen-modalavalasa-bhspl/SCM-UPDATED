@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { AlertTriangle, Check, Circle } from "lucide-react";
 import { fmtDateTime, humanise } from "../format";
-import type { DispatchEvent } from "../types";
+import type { ApprovalEvent, DispatchEvent } from "../types";
 
 /**
  * The vertical trail used for a dispatch's custody/cold-chain events and for a
@@ -56,6 +56,41 @@ export function Timeline({ entries, empty = "Nothing recorded yet." }: {
       })}
     </ol>
   );
+}
+
+// SUBMITTED is dropped: the "Raised" entry the screens build from the document's own
+// created_at already says it, and showing both reads as two separate events.
+const APPROVAL_VERB: Record<string, string> = {
+  APPROVED: "approved",
+  REJECTED: "rejected",
+  RETURNED: "returned for changes",
+  DELEGATED: "delegated",
+  FALLBACK: "routed by fallback",
+};
+
+/**
+ * Maps the engine's `wf_actions` rows onto the trail.
+ *
+ * Every rung, not just the last one. A document's own `approved_at`/`approved_by_name`
+ * are written when the WHOLE ladder finishes, so on a two-rung ladder the first
+ * approver's decision is recorded here and nowhere else — a panel built from the
+ * document's columns alone silently loses it.
+ */
+export function approvalsToTimeline(events: ApprovalEvent[] = []): TimelineEntry[] {
+  return events
+    .filter((e) => e.action !== "SUBMITTED")
+    .map((e, index) => {
+      const verb = APPROVAL_VERB[e.action] ?? humanise(e.action).toLowerCase();
+      const stage = e.stage_name?.trim();
+      return {
+        id: `wf-${e.stage_sequence}-${index}`,
+        title: stage ? `${stage} ${verb}` : humanise(e.action),
+        at: e.acted_at,
+        by: [e.actor_name, e.actor_position].filter(Boolean).join(" · ") || null,
+        tone: e.action === "REJECTED" ? ("bad" as const) : ("done" as const),
+        detail: e.comments ? <span className="text-muted">{e.comments}</span> : undefined,
+      };
+    });
 }
 
 /** Maps `out_dispatch_events` rows onto the trail. */

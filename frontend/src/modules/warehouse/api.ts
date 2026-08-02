@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
   AcknowledgeWrite,
+  ApprovalEvent,
   Attachment,
   Batch,
   Bin,
@@ -247,6 +248,18 @@ export const acknowledgeIssue = (id: number, remarks?: string) =>
 
 export const cancelIssue = (id: number, reason?: string) =>
   post<Issue>(`${BASE}/issues/${id}/cancel`, { reason });
+
+/**
+ * Every rung the document has already passed, from the engine's own log.
+ *
+ * The one call in this module that leaves `/api/warehouse` — deliberately: approval
+ * history belongs to `platform/workflow`, which owns it for every document type, and
+ * mirroring those rows onto the issue payload would be a second copy of the truth.
+ * `WH_ISSUE` is the doc_type the module submits under (modules/warehouse/service.py).
+ */
+export const issueApprovalHistory = (id: number) =>
+  get<{ items: ApprovalEvent[] }>(`/api/workflow/history/WH_ISSUE/${id}`)
+    .then((r) => r.items);
 
 /* ---------------------------------------------------------------- dispatch -- */
 

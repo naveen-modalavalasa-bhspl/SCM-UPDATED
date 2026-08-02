@@ -550,6 +550,25 @@ export interface Issue {
   items?: IssueItem[];
 }
 
+/**
+ * One `wf_actions` row, as served by `/api/workflow/history/{doc_type}/{doc_id}`.
+ *
+ * A document's own columns only carry the FINAL approval (`approved_at` is written
+ * when the whole ladder completes), so a two-rung ladder's first approval exists
+ * nowhere on the document. The engine records every rung here; a progress panel that
+ * wants to show them has to read this.
+ */
+export interface ApprovalEvent {
+  stage_sequence: number;
+  stage_name?: string | null;
+  actor_id?: number | null;
+  actor_name?: string | null;
+  actor_position?: string | null;
+  action: string;
+  comments?: string | null;
+  acted_at?: string | null;
+}
+
 /** `out_issue_items`. */
 export interface IssueItem {
   id: number;
