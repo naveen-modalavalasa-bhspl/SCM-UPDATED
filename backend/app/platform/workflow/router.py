@@ -5,7 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_permission
 from app.platform.rbac import permissions as perms
-from app.platform.workflow import custom_ladder, engine, ladder_config, service
+from app.platform.workflow import (
+    custom_ladder, engine, ladder, ladder_config, service,
+)
 from app.platform.workflow.schemas import (
     CustomLadderIn, DelegationEndIn, DelegationIn, DelegationOut, LadderCopyIn, LadderIn,
     WorkflowActionIn, WorkflowActionOut, WorkflowIn,
@@ -63,6 +65,8 @@ async def preview_ladder(
     return await ladder_config.preview(
         db, body.project_id, body.doc_type,
         [rung.model_dump() for rung in body.rungs], from_role_id,
+        body.self_approval_policy or ladder.POLICY_INDEPENDENT,
+        body.fallback_position_id,
     )
 
 

@@ -22,7 +22,22 @@ import {
 } from "lucide-react";
 import { Button, Card, Field, PageHeader, Select } from "@/shared/components";
 import { adminApi } from "../api";
-import type { CustomLadderStep, LadderPost } from "../types";
+import type { CustomLadderStep, LadderPost, SelfApprovalPolicy } from "../types";
+
+/** Same two answers the rank ladder offers, worded the same way — an admin flipping
+ *  between the screens should not have to re-read them. */
+const POLICY_CHOICES: { value: SelfApprovalPolicy; label: string; help: string }[] = [
+  {
+    value: "INDEPENDENT",
+    label: "No — somebody else must approve",
+    help: "The person who raised it is skipped on every step.",
+  },
+  {
+    value: "CREATOR_ALLOWED",
+    label: "Yes — they can approve it themselves",
+    help: "They stay on the ladder and the approval lands in their own queue.",
+  },
+];
 
 /** Departments and their posts move only when HCM syncs. */
 const HCM_STALE_MS = 5 * 60 * 1000;
@@ -49,6 +64,10 @@ export function CustomLadderPage() {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  // Ladder-wide. Warehouse's twelve posts are held by the same handful of people, so
+  // whether the person raising a document may also sign it is the setting that decides
+  // whether anything moves at all.
+  const [policy, setPolicy] = useState<SelfApprovalPolicy>("INDEPENDENT");
 
   const options = useQuery({
     queryKey: ["admin", "ladders", "options"],
@@ -85,12 +104,14 @@ export function CustomLadderPage() {
   useEffect(() => {
     if (!saved_ladder.data) return;
     setSteps(saved_ladder.data.steps);
+    setPolicy(saved_ladder.data.self_approval_policy ?? "INDEPENDENT");
     setError(null);
     setSaved(null);
   }, [saved_ladder.data]);
 
   const save = useMutation({
-    mutationFn: () => adminApi.customLadders.save(projectId, docType, steps),
+    mutationFn: () => adminApi.customLadders.save(projectId, docType, steps,
+                                                  { self_approval_policy: policy }),
     onSuccess: (data) => {
       setConfirming(false);
       setSteps(data.steps);
@@ -253,6 +274,39 @@ export function CustomLadderPage() {
             <div className="p-6 text-sm text-muted">
               Nothing ticked yet. Until you save one, this document keeps using the
               rank ladder.
+            </div>
+          )}
+
+          <div className="border-b border-line/50 px-4 py-3">
+            <div className="text-sm font-semibold text-ink">
+              Can the person who raises it also approve it?
+            </div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {POLICY_CHOICES.map((choice) => (
+                <button
+                  key={choice.value}
+                  type="button"
+                  onClick={() => setPolicy(choice.value)}
+                  className={`min-h-11 rounded-xl border px-3 py-2 text-left transition ${
+                    policy === choice.value
+                      ? "border-brand bg-brand-050"
+                      : "border-line/70 hover:border-line"}`}
+                >
+                  <div className="text-sm font-medium text-ink">{choice.label}</div>
+                  <p className="mt-0.5 text-xs text-body">{choice.help}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {(saved_ladder.data?.warnings ?? []).length > 0 && (
+            <div className="border-b border-line/50 bg-warn-050 px-4 py-3">
+              <div className="text-sm font-semibold text-ink">
+                One person, more than one step
+              </div>
+              <ul className="mt-1 space-y-1 text-sm text-body">
+                {saved_ladder.data!.warnings.map((line) => <li key={line}>{line}</li>)}
+              </ul>
             </div>
           )}
           <ul>

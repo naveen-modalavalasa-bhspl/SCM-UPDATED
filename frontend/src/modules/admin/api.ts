@@ -2,7 +2,8 @@ import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
   AppLog, AuditRow, Conflict, CustomLadder, CustomLadderStep, DocSeries, Ladder,
-  LadderDepartment, LadderOptions, LadderPosition, LadderPost, LadderPreview, LadderRank,
+  LadderDepartment, LadderOptions, LadderPolicy, LadderPosition, LadderPost,
+  LadderPreview, LadderRank,
   LadderRung, NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult,
   SyncResult, SyncStatus, WorkflowDefinition, WorkflowOptions,
 } from "./types";
@@ -15,6 +16,13 @@ const rungPayload = (rungs: LadderRung[]) => rungs.map((rung) => ({
   selected_position_ids: rung.selected_position_ids,
   conditions: rung.conditions,
 }));
+
+/** The ladder-wide settings, omitted entirely when the caller has none — the server
+ *  treats a missing policy as "leave it at the default". */
+const policyPayload = (policy?: Partial<LadderPolicy>) => (policy ? {
+  self_approval_policy: policy.self_approval_policy,
+  fallback_position_id: policy.fallback_position_id ?? null,
+} : {});
 
 type ListParams = { search?: string; page?: number; size?: number };
 const page = <T>(url: string, params: Record<string, unknown> = {}) =>
@@ -113,14 +121,17 @@ export const adminApi = {
     // Runs against the toggles currently on screen, saved or not, so the admin sees
     // the outcome of a change before committing to it.
     preview: (projectId: number | null, docType: string, rungs: LadderRung[],
-              fromRoleId: number | null) =>
+              fromRoleId: number | null, policy?: Partial<LadderPolicy>) =>
       api.post<LadderPreview>("/api/workflow/ladders/preview", {
         project_id: projectId, doc_type: docType, rungs: rungPayload(rungs),
+        ...policyPayload(policy),
       }, { params: fromRoleId != null ? { from_role_id: fromRoleId } : {} })
         .then((r) => r.data),
-    save: (projectId: number | null, docType: string, rungs: LadderRung[]) =>
+    save: (projectId: number | null, docType: string, rungs: LadderRung[],
+           policy?: Partial<LadderPolicy>) =>
       api.post<Ladder>("/api/workflow/ladders", {
         project_id: projectId, doc_type: docType, rungs: rungPayload(rungs),
+        ...policyPayload(policy),
       }).then((r) => r.data),
     copy: (fromProjectId: number | null, docType: string, toProjectIds: number[]) =>
       api.post<{ copied_to: number[] }>("/api/workflow/ladders/copy", {
@@ -143,10 +154,12 @@ export const adminApi = {
       api.get<CustomLadder>("/api/workflow/ladders/custom", {
         params: { doc_type: docType, ...(projectId != null ? { project_id: projectId } : {}) },
       }).then((r) => r.data),
-    save: (projectId: number | null, docType: string, steps: CustomLadderStep[]) =>
+    save: (projectId: number | null, docType: string, steps: CustomLadderStep[],
+           policy?: Partial<LadderPolicy>) =>
       api.post<CustomLadder>("/api/workflow/ladders/custom", {
         project_id: projectId, doc_type: docType,
         steps: steps.map((step) => ({ position_id: step.position_id, name: step.name })),
+        ...policyPayload(policy),
       }).then((r) => r.data),
   },
   docSeries: {

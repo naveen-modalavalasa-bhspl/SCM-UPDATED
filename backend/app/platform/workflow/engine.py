@@ -9,6 +9,8 @@ Rules honoured:
 - approval_actions rows are append-only (never deleted).
 Engine functions flush but do not commit — the calling module owns the transaction.
 """
+from types import SimpleNamespace
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -347,6 +349,13 @@ async def _materialize_pending(
 SELF_APPROVED_COMMENT = "Top of the approval ladder — self-approved"
 
 
+def _chain_employees(link: dict) -> list:
+    """Just enough of an employee for fallback.record() to name them in the log."""
+    return [SimpleNamespace(id=employee_id, full_name=name)
+            for employee_id, name in zip(link.get("approver_ids") or [],
+                                         link.get("approver_names") or [])]
+
+
 def _link(instance: Instance) -> dict | None:
     """The chain entry the document is currently sitting on."""
     chain = instance.resolved_chain or []
@@ -390,14 +399,39 @@ async def _finish_ladder(db: AsyncSession, instance: Instance) -> None:
 async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dict,
                         user, project_id: int | None,
                         requester_position_id: int | None) -> Instance:
+    # Who may approve a document this person raised is a property of the ladder, not of
+    # a role or a person, so it is read here and applied to whichever resolution runs.
+    policy, fallback_position_id = await ladder.read_policy(db, stages)
     # A hand-built ladder names its posts outright, so there is nothing to climb — and
     # for Inventory and Warehouse there is nothing above the raiser to reach anyway.
     chain = (
-        await custom_ladder.resolve_fixed_chain(db, stages, user.id)
+        await custom_ladder.resolve_fixed_chain(db, stages, user.id, policy)
         if ladder.is_custom_ladder(wf)
         else await ladder.resolve_chain(
-            db, stages, requester_position_id, user.id, context)
+            db, stages, requester_position_id, user.id, context, policy)
     )
+
+    # Every rung resolved to the raiser himself, and this ladder demands somebody else.
+    # Self-approving here is exactly what the setting forbids, so the document goes to
+    # the post the project nominated — and if none was nominated, to the reporting line
+    # and then the admin safety net. Recorded loudly either way; never silent.
+    independent_fallback = ""
+    if not chain and policy == ladder.POLICY_INDEPENDENT:
+        chain = await ladder.fallback_chain(db, fallback_position_id, user.id)
+        independent_fallback = fallback.REASON_INDEPENDENT_FALLBACK if chain else ""
+        if not chain:
+            approvers, reason = await fallback.resolve(
+                db, user.id, requester_position_id)
+            approvers = [a for a in approvers if a.id != user.id]
+            if approvers:
+                chain = [{
+                    "sequence": 1, "position_id": None,
+                    "position_name": None, "role_id": None,
+                    "role_name": "Independent approver (fallback)",
+                    "approver_ids": [a.id for a in approvers],
+                    "approver_names": [a.full_name for a in approvers],
+                }]
+                independent_fallback = f"{fallback.REASON_INDEPENDENT_FALLBACK}/{reason}"
 
     instance = Instance(
         doc_type=doc_type, doc_id=doc_id, workflow_id=wf.id,
@@ -416,6 +450,10 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
         action=ApprovalAction.SUBMITTED.value,
     ))
     await db.flush()
+
+    if independent_fallback:
+        await fallback.record(db, instance, independent_fallback,
+                              _chain_employees(chain[0]), chain[0]["role_name"])
 
     if not chain:
         # Nobody above the raiser on this ladder: he IS the top. Recorded as a real
@@ -455,8 +493,13 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
 
     # Someone holding two posts must act under the one the ladder picked. A delegate
     # never holds it, so the check applies only to the rung's own holders.
+    # A fallback rung names people, not a post (link["position_id"] is None), so there
+    # is no position to switch to — requiring one would lock the document again, which
+    # is the exact thing the fallback exists to prevent.
     active_position_id = getattr(user, "active_position_id", None)
-    if user.id in link.get("approver_ids", []) and active_position_id != link["position_id"]:
+    if (link.get("position_id") is not None
+            and user.id in link.get("approver_ids", [])
+            and active_position_id != link["position_id"]):
         raise PermissionError_("Switch to the approval position before acting")
 
     active_position = await hcm_service.get_position(

@@ -115,7 +115,8 @@ async def competing_demand(db: AsyncSession, item_id: int,
 # ---------------- the decision ----------------
 
 async def create(db: AsyncSession, indent_id: int, indent_no: str,
-                 decisions: list[dict], user, ctx: dict | None = None) -> Allocation:
+                 decisions: list[dict], user, ctx: dict | None = None,
+                 on_approved=None) -> Allocation:
     """Record what a person decided to give, and send it for approval.
 
     `decisions` is one entry per (indent line, warehouse) chosen: indent_item_id,
@@ -164,7 +165,7 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
         ))
     await db.flush()
 
-    await engine.start(
+    instance = await engine.start(
         db, doc_type=DocType.ALLOCATION.value, doc_id=alloc.id,
         context={
             "doc_no": alloc.allocation_no,
@@ -177,8 +178,20 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
         },
         user=user,
     )
-    alloc.status = AllocationStatus.PENDING_APPROVAL.value
-    await _refresh_approver(db, alloc)
+    # The ladder can finish at submit — the raiser is the top of it, or the only rung
+    # resolves to him and the policy lets him approve. Setting PENDING_APPROVAL anyway
+    # left the document and its workflow disagreeing: Allocation Approvals showed
+    # nothing (there is no pending row), the Fulfilment Queue hid the indent (it sees
+    # PENDING_APPROVAL), and nothing was ever reserved. The engine owns the approval,
+    # the module owns the status — so the status follows what the engine actually did.
+    if instance.status == InstanceStatus.APPROVED.value:
+        # The lines were only just added; loading them lazily inside apply_to_stock
+        # would be a blocking IO call on the async session.
+        await db.refresh(alloc, ["items"])
+        await _settle_approved(db, alloc, user, ctx, on_approved)
+    else:
+        alloc.status = AllocationStatus.PENDING_APPROVAL.value
+        await _refresh_approver(db, alloc)
 
     await write_audit(
         db, entity="inv_allocations", entity_id=alloc.id,
@@ -190,6 +203,37 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
     await db.commit()
     await db.refresh(alloc)
     return alloc
+
+
+async def _settle_approved(db: AsyncSession, alloc: Allocation, user,
+                           ctx: dict | None, on_approved=None) -> None:
+    """Everything approval means: status, reservations, the downstream handoff.
+
+    Shared by create() and act() on purpose. The engine can approve at either moment —
+    at submit when the ladder resolves to nobody but the raiser, or later when a real
+    approver acts — and the document must end up in exactly the same state both times.
+    """
+    alloc.status = AllocationStatus.APPROVED.value
+    alloc.approved_at = utcnow()
+    alloc.current_approver_name = None
+    implied_indent_status = await apply_to_stock(db, alloc, user, ctx)
+    if on_approved is not None:
+        # The owning business module supplies its downstream handoff. Keeping the
+        # callback inside this transaction means approval, reservations and the
+        # generated warehouse drafts succeed or roll back together.
+        await on_approved(db, alloc, user)
+    await rules.safe_fire(
+        db,
+        "ALLOCATION_APPROVED",
+        {
+            "allocation_id": alloc.id,
+            "indent_id": alloc.indent_id,
+            "given_qty": float(sum(_d(line.quantity) for line in alloc.items)),
+            "status": implied_indent_status,
+        },
+        doc_type=DocType.ALLOCATION.value,
+        doc_id=alloc.id,
+    )
 
 
 async def _refresh_approver(db: AsyncSession, alloc: Allocation) -> None:
@@ -239,27 +283,7 @@ async def act(db: AsyncSession, allocation_id: int, action: str, user,
     )
 
     if instance.status == InstanceStatus.APPROVED.value:
-        alloc.status = AllocationStatus.APPROVED.value
-        alloc.approved_at = utcnow()
-        alloc.current_approver_name = None
-        implied_indent_status = await apply_to_stock(db, alloc, user, ctx)
-        if on_approved is not None:
-            # The owning business module supplies its downstream handoff. Keeping the
-            # callback inside this transaction means approval, reservations and the
-            # generated warehouse drafts succeed or roll back together.
-            await on_approved(db, alloc, user)
-        await rules.safe_fire(
-            db,
-            "ALLOCATION_APPROVED",
-            {
-                "allocation_id": alloc.id,
-                "indent_id": alloc.indent_id,
-                "given_qty": float(sum(_d(line.quantity) for line in alloc.items)),
-                "status": implied_indent_status,
-            },
-            doc_type=DocType.ALLOCATION.value,
-            doc_id=alloc.id,
-        )
+        await _settle_approved(db, alloc, user, ctx, on_approved)
     elif instance.status == InstanceStatus.REJECTED.value:
         alloc.status = AllocationStatus.REJECTED.value
         alloc.current_approver_name = None

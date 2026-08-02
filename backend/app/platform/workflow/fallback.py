@@ -45,6 +45,9 @@ REASON_ADMIN = "ADMIN_SAFETY_NET"
 # Every floor gave way: no configured approver, no reporting line, no admin. The
 # document is left stuck rather than failing the caller -- see engine._materialize_pending.
 REASON_NO_APPROVER = "NO_APPROVER_STUCK"
+# The ladder demands an approver other than the raiser, and every rung resolved to the
+# raiser himself. Routed to the post the project nominated, or to the reporting line.
+REASON_INDEPENDENT_FALLBACK = "INDEPENDENT_APPROVER_REQUIRED"
 
 
 async def ladder_approvers(db: AsyncSession, requester_id: int | None,

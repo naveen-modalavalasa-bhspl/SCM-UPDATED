@@ -265,7 +265,27 @@ export interface LadderRung {
   conditions: WorkflowCondition[];
 }
 
-export interface Ladder {
+/** Who may approve a document raised by someone who is also ON this ladder.
+ *
+ *  INDEPENDENT — the raiser is dropped from every rung; somebody else has to sign.
+ *  CREATOR_ALLOWED — the raiser stays on the ladder and gets the approval task, which
+ *  is what Inventory and Warehouse need: the same handful of people hold every post
+ *  there, so dropping the raiser emptied the whole ladder and nothing moved. */
+export type SelfApprovalPolicy = "INDEPENDENT" | "CREATOR_ALLOWED";
+
+/** Both ladder kinds carry the same policy — it belongs to the ladder, not to a role
+ *  or a person, so each project decides for itself. */
+export interface LadderPolicy {
+  self_approval_policy: SelfApprovalPolicy;
+  /** Where an INDEPENDENT ladder sends a document when every rung resolved to the
+   *  raiser himself. A POST, so it survives the person in the chair changing. */
+  fallback_position_id: number | null;
+  /** One line per person who fills more than one switched-on rung; they collapse to a
+   *  single approver at submit, so a "two-step" ladder would only ever be one step. */
+  warnings: string[];
+}
+
+export interface Ladder extends LadderPolicy {
   workflow_id: number | null;
   version: number;
   project_id: number | null;
@@ -315,7 +335,7 @@ export interface CustomLadderStep {
   is_dead?: boolean;
 }
 
-export interface CustomLadder {
+export interface CustomLadder extends LadderPolicy {
   workflow_id: number | null;
   version: number;
   project_id: number | null;
@@ -329,5 +349,8 @@ export interface LadderPreview {
   from: { position_id: number; position_name: string } | null;
   chain: { role_name: string; position_name: string; approver_names: string[] }[];
   self_approved?: boolean;
+  /** The climb reached only the raiser, so the ladder's nominated fallback post is
+   *  where this really goes. */
+  used_fallback?: boolean;
   note?: string;
 }

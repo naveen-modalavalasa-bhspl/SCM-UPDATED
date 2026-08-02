@@ -2273,8 +2273,14 @@ async def _build_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
         picking.items.append(m.PickingItem(
             line_no=index, item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=item.uom_code,
-            bin_id=line.bin_id, bin_code=await _bin_code(db, line.bin_id),
-            batch_id=line.batch_id, batch_no=batch.batch_no if batch else None,
+            # The sentinel, not NULL. out_picking_items.bin_id and .batch_id are
+            # NOT NULL DEFAULT 0 in the live schema even though the model says
+            # nullable, so an unbinned/unbatched line has to be written as 0 the way
+            # every other whs_ table already does.
+            bin_id=line.bin_id or m.NO_BIN,
+            bin_code=await _bin_code(db, line.bin_id),
+            batch_id=line.batch_id or m.NO_BATCH,
+            batch_no=batch.batch_no if batch else None,
             required_qty=required, picked_qty=ZERO,
             status=PickLineStatus.PENDING.value,
         ))

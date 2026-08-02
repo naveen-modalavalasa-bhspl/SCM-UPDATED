@@ -32,7 +32,7 @@ from app.core.exceptions import ValidationError
 from app.platform.hcm.models import HcmDepartment, HcmEmployee, HcmPosition
 from app.platform.settings.service import write_audit
 from app.platform.workflow import ladder
-from app.platform.workflow.models import Instance, Stage, Workflow
+from app.platform.workflow.models import Instance, Stage, StageCondition, Workflow
 from app.shared.enums import ApprovalMode, ApproverType, AuditAction, InstanceStatus
 from app.shared.models.base import utcnow
 
@@ -110,7 +110,9 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
     wf = await _active_custom(db, project_id, doc_type)
     if wf is None:
         return {"workflow_id": None, "version": 0, "project_id": project_id,
-                "doc_type": doc_type, "is_new": True, "steps": [], "in_flight": 0}
+                "doc_type": doc_type, "is_new": True, "steps": [], "in_flight": 0,
+                "self_approval_policy": ladder.POLICY_INDEPENDENT,
+                "fallback_position_id": None, "warnings": []}
 
     rows = list((await db.execute(
         select(Stage).where(Stage.workflow_id == wf.id).order_by(Stage.sequence)
@@ -123,9 +125,25 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
             Instance.status == InstanceStatus.IN_PROGRESS.value,
         )
     )).scalar() or 0
+    policy, fallback_position_id = await ladder.read_policy(db, rows)
+    # Two ticked posts filled by one person are one approver: the chain collapses them
+    # at submit, so the admin is told before they build a step that never happens.
+    warnings: list[str] = []
+    by_employee: dict[int, tuple[str, list[str]]] = {}
+    for row in rows:
+        for holder in holders_of.get(row.position_id, []):
+            entry = by_employee.setdefault(holder.id, (holder.full_name, []))
+            entry[1].append(row.name or str(row.position_id))
+    warnings = [f"{name} fills {len(posts)} of these steps ({', '.join(posts)}) — "
+                f"they count as ONE approver."
+                for name, posts in by_employee.values() if len(posts) > 1]
+
     return {
         "workflow_id": wf.id, "version": wf.version, "project_id": project_id,
         "doc_type": doc_type, "is_new": False, "in_flight": in_flight,
+        "self_approval_policy": policy,
+        "fallback_position_id": fallback_position_id,
+        "warnings": warnings,
         "steps": [{
             "sequence": row.sequence,
             "position_id": row.position_id,
@@ -154,12 +172,17 @@ async def _active_custom(db: AsyncSession, project_id: int | None,
 # ---------------- resolution (no climbing) ----------------
 
 async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
-                              requester_id: int | None) -> list[dict]:
+                              requester_id: int | None,
+                              policy: str = ladder.POLICY_INDEPENDENT) -> list[dict]:
     """The ticked posts, in order, skipping the ones nobody fills.
 
     Same shape as ladder.resolve_chain so the engine's ladder path needs no other
-    change. The raiser is dropped from a rung's holders: nobody approves their own.
+    change. Under INDEPENDENT the raiser is dropped from a rung's holders — nobody
+    approves their own. Under CREATOR_ALLOWED he stays and receives the task, which is
+    what Inventory and Warehouse need: the same dozen people hold every post there, so
+    dropping the raiser routinely emptied the whole ladder.
     """
+    exclude_id = None if policy == ladder.POLICY_CREATOR_ALLOWED else requester_id
     chain: list[dict] = []
     for stage in sorted(stages, key=lambda s: s.sequence):
         if not stage.is_enabled or stage.position_id is None:
@@ -167,7 +190,7 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
         position = await db.get(HcmPosition, stage.position_id)
         if position is None or not position.is_active:
             continue
-        holders = await ladder._position_holders(db, position.id, requester_id)
+        holders = await ladder._position_holders(db, position.id, exclude_id)
         if not holders:
             continue
         chain.append({
@@ -181,7 +204,8 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
             "approver_ids": [h.id for h in holders],
             "approver_names": [h.full_name for h in holders],
         })
-    return chain
+    # Two ticked posts held by one person are one approver, not two.
+    return ladder.dedupe_chain(chain)
 
 
 # ---------------- saving ----------------
@@ -242,8 +266,12 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
     db.add(wf)
     await db.flush()
 
+    policy = (data.self_approval_policy
+              if data.self_approval_policy in ladder.POLICIES
+              else ladder.POLICY_INDEPENDENT)
+
     for index, step in enumerate(data.steps):
-        db.add(Stage(
+        stage = Stage(
             workflow_id=wf.id,
             sequence=index + 1,
             name=step.name,
@@ -253,7 +281,20 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
             position_id=step.position_id,
             is_enabled=True,
             approval_mode=ApprovalMode.ANY_ONE.value,
-        ))
+        )
+        db.add(stage)
+        if index == 0:
+            # The policy belongs to the ladder, so it is written once on its first step.
+            await db.flush()
+            db.add(StageCondition(
+                stage_id=stage.id, field_name=ladder.POLICY_FIELD,
+                operator="EQ", field_value=policy, logic="AND"))
+            if data.fallback_position_id:
+                db.add(StageCondition(
+                    stage_id=stage.id,
+                    field_name=ladder.FALLBACK_POSITION_FIELD,
+                    operator="EQ", field_value=str(data.fallback_position_id),
+                    logic="AND"))
     await db.flush()
 
     await write_audit(

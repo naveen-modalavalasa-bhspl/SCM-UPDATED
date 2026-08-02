@@ -85,7 +85,21 @@ class LadderRungIn(BaseModel):
     conditions: list[WorkflowConditionIn] = Field(default_factory=list)
 
 
-class LadderIn(BaseModel):
+class LadderPolicyMixin(BaseModel):
+    """Who may approve a document raised by someone who is also ON this ladder.
+
+    A property of the ladder, not of a role or a person, so a project where one person
+    wears three hats can let them approve while another keeps segregation of duties.
+    None means leave it at the default, INDEPENDENT — which is what every ladder saved
+    before this setting existed did.
+    """
+    self_approval_policy: str | None = None
+    # Where an INDEPENDENT ladder sends a document when every rung resolved to the
+    # raiser himself. A POST, so it survives the person in the chair changing.
+    fallback_position_id: int | None = None
+
+
+class LadderIn(LadderPolicyMixin):
     project_id: int | None = None
     doc_type: str
     rungs: list[LadderRungIn] = Field(default_factory=list)
@@ -97,7 +111,7 @@ class CustomLadderStepIn(BaseModel):
     name: str
 
 
-class CustomLadderIn(BaseModel):
+class CustomLadderIn(LadderPolicyMixin):
     project_id: int | None = None
     doc_type: str
     steps: list[CustomLadderStepIn] = Field(default_factory=list)

@@ -35,6 +35,8 @@ A rung that resolves to nobody is skipped too, so a vacant seat cannot strand a
 document. Reaching the top with nothing collected means the raiser IS the top — the
 document is self-approved, recorded explicitly.
 """
+import logging
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
@@ -45,6 +47,8 @@ from app.platform.hcm.models import (
 from app.platform.workflow.conditions import stage_applies
 from app.platform.workflow.models import Stage, StageCondition, Workflow
 from app.shared.enums import ApprovalMode, ApproverType, DocType
+
+logger = logging.getLogger(__name__)
 
 # Which module owns each document type. Drives the grouping in the Approvals Config
 # screen; it is presentation, not routing.
@@ -79,6 +83,27 @@ CUSTOM_CODE_PREFIX = "CUSTOM"
 MAX_CLIMB = 20
 APPROVER_SCOPE_FIELD = "__approver_positions_configured"
 APPROVER_POSITION_FIELD = "__approver_position_id"
+
+# ---- self-approval policy ----------------------------------------------------
+#
+# Who may approve a document raised by someone who also sits on the ladder. It is a
+# property of the LADDER, not of a role or a person, so a project where one person
+# wears three hats (Inventory, Warehouse) can let them approve while a project with a
+# real segregation-of-duties rule keeps them out. Both live on the ladder's first rung
+# as marker conditions, the same trick `selected_position_ids` already uses, so no
+# table changes and no migration.
+POLICY_FIELD = "__self_approval_policy"
+FALLBACK_POSITION_FIELD = "__fallback_position_id"
+# The raiser is dropped from every rung; nobody approves their own document. Default,
+# and what the system did before the policy existed.
+POLICY_INDEPENDENT = "INDEPENDENT"
+# The raiser stays on the ladder and gets the approval task. This is the honest setting
+# for Inventory and Warehouse, where the same twelve people hold every post.
+POLICY_CREATOR_ALLOWED = "CREATOR_ALLOWED"
+POLICIES = (POLICY_INDEPENDENT, POLICY_CREATOR_ALLOWED)
+# Marker rows, not real conditions: never evaluated, never shown to an admin.
+INTERNAL_FIELDS = {APPROVER_SCOPE_FIELD, APPROVER_POSITION_FIELD,
+                   POLICY_FIELD, FALLBACK_POSITION_FIELD}
 
 
 def ladder_code(project_id: int | None, doc_type: str) -> str:
@@ -530,9 +555,7 @@ async def _enabled_role_scopes(db: AsyncSession, stages: list[Stage],
             }
             conditions = [
                 condition for condition in stored
-                if condition.field_name not in {
-                    APPROVER_SCOPE_FIELD, APPROVER_POSITION_FIELD,
-                }
+                if condition.field_name not in INTERNAL_FIELDS
             ]
         else:
             configured = getattr(stage, "selected_position_ids", None) is not None
@@ -548,22 +571,110 @@ async def _enabled_role_scopes(db: AsyncSession, stages: list[Stage],
     return enabled
 
 
+# ---------------- the self-approval policy ----------------
+
+async def read_policy(db: AsyncSession,
+                      stages: list[Stage]) -> tuple[str, int | None]:
+    """(policy, fallback position) for a ladder, read off its first rung's markers.
+
+    A ladder saved before the policy existed has no marker at all, and must keep
+    behaving exactly as it did — so the default is INDEPENDENT.
+    """
+    policy, fallback_position_id = POLICY_INDEPENDENT, None
+    for stage in stages:
+        if stage.id is None:
+            # A draft from the config screen: the values are on the object itself.
+            policy = getattr(stage, "self_approval_policy", None) or policy
+            raw = getattr(stage, "fallback_position_id", None)
+            fallback_position_id = fallback_position_id or (int(raw) if raw else None)
+            continue
+        rows = (await db.execute(
+            select(StageCondition).where(
+                StageCondition.stage_id == stage.id,
+                StageCondition.field_name.in_([POLICY_FIELD,
+                                               FALLBACK_POSITION_FIELD]),
+            )
+        )).scalars().all()
+        for row in rows:
+            if row.field_name == POLICY_FIELD and row.field_value in POLICIES:
+                policy = row.field_value
+            elif row.field_name == FALLBACK_POSITION_FIELD and row.field_value:
+                fallback_position_id = int(row.field_value)
+        if rows:
+            # The markers live on the first rung; later rungs never carry them.
+            break
+    return policy, fallback_position_id
+
+
+def dedupe_chain(chain: list[dict]) -> list[dict]:
+    """Collapse rungs that resolve to people an earlier rung already reached.
+
+    Two posts held by the same employee are ONE approver, not two: leaving both in
+    would ask that person to approve the same document twice, which no ladder ever
+    means. Resequenced so the engine's `sequence` walk stays contiguous.
+    """
+    out: list[dict] = []
+    seen: set[int] = set()
+    for link in chain:
+        approvers = set(link.get("approver_ids") or [])
+        if approvers and approvers <= seen:
+            logger.info("Ladder rung %r collapsed: %s already approve at an earlier "
+                        "rung", link.get("role_name"), link.get("approver_names"))
+            continue
+        seen |= approvers
+        out.append({**link, "sequence": len(out) + 1})
+    return out
+
+
+async def fallback_chain(db: AsyncSession, fallback_position_id: int | None,
+                         exclude_employee_id: int | None) -> list[dict]:
+    """The one-rung chain for a ladder's configured fallback post, or nothing.
+
+    Reached when a ladder demands an independent approver and every rung resolved to
+    the raiser himself. Somebody outside his own line has to sign it, and this is the
+    post the project nominated for exactly that.
+    """
+    if not fallback_position_id:
+        return []
+    position = await db.get(HcmPosition, fallback_position_id)
+    if position is None or not position.is_active:
+        return []
+    holders = await _position_holders(db, position.id, exclude_employee_id)
+    if not holders:
+        return []
+    return [{
+        "sequence": 1,
+        "position_id": position.id,
+        "position_name": position.name,
+        "role_id": position.role_id,
+        "role_name": f"{position.role_name or position.name} (independent approver)",
+        "approver_ids": [h.id for h in holders],
+        "approver_names": [h.full_name for h in holders],
+    }]
+
+
 # ---------------- resolution ----------------
 
 async def resolve_chain(db: AsyncSession, stages: list[Stage],
                         requester_position_id: int | None,
                         requester_id: int | None,
-                        context: dict | None = None) -> list[dict]:
+                        context: dict | None = None,
+                        policy: str = POLICY_INDEPENDENT) -> list[dict]:
     """Walk up from the raiser and keep the ancestors whose rank is switched on.
 
     Returns the frozen chain: one entry per approval stage, in order. Empty means the
     raiser sits at the top of the ladder and there is nobody above to approve.
+
+    Under CREATOR_ALLOWED the raiser is NOT dropped from the rungs he holds. That
+    matters where one person wears two hats — Siva holds both Inventory Manager and
+    the Assistant Manager post above it, so dropping him emptied the whole ladder.
     """
     if requester_position_id is None:
         return []
     enabled = await _enabled_role_scopes(db, stages, context or {})
     if not enabled:
         return []
+    exclude_id = None if policy == POLICY_CREATOR_ALLOWED else requester_id
 
     chain: list[dict] = []
     seen: set[int] = {requester_position_id}
@@ -583,7 +694,7 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
         role_enabled = parent.role_id in enabled
         position_enabled = position_scope is None or parent.id in position_scope
         if role_enabled and position_enabled and parent.is_active:
-            holders = await _position_holders(db, parent.id, requester_id)
+            holders = await _position_holders(db, parent.id, exclude_id)
             # A rung nobody fills is skipped rather than held: a vacant seat must not
             # strand the document. Delegation covers the named-stand-in case.
             if holders:
@@ -597,7 +708,7 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
                     "approver_names": [h.full_name for h in holders],
                 })
         position = parent
-    return chain
+    return dedupe_chain(chain)
 
 
 async def _position_holders(db: AsyncSession, position_id: int,

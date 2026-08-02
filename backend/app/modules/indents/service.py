@@ -2875,19 +2875,37 @@ async def decide_allocation(db: AsyncSession, body, user):
         raise NotFoundError(f"Indent {body.indent_id} not found")
     _ensure_allocation_eligible(indent)
 
-    return await allocations.create(
+    # Imported here, not at module load: warehouse sits after indents in the import
+    # chain, so a top-level import would run it backwards.
+    from app.modules.warehouse import service as warehouse_service
+
+    alloc = await allocations.create(
         db, indent.id, indent.indent_no,
         [d.model_dump() for d in body.decisions], user,
         ctx={
             "department_id": indent.department_id,
             "project_id": indent.project_id,
+            "project_name": indent.project_name,
             "remarks": body.remarks,
             # The code-level ALLOCATION fallback is the allocator's reporting
             # manager. Without this, a perfectly healthy hierarchy was skipped and
             # every allocation fell through to System Admin.
             "requester_position_id": getattr(user, "active_position_id", None),
         },
+        # The ladder can approve at submit (the allocator IS the top of it, or the
+        # policy lets him sign his own). The warehouse drafts must be generated then
+        # too, exactly as they are when a separate approver acts.
+        on_approved=warehouse_service.create_fulfilment_drafts_for_allocation,
     )
+
+    # Approved the moment it was raised, so the indent has to move here too — the
+    # act_on_allocation path is never reached and the indent would sit in
+    # AWAITING_ALLOCATION forever with its stock already reserved.
+    if alloc.status == AllocationStatus.APPROVED.value:
+        await _recalculate_indent_allocation_state(db, indent)
+        await db.commit()
+        await db.refresh(alloc)
+    return alloc
 
 
 async def list_allocations(

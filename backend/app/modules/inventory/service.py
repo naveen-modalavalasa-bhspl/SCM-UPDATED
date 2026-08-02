@@ -494,7 +494,7 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
 
     # Straight into approval: nobody types an auto-raised MR, so leaving it in DRAFT
     # would strand it waiting for a human to press submit.
-    await engine.start(
+    instance = await engine.start(
         db, doc_type=DocType.MR.value, doc_id=mr.id,
         context={
             "doc_no": mr.mr_no,
@@ -509,8 +509,16 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
         },
         user=user,
     )
-    mr.status = MRStatus.PENDING_APPROVAL.value
-    await _refresh_mr_approver(db, mr)
+    # The ladder can finish at submit. Recording PENDING_APPROVAL anyway would leave
+    # the MR waiting for an approval that already happened and no pending row to make
+    # it happen — the same divergence that stranded the allocations.
+    if instance.status == InstanceStatus.APPROVED.value:
+        mr.status = MRStatus.APPROVED.value
+        mr.approved_at = utcnow()
+        mr.current_approver_name = None
+    else:
+        mr.status = MRStatus.PENDING_APPROVAL.value
+        await _refresh_mr_approver(db, mr)
     await write_audit(
         db, entity="inv_material_requests", entity_id=mr.id, entity_no=mr.mr_no,
         action=AuditAction.CREATE, actor=user,

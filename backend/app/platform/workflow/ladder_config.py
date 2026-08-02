@@ -53,8 +53,7 @@ async def _conditions_by_stage(db: AsyncSession,
 def _conditions_out(rows: list[StageCondition]) -> list[dict]:
     return [{"field_name": r.field_name, "operator": r.operator,
              "field_value": r.field_value, "logic": r.logic} for r in rows
-            if r.field_name not in {ladder.APPROVER_SCOPE_FIELD,
-                                    ladder.APPROVER_POSITION_FIELD}]
+            if r.field_name not in ladder.INTERNAL_FIELDS]
 
 
 def _selected_positions_out(rows: list[StageCondition]) -> list[int] | None:
@@ -73,6 +72,31 @@ def _selected_positions_out(rows: list[StageCondition]) -> list[int] | None:
         int(row.field_value) for row in rows
         if row.field_name == ladder.APPROVER_POSITION_FIELD
     ]
+
+
+async def shared_holder_warnings(db: AsyncSession, project_id: int | None,
+                                 role_ids: list[int]) -> list[str]:
+    """One line per person who fills more than one of the switched-on rungs.
+
+    Two rungs held by the same employee are one approver, not two — the chain collapses
+    them at submit (ladder.dedupe_chain). Saying so on the config screen stops an admin
+    building a "two-step" ladder that was only ever going to be one step.
+    """
+    if len(role_ids) < 2:
+        return []
+    holders_of = await ladder._rank_holders(db, project_id)
+    names = {role_id: rank["role_name"]
+             for role_id, rank in (await ladder.project_rank_summary(
+                 db, project_id)).items()}
+
+    rungs_of: dict[int, tuple[str, list[str]]] = {}
+    for role_id in role_ids:
+        for holder in holders_of.get(role_id, []):
+            entry = rungs_of.setdefault(holder["id"], (holder["name"], []))
+            entry[1].append(names.get(role_id) or f"Rank {role_id}")
+    return [f"{name} holds {len(rungs)} of the switched-on ranks "
+            f"({', '.join(rungs)}) — they count as ONE approver."
+            for name, rungs in rungs_of.values() if len(rungs) > 1]
 
 
 async def ranks(db: AsyncSession, project_id: int | None) -> dict:
@@ -108,17 +132,14 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
     # A hand-built ladder lives on the same scope but names posts, not ranks. Rendering
     # its stages here would draw rungs with no rank at all, so this screen shows the
     # rank draft and flags that the custom one is what actually runs.
-    if found is not None and ladder.is_custom_ladder(found[0]):
+    if found is None or ladder.is_custom_ladder(found[0]):
         draft = await ladder.autobuild(db, project_id, doc_type)
         draft["in_flight"] = 0
         draft["rungs"] = draft.pop("stages")
-        draft["has_custom"] = True
-        return draft
-    if found is None:
-        draft = await ladder.autobuild(db, project_id, doc_type)
-        draft["in_flight"] = 0
-        draft["rungs"] = draft.pop("stages")
-        draft["has_custom"] = False
+        draft["has_custom"] = found is not None
+        draft["self_approval_policy"] = ladder.POLICY_INDEPENDENT
+        draft["fallback_position_id"] = None
+        draft["warnings"] = []
         return draft
 
     wf, rows = found
@@ -173,6 +194,7 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
         )
     )).scalar() or 0
 
+    policy, fallback_position_id = await ladder.read_policy(db, rows)
     return {
         "workflow_id": wf.id,
         "version": wf.version,
@@ -183,11 +205,17 @@ async def get_ladder(db: AsyncSession, project_id: int | None, doc_type: str) ->
         "has_custom": False,
         "rungs": rungs,
         "in_flight": in_flight,
+        "self_approval_policy": policy,
+        "fallback_position_id": fallback_position_id,
+        "warnings": await shared_holder_warnings(
+            db, project_id, [r["position_role_id"] for r in rungs if r["is_enabled"]]),
     }
 
 
 async def preview(db: AsyncSession, project_id: int | None, doc_type: str,
-                  rungs: list[dict], from_role_id: int | None) -> dict:
+                  rungs: list[dict], from_role_id: int | None,
+                  policy: str = ladder.POLICY_INDEPENDENT,
+                  fallback_position_id: int | None = None) -> dict:
     """Who would approve, if someone at this rank raised this document right now.
 
     Runs against the rungs currently on screen, saved or not, so an admin sees the
@@ -206,14 +234,23 @@ async def preview(db: AsyncSession, project_id: int | None, doc_type: str,
     draft = [SimpleNamespace(id=None, position_role_id=r["position_role_id"],
                              is_enabled=r.get("is_enabled", True),
                              selected_position_ids=r.get("selected_position_ids"),
+                             self_approval_policy=policy,
+                             fallback_position_id=fallback_position_id,
                              conditions=[])
              for r in rungs]
-    chain = await ladder.resolve_chain(db, draft, position.id, holder_id, {})
+    chain = await ladder.resolve_chain(db, draft, position.id, holder_id, {}, policy)
+    # Shown exactly as it would run: if the ladder demands an independent approver and
+    # the climb reached only the raiser, the nominated post is where it really goes.
+    used_fallback = False
+    if not chain and policy == ladder.POLICY_INDEPENDENT:
+        chain = await ladder.fallback_chain(db, fallback_position_id, holder_id)
+        used_fallback = bool(chain)
     return {
         "from": {"position_id": position.id, "position_name": position.name},
         "chain": [{"role_name": c["role_name"], "position_name": c["position_name"],
                    "approver_names": c["approver_names"]} for c in chain],
         "self_approved": not chain,
+        "used_fallback": used_fallback,
     }
 
 
@@ -287,6 +324,10 @@ async def save_ladder(db: AsyncSession, data: LadderIn, user) -> dict:
         row.is_active = False
         row.effective_to = utcnow().date()
 
+    policy = (data.self_approval_policy
+              if data.self_approval_policy in ladder.POLICIES
+              else ladder.POLICY_INDEPENDENT)
+
     wf = ladder.new_workflow(data.project_id, project_name, data.doc_type, version)
     db.add(wf)
     await db.flush()
@@ -296,6 +337,17 @@ async def save_ladder(db: AsyncSession, data: LadderIn, user) -> dict:
                                  rung.position_role_id, rung.is_enabled)
         db.add(stage)
         await db.flush()
+        if index == 0:
+            # The policy belongs to the LADDER, so it is written once, on its first
+            # rung. read_policy() stops at the first rung carrying these markers.
+            db.add(StageCondition(
+                stage_id=stage.id, field_name=ladder.POLICY_FIELD,
+                operator="EQ", field_value=policy, logic="AND"))
+            if data.fallback_position_id:
+                db.add(StageCondition(
+                    stage_id=stage.id, field_name=ladder.FALLBACK_POSITION_FIELD,
+                    operator="EQ", field_value=str(data.fallback_position_id),
+                    logic="AND"))
         for condition in rung.conditions:
             db.add(StageCondition(
                 stage_id=stage.id, field_name=condition.field_name,
@@ -325,7 +377,9 @@ async def save_ladder(db: AsyncSession, data: LadderIn, user) -> dict:
         db, entity="wf_workflows", entity_id=wf.id, entity_no=wf.code[:50],
         action=AuditAction.CREATE, actor=user,
         after={"version": version, "project_id": data.project_id,
-               "doc_type": data.doc_type, "enabled_ranks": enabled},
+               "doc_type": data.doc_type, "enabled_ranks": enabled,
+               "self_approval_policy": policy,
+               "fallback_position_id": data.fallback_position_id},
         summary=f"Approval ladder v{version} saved ({', '.join(enabled) or 'none'})",
     )
     await db.commit()
@@ -355,6 +409,9 @@ async def copy_ladder(db: AsyncSession, data: LadderCopyIn, user) -> dict:
         rungs = ladder.build_stages(ranks, enabled)
         await save_ladder(db, LadderIn(
             project_id=project_id, doc_type=data.doc_type,
+            # The policy travels with the ladder; the fallback POST does not — it is a
+            # real position in the source project and means nothing in the target.
+            self_approval_policy=source.get("self_approval_policy"),
             rungs=[{"position_role_id": r["position_role_id"], "name": r["name"],
                     "is_enabled": r["is_enabled"],
                     "selected_position_ids": r["selected_position_ids"],
