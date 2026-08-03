@@ -548,6 +548,14 @@ export interface Issue {
   created_at?: string;
   updated_at?: string;
   items?: IssueItem[];
+  /**
+   * Is this document waiting on ME right now? Served only by the detail endpoint.
+   *
+   * Not the same question as `<Can do="issue.issue">`: every warehouse post shares one
+   * HCM rank, so all eleven holders have that permission on every issue, but only the
+   * one named in the approval chain may act. Gate the Approve button on this.
+   */
+  can_approve?: boolean;
 }
 
 /**
@@ -724,6 +732,8 @@ export interface Dispatch {
   items?: DispatchItem[];
   packages?: DispatchPackage[];
   events?: DispatchEvent[];
+  /** See Issue.can_approve — whose turn it is, not who holds the permission. */
+  can_approve?: boolean;
 }
 
 /** `out_dispatch_items`. */
@@ -948,6 +958,8 @@ export interface PurchaseReturn {
   created_by_name?: string | null;
   created_at?: string;
   items?: PurchaseReturnItem[];
+  /** See Issue.can_approve — whose turn it is, not who holds the permission. */
+  can_approve?: boolean;
 }
 
 /** `pro_return_items`. */

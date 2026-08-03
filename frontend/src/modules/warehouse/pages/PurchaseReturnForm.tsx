@@ -270,7 +270,9 @@ export default function PurchaseReturnForm() {
                 <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
               </Can>
             )}
-            {editing && doc?.status === "PENDING_APPROVAL" && (
+            {/* can_approve — see MaterialIssueForm: the permission says you approve
+                returns, the chain says whether this one is yours. */}
+            {editing && doc?.status === "PENDING_APPROVAL" && doc?.can_approve && (
               <Can do="return.approve">
                 <Button variant="subtle" onClick={() => setConfirming("approve")}>Approve</Button>
                 <Button variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>

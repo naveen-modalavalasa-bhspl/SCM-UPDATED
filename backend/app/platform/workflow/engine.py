@@ -491,15 +491,18 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
     if user.id not in {row.approver_id for row in pending}:
         raise PermissionError_("You are not a valid approver for the current stage")
 
-    # Someone holding two posts must act under the one the ladder picked. A delegate
-    # never holds it, so the check applies only to the rung's own holders.
-    # A fallback rung names people, not a post (link["position_id"] is None), so there
-    # is no position to switch to — requiring one would lock the document again, which
-    # is the exact thing the fallback exists to prevent.
+    # Someone holding two posts must act under one the ladder picked. A delegate never
+    # holds one, so the check applies only to the rung's own holders. Any post the
+    # ladder named counts: when two rungs collapsed into this one because the same
+    # person fills both, both posts are still authorised (see ladder.dedupe_chain).
+    # A fallback rung names people, not a post, so it has no position to switch to —
+    # requiring one would lock the document again, which is the exact thing the
+    # fallback exists to prevent.
     active_position_id = getattr(user, "active_position_id", None)
-    if (link.get("position_id") is not None
+    allowed_positions = ladder.allowed_position_ids(link)
+    if (allowed_positions
             and user.id in link.get("approver_ids", [])
-            and active_position_id != link["position_id"]):
+            and active_position_id not in allowed_positions):
         raise PermissionError_("Switch to the approval position before acting")
 
     active_position = await hcm_service.get_position(

@@ -11,16 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.home.schemas import DateRange
 from app.modules.indents import service as indent_service
 from app.modules.indents.models import Indent
-from app.modules.inventory.models import Stock
+from app.modules.inventory import service as inventory_service
 from app.modules.procurement.models import PurchaseOrder
-from app.modules.warehouse.enums import ReceiptStatus
+from app.modules.warehouse.enums import ReceiptStatus, ReceiptType
 from app.modules.warehouse.models import Receipt
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.service import get_user_menu, get_user_permissions
 from app.platform.settings.models import AuditLog
 from app.platform.workflow import engine
 from app.shared.enums import IndentStatus, POStatus
-from app.shared.models.master import Item
 
 
 APPROVE_PERMISSIONS = {
@@ -88,18 +87,16 @@ def _attention(
     }
 
 
-async def _stock_counts(db: AsyncSession) -> tuple[int, int]:
-    base = (
-        select(func.count())
-        .select_from(Stock)
-        .join(Item, Item.id == Stock.item_id)
-        .where(Item.reorder_level > 0)
-    )
-    low = int(await db.scalar(
-        base.where(Stock.available_qty > 0, Stock.available_qty < Item.reorder_level)
-    ) or 0)
-    out = int(await db.scalar(base.where(Stock.available_qty <= 0)) or 0)
-    return low, out
+async def _stock_counts(db: AsyncSession, user) -> tuple[int, int]:
+    """Low / out-of-stock item counts, read from the same list the Replenishment
+    screen shows. Counting `stk_balance` rows here instead reported a different
+    number than Inventory > Overview ("Items Below Reorder"), because a single item
+    has one row per warehouse/bin/batch and rows are warehouse-scoped per user.
+    low + out is exactly `items_below_reorder`.
+    """
+    rows = await inventory_service.get_stock_replenishment(db, user=user)
+    low = sum(1 for row in rows if float(row["available_qty"] or 0) > 0)
+    return low, len(rows) - low
 
 
 def _visible_modules(menu: list[dict]) -> list[dict]:
@@ -220,9 +217,10 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
 
     if perms.INDENT_VIEW in permissions:
         indent_scope = await indent_service.indent_access_condition(db, user)
-        indent_count = await _count(
-            db, Indent, indent_scope, Indent.created_at >= since,
-        )
+        # All-time, not date-ranged: the tile has to read the same as "Total indents"
+        # on the indent dashboard, which is unfiltered until the user filters it.
+        # The date range picker scopes recent activity only.
+        indent_count = await _count(db, Indent, indent_scope)
         pending_indents = await _count(
             db, Indent, indent_scope,
             Indent.status == IndentStatus.PENDING_APPROVAL.value,
@@ -251,9 +249,7 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
             ))
 
     if perms.PO_VIEW in permissions:
-        po_count = await _count(
-            db, PurchaseOrder, PurchaseOrder.created_at >= since,
-        )
+        po_count = await _count(db, PurchaseOrder)
         awaiting_po = await _count(
             db, PurchaseOrder, PurchaseOrder.status.in_([
                 POStatus.APPROVED.value,
@@ -274,12 +270,15 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
 
     receipt_visible = bool({perms.RECEIPT_VIEW, perms.GRN_VIEW} & permissions)
     if receipt_visible:
-        receipt_count = await _count(db, Receipt, Receipt.created_at >= since)
+        # Purchase receipts only, and the same "pending" set the warehouse dashboard
+        # counts under "GRN to raise" — counting every receipt type here made the two
+        # screens disagree.
+        is_purchase = Receipt.receipt_type == ReceiptType.PURCHASE.value
+        receipt_count = await _count(db, Receipt, is_purchase)
         pending_receipts = await _count(
-            db, Receipt, Receipt.status.in_([
+            db, Receipt, is_purchase,
+            Receipt.status.in_([
                 ReceiptStatus.DRAFT.value,
-                ReceiptStatus.GATE_ENTRY.value,
-                ReceiptStatus.SUBMITTED.value,
                 ReceiptStatus.PENDING_QC.value,
             ]),
         )
@@ -295,7 +294,7 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
             ))
 
     if perms.STOCK_VIEW in permissions:
-        low_stock, out_of_stock = await _stock_counts(db)
+        low_stock, out_of_stock = await _stock_counts(db, user)
         kpis.extend([
             _kpi(
                 "low_stock", "LOW STOCK ITEMS", low_stock, "Reorder Soon",

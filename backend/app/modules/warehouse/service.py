@@ -2617,9 +2617,32 @@ async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | 
     return await paginate(db, stmt.order_by(m.MaterialIssue.id.desc()), params)
 
 
-async def get_issue(db: AsyncSession, issue_id: int) -> m.MaterialIssue:
+async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
+    """Set `can_approve` — is this document waiting on THIS person right now?
+
+    The engine already owns the answer (`wf_pending`), but nothing exposed it, so the
+    screens fell back to gating the Approve button on the permission alone. Every
+    warehouse post shares one HCM rank, so all eleven holders saw Approve on a document
+    only one of them could act on, and the other ten got "You are not a valid approver"
+    after clicking. Hiding the button is not the security — `engine.act` still decides —
+    it is simply telling the truth about whose turn it is.
+
+    `user` is optional because get_issue() is also called from create_consignment() and
+    other server-side paths where there is no one to answer this for; those get False.
+    """
+    can = False
+    if user is not None:
+        approvers = await engine.current_approvers(db, doc_type, doc.id)
+        can = any(approver.id == user.id for approver in approvers)
+    setattr(doc, "can_approve", can)
+    return doc
+
+
+async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIssue:
     issue = await _load(db, m.MaterialIssue, issue_id, "Issue", m.MaterialIssue.items)
     issue = await _decorate_issue_serials(db, issue)
+    issue = await _decorate_can_approve(
+        db, issue, WarehouseDocType.WH_ISSUE.value, user)
     return await _decorate_issue_destination(db, issue)
 
 
@@ -3485,9 +3508,11 @@ async def list_consignments(db: AsyncSession, params: PageParams, *, status: str
     )
 
 
-async def get_dispatch(db: AsyncSession, dispatch_id: int) -> m.Dispatch:
+async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispatch:
     dispatch = await _load(db, m.Dispatch, dispatch_id, "Dispatch",
                            m.Dispatch.items, m.Dispatch.packages, m.Dispatch.events)
+    dispatch = await _decorate_can_approve(
+        db, dispatch, WarehouseDocType.DISPATCH.value, user)
     return await _decorate_dispatch_destination(db, dispatch)
 
 
@@ -4238,8 +4263,10 @@ async def list_returns(db: AsyncSession, params: PageParams, *, status: str | No
     return await paginate(db, stmt.order_by(m.PurchaseReturn.id.desc()), params)
 
 
-async def get_return(db: AsyncSession, return_id: int) -> m.PurchaseReturn:
-    return await _load(db, m.PurchaseReturn, return_id, "Return", m.PurchaseReturn.items)
+async def get_return(db: AsyncSession, return_id: int, user=None) -> m.PurchaseReturn:
+    doc = await _load(db, m.PurchaseReturn, return_id, "Return", m.PurchaseReturn.items)
+    return await _decorate_can_approve(
+        db, doc, WarehouseDocType.PURCHASE_RETURN.value, user)
 
 
 async def create_return(db: AsyncSession, data: s.ReturnWrite, user) -> m.PurchaseReturn:

@@ -617,18 +617,52 @@ def dedupe_chain(chain: list[dict]) -> list[dict]:
     Two posts held by the same employee are ONE approver, not two: leaving both in
     would ask that person to approve the same document twice, which no ladder ever
     means. Resequenced so the engine's `sequence` walk stays contiguous.
+
+    Collapsing merges the dropped rung's POST into the surviving one
+    (`allowed_position_ids`) instead of discarding it. The ladder authorised both
+    posts; dropping one meant the holder could only act while wearing whichever hat
+    happened to sit higher in the config, and the document still showed in his queue
+    under the other one — visible but not actionable.
     """
     out: list[dict] = []
     seen: set[int] = set()
     for link in chain:
         approvers = set(link.get("approver_ids") or [])
         if approvers and approvers <= seen:
+            for kept in out:
+                if approvers <= set(kept.get("approver_ids") or []):
+                    _merge_position(kept, link.get("position_id"))
+                    break
             logger.info("Ladder rung %r collapsed: %s already approve at an earlier "
                         "rung", link.get("role_name"), link.get("approver_names"))
             continue
         seen |= approvers
-        out.append({**link, "sequence": len(out) + 1})
+        merged = {**link, "sequence": len(out) + 1}
+        merged["allowed_position_ids"] = allowed_position_ids(link)
+        out.append(merged)
     return out
+
+
+def allowed_position_ids(link: dict) -> list[int]:
+    """The posts a holder may act under on this rung.
+
+    Falls back to the rung's own post so chains frozen before `allowed_position_ids`
+    existed keep working — an in-flight document must not change who can sign it.
+    """
+    allowed = link.get("allowed_position_ids")
+    if allowed:
+        return [int(value) for value in allowed]
+    position_id = link.get("position_id")
+    return [int(position_id)] if position_id is not None else []
+
+
+def _merge_position(link: dict, position_id: int | None) -> None:
+    if position_id is None:
+        return
+    allowed = allowed_position_ids(link)
+    if position_id not in allowed:
+        allowed.append(int(position_id))
+    link["allowed_position_ids"] = allowed
 
 
 async def fallback_chain(db: AsyncSession, fallback_position_id: int | None,

@@ -518,7 +518,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
               </Can>
             )}
-            {editing && doc?.status === "PENDING_APPROVAL" && (
+            {/* can_approve, not just the permission: the whole warehouse shares one
+                HCM rank, so all eleven hold `issue.issue` while only the approver the
+                chain named may act. Showing it to the rest sent them into a
+                "You are not a valid approver" error after clicking. */}
+            {editing && doc?.status === "PENDING_APPROVAL" && doc?.can_approve && (
               <Can do="issue.issue">
                 <Button variant="subtle" onClick={() => setConfirming("approve")}>Approve</Button>
                 <Button variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>

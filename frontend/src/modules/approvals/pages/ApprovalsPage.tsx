@@ -57,9 +57,14 @@ export function ApprovalsPage() {
     raised_to: serverWindow && Number.isFinite(serverWindow[1]) ? new Date(serverWindow[1]).toISOString() : undefined,
   };
   const query = useQuery({ queryKey: ["approvals", "pending", page, size, queryFilters], queryFn: () => approvalsApi.pending(page, size, queryFilters) });
+  // The tiles and the type chips describe the whole queue, so they read the whole
+  // queue. Counting `query.data.items` counted one page of 20, which made "Waiting on
+  // you" disagree with the same number on Home.
+  const queueQuery = useQuery({ queryKey: ["approvals", "pending", "queue"], queryFn: () => approvalsApi.pendingAll() });
+  const queue = useMemo(() => queueQuery.data ?? [], [queueQuery.data]);
   useEffect(() => setPage(1), [dateFrom, dateTo, docType, pastDueOnly, raisedRange, search, sort]);
   const all = useMemo(() => query.data?.items ?? [], [query.data?.items]);
-  const types = useMemo(() => approvalTypeCounts(all), [all]);
+  const types = useMemo(() => approvalTypeCounts(queue), [queue]);
   const rows = useMemo(() => {
     const term = search.trim().toLowerCase();
     const window = raisedWindow(raisedRange, dateFrom, dateTo);
@@ -87,8 +92,8 @@ export function ApprovalsPage() {
     { key: "waiting", header: "Waiting", render: (row) => <div className={overdue(row) ? "font-semibold text-danger" : (daysSince(row.waiting_since) ?? 0) > 3 ? "font-semibold text-warning" : "text-body"}>{daysSince(row.waiting_since) === null ? "—" : `${daysSince(row.waiting_since)}d`}{overdue(row) && <p className="text-xs">Overdue</p>}</div> },
     { key: "action", header: "", render: (row) => <Button onClick={() => setSelected(row)}>View details</Button> },
   ];
-  const pastDue = all.filter(overdue).length;
-  const oldest = Math.max(0, ...all.map((row) => daysSince(row.waiting_since) ?? 0));
+  const pastDue = queue.filter(overdue).length;
+  const oldest = Math.max(0, ...queue.map((row) => daysSince(row.waiting_since) ?? 0));
   const filtered = Boolean(search || docType || pastDueOnly || raisedRange);
   const clear = () => { setSearch(""); setDocType(""); setPastDueOnly(false); setRaisedRange(""); setDateFrom(""); setDateTo(""); setSort("oldest"); setPage(1); };
 
@@ -111,7 +116,7 @@ export function ApprovalsPage() {
 
   return <>
     <PageHeader eyebrow="Approvals" title="Waiting for me" actions={<div className="flex gap-2"><Button variant="ghost" onClick={() => setParams({ view: "reports" })}><BarChart3 className="h-4 w-4" /> Reports</Button><Button variant="ghost" disabled={query.isFetching} onClick={() => query.refetch()}><RefreshCw className={`h-4 w-4 ${query.isFetching ? "animate-spin" : ""}`} /> Refresh</Button></div>} />
-    <ResponsiveGrid cols={3} className="mb-4"><StatCard label="Waiting on you" value={all.length} icon={<Inbox size={16} />} /><StatCard label="Past due" value={pastDue} icon={<TriangleAlert size={16} />} tone={pastDue ? "text-danger" : "text-muted"} /><StatCard label="Longest wait" value={all.length ? `${oldest}d` : "—"} icon={<AlarmClock size={16} />} tone={oldest > 3 ? "text-warning" : "text-muted"} /></ResponsiveGrid>
+    <ResponsiveGrid cols={3} className="mb-4"><StatCard label="Waiting on you" value={queue.length} icon={<Inbox size={16} />} /><StatCard label="Past due" value={pastDue} icon={<TriangleAlert size={16} />} tone={pastDue ? "text-danger" : "text-muted"} /><StatCard label="Longest wait" value={queue.length ? `${oldest}d` : "—"} icon={<AlarmClock size={16} />} tone={oldest > 3 ? "text-warning" : "text-muted"} /></ResponsiveGrid>
     <Card className="mb-4 space-y-3 p-4">
       <div className="flex flex-wrap gap-2">
         <div className="relative min-w-60 flex-1"><Search className="absolute left-3 top-3.5 h-4 w-4 text-muted" /><input className="h-11 w-full rounded-lg border border-line bg-content1 pl-9 pr-3 text-sm text-ink" aria-label="Search approvals" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search document, requester or stage" /></div>

@@ -674,6 +674,11 @@ class IssueRead(_Read):
 
 class IssueDetail(IssueRead):
     items: list[IssueItemRead] = []
+    # True only for the person the document is waiting on RIGHT NOW. Holding the
+    # permission is not enough: every warehouse post shares one HCM rank, so all
+    # eleven of them hold `issue.issue` and a permission-gated button appeared for
+    # all eleven on a document only one of them could act on.
+    can_approve: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -921,6 +926,8 @@ class DispatchDetail(DispatchRead):
     items: list[DispatchItemRead] = []
     packages: list[DispatchPackageRead] = []
     events: list[DispatchEventRead] = []
+    #: See IssueDetail.can_approve.
+    can_approve: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +998,8 @@ class ReturnRead(_Read):
 
 class ReturnDetail(ReturnRead):
     items: list[ReturnItemRead] = []
+    #: See IssueDetail.can_approve.
+    can_approve: bool = False
 
 
 # ---------------------------------------------------------------------------

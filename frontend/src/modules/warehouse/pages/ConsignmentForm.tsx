@@ -57,8 +57,13 @@ const MODES = [
 type PackageDraft = ConsignmentPackageWrite & { key: string; locked?: boolean };
 type SerialTarget = { packageIndex: number; line: IssueDispatchSourceItem } | null;
 
+// `crypto.randomUUID` exists only in a secure context, so it is undefined for anyone
+// reaching the app over plain http on the LAN. The key is a React list key inside one
+// form — a counter is enough and works everywhere.
+let packageKeySeq = 0;
+
 const newPackage = (count: number): PackageDraft => ({
-  key: crypto.randomUUID(),
+  key: `pkg-${(packageKeySeq += 1)}`,
   package_no: `PKG-${String(count + 1).padStart(2, "0")}`,
   package_type: "BOX",
   barcode: "",

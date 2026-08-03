@@ -361,8 +361,8 @@ async def list_issues(params: PageParams = Depends(), direction: str | None = No
 
 @router.get("/issues/{issue_id}", response_model=s.IssueDetail)
 async def get_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                    _=Depends(require_permission(ISSUE_VIEW))):
-    return await service.get_issue(db, issue_id)
+                    user=Depends(require_permission(ISSUE_VIEW))):
+    return await service.get_issue(db, issue_id, user)
 
 
 @router.post("/issues", response_model=s.IssueDetail, status_code=201)
@@ -435,8 +435,8 @@ async def list_consignments(params: PageParams = Depends(), status: str | None =
 
 @router.get("/consignments/{consignment_id}", response_model=s.DispatchDetail)
 async def get_consignment(consignment_id: int, db: AsyncSession = Depends(get_db),
-                          _=Depends(require_permission(DISPATCH_VIEW))):
-    return await service.get_dispatch(db, consignment_id)
+                          user=Depends(require_permission(DISPATCH_VIEW))):
+    return await service.get_dispatch(db, consignment_id, user)
 
 
 @router.post("/consignments", response_model=s.DispatchDetail, status_code=201)
@@ -463,8 +463,8 @@ async def list_dispatches(params: PageParams = Depends(), status: str | None = N
 
 @router.get("/dispatches/{dispatch_id}", response_model=s.DispatchDetail)
 async def get_dispatch(dispatch_id: int, db: AsyncSession = Depends(get_db),
-                       _=Depends(require_permission(DISPATCH_VIEW))):
-    return await service.get_dispatch(db, dispatch_id)
+                       user=Depends(require_permission(DISPATCH_VIEW))):
+    return await service.get_dispatch(db, dispatch_id, user)
 
 
 @router.post("/dispatches", response_model=s.DispatchDetail, status_code=201)
@@ -567,8 +567,8 @@ async def returnable_lines(grn_id: int = Query(...), db: AsyncSession = Depends(
 
 @router.get("/returns/{return_id}", response_model=s.ReturnDetail)
 async def get_return(return_id: int, db: AsyncSession = Depends(get_db),
-                     _=Depends(require_permission(RETURN_VIEW))):
-    return await service.get_return(db, return_id)
+                     user=Depends(require_permission(RETURN_VIEW))):
+    return await service.get_return(db, return_id, user)
 
 
 @router.post("/returns", response_model=s.ReturnDetail, status_code=201)
