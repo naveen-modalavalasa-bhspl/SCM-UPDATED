@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
+import { NewPutawayModal } from "../components/NewPutawayModal";
 import { listPutaways } from "../api";
 import { fmtQty, humanise, normaliseStatus } from "../format";
 import type { Putaway as PutawayTask } from "../types";
@@ -27,6 +29,7 @@ const STATUSES = [
 
 export default function Putaway() {
   const nav = useNavigate();
+  const [raising, setRaising] = useState(false);
 
   const columns: Column<PutawayTask>[] = [
     {
@@ -92,12 +95,16 @@ export default function Putaway() {
   ];
 
   return (
+    <>
     <DocumentList<PutawayTask>
       title="Putaway"
       queryKey="wh-putaways"
       fetch={listPutaways}
       columns={columns}
       keyOf={(r) => r.id}
+      onCreate={() => setRaising(true)}
+      createLabel="New putaway"
+      createPermission="putaway.execute"
       searchIn={(r) => [r.putaway_no, r.grn_no, r.item_code, r.item_name, r.batch_no, r.suggested_bin_code]}
       searchPlaceholder="Search task, GRN, item or bin…"
       statuses={STATUSES}
@@ -128,5 +135,13 @@ export default function Putaway() {
         </div>
       )}
     />
+
+    <NewPutawayModal
+      isOpen={raising}
+      onClose={() => setRaising(false)}
+      // One task raised is one task to go and do; several is a queue to work through.
+      onCreated={(ids) => ids.length === 1 && nav(String(ids[0]))}
+    />
+    </>
   );
 }

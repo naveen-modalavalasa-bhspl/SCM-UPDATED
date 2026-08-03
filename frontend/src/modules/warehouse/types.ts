@@ -449,6 +449,28 @@ export interface PutawayConfirm {
   serial_numbers?: string[] | null;
 }
 
+/** A GRN line offered to the manual putaway picker. */
+export interface PutawayCandidate {
+  grn_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  accepted_qty: number;
+  qc_status?: string | null;
+  existing_putaway_no?: string | null;
+  eligible: boolean;
+  /** Why not, when `eligible` is false. Shown beside the greyed-out line. */
+  reason?: string | null;
+}
+
+/** Empty `grn_item_ids` means every eligible line on the GRN. */
+export interface PutawayCreate {
+  grn_id: number;
+  grn_item_ids: number[];
+}
+
 /* ----------------------------------------------------------------- outward -- */
 
 /** `out_picking`. */

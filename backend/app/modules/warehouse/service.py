@@ -480,7 +480,8 @@ def _receipt_totals(receipt: m.Receipt) -> None:
 
 
 async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
-                               lines: list[s.ReceiptItemWrite]) -> None:
+                               lines: list[s.ReceiptItemWrite], *,
+                               at_gate: bool = False) -> None:
     """Replaces the receipt's lines, deriving what must be derived.
 
     Accepted is capped at received and rejected is the remainder, so the three
@@ -489,6 +490,16 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
 
     Serial-tracked items are strict at GRN: one received unit must have one serial
     number before the line can be saved. QC and putaway then work from that unit list.
+
+    At the gate they are optional. A gate entry is a head count taken while the vehicle
+    is still outside — cartons unopened, nothing yours yet — so whatever the guard can
+    read off the paperwork is captured and the rest is left to the GRN, which reuses the
+    same row and so inherits them. Every other serial rule (unique, not already
+    recorded, tracked item) still applies to whatever was entered.
+
+    `at_gate` is the caller's intent, not the row's type: the GRN is built by saving the
+    gate entry's own row with GRN content and converting it afterwards, so the stored
+    `receipt_type` still reads GATE_ENTRY while the storekeeper is filling in the GRN.
     """
     receipt.items.clear()
     await db.flush()
@@ -512,7 +523,12 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             raise ValidationError(
                 f"Line {index}: serialized quantity must be a whole number"
             )
-        if item.is_serial_tracked and len(serials) != int(received):
+        if item.is_serial_tracked and at_gate and len(serials) > int(received):
+            raise ValidationError(
+                f"Line {index}: {len(serials)} serial numbers for {int(received)} "
+                f"received units of {item.code}"
+            )
+        if item.is_serial_tracked and not at_gate and len(serials) != int(received):
             raise ValidationError(
                 f"Line {index}: enter exactly {int(received)} serial numbers for {item.code}"
             )
@@ -730,7 +746,7 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
     db.add(receipt)
     await db.flush()
 
-    await _apply_receipt_lines(db, receipt, data.items)
+    await _apply_receipt_lines(db, receipt, data.items, at_gate=is_gate_entry)
     await db.flush()
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
@@ -785,7 +801,14 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
     receipt.gate_entry_no = data.gate_entry_no
     receipt.remarks = data.remarks
 
-    await _apply_receipt_lines(db, receipt, data.items)
+    # Both sides must agree: the payload says this is still gate work, and the row has
+    # not already been promoted. A converted GRN cannot be relaxed by re-sending the
+    # old type.
+    await _apply_receipt_lines(
+        db, receipt, data.items,
+        at_gate=(data.receipt_type == ReceiptType.GATE_ENTRY
+                 and receipt.receipt_type == ReceiptType.GATE_ENTRY.value),
+    )
     await db.flush()
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
@@ -808,6 +831,21 @@ async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
     direct_lines: list[m.ReceiptItem] = []
     for line in receipt.items:
         item = await _item_snapshot(db, line.item_id)
+        # The last gate: the partial list a gate entry is allowed to carry must be
+        # finished before the document moves on, because QC selects the units it is
+        # keeping from this list and putaway names each one from what QC passed.
+        if item.is_serial_tracked:
+            captured = len(line.serial_numbers or [])
+            received = _d(line.received_qty)
+            if received != received.to_integral_value():
+                raise ValidationError(
+                    f"{item.code}: serialized quantity must be a whole number"
+                )
+            if captured != int(received):
+                raise ValidationError(
+                    f"{item.code}: {captured} of {int(received)} serial numbers captured; "
+                    "a serialized line needs one serial per unit before submitting"
+                )
         if item.requires_qi:
             line.qc_status = QcStatus.PENDING.value
             qc_lines.append(line)
@@ -1185,6 +1223,13 @@ async def _raise_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
     if existing is not None:
         return existing
 
+    return await _build_putaway_task(db, receipt, line, user)
+
+
+async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.ReceiptItem,
+                              user) -> m.PutawayTask:
+    """Creates the task itself. Split from `_raise_putaway_task` so the manual route
+    can apply its own rules about what may be re-raised before building one."""
     suggested = await _suggest_bin(db, receipt.warehouse_id, line.item_id)
     item = await _item_snapshot(db, line.item_id)
     task = m.PutawayTask(
@@ -1517,9 +1562,10 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                 continue
             original_serials = list(line.serial_numbers or [])
             accepted_serials = list(verdict.serial_numbers or [])
-            # Only meaningful when the GRN read the serials in the first place. It often
-            # does not — they are optional until putaway — and then the inspection's own
-            # list is the first record of them, not a selection from an earlier one.
+            # A serial-tracked line always reaches QC with its full list, because the GRN
+            # will not save without one serial per received unit. The guard stays
+            # conditional for the untracked lines, whose list is empty and whose
+            # inspection therefore has nothing to select from.
             if original_serials and not set(accepted_serials).issubset(set(original_serials)):
                 raise ValidationError(
                     f"{line.item_code}: accepted serials must come from the GRN"
@@ -1711,6 +1757,115 @@ async def list_putaways(db: AsyncSession, params: PageParams, *, status: str | N
 async def get_putaway(db: AsyncSession, task_id: int) -> dict:
     task = await _get(db, m.PutawayTask, task_id, "Putaway task")
     return await _decorate_putaway(db, task)
+
+
+# A line with a task in one of these already has its putaway accounted for: three of
+# them are work in hand and the fourth has been placed. Skipped and cancelled are the
+# two that leave the stock still standing on the floor, so those may be re-raised.
+_SETTLED_PUTAWAY_STATUSES = (
+    PutawayStatus.DRAFT.value,
+    PutawayStatus.PENDING.value,
+    PutawayStatus.IN_PROGRESS.value,
+    PutawayStatus.COMPLETED.value,
+)
+
+
+async def putaway_candidates(db: AsyncSession, receipt_id: int) -> list[dict]:
+    """The GRN lines a manual putaway could be raised for, with a reason when it
+    cannot. The screen shows the ineligible ones too — "why can I not put this away"
+    is the question being asked, and an empty list does not answer it."""
+    receipt = await get_receipt(db, receipt_id)
+    wh = await _warehouse(db, receipt.warehouse_id)
+    rows: list[dict] = []
+    for line in receipt.items:
+        blocking = await db.scalar(
+            select(m.PutawayTask).where(
+                m.PutawayTask.grn_item_id == line.id,
+                m.PutawayTask.status.in_(_SETTLED_PUTAWAY_STATUSES),
+            ).limit(1)
+        )
+        reason = _putaway_block_reason(receipt, wh, line, blocking)
+        rows.append({
+            "grn_item_id": line.id,
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "batch_no": line.batch_no,
+            "accepted_qty": _d(line.accepted_qty),
+            "qc_status": line.qc_status,
+            "existing_putaway_no": blocking.putaway_no if blocking else None,
+            "eligible": reason is None,
+            "reason": reason,
+        })
+    return rows
+
+
+def _putaway_block_reason(receipt: m.Receipt, wh: Warehouse, line: m.ReceiptItem,
+                          blocking: m.PutawayTask | None) -> str | None:
+    """Why this line cannot be put away, or None if it can."""
+    if not wh.is_bin_managed:
+        return f"{wh.name} does not use bins — its stock is posted at receipt"
+    if receipt.is_stock_posted:
+        return f"{receipt.grn_no} is already posted to stock"
+    if line.qc_status != QcStatus.PASSED.value:
+        return f"QC is {line.qc_status.lower()}"
+    if _d(line.accepted_qty) <= ZERO:
+        return "nothing was accepted on this line"
+    if blocking is not None:
+        return f"{blocking.putaway_no} already covers this line ({blocking.status})"
+    return None
+
+
+async def create_putaway(db: AsyncSession, data: s.PutawayCreate, user) -> list[dict]:
+    """Raise putaway tasks by hand for GRN lines that have none.
+
+    QC passing a line raises its task automatically, so this is the repair path — a
+    task that was cancelled, or one skipped back when skipping was still a thing and
+    the pallet is still standing there. It is anchored to a GRN line on purpose:
+    `confirm_putaway` only moves stock IN, so a task with no receipt behind it would
+    conjure stock into a bin that nothing was ever received into.
+    """
+    receipt = await get_receipt(db, data.grn_id)
+    wh = await _warehouse(db, receipt.warehouse_id)
+    wanted = set(data.grn_item_ids)
+    unknown = wanted - {line.id for line in receipt.items}
+    if unknown:
+        raise ValidationError(
+            f"{receipt.grn_no} has no line {sorted(unknown)[0]}"
+        )
+    lines = [line for line in receipt.items if not wanted or line.id in wanted]
+
+    tasks: list[m.PutawayTask] = []
+    for line in lines:
+        blocking = await db.scalar(
+            select(m.PutawayTask).where(
+                m.PutawayTask.grn_item_id == line.id,
+                m.PutawayTask.status.in_(_SETTLED_PUTAWAY_STATUSES),
+            ).limit(1)
+        )
+        reason = _putaway_block_reason(receipt, wh, line, blocking)
+        if reason is not None:
+            # Selected lines are the operator's explicit ask, so a blocked one is an
+            # error. "Everything eligible" is a filter, so a blocked one is just skipped.
+            if wanted:
+                raise ValidationError(f"{line.item_code}: {reason}")
+            continue
+        tasks.append(await _build_putaway_task(db, receipt, line, user))
+
+    if not tasks:
+        raise ValidationError(
+            f"{receipt.grn_no} has no line waiting to be put away"
+        )
+
+    for task in tasks:
+        await write_audit(db, entity="whs_warehouse_items", entity_id=task.id,
+                          entity_no=task.putaway_no, action=AuditAction.CREATE,
+                          actor=user,
+                          after={"grn_no": receipt.grn_no, "grn_item_id": task.grn_item_id,
+                                 "qty": str(task.qty), "raised": "manual"})
+    await db.commit()
+    return [await get_putaway(db, task.id) for task in tasks]
 
 
 async def start_putaway(db: AsyncSession, task_id: int, user) -> dict:

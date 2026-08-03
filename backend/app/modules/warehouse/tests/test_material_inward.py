@@ -12,6 +12,7 @@ from app.modules.warehouse.enums import (
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, PUTAWAY_EXECUTE, PUTAWAY_VIEW,
     RECEIPT_CREATE, RECEIPT_VIEW,
 )
+from app.modules.warehouse.models import PutawayTask
 from app.shared.models.master import Item
 from app.shared.models.warehouse import Bin, Warehouse
 
@@ -164,11 +165,17 @@ async def test_submitting_a_receipt_raises_its_inspection(db, client, make_user,
     assert r.json()["status"] == "PENDING_QC"
 
 
-async def test_serials_are_optional_until_putaway(db, client, make_user, login):
-    """Serials may be captured at the GRN, at QC, or at neither — putaway is where every
-    unit is accounted for. A storekeeper counting cartons off a vehicle cannot read what
-    is inside them, so demanding serials earlier stopped the consignment being booked in
-    at all. More serials than units is still a contradiction and stays refused."""
+async def test_serials_are_optional_at_the_gate_and_mandatory_on_the_grn(
+    db, client, make_user, login,
+):
+    """The two ends of the serial rule.
+
+    A guard counting sealed cartons off a vehicle cannot read what is inside them, so
+    the gate takes whatever they can see — none, one, all. The GRN is the opposite: QC
+    picks the units it is keeping from that list and putaway names each one, so it will
+    not save, or submit, without one serial per received unit. More serials than units
+    is a contradiction at both ends.
+    """
     wh, _ = await _fixtures(db)
     item = Item(code="ELE-GEN-0003", name="Laptop dock", uom_code="NOS",
                 requires_qi=True, is_serial_tracked=True, is_active=True)
@@ -177,39 +184,78 @@ async def test_serials_are_optional_until_putaway(db, client, make_user, login):
     await make_user(username="store", permissions=[RECEIPT_CREATE, RECEIPT_VIEW])
     headers = await login("store", "pw")
 
-    created = await client.post("/api/warehouse/receipts", json={
-        "receipt_type": "PURCHASE",
+    gate = {
+        "receipt_type": "GATE_ENTRY",
         "grn_date": "2026-07-31",
         "warehouse_id": wh.id,
         "items": [{"item_id": item.id, "received_qty": 3}],
-    }, headers=headers)
+    }
+    created = await client.post("/api/warehouse/receipts", json=gate, headers=headers)
     assert created.status_code == 201, created.text
     receipt_id = created.json()["id"]
     assert created.json()["items"][0]["serial_numbers"] is None
 
-    # A partial capture is fine — the rest are read at putaway.
     partial = await client.put(f"/api/warehouse/receipts/{receipt_id}", json={
-        "receipt_type": "PURCHASE",
-        "grn_date": "2026-07-31",
-        "warehouse_id": wh.id,
+        **gate,
         "items": [{"item_id": item.id, "received_qty": 3, "serial_numbers": ["SN-1"]}],
     }, headers=headers)
     assert partial.status_code == 200, partial.text
     assert partial.json()["items"][0]["serial_numbers"] == ["SN-1"]
 
     too_many = await client.put(f"/api/warehouse/receipts/{receipt_id}", json={
-        "receipt_type": "PURCHASE",
-        "grn_date": "2026-07-31",
-        "warehouse_id": wh.id,
+        **gate,
         "items": [{"item_id": item.id, "received_qty": 1,
                    "serial_numbers": ["SN-1", "SN-2"]}],
     }, headers=headers)
     assert too_many.status_code == 422, too_many.text
 
+    # Filling in the GRN on that same row: the partial list is no longer enough.
+    grn = {**gate, "receipt_type": "PURCHASE"}
+    short = await client.put(f"/api/warehouse/receipts/{receipt_id}", json={
+        **grn,
+        "items": [{"item_id": item.id, "received_qty": 3, "serial_numbers": ["SN-1"]}],
+    }, headers=headers)
+    assert short.status_code == 422, short.text
+    assert "exactly 3" in short.json()["error"]
+
+    full = await client.put(f"/api/warehouse/receipts/{receipt_id}", json={
+        **grn,
+        "items": [{"item_id": item.id, "received_qty": 3,
+                   "serial_numbers": ["SN-1", "SN-2", "SN-3"]}],
+    }, headers=headers)
+    assert full.status_code == 200, full.text
+
     submitted = await client.post(f"/api/warehouse/receipts/{receipt_id}/submit",
                                   headers=headers)
     assert submitted.status_code == 200, submitted.text
     assert submitted.json()["status"] == "PENDING_QC"
+
+
+async def test_a_gate_entry_cannot_be_submitted_with_serials_missing(
+    db, client, make_user, login,
+):
+    """Submit is the last gate. Whatever the entry was allowed to leave blank has to be
+    finished before QC, which selects the units it keeps from exactly this list."""
+    wh, _ = await _fixtures(db)
+    item = Item(code="ELE-GEN-0004", name="Barcode scanner", uom_code="NOS",
+                requires_qi=True, is_serial_tracked=True, is_active=True)
+    db.add(item)
+    await db.commit()
+    await make_user(username="store", permissions=[RECEIPT_CREATE, RECEIPT_VIEW])
+    headers = await login("store", "pw")
+
+    created = await client.post("/api/warehouse/receipts", json={
+        "receipt_type": "GATE_ENTRY",
+        "grn_date": "2026-07-31",
+        "warehouse_id": wh.id,
+        "items": [{"item_id": item.id, "received_qty": 2, "serial_numbers": ["SN-A"]}],
+    }, headers=headers)
+    assert created.status_code == 201, created.text
+
+    blocked = await client.post(
+        f"/api/warehouse/receipts/{created.json()['id']}/submit", headers=headers)
+    assert blocked.status_code == 422, blocked.text
+    assert "1 of 2 serial numbers" in blocked.json()["error"]
 
 
 async def test_cancelling_an_inspection_reopens_its_receipt(db, client, make_user, login):
@@ -397,6 +443,81 @@ async def test_putaway_stamps_a_lot_number_from_the_storage_path(
     assert body["lot_no"].startswith(f"LOT/WH{wh.id}/A-F1-L1-R1-S1-A1/"), body["lot_no"]
     assert body["lot_no"].endswith("/00001"), body["lot_no"]
     assert body["actual_bin_path"] == "block A / flr-1 / lane -1 / rack-1 / shf-1 / bin A1"
+
+
+async def test_a_putaway_can_be_raised_by_hand_but_never_twice(
+    db, client, make_user, login,
+):
+    """The manual route exists to repair a queue, not to invent stock.
+
+    Confirming a putaway only moves stock IN, so a task with no GRN line behind it
+    would create stock nothing was received against. A line that already has a live
+    task is refused for the same reason: two tasks for one line put the same pallet
+    away twice.
+    """
+    wh = Warehouse(code="WH-MAN", name="Manual store", warehouse_type="MAIN",
+                   is_bin_managed=True, is_active=True)
+    item = Item(code="ELE-GEN-0008", name="Junction box", uom_code="NOS",
+                requires_qi=False, is_active=True)
+    db.add_all([wh, item])
+    await db.commit()
+
+    await make_user(username="raiser", permissions=[RECEIPT_CREATE, RECEIPT_VIEW,
+                                                    PUTAWAY_VIEW, PUTAWAY_EXECUTE,
+                                                    "stock.view", "stock.transfer"])
+    headers = await login("raiser", "pw")
+
+    created = await client.post("/api/warehouse/receipts", json={
+        "receipt_type": "PURCHASE",
+        "grn_date": "2026-07-31",
+        "warehouse_id": wh.id,
+        "items": [{"item_id": item.id, "received_qty": 4}],
+    }, headers=headers)
+    assert created.status_code == 201, created.text
+    receipt_id = created.json()["id"]
+
+    # Before submit the line has not passed QC, so there is nothing to place yet.
+    early = await client.get("/api/warehouse/putaways/candidates",
+                             params={"grn_id": receipt_id}, headers=headers)
+    assert early.status_code == 200, early.text
+    assert early.json()[0]["eligible"] is False
+
+    submitted = await client.post(f"/api/warehouse/receipts/{receipt_id}/submit",
+                                  headers=headers)
+    assert submitted.status_code == 200, submitted.text
+
+    # Submitting raised the task automatically, so the line is now spoken for.
+    after = await client.get("/api/warehouse/putaways/candidates",
+                             params={"grn_id": receipt_id}, headers=headers)
+    line = after.json()[0]
+    assert line["eligible"] is False
+    assert line["existing_putaway_no"]
+
+    refused = await client.post("/api/warehouse/putaways", json={
+        "grn_id": receipt_id,
+        "grn_item_ids": [line["grn_item_id"]],
+    }, headers=headers)
+    assert refused.status_code == 422, refused.text
+    assert "already covers this line" in refused.json()["error"]
+
+    # Cancel the task and the same line becomes raisable again: the stock never moved.
+    tasks = await client.get("/api/warehouse/putaways", headers=headers)
+    task_id = tasks.json()["items"][0]["id"]
+    # The test session opened its transaction before the API wrote this row, and MySQL
+    # is REPEATABLE READ — without ending that snapshot the row is simply not there.
+    await db.rollback()
+    task = await db.get(PutawayTask, task_id)
+    task.status = "cancelled"
+    await db.commit()
+
+    raised = await client.post("/api/warehouse/putaways", json={
+        "grn_id": receipt_id,
+        "grn_item_ids": [line["grn_item_id"]],
+    }, headers=headers)
+    assert raised.status_code == 201, raised.text
+    assert len(raised.json()) == 1
+    assert raised.json()[0]["grn_item_id"] == line["grn_item_id"]
+    assert raised.json()[0]["putaway_no"] != tasks.json()["items"][0]["putaway_no"]
 
 
 async def test_creating_a_picklist_saves_its_lines(db, client, make_user, login):

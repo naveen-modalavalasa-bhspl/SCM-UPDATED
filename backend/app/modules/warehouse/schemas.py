@@ -452,6 +452,35 @@ class PutawayRead(_Read):
     created_at: datetime | None = None
 
 
+class PutawayCreate(BaseModel):
+    """Raise putaway tasks by hand, always against GRN lines.
+
+    A task is normally raised by QC passing a line. This is the repair path, so it
+    still points at the receipt it came from: a putaway with no GRN line behind it
+    would put stock into a bin that nothing ever received. An empty `grn_item_ids`
+    means every eligible line on the GRN.
+    """
+    grn_id: int
+    grn_item_ids: list[int] = Field(default_factory=list)
+
+
+class PutawayCandidate(BaseModel):
+    """A GRN line offered to the manual putaway picker. Ineligible lines are returned
+    too, carrying the reason — the screen shows them greyed out rather than hiding
+    them, so "why is this one not here" never has to be asked."""
+    grn_item_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    accepted_qty: Decimal
+    qc_status: str | None = None
+    existing_putaway_no: str | None = None
+    eligible: bool
+    reason: str | None = None
+
+
 class PutawayConfirm(BaseModel):
     actual_bin_id: int
     qty: Decimal | None = None

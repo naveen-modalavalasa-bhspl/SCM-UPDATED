@@ -416,13 +416,6 @@ export function ItemMasterTab() {
                 options={opt(subclasses.data ?? [])}
                 onChange={(v) => set("item_sub_class_id", v)}
                 isDisabled={!form.item_class_id} placeholder="Select class first" /></Field>
-              {/* Asset or consumable. The code itself is generated during putaway
-                  in the warehouse module, so nothing is numbered here. */}
-              <Field label="Asset or Consumable"><Select
-                value={form.is_asset ? "ASSET" : "CONSUMABLE"}
-                options={[{ value: "CONSUMABLE", label: "Consumable" },
-                          { value: "ASSET", label: "Asset" }]}
-                onChange={(v) => set("is_asset", v === "ASSET")} /></Field>
               <label className="flex items-center gap-2 pt-7 text-sm"><Switch size="sm"
                 isSelected={form.has_components}
                 onValueChange={(v) => {

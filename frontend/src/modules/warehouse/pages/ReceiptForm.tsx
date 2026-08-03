@@ -23,9 +23,14 @@ import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../typ
  *
  * `receipt_type` decides how much of the form is on show: a gate entry captures the
  * paperwork, the vehicle and a head count of what came off it; a GRN adds the
- * inspection detail — accepted and rejected quantities, batch and expiry, bin, rate and
- * serials. Asking for any of that at the gate is asking a security guard to do QC, so
+ * inspection detail — accepted and rejected quantities, batch and expiry, bin and rate.
+ * Asking for any of that at the gate is asking a security guard to do QC, so
  * `GRN_ONLY_LINE_COLUMNS` keeps those columns out of the inward grid entirely.
+ *
+ * Serials are the exception: they show on both, but only the GRN insists on a full set.
+ * At the gate you capture whatever the cartons let you read — none, some, all — and the
+ * GRN, which is the same row, opens with those already in the grid and will not save
+ * until the rest are scanned.
  *
  * The purchase order is a typed box on both. It used to be a picker on the GRN that
  * filled the lines from the chosen order, but procurement does not raise orders in this
@@ -60,7 +65,7 @@ const emptyLine = (): ReceiptItemWrite => ({
 /** Line columns a gate entry does not ask for — they belong to the GRN, after the
  *  consignment has been opened and inspected. */
 const GRN_ONLY_LINE_COLUMNS = new Set([
-  "accepted", "rejected", "batch", "manufactured", "expiry", "reason", "bin", "rate", "serials",
+  "accepted", "rejected", "batch", "manufactured", "expiry", "reason", "bin", "rate",
 ]);
 
 const RECEIPT_TYPES = [
@@ -251,6 +256,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
   const locked = !!doc && !["DRAFT", "GATE_ENTRY"].includes(doc.status);
 
+  /** A full set is a GRN rule. The gate only checks you have not typed more serials
+   *  than units — capturing some of a load is the normal case out there. */
   const validateSerialLines = () => {
     for (const [index, line] of form.items.entries()) {
       if (!line.is_serial_tracked) continue;
@@ -259,8 +266,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         throw new Error(`Line ${index + 1}: serialized received quantity must be a whole number.`);
       }
       const actual = line.serial_numbers?.length ?? 0;
-      if (actual !== required) {
+      if (isGrn && actual !== required) {
         throw new Error(`Line ${index + 1}: enter exactly ${required} serial numbers before saving.`);
+      }
+      if (!isGrn && actual > required) {
+        throw new Error(`Line ${index + 1}: ${actual} serial numbers for ${required} received units.`);
       }
     }
   };
@@ -544,16 +554,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       header: "Serials",
       width: "w-28",
       hideOnNarrow: true,
-      render: (l, i) => (
-        l.is_serial_tracked ? (
-          <Button variant="ghost" onClick={() => setSerialLine(i)} disabled={!isGrn}>
+      render: (l, i) => {
+        if (!l.is_serial_tracked) return <span className="text-xs text-muted">—</span>;
+        const captured = l.serial_numbers?.length ?? 0;
+        const required = Math.floor(num(l.received_qty));
+        return (
+          <Button variant="ghost" onClick={() => setSerialLine(i)}>
             <ScanLine className="h-4 w-4" />
-            {l.serial_numbers?.length ? `${l.serial_numbers.length}` : "Add"}
+            {captured || required ? `${captured}/${required}` : "Add"}
           </Button>
-        ) : (
-          <span className="text-xs text-muted">—</span>
-        )
-      ),
+        );
+      },
     },
   ];
 
@@ -748,7 +759,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           hint={
             isGrn
               ? "Rejected is received minus accepted; short is ordered minus received."
-              : "Record the physical item count at the gate. Batch, QC and serial details are completed in the GRN."
+              : "Record the physical item count at the gate. Capture any serials you can read — the rest, plus batch and QC, are completed in the GRN."
           }
         >
           {invalid.lines && <ErrorBanner error="Add at least one line before saving." />}
@@ -808,6 +819,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               ?? `Line ${serialLine + 1}`
         }
         readOnly={locked}
+        partial={!isGrn}
         onSave={(serials) => serialLine !== null && patchLine(serialLine, { serial_numbers: serials })}
       />
 

@@ -2,12 +2,12 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, ScanLine, SkipForward } from "lucide-react";
+import { ArrowLeft, ScanLine } from "lucide-react";
 import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
-import { binOptions, confirmPutaway, getPutaway, skipPutaway, startPutaway, suggestBins } from "../api";
+import { binOptions, confirmPutaway, getPutaway, startPutaway, suggestBins } from "../api";
 import { fmtDate, fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
 
 /**
@@ -33,7 +33,6 @@ export default function PutawayForm() {
   const [scan, setScan] = useState("");
   const [scanError, setScanError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
-  const [skipping, setSkipping] = useState(false);
   const [enteringSerials, setEnteringSerials] = useState(false);
 
   const { data: task, isLoading, error } = useQuery({
@@ -72,15 +71,6 @@ export default function PutawayForm() {
     onSuccess: () => {
       invalidate();
       setConfirming(false);
-      nav("/warehouse/transactions/putaway", { replace: true });
-    },
-  });
-
-  const skip = useMutation({
-    mutationFn: () => skipPutaway(taskId, remarks || undefined),
-    onSuccess: () => {
-      invalidate();
-      setSkipping(false);
       nav("/warehouse/transactions/putaway", { replace: true });
     },
   });
@@ -131,13 +121,6 @@ export default function PutawayForm() {
               <Can do="stock.transfer">
                 <Button variant="subtle" onClick={() => start.mutate()} disabled={start.isPending}>
                   Start
-                </Button>
-              </Can>
-            )}
-            {!done && (
-              <Can do="stock.transfer">
-                <Button variant="subtle" onClick={() => setSkipping(true)}>
-                  <SkipForward className="h-4 w-4" /> Skip
                 </Button>
               </Can>
             )}
@@ -338,23 +321,6 @@ export default function PutawayForm() {
         itemLabel={task.item_name ?? task.item_code ?? ""}
         onSave={setSerials}
       />
-
-      <ConfirmModal
-        isOpen={skipping}
-        title="Skip this task?"
-        message="The stock stays where it is and the task is marked skipped. Say why."
-        confirmLabel="Skip task"
-        busy={skip.isPending}
-        error={skip.error}
-        onConfirm={() => skip.mutate()}
-        onClose={() => setSkipping(false)}
-      >
-        <div className="mt-3">
-          <Field label="Reason">
-            <Input value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Bin full, item damaged…" />
-          </Field>
-        </div>
-      </ConfirmModal>
     </div>
   );
 }

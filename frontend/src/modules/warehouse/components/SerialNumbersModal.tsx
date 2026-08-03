@@ -13,6 +13,11 @@ import { Button, ErrorBanner } from "@/shared/components";
  * error once the modal has closed. The box keeps focus and clears on Enter so a scanner
  * gun can fire through a whole carton without anyone touching the keyboard.
  *
+ * `partial` relaxes only the count, for the gate entry: the guard records what the
+ * unopened load lets them read and the GRN, which is the same document row, insists on
+ * the full set later. The ceiling stays — more serials than units is a miscount either
+ * way.
+ *
  * **Pick mode** (`available` given, used by QC): the serials already exist — they were
  * read off the units at the GRN — so typing them again could only introduce a number
  * that was never received, which the backend rejects at completion. The inspector ticks
@@ -27,6 +32,7 @@ export function SerialNumbersModal({
   quantity,
   itemLabel,
   readOnly = false,
+  partial = false,
   available = null,
   pickMode = "reject",
 }: {
@@ -39,6 +45,8 @@ export function SerialNumbersModal({
   quantity: number;
   itemLabel: string;
   readOnly?: boolean;
+  /** Allow saving fewer serials than the quantity. Capture mode only. */
+  partial?: boolean;
   /** The GRN's serials for this line. Present = pick mode, absent = type them. */
   available?: string[] | null;
   /** `reject` is QC semantics; `select` is used when issuing stock from a bin. */
@@ -258,10 +266,12 @@ export function SerialNumbersModal({
 
   // A plain expression, not a useMemo: pick mode returns before this point, and a hook
   // that only runs on one branch breaks the rules of hooks.
-  const tone = remaining === 0 ? "text-ok" : remaining < 0 ? "text-bad" : "text-warn";
+  const tone = remaining === 0 ? "text-ok"
+    : remaining < 0 ? "text-bad"
+      : partial ? "text-muted" : "text-warn";
 
   const save = () => {
-    if (serials.length !== required) {
+    if (!partial && serials.length !== required) {
       setError(`This line needs exactly ${required} serial numbers; ${serials.length} captured.`);
       return;
     }
@@ -281,7 +291,10 @@ export function SerialNumbersModal({
           <ErrorBanner error={error} />
 
           <div className="mb-3 flex items-center justify-between text-sm">
-            <span className="text-muted">{serials.length} of {required} captured</span>
+            <span className="text-muted">
+              {serials.length} of {required} captured
+              {partial && " · the rest can wait for the GRN"}
+            </span>
             <span className={`font-semibold ${tone}`}>
               {remaining > 0 ? `${remaining} to go` : remaining === 0 ? "Complete" : `${-remaining} too many`}
             </span>

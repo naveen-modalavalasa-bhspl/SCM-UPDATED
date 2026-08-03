@@ -27,7 +27,9 @@ import type {
   PurchaseReturn,
   PurchaseReturnWrite,
   Putaway,
+  PutawayCandidate,
   PutawayConfirm,
+  PutawayCreate,
   Receipt,
   ReceiptWrite,
   SerialNumber,
@@ -174,14 +176,20 @@ export const listPutaways = (params: ListParams = {}) =>
 
 export const getPutaway = (id: number) => get<Putaway>(`${BASE}/putaways/${id}`);
 
+/** GRN lines a manual putaway could be raised for. Ineligible ones come back too,
+ *  carrying the reason, so the picker can grey them out instead of hiding them. */
+export const putawayCandidates = (grn_id: number) =>
+  get<PutawayCandidate[]>(`${BASE}/putaways/candidates`, { grn_id });
+
+/** Raises tasks by hand for GRN lines that have none. Empty `grn_item_ids` = all. */
+export const createPutaway = (body: PutawayCreate) =>
+  post<Putaway[]>(`${BASE}/putaways`, body);
+
 export const startPutaway = (id: number) => post<Putaway>(`${BASE}/putaways/${id}/start`);
 
 /** Confirming a putaway is what moves the stock into the bin. */
 export const confirmPutaway = (id: number, body: PutawayConfirm) =>
   post<Putaway>(`${BASE}/putaways/${id}/confirm`, body);
-
-export const skipPutaway = (id: number, reason?: string) =>
-  post<Putaway>(`${BASE}/putaways/${id}/skip`, { reason });
 
 /** Bins the engine suggests for this task, best first. */
 export const suggestBins = (id: number) => get<Bin[]>(`${BASE}/putaways/${id}/suggested-bins`);

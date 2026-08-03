@@ -245,6 +245,20 @@ async def list_putaways(params: PageParams = Depends(), status: str | None = Non
     return await service.list_putaways(db, params, status=status, warehouse_id=warehouse_id)
 
 
+# Declared above /putaways/{task_id}: that path param is an int, so "candidates" would
+# 422 against it rather than falling through.
+@router.get("/putaways/candidates", response_model=list[s.PutawayCandidate])
+async def putaway_candidates(grn_id: int, db: AsyncSession = Depends(get_db),
+                             _=Depends(require_permission(PUTAWAY_VIEW))):
+    return await service.putaway_candidates(db, grn_id)
+
+
+@router.post("/putaways", response_model=list[s.PutawayRead], status_code=201)
+async def create_putaway(data: s.PutawayCreate, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(PUTAWAY_EXECUTE))):
+    return await service.create_putaway(db, data, user)
+
+
 @router.get("/putaways/{task_id}", response_model=s.PutawayRead)
 async def get_putaway(task_id: int, db: AsyncSession = Depends(get_db),
                       _=Depends(require_permission(PUTAWAY_VIEW))):

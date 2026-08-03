@@ -45,6 +45,8 @@ export interface DocumentListProps<T> {
   onRowClick?: (row: T) => void;
   /** Route to push for "new"; omit to hide the button. */
   createTo?: string;
+  /** Opens a modal instead of a route. Takes precedence over `createTo`. */
+  onCreate?: () => void;
   createLabel?: string;
   createPermission?: string;
   empty?: string;
@@ -69,6 +71,7 @@ export function DocumentList<T>({
   kpis,
   onRowClick,
   createTo,
+  onCreate,
   createLabel = "New",
   createPermission,
   empty = "Nothing here yet.",
@@ -113,8 +116,8 @@ export function DocumentList<T>({
 
   const openRow = onRowClick ?? ((row: T) => nav(String(keyOf(row))));
 
-  const create = createTo && (
-    <Button onClick={() => nav(createTo)}>
+  const create = (onCreate || createTo) && (
+    <Button onClick={onCreate ?? (() => nav(createTo!))}>
       <Plus className="h-4 w-4" /> {createLabel}
     </Button>
   );
