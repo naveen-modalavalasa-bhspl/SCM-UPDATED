@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch,
@@ -169,6 +170,16 @@ export function UsersPage() {
             </button>
           ),
         )}
+        {/* Job Profiles is a route, not one of the local views above — it replaces the
+         *  HCM role as the grant unit and is being trialled beside the old screens
+         *  rather than folded into them. Linked here so it is reachable. */}
+        <Link
+          to="/rbac/job-profiles"
+          className="border-b-2 border-transparent px-1 pb-3 text-sm font-semibold
+                     text-muted hover:text-body"
+        >
+          Job profiles
+        </Link>
       </div>
 
       {view === "users" ? (

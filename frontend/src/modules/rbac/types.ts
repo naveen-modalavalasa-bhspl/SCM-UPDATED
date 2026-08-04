@@ -174,3 +174,55 @@ export interface SetPermissionsResult {
   permission_codes: string[];
 }
 
+
+/* Job Profiles — the derived grant unit. See backend platform/rbac/profiles.py. */
+export type ScopeRung = "SELF" | "OFFICE" | "SUBTREE" | "PROJECT" | "ALL";
+
+export interface JobProfilePosition {
+  id: number;
+  name: string;
+  code?: string | null;
+  hcm_role?: string | null;
+  office_level?: string | null;
+  holders: number;
+}
+
+export interface JobProfile {
+  key: string;
+  name: string;
+  role_id: number | null;
+  /** false = nobody has granted this profile yet, so its people still resolve
+   *  through the old HCM role. Saving once flips it and takes over. */
+  configured: boolean;
+  scope: ScopeRung;
+  suggested_scope: ScopeRung;
+  position_count: number;
+  holder_count: number;
+  hcm_roles: string[];
+  office_levels: string[];
+  positions: JobProfilePosition[];
+  page_codes: string[];
+  permission_codes: string[];
+}
+
+export interface JobProfileMatrix {
+  items: JobProfile[];
+  total: number;
+  position_total: number;
+  pages: {
+    id: number; code: string; name: string; module?: string | null;
+    parent_id: number | null; always_on: boolean;
+    required_permission: string | null;
+  }[];
+  features: { code: string; module: string; description: string }[];
+  scopes: ScopeRung[];
+}
+
+export interface JobProfileHolders {
+  key: string;
+  total: number;
+  items: {
+    employee_id: number; name: string; emp_code?: string | null;
+    office_name?: string | null; position_name?: string | null;
+  }[];
+}

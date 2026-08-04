@@ -28,6 +28,12 @@ INDENT_REJECT = "indent.reject"
 # service also checks the actor raised the indent, because this is the one step nobody
 # else can perform on their behalf.
 INDENT_ACKNOWLEDGE = "indent.acknowledge"
+# Seeing requests you neither raised nor approved, because you have to FILL them.
+# Inventory and the warehouse work the fulfilment queue; nobody else has a reason to
+# read another department's indent. Split out of stock.view/mr.view, which every one
+# of the 25 roles holds — gating the queue on those showed all 2,801 logins every
+# approved indent in the company.
+INDENT_VIEW_FULFILMENT = "indent.view.fulfilment"
 
 # --- Purchase Orders ---
 PO_VIEW = "po.view"
@@ -129,6 +135,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(INDENT_REJECT, "indents", "indent", "reject", "Reject indents"),
     Perm(INDENT_ACKNOWLEDGE, "indents", "indent", "acknowledge",
          "Acknowledge receipt of indent goods"),
+    Perm(INDENT_VIEW_FULFILMENT, "indents", "indent", "view_fulfilment",
+         "View approved indents awaiting fulfilment, raised by anyone"),
     Perm(PO_VIEW, "procurement", "po", "view", "View purchase orders"),
     Perm(PO_CREATE, "procurement", "po", "create", "Create purchase orders"),
     Perm(PO_EDIT, "procurement", "po", "edit", "Edit purchase orders"),
@@ -217,3 +225,90 @@ ALL_PERMISSIONS: list[Perm] = [
 ]
 
 ALL_CODES: list[str] = [p.code for p in ALL_PERMISSIONS]
+
+
+# --------------------------------------------------------------------------- #
+#  Per-page view permissions
+# --------------------------------------------------------------------------- #
+# One permission per page, so pages stop being granted in clumps. Before this,
+# `indent.view` was the required_permission of TEN pages — the six Indents screens
+# AND the four Approvals screens — so ticking Indents silently handed a storekeeper
+# the approval queue. `stock.view` did the same across nine pages spanning BOTH
+# Warehouse and Inventory.
+#
+# These guard page VISIBILITY only. The action permissions above still guard the
+# endpoints (rule 6 is unchanged): seeing the Approvals page is not permission to
+# approve, `indent.approve` still is.
+#
+# `home` is deliberately absent — it has no required_permission and is the one screen
+# everyone keeps, so a profile with nothing ticked lands on Home and nowhere else.
+PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
+    # (page code, module, page name)
+    ("grp_indents", "indents", "Indents"),
+    ("ind_dashboard", "indents", "Indents · Overview"),
+    ("ind_list", "indents", "Indents · All Requests"),
+    ("ind_deliveries", "indents", "Indents · My Deliveries"),
+    ("ind_ack", "indents", "Indents · Acknowledgments"),
+    ("ind_reports", "indents", "Indents · Activity Ledger"),
+    ("ind_notifications", "indents", "Indents · Notifications"),
+    ("approvals", "approvals", "Approvals"),
+    ("approval_waiting", "approvals", "Approvals · Waiting for Me"),
+    ("approval_decisions", "approvals", "Approvals · My Decisions"),
+    ("approval_team", "approvals", "Approvals · Team Queue"),
+    ("grp_purchasing", "procurement", "Purchasing"),
+    ("po_list", "procurement", "Purchase Orders"),
+    ("grp_warehouse", "warehouse", "Warehouse"),
+    ("wh_dashboard", "warehouse", "Warehouse · Dashboard"),
+    ("wh_inward", "warehouse", "Warehouse · Material Inward"),
+    ("wh_grn", "warehouse", "Warehouse · Goods Receipt"),
+    ("wh_qc", "warehouse", "Warehouse · Quality Inspection"),
+    ("wh_putaway", "warehouse", "Warehouse · Put-away"),
+    ("wh_issues", "warehouse", "Warehouse · Material Issues"),
+    ("wh_picklist", "warehouse", "Warehouse · Picklists"),
+    ("wh_consignments", "warehouse", "Warehouse · Consignments"),
+    ("wh_dispatch", "warehouse", "Warehouse · Dispatch"),
+    ("wh_returns", "warehouse", "Warehouse · Purchase Returns"),
+    ("wh_notifications", "warehouse", "Warehouse · Notifications"),
+    ("wh_reports", "warehouse", "Warehouse · Reports"),
+    ("wh_masters", "warehouse", "Warehouse · Masters"),
+    ("grp_inventory", "inventory", "Inventory"),
+    ("inv_overview", "inventory", "Inventory · Overview"),
+    ("inv_balance", "inventory", "Inventory · Stock Balance"),
+    ("inv_ledger", "inventory", "Inventory · Stock Ledger"),
+    ("inv_replenishment", "inventory", "Inventory · Replenishment"),
+    ("inv_transfers", "inventory", "Inventory · Transfers"),
+    ("inv_fulfillment", "inventory", "Inventory · Fulfilment Queue"),
+    ("inv_allocation_approvals", "inventory", "Inventory · Allocation Approvals"),
+    ("inv_mr", "inventory", "Inventory · Material Requests"),
+    ("inv_labels", "inventory", "Inventory · Labels & Printing"),
+    ("masters", "masters", "Masters"),
+    ("grp_rbac", "rbac", "RBAC"),
+    ("rbac_access", "rbac", "RBAC · Roles & Access"),
+    ("rbac_groups", "rbac", "RBAC · User Groups"),
+    ("grp_settings", "admin", "Settings"),
+    ("admin", "admin", "Settings · HCM & Config"),
+    ("admin_settings", "admin", "Settings · Company Settings"),
+    ("admin_policies", "admin", "Settings · Approval & Automation"),
+    ("admin_workflows", "admin", "Settings · Approval Workflows"),
+    ("admin_approvals_config", "admin", "Settings · Approvals Config"),
+    ("admin_rules", "admin", "Settings · Rules Engine"),
+    ("admin_numbering", "admin", "Settings · Document Numbering"),
+    ("admin_notifications", "admin", "Settings · Notifications"),
+    ("admin_audit", "admin", "Settings · Audit Log"),
+    ("admin_fallback", "admin", "Settings · Fallback Log"),
+    ("admin_app_logs", "admin", "Settings · App Logs"),
+]
+
+
+def page_view_code(page_code: str) -> str:
+    """The permission that makes one page visible. `page.<page code>.view`."""
+    return f"page.{page_code}.view"
+
+
+PAGE_VIEW_PERMISSIONS: list[Perm] = [
+    Perm(page_view_code(code), module, "page", "view", f"See the {name} page")
+    for code, module, name in PAGE_VIEW_CODES
+]
+
+ALL_PERMISSIONS.extend(PAGE_VIEW_PERMISSIONS)
+ALL_CODES.extend(p.code for p in PAGE_VIEW_PERMISSIONS)

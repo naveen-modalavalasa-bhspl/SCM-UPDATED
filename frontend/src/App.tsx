@@ -27,6 +27,7 @@ import { WarehouseModule } from "@/modules/warehouse";
 import { AdminPage } from "@/modules/admin/pages/AdminPage";
 import { UsersPage } from "@/modules/rbac/pages/UsersPage";
 import { GroupsPage } from "@/modules/rbac/pages/GroupsPage";
+import { JobProfilesPage } from "@/modules/rbac/pages/JobProfilesPage";
 import { RulesPage } from "@/modules/admin/pages/RulesPage";
 import { WorkflowsPage } from "@/modules/admin/pages/WorkflowsPage";
 import { ApprovalConfigPage } from "@/modules/admin/pages/ApprovalConfigPage";
@@ -120,6 +121,10 @@ function AppRoutes() {
         <Route path="admin/settings" element={<SettingsPage />} />
         <Route path="rbac/access" element={<UsersPage />} />
         <Route path="rbac/groups" element={<GroupsPage />} />
+        {/* Job Profiles: reachable by URL only for now. Adding a menu row means a
+            rbac_pages insert, and seed prunes the live tree — same reason the
+            custom ladder route below has no menu entry. */}
+        <Route path="rbac/job-profiles" element={<JobProfilesPage />} />
         <Route path="admin/rules" element={<RulesPage />} />
         <Route path="admin/workflows" element={<WorkflowsPage />} />
         <Route path="admin/approvals-config" element={<ApprovalConfigPage />} />

@@ -7,10 +7,10 @@ from app.core.dependencies import require_permission
 from app.core.pagination import PageParams
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.schemas import (
-    RoleCloneIn, RoleFeatureAccessIn, RoleIn, RolePageAccessIn,
+    JobProfileAccessIn, RoleCloneIn, RoleFeatureAccessIn, RoleIn, RolePageAccessIn,
     RolePermissionsIn, UserGroupIn,
 )
-from app.platform.rbac import service
+from app.platform.rbac import profiles, service
 
 router = APIRouter(prefix="/api/rbac", tags=["rbac"])
 
@@ -180,3 +180,33 @@ async def update_feature_access(role_id: int, data: RoleFeatureAccessIn,
     return await service.set_role_feature_access(
         db, role_id, data.permission_codes, user,
     )
+
+
+# ------------------------------ job profiles ------------------------------- #
+# The grant unit that HCM roles are too coarse to be — see profiles.py. A separate
+# surface on purpose: the page/feature matrices above are untouched and keep working.
+@router.get("/job-profiles")
+async def list_job_profiles(db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.ADMIN_ROLES_MANAGE))):
+    return await profiles.list_profiles(db)
+
+
+@router.get("/job-profiles/{key}/holders")
+async def job_profile_holders(key: str, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.ADMIN_ROLES_MANAGE))):
+    return await profiles.preview_profile(db, key)
+
+
+@router.put("/job-profiles/{key}/access")
+async def set_job_profile_access(key: str, data: JobProfileAccessIn,
+                                 db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(perms.ADMIN_ROLES_MANAGE))):
+    return await profiles.set_profile_access(
+        db, key, data.page_codes, data.permission_codes, data.scope, data.name, user,
+    )
+
+
+@router.delete("/job-profiles/{key}/access")
+async def reset_job_profile(key: str, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.ADMIN_ROLES_MANAGE))):
+    return await profiles.reset_profile(db, key, user)

@@ -14,6 +14,7 @@ from app.platform.rbac.models import (
 )
 from app.platform.settings.models import UserCredential
 from app.platform.settings.service import write_audit
+from app.platform.rbac.profiles import PROFILE_PREFIX
 from app.shared.enums import AuditAction, GroupType
 
 MAX_GROUP_DEPTH = 10
@@ -71,7 +72,12 @@ async def get_page_access_matrix(db: AsyncSession) -> dict:
         select(Page).where(Page.is_active.is_(True))
         .order_by(Page.sort_order, Page.name)
     )).scalars().all()
-    roles = (await db.execute(select(Role).where(Role.is_active.is_(True)).order_by(
+    roles = (await db.execute(select(Role).where(
+        Role.is_active.is_(True),
+        # Job-profile rows live in rbac_roles too (profiles.py). They are granted on
+        # their own screen and would only confuse this one, so they stay out of it.
+        Role.description.notlike(f"{PROFILE_PREFIX}%"),
+    ).order_by(
         Role.description.startswith(HCM_ROLE_DESCRIPTION_PREFIX).desc(), Role.name,
     ))).scalars().all()
     permission_rows = (await db.execute(
@@ -197,7 +203,12 @@ async def get_feature_access_matrix(db: AsyncSession) -> dict:
     features = (await db.execute(
         stmt.order_by(Permission.module, Permission.code)
     )).scalars().all()
-    roles = (await db.execute(select(Role).where(Role.is_active.is_(True)).order_by(
+    roles = (await db.execute(select(Role).where(
+        Role.is_active.is_(True),
+        # Job-profile rows live in rbac_roles too (profiles.py). They are granted on
+        # their own screen and would only confuse this one, so they stay out of it.
+        Role.description.notlike(f"{PROFILE_PREFIX}%"),
+    ).order_by(
         Role.description.startswith(HCM_ROLE_DESCRIPTION_PREFIX).desc(), Role.name,
     ))).scalars().all()
     feature_codes = {feature.code for feature in features}
@@ -291,6 +302,28 @@ async def get_user_roles(
     roles = {row.id: row for row in (await db.execute(stmt)).scalars().all()}
 
     if position_id is not None:
+        # A job profile REPLACES the position's HCM role rather than adding to it —
+        # that replacement is the entire point. HCM role 29 "MANAGER" covers fifteen
+        # unrelated jobs, so anything granted to it leaks to all fifteen; the profile
+        # ("IVM", "CPO", "LE"...) is the job the person actually does.
+        # Until an admin saves a profile there is no profile row, so this falls
+        # straight through and resolution is exactly what it was before.
+        from app.platform.rbac.profiles import profile_role_for_position
+
+        profile_role = await profile_role_for_position(db, position_id)
+        if profile_role is not None:
+            # The profile replaces EVERYTHING, including personal rbac_user_roles.
+            # Those are grants made to a human on the Users & roles screen, and they
+            # used to be unioned in — so emptying a profile changed nothing for anyone
+            # who had been handed REQUESTER or STORE when their login was created.
+            # A job profile that cannot take access away is not a grant unit, so once
+            # a position has one it is the only thing that decides.
+            #
+            # A login with no position, or a position nobody has configured, still
+            # falls through to its personal roles — which is what keeps the
+            # position-less System Admin able to configure the profiles.
+            return [profile_role]
+
         hcm_role_id = await db.scalar(
             select(HcmPosition.role_id).where(HcmPosition.id == position_id)
         )
@@ -803,7 +836,9 @@ async def list_permissions(db: AsyncSession) -> dict:
 
 async def list_roles_with_permissions(db: AsyncSession) -> dict:
     """All roles with their held permission codes, in two queries (no N+1)."""
-    roles = (await db.execute(select(Role).order_by(Role.code))).scalars().all()
+    roles = (await db.execute(select(Role).where(
+        Role.description.notlike(f"{PROFILE_PREFIX}%"),
+    ).order_by(Role.code))).scalars().all()
     held_rows = (await db.execute(
         select(RolePermission.role_id, Permission.code)
         .join(Permission, Permission.id == RolePermission.permission_id)

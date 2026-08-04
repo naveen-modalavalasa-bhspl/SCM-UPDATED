@@ -505,15 +505,24 @@ def _has_global_indent_read(scope_code: str | None, role_codes: set[str]) -> boo
 
 
 async def _scm_stage_statuses(db: AsyncSession, user) -> list[str]:
+    """Statuses at which a fulfiller may read an indent raised by anyone.
+
+    This branch is unscoped by design — inventory picks the warehouse that fills a
+    request, so it cannot be limited to the reader's own office or reporting line.
+    That makes the permission guarding it the only thing standing between a
+    storekeeper and every indent in the company, so it must be a permission only
+    fulfillers hold.
+
+    It used to be `stock.view | mr.view | allocation.view`. All 25 roles hold at
+    least one of those — stock.view alone is the required_permission for nine pages
+    across Inventory AND Warehouse — so every login, DEO and pilot included, could
+    read all 67 approved-or-later indents. Now it is one dedicated code, granted to
+    nobody by default.
+    """
     user_perms = await rbac_service.get_user_permissions(
         db, user, getattr(user, "active_position_id", None),
     )
-    scm_codes = {
-        perms.ALLOCATION_VIEW,
-        perms.STOCK_VIEW,
-        perms.MR_VIEW,
-    }
-    if not (user_perms & scm_codes):
+    if perms.INDENT_VIEW_FULFILMENT not in user_perms:
         return []
     return [
         IndentStatus.APPROVED.value,

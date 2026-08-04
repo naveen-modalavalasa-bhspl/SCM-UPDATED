@@ -35,3 +35,11 @@ class RolePermissionsIn(BaseModel):
 class RoleCloneIn(BaseModel):
     code: str
     name: str
+
+
+class JobProfileAccessIn(BaseModel):
+    """A job profile's whole grant, saved in one shot (profiles.py)."""
+    page_codes: list[str] = []
+    permission_codes: list[str] = []
+    scope: str = "SELF"
+    name: str | None = None

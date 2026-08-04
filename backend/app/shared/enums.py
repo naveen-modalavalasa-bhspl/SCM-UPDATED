@@ -375,3 +375,20 @@ class ResetPolicy(str, Enum):
     NEVER = "NEVER"
     YEARLY = "YEARLY"
     MONTHLY = "MONTHLY"
+
+
+class ScopeRung(str, Enum):
+    """How far a job profile can see. Rows, not pages.
+
+    Splitting profiles fixes WHICH SCREENS someone gets; it does nothing about
+    WHOSE ROWS. District Manager Anantapur and District Manager Kurnool are one
+    profile doing one job — they must not read each other's documents.
+
+    The ladder is HCM's own, read off hcm_positions.raw["office_level"]:
+    FACILITATE -> BRANCH OFFICE -> DISTRICT/REGIONAL OFFICE -> HEAD OFFICE.
+    """
+    SELF = "SELF"            # only documents the login raised
+    OFFICE = "OFFICE"        # own hcm office
+    SUBTREE = "SUBTREE"      # own position and everything reporting under it
+    PROJECT = "PROJECT"      # own hcm_employees.project_id
+    ALL = "ALL"              # the whole network

@@ -2,6 +2,7 @@ import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
   AccessSummary, AdminUserRow, FeatureAccessMatrix, GrantResult, GroupMember,
+  JobProfileHolders, JobProfileMatrix,
   OrgTree, PageAccessMatrix, PermissionDef, PermissionHolders, Region,
   Reporting, RoleWithPermissions, SetPermissionsResult, UserFilters, UserGroup, ViewAs,
 } from "./types";
@@ -55,6 +56,25 @@ export const rbacApi = {
     removeMember: (id: number, employeeId: number) =>
       api.delete(`/api/rbac/groups/${id}/members/${employeeId}`).then((response) => response.data),
     regions: () => all<Region>("/api/rbac/regions"),
+  },
+  /* Job profiles: the grant unit derived from HCM positions. Separate endpoints
+     from pageAccess/featureAccess on purpose — those screens are untouched. */
+  jobProfiles: {
+    matrix: () =>
+      api.get<JobProfileMatrix>("/api/rbac/job-profiles").then((r) => r.data),
+    holders: (key: string) =>
+      api.get<JobProfileHolders>(
+        `/api/rbac/job-profiles/${encodeURIComponent(key)}/holders`,
+      ).then((r) => r.data),
+    setAccess: (key: string, body: {
+      page_codes: string[]; permission_codes: string[];
+      scope: string; name?: string | null;
+    }) => api.put(
+      `/api/rbac/job-profiles/${encodeURIComponent(key)}/access`, body,
+    ).then((r) => r.data),
+    reset: (key: string) =>
+      api.delete(`/api/rbac/job-profiles/${encodeURIComponent(key)}/access`)
+        .then((r) => r.data),
   },
   roles: () => all<{
     id: number;
