@@ -31,6 +31,18 @@ async def lifespan(app: FastAPI):
         scheduler.configure(enabled, interval)
     except Exception as exc:  # don't block startup if settings/DB not ready
         log.warning("HCM scheduler not configured at startup: %s", exc)
+
+    # Register screens added since the last deploy. Additive only — it never drops a
+    # page — so unlike scripts.seed this is safe to run against the live database.
+    try:
+        from app.platform.rbac.page_registry import sync_pages
+
+        async with SessionLocal() as db:
+            result = await sync_pages(db)
+        if result["added"] or result["updated"]:
+            log.info("rbac_pages synced: %s", result)
+    except Exception as exc:
+        log.warning("Page registry sync skipped: %s", exc)
     yield
     scheduler.shutdown()
 

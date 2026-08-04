@@ -5,11 +5,12 @@ permissions for their active position. The frontend never receives cards, action
 modules, attention items, or activity for a capability the user cannot access.
 """
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.home.schemas import DateRange
 from app.modules.indents import service as indent_service
+from app.shared.scope import scope_condition
 from app.modules.indents.models import Indent
 from app.modules.inventory import service as inventory_service
 from app.modules.procurement.models import PurchaseOrder
@@ -216,7 +217,18 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
     attention: list[dict] = []
 
     if perms.INDENT_VIEW in permissions:
-        indent_scope = await indent_service.indent_access_condition(db, user)
+        # Both filters, exactly as list_indents applies them. With only the access
+        # rule this tile read 79 while the Indents screen read 2.
+        indent_scope = and_(
+            await indent_service.indent_access_condition(db, user),
+            await scope_condition(
+                db, user,
+                owner_col=Indent.requested_by_id,
+                position_col=Indent.position_id,
+                office_col=Indent.office_id,
+                project_col=Indent.project_id,
+            ),
+        )
         # All-time, not date-ranged: the tile has to read the same as "Total indents"
         # on the indent dashboard, which is unfiltered until the user filters it.
         # The date range picker scopes recent activity only.

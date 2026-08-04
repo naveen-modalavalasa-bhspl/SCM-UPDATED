@@ -38,6 +38,8 @@ from app.modules.warehouse.enums import (
 from app.platform.settings import attachments
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
+from app.modules.inventory.service import warehouse_ids_for_user
+from app.shared.scope import scope_condition
 from app.shared.enums import (
     AuditAction, IndentStatus, InstanceStatus, POStatus, ReservationStatus,
     RefType as InventoryRefType, StockDirection,
@@ -177,7 +179,7 @@ async def _next_lot_no(db: AsyncSession, warehouse: Warehouse, target: Bin) -> s
 # ---------------------------------------------------------------------------
 
 async def list_warehouses(db: AsyncSession, params: PageParams, *, search: str | None = None,
-                          is_active: bool | None = None) -> dict:
+                          is_active: bool | None = None, user=None) -> dict:
     stmt = select(Warehouse)
     if search:
         like = f"%{search}%"
@@ -595,8 +597,16 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
 async def list_receipts(db: AsyncSession, params: PageParams, *, receipt_type: str | None = None,
                         status: str | None = None, warehouse_id: int | None = None,
                         search: str | None = None, date_from: date | None = None,
-                        date_to: date | None = None, gate_register: bool = False) -> dict:
+                        date_to: date | None = None, gate_register: bool = False, user=None) -> dict:
     stmt = select(m.Receipt)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.Receipt.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            owner_col=m.Receipt.created_by_id,
+            project_col=m.Receipt.project_id,
+        ))
     if gate_register:
         # The gate register is a log of vehicles that arrived, not a queue of open ones.
         # Converting a gate entry rewrites `receipt_type` to PURCHASE on the same row, so
@@ -1414,8 +1424,14 @@ async def _raise_inspection_for(
 
 async def list_inspections(db: AsyncSession, params: PageParams, *,
                            inspection_type: str | None = None, status: str | None = None,
-                           warehouse_id: int | None = None, search: str | None = None) -> dict:
+                           warehouse_id: int | None = None, search: str | None = None, user=None) -> dict:
     stmt = select(m.Inspection)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.Inspection.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        ))
     if inspection_type:
         stmt = stmt.where(m.Inspection.inspection_type == inspection_type)
     if status:
@@ -1742,8 +1758,14 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
 
 
 async def list_putaways(db: AsyncSession, params: PageParams, *, status: str | None = None,
-                        warehouse_id: int | None = None) -> dict:
-    stmt = select(m.PutawayTask).where(m.PutawayTask.is_active.is_(True))
+                        warehouse_id: int | None = None, user=None) -> dict:
+    stmt = select(m.PutawayTask)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.PutawayTask.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        )).where(m.PutawayTask.is_active.is_(True))
     if status:
         stmt = stmt.where(m.PutawayTask.status == status)
     if warehouse_id:
@@ -2337,8 +2359,14 @@ async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list
 # ---------------------------------------------------------------------------
 
 async def list_pickings(db: AsyncSession, params: PageParams, *, status: str | None = None,
-                        warehouse_id: int | None = None) -> dict:
+                        warehouse_id: int | None = None, user=None) -> dict:
     stmt = select(m.Picking)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.Picking.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        ))
     if status:
         stmt = stmt.where(m.Picking.status == status)
     if warehouse_id:
@@ -2756,8 +2784,16 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
 
 async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | None = None,
                       status: str | None = None, warehouse_id: int | None = None,
-                      search: str | None = None) -> dict:
+                      search: str | None = None, user=None) -> dict:
     stmt = select(m.MaterialIssue)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.MaterialIssue.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            owner_col=m.MaterialIssue.created_by_id,
+            project_col=m.MaterialIssue.project_id,
+        ))
     if direction:
         stmt = stmt.where(m.MaterialIssue.direction == direction)
     if status:
@@ -3619,8 +3655,16 @@ async def _apply_consignment_packages(
 
 
 async def list_dispatches(db: AsyncSession, params: PageParams, *, status: str | None = None,
-                          warehouse_id: int | None = None, search: str | None = None) -> dict:
+                          warehouse_id: int | None = None, search: str | None = None, user=None) -> dict:
     stmt = select(m.Dispatch)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.Dispatch.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            owner_col=m.Dispatch.created_by_id,
+            project_col=m.Dispatch.project_id,
+        ))
     if status:
         stmt = stmt.where(m.Dispatch.status == status)
     if warehouse_id:
@@ -3638,8 +3682,16 @@ async def list_dispatches(db: AsyncSession, params: PageParams, *, status: str |
 
 
 async def list_consignments(db: AsyncSession, params: PageParams, *, status: str | None = None,
-                            warehouse_id: int | None = None, search: str | None = None) -> dict:
-    stmt = select(m.Dispatch).where(
+                            warehouse_id: int | None = None, search: str | None = None, user=None) -> dict:
+    stmt = select(m.Dispatch)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.Dispatch.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            owner_col=m.Dispatch.created_by_id,
+            project_col=m.Dispatch.project_id,
+        )).where(
         m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
         m.Dispatch.packages.any(),
     )
@@ -4403,8 +4455,15 @@ async def _apply_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
 
 
 async def list_returns(db: AsyncSession, params: PageParams, *, status: str | None = None,
-                       warehouse_id: int | None = None, search: str | None = None) -> dict:
+                       warehouse_id: int | None = None, search: str | None = None, user=None) -> dict:
     stmt = select(m.PurchaseReturn)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.PurchaseReturn.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            owner_col=m.PurchaseReturn.created_by_id,
+        ))
     if status:
         stmt = stmt.where(m.PurchaseReturn.status == status)
     if warehouse_id:
@@ -4626,8 +4685,14 @@ async def returnable_lines(db: AsyncSession, grn_id: int) -> list[m.ReceiptItem]
 async def list_serials(db: AsyncSession, params: PageParams, *, status: str | None = None,
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
-                       search: str | None = None) -> dict:
-    stmt = select(m.SerialNumber).where(m.SerialNumber.is_active.is_(True))
+                       search: str | None = None, user=None) -> dict:
+    stmt = select(m.SerialNumber)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.SerialNumber.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        )).where(m.SerialNumber.is_active.is_(True))
     if status:
         stmt = stmt.where(m.SerialNumber.status == status)
     if item_id:

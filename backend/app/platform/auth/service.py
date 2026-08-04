@@ -54,6 +54,12 @@ async def build_me(db: AsyncSession, user: HcmEmployee) -> dict:
         "active_position": active_position,
         "permissions": sorted(permissions),
         "menu": menu,
+        # Every page path that exists, granted or not. The client needs both halves
+        # to tell "this URL is not a page at all" (/indents/42, a detail screen with
+        # no rbac_pages row — always allowed) from "this URL is a page you were not
+        # given" (/indents/reports — bounce to Home). With only `menu`, the client
+        # cannot distinguish the two and either blocks detail screens or nothing.
+        "page_paths": await rbac_service.all_page_paths(db),
     }
 
 

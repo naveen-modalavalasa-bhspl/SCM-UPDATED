@@ -3,7 +3,7 @@ never imports logistics. Approvals go only through the workflow engine.
 """
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -14,6 +14,7 @@ from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import POItem, PurchaseOrder
 from app.modules.procurement.schemas import POCreate
 from app.platform.workflow import engine
+from app.shared.scope import scope_condition
 from app.shared.enums import DocType, IndentStatus, InstanceStatus, MRStatus, POStatus
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Vendor
@@ -142,16 +143,31 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     return po
 
 
-async def get_po(db: AsyncSession, po_id: int) -> PurchaseOrder:
-    po = (await db.execute(select(PurchaseOrder).where(PurchaseOrder.id == po_id))).scalar_one_or_none()
+async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
+    po = (await db.execute(select(PurchaseOrder).where(
+            PurchaseOrder.id == po_id,
+            # Same scope the list applies. A document hidden from the list must
+            # not be readable by putting its id in the URL.
+            await scope_condition(
+                db, user,
+                owner_col=PurchaseOrder.created_by_id,
+                office_col=PurchaseOrder.office_id,
+            ) if user is not None else true(),
+        ))).scalar_one_or_none()
     if not po:
         raise NotFoundError(f"PO {po_id} not found")
     return po
 
 
 async def list_pos(db: AsyncSession, params: PageParams, status: str | None = None,
-                   vendor_id: int | None = None) -> dict:
+                   vendor_id: int | None = None, user=None) -> dict:
     stmt = select(PurchaseOrder)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            owner_col=PurchaseOrder.created_by_id,
+            office_col=PurchaseOrder.office_id,
+        ))
     if status:
         stmt = stmt.where(PurchaseOrder.status == status)
     if vendor_id is not None:

@@ -1,0 +1,20 @@
+{
+  "comment": "Copy to users.json and fill in real logins. 'raiser' creates the indent. Every account in 'approvers' is tried against /api/workflow/pending at each rung, so the ladder can change without touching the test. Add the whole approval population here. Optional 'position' picks which hat the person wears — scope and permissions follow the active position, so someone can be blind to a document under one and own it under another.",
+  "raiser": {
+    "employeeId": "1001",
+    "password": "change-me",
+    "label": "Store Keeper"
+  },
+  "approvers": [
+    { "employeeId": "1002", "password": "change-me", "label": "Store Manager" },
+    { "employeeId": "1003", "password": "change-me", "label": "Project Head" },
+    { "employeeId": "1004", "password": "change-me", "label": "Regional Manager" },
+    { "employeeId": "1005", "password": "change-me", "label": "COO" }
+  ],
+  "inventory": {
+    "employeeId": "1006",
+    "password": "change-me",
+    "label": "Inventory Controller",
+    "position": "INVENTORY MANAGER"
+  }
+}

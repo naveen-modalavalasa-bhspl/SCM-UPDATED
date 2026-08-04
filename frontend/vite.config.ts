@@ -18,6 +18,11 @@ export default defineConfig({
     host: true,
     port: 5173,
     strictPort: true,
+    // Accept any Host header. Vite's DNS-rebinding guard rejects tunnel hostnames
+    // (ngrok, Cloudflare) it was not told about, which is what blocks demoing the
+    // dev server over a share link. Dev and preview only — `vite build` output is
+    // static files and is unaffected, so nothing here reaches production.
+    allowedHosts: true,
     proxy: {
       "/api": { target: apiTarget, changeOrigin: true },
     },
@@ -25,6 +30,7 @@ export default defineConfig({
   preview: {
     host: true,
     port: 4173,
+    allowedHosts: true,
     proxy: {
       "/api": { target: apiTarget, changeOrigin: true },
     },

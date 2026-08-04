@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/pos", tags=["procurement"])
 async def list_pos(params: PageParams = Depends(), status: str | None = None,
                    vendor_id: int | None = None, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission(perms.PO_VIEW))):
-    return await service.list_pos(db, params, status, vendor_id)
+    return await service.list_pos(db, params, status, vendor_id, user=user)
 
 
 @router.get("/open-for-grn", response_model=Page[POListRow])
@@ -34,7 +34,7 @@ async def create_from_indent(indent_id: int, data: POCreate, db: AsyncSession = 
 @router.get("/{po_id}", response_model=POOut)
 async def get_one(po_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.PO_VIEW))):
-    return await service.get_po(db, po_id)
+    return await service.get_po(db, po_id, user=user)
 
 
 @router.post("/{po_id}/submit", response_model=POOut)

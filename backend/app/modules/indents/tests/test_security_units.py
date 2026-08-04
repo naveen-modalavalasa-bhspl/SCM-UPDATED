@@ -261,7 +261,10 @@ async def test_inventory_sees_requests_that_have_reached_the_scm_stages(monkeypa
     text = await access_sql(
         monkeypatch,
         role_name="MANAGER",
-        permissions=["allocation.view"],
+        # `indent.view.fulfilment`, not allocation.view/stock.view/mr.view. All 25
+        # roles hold one of those three, so gating the queue on them showed every
+        # login every approved indent in the company.
+        permissions=["indent.view.fulfilment"],
     )
 
     assert "ind_indents.status IN ('APPROVED', 'AWAITING_ALLOCATION'" in text
@@ -957,6 +960,17 @@ class EmptyResult:
 
     def one(self):
         return (0, 0)
+
+    def first(self):
+        """Used by profiles.profile_role_for_position, which shared.scope calls to
+        find the login's rung.
+
+        Always None, never `scalar_row`: this double hands the same row back to
+        every query, and the profile lookup is a different question from the one
+        these tests are asking. None means "no profile configured", which is the
+        state each of these predicate tests describes.
+        """
+        return None
 
     def all(self):
         return self.mapping_rows

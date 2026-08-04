@@ -45,6 +45,10 @@ class MeOut(BaseModel):
     active_position: PositionBrief | None = None
     permissions: list[str]
     menu: list[MenuItem]
+    # Every page path that exists, granted or not — the client route guard needs the
+    # ungranted ones to tell a detail screen (/indents/42, no rbac_pages row) from a
+    # page it was not given (/indents/reports).
+    page_paths: list[str] = []
 
 
 MenuItem.model_rebuild()

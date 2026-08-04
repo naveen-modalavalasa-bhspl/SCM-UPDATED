@@ -32,6 +32,9 @@ export interface Me {
   } | null;
   permissions: string[];
   menu: MenuItem[];
+  /** Every page path that exists, granted or not. Lets the route guard tell an
+   *  ungranted page from a detail screen that has no rbac_pages row at all. */
+  page_paths?: string[];
 }
 
 export interface Option {

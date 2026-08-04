@@ -34,6 +34,7 @@ from app.platform.settings.service import write_audit
 from app.platform.settings.models import AuditLog
 from app.platform.rbac import service as rbac_service
 from app.platform.rbac import permissions as perms
+from app.shared.scope import scope_condition
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
 from app.shared.numbering import next_number
@@ -601,11 +602,24 @@ async def indent_access_condition(db: AsyncSession, user):
 
 
 async def _assert_can_view_indent(db: AsyncSession, indent_id: int, user) -> Indent:
+    # Both filters, the same pair the list applies. With only the access rule, a
+    # document hidden from All Requests was still readable by typing its id into
+    # the URL — the list narrowed and the detail did not, which is the worse half
+    # of the leak because it returns one specific document rather than a page.
     stmt = (
         select(Indent)
         .options(selectinload(Indent.items))
         .where(Indent.id == indent_id)
-        .where(await indent_access_condition(db, user))
+        .where(
+            await indent_access_condition(db, user),
+            await scope_condition(
+                db, user,
+                owner_col=Indent.requested_by_id,
+                position_col=Indent.position_id,
+                office_col=Indent.office_id,
+                project_col=Indent.project_id,
+            ),
+        )
     )
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if not indent:
@@ -677,7 +691,19 @@ async def _get_indent_for_journey(db: AsyncSession, indent_id: int, user) -> Ind
             Indent.remarks,
         ))
         .where(Indent.id == indent_id)
-        .where(await indent_access_condition(db, user))
+        # Same pair as the detail and the list. The journey exposes the approval
+        # chain, the actors and the audit trail, so reading it for a document you
+        # cannot see is a bigger disclosure than the document itself.
+        .where(
+            await indent_access_condition(db, user),
+            await scope_condition(
+                db, user,
+                owner_col=Indent.requested_by_id,
+                position_col=Indent.position_id,
+                office_col=Indent.office_id,
+                project_col=Indent.project_id,
+            ),
+        )
     )
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if not indent:
@@ -751,7 +777,21 @@ async def list_indents(
     )
     stmt = select(Indent).options(selectinload(Indent.items))
     if user is not None:
-        stmt = stmt.where(await indent_access_condition(db, user))
+        # Two filters, ANDed, doing two different jobs. indent_access_condition says
+        # what KIND of document this login may read (mine, my approvals, the
+        # fulfilment queue); scope_condition says WHOSE, from the profile's rung.
+        # AND, never OR: the scope filter must only ever narrow, so adding it can
+        # never hand anyone a row they could not already see.
+        stmt = stmt.where(
+            await indent_access_condition(db, user),
+            await scope_condition(
+                db, user,
+                owner_col=Indent.requested_by_id,
+                position_col=Indent.position_id,
+                office_col=Indent.office_id,
+                project_col=Indent.project_id,
+            ),
+        )
     stmt = _apply_indent_filters(
         stmt, search=search, date_from=date_from, date_to=date_to,
         required_by_from=required_by_from, required_by_to=required_by_to,
@@ -2063,7 +2103,20 @@ async def indent_stats(
     )
     base = select(Indent.id)
     if user is not None:
-        base = base.where(await indent_access_condition(db, user))
+        # The SAME two filters the list uses. A KPI card and the list beneath it are
+        # two readings of one question, so any predicate missing from one shows up
+        # as a contradiction on screen: the dashboard read 79 while All Requests
+        # read 2, because this query had the access rule but not the scope rung.
+        base = base.where(
+            await indent_access_condition(db, user),
+            await scope_condition(
+                db, user,
+                owner_col=Indent.requested_by_id,
+                position_col=Indent.position_id,
+                office_col=Indent.office_id,
+                project_col=Indent.project_id,
+            ),
+        )
     filtered_ids = _apply_indent_filters(
         base, search=search, date_from=date_from, date_to=date_to,
         required_by_from=required_by_from, required_by_to=required_by_to,

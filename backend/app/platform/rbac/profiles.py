@@ -74,6 +74,30 @@ def derive_key(code: str | None, job_name: str | None, name: str | None) -> str:
     return key or (job_name or "UNCLASSIFIED").upper()
 
 
+# A profile belongs to ONE project. "DEO" in AP-104 and "DEO" in a project taken on
+# next year are different jobs run by different people under different managers, and
+# giving them one grant row means one admin's edit silently moves the other project.
+# So the stored key is "<project id>:<job>" — "4:DEO".
+#
+# HCM does not put the project on the position: hcm_positions.project_id is NULL on
+# all 3,733 live rows (raw.project_name is a name, not an id). The project of a
+# position is therefore the project of the people assigned to it, which is where
+# CLAUDE.md rule 8 already says it lives.
+UNASSIGNED_PROJECT = 0
+
+
+def profile_key(project_id: int | None, job: str) -> str:
+    return f"{project_id or UNASSIGNED_PROJECT}:{job}"
+
+
+def split_key(key: str) -> tuple[int, str]:
+    """('4:DEO') -> (4, 'DEO'). An old unqualified key reads as unassigned."""
+    head, sep, tail = key.partition(":")
+    if sep and head.isdigit():
+        return int(head), tail
+    return UNASSIGNED_PROJECT, key
+
+
 def profile_description(key: str, scope: str = ScopeRung.SELF.value) -> str:
     return f"{PROFILE_PREFIX}{key}|{SCOPE_PREFIX}{scope}"
 
@@ -90,6 +114,39 @@ def parse_description(description: str | None) -> tuple[str | None, str | None]:
 def profile_code(key: str) -> str:
     code = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
     return f"jp_{code}"[:50] or "jp_unclassified"
+
+
+async def position_projects(db: AsyncSession) -> dict[int, tuple[int | None, str | None]]:
+    """position id -> (project id, project name).
+
+    Taken from the employees assigned to the post. Where a post has nobody in it,
+    raw.project_name is matched back to an id through the employee mirror, so an
+    empty post still lands in the right project instead of a limbo bucket.
+    """
+    rows = (await db.execute(
+        select(HcmPositionAssignment.position_id, HcmEmployee.project_id,
+               HcmEmployee.project_name)
+        .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
+        .where(HcmPositionAssignment.is_active.is_(True))
+    )).all()
+    out: dict[int, tuple[int | None, str | None]] = {}
+    by_name: dict[str, int] = {}
+    for position_id, project_id, project_name in rows:
+        if project_id is None:
+            continue
+        out.setdefault(position_id, (project_id, project_name))
+        if project_name:
+            by_name.setdefault(project_name, project_id)
+    return out, by_name
+
+
+def _raw_project_name(raw) -> str | None:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    return (raw or {}).get("project_name") if isinstance(raw, dict) else None
 
 
 def _office_level(raw) -> str | None:
@@ -141,11 +198,23 @@ async def _derive(db: AsyncSession) -> dict[str, dict]:
         .group_by(HcmPositionAssignment.position_id)
     )).all())
 
+    by_position, project_id_by_name = await position_projects(db)
+
     profiles: dict[str, dict] = {}
     for row in rows:
-        key = derive_key(row.code, row.job_name, row.name)
+        job = derive_key(row.code, row.job_name, row.name)
+        project_id, project_name = by_position.get(row.id, (None, None))
+        if project_id is None:
+            # Nobody in the post: fall back to the project name HCM stamps on it.
+            raw_name = _raw_project_name(row.raw)
+            project_id = project_id_by_name.get(raw_name or "")
+            project_name = raw_name if project_id else None
+        key = profile_key(project_id, job)
         bucket = profiles.setdefault(key, {
-            "key": key, "positions": [], "position_ids": [],
+            "key": key, "job": job,
+            "project_id": project_id or UNASSIGNED_PROJECT,
+            "project_name": project_name or "Unassigned",
+            "positions": [], "position_ids": [],
             "holders": 0, "hcm_roles": set(), "office_levels": Counter(),
         })
         level = _office_level(row.raw)
@@ -180,15 +249,39 @@ async def _profile_roles(db: AsyncSession) -> dict[str, Role]:
 async def profile_role_for_position(db: AsyncSession, position_id: int) -> Role | None:
     """The saved profile role for one position, or None if nobody has granted it yet."""
     row = (await db.execute(
-        select(HcmPosition.name, HcmPosition.code, HcmPosition.job_name)
+        select(HcmPosition.name, HcmPosition.code, HcmPosition.job_name, HcmPosition.raw)
         .where(HcmPosition.id == position_id)
     )).first()
     if row is None:
         return None
-    key = derive_key(row.code, row.job_name, row.name)
+    job = derive_key(row.code, row.job_name, row.name)
+    # Targeted, NOT the whole-mirror position_projects() map. This runs on every
+    # scoped query — the indent list, the dashboard KPIs, the Home tile, every
+    # detail read — and building a 3,400-row dictionary each time to look up one
+    # position made every one of those pay for the entire org chart.
+    project_id = await db.scalar(
+        select(HcmEmployee.project_id)
+        .join(HcmPositionAssignment,
+              HcmPositionAssignment.employee_id == HcmEmployee.id)
+        .where(HcmPositionAssignment.position_id == position_id,
+               HcmPositionAssignment.is_active.is_(True),
+               HcmEmployee.project_id.isnot(None))
+        .limit(1)
+    )
+    if project_id is None:
+        # Empty post: match HCM's project NAME back to an id.
+        raw_name = _raw_project_name(row.raw)
+        if raw_name:
+            project_id = await db.scalar(
+                select(HcmEmployee.project_id)
+                .where(HcmEmployee.project_name == raw_name,
+                       HcmEmployee.project_id.isnot(None))
+                .limit(1)
+            )
+    key = profile_key(project_id, job)
     return (await db.execute(
         select(Role).where(
-            Role.description.startswith(profile_description(key).split("|")[0] + "|"),
+            Role.description.startswith(f"{PROFILE_PREFIX}{key}|"),
             Role.is_active.is_(True),
         )
     )).scalars().first()
@@ -214,13 +307,19 @@ async def list_profiles(db: AsyncSession) -> dict:
         held.setdefault(role_id, set()).add(code)
 
     items = []
-    for key, bucket in sorted(derived.items(), key=lambda kv: -len(kv[1]["position_ids"])):
+    for key, bucket in sorted(
+        derived.items(),
+        key=lambda kv: (kv[1]["project_name"], -len(kv[1]["position_ids"])),
+    ):
         role = saved.get(key)
         _, saved_scope = parse_description(role.description if role else None)
         codes = held.get(role.id, set()) if role else set()
         items.append({
             "key": key,
-            "name": role.name if role else key.title(),
+            "job": bucket["job"],
+            "project_id": bucket["project_id"],
+            "project_name": bucket["project_name"],
+            "name": role.name if role else bucket["job"].title(),
             "role_id": role.id if role else None,
             "configured": role is not None,
             "scope": saved_scope or default_scope(bucket["office_levels"]),
@@ -239,6 +338,9 @@ async def list_profiles(db: AsyncSession) -> dict:
     return {
         "items": items,
         "total": len(items),
+        "projects": sorted({
+            (b["project_id"], b["project_name"]) for b in derived.values()
+        }),
         "position_total": sum(len(b["position_ids"]) for b in derived.values()),
         "pages": [{
             "code": p.code, "name": p.name, "module": p.module,
@@ -297,7 +399,7 @@ async def set_profile_access(
     if role is None:
         role = Role(
             code=await _free_code(db, profile_code(key)),
-            name=name or key.title(),
+            name=name or split_key(key)[1].title(),
             description=profile_description(key, scope),
             is_system=True, is_active=True,
         )

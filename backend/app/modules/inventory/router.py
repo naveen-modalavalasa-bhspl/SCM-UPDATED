@@ -72,13 +72,13 @@ async def create_adjustment(body: AdjustmentIn, db: AsyncSession = Depends(get_d
 async def list_adjustments(params: PageParams = Depends(), warehouse_id: int | None = None,
                             status: str | None = None, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_adjustments(db, params, warehouse_id, status)
+    return await service.list_adjustments(db, params, warehouse_id, status, user=user)
 
 
 @stock_router.get("/adjustments/{id}", response_model=AdjustmentOut)
 async def get_adjustment(id: int, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_adjustment(db, id)
+    return await service.get_adjustment(db, id, user=user)
 
 
 @stock_router.post("/adjustments/{id}/approve", response_model=AdjustmentOut)
@@ -175,13 +175,13 @@ async def create_sto(body: STOIn, db: AsyncSession = Depends(get_db),
 async def list_stos(params: PageParams = Depends(), status: str | None = None,
                     db: AsyncSession = Depends(get_db),
                     user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_stos(db, params, status)
+    return await service.list_stos(db, params, status, user=user)
 
 
 @stock_router.get("/sto/{id}", response_model=STOOut)
 async def get_sto(id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_sto(db, id)
+    return await service.get_sto(db, id, user=user)
 
 
 @stock_router.post("/sto/{id}/approve", response_model=STOOut)
@@ -213,13 +213,13 @@ async def create_cycle_count(body: CycleCountIn, db: AsyncSession = Depends(get_
 async def list_cycle_counts(params: PageParams = Depends(), warehouse_id: int | None = None,
                             status: str | None = None, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_cycle_counts(db, params, warehouse_id, status)
+    return await service.list_cycle_counts(db, params, warehouse_id, status, user=user)
 
 
 @stock_router.get("/cycle-counts/{id}", response_model=CycleCountOut)
 async def get_cycle_count(id: int, db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.get_cycle_count(db, id)
+    return await service.get_cycle_count(db, id, user=user)
 
 
 @stock_router.put("/cycle-counts/{id}", response_model=CycleCountOut)
@@ -244,7 +244,7 @@ async def list_reservations(params: PageParams = Depends(), item_id: int | None 
                             ref_type: str | None = None, ref_id: int | None = None,
                             db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_reservations(db, params, item_id, warehouse_id, status, ref_type, ref_id)
+    return await service.list_reservations(db, params, item_id, warehouse_id, status, ref_type, ref_id, user=user)
 
 
 @res_router.post("/{id}/release", response_model=ReservationReleaseOut)
@@ -260,13 +260,13 @@ mr_router = APIRouter(prefix="/api/material-requests")
 async def list_mrs(params: PageParams = Depends(), status: str | None = None,
                    indent_id: int | None = None, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission(perms.MR_VIEW))):
-    return await service.list_mrs(db, params, status, indent_id)
+    return await service.list_mrs(db, params, status, indent_id, user=user)
 
 
 @mr_router.get("/{mr_id}", response_model=MROut)
 async def get_mr(mr_id: int, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission(perms.MR_VIEW))):
-    return await service.get_mr(db, mr_id)
+    return await service.get_mr(db, mr_id, user=user)
 
 
 @mr_router.post("/{mr_id}/approve", response_model=MROut)

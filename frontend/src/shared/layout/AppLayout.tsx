@@ -15,6 +15,43 @@ function moduleHome(root: MenuItem): string {
   return root.children?.length ? root.children[0].path : root.path;
 }
 
+/** Every path in the menu, at any depth. */
+function grantedPaths(nodes: MenuItem[]): Set<string> {
+  const out = new Set<string>();
+  const walk = (ns: MenuItem[]) => {
+    for (const n of ns) {
+      out.add(n.path);
+      walk(n.children ?? []);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+/**
+ * The page a URL belongs to, or null when it belongs to none.
+ *
+ * Longest match wins, so /indents/reports resolves to the reports page rather than
+ * to /indents. A URL with no page behind it — /indents/42, /inventory/allocate/7 —
+ * returns null and is always allowed: detail screens have no rbac_pages row, and
+ * their data is guarded by the API, which is the real gate.
+ *
+ * "/" is only ever an exact match; as a prefix it would swallow every URL.
+ */
+function owningPage(pathname: string, known: string[]): string | null {
+  let best: string | null = null;
+  for (const page of known) {
+    if (page === "/") {
+      if (pathname === "/") return "/";
+      continue;
+    }
+    if (pathname === page || pathname.startsWith(`${page}/`)) {
+      if (!best || page.length > best.length) best = page;
+    }
+  }
+  return best;
+}
+
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-2.5">
@@ -58,6 +95,16 @@ export function AppLayout() {
     .sort((a, b) => b.child.path.length - a.child.path.length)[0];
   const activeRoot = best?.root ?? menu[0];
   const tabs = activeRoot?.children ?? [];
+
+  // Bounce a URL the login was not granted. The API already refuses its data, so
+  // this is about not rendering a screen that can only ever show errors — which is
+  // exactly what a typed or bookmarked URL used to do.
+  const allowedPaths = grantedPaths(menu);
+  const owner = owningPage(loc, me?.page_paths ?? []);
+  const blocked = owner !== null && !allowedPaths.has(owner);
+  useEffect(() => {
+    if (blocked) nav("/", { replace: true });
+  }, [blocked, nav]);
   const positionSelector = (compact = false) => me?.positions.length ? (
     <Select
       aria-label="Working position"
@@ -236,7 +283,7 @@ export function AppLayout() {
         <main className="flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
           {/* Collapsing the rail is a request for room — let the content claim it. */}
           <div className={`mx-auto ${collapsed ? "max-w-7xl" : "max-w-6xl"}`}>
-            <Outlet />
+            {blocked ? null : <Outlet />}
           </div>
         </main>
       </div>

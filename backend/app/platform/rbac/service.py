@@ -76,7 +76,12 @@ async def get_page_access_matrix(db: AsyncSession) -> dict:
         Role.is_active.is_(True),
         # Job-profile rows live in rbac_roles too (profiles.py). They are granted on
         # their own screen and would only confuse this one, so they stay out of it.
-        Role.description.notlike(f"{PROFILE_PREFIX}%"),
+        #
+        # The NULL arm is required, not defensive: in SQL `NULL NOT LIKE 'x%'` is
+        # NULL, which is not true, so a bare NOT LIKE drops every role with no
+        # description — that is ADMIN, REQUESTER, APPROVER, PROCUREMENT and STORE.
+        or_(Role.description.is_(None),
+            Role.description.notlike(f"{PROFILE_PREFIX}%")),
     ).order_by(
         Role.description.startswith(HCM_ROLE_DESCRIPTION_PREFIX).desc(), Role.name,
     ))).scalars().all()
@@ -207,7 +212,12 @@ async def get_feature_access_matrix(db: AsyncSession) -> dict:
         Role.is_active.is_(True),
         # Job-profile rows live in rbac_roles too (profiles.py). They are granted on
         # their own screen and would only confuse this one, so they stay out of it.
-        Role.description.notlike(f"{PROFILE_PREFIX}%"),
+        #
+        # The NULL arm is required, not defensive: in SQL `NULL NOT LIKE 'x%'` is
+        # NULL, which is not true, so a bare NOT LIKE drops every role with no
+        # description — that is ADMIN, REQUESTER, APPROVER, PROCUREMENT and STORE.
+        or_(Role.description.is_(None),
+            Role.description.notlike(f"{PROFILE_PREFIX}%")),
     ).order_by(
         Role.description.startswith(HCM_ROLE_DESCRIPTION_PREFIX).desc(), Role.name,
     ))).scalars().all()
@@ -405,6 +415,20 @@ async def get_default_position(db: AsyncSession, employee_id: int) -> dict | Non
     return positions[0] if positions else None
 
 
+async def all_page_paths(db: AsyncSession) -> list[str]:
+    """Every active page path, regardless of who may see it.
+
+    Not a permission leak: these are static route strings, the same ones already in
+    the compiled bundle. What they buy the client is the ability to route-guard
+    precisely instead of by path prefix.
+    """
+    return sorted({
+        path for path in (await db.execute(
+            select(Page.path).where(Page.is_active.is_(True))
+        )).scalars().all() if path
+    })
+
+
 async def get_user_menu(db: AsyncSession, permissions: set[str]) -> list[dict]:
     """Pages the user may see (required_permission null or held), built into a tree."""
     rows = (await db.execute(
@@ -428,6 +452,28 @@ async def get_user_menu(db: AsyncSession, permissions: set[str]) -> list[dict]:
         if not orphan_ids:
             break
         visible_ids -= orphan_ids
+
+    # A group whose children are ALL hidden is an empty folder. It used to survive
+    # and, because several groups share a path with their first child (grp_indents
+    # and ind_dashboard are both /indents/dashboard), clicking it opened a screen
+    # that had not been granted. Dropping it is also what makes "untick everything"
+    # mean Home and nothing else.
+    #
+    # Only groups that HAVE children are dropped — a leaf page like Masters has none
+    # by design and must stay.
+    has_children = {page.parent_id for page in rows if page.parent_id is not None}
+    while True:
+        empty_groups = {
+            page.id for page in rows
+            if page.id in visible_ids
+            and page.id in has_children
+            and not any(other.parent_id == page.id and other.id in visible_ids
+                        for other in rows)
+        }
+        if not empty_groups:
+            break
+        visible_ids -= empty_groups
+
     visible = [page for page in rows if page.id in visible_ids]
 
     def node(p: Page) -> dict:
@@ -837,7 +883,8 @@ async def list_permissions(db: AsyncSession) -> dict:
 async def list_roles_with_permissions(db: AsyncSession) -> dict:
     """All roles with their held permission codes, in two queries (no N+1)."""
     roles = (await db.execute(select(Role).where(
-        Role.description.notlike(f"{PROFILE_PREFIX}%"),
+        or_(Role.description.is_(None),
+            Role.description.notlike(f"{PROFILE_PREFIX}%")),
     ).order_by(Role.code))).scalars().all()
     held_rows = (await db.execute(
         select(RolePermission.role_id, Permission.code)

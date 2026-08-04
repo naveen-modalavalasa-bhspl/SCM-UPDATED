@@ -138,11 +138,11 @@ async def list_receipts(params: PageParams = Depends(), receipt_type: str | None
                         search: str | None = None, date_from: date | None = None,
                         date_to: date | None = None, gate_register: bool = False,
                         db: AsyncSession = Depends(get_db),
-                        _=Depends(require_permission(RECEIPT_VIEW))):
+                        user=Depends(require_permission(RECEIPT_VIEW))):
     return await service.list_receipts(db, params, receipt_type=receipt_type, status=status,
                                        warehouse_id=warehouse_id, search=search,
                                        date_from=date_from, date_to=date_to,
-                                       gate_register=gate_register)
+                                       gate_register=gate_register, user=user)
 
 
 @router.get("/receipts/{receipt_id}", response_model=s.ReceiptDetail)
@@ -196,10 +196,10 @@ async def cancel_receipt(receipt_id: int, body: s.ReasonIn, db: AsyncSession = D
 async def list_inspections(params: PageParams = Depends(), inspection_type: str | None = None,
                            status: str | None = None, warehouse_id: int | None = None,
                            search: str | None = None, db: AsyncSession = Depends(get_db),
-                           _=Depends(require_permission(INSPECTION_VIEW))):
+                           user=Depends(require_permission(INSPECTION_VIEW))):
     return await service.list_inspections(db, params, inspection_type=inspection_type,
                                           status=status, warehouse_id=warehouse_id,
-                                          search=search)
+                                          search=search, user=user)
 
 
 @router.get("/inspections/{inspection_id}", response_model=s.InspectionDetail)
@@ -241,8 +241,8 @@ async def cancel_inspection(inspection_id: int, body: s.ReasonIn,
 @router.get("/putaways", response_model=Page[s.PutawayRead])
 async def list_putaways(params: PageParams = Depends(), status: str | None = None,
                         warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
-                        _=Depends(require_permission(PUTAWAY_VIEW))):
-    return await service.list_putaways(db, params, status=status, warehouse_id=warehouse_id)
+                        user=Depends(require_permission(PUTAWAY_VIEW))):
+    return await service.list_putaways(db, params, status=status, warehouse_id=warehouse_id, user=user)
 
 
 # Declared above /putaways/{task_id}: that path param is an int, so "candidates" would
@@ -325,8 +325,8 @@ async def stock_availability(warehouse_id: int, source_bin_id: int, item_id: int
 @router.get("/pickings", response_model=Page[s.PickingRead])
 async def list_pickings(params: PageParams = Depends(), status: str | None = None,
                         warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
-                        _=Depends(require_permission(PICKING_VIEW))):
-    return await service.list_pickings(db, params, status=status, warehouse_id=warehouse_id)
+                        user=Depends(require_permission(PICKING_VIEW))):
+    return await service.list_pickings(db, params, status=status, warehouse_id=warehouse_id, user=user)
 
 
 @router.get("/pickings/{picking_id}", response_model=s.PickingDetail)
@@ -368,9 +368,9 @@ async def complete_picking(picking_id: int, db: AsyncSession = Depends(get_db),
 async def list_issues(params: PageParams = Depends(), direction: str | None = None,
                       status: str | None = None, warehouse_id: int | None = None,
                       search: str | None = None, db: AsyncSession = Depends(get_db),
-                      _=Depends(require_permission(ISSUE_VIEW))):
+                      user=Depends(require_permission(ISSUE_VIEW))):
     return await service.list_issues(db, params, direction=direction, status=status,
-                                     warehouse_id=warehouse_id, search=search)
+                                     warehouse_id=warehouse_id, search=search, user=user)
 
 
 @router.get("/issues/{issue_id}", response_model=s.IssueDetail)
@@ -442,9 +442,9 @@ async def cancel_issue(issue_id: int, body: s.ReasonIn, db: AsyncSession = Depen
 async def list_consignments(params: PageParams = Depends(), status: str | None = None,
                             warehouse_id: int | None = None, search: str | None = None,
                             db: AsyncSession = Depends(get_db),
-                            _=Depends(require_permission(DISPATCH_VIEW))):
+                            user=Depends(require_permission(DISPATCH_VIEW))):
     return await service.list_consignments(db, params, status=status,
-                                           warehouse_id=warehouse_id, search=search)
+                                           warehouse_id=warehouse_id, search=search, user=user)
 
 
 @router.get("/consignments/{consignment_id}", response_model=s.DispatchDetail)
@@ -470,9 +470,9 @@ async def update_consignment(consignment_id: int, data: s.ConsignmentWrite,
 async def list_dispatches(params: PageParams = Depends(), status: str | None = None,
                           warehouse_id: int | None = None, search: str | None = None,
                           db: AsyncSession = Depends(get_db),
-                          _=Depends(require_permission(DISPATCH_VIEW))):
+                          user=Depends(require_permission(DISPATCH_VIEW))):
     return await service.list_dispatches(db, params, status=status,
-                                         warehouse_id=warehouse_id, search=search)
+                                         warehouse_id=warehouse_id, search=search, user=user)
 
 
 @router.get("/dispatches/{dispatch_id}", response_model=s.DispatchDetail)
@@ -568,9 +568,9 @@ async def cancel_dispatch(dispatch_id: int, body: s.ReasonIn,
 async def list_returns(params: PageParams = Depends(), status: str | None = None,
                        warehouse_id: int | None = None, search: str | None = None,
                        db: AsyncSession = Depends(get_db),
-                       _=Depends(require_permission(RETURN_VIEW))):
+                       user=Depends(require_permission(RETURN_VIEW))):
     return await service.list_returns(db, params, status=status, warehouse_id=warehouse_id,
-                                      search=search)
+                                      search=search, user=user)
 
 
 @router.get("/returns/returnable-lines", response_model=list[s.ReceiptItemRead])
@@ -644,10 +644,10 @@ async def list_serials(params: PageParams = Depends(), status: str | None = None
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, db: AsyncSession = Depends(get_db),
-                       _=Depends(require_permission(STOCK_VIEW))):
+                       user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_serials(db, params, status=status, item_id=item_id,
                                       batch_id=batch_id, warehouse_id=warehouse_id,
-                                      bin_id=bin_id, search=search)
+                                      bin_id=bin_id, search=search, user=user)
 
 
 @router.get("/batches", response_model=Page[s.BatchRead])

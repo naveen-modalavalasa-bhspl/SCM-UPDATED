@@ -8,7 +8,7 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select, or_, and_, text
+from sqlalchemy import func, select, or_, and_, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
@@ -28,6 +28,7 @@ from app.platform.notifications import service as notifications
 from app.platform.rules import evaluator as rules
 from app.platform.settings.service import get_setting, set_setting, write_audit
 from app.platform.workflow import engine
+from app.shared.scope import scope_condition
 from app.shared.enums import (
     AuditAction, DocType, IndentStatus, InstanceStatus, MRStatus, Priority, RefType,
     StockDirection, UserRole as RoleCode,
@@ -94,6 +95,13 @@ async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
         .outerjoin(HcmFacility, HcmFacility.id == Warehouse.facility_id)
         .where(Warehouse.is_active.is_(True), or_(*conditions))
     )).scalars().all())
+
+
+async def warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
+    """Public alias — later modules (warehouse, procurement) scope their documents
+    to the same warehouse set the inventory screens use, so the two can never
+    disagree about which docks a login can see. None means unrestricted."""
+    return await _warehouse_ids_for_user(db, user)
 
 
 async def _scoped_warehouse_ids(
@@ -425,9 +433,18 @@ async def list_movements(db: AsyncSession, params: PageParams,
 
 # ---------------- Material Request ----------------
 
-async def get_mr(db: AsyncSession, mr_id: int) -> MaterialRequest:
+async def get_mr(db: AsyncSession, mr_id: int, user=None) -> MaterialRequest:
     mr = (await db.execute(
-        select(MaterialRequest).where(MaterialRequest.id == mr_id)
+        select(MaterialRequest).where(
+            MaterialRequest.id == mr_id,
+            # Same scope the list applies. A document hidden from the list must
+            # not be readable by putting its id in the URL.
+            await scope_condition(
+                db, user,
+                owner_col=MaterialRequest.requested_by_id,
+                project_col=MaterialRequest.project_id,
+            ) if user is not None else true(),
+        )
     )).scalar_one_or_none()
     if not mr:
         raise NotFoundError(f"Material request {mr_id} not found")
@@ -435,8 +452,14 @@ async def get_mr(db: AsyncSession, mr_id: int) -> MaterialRequest:
 
 
 async def list_mrs(db: AsyncSession, params: PageParams, status: str | None = None,
-                   indent_id: int | None = None) -> dict:
+                   indent_id: int | None = None, user=None) -> dict:
     stmt = select(MaterialRequest)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            owner_col=MaterialRequest.requested_by_id,
+            project_col=MaterialRequest.project_id,
+        ))
     if status:
         stmt = stmt.where(MaterialRequest.status == status)
     if indent_id is not None:
@@ -715,8 +738,15 @@ async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, u
 
 
 async def list_adjustments(db: AsyncSession, params: PageParams, warehouse_id: int | None = None,
-                           status: str | None = None) -> dict:
+                           status: str | None = None, user=None) -> dict:
     stmt = select(StockAdjustment)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            owner_col=StockAdjustment.created_by_id,
+            warehouse_col=StockAdjustment.warehouse_id,
+            warehouse_ids=await _warehouse_ids_for_user(db, user),
+        ))
     if warehouse_id:
         stmt = stmt.where(StockAdjustment.warehouse_id == warehouse_id)
     if status:
@@ -724,9 +754,19 @@ async def list_adjustments(db: AsyncSession, params: PageParams, warehouse_id: i
     return await paginate(db, stmt.order_by(StockAdjustment.created_at.desc()), params)
 
 
-async def get_adjustment(db: AsyncSession, adjustment_id: int) -> StockAdjustment:
+async def get_adjustment(db: AsyncSession, adjustment_id: int, user=None) -> StockAdjustment:
     adj = (await db.execute(
-        select(StockAdjustment).where(StockAdjustment.id == adjustment_id)
+        select(StockAdjustment).where(
+            StockAdjustment.id == adjustment_id,
+            # Same scope the list applies. A document hidden from the list must not
+            # be readable by putting its id in the URL.
+            await scope_condition(
+                db, user,
+                owner_col=StockAdjustment.created_by_id,
+                warehouse_col=StockAdjustment.warehouse_id,
+                warehouse_ids=await _warehouse_ids_for_user(db, user),
+            ) if user is not None else true(),
+        )
     )).scalar_one_or_none()
     if not adj:
         raise NotFoundError(f"Stock adjustment {adjustment_id} not found")
@@ -1016,8 +1056,16 @@ async def get_stock_replenishment(db: AsyncSession, warehouse_id: int | None = N
 
 async def list_reservations(db: AsyncSession, params: PageParams, item_id: int | None = None,
                             warehouse_id: int | None = None, status: str | None = None,
-                            ref_type: str | None = None, ref_id: int | None = None) -> dict:
+                            ref_type: str | None = None, ref_id: int | None = None, user=None) -> dict:
     stmt = select(Reservation)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            owner_col=Reservation.created_by_id,
+            project_col=Reservation.project_id,
+            warehouse_col=Reservation.warehouse_id,
+            warehouse_ids=await _warehouse_ids_for_user(db, user),
+        ))
     if item_id:
         stmt = stmt.where(Reservation.item_id == item_id)
     if warehouse_id:
@@ -1301,17 +1349,30 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
     return sto
 
 
-async def get_sto(db: AsyncSession, sto_id: int) -> StockTransferOrder:
+async def get_sto(db: AsyncSession, sto_id: int, user=None) -> StockTransferOrder:
     sto = (await db.execute(
-        select(StockTransferOrder).where(StockTransferOrder.id == sto_id)
+        select(StockTransferOrder).where(
+            StockTransferOrder.id == sto_id,
+            # Same scope the list applies. A document hidden from the list must
+            # not be readable by putting its id in the URL.
+            await scope_condition(
+                db, user,
+                owner_col=StockTransferOrder.requested_by_id,
+            ) if user is not None else true(),
+        )
     )).scalar_one_or_none()
     if not sto:
         raise NotFoundError(f"STO {sto_id} not found")
     return sto
 
 
-async def list_stos(db: AsyncSession, params: PageParams, status: str | None = None) -> dict:
+async def list_stos(db: AsyncSession, params: PageParams, status: str | None = None, user=None) -> dict:
     stmt = select(StockTransferOrder)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            owner_col=StockTransferOrder.requested_by_id,
+        ))
     if status:
         stmt = stmt.where(StockTransferOrder.status == status)
     return await paginate(db, stmt.order_by(StockTransferOrder.created_at.desc()), params)
@@ -1416,9 +1477,18 @@ async def create_cycle_count(db: AsyncSession, data, user) -> CycleCount:
     return cc
 
 
-async def get_cycle_count(db: AsyncSession, cc_id: int) -> CycleCount:
+async def get_cycle_count(db: AsyncSession, cc_id: int, user=None) -> CycleCount:
     cc = (await db.execute(
-        select(CycleCount).where(CycleCount.id == cc_id)
+        select(CycleCount).where(
+            CycleCount.id == cc_id,
+            # Same scope the list applies. A document hidden from the list must
+            # not be readable by putting its id in the URL.
+            await scope_condition(
+                db, user,
+                warehouse_col=CycleCount.warehouse_id,
+                warehouse_ids=await _warehouse_ids_for_user(db, user),
+            ) if user is not None else true(),
+        )
     )).scalar_one_or_none()
     if not cc:
         raise NotFoundError(f"Cycle count {cc_id} not found")
@@ -1426,8 +1496,14 @@ async def get_cycle_count(db: AsyncSession, cc_id: int) -> CycleCount:
 
 
 async def list_cycle_counts(db: AsyncSession, params: PageParams, warehouse_id: int | None = None,
-                           status: str | None = None) -> dict:
+                           status: str | None = None, user=None) -> dict:
     stmt = select(CycleCount)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=CycleCount.warehouse_id,
+            warehouse_ids=await _warehouse_ids_for_user(db, user),
+        ))
     if warehouse_id:
         stmt = stmt.where(CycleCount.warehouse_id == warehouse_id)
     if status:
