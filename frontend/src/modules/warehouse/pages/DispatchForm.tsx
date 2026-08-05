@@ -94,7 +94,7 @@ export default function DispatchForm() {
       qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
       qc.invalidateQueries({ queryKey: ["wh-consignments"] });
       qc.invalidateQueries({ queryKey: ["wh-dispatch", String(saved.id)] });
-      nav(`../${saved.id}`, { replace: true });
+      nav(`/warehouse/dispatch/${saved.id}`, { replace: true });
     },
   });
 
@@ -153,7 +153,7 @@ export default function DispatchForm() {
           title="Confirm dispatch"
           actions={
             <>
-              <Button variant="ghost" onClick={() => nav("..")}>
+              <Button variant="ghost" onClick={() => nav("/warehouse/dispatch")}>
                 <ArrowLeft className="h-4 w-4" /> Back
               </Button>
               <Can do="dispatch.gate_out">
@@ -205,7 +205,7 @@ export default function DispatchForm() {
         title={`Dispatch ${doc.dispatch_no}`}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav("/warehouse/dispatch")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {["APPROVED", "PACKED"].includes(doc.status) && (

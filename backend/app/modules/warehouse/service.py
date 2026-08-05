@@ -23,7 +23,7 @@ from sqlalchemy import String, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import AppException, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation as stock_allocation
 from app.modules.inventory.service import move_stock, move_stock_out
@@ -2467,34 +2467,62 @@ async def create_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
     return await get_picking(db, picking.id)
 
 
-async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user) -> list[m.Picking]:
-    """Create one warehouse fulfilment draft per warehouse in an approved allocation.
+async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user) -> list[m.MaterialIssue]:
+    """Create one material issue draft per warehouse in an approved allocation.
 
-    Allocation lines are combined by item within a warehouse. The underlying picking
-    tables and API names remain unchanged for compatibility; this is the automatic
-    Inventory -> Warehouse handoff exposed to users as Material Fulfilment.
+    The automatic Inventory -> Warehouse handoff, and the head of the draft chain:
+    allocation approved -> ISSUE draft -> (post stock) -> PICKING draft ->
+    (complete pick) -> CONSIGNMENT. The issue comes first because posting stock is
+    what turns an allocation into goods the floor can pick; a picklist raised before
+    that would be asking someone to walk for stock nothing had committed yet.
+
+    Allocation lines are combined by item within a warehouse. A split allocation
+    therefore yields one draft per site, each carrying its own lines.
     """
-    by_warehouse: dict[int, dict[int, Decimal]] = {}
+    by_warehouse: dict[int, dict[int, dict]] = {}
     for line in alloc.items:
         qty = _d(line.quantity)
         if qty <= ZERO or not line.warehouse_id:
             continue
         by_item = by_warehouse.setdefault(line.warehouse_id, {})
-        by_item[line.item_id] = by_item.get(line.item_id, ZERO) + qty
+        seen = by_item.get(line.item_id)
+        if seen is None:
+            by_item[line.item_id] = {
+                "qty": qty,
+                "requested": _d(line.requested_qty),
+                # Only carried when the item maps to exactly one indent line. A line
+                # split across warehouses would otherwise point every draft at the
+                # same indent line and double-count it on the fulfilment view.
+                "indent_item_id": line.indent_item_id,
+                "project_id": line.project_id,
+            }
+        else:
+            seen["qty"] += qty
+            seen["requested"] += _d(line.requested_qty)
+            if seen["indent_item_id"] != line.indent_item_id:
+                seen["indent_item_id"] = None
 
-    drafts: list[m.Picking] = []
-    for warehouse_id, quantities in by_warehouse.items():
-        data = s.PickingWrite(
-            pick_date=date.today(),
+    drafts: list[m.MaterialIssue] = []
+    for warehouse_id, lines in by_warehouse.items():
+        project_id = next(
+            (v["project_id"] for v in lines.values() if v["project_id"]), None
+        )
+        data = s.IssueWrite(
+            issue_date=date.today(),
             warehouse_id=warehouse_id,
-            ref_type="INDENT",
-            ref_id=alloc.indent_id,
+            indent_id=alloc.indent_id,
+            project_id=project_id,
             items=[
-                s.PickingItemWrite(item_id=item_id, required_qty=qty)
-                for item_id, qty in quantities.items()
+                s.IssueItemWrite(
+                    item_id=item_id,
+                    indent_item_id=v["indent_item_id"],
+                    requested_qty=v["requested"] or v["qty"],
+                    issued_qty=v["qty"],
+                )
+                for item_id, v in lines.items()
             ],
         )
-        drafts.append(await _build_picking(db, data, user))
+        drafts.append(await _build_issue(db, data, user))
     return drafts
 
 
@@ -2583,6 +2611,87 @@ async def pick_line(db: AsyncSession, picking_id: int, line_id: int, data: s.Pic
     return await get_picking(db, picking_id)
 
 
+async def _raise_consignment_for_picking(
+    db: AsyncSession, picking: m.Picking, user,
+) -> "m.Dispatch | None":
+    """Raise the consignment that follows a completed pick.
+
+    Rung three of the draft chain. Only picks raised off an issue carry a
+    consignment — a pick against an indent under the older pick-then-issue path has
+    no posted issue behind it yet, and a consignment has to point at one.
+
+    Everything issued goes into a single package, since the storekeeper who just
+    filled one trolley is the one who knows how it actually splits into boxes; the
+    consignment form lets them break it up. Packing is validated as exactly-equals
+    issued, so anything less than the whole issue would be rejected here.
+
+    A failure here must not lose the pick, which is a physical fact already recorded.
+    The consignment is convenience; it can be raised by hand from the issue.
+    """
+    if picking.ref_type != "ISSUE" or not picking.ref_id:
+        return None
+    if picking.status != PickingStatus.COMPLETED.value:
+        return None      # a short pick cannot pack to the issued quantity
+
+    existing = await db.scalar(
+        select(m.Dispatch.id).where(
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+            m.Dispatch.ref_id == picking.ref_id,
+            m.Dispatch.status != DispatchStatus.CANCELLED.value,
+        ).limit(1)
+    )
+    if existing is not None:
+        return None
+
+    issue = await get_issue(db, picking.ref_id)
+    if not issue.is_stock_posted or issue.direction != IssueDirection.OUT.value:
+        return None
+
+    # Serial-tracked lines have to name their serials, and only the ones this issue
+    # actually put out; the packer validates against exactly that set.
+    serials_by_key: dict[tuple[int, int], list[str]] = {}
+    for row in (await _issued_serial_index(db, issue)).values():
+        serials_by_key.setdefault(
+            (row.item_id, row.batch_id or m.NO_BATCH), []
+        ).append(row.serial_number)
+
+    lines: list[s.ConsignmentPackageItemWrite] = []
+    for (item_id, batch_id), qty in _issue_qty_by_item_batch(issue).items():
+        if qty <= ZERO:
+            continue
+        item = await db.get(Item, item_id)
+        picked = serials_by_key.get((item_id, batch_id), [])
+        if item is not None and item.is_serial_tracked and len(picked) != int(qty):
+            return None       # serials incomplete — let the storekeeper pack by hand
+        lines.append(s.ConsignmentPackageItemWrite(
+            item_id=item_id,
+            batch_id=None if batch_id == m.NO_BATCH else batch_id,
+            serial_numbers=picked,
+            quantity=qty,
+            indent_id=issue.indent_id,
+        ))
+    if not lines:
+        return None
+
+    # A savepoint, because _build_consignment flushes the header before it packs:
+    # without one, a rejected package list would leave that half-built PACKED row
+    # behind to be committed with the pick.
+    try:
+        async with db.begin_nested():
+            return await _build_consignment(db, s.ConsignmentWrite(
+                issue_id=issue.id,
+                # PROJECT, not the TRANSFER default: a transfer needs a destination
+                # warehouse, and nothing upstream of here has chosen one.
+                dispatch_type=DispatchType.PROJECT,
+                dispatch_date=date.today(),
+                project_id=issue.project_id,
+                packages=[s.ConsignmentPackageWrite(items=lines)],
+            ), user)
+    except AppException as exc:
+        logger.warning("auto-consignment for %s skipped: %s", picking.pick_no, exc)
+        return None
+
+
 async def complete_picking(db: AsyncSession, picking_id: int, user) -> m.Picking:
     picking = await get_picking(db, picking_id)
     _guard(picking.status, {PickingStatus.IN_PROGRESS.value, PickingStatus.RELEASED.value},
@@ -2594,12 +2703,15 @@ async def complete_picking(db: AsyncSession, picking_id: int, user) -> m.Picking
                       else PickingStatus.PICKED).value
     picking.completed_at = utcnow()
 
+    consignment = await _raise_consignment_for_picking(db, picking, user)
+
     await write_audit(db, entity="out_picking", entity_id=picking.id, entity_no=picking.pick_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": PickingStatus.IN_PROGRESS.value},
                       after={"status": picking.status,
                              "picked_lines": picking.picked_lines,
-                             "total_lines": picking.total_lines})
+                             "total_lines": picking.total_lines,
+                             "consignment_no": consignment.dispatch_no if consignment else None})
     await db.commit()
     return await get_picking(db, picking_id)
 
@@ -2883,7 +2995,13 @@ async def _decorate_dispatch_page_destinations(db: AsyncSession, page: dict) -> 
     return page
 
 
-async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.MaterialIssue:
+async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.MaterialIssue:
+    """Build one material issue draft without committing it.
+
+    Same reason as _build_picking: allocation approval creates its warehouse drafts
+    in the same transaction as the stock reservations behind them, so a split
+    allocation either produces every draft or none.
+    """
     wh = await _warehouse(db, data.warehouse_id)
     if not data.items:
         raise ValidationError("An issue with no lines has nothing to issue")
@@ -2971,6 +3089,11 @@ async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.CREATE, actor=user,
                       after={"status": issue.status, "total_qty": str(issue.total_qty)})
+    return issue
+
+
+async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.MaterialIssue:
+    issue = await _build_issue(db, data, user)
     await db.commit()
     return await get_issue(db, issue.id)
 
@@ -3141,6 +3264,75 @@ def _approver_label(approvers: list) -> str | None:
     return names[0] if len(names) == 1 else f"{names[0]} +{len(names) - 1}"
 
 
+async def _raise_picking_for_issue(
+    db: AsyncSession, issue: m.MaterialIssue, user,
+) -> m.Picking | None:
+    """Raise the picklist draft that follows an issue whose stock has just posted.
+
+    Rung two of the draft chain, and it is strictly a convenience: posting stock is a
+    physical fact — the goods have left the shelf — so nothing in here may veto it.
+    Everything below either degrades or gives up quietly, and the storekeeper can
+    always raise the pick by hand.
+
+    Skipped when the issue already came from a picklist (issue.picking_id) — that is
+    the older pick-then-issue path, and re-raising there would loop.
+    """
+    if issue.picking_id:
+        return None
+    existing = await db.scalar(
+        select(m.Picking.id).where(
+            m.Picking.ref_type == "ISSUE",
+            m.Picking.ref_id == issue.id,
+            m.Picking.status != PickingStatus.CANCELLED.value,
+        ).limit(1)
+    )
+    if existing is not None:
+        return None
+
+    # Resolve the bins before handing them over. _build_picking rejects a bin it
+    # cannot load, and live issue lines carry ids that no longer exist in
+    # whs_warehouse_locations; sending one through would turn a stale reference on a
+    # draft into a hard failure to issue stock at all. An unresolved bin becomes "no
+    # bin", which is what the picker sees anyway when nothing has told them where to go.
+    lines: list[s.PickingItemWrite] = []
+    for line in issue.items:
+        if _d(line.issued_qty) <= ZERO:
+            continue
+        bin_id = line.bin_id or None
+        if bin_id is not None:
+            source = await db.get(Bin, bin_id)
+            if source is None or source.warehouse_id != issue.warehouse_id:
+                logger.warning(
+                    "issue %s line %s: bin %s is unusable, picking line raised unbinned",
+                    issue.issue_no, line.line_no, bin_id,
+                )
+                bin_id = None
+        lines.append(s.PickingItemWrite(
+            item_id=line.item_id,
+            bin_id=bin_id,
+            batch_id=line.batch_id or None,
+            required_qty=_d(line.issued_qty),
+        ))
+    if not lines:
+        return None
+
+    # Savepoint for the same reason as the consignment below: _build_picking flushes
+    # its header before its lines, so a rejection partway would otherwise leave a
+    # half-built pick to be committed alongside the stock movement.
+    try:
+        async with db.begin_nested():
+            return await _build_picking(db, s.PickingWrite(
+                pick_date=date.today(),
+                warehouse_id=issue.warehouse_id,
+                ref_type="ISSUE",
+                ref_id=issue.id,
+                items=lines,
+            ), user)
+    except AppException as exc:
+        logger.warning("auto-picklist for %s skipped: %s", issue.issue_no, exc)
+        return None
+
+
 async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Takes the stock off the shelf. The only step here that moves anything."""
     issue = await get_issue(db, issue_id)
@@ -3238,6 +3430,9 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     issue.issued_by_id = getattr(user, "id", None)
     issue.issued_by_name = _name(user)
     issue.status = IssueStatus.ISSUED.value
+
+    if outward:
+        await _raise_picking_for_issue(db, issue, user)
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -3723,7 +3918,13 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
     return await _decorate_dispatch_destination(db, dispatch)
 
 
-async def create_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -> m.Dispatch:
+async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -> m.Dispatch:
+    """Build one consignment without committing it — see _build_picking / _build_issue.
+
+    A consignment and a dispatch are the same `out_dispatches` row: this writes it at
+    PACKED, and gate_out() later moves that same row out of the gate. There is no
+    separate dispatch document to raise.
+    """
     issue = await get_issue(db, data.issue_id)
     if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
         raise ValidationError("Only a posted outward material issue can become a consignment")
@@ -3787,6 +3988,11 @@ async def create_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
     await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
                       entity_no=dispatch.dispatch_no, action=AuditAction.CREATE, actor=user,
                       after={"status": dispatch.status, "packages": len(dispatch.packages)})
+    return dispatch
+
+
+async def create_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -> m.Dispatch:
+    dispatch = await _build_consignment(db, data, user)
     await db.commit()
     return await get_dispatch(db, dispatch.id)
 
@@ -5179,7 +5385,20 @@ async def _recent_activity(db: AsyncSession, warehouse_id: int | None, limit: in
     await collect(m.MaterialIssue, "issue_no", "ISSUE")
     await collect(m.Dispatch, "dispatch_no", "DISPATCH")
 
-    out.sort(key=lambda r: r["created_at"] or datetime.min, reverse=True)
+    def _sort_key(row: dict) -> datetime:
+        """Sort on a single, comparable notion of "when".
+
+        MySQL DATETIME columns come back naive, but rows written in the same session
+        that set them from utcnow() are still tz-aware in the identity map. Mixing the
+        two in one sort raises TypeError and takes the whole dashboard down with it,
+        so both are flattened to naive UTC here rather than trusted to match.
+        """
+        value = row["created_at"]
+        if value is None:
+            return datetime.min
+        return value.replace(tzinfo=None) if value.tzinfo else value
+
+    out.sort(key=_sort_key, reverse=True)
     return out[:limit]
 
 

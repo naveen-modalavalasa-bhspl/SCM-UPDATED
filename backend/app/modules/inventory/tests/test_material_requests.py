@@ -20,7 +20,7 @@ from sqlalchemy import select
 from app.core.exceptions import ValidationError
 from app.modules.inventory import allocations
 from app.modules.warehouse import service as warehouse_service
-from app.modules.warehouse.models import Picking, PickingItem
+from app.modules.warehouse.models import MaterialIssue, MaterialIssueLine
 from app.modules.inventory.models import (
     NO_BIN, NO_PROJECT, Allocation, MaterialRequest, Reservation, Stock,
 )
@@ -231,7 +231,12 @@ async def test_one_line_can_be_split_across_two_warehouses(db, actor):
     assert all(r.available_qty == Decimal("0") for r in rows)
 
 
-async def test_approval_generates_one_fulfilment_draft_per_warehouse(db, actor):
+async def test_approval_generates_one_issue_draft_per_warehouse(db, actor):
+    """Allocation approval opens the draft chain at the ISSUE, not the picklist.
+
+    The picklist is raised later, by post_issue, once the stock has actually come
+    off the shelf — see warehouse.service._raise_picking_for_issue.
+    """
     stocked, _bare, main, lip, admin = await _world(db)
     await _stock(db, stocked, main, 40)
     await _stock(db, stocked, lip, 20)
@@ -250,23 +255,25 @@ async def test_approval_generates_one_fulfilment_draft_per_warehouse(db, actor):
     )
 
     drafts = (await db.execute(
-        select(Picking).where(Picking.ref_type == "INDENT", Picking.ref_id == 55)
-        .order_by(Picking.warehouse_id)
+        select(MaterialIssue).where(MaterialIssue.indent_id == 55)
+        .order_by(MaterialIssue.warehouse_id)
     )).scalars().all()
     assert len(drafts) == 2
     assert {draft.warehouse_id for draft in drafts} == {main.id, lip.id}
     assert all(draft.status == "DRAFT" for draft in drafts)
+    assert all(not draft.is_stock_posted for draft in drafts)
 
     quantities = (await db.execute(
-        select(Picking.warehouse_id, PickingItem.required_qty)
-        .join(PickingItem, PickingItem.picking_id == Picking.id)
-        .where(Picking.ref_id == 55)
+        select(MaterialIssue.warehouse_id, MaterialIssueLine.issued_qty)
+        .join(MaterialIssueLine, MaterialIssueLine.issue_id == MaterialIssue.id)
+        .where(MaterialIssue.indent_id == 55)
     )).all()
     assert {warehouse_id: qty for warehouse_id, qty in quantities} == {
         main.id: Decimal("40"),
         lip.id: Decimal("20"),
     }
-    assert (await warehouse_service.dashboard(db))["open_picklists"] == 2
+    # No picklist yet — nothing has been issued off the shelf.
+    assert (await warehouse_service.dashboard(db))["open_picklists"] == 0
 
 
 async def test_rejecting_an_allocation_reserves_nothing(db, actor):

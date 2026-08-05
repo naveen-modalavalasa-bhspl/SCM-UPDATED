@@ -39,17 +39,22 @@ export function NewPutawayModal({
     }
   }, [isOpen]);
 
-  const { data: candidates = [], isFetching } = useQuery({
+  const { data: candidatesData, isFetching } = useQuery({
     queryKey: ["wh-putaway-candidates", grnId],
     queryFn: () => putawayCandidates(Number(grnId)),
     enabled: grnId !== "",
   });
 
+  const candidates = candidatesData ?? [];
+
   // Everything that can be raised starts ticked: the common case is "the whole GRN",
   // and unticking two lines is less work than ticking eight.
+  // The effect depends on `candidatesData`, not on a defaulted `candidates`: a
+  // `= []` default builds a NEW array every render, so the effect re-ran, setState
+  // re-rendered, and the modal spun until the tab locked up.
   useEffect(() => {
-    setPicked(candidates.filter((c) => c.eligible).map((c) => c.grn_item_id));
-  }, [candidates]);
+    setPicked(candidatesData ? candidatesData.filter((c) => c.eligible).map((c) => c.grn_item_id) : []);
+  }, [candidatesData]);
 
   const eligible = candidates.filter((c) => c.eligible);
 

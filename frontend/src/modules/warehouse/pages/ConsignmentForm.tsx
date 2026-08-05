@@ -533,7 +533,7 @@ export default function ConsignmentForm() {
         title={editing ? `Consignment ${doc?.dispatch_no ?? ""}` : "New consignment"}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav("/warehouse/dispatch/consignments")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {doc?.status === "PACKED" && (

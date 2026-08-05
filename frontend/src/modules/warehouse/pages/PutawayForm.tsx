@@ -71,7 +71,7 @@ export default function PutawayForm() {
     onSuccess: () => {
       invalidate();
       setConfirming(false);
-      nav("/warehouse/transactions/putaway", { replace: true });
+      nav("/warehouse/putaway", { replace: true });
     },
   });
 
@@ -114,7 +114,7 @@ export default function PutawayForm() {
         title={`Putaway ${task.putaway_no}`}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav("/warehouse/putaway")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {!done && task.status === "pending" && (

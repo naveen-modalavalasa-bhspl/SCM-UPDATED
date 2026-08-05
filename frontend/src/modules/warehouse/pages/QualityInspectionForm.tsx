@@ -53,6 +53,9 @@ export default function QualityInspectionForm({
   const nav = useNavigate();
   const qc = useQueryClient();
   const editing = !!id && id !== "new";
+  /* Absolute: this screen is mounted at two depths, so `".."` resolved against the
+   * matched route and Back landed somewhere different depending on the entry URL. */
+  const listPath = type === "OUTGOING" ? "/warehouse/qc-outward" : "/warehouse/quality-inspection";
 
   const [form, setForm] = useState<InspectionWrite>({
     inspection_date: today(),
@@ -210,7 +213,7 @@ export default function QualityInspectionForm({
     onSuccess: (saved: Inspection) => {
       qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
       qc.invalidateQueries({ queryKey: ["wh-inspection", String(saved.id)] });
-      if (!editing) nav(`../${saved.id}`, { replace: true });
+      if (!editing) nav(`${listPath}/${saved.id}`, { replace: true });
     },
   });
 
@@ -376,7 +379,7 @@ export default function QualityInspectionForm({
         title={editing ? `Inspection ${doc?.inspection_no ?? ""}` : "New inspection"}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav(listPath)}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {!locked && (

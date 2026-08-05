@@ -136,7 +136,7 @@ export default function PurchaseReturnForm() {
     onSuccess: (saved: PurchaseReturn) => {
       qc.invalidateQueries({ queryKey: ["wh-returns"] });
       qc.invalidateQueries({ queryKey: ["wh-return", String(saved.id)] });
-      if (!editing) nav(`../${saved.id}`, { replace: true });
+      if (!editing) nav(`/warehouse/purchase-returns/${saved.id}`, { replace: true });
     },
   });
 
@@ -255,7 +255,7 @@ export default function PurchaseReturnForm() {
         title={editing ? `Return ${doc?.return_no ?? ""}` : "New purchase return"}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav("/warehouse/purchase-returns")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {!locked && (

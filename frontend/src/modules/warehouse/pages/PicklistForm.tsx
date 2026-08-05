@@ -75,7 +75,7 @@ export default function PicklistForm() {
     mutationFn: () => createPicking(form),
     onSuccess: (saved: Picking) => {
       qc.invalidateQueries({ queryKey: ["wh-pickings"] });
-      nav(`../${saved.id}`, { replace: true });
+      nav(`/warehouse/picklist/${saved.id}`, { replace: true });
     },
   });
 
@@ -105,10 +105,15 @@ export default function PicklistForm() {
 
   const complete = useMutation({
     mutationFn: () => completePicking(Number(id)),
-    onSuccess: () => {
+    onSuccess: (saved: Picking) => {
       invalidate();
+      qc.invalidateQueries({ queryKey: ["wh-consignments"] });
       setConfirming(false);
-      nav(`/warehouse/transactions/material-issues/new?picking_id=${id}`);
+      /* A pick raised off an issue has had its consignment raised for it by the
+       * time this returns, so go there. A pick with no issue behind it (the older
+       * pick-then-issue path) still goes to a new issue. */
+      if (saved.ref_type === "ISSUE") nav("/warehouse/dispatch/consignments");
+      else nav(`/warehouse/material-issues/new?picking_id=${id}`);
     },
   });
 
@@ -172,7 +177,7 @@ export default function PicklistForm() {
           title="New material fulfilment"
           actions={
             <>
-              <Button variant="ghost" onClick={() => nav("..")}>
+              <Button variant="ghost" onClick={() => nav("/warehouse/picklist")}>
                 <ArrowLeft className="h-4 w-4" /> Back
               </Button>
               <Can do="issue.create">
@@ -343,7 +348,7 @@ export default function PicklistForm() {
         title={`Material fulfilment ${doc.pick_no}`}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav("/warehouse/picklist")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {doc.status === "DRAFT" && (

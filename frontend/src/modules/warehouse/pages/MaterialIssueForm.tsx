@@ -59,6 +59,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const qc = useQueryClient();
   const editing = !!id && id !== "new";
   const pickingSourceId = Number(searchParams.get("picking_id") || 0);
+  /* Absolute, not `".."`. This screen is mounted at two depths (under
+   * /warehouse/... and under /warehouse/transactions/...), and a relative Back
+   * resolves against the matched route, so it landed on the dashboard from one
+   * of them and on the list from the other. */
+  const listPath = direction === "OUT" ? "/warehouse/material-issues" : "/warehouse/material-returns";
 
   const [form, setForm] = useState<IssueWrite>({
     issue_type: "DEPARTMENT",
@@ -214,7 +219,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     onSuccess: (saved: Issue) => {
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       qc.invalidateQueries({ queryKey: ["wh-issue", String(saved.id)] });
-      if (!editing) nav(`../${saved.id}`, { replace: true });
+      if (!editing) nav(`${listPath}/${saved.id}`, { replace: true });
     },
   });
 
@@ -496,7 +501,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         title={editing ? `${doc?.issue_no ?? ""}` : `New material ${noun}`}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav(listPath)}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {!locked && (
@@ -567,8 +572,10 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           <MetaRow label="Stock" value={doc.is_stock_posted ? `Posted ${fmtDateTime(doc.posted_at)}` : "Not posted"} />
           <MetaRow label="Against indent" value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
           <MetaRow label="Fulfilment" value={<span className="font-mono">{doc.pick_no ?? "—"}</span>} />
-          <MetaRow label="Issued by" value={doc.issued_by_name} />
-          <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name} />
+          {/* `issued_by` is only stamped when stock is posted; before that the row
+            * still has an author, and a blank field read as missing data. */}
+          <MetaRow label="Issued by" value={doc.issued_by_name || doc.created_by_name || "—"} />
+          <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name || "—"} />
           <MetaRow
             label="Reverses"
             value={doc.original_issue_no ? <span className="font-mono">{doc.original_issue_no}</span> : "—"}

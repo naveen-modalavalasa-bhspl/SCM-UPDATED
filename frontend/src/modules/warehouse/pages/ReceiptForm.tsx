@@ -301,10 +301,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       qc.invalidateQueries({ queryKey: ["wh-attachments", "RECEIPT", saved.id] });
       if (!editing) {
         if (!isGrn) {
-          nav("/warehouse/transactions/material-inward", { replace: true });
+          nav("/warehouse/material-inward", { replace: true });
           return;
         }
-        nav(`/warehouse/transactions/grn/${saved.id}`, { replace: true });
+        nav(`/warehouse/grn/${saved.id}`, { replace: true });
       }
     },
   });
@@ -331,7 +331,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     onSuccess: (saved) => {
       qc.invalidateQueries({ queryKey: ["wh-gate-entries"] });
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
-      nav(`/warehouse/transactions/grn/${saved.id}`);
+      nav(`/warehouse/grn/${saved.id}`);
     },
   });
 
@@ -581,7 +581,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         title={editing ? `${label} ${doc?.grn_no ?? ""}` : `New ${label.toLowerCase()}`}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav(isGrn ? "/warehouse/grn" : "/warehouse/material-inward")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {!locked && (

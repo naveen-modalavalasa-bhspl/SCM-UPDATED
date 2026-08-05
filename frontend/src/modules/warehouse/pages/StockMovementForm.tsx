@@ -69,7 +69,7 @@ export default function StockMovementForm() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wh-stock-movements"] });
       queryClient.invalidateQueries({ queryKey: ["inventory-stock"] });
-      nav("..", { replace: true });
+      nav("/warehouse/stock-movements", { replace: true });
     },
   });
 
@@ -90,7 +90,7 @@ export default function StockMovementForm() {
         title="New stock movement"
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("..")}>
+            <Button variant="ghost" onClick={() => nav("/warehouse/stock-movements")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             <Can do="stock.transfer">

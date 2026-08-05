@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import {
   Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, Spinner, Skeleton,
+  Pagination,
 } from "@heroui/react";
 
 export interface Column<T> {
@@ -19,15 +20,34 @@ interface Props<T> {
   keyOf: (row: T) => string | number;
   loading?: boolean;
   empty?: ReactNode;
+  /** Pagination is opt-in: pass all three and a pager renders under the rows.
+   * Callers that omit them keep the old un-paged behaviour untouched. */
+  page?: number;
+  totalPages?: number;
+  onPageChange?: (page: number) => void;
 }
 
 /** HeroUI Table on desktop, stacked HeroUI cards under 768px. Every list screen uses
  * this — we never horizontal-scroll a table on a phone. */
 export function ResponsiveList<T>({
   data, columns, renderCard, onRowClick, keyOf, loading, empty,
+  page, totalPages, onPageChange,
 }: Props<T>) {
   const colByKey = Object.fromEntries(columns.map((c) => [c.key, c])) as Record<string, Column<T>>;
   const rowByKey = new Map(data.map((r) => [String(keyOf(r)), r]));
+
+  const pager = onPageChange && totalPages && totalPages > 1 ? (
+    <div className="flex w-full justify-center p-4">
+      <Pagination
+        isCompact
+        showControls
+        color="primary"
+        page={page ?? 1}
+        total={totalPages}
+        onChange={onPageChange}
+      />
+    </div>
+  ) : null;
 
   return (
     <>
@@ -41,6 +61,7 @@ export function ResponsiveList<T>({
           aria-label="List"
           removeWrapper
           selectionMode="none"
+          bottomContent={pager}
           onRowAction={onRowClick ? (key) => {
             const r = rowByKey.get(String(key));
             if (r) onRowClick(r);
@@ -96,6 +117,7 @@ export function ResponsiveList<T>({
                   {renderCard(row)}
                 </button>
               ))}
+        {pager}
       </div>
     </>
   );

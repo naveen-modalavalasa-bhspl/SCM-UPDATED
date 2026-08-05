@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
@@ -82,6 +82,14 @@ export function DocumentList<T>({
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [warehouse, setWarehouse] = useState("");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 20;
+
+  // Narrowing the list while sitting on page 4 would otherwise show an empty page
+  // with no hint that the rows exist a few pages back.
+  useEffect(() => {
+    setPage(1);
+  }, [search, status, warehouse]);
 
   const { data: houses = [] } = useQuery({
     queryKey: ["wh-lookup", "warehouses", ""],
@@ -111,6 +119,11 @@ export function DocumentList<T>({
       searchIn(r).some((v) => (v ?? "").toString().toLowerCase().includes(q)),
     );
   }, [all, search, searchIn]);
+
+  // Paginate in the browser over the page the server already sent. The KPI tiles
+  // stay on `all` so they read as the list-wide total and don't jump as you page.
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const pageRows = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const tiles = kpis?.(all) ?? [];
 
@@ -170,13 +183,16 @@ export function DocumentList<T>({
       {children}
 
       <ResponsiveList
-        data={rows}
+        data={pageRows}
         columns={columns}
         keyOf={keyOf}
         loading={isLoading}
         onRowClick={openRow}
         empty={empty}
         renderCard={renderCard}
+        page={page}
+        totalPages={totalPages}
+        onPageChange={setPage}
       />
     </div>
   );
