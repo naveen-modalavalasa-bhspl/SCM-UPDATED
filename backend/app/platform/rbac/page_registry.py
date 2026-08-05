@@ -54,8 +54,12 @@ class PageDef:
 # Only pages this file knows about are managed. Everything already in rbac_pages
 # stays exactly as it is, which is why this list does not have to be exhaustive.
 PAGES: list[PageDef] = [
+    # Sorts AFTER the existing RBAC screens (81, 82) on purpose. The left rail sends
+    # a module to its FIRST child, so a new page that sorts first silently becomes
+    # the module's front door — and on a backend that predates its endpoint, opening
+    # the whole module then 404s. New screens go at the end of their group.
     PageDef("rbac_job_profiles", "/rbac/job-profiles", "Job Profiles",
-            parent="grp_rbac", module="rbac", sort_order=50),
+            parent="grp_rbac", module="rbac", sort_order=83),
 ]
 
 
@@ -107,13 +111,19 @@ async def sync_pages(db: AsyncSession) -> dict:
         else:
             # Refresh presentation only. is_active is NOT forced back on: an admin
             # who retired a screen should not have it reappear on every restart.
+            #
+            # sort_order is refreshed too: it decides which child a module opens on,
+            # so a wrong one is a broken module, not a cosmetic detail — and it has
+            # to be correctable by deploying rather than by hand-editing the row.
             changed = (
                 page.path != spec.path or page.name != spec.name
+                or page.sort_order != spec.sort_order
                 or page.parent_id != (parent.id if parent else None)
             )
             page.path = spec.path
             page.name = spec.name
             page.module = spec.module
+            page.sort_order = spec.sort_order
             page.parent_id = parent.id if parent else None
             if changed:
                 updated.append(spec.code)
