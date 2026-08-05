@@ -188,7 +188,20 @@ export interface JobProfilePosition {
 }
 
 export interface JobProfile {
+  /** `<project_id>:<job>` — the grant unit. The same job in two projects is two
+   *  profiles, which is what makes a grant project-specific. */
   key: string;
+  job: string;
+  /** A default profile — what an unconfigured job in this project resolves to,
+   *  instead of falling through to its HCM role. Holds no positions of its own. */
+  is_default: boolean;
+  /** The company-wide default, which applies to every project that has not set its
+   *  own. Stays visible under a project filter, because it is that project's
+   *  fallback. */
+  is_company_default: boolean;
+  /** 0 = the profile's positions have no HCM project ("Unassigned"). */
+  project_id: number;
+  project_name: string;
   name: string;
   role_id: number | null;
   /** false = nobody has granted this profile yet, so its people still resolve
@@ -208,6 +221,8 @@ export interface JobProfile {
 export interface JobProfileMatrix {
   items: JobProfile[];
   total: number;
+  /** Every project the derived profiles belong to, as `[id, name]`. */
+  projects: [number, string][];
   position_total: number;
   pages: {
     id: number; code: string; name: string; module?: string | null;

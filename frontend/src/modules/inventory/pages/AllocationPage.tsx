@@ -176,8 +176,20 @@ export function AllocationPage() {
                           <Input
                             type="number"
                             min={0}
+                            max={line.requested_qty - splits.reduce((sum, sp, idx) => idx !== i ? sum + Number(sp.qty || 0) : sum, 0)}
                             value={s.qty}
-                            onChange={(e) => set(line.indent_item_id, i, { qty: e.target.value })}
+                            onChange={(e) => {
+                              let val = e.target.value;
+                              if (val !== "") {
+                                const num = Number(val);
+                                const otherSplitsSum = splits.reduce((sum, sp, idx) => idx !== i ? sum + Number(sp.qty || 0) : sum, 0);
+                                const maxAllowed = line.requested_qty - otherSplitsSum;
+                                if (num > maxAllowed) {
+                                  val = String(Math.max(0, maxAllowed));
+                                }
+                              }
+                              set(line.indent_item_id, i, { qty: val });
+                            }}
                           />
                         </Field>
                       </div>

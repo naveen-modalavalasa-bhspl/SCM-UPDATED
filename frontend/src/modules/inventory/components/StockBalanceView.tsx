@@ -222,7 +222,7 @@ export function StockBalanceView() {
         eyebrow="Inventory"
         title="Stock Balance"
         actions={
-          <Button variant="ghost" onClick={() => navigate("/inventory/labels")}>
+          <Button variant="primary" onClick={() => navigate("/inventory/labels")}>
             <TagIcon size={14} /> Labels & Printing
           </Button>
         }

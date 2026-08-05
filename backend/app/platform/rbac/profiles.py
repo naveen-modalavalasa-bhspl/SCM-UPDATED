@@ -85,9 +85,36 @@ def derive_key(code: str | None, job_name: str | None, name: str | None) -> str:
 # CLAUDE.md rule 8 already says it lives.
 UNASSIGNED_PROJECT = 0
 
+# A default profile: what a job gets when nobody has configured it yet.
+#
+# Without one, an unconfigured position resolves through its HCM role — the exact
+# leak this screen exists to close, since role 29 "MANAGER" covers fifteen unrelated
+# jobs. A default is a normal profile row with a reserved job, so it saves, resets,
+# lists and audits through the same code as every other profile.
+#
+# Resolution walks outward, the same order the approval ladders use (CLAUDE.md rule
+# 8): the project's own default, then the company-wide one, then — only if neither
+# has ever been configured — the old HCM behaviour, unchanged.
+DEFAULT_JOB = "*"
+COMPANY_DEFAULT_KEY = "ALL:*"   # deliberately not "0:*", which is Unassigned's own
+
 
 def profile_key(project_id: int | None, job: str) -> str:
     return f"{project_id or UNASSIGNED_PROJECT}:{job}"
+
+
+def is_default_key(key: str) -> bool:
+    return key == COMPANY_DEFAULT_KEY or key.endswith(f":{DEFAULT_JOB}")
+
+
+def default_profile_name(key: str, bucket: dict | None = None) -> str:
+    """Display name for an unsaved profile. A default reads as what it does."""
+    if key == COMPANY_DEFAULT_KEY:
+        return "Default — every project"
+    if is_default_key(key):
+        name = (bucket or {}).get("project_name") or "this project"
+        return f"Default — {name}"
+    return (bucket["job"] if bucket else split_key(key)[1]).title()
 
 
 def split_key(key: str) -> tuple[int, str]:
@@ -231,7 +258,30 @@ async def _derive(db: AsyncSession) -> dict[str, dict]:
                 "hcm_role": row.role_name, "office_level": level,
                 "holders": holders.get(row.id, 0),
             })
+
+    # One default bucket per project, plus the company-wide one. Synthetic: they hold
+    # no positions of their own, because they stand for the jobs that do not exist
+    # yet. Adding them here rather than only in list_profiles is what lets
+    # set_profile_access, reset_profile and preview_profile accept them without
+    # knowing defaults exist — they all validate against this dict.
+    seen = {(b["project_id"], b["project_name"]) for b in profiles.values()}
+    for project_id, project_name in sorted(seen, key=lambda pair: pair[0]):
+        key = profile_key(project_id, DEFAULT_JOB)
+        profiles.setdefault(key, _default_bucket(key, project_id, project_name))
+    profiles.setdefault(
+        COMPANY_DEFAULT_KEY,
+        _default_bucket(COMPANY_DEFAULT_KEY, UNASSIGNED_PROJECT, "Every project"),
+    )
     return profiles
+
+
+def _default_bucket(key: str, project_id: int, project_name: str) -> dict:
+    return {
+        "key": key, "job": DEFAULT_JOB,
+        "project_id": project_id, "project_name": project_name,
+        "positions": [], "position_ids": [],
+        "holders": 0, "hcm_roles": set(), "office_levels": Counter(),
+    }
 
 
 async def _profile_roles(db: AsyncSession) -> dict[str, Role]:
@@ -278,13 +328,22 @@ async def profile_role_for_position(db: AsyncSession, position_id: int) -> Role 
                        HcmEmployee.project_id.isnot(None))
                 .limit(1)
             )
-    key = profile_key(project_id, job)
-    return (await db.execute(
-        select(Role).where(
-            Role.description.startswith(f"{PROFILE_PREFIX}{key}|"),
-            Role.is_active.is_(True),
-        )
-    )).scalars().first()
+    # The job's own profile, then the project's default, then the company-wide one.
+    # First hit wins, so configuring a job always beats a default, and a project
+    # default always beats the company-wide one. All three miss -> None, and the
+    # caller falls through to the HCM role exactly as it did before defaults existed.
+    for key in (profile_key(project_id, job),
+                profile_key(project_id, DEFAULT_JOB),
+                COMPANY_DEFAULT_KEY):
+        role = (await db.execute(
+            select(Role).where(
+                Role.description.startswith(f"{PROFILE_PREFIX}{key}|"),
+                Role.is_active.is_(True),
+            )
+        )).scalars().first()
+        if role is not None:
+            return role
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -309,7 +368,11 @@ async def list_profiles(db: AsyncSession) -> dict:
     items = []
     for key, bucket in sorted(
         derived.items(),
-        key=lambda kv: (kv[1]["project_name"], -len(kv[1]["position_ids"])),
+        # Defaults sort to the top of their project: they are the thing that decides
+        # every row below them, so burying them under 35 jobs would hide the setting
+        # that matters most.
+        key=lambda kv: (kv[1]["project_name"], not is_default_key(kv[0]),
+                        -len(kv[1]["position_ids"])),
     ):
         role = saved.get(key)
         _, saved_scope = parse_description(role.description if role else None)
@@ -317,9 +380,11 @@ async def list_profiles(db: AsyncSession) -> dict:
         items.append({
             "key": key,
             "job": bucket["job"],
+            "is_default": is_default_key(key),
+            "is_company_default": key == COMPANY_DEFAULT_KEY,
             "project_id": bucket["project_id"],
             "project_name": bucket["project_name"],
-            "name": role.name if role else bucket["job"].title(),
+            "name": role.name if role else default_profile_name(key, bucket),
             "role_id": role.id if role else None,
             "configured": role is not None,
             "scope": saved_scope or default_scope(bucket["office_levels"]),
@@ -337,9 +402,14 @@ async def list_profiles(db: AsyncSession) -> dict:
         })
     return {
         "items": items,
-        "total": len(items),
+        # Real jobs only: the header reads "N real jobs derived from M positions",
+        # and a default is neither derived nor a job.
+        "total": sum(1 for i in items if not i["is_default"]),
+        # Real projects only. The company-wide default's bucket carries the label
+        # "Every project", which is not a project and must never reach the filter.
         "projects": sorted({
-            (b["project_id"], b["project_name"]) for b in derived.values()
+            (b["project_id"], b["project_name"])
+            for k, b in derived.items() if not is_default_key(k)
         }),
         "position_total": sum(len(b["position_ids"]) for b in derived.values()),
         "pages": [{
@@ -399,7 +469,7 @@ async def set_profile_access(
     if role is None:
         role = Role(
             code=await _free_code(db, profile_code(key)),
-            name=name or split_key(key)[1].title(),
+            name=name or default_profile_name(key),
             description=profile_description(key, scope),
             is_system=True, is_active=True,
         )

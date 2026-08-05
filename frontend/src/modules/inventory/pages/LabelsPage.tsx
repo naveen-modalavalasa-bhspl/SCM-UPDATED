@@ -214,19 +214,26 @@ export function LabelsPage() {
                       {r.expiry_date ? ` · Exp ${r.expiry_date}` : ""}
                     </div>
                   </div>
-                  {kind === "qr" ? (
-                    <QRCodeSVG value={codeFor(r)} size={dim.bar * 2.2} />
-                  ) : (
-                    <Barcode
-                      value={codeFor(r)}
-                      format="CODE128"
-                      height={dim.bar * 1.6}
-                      width={1}
-                      fontSize={8}
-                      margin={0}
-                      displayValue
-                    />
-                  )}
+                  <div className="flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden">
+                    {kind === "qr" ? (
+                      <QRCodeSVG
+                        value={codeFor(r)}
+                        size={dim.bar * 2.2}
+                        className="block h-auto max-h-full w-auto max-w-full"
+                      />
+                    ) : (
+                      <Barcode
+                        value={codeFor(r)}
+                        format="CODE128"
+                        height={dim.bar * 1.6}
+                        width={1}
+                        fontSize={8}
+                        margin={0}
+                        displayValue
+                        className="block h-auto max-h-full w-auto max-w-full"
+                      />
+                    )}
+                  </div>
                 </div>
               ))}
             </div>

@@ -64,6 +64,9 @@ export function JobProfilesPage() {
   });
 
   const [search, setSearch] = useState("");
+  // "" = every project. A profile is keyed by project, so this is the axis the list
+  // is actually organised along — not a convenience filter.
+  const [project, setProject] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [pageCodes, setPageCodes] = useState<Set<string>>(new Set());
   const [featureCodes, setFeatureCodes] = useState<Set<string>>(new Set());
@@ -119,13 +122,28 @@ export function JobProfilesPage() {
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    if (!needle) return profiles;
-    return profiles.filter((p) =>
-      p.key.toLowerCase().includes(needle)
-      || p.name.toLowerCase().includes(needle)
-      || p.hcm_roles.some((r) => r.toLowerCase().includes(needle))
-      || p.positions.some((pos) => pos.name.toLowerCase().includes(needle)));
-  }, [profiles, search]);
+    return profiles.filter((p) => {
+      // The company-wide default survives a project filter: it is what the filtered
+      // project falls back to when it has no default of its own, so hiding it would
+      // hide the rule actually in force.
+      if (project && !p.is_company_default && String(p.project_id) !== project) {
+        return false;
+      }
+      if (!needle) return true;
+      return p.key.toLowerCase().includes(needle)
+        || p.name.toLowerCase().includes(needle)
+        || p.project_name.toLowerCase().includes(needle)
+        || p.hcm_roles.some((r) => r.toLowerCase().includes(needle))
+        || p.positions.some((pos) => pos.name.toLowerCase().includes(needle));
+    });
+  }, [profiles, search, project]);
+
+  // Counted off the unfiltered list so the numbers stay put while you filter.
+  const perProject = useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const p of profiles) counts.set(p.project_id, (counts.get(p.project_id) ?? 0) + 1);
+    return counts;
+  }, [profiles]);
 
   const groups = useMemo(() => pageTree(data?.pages ?? []), [data?.pages]);
   const featureModules = useMemo(() => {
@@ -164,12 +182,27 @@ export function JobProfilesPage() {
       <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
         {/* ------------------------------ profiles ------------------------------ */}
         <Card className="p-0 overflow-hidden">
-          <div className="p-3 border-b border-default-200">
+          <div className="p-3 border-b border-default-200 space-y-2">
             <Input
               aria-label="Search job profiles"
-              placeholder="Search job, HCM role, position…"
+              placeholder="Search job, project, HCM role, position…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+            />
+            <Select
+              ariaLabel="Project"
+              value={project}
+              onChange={setProject}
+              placeholder="All projects"
+              // Explicit "All projects" row: the placeholder only shows while nothing
+              // is picked, so without it there is no way back out of a project.
+              options={[
+                { value: "", label: `All projects (${profiles.length})` },
+                ...(data?.projects ?? []).map(([id, name]) => ({
+                  value: String(id),
+                  label: `${name} (${perProject.get(id) ?? 0})`,
+                })),
+              ]}
             />
           </div>
           <ScrollBox className="max-h-[70vh]">
@@ -190,18 +223,37 @@ export function JobProfilesPage() {
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-medium text-sm truncate">{profile.name}</span>
-                      {profile.configured
-                        ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-success-100
-                                           text-success-700 whitespace-nowrap">LIVE</span>
-                        : <span className="text-[10px] px-1.5 py-0.5 rounded bg-default-200
-                                           text-default-600 whitespace-nowrap">HCM ROLE</span>}
+                      {profile.is_default
+                        ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary-100
+                                           text-primary-700 whitespace-nowrap">
+                            {profile.configured ? "DEFAULT" : "NOT SET"}
+                          </span>
+                        : profile.configured
+                          ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-success-100
+                                             text-success-700 whitespace-nowrap">LIVE</span>
+                          : <span className="text-[10px] px-1.5 py-0.5 rounded bg-default-200
+                                             text-default-600 whitespace-nowrap">HCM ROLE</span>}
                     </div>
-                    <div className="text-xs text-default-500 mt-0.5 truncate">
-                      {profile.holder_count} people · {profile.position_count} positions
+                    {/* The project is half the profile's identity, not a detail:
+                     *  "4:DEO" and "6:DEO" are two grant units, and the name alone
+                     *  cannot tell them apart. Always shown, never truncated away. */}
+                    <div className="text-[11px] text-primary-600 truncate">
+                      {profile.project_name}
                     </div>
-                    <div className="text-[11px] text-default-400 truncate">
-                      was: {profile.hcm_roles.join(", ") || "—"}
-                    </div>
+                    {profile.is_default ? (
+                      <div className="text-xs text-default-500 mt-0.5">
+                        Used by any job here nobody has configured
+                      </div>
+                    ) : (
+                      <>
+                        <div className="text-xs text-default-500 mt-0.5 truncate">
+                          {profile.holder_count} people · {profile.position_count} positions
+                        </div>
+                        <div className="text-[11px] text-default-400 truncate">
+                          was: {profile.hcm_roles.join(", ") || "—"}
+                        </div>
+                      </>
+                    )}
                   </button>
                 </li>
               ))}
@@ -223,13 +275,43 @@ export function JobProfilesPage() {
                       <h2 className="text-lg font-semibold">{selected.name}</h2>
                       <code className="text-xs text-default-500">{selected.key}</code>
                     </div>
-                    <p className="text-sm text-default-500 mt-1">
-                      {selected.holder_count} people across {selected.position_count}{" "}
-                      position{selected.position_count === 1 ? "" : "s"}
-                      {selected.hcm_roles.length
-                        ? ` · currently inside HCM role ${selected.hcm_roles.join(", ")}`
-                        : ""}
-                    </p>
+                    {selected.is_default ? (
+                      <>
+                        <p className="text-sm text-default-500 mt-1">
+                          <span className="font-medium text-primary-600">
+                            {selected.project_name}
+                          </span>
+                          {" · "}the starting point for any job here that nobody has
+                          configured
+                        </p>
+                        <p className="text-xs text-default-400 mt-0.5">
+                          {selected.configured
+                            ? "New and unconfigured jobs see this instead of their HCM role."
+                            : "Not set — unconfigured jobs still fall through to their "
+                              + "HCM role. Save once to take over."}
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm text-default-500 mt-1">
+                          <span className="font-medium text-primary-600">
+                            {selected.project_name}
+                          </span>
+                          {" · "}
+                          {selected.holder_count} people across {selected.position_count}{" "}
+                          position{selected.position_count === 1 ? "" : "s"}
+                          {selected.hcm_roles.length
+                            ? ` · currently inside HCM role ${selected.hcm_roles.join(", ")}`
+                            : ""}
+                        </p>
+                        {/* Saving grants this job in THIS project only. Worth saying
+                         *  out loud: the list shows one row per project, so the same
+                         *  job name can appear more than once, granted separately. */}
+                        <p className="text-xs text-default-400 mt-0.5">
+                          Grants apply to {selected.job} in {selected.project_name} only.
+                        </p>
+                      </>
+                    )}
                   </div>
                   <div className="flex gap-2">
                     <Button variant="subtle" onClick={() => setShowHolders((v) => !v)}>

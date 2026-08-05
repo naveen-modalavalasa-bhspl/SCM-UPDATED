@@ -144,9 +144,15 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(PO_APPROVE, "procurement", "po", "approve", "Approve purchase orders"),
     Perm(PO_REJECT, "procurement", "po", "reject", "Reject purchase orders"),
     Perm(PO_SEND_VENDOR, "procurement", "po", "send_vendor", "Send PO to vendor"),
-    Perm(GRN_VIEW, "logistics", "grn", "view", "View GRNs"),
-    Perm(GRN_CREATE, "logistics", "grn", "create", "Create GRNs"),
-    Perm(GRN_QC, "logistics", "grn", "qc", "QC pass/fail a GRN"),
+    # module is "warehouse", not "logistics": the endpoints still live in
+    # modules/logistics, but its GRN and issue screens are gone — no route in App.tsx,
+    # no rbac_pages row — and the surviving screens are /warehouse/grn and
+    # /warehouse/material-issues. This column decides which module the RBAC screens
+    # file a button under, so it has to name where the screen is, not which module
+    # first served the endpoint.
+    Perm(GRN_VIEW, "warehouse", "grn", "view", "View GRNs"),
+    Perm(GRN_CREATE, "warehouse", "grn", "create", "Create GRNs"),
+    Perm(GRN_QC, "warehouse", "grn", "qc", "QC pass/fail a GRN"),
     # module is "inventory": stk_* moved there when Inventory became the base module.
     Perm(STOCK_VIEW, "inventory", "stock", "view", "View stock"),
     Perm(STOCK_VIEW_ALL, "inventory", "stock", "view_all",
@@ -169,9 +175,10 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(MR_APPROVE, "inventory", "material_request", "approve",
          "Approve material requests"),
     Perm(MR_REJECT, "inventory", "material_request", "reject", "Reject material requests"),
-    Perm(ISSUE_VIEW, "logistics", "issue", "view", "View issues"),
-    Perm(ISSUE_CREATE, "logistics", "issue", "create", "Create issues"),
-    Perm(ISSUE_ISSUE, "logistics", "issue", "issue", "Issue stock to a department"),
+    # See the GRN block above: the screen is /warehouse/material-issues.
+    Perm(ISSUE_VIEW, "warehouse", "issue", "view", "View issues"),
+    Perm(ISSUE_CREATE, "warehouse", "issue", "create", "Create issues"),
+    Perm(ISSUE_ISSUE, "warehouse", "issue", "issue", "Issue stock to a department"),
     Perm(RECEIPT_VIEW, "warehouse", "receipt", "view", "View goods receipts"),
     Perm(RECEIPT_CREATE, "warehouse", "receipt", "create", "Create goods receipts"),
     Perm(RECEIPT_POST, "warehouse", "receipt", "post", "Post a goods receipt"),

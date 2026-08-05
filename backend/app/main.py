@@ -35,12 +35,15 @@ async def lifespan(app: FastAPI):
     # Register screens added since the last deploy. Additive only — it never drops a
     # page — so unlike scripts.seed this is safe to run against the live database.
     try:
-        from app.platform.rbac.page_registry import sync_pages
+        from app.platform.rbac.page_registry import sync_pages, sync_permission_labels
 
         async with SessionLocal() as db:
             result = await sync_pages(db)
+            relabelled = await sync_permission_labels(db)
         if result["added"] or result["updated"]:
             log.info("rbac_pages synced: %s", result)
+        if relabelled:
+            log.info("rbac_permissions relabelled: %s", relabelled)
     except Exception as exc:
         log.warning("Page registry sync skipped: %s", exc)
     yield

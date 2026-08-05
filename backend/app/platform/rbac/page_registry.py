@@ -63,6 +63,39 @@ PAGES: list[PageDef] = [
 ]
 
 
+async def sync_permission_labels(db: AsyncSession) -> list[str]:
+    """Refresh the descriptive columns of rbac_permissions from the catalogue.
+
+    `seed_permissions` inserts through `get_or_create`, whose defaults only apply on
+    INSERT. So a permission's module/description is frozen at whatever it was the day
+    the row was first created, and every later correction in `permissions.py` is
+    silently ignored on any database that already has the row — which is all of them.
+
+    That is how `stock.view` and `stock.adjust` stayed tagged `logistics` long after
+    the catalogue moved them to `inventory`, and why the RBAC screens file their
+    buttons under a module the screen left. The grouping was never the bug; the label
+    was, and nothing was refreshing it.
+
+    Only labels. `code` is the identity and is never touched, and no grant is read or
+    written, so this cannot widen or narrow anyone's access.
+    """
+    catalogue = {p.code: p for p in perms.ALL_PERMISSIONS}
+    rows = (await db.execute(select(Permission))).scalars().all()
+    changed = []
+    for row in rows:
+        spec = catalogue.get(row.code)
+        if spec is None:
+            continue  # not ours: left alone, same rule as an unknown page
+        if (row.module, row.resource, row.action) == (
+                spec.module, spec.resource, spec.action):
+            continue
+        changed.append(f"{row.code}: {row.module} -> {spec.module}")
+        row.module, row.resource, row.action = spec.module, spec.resource, spec.action
+    if changed:
+        await db.commit()
+    return changed
+
+
 async def sync_pages(db: AsyncSession) -> dict:
     """Insert missing pages, refresh known ones, delete nothing."""
     existing = {

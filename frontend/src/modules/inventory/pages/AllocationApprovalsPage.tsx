@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Modal, ModalBody, ModalContent, ModalFooter, ModalHeader,
+  Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Pagination,
 } from "@heroui/react";
 import { CheckCircle2, XCircle } from "lucide-react";
 import {
@@ -12,6 +12,7 @@ import {
   approveAllocation, getAllocation, getAllocationHistory,
   getPendingInventoryApprovals, rejectAllocation,
 } from "../api";
+import { FilterBar, FilterSelect } from "../components/FilterBar";
 import type { Allocation } from "../types";
 
 const fmt = (value: number) =>
@@ -27,6 +28,9 @@ export function AllocationApprovalsPage() {
   const [selected, setSelected] = useState<Allocation | null>(null);
   const [comments, setComments] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [allocatorFilter, setAllocatorFilter] = useState("");
+  const [page, setPage] = useState(1);
 
   const queue = useQuery({
     queryKey: ["inventory", "allocation-approvals"],
@@ -86,6 +90,27 @@ export function AllocationApprovalsPage() {
     if (decisionView) nav("/approvals/decisions");
   };
 
+  const allAllocators = useMemo(() => {
+    const allocs = new Set<string>();
+    for (const row of queue.data ?? []) {
+      if (row.allocated_by_name) allocs.add(row.allocated_by_name);
+    }
+    return Array.from(allocs).sort().map(a => ({ value: a, label: a }));
+  }, [queue.data]);
+
+  const rows = useMemo(() => {
+    let items = queue.data ?? [];
+    if (allocatorFilter) items = items.filter((r) => r.allocated_by_name === allocatorFilter);
+    const q = search.trim().toLowerCase();
+    if (q) {
+      items = items.filter((r) =>
+        r.allocation_no.toLowerCase().includes(q) ||
+        (r.indent_no && r.indent_no.toLowerCase().includes(q))
+      );
+    }
+    return items;
+  }, [queue.data, search, allocatorFilter]);
+
   const columns: Column<Allocation>[] = [
     {
       key: "allocation",
@@ -131,6 +156,38 @@ export function AllocationApprovalsPage() {
         that quantity; any shortage becomes one Material Request.
       </p>
 
+      <div className="mb-4 grid grid-cols-2 gap-2">
+        <div className="rounded-xl border border-line/70 bg-content1 p-3 text-left">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Total Approvals</div>
+          <div className="text-2xl font-bold text-ink">{queue.isLoading ? "…" : rows.length}</div>
+        </div>
+        <div className="rounded-xl border border-line/70 bg-content1 p-3 text-left">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Total Lines</div>
+          <div className="text-2xl font-bold text-ink">
+            {queue.isLoading ? "…" : rows.reduce((sum, r) => sum + r.items.length, 0)}
+          </div>
+        </div>
+      </div>
+
+      <FilterBar
+        search={search}
+        onSearch={(v) => { setSearch(v); setPage(1); }}
+        searchPlaceholder="Search allocation or indent no…"
+        onClear={() => {
+          setSearch("");
+          setAllocatorFilter("");
+          setPage(1);
+        }}
+        active={(search ? 1 : 0) + (allocatorFilter ? 1 : 0)}
+      >
+        <FilterSelect
+          value={allocatorFilter}
+          onChange={(v) => { setAllocatorFilter(v); setPage(1); }}
+          options={allAllocators}
+          placeholder="All Allocators"
+        />
+      </FilterBar>
+
       {queue.error || decidedAllocation.error ? (
         <div className="rounded-lg bg-bad-bg p-4 text-sm text-bad">
           {((decidedAllocation.error || queue.error) as Error).message}
@@ -138,7 +195,7 @@ export function AllocationApprovalsPage() {
       ) : (
         <Card className="p-2">
           <ResponsiveList
-            data={queue.data ?? []}
+            data={rows.slice((page - 1) * 10, page * 10)}
             loading={queue.isLoading}
             keyOf={(row) => row.id}
             columns={columns}
@@ -164,6 +221,18 @@ export function AllocationApprovalsPage() {
               </div>
             )}
           />
+          {rows.length > 0 && (
+            <div className="mt-4 flex justify-center pb-2">
+              <Pagination
+                isCompact
+                showControls
+                color="primary"
+                page={page}
+                total={Math.max(1, Math.ceil(rows.length / 10))}
+                onChange={setPage}
+              />
+            </div>
+          )}
         </Card>
       )}
 

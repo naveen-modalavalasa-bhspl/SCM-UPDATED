@@ -1,0 +1,15 @@
+- generic [ref=e4]:
+  - img "SCM — procurement, inventory, warehouse, logistics" [ref=e6]
+  - generic [ref=e8]:
+    - generic [ref=e9]: Welcome back
+    - heading "Sign in" [level=1] [ref=e10]
+    - paragraph [ref=e11]: One thread from indent to stock.
+    - generic [ref=e12]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Employee ID
+        - textbox "Employee ID" [active] [ref=e17]:
+          - /placeholder: Enter your employee ID
+      - generic [ref=e19]:
+        - generic: Password
+        - textbox "Password" [ref=e21]
+      - button "Sign in" [ref=e22] [cursor=pointer]

@@ -196,13 +196,29 @@ sign-in.
   "level":      { "id": 5, "code": "L5", "name": "Manager", "rank": 5 },
   "role":       { "id": 31, "name": "District Manager" },
   "job_name":   "District Manager",
+  "office_level": "District",
   "department": { "id": 4, "name": "Network" },
   "office":     { "id": 12, "name": "Anantapur" },
   "project":    { "id": 7, "name": "APSFL Phase 2" },
   "assigned_employees": [ { "id": 10432, "name": "R. Kumar", "employee_code": "TIR-0432", "is_primary": true } ],
+  "holder_count": 1,
   "updated_at": "2026-07-30T06:00:00Z"
 }
 ```
+
+**`office_level` must be a first-class field.** SCM reads it today by digging into the
+position's raw HCM payload (`raw.office_level`) to seed row-level scoping — it decides
+whether a login sees only their own documents, their office's, their subtree's, their
+project's, or everything. Reading it out of an untyped blob is fragile; it needs to be
+a documented field with a documented value set (`Head Office | State | Region |
+District | Mandal | …`). Same for `raw.project_name`, which SCM currently
+string-matches back to a project id: send `project` as an object with an id (above) and
+that hack disappears.
+
+**`code` format.** SCM parses the position code as `<PROFILE-KEY>@<suffix>` — it splits
+on `@` and uses the left side to group seats into job profiles. If that convention is
+accidental rather than guaranteed, say so and SCM will stop relying on it; if it is
+intentional, document it here as part of the contract.
 
 **`role` is the rung SCM's approval ladders are built on.** It is HCM's *rank* —
 "District Manager", "Regional Manager", "COO" — not a permission and not a person.
@@ -287,6 +303,31 @@ HCM matches any of the three (SCM's login box accepts all three today).
 | Output | `{ "data": Employee }`, or 404 |
 | Note | must **not** reveal whether a username exists in a timing-obvious way |
 | Frequency | one per login attempt |
+
+#### A.2b `GET /employees/by-code/{employee_code}` ★
+`employee_code` ("TIR-0432") is what humans type, print on documents and paste into a
+support ticket — SCM users do not know numeric HCM ids. A.2 handles it for login;
+this is the general-purpose version.
+
+| | |
+|---|---|
+| Input | path `employee_code` (exact match, case-insensitive) |
+| Output | `{ "data": Employee }` — identical shape to A.1 |
+| 404 | unknown code |
+
+**Employee code must be accepted everywhere an id is**, not just here:
+
+| Endpoint | id form | code form |
+|---|---|---|
+| A.1 / A.2b | `GET /employees/{id}` | `GET /employees/by-code/{code}` |
+| B.1 batch | `{"ids":[…]}` | `{"employee_codes":[…]}` — either key, or both |
+| B.3 resolve-names | `{"ids":[…]}` | `{"employee_codes":[…]}`, keyed by code in the response |
+| C.4 / C.6 | `/employees/{id}/positions`, `/reports` | accept `?employee_code=` instead of the path id |
+| I.1 list | `?ids=` | `?employee_codes=TIR-0432,TIR-0077` |
+
+Codes must be **unique and never reused**, including across an employee who left and a
+new joiner. If HCM cannot guarantee that, say so — SCM will then treat the code as
+display-only and force every lookup through the numeric id.
 
 #### A.3 `GET /employees/{id}/context` ★ **required**
 The one call SCM makes right after login to build the whole session. Replaces
@@ -420,6 +461,39 @@ All seats a person holds, primary flagged. Powers SCM's position switcher.
 Convenience wrapper on C.1 keyed by employee instead of position — same response
 shape, saves a lookup. Optional if C.1 exists.
 
+#### C.6 `GET /employees/{id}/reports` ★ the downward direction
+C.1/C.5 answer "who is above this person". This answers **"who is below"** — and SCM
+needs it just as often: a manager's dashboard, "documents raised by my team", bulk
+notification to a team, and reassigning work when someone resigns.
+
+```
+GET /employees/10077/reports?depth=direct        → people in the seats directly under theirs
+GET /employees/10077/reports?depth=all           → the whole subtree, every level
+GET /employees/10077/reports?depth=all&ids_only=true
+GET /employees/10077/reports?depth=all&status=active&office_id=&project_id=&limit=&offset=
+```
+```json
+{
+  "data": [
+    { "employee": { "id": 10432, "name": "R. Kumar", "employee_code": "TIR-0432", "status": "active" },
+      "position": { "id": 880, "name": "District Manager - Anantapur", "role": { "id": 31, "name": "District Manager" } },
+      "depth": 1, "via_position_id": 654 }
+  ],
+  "page": { "total": 47 }
+}
+```
+- `depth=direct` is one hop; `depth=all` walks the whole subtree; `depth=3` caps it.
+- `ids_only=true` returns a bare employee-id array — this is the form SCM's list
+  screens use to filter their own documents (§I.3), so it must be uncapped.
+- A vacant seat in the middle of the tree does **not** stop the walk — the people
+  under it are still reports. Add `include_vacant_positions=true` to also list the
+  empty seats, which SCM's admin screen shows as gaps.
+- If a person holds two seats, reports are the union of both subtrees, deduplicated.
+
+#### C.7 `GET /positions/{id}/children`
+The one-hop version of C.2, for rendering an org chart lazily one level at a time
+rather than pulling a whole subtree.
+
 ---
 
 ### D. Rank / role queries (approval-ladder configuration)
@@ -535,12 +609,68 @@ circuit breaker probes it before closing.
 
 ---
 
+### I. Plain lists, aggregates, and cross-system joins
+
+Three read patterns that the mirror made trivial and a per-record API does not cover.
+
+#### I.1 `GET /employees` — the full filterable list ★
+Not the same thing as search (G.1). SCM's **User Management** screen must page through
+*every* employee, sorted by name, to answer "who does not have an SCM login yet".
+
+```
+GET /employees?status=active&office_id=&department_id=&project_id=&position_id=&role_id=
+              &q=&ids=10432,10077&sort=name|employee_code|updated_at&limit=100&offset=0
+```
+- `ids=` lets SCM ask for an explicit set (its own filters run locally — see I.3).
+- `sort` must be server-side and stable; SCM paginates a 5,000-row list off it.
+- Same for `GET /positions` (already D.4) and each reference list in §F.
+
+#### I.2 Aggregates — counts SCM currently gets from `GROUP BY`
+SCM's admin screens show "13 positions in this rank", "how many seats per department",
+"headcount per project". Fetching every row to count it is not acceptable at these
+volumes.
+
+```
+GET /positions/aggregate?group_by=role|department|office|level&project_id=&status=active
+→ { "data": [ { "key": { "id": 4, "name": "Network" }, "position_count": 132, "holder_count": 118 } ] }
+```
+- `group_by=department` must include an explicit **"no department"** bucket
+  (`"key": null`) — SCM renders one today and a missing bucket loses seats.
+- `holder_count` per position is also needed inline on the `Position` object (§4.2).
+- Equivalents already requested: §D.2 (ranks per project), §E.1 (`include_headcount`).
+
+#### I.3 Cross-system joins — the pattern that must not be forgotten ★
+Several SCM queries **join a local table to an HCM table in one SQL statement**:
+
+| SCM query | Local table | HCM table joined | Becomes |
+|---|---|---|---|
+| warehouses in an office | `whs_warehouses` | `hcm_facilities.office_id` | `GET /facilities?office_id=&ids_only=true` → local `WHERE facility_id IN (…)` |
+| users without a login | `sys_user_credentials` | `hcm_employees` | I.1 + local set difference |
+| approval stage → seat name | `wf_stages.position_id` | `hcm_positions.name` | `POST /positions/batch` |
+| notification recipients | `sys_notification_rules` | assignments by position | §C.3 |
+| document scope filter | `ind_*`, `pro_*` | descendant positions | `GET /positions/{id}/descendants?ids_only=true` |
+
+**The rule:** every such join becomes *"ask HCM for a set of ids, then filter locally
+with `IN (…)`"*. That only works if the `ids_only=true` form exists on **every**
+filterable list endpoint (employees, positions, facilities, offices, departments,
+projects) and can return **up to 20,000 ids in one uncapped response** — a paginated
+id list defeats the purpose, because SCM cannot run its own query until it holds the
+whole set.
+
+#### I.4 `GET /projects?q=&name=`
+Lookup a project by name. SCM currently string-matches project names to ids as a
+workaround; this endpoint plus a real `project.id` on the position object (§4.2)
+retires that.
+
+---
+
 ## 6. Endpoint summary
 
 | # | Method & path | Purpose | Priority |
 |---|---|---|---|
 | A.1 | `GET /employees/{id}` | resolve token subject | **P0** |
 | A.2 | `GET /employees/lookup?username=` | login | **P0** |
+| A.2b | `GET /employees/by-code/{code}` + code accepted everywhere | humans use codes, not ids | **P0** |
 | A.3 | `GET /employees/{id}/context` | build session in one call | **P0** |
 | A.4 | `POST /auth/verify-credentials` | HCM-owned passwords | P2 |
 | B.1 | `POST /employees/batch` | bulk fetch by ids | **P0** |
@@ -551,6 +681,8 @@ circuit breaker probes it before closing.
 | C.3 | `GET /positions/{id}/holders` | who fills a seat | **P0** |
 | C.4 | `GET /employees/{id}/positions` | position switcher | **P0** |
 | C.5 | `GET /employees/{id}/manager-chain` | convenience | P2 |
+| C.6 | `GET /employees/{id}/reports?depth=` | who reports to this person | **P0** |
+| C.7 | `GET /positions/{id}/children` | lazy org-chart render | P2 |
 | D.1 | `GET /roles` | rank list | **P0** |
 | D.2 | `GET /roles?project_id=` | ranks present on a project | **P1** |
 | D.3 | `GET /roles/{id}/positions` | ladder preview | **P1** |
@@ -564,6 +696,10 @@ circuit breaker probes it before closing.
 | G.2 | `GET /positions/search` | type-ahead | P2 |
 | H.1 | `GET /changes?since=` | webhook catch-up | **P1** |
 | H.2 | `GET /health` | liveness | **P1** |
+| I.1 | `GET /employees` (filter + sort + `ids=`) | user-management paging | **P0** |
+| I.2 | `GET /positions/aggregate?group_by=` | admin counts | **P1** |
+| I.3 | `ids_only=true` on every list endpoint | cross-system joins | **P0** |
+| I.4 | `GET /projects?q=` | project lookup by name | P2 |
 | W | webhook delivery + §7.6 management endpoints | push changes | **P0** |
 
 ---
@@ -766,3 +902,16 @@ those are HCM bugs and which are SCM's compensations before the safety net is re
 8. **Ex-employee retention** — confirm inactive employees are readable indefinitely
    (SCM renders their names on documents years later).
 9. **Sandbox** — when, and with what data volume?
+10. **`office_level`** — today SCM reads it out of the position's raw payload and it
+    drives row-level scoping. Can it become a typed field with a fixed value set?
+11. **Position `code` format** — is `<PROFILE-KEY>@<suffix>` a guaranteed convention
+    or an accident? SCM groups seats into job profiles by splitting on `@`.
+12. **Uncapped id lists** — will HCM serve `ids_only=true` responses of ~20k ids
+    without pagination? Every local⨝HCM join in SCM depends on it (§I.3).
+13. **Production volumes** — how many employees, positions and assignments today, and
+    the expected growth? The latency table in §8 assumes ~5k of each.
+14. **`employee_code` uniqueness** — guaranteed unique and never reused, including
+    across leavers and new joiners? SCM wants to key lookups on it (§A.2b).
+15. **Reports across multiple seats** — when a person holds two positions, is the
+    union of both subtrees the right answer for "their reports" (§C.6), or does HCM
+    have its own rule?
