@@ -9,7 +9,8 @@ import {
   Button, Card, Field, Input, PageHeader, ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
 import {
-  approveAllocation, getAllocation, getPendingInventoryApprovals, rejectAllocation,
+  approveAllocation, getAllocation, getAllocationHistory,
+  getPendingInventoryApprovals, rejectAllocation,
 } from "../api";
 import type { Allocation } from "../types";
 
@@ -41,6 +42,15 @@ export function AllocationApprovalsPage() {
     queryKey: ["inventory", "allocation-decision", reviewId],
     queryFn: () => getAllocation(reviewId),
     enabled: decisionView && Number.isFinite(reviewId) && reviewId > 0,
+  });
+
+  // Who has signed so far, and under which hat. A post-based ladder can ask one
+  // person for two signatures — Assistant Manager, then Inventory Manager — so
+  // "approved by Siva" alone does not say how far along the document is.
+  const history = useQuery({
+    queryKey: ["inventory", "allocation-history", selected?.id],
+    queryFn: () => getAllocationHistory(selected!.id),
+    enabled: selected !== null,
   });
 
   const act = useMutation({
@@ -208,6 +218,43 @@ export function AllocationApprovalsPage() {
                     </tbody>
                   </table>
                 </div>
+
+                <section>
+                  <h3 className="mb-2 text-sm font-semibold text-ink">Approval history</h3>
+                  <div className="divide-y divide-line rounded-xl border border-line">
+                    {history.isLoading && (
+                      <p className="p-3 text-sm text-muted">Loading history…</p>
+                    )}
+                    {(history.data ?? []).map((row, index) => (
+                      <div key={`${row.stage_sequence}-${index}`} className="p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <strong className="text-ink">{row.actor_name ?? "System"}</strong>
+                            <p className="text-xs text-muted">
+                              {row.stage_name ?? `Step ${row.stage_sequence}`}
+                              {" · "}
+                              {/* The hat matters: the same person signs each step
+                                  under a different position. */}
+                              {row.actor_position ?? "Position unavailable"}
+                            </p>
+                          </div>
+                          <StatusPill status={row.action} />
+                        </div>
+                        {row.comments && (
+                          <p className="mt-1 text-sm text-body">{row.comments}</p>
+                        )}
+                        <p className="mt-1 text-xs text-muted">
+                          {row.acted_at ? new Date(row.acted_at).toLocaleString() : "—"}
+                        </p>
+                      </div>
+                    ))}
+                    {!history.isLoading && !(history.data ?? []).length && (
+                      <p className="p-3 text-sm text-muted">
+                        Nothing signed yet — this is the first step.
+                      </p>
+                    )}
+                  </div>
+                </section>
 
                 {!decisionView && <Field label="Comments">
                   <Input

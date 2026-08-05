@@ -172,14 +172,18 @@ export function UsersPage() {
         )}
         {/* Job Profiles is a route, not one of the local views above — it replaces the
          *  HCM role as the grant unit and is being trialled beside the old screens
-         *  rather than folded into them. Linked here so it is reachable. */}
-        <Link
-          to="/rbac/job-profiles"
-          className="border-b-2 border-transparent px-1 pb-3 text-sm font-semibold
-                     text-muted hover:text-body"
-        >
-          Job profiles
-        </Link>
+         *  rather than folded into them. Linked here so it is reachable, but only
+         *  when the code is being run: a production build is the deployed image, and
+         *  the trial is not for it. Same condition as IN_TRIAL in AppLayout. */}
+        {import.meta.env.DEV && (
+          <Link
+            to="/rbac/job-profiles"
+            className="border-b-2 border-transparent px-1 pb-3 text-sm font-semibold
+                       text-muted hover:text-body"
+          >
+            Job profiles
+          </Link>
+        )}
       </div>
 
       {view === "users" ? (

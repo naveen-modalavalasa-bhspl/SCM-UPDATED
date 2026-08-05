@@ -41,6 +41,12 @@ export interface Account {
    * the "Working as" switcher; a substring is enough.
    */
   position?: string;
+  /**
+   * Every hat this person must sign under, in ladder order. A post-based ladder
+   * asks one person for one signature per post, so a run has to switch between
+   * them; a single `position` is not enough to express that.
+   */
+  hats?: string[];
 }
 
 interface Users {

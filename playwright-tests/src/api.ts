@@ -72,6 +72,13 @@ export class ApiClient {
     return body.items ?? [];
   }
 
+  /** An indent parked in front of inventory, so this suite can run on its own. */
+  async firstIndentAwaiting(as: Account): Promise<IndentSnapshot | null> {
+    const body = await this.get<{ items: IndentSnapshot[] }>(
+      "/api/indents?status=AWAITING_ALLOCATION&size=50", as);
+    return (body.items ?? [])[0] ?? null;
+  }
+
   history(docType: string, docId: number, as: Account) {
     return this.get<{ items: { actor_name: string; action: string; stage_name: string }[] }>(
       `/api/workflow/history/${docType}/${docId}`,

@@ -126,8 +126,9 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
         )
     )).scalar() or 0
     policy, fallback_position_id = await ladder.read_policy(db, rows)
-    # Two ticked posts filled by one person are one approver: the chain collapses them
-    # at submit, so the admin is told before they build a step that never happens.
+    # One person on several steps is allowed and normal here — each step is a hat, and
+    # he signs once per hat, switching between them. Said plainly so an admin building
+    # the ladder knows how many signatures they are actually asking that person for.
     warnings: list[str] = []
     by_employee: dict[int, tuple[str, list[str]]] = {}
     for row in rows:
@@ -135,7 +136,7 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
             entry = by_employee.setdefault(holder.id, (holder.full_name, []))
             entry[1].append(row.name or str(row.position_id))
     warnings = [f"{name} fills {len(posts)} of these steps ({', '.join(posts)}) — "
-                f"they count as ONE approver."
+                f"they sign once per step, switching position each time."
                 for name, posts in by_employee.values() if len(posts) > 1]
 
     return {
@@ -173,24 +174,45 @@ async def _active_custom(db: AsyncSession, project_id: int | None,
 
 async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
                               requester_id: int | None,
-                              policy: str = ladder.POLICY_INDEPENDENT) -> list[dict]:
+                              policy: str = ladder.POLICY_INDEPENDENT,
+                              requester_position_id: int | None = None) -> list[dict]:
     """The ticked posts, in order, skipping the ones nobody fills.
 
     Same shape as ladder.resolve_chain so the engine's ladder path needs no other
-    change. Under INDEPENDENT the raiser is dropped from a rung's holders — nobody
-    approves their own. Under CREATOR_ALLOWED he stays and receives the task, which is
-    what Inventory and Warehouse need: the same dozen people hold every post there, so
-    dropping the raiser routinely emptied the whole ladder.
+    change. The difference from a rank ladder is what a rung MEANS here: a rung is a
+    POST — a hat — not a person. One person routinely wears several of them, and each
+    hat is a separate signature.
+
+    So the raiser is never struck off a rung merely for being the raiser. What is
+    spent is the ONE hat he submitted under:
+
+      * INDEPENDENT — the post he submitted wearing is skipped. Siva allocates as
+        Assistant Manager, so that rung is his own work and he signs the remaining
+        one, Inventory Manager, after switching hats.
+      * CREATOR_ALLOWED — nothing is skipped. He signs the Assistant Manager rung,
+        switches, and signs the Inventory Manager rung: two approvals, one per hat.
+
+    Rungs are deliberately NOT deduped by person. Collapsing two posts held by one
+    employee is right for a rank ladder — the same human twice up a reporting line
+    really is one approver — and wrong here, where the two posts are the two hats the
+    ladder is made of. Each rung keeps its own post, so `engine.act` requires the
+    matching hat to be active before it will accept a decision.
     """
-    exclude_id = None if policy == ladder.POLICY_CREATOR_ALLOWED else requester_id
     chain: list[dict] = []
     for stage in sorted(stages, key=lambda s: s.sequence):
         if not stage.is_enabled or stage.position_id is None:
             continue
+        # The hat he raised the document under. Under CREATOR_ALLOWED it still has to
+        # be signed; under INDEPENDENT signing it would be approving his own work.
+        if (policy != ladder.POLICY_CREATOR_ALLOWED
+                and requester_position_id is not None
+                and stage.position_id == requester_position_id):
+            logger.info("Rung %r skipped: raised under that post", stage.name)
+            continue
         position = await db.get(HcmPosition, stage.position_id)
         if position is None or not position.is_active:
             continue
-        holders = await ladder._position_holders(db, position.id, exclude_id)
+        holders = await ladder._position_holders(db, position.id, None)
         if not holders:
             continue
         chain.append({
@@ -203,9 +225,10 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
             "role_name": stage.name or position.name,
             "approver_ids": [h.id for h in holders],
             "approver_names": [h.full_name for h in holders],
+            # Exactly its own post: the rung is a hat, so only that hat may sign it.
+            "allowed_position_ids": [position.id],
         })
-    # Two ticked posts held by one person are one approver, not two.
-    return ladder.dedupe_chain(chain)
+    return chain
 
 
 # ---------------- saving ----------------

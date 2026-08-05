@@ -405,7 +405,8 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
     # A hand-built ladder names its posts outright, so there is nothing to climb — and
     # for Inventory and Warehouse there is nothing above the raiser to reach anyway.
     chain = (
-        await custom_ladder.resolve_fixed_chain(db, stages, user.id, policy)
+        await custom_ladder.resolve_fixed_chain(
+            db, stages, user.id, policy, requester_position_id)
         if ladder.is_custom_ladder(wf)
         else await ladder.resolve_chain(
             db, stages, requester_position_id, user.id, context, policy)

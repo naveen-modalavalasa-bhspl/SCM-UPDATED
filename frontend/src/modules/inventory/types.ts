@@ -638,3 +638,15 @@ export interface CycleCountOut extends CycleCountListRow {
   items: CycleCountItemOut[];
 }
 
+
+/** One recorded decision on an allocation's approval chain. */
+export interface AllocationHistoryRow {
+  stage_sequence: number;
+  stage_name?: string | null;
+  actor_name?: string | null;
+  /** Which hat they signed under — the point of a post-based ladder. */
+  actor_position?: string | null;
+  action: string;
+  comments?: string | null;
+  acted_at?: string | null;
+}

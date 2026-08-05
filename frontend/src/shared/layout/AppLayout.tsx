@@ -11,6 +11,24 @@ import { IndentsNav } from "@/modules/indents/components/IndentsNav";
 const matches = (path: string, loc: string) =>
   loc === path || (path !== "/" && loc.startsWith(path));
 
+/**
+ * Screens still being trialled: in the menu when the code is being run (`npm run
+ * dev`), absent from a production build — which is what the deployed image is.
+ * So a developer who pulls sees them, the live site does not, and nobody has to
+ * set an env var or hand-edit an rbac_pages row per environment.
+ *
+ * The permission still gates the API; this only decides whether the nav shows it.
+ * UsersPage.tsx links to job profiles under the same condition.
+ */
+const IN_TRIAL = new Set(["rbac_job_profiles"]);
+
+const visible = (nodes: MenuItem[]): MenuItem[] =>
+  import.meta.env.DEV
+    ? nodes
+    : nodes
+        .filter((n) => !IN_TRIAL.has(n.code))
+        .map((n) => ({ ...n, children: visible(n.children ?? []) }));
+
 function moduleHome(root: MenuItem): string {
   return root.children?.length ? root.children[0].path : root.path;
 }
@@ -74,7 +92,7 @@ const RAIL_STORAGE_KEY = "scm.sidebar.collapsed";
 
 export function AppLayout() {
   const { me, logout, switchPosition } = useAuth();
-  const menu = me?.menu ?? [];
+  const menu = visible(me?.menu ?? []);
   const nav = useNavigate();
   const loc = useLocation().pathname;
   // ponytail: localStorage, not a settings table — a rail width is per-device UI

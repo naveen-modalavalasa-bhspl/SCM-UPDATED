@@ -62,8 +62,11 @@ export async function approveAllocation(
   log: RunLogger,
   indent: { indentNo: string },
   goto: Goto,
+  hat?: string,
 ) {
-  await log.runStep(`Approve the allocation for ${indent.indentNo}`, async () => {
+  await log.runStep(
+    `Approve the allocation for ${indent.indentNo}${hat ? ` as ${hat}` : ""}`,
+    async () => {
     await goto("/inventory/allocation-approvals", "allocation-approvals-queue");
 
     const row = page.getByText(indent.indentNo, { exact: false }).first();
@@ -76,6 +79,16 @@ export async function approveAllocation(
 
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible({ timeout: 15_000 });
+
+    // Read the signatures already on the document while the dialog is still open —
+    // this is what proves a second rung exists rather than one clicked twice.
+    const signed = await dialog.locator("section", { hasText: "Approval history" })
+      .locator("div.p-3").allInnerTexts().catch(() => [] as string[]);
+    log.info(`Signatures already on this allocation: ${signed.length}`);
+    for (const entry of signed) {
+      log.info(`  · ${entry.replace(/\s+/g, " ").trim().slice(0, 110)}`);
+    }
+
     await dialog.getByPlaceholder("Optional reason or instruction")
       .fill("Approved by the automated functional run.");
 
@@ -92,4 +105,19 @@ export async function approveAllocation(
     }
     await expect(dialog).toBeHidden({ timeout: 30_000 });
   });
+}
+
+/**
+ * Reads the signatures already on an allocation, straight off the screen.
+ *
+ * A post-based ladder can ask one person for several signatures, one per hat, so
+ * "who signed and wearing what" is the thing worth asserting — it is the difference
+ * between two real approvals and one that merely got clicked twice.
+ */
+export async function readAllocationHistory(page: Page, log: RunLogger) {
+  const rows = await page.locator("section", { hasText: "Approval history" })
+    .locator("div.p-3").allInnerTexts().catch(() => [] as string[]);
+  log.info(`Approval history on screen: ${rows.length} entr(y/ies)`);
+  for (const row of rows) log.info(`  · ${row.replace(/\s+/g, " ").trim().slice(0, 120)}`);
+  return rows;
 }

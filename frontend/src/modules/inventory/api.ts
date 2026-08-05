@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
   AllocationDecision,
+  AllocationHistoryRow,
   Allocation,
   AllocationListRow,
   AllocationProposal,
@@ -214,6 +215,12 @@ export const listAllocations = (params?: { status?: string; indent_id?: number }
 
 export const getAllocation = (id: number) =>
   api.get<Allocation>(`/api/allocations/${id}`).then((r) => r.data);
+
+/** Who has signed this allocation so far, and under which hat. */
+export const getAllocationHistory = (id: number) =>
+  api
+    .get<{ items: AllocationHistoryRow[] }>(`/api/workflow/history/ALLOCATION/${id}`)
+    .then((r) => r.data.items);
 
 export const getPendingInventoryApprovals = () =>
   api.get<{ items: WorkflowPending[] }>("/api/workflow/pending")
