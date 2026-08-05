@@ -411,8 +411,35 @@ async def get_assigned_position(
 
 
 async def get_default_position(db: AsyncSession, employee_id: int) -> dict | None:
+    """Which hat a login starts under.
+
+    Position order (primary first, then name) decides it — except that a position
+    granting nothing is never chosen over one that grants something. HCM can flag
+    two positions primary at once, and it does: HR-EMP-15450 holds both LAB
+    TECHNICIAN and STORE KEEPER as primary, so the name tie-break landed her on the
+    LAB TECHNICIAN hat, which carries no roles, and Home said "No modules are
+    assigned yet" to a storekeeper with a full queue of work. Whether a hat is
+    configured with roles is a fact this function can check, so it does.
+    """
     positions = await get_user_positions(db, employee_id)
-    return positions[0] if positions else None
+    if not positions:
+        return None
+    for position in positions:
+        # Permissions, not roles. A position can hold a role that grants nothing —
+        # jp_lt is exactly that — and landing on it is indistinguishable from having
+        # no access at all. What matters is whether the hat can actually do anything.
+        roles = await get_user_roles(db, employee_id, position["id"])
+        if not roles:
+            continue
+        granted = await db.scalar(
+            select(func.count())
+            .select_from(RolePermission)
+            .where(RolePermission.role_id.in_([role.id for role in roles]))
+        )
+        if granted:
+            return position
+    # Nothing is configured anywhere — keep the old answer rather than inventing one.
+    return positions[0]
 
 
 async def all_page_paths(db: AsyncSession) -> list[str]:

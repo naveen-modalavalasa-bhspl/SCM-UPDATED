@@ -529,7 +529,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 "You are not a valid approver" error after clicking. */}
             {editing && doc?.status === "PENDING_APPROVAL" && doc?.can_approve && (
               <Can do="issue.issue">
-                <Button variant="subtle" onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button onClick={() => setConfirming("approve")}>Approve</Button>
                 <Button variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
               </Can>
             )}
@@ -540,7 +540,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
             )}
             {editing && ["ISSUED", "DISPATCHED"].includes(doc?.status ?? "") && (
               <Can do="issue.view">
-                <Button variant="subtle" onClick={() => setConfirming("ack")}>Acknowledge</Button>
+                <Button onClick={() => setConfirming("ack")}>Acknowledge</Button>
               </Can>
             )}
             {editing && doc && !["CANCELLED", "ACKNOWLEDGED"].includes(doc.status) && (
@@ -601,6 +601,13 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           <Field label="Against indent" hint="Loads the approved stock reservation.">
             <Lookup name={`indents-${form.warehouse_id}`}
                     load={(search) => indentOptions(search, form.warehouse_id || undefined)}
+                    // The loader lists indents still open to be issued, so once this
+                    // issue exists its own indent has left that list. Without the
+                    // fallback the field on a saved document reads "Indent" in grey
+                    // while the header above it names IND/2026-27/00196.
+                    fallback={doc?.indent_id
+                      ? [{ id: doc.indent_id, name: doc.indent_no ?? String(doc.indent_id) }]
+                      : []}
                     value={form.indent_id ?? ""} isDisabled={locked || !form.warehouse_id}
                     onChange={(v) => {
                 const indentId = v === "" ? null : v;

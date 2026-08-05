@@ -46,14 +46,29 @@ export function Lookup({
   serverSearch,
   fallback = [],
 }: Props) {
+  // A disabled lookup with nothing chosen has nothing to say, so it stays unfetched.
+  // A disabled lookup WITH a value still has to fetch: the Select renders the option
+  // whose id matches, and with no options loaded it falls back to the placeholder.
+  // That is why every submitted material issue showed "Warehouse", "Indent",
+  // "Department" in grey on a document that plainly had all three — the fields were
+  // not empty, the list behind them had never loaded.
+  const hasValue = value !== "" && value !== null && value !== undefined;
   const { data } = useQuery({
     queryKey: ["wh-lookup", name, serverSearch ?? ""],
     queryFn: () => load(serverSearch || undefined),
     staleTime: 5 * 60_000,
-    enabled: !isDisabled,
+    enabled: !isDisabled || hasValue,
   });
 
-  const rows = data?.length ? data : fallback;
+  // Merge, don't choose. A loaded list that simply does not contain the chosen id —
+  // an indent that has left the "still to be issued" list because this very document
+  // issued it — would otherwise discard the fallback and render the placeholder over
+  // a value that exists.
+  const loaded = data ?? [];
+  const rows = [
+    ...loaded,
+    ...fallback.filter((row) => !loaded.some((known) => known.id === row.id)),
+  ];
   const options = rows.map((o) => ({
     value: o.id,
     label: o.code ? `${o.code} — ${o.name}` : o.name,

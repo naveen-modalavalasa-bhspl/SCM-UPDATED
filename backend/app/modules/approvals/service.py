@@ -10,6 +10,7 @@ from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.modules.indents import service as indent_service
 from app.modules.indents.models import Indent
 from app.modules.indents.enums import ApprovalAction, IndentStatus
+from app.platform.hcm import service as hcm_service
 from app.platform.settings.service import write_audit
 from app.platform.notifications import service as notification_service
 from app.platform.workflow import engine, service as workflow_service
@@ -32,7 +33,13 @@ async def pending_page(
     raised_from: datetime | None = None, raised_to: datetime | None = None,
     sort: str = "oldest",
 ) -> dict:
-    conditions = [Pending.approver_id == user.id]
+    # Same rule the engine applies in pending_for_user: a task whose workflow has
+    # finished is not work, whatever the row says. Without it a cancelled document
+    # kept a live-looking task in the queue and in every count above it.
+    conditions = [
+        Pending.approver_id == user.id,
+        Instance.status == InstanceStatus.IN_PROGRESS.value,
+    ]
     term = search.strip()
     if term:
         like = f"%{term}%"
@@ -474,15 +481,20 @@ async def return_indent(
 ) -> ApprovalIndentOut:
     indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
     before_status = indent.status
-    # This requester-return behaviour is intentionally owned here so the shared
-    # workflow engine and every other document flow remain unchanged.
+    # The position is snapshotted exactly as the engine does it for every other
+    # action. It is not decoration: indent visibility for a workflow participant
+    # matches Action.actor_position against the viewer's active position, so a
+    # RETURNED row written without one left the returning approver unable to open
+    # the document they had just acted on — My Decisions answered 404.
+    active_position_id = getattr(user, "active_position_id", None)
+    active_position = await hcm_service.get_position(db, active_position_id) if active_position_id else None
     db.add(Action(
         instance_id=instance.id,
         stage_sequence=instance.current_sequence,
         stage_name=instance.current_stage_name,
         actor_id=user.id,
         actor_name=user.full_name,
-        actor_position=None,
+        actor_position=active_position.name if active_position else None,
         action=ApprovalAction.RETURNED.value,
         comments=comments,
     ))
@@ -509,7 +521,10 @@ async def return_indent(
         [indent.requested_by_id],
         title=f"{indent.indent_no} returned for correction",
         body=comments,
-        deep_link=f"/approvals?correction={indent.id}",
+        # Not /approvals: the requester is not an approver, so that route bounces
+        # them to Home and the notification leads nowhere. The correction form is
+        # served under indents, which they can reach.
+        deep_link=f"/indents/{indent.id}/correction",
         entity_type=DocType.INDENT.value,
         entity_id=indent.id,
     )

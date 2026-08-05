@@ -2,7 +2,7 @@
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, PermissionError_
 from app.core.security import create_access_token, verify_password
 from app.platform.hcm.models import HcmEmployee
 from app.platform.rbac import service as rbac_service

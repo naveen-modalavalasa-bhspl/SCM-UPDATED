@@ -1,4 +1,6 @@
 """Workflow endpoint services."""
+from datetime import datetime, timezone
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -250,6 +252,19 @@ async def my_decisions(db: AsyncSession, user) -> list[dict]:
     } for action, instance in rows]
 
 
+def _utc_datetime(value: datetime | None) -> datetime | None:
+    """MySQL hands back naive datetimes even for `DateTime(timezone=True)` columns.
+
+    Subtracting one of those from an aware `utcnow()` raises TypeError, which is
+    what took the whole Team Queue down for anybody who had a pending row.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 async def team_queue(db: AsyncSession, user) -> list[dict]:
     team_ids = await _team_employee_ids(db, user)
     if not team_ids:
@@ -275,11 +290,13 @@ async def team_queue(db: AsyncSession, user) -> list[dict]:
         })
         result["pending_count"] += 1
         result["document_types"].add(pending.doc_type)
-        if pending.due_at and pending.due_at < now:
+        due_at = _utc_datetime(pending.due_at)
+        created_at = _utc_datetime(pending.created_at)
+        if due_at and due_at < now:
             result["overdue_count"] += 1
-        if result["oldest_waiting_since"] is None or pending.created_at < result["oldest_waiting_since"]:
-            result["oldest_waiting_since"] = pending.created_at
-        result["_waiting_hours"].append(round((now - pending.created_at).total_seconds() / 3600, 1))
+        if result["oldest_waiting_since"] is None or created_at < result["oldest_waiting_since"]:
+            result["oldest_waiting_since"] = created_at
+        result["_waiting_hours"].append(round((now - created_at).total_seconds() / 3600, 1))
     output = []
     for result in grouped.values():
         waits = result.pop("_waiting_hours")

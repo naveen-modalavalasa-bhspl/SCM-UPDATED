@@ -119,6 +119,12 @@ class IssueStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+# An issue in one of these is over: it holds no stock and blocks nothing, so the
+# indent behind it is free to be issued again. Every other status is LIVE and is
+# what the one-issue-per-indent rule counts.
+DEAD_ISSUE_STATUSES = (IssueStatus.CANCELLED.value, IssueStatus.REJECTED.value)
+
+
 class IssueType(str, Enum):
     """`out_issues.issue_type`."""
     DEPARTMENT = "DEPARTMENT"

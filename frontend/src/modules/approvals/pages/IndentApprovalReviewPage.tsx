@@ -49,8 +49,15 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     return !Number.isFinite(value) || value < 0 || value > line.requested_quantity;
   }), [indent.data, quantities]);
 
+  const needsReason = confirming === "reject" || confirming === "return";
+
   const finish = () => {
-    qc.invalidateQueries({ queryKey: ["approvals"] });
+    // Drop this indent's detail cache rather than refetching it. The decision just
+    // took the document out of approval, so a refetch answers 422 ("Indent is not
+    // awaiting approval") and paints an error over a screen that succeeded.
+    qc.removeQueries({ queryKey: ["approvals", "indent", indentId] });
+    qc.removeQueries({ queryKey: ["approvals", "history", "INDENT", indentId] });
+    qc.invalidateQueries({ queryKey: ["approvals", "pending"] });
     nav("/approvals");
   };
   const approve = useMutation({
@@ -76,7 +83,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const actionError = approve.error || reject.error || returnForCorrection.error;
 
   const confirm = () => {
-    if ((confirming === "reject" || confirming === "return") && !reason.trim()) return;
+    if (needsReason && !reason.trim()) return;
     if (confirming === "approve") approve.mutate();
     if (confirming === "reject") reject.mutate();
     if (confirming === "return") returnForCorrection.mutate();
@@ -112,8 +119,8 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       <div className="flex flex-wrap justify-end gap-2 border-t border-line py-4"><Button variant="ghost" disabled={busy} onClick={() => { setReason(""); setConfirming("return"); }}><RotateCcw className="h-4 w-4" /> Return for correction</Button><Button variant="danger" disabled={busy} onClick={() => { setReason(""); setConfirming("reject"); }}><X className="h-4 w-4" /> Reject</Button><Button disabled={busy || invalidQuantity || !checks.every(Boolean)} onClick={() => setConfirming("approve")}><Check className="h-4 w-4" /> Approve</Button></div>
     </div>
 
-    <ConfirmModal isOpen={confirming !== null} title={confirming === "approve" ? "Approve this request?" : confirming === "reject" ? "Reject this request?" : "Return for correction?"} message={confirming === "approve" ? "The saved quantities move to the next approval level or complete the approval." : confirming === "reject" ? "The request will stop and the requester will see your reason." : "Your correction instructions will be recorded in approval history."} confirmLabel={confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return"} danger={confirming === "reject"} busy={busy} error={actionError} onClose={() => setConfirming(null)} onConfirm={confirm}>
-      {(confirming === "reject" || confirming === "return") && <label className="text-sm font-semibold text-ink">{confirming === "reject" ? "Rejection reason" : "What must be corrected?"}<textarea autoFocus value={reason} onChange={(event) => setReason(event.target.value)} className="mt-2 min-h-24 w-full rounded-lg border border-line bg-content1 p-3 text-sm text-ink" placeholder="Required" />{!reason.trim() && <p className="mt-1 text-xs text-danger">A reason is required.</p>}</label>}
+    <ConfirmModal isOpen={confirming !== null} title={confirming === "approve" ? "Approve this request?" : confirming === "reject" ? "Reject this request?" : "Return for correction?"} message={confirming === "approve" ? "The saved quantities move to the next approval level or complete the approval." : confirming === "reject" ? "The request will stop and the requester will see your reason." : "Your correction instructions will be recorded in approval history."} confirmLabel={confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return"} danger={confirming === "reject"} busy={busy} confirmDisabled={needsReason && !reason.trim()} error={actionError} onClose={() => setConfirming(null)} onConfirm={confirm}>
+      {needsReason && <label className="text-sm font-semibold text-ink">{confirming === "reject" ? "Rejection reason" : "What must be corrected?"}<textarea autoFocus value={reason} onChange={(event) => setReason(event.target.value)} className="mt-2 min-h-24 w-full rounded-lg border border-line bg-content1 p-3 text-sm text-ink" placeholder="Required" />{!reason.trim() && <p className="mt-1 text-xs text-danger">A reason is required.</p>}</label>}
     </ConfirmModal>
   </>;
 }

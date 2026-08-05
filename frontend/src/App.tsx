@@ -17,7 +17,7 @@ import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
 // Approvals is its own module now — the inbox, decisions, team queue, reports and the
 // indent review screen all live there, not inside indents.
-import { ApprovalsPage, MyDecisionsPage, TeamQueuePage } from "@/modules/approvals";
+import { ApprovalCorrectionPage, ApprovalsPage, MyDecisionsPage, TeamQueuePage } from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 import { PODetailPage } from "@/modules/procurement/pages/PODetailPage";
@@ -87,10 +87,14 @@ function AppRoutes() {
         <Route path="indents/notifications" element={<IndentNotificationsPage />} />
         <Route path="indents/new" element={<IndentFormPage />} />
         <Route path="indents/:id/journey" element={<IndentJourneyPage />} />
+        {/* A returned indent belongs to its requester, who is not an approver and
+            cannot open /approvals at all — the ?correction= form there redirected
+            them to Home, so the notification the return sends was a dead end. The
+            same screen lives here, under the module they can actually reach. */}
+        <Route path="indents/:id/correction" element={<ApprovalCorrectionPage />} />
         <Route path="indents/:id" element={<IndentDetailPage />} />
-        {/* Reports, the correction form and the indent review screen are reached from
-            the inbox via ?view=reports / ?correction= / ?reviewIndent=, so they need
-            no route of their own. */}
+        {/* Reports and the indent review screen are reached from the inbox via
+            ?view=reports / ?reviewIndent=, so they need no route of their own. */}
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="approvals/decisions" element={<MyDecisionsPage />} />
         <Route path="approvals/team-queue" element={<TeamQueuePage />} />

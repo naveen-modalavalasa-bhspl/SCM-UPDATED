@@ -204,7 +204,7 @@ export default function WarehouseDetail() {
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             <Can do="master.location.manage">
-              <Button variant="subtle" onClick={() => nav("edit")}>
+              <Button onClick={() => nav("edit")}>
                 <Pencil className="h-4 w-4" /> Edit
               </Button>
             </Can>

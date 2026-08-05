@@ -30,6 +30,7 @@ from app.modules.inventory.service import move_stock, move_stock_out
 from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse.enums import (
+    DEAD_ISSUE_STATUSES,
     DispatchEventType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, PackageStatus, PickLineStatus,
     PickingStatus, PutawayStatus, PutawayType, QcStatus, ReceiptStatus, ReceiptType,
@@ -1207,6 +1208,9 @@ async def _prepare_receipt_line(
         bin_id=m.NO_BIN,
         batch_id=line.batch_id or m.NO_BATCH,
         project_id=receipt.project_id or 0,
+        # What the goods cost, carried onto the balance they become. The GRN has
+        # captured this rate all along; it just never reached stk_balance.
+        rate=line.rate,
     )
     if batch is not None:
         stock.batch_no = batch.batch_no
@@ -1957,14 +1961,17 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             raise ValidationError(
                 "A serialized putaway cannot be split; place all selected units together"
             )
+    batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
     stock = await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
                              ref_type=WarehouseDocType.RECEIPT.value,
                              ref_id=receipt.id if receipt else task.id,
                              ref_no=receipt.grn_no if receipt else ref_no,
                              user=user, warehouse_id=task.warehouse_id,
                              bin_id=target.id, batch_id=task.batch_id or m.NO_BATCH,
-                             project_id=project_id)
-    batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
+                             project_id=project_id,
+                             # Putaway moves the same goods into their bin, so it
+                             # carries the same cost the batch was received at.
+                             rate=batch.rate if batch else None)
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
@@ -2093,6 +2100,34 @@ async def skip_putaway(db: AsyncSession, task_id: int, reason: str | None, user)
 # ---------------------------------------------------------------------------
 # Internal stock movements
 # ---------------------------------------------------------------------------
+
+async def _pick_bin_for(db: AsyncSession, *, item_id: int, warehouse_id: int,
+                        batch_id: int | None = None) -> int | None:
+    """Where this item should be picked from, or None when stock cannot say.
+
+    The ordering is inventory's, not a second copy of it: FEFO for anything with an
+    expiry so the nearest-dated lot leaves first, FIFO otherwise. Returns None
+    rather than guessing when no binned balance exists — an honest "no bin" beats a
+    bin the picker will find empty.
+    """
+    from app.modules.inventory import availability
+    from app.modules.inventory.models import Stock
+
+    item = await db.get(Item, item_id)
+    stmt = select(Stock).where(
+        Stock.item_id == item_id,
+        Stock.warehouse_id == warehouse_id,
+        Stock.bin_id != m.NO_BIN,
+        Stock.available_qty > 0,
+    )
+    if batch_id:
+        stmt = stmt.where(Stock.batch_id == batch_id)
+    rows = list((await db.execute(stmt)).scalars().all())
+    if not rows:
+        return None
+    rows.sort(key=availability.sort_key(availability.pick_strategy_for(item)))
+    return rows[0].bin_id
+
 
 async def stock_availability(
     db: AsyncSession,
@@ -2393,6 +2428,23 @@ async def _build_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
         raise ValidationError("An indent fulfilment needs an indent reference")
 
     if data.ref_type == "INDENT" and data.ref_id:
+        # One indent, one open fulfilment. Two pickers working the same indent from
+        # the same reservation pick the same stock twice; IND/2026-27/00142 ended
+        # up with three completed fulfilments against one requirement.
+        clash = (await db.execute(
+            select(m.Picking.pick_no, m.Picking.status).where(
+                m.Picking.ref_type == "INDENT",
+                m.Picking.ref_id == data.ref_id,
+                m.Picking.status != PickingStatus.CANCELLED.value,
+            ).limit(1)
+        )).first()
+        if clash is not None:
+            raise ValidationError(
+                f"This indent already has material fulfilment {clash.pick_no} "
+                f"({clash.status.replace('_', ' ').lower()}). Cancel it before "
+                f"starting another."
+            )
+
         requested_by_item: dict[int, Decimal] = {}
         for line in data.items:
             requested_by_item[line.item_id] = (
@@ -2439,6 +2491,11 @@ async def _build_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
                     f"Line {index}: bin {source_bin.code} is not in {wh.name}"
                 )
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
+        # Nobody named a bin, so ask stock where the item is rather than sending the
+        # picker out with "any". See _pick_bin_for.
+        resolved_bin = line.bin_id or await _pick_bin_for(
+            db, item_id=item.id, warehouse_id=wh.id, batch_id=line.batch_id or None,
+        )
         picking.items.append(m.PickingItem(
             line_no=index, item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=item.uom_code,
@@ -2446,8 +2503,8 @@ async def _build_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
             # NOT NULL DEFAULT 0 in the live schema even though the model says
             # nullable, so an unbinned/unbatched line has to be written as 0 the way
             # every other whs_ table already does.
-            bin_id=line.bin_id or m.NO_BIN,
-            bin_code=await _bin_code(db, line.bin_id),
+            bin_id=resolved_bin or m.NO_BIN,
+            bin_code=await _bin_code(db, resolved_bin),
             batch_id=line.batch_id or m.NO_BATCH,
             batch_no=batch.batch_no if batch else None,
             required_qty=required, picked_qty=ZERO,
@@ -2731,6 +2788,13 @@ def _issue_serial_marker(issue_id: int) -> str:
     return f"Reserved for issue {issue_id}"
 
 
+async def _project_name(db: AsyncSession, project_id: int | None) -> str | None:
+    """The project's display name, snapshotted beside its id (rule 10)."""
+    from app.shared.models.master import Project
+    project = await db.get(Project, project_id) if project_id else None
+    return project.name if project else None
+
+
 async def _issue_snapshot_values(
     db: AsyncSession,
     *,
@@ -2875,6 +2939,11 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
 
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
         rate = _d(line.rate)
+        if rate < ZERO:
+            # WHI/2026-27/00030 carries rates of -1323, -233 and -4343, which is how
+            # a material issue came to be worth ₹ -62,617. Goods leaving a store have
+            # a cost or they have none; they never have a negative one.
+            raise ValidationError(f"Line {index}: rate cannot be negative")
         issue.items.append(m.MaterialIssueLine(
             line_no=index, indent_item_id=line.indent_item_id,
             item_id=item.id, item_code=item.code, item_name=item.name, uom_code=item.uom_code,
@@ -3003,6 +3072,34 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     allocation either produces every draft or none.
     """
     wh = await _warehouse(db, data.warehouse_id)
+    from app.modules.indents.models import Indent
+    indent = await db.get(Indent, data.indent_id) if data.indent_id else None
+
+    if data.direction != IssueDirection.IN and indent is not None:
+        # Checked before the lines, deliberately: when the indent is already spoken
+        # for, "add some lines first" is the wrong thing to tell the storekeeper —
+        # no set of lines would have made this issue allowed.
+        #
+        # The picklist guard further down only covers an issue raised FROM a
+        # fulfilment. An issue raised straight against an indent skipped it, and
+        # live data grew indents carrying three issues at once — two of them
+        # stranded in PENDING_APPROVAL, each reserving stock for the same
+        # requirement. A return (direction IN) is exempt: it exists precisely to
+        # point back at an issue already made against the indent.
+        clash = (await db.execute(
+            select(m.MaterialIssue.issue_no, m.MaterialIssue.status).where(
+                m.MaterialIssue.indent_id == indent.id,
+                m.MaterialIssue.direction == IssueDirection.OUT.value,
+                m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+            ).limit(1)
+        )).first()
+        if clash is not None:
+            raise ValidationError(
+                f"{indent.indent_no} already has material issue {clash.issue_no} "
+                f"({clash.status.replace('_', ' ').lower()}). Cancel it before "
+                f"raising another, or issue the shortfall as a return against it."
+            )
+
     if not data.items:
         raise ValidationError("An issue with no lines has nothing to issue")
 
@@ -3013,8 +3110,6 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
         original.direction != IssueDirection.OUT.value or not original.is_stock_posted
     ):
         raise ValidationError("Materials can only return against a posted outward issue")
-    from app.modules.indents.models import Indent
-    indent = await db.get(Indent, data.indent_id) if data.indent_id else None
     picking = await get_picking(db, data.picking_id) if data.picking_id else None
     if data.picking_id and picking is None:
         raise NotFoundError(f"Material fulfilment {data.picking_id} not found")
@@ -3307,6 +3402,15 @@ async def _raise_picking_for_issue(
                     issue.issue_no, line.line_no, bin_id,
                 )
                 bin_id = None
+        if bin_id is None:
+            # Nothing upstream chose a bin — an issue drafted from an allocation never
+            # does — so 58 of 64 live pick lines told the picker to go to "any" bin.
+            # A picklist without a location is a list of things to hunt for. Ask stock
+            # where this item actually is, in the order the strategy says to draw it.
+            bin_id = await _pick_bin_for(
+                db, item_id=line.item_id, warehouse_id=issue.warehouse_id,
+                batch_id=line.batch_id or None,
+            )
         lines.append(s.PickingItemWrite(
             item_id=line.item_id,
             bin_id=bin_id,
@@ -3544,6 +3648,51 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
     await db.flush()
 
 
+async def _dispatch_for_issue(db: AsyncSession, issue_id: int) -> m.Dispatch | None:
+    """The consignment carrying this issue, if one was ever raised for it."""
+    return (await db.execute(
+        select(m.Dispatch).where(
+            m.Dispatch.ref_type == WarehouseDocType.WH_ISSUE.value,
+            m.Dispatch.ref_id == issue_id,
+            m.Dispatch.status != DispatchStatus.CANCELLED.value,
+        ).limit(1)
+    )).scalar_one_or_none()
+
+
+async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, user) -> None:
+    """Move the indent on once everything issued against it has been received.
+
+    Acknowledgement used to stop at the issue: the indent behind it sat at
+    ALLOCATED forever, so nothing on any screen ever showed a request as finished.
+    An indent is only closed when no live issue against it is still outstanding.
+    """
+    if not indent_id:
+        return
+    from app.modules.indents.models import Indent
+    indent = await db.get(Indent, indent_id)
+    if indent is None or indent.status in (
+        IndentStatus.CLOSED.value, IndentStatus.CANCELLED.value,
+    ):
+        return
+    outstanding = await db.scalar(
+        select(func.count(m.MaterialIssue.id)).where(
+            m.MaterialIssue.indent_id == indent_id,
+            m.MaterialIssue.direction == IssueDirection.OUT.value,
+            m.MaterialIssue.status.notin_(
+                (*DEAD_ISSUE_STATUSES, IssueStatus.ACKNOWLEDGED.value)
+            ),
+        )
+    )
+    if outstanding:
+        return
+    before_status = indent.status
+    indent.status = IndentStatus.CLOSED.value
+    await write_audit(db, entity="ind_indents", entity_id=indent.id,
+                      entity_no=indent.indent_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": before_status},
+                      after={"status": indent.status})
+
+
 async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None,
                             user) -> m.MaterialIssue:
     issue = await get_issue(db, issue_id)
@@ -3557,6 +3706,21 @@ async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None
     issue.acknowledged_at = utcnow()
     if remarks:
         issue.remarks = f"{issue.remarks or ''}\nReceiver: {remarks}".strip()
+
+    # The receiver signs once. Leaving the consignment at DISPATCHED afterwards
+    # made the dispatch board disagree with the issue it was carrying, and no
+    # dispatch in the live data ever reached acknowledged_at.
+    dispatch = await _dispatch_for_issue(db, issue.id)
+    if dispatch is not None and dispatch.status in (
+        DispatchStatus.DISPATCHED.value, DispatchStatus.IN_TRANSIT.value,
+        DispatchStatus.DELIVERED.value,
+    ):
+        dispatch.status = DispatchStatus.ACKNOWLEDGED.value
+        dispatch.acknowledged_by_name = issue.acknowledged_by_name
+        dispatch.acknowledged_at = issue.acknowledged_at
+        dispatch.delivered_at = dispatch.delivered_at or issue.acknowledged_at
+
+    await _close_indent_if_delivered(db, issue.indent_id, user)
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -3579,7 +3743,14 @@ async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user
 
     before = {"status": issue.status}
     issue.status = IssueStatus.CANCELLED.value
+    issue.current_approver_name = None
     issue.remarks = f"{issue.remarks or ''}\nCancelled: {reason or '—'}".strip()
+
+    # Withdrawing the document has to withdraw the approval behind it. Without
+    # this the engine kept handing the task out: WHI/2026-27/00027 sat CANCELLED
+    # in an approver's queue for two days with no decision left to make.
+    await engine.abandon(db, WarehouseDocType.WH_ISSUE.value, issue.id, user,
+                         reason=reason or "Issue cancelled")
 
     await _clear_issue_serial_reservations(db, issue.id)
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
@@ -3960,6 +4131,10 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         vendor_id=data.vendor_id,
         vendor_name=vendor.name if vendor else None,
         project_id=data.project_id or issue.project_id,
+        # Snapshot the name beside the id, the way every other document here does
+        # (rule 10). Live consignments carry project_id 4 with project_name NULL, so
+        # the dispatch board and its printouts show a blank where the project goes.
+        project_name=await _project_name(db, data.project_id or issue.project_id),
         delivery_address=data.delivery_address or destination_office_name,
         contact_person=data.contact_person,
         contact_phone=data.contact_phone,
@@ -4562,6 +4737,19 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
 
     for package in dispatch.packages:
         package.status = PackageStatus.DELIVERED.value
+
+    # Acknowledging the consignment acknowledges what it was carrying. Without this
+    # the two documents drift: the dispatch reads ACKNOWLEDGED while the issue it
+    # came from still reads DISPATCHED, and the indent never closes.
+    if dispatch.ref_type == WarehouseDocType.WH_ISSUE.value and dispatch.ref_id:
+        issue = await db.get(m.MaterialIssue, dispatch.ref_id)
+        if issue is not None and issue.status in (
+            IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value,
+        ):
+            issue.status = IssueStatus.ACKNOWLEDGED.value
+            issue.acknowledged_by_name = dispatch.acknowledged_by_name
+            issue.acknowledged_at = dispatch.acknowledged_at
+            await _close_indent_if_delivered(db, issue.indent_id, user)
 
     await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
                       entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE, actor=user,

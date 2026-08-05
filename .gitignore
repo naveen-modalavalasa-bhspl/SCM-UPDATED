@@ -90,6 +90,23 @@ logs/
 tmp/
 temp/
 
+# ---- Playwright ----
+# Run output, not source. Traces, videos and screenshots are large, binary and only
+# meaningful for the run that produced them; the MCP browser writes a snapshot file
+# per navigation, which is how 26 of them ended up committed.
+.playwright-mcp/
+playwright-report/
+test-results/
+playwright-tests/reports/
+playwright-tests/test-results/
+playwright-tests/.auth/
+# Logins. The suite reads these from a gitignored file precisely so no credential
+# ever lands in a commit — see playwright-tests/users.example.json for the shape.
+playwright-tests/users.json
+
+# ---- Local tool caches ----
+.impeccable/
+
 # ---- Uploaded documents (invoice copies, LR slips, PODs) ----
 # Default store for sys_attachments files; override with UPLOAD_DIR in backend/.env.
 var/

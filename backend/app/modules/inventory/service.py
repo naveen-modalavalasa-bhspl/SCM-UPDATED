@@ -160,11 +160,17 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                      ref_type: str, ref_id: int, ref_no: str, user,
                      warehouse_id: int | None = None, facility_id: int | None = None,
                      bin_id: int = NO_BIN, batch_id: int = NO_BATCH,
-                     project_id: int = NO_PROJECT) -> Stock:
+                     project_id: int = NO_PROJECT, rate=None) -> Stock:
     """The ONLY function that changes stock. Always writes a stk_ledger row.
 
     Either warehouse_id or facility_id must be given; a facility resolves to its
     default warehouse, so callers that only know a facility keep working.
+
+    `rate` is the unit cost the goods arrived at, and only means anything on an
+    inward move. It belongs here rather than in the GRN because valuation lives on
+    `stk_balance`, and rule 7 says nothing but this function assigns to that table.
+    Without it every balance row kept `valuation_rate = 0` and the warehouse read
+    "Stock value on hand ₹ 0" no matter how much had been received.
     """
     qty = _d(qty)
     if qty <= 0:
@@ -215,6 +221,23 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     # total = what is on hand, including what is spoken for but not yet issued.
     stock.total_qty = new_balance + (stock.reserved_qty or Decimal("0"))
     stock.last_movement_at = utcnow()
+
+    unit_cost = _d(rate) if rate is not None else Decimal("0")
+    if direction == StockDirection.IN.value and unit_cost > 0:
+        # Weighted average, not "latest wins": a hundred units bought at 10 and ten
+        # at 100 are worth 1,910, and overwriting the rate would call them 11,000.
+        held = stock.total_qty - qty
+        previous = _d(stock.valuation_rate)
+        stock.valuation_rate = (
+            ((held * previous) + (qty * unit_cost)) / stock.total_qty
+            if stock.total_qty > 0 and held > 0 and previous > 0
+            else unit_cost
+        )
+        # The item-level fallback the masters overhaul kept for exactly this: a
+        # cost for screens that value stock without a balance row to read.
+        item = await db.get(Item, item_id)
+        if item is not None:
+            item.purchase_price = unit_cost
 
     db.add(StockMovement(
         warehouse_id=warehouse_id,

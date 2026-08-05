@@ -62,6 +62,7 @@ export function ConfirmModal({
   confirmLabel = "Confirm",
   danger = false,
   busy = false,
+  confirmDisabled = false,
   error,
   onConfirm,
   onClose,
@@ -73,6 +74,11 @@ export function ConfirmModal({
   confirmLabel?: string;
   danger?: boolean;
   busy?: boolean;
+  /**
+   * For a modal whose body collects something required. Without it the caller's
+   * only defence is to ignore the click, which reads to the user as a dead button.
+   */
+  confirmDisabled?: boolean;
   error?: unknown;
   onConfirm: () => void;
   onClose: () => void;
@@ -89,7 +95,11 @@ export function ConfirmModal({
         </ModalBody>
         <ModalFooter>
           <Button variant="subtle" onClick={onClose}>Cancel</Button>
-          <Button variant={danger ? "danger" : "primary"} onClick={onConfirm} disabled={busy}>
+          <Button
+            variant={danger ? "danger" : "primary"}
+            onClick={onConfirm}
+            disabled={busy || confirmDisabled}
+          >
             {busy ? "Working…" : confirmLabel}
           </Button>
         </ModalFooter>

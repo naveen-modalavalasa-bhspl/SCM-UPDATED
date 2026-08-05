@@ -33,9 +33,14 @@ from app.shared.models.warehouse import Warehouse
 from app.shared.numbering import next_number
 
 ZERO = Decimal("0")
+# An allocation still in play. APPROVED belongs here: an approved allocation is a
+# live claim on stock, not a finished one — it stays live until the warehouse has
+# issued against it. Leaving it out let IND/2026-27/00013 collect four APPROVED
+# allocations, each one reserving the same stock for the same requirement again.
 ACTIVE_ALLOCATION_STATUSES = (
     AllocationStatus.DRAFT.value,
     AllocationStatus.PENDING_APPROVAL.value,
+    AllocationStatus.APPROVED.value,
 )
 
 
@@ -44,7 +49,7 @@ def _d(value) -> Decimal:
 
 
 async def ensure_no_active(db: AsyncSession, indent_id: int) -> None:
-    """An indent may have only one undecided allocation at a time."""
+    """An indent may have only one live allocation at a time."""
     existing = (await db.execute(
         select(Allocation.allocation_no, Allocation.status)
         .where(
@@ -54,9 +59,14 @@ async def ensure_no_active(db: AsyncSession, indent_id: int) -> None:
         .limit(1)
     )).first()
     if existing:
+        state = (
+            "is already awaiting approval"
+            if existing.status != AllocationStatus.APPROVED.value
+            else "is already approved and holding stock for this indent"
+        )
         raise ValidationError(
-            f"Allocation {existing.allocation_no} for this indent is already "
-            f"awaiting approval"
+            f"Allocation {existing.allocation_no} {state}. Cancel it before "
+            f"allocating again."
         )
 
 

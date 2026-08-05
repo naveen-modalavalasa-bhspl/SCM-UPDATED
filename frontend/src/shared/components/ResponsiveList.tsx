@@ -109,13 +109,30 @@ export function ResponsiveList<T>({
           : data.length === 0
             ? <div className="py-16 text-center text-muted">{empty ?? "Nothing here yet."}</div>
             : data.map((row) => (
-                <button
+                // Not a <button>. Cards carry their own actions — "View details" on
+                // the approvals queue is a real button — and a button inside a
+                // button is invalid HTML: React warns, and the browser is free to
+                // decide which of the two a tap belongs to. A div with the button
+                // role keeps the whole card clickable and keyboard-reachable while
+                // the controls inside it stay controls.
+                <div
                   key={keyOf(row)}
-                  onClick={() => onRowClick?.(row)}
-                  className="block w-full rounded-2xl border border-line/70 bg-content1 p-4 text-left shadow-sm transition-transform active:scale-[0.99]"
+                  role={onRowClick ? "button" : undefined}
+                  tabIndex={onRowClick ? 0 : undefined}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  onKeyDown={onRowClick ? (event) => {
+                    if (event.target !== event.currentTarget) return;
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onRowClick(row);
+                    }
+                  } : undefined}
+                  className={`block w-full rounded-2xl border border-line/70 bg-content1 p-4 text-left shadow-sm ${
+                    onRowClick ? "cursor-pointer transition-transform active:scale-[0.99]" : ""
+                  }`}
                 >
                   {renderCard(row)}
-                </button>
+                </div>
               ))}
         {pager}
       </div>

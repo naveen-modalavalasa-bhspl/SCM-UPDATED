@@ -43,7 +43,7 @@ export default function WarehouseNotifications() {
         title="Notifications"
         actions={
           unread > 0 ? (
-            <Button variant="subtle" onClick={() => readAll.mutate()} disabled={readAll.isPending}>
+            <Button onClick={() => readAll.mutate()} disabled={readAll.isPending}>
               <CheckCheck className="h-4 w-4" /> Mark all read
             </Button>
           ) : undefined

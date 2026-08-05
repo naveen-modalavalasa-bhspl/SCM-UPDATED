@@ -59,6 +59,10 @@ class ApprovalAction(str, Enum):
     REJECTED = "REJECTED"
     RETURNED = "RETURNED"        # added: wf_actions (addendum Part D)
     DELEGATED = "DELEGATED"      # added
+    # Written when the document itself was withdrawn, so the approval behind it is
+    # closed without anybody having decided anything. Not a decision — see
+    # workflow.engine.abandon().
+    CANCELLED = "CANCELLED"
     # Written when configuration failed to produce an approver and the hardcoded
     # reporting-manager ladder took over. Never an action a person performs.
     FALLBACK = "FALLBACK"

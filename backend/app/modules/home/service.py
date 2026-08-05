@@ -154,12 +154,29 @@ def _activity_meta(entity: str, entity_id: int) -> tuple[str, str, str]:
     return "settings", "neutral", "/admin"
 
 
+# An audit action is something a person did; a status is what the document became.
+# Falling back to the raw action put both in the same slot, so the feed read
+# "IND/2026-27/00576 deactivate" as though DEACTIVATE were an indent status.
+_ACTION_PHRASES = {
+    "CREATE": "created",
+    "UPDATE": "updated",
+    "DELETE": "deleted",
+    "DEACTIVATE": "deactivated",
+    "ACTIVATE": "reactivated",
+    "APPROVE": "approved",
+    "REJECT": "rejected",
+    "CANCEL": "cancelled",
+    "SUBMIT": "submitted",
+}
+
+
 def _activity_verb(row: AuditLog) -> str:
     changed = row.changed_fields if isinstance(row.changed_fields, dict) else {}
     status = changed.get("status")
     if isinstance(status, dict) and status.get("to"):
         return str(status["to"]).replace("_", " ").lower()
-    return str(row.action).replace("_", " ").lower()
+    action = str(row.action or "").upper()
+    return _ACTION_PHRASES.get(action, action.replace("_", " ").lower() or "changed")
 
 
 def _is_overdue(row: dict) -> bool:
@@ -261,9 +278,18 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
             ))
 
     if perms.PO_VIEW in permissions:
-        po_count = await _count(db, PurchaseOrder)
+        # Scoped exactly as procurement.list_pos scopes the screen this tile links
+        # to. Counting every PO in the company here meant a store keeper's Home read
+        # a number they could not find a single row of on /pos — the same mismatch
+        # already fixed for the indents tile above.
+        po_scope = await scope_condition(
+            db, user,
+            owner_col=PurchaseOrder.created_by_id,
+            office_col=PurchaseOrder.office_id,
+        )
+        po_count = await _count(db, PurchaseOrder, po_scope)
         awaiting_po = await _count(
-            db, PurchaseOrder, PurchaseOrder.status.in_([
+            db, PurchaseOrder, po_scope, PurchaseOrder.status.in_([
                 POStatus.APPROVED.value,
                 POStatus.SENT_TO_VENDOR.value,
                 POStatus.PARTIALLY_RECEIVED.value,
@@ -286,9 +312,18 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
         # counts under "GRN to raise" — counting every receipt type here made the two
         # screens disagree.
         is_purchase = Receipt.receipt_type == ReceiptType.PURCHASE.value
-        receipt_count = await _count(db, Receipt, is_purchase)
+        # Same warehouse/office scope warehouse.list_receipts applies, for the same
+        # reason as the PO tile: the number has to be one the user can drill into.
+        receipt_scope = and_(is_purchase, await scope_condition(
+            db, user,
+            warehouse_col=Receipt.warehouse_id,
+            warehouse_ids=await inventory_service.warehouse_ids_for_user(db, user),
+            owner_col=Receipt.created_by_id,
+            project_col=Receipt.project_id,
+        ))
+        receipt_count = await _count(db, Receipt, receipt_scope)
         pending_receipts = await _count(
-            db, Receipt, is_purchase,
+            db, Receipt, receipt_scope,
             Receipt.status.in_([
                 ReceiptStatus.DRAFT.value,
                 ReceiptStatus.PENDING_QC.value,

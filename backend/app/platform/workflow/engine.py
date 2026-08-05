@@ -723,6 +723,36 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
     return instance
 
 
+async def abandon(db, doc_type: str, doc_id: int, user, reason: str = "") -> Instance | None:
+    """Close the approval behind a document that has been withdrawn.
+
+    A module that cancels its own document has to tell the engine, or the task
+    outlives the thing it was about: the approver keeps seeing it in "Waiting on
+    you", clicking through to a cancelled document with no decision left to make,
+    and every count fed by the queue stays overstated. Cancelling WHI/2026-27/00027
+    left exactly that behind.
+
+    Not `act()`: this is not a decision anybody made about the request, so it must
+    not be recorded as an approval or a rejection. The audit trail keeps its own
+    CANCELLED action row, and no `wf_actions` row is ever deleted (rule 9).
+    """
+    instance = await _load_instance(db, doc_type, doc_id)
+    if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
+        return instance
+    db.add(Action(
+        instance_id=instance.id, stage_sequence=instance.current_sequence,
+        stage_name=instance.current_stage_name,
+        actor_id=getattr(user, "id", None), actor_name=getattr(user, "full_name", None),
+        actor_position=None, action=ApprovalAction.CANCELLED.value, comments=reason,
+    ))
+    await _clear_pending(db, instance.id)
+    instance.status = InstanceStatus.CANCELLED.value
+    instance.completed_at = utcnow()
+    instance.current_stage_name = None
+    await db.flush()
+    return instance
+
+
 async def current_approvers(db, doc_type: str, doc_id: int) -> list:
     instance = await _load_instance(db, doc_type, doc_id)
     if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
@@ -738,7 +768,14 @@ async def pending_for_user(db, user) -> list[dict]:
     rows = (await db.execute(
         select(Pending, Instance)
         .join(Instance, Instance.id == Pending.instance_id)
-        .where(Pending.approver_id == user.id)
+        .where(
+            Pending.approver_id == user.id,
+            # A pending row on a finished instance is stale by definition — every
+            # terminal transition already calls _clear_pending. Reading through the
+            # instance status costs nothing for healthy data and stops rows that
+            # escaped an earlier code path from being handed out as live work.
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        )
         .order_by(Pending.created_at.desc())
     )).all()
     return [{
