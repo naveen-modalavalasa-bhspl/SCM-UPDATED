@@ -64,6 +64,14 @@ export class ApiClient {
     return body.items ?? [];
   }
 
+  async allocationsFor(indentId: number, as: Account) {
+    const body = await this.get<{ items: { id: number; allocation_no: string; status: string }[] }>(
+      `/api/allocations?indent_id=${indentId}&size=50`,
+      as,
+    );
+    return body.items ?? [];
+  }
+
   history(docType: string, docId: number, as: Account) {
     return this.get<{ items: { actor_name: string; action: string; stage_name: string }[] }>(
       `/api/workflow/history/${docType}/${docId}`,

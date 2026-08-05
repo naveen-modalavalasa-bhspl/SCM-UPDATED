@@ -10,7 +10,9 @@ export default defineConfig({
   workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  timeout: 5 * 60_000,
+  // Generous because SLOW_MO turns a 2-minute journey into a watchable one: at
+  // SLOW_MO=3000 every click costs 3s, and a full ladder is ~90 actions.
+  timeout: 25 * 60_000,
   expect: { timeout: 15_000 },
 
   reporter: [

@@ -61,11 +61,28 @@ npm run report           # open the HTML report
 npm run codegen          # record selectors for a new test
 ```
 
+## Suites
+
+One folder per kind of question, so a failure tells you which kind of thing broke.
+
+| Folder | Asks |
+| --- | --- |
+| `tests/indent-approval-flow/` | Does the business journey complete? Raise → every ladder rung → Inventory. Crosses several logins. |
+| `tests/ui-checks/` | Is each screen correct on its own? Buttons, validation, empty and disabled states, per module. No document needed. |
+
+Add a folder per new question, not per new screen. Playwright picks up nested
+directories automatically.
+
+## Watching a run
+
+`SLOW_MO` in `.env` is the pause between actions. `0` for CI, `3000` to follow along
+with `npm run test:headed` — a full ladder is ~90 actions, so budget five minutes.
+
 ## Adding a flow
 
 1. Put shared clicking in `src/pages/<screen>.ts` — one exported function per
    action, each wrapped in `log.runStep()` so it shows up in the report.
-2. Put the journey in `tests/<flow>.spec.ts`, using the `test` from
+2. Put the journey in `tests/<suite>/<flow>.spec.ts`, using the `test` from
    `src/fixtures.js` (not `@playwright/test`) — that is what wires the logging.
 3. Use `goto()` rather than `page.goto()`: it waits for the app to settle, times
    the load, screenshots and accessibility-scans the screen.

@@ -1,8 +1,9 @@
-import { test, expect } from "../src/fixtures.js";
-import { loadUsers, type Account } from "../src/config.js";
-import { loginAs } from "../src/pages/login.js";
-import { createIndent, submitForApproval } from "../src/pages/indents.js";
-import { approveRung } from "../src/pages/approvals.js";
+import { test, expect } from "../../src/fixtures.js";
+import { loadUsers, type Account } from "../../src/config.js";
+import { loginAs } from "../../src/pages/login.js";
+import { createIndent, submitForApproval } from "../../src/pages/indents.js";
+import { approveRung } from "../../src/pages/approvals.js";
+import { allocateStock, approveAllocation } from "../../src/pages/inventory.js";
 
 const users = loadUsers();
 
@@ -16,7 +17,7 @@ test.describe("Indent lifecycle", () => {
   // One user journey across several logins; it cannot be split or parallelised.
   test.describe.configure({ mode: "serial" });
 
-  test("store keeper raises an indent, the ladder approves it, and it lands in inventory", async ({
+  test("store keeper raises an indent, the ladder approves it, and inventory allocates and signs it off", async ({
     page,
     log,
     api,
@@ -105,6 +106,41 @@ test.describe("Indent lifecycle", () => {
     ).toBeVisible({ timeout: 20_000 });
     await capture("landed-in-inventory");
 
-    log.info(`✔ ${indent.indentNo} completed the journey: raised → ${walked.length} approval(s) → inventory.`);
+    // ---- inventory's own half: decide, then approve that decision ----
+
+    await allocateStock(page, log, indent, goto);
+    await capture("allocation-submitted");
+
+    const submitted = await api.allocationsFor(indent.id, inventoryUser);
+    expect(
+      submitted.length,
+      `No allocation exists for ${indent.indentNo} after submitting one.`,
+    ).toBeGreaterThan(0);
+    const allocation = submitted[submitted.length - 1];
+    log.info(`Allocation ${allocation.allocation_no} is ${allocation.status}.`);
+
+    await approveAllocation(page, log, indent, goto);
+    await capture("allocation-approved");
+
+    const decided = (await api.allocationsFor(indent.id, inventoryUser))
+      .find((row) => row.id === allocation.id);
+    expect(
+      decided?.status,
+      `${allocation.allocation_no} did not reach APPROVED after being approved.`,
+    ).toBe("APPROVED");
+
+    // Which of these the indent lands on depends on what was actually on the shelf:
+    // everything reserved, part reserved with the rest raised as a material request,
+    // or nothing available at all. All three are the flow working.
+    const closed = await api.indent(indent.id, raiser);
+    log.info(`Ladder walked: ${walked.join(" → ") || "(resumed)"}`);
+    log.info(`${indent.indentNo} finished at ${closed.status}.`);
+    expect(
+      ["ALLOCATED", "PARTIALLY_FULFILLED", "PENDING_PROCUREMENT"],
+      `After its allocation was approved, ${indent.indentNo} is ${closed.status} — `
+        + "approving an allocation should have moved it out of AWAITING_ALLOCATION.",
+    ).toContain(closed.status);
+
+    log.info(`✔ ${indent.indentNo} completed the journey: raised → approvals → allocated → ${closed.status}.`);
   });
 });
