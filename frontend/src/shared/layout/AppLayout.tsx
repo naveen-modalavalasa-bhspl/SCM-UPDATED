@@ -19,8 +19,13 @@ const matches = (path: string, loc: string) =>
  *
  * The permission still gates the API; this only decides whether the nav shows it.
  * UsersPage.tsx links to job profiles under the same condition.
+ *
+ * Empty since v1.3: `rbac_job_profiles` shipped, so it comes out of the trial set.
+ * Note this also gates the URL — `allowedPaths` below is built from the FILTERED
+ * menu, so a trialled screen is not merely hidden, it bounces a typed URL back to
+ * Home. Anything added here is unreachable in production, not just unadvertised.
  */
-const IN_TRIAL = new Set(["rbac_job_profiles"]);
+const IN_TRIAL = new Set<string>([]);
 
 const visible = (nodes: MenuItem[]): MenuItem[] =>
   import.meta.env.DEV

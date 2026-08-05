@@ -4,8 +4,8 @@ import { rbacApi } from "../api";
 describe("RBAC api", () => {
   it("owns users, groups, roles, access controls, matrix and reporting", () => {
     expect(Object.keys(rbacApi).sort()).toEqual([
-      "featureAccess", "groups", "hcmRoles", "matrix", "orgTree", "pageAccess",
-      "permissionHolders", "reporting", "roles", "setFeatureAccess",
+      "featureAccess", "groups", "hcmRoles", "jobProfiles", "matrix", "orgTree",
+      "pageAccess", "permissionHolders", "reporting", "roles", "setFeatureAccess",
       "setPageAccess", "users", "viewAs",
     ]);
   });
