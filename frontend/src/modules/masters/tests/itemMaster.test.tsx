@@ -2,15 +2,24 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  ITEM_SECTIONS, ItemSectionTabs, itemCodePreview, manufacturersForBrand,
-  missingRequiredTags, packagingBreakupText,
+  ITEM_SECTIONS, ItemSectionTabs, brandsForGeneralName, itemCodePreview,
+  manufacturersForBrand, missingRequiredTags, packagingBreakupText,
 } from "../components/ItemMasterTab";
-import type { MasterCategoryTag } from "../types";
+import type { MasterBrand, MasterCategoryTag, MasterGeneralName } from "../types";
 
 const manufacturers = [
   { id: 10, code: "ACME", name: "Acme", is_active: true },
   { id: 20, code: "OTHER", name: "Other", is_active: true },
 ];
+
+const brands: MasterBrand[] = [
+  { id: 1, code: "DOLO", name: "Dolo", manufacturer_ids: [], manufacturer_names: [], is_active: true },
+  { id: 2, code: "CROCIN", name: "Crocin", manufacturer_ids: [], manufacturer_names: [], is_active: true },
+];
+const generalName = (brand_ids: number[]): MasterGeneralName => ({
+  id: 5, code: "PARACET", name: "Paracetamol", brand_ids,
+  brand_names: [], is_active: true,
+});
 
 describe("item master identity", () => {
   it("shows only active manufacturers mapped to the selected brand", () => {
@@ -26,6 +35,18 @@ describe("item master identity", () => {
     ]);
 
     expect(rows.map((row) => row.code)).toEqual(["ACME"]);
+  });
+
+  it("shows only the brands mapped to the selected general name", () => {
+    expect(brandsForGeneralName(brands, generalName([2])).map((row) => row.code))
+      .toEqual(["CROCIN"]);
+  });
+
+  it("falls back to every brand when the general name has no mapping", () => {
+    // The mapping table starts empty. Narrowing to nothing would mean no item could
+    // be created until every general name had been mapped first.
+    expect(brandsForGeneralName(brands, generalName([]))).toHaveLength(2);
+    expect(brandsForGeneralName(brands, undefined)).toHaveLength(2);
   });
 
   it("previews the generated L1/L2/L3-general-brand-manufacturer code", () => {

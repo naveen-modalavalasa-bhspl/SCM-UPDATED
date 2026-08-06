@@ -508,6 +508,7 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
     await db.flush()
 
     seen_serials_by_item: dict[int, set[str]] = {}
+    seen_imeis_by_item: dict[int, set[str]] = {}
 
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
@@ -556,6 +557,62 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
                 )
             seen_for_item.update(normalized_serials)
 
+        # IMEIs follow exactly the serial rules above: anything may be captured at the
+        # gate, but a GRN must account for every unit. `is_imei_tracked` had no
+        # consumer at all until now — the flag was on the item master and nothing read
+        # it, so ticking it changed nothing anywhere.
+        imeis = [value.strip() for value in (line.imei_numbers or []) if value.strip()]
+        normalized_imeis = [value.lower() for value in imeis]
+        if len(normalized_imeis) != len(set(normalized_imeis)):
+            raise ValidationError(f"Line {index}: IMEI numbers must be unique")
+        if imeis and not item.is_imei_tracked:
+            raise ValidationError(
+                f"Line {index}: {item.code} is not configured for IMEI tracking"
+            )
+        if item.is_imei_tracked and received != received.to_integral_value():
+            raise ValidationError(
+                f"Line {index}: IMEI-tracked quantity must be a whole number"
+            )
+        if item.is_imei_tracked and at_gate and len(imeis) > int(received):
+            raise ValidationError(
+                f"Line {index}: {len(imeis)} IMEI numbers for {int(received)} "
+                f"received units of {item.code}"
+            )
+        if item.is_imei_tracked and not at_gate and len(imeis) != int(received):
+            raise ValidationError(
+                f"Line {index}: enter exactly {int(received)} IMEI numbers for {item.code}"
+            )
+        if imeis:
+            seen_for_item = seen_imeis_by_item.setdefault(item.id, set())
+            duplicate = next(
+                (imei for imei in imeis if imei.lower() in seen_for_item), None)
+            if duplicate:
+                raise ValidationError(
+                    f"Line {index}: IMEI {duplicate} is already used for {item.code} in this GRN"
+                )
+            seen_for_item.update(normalized_imeis)
+
+        # Batch and expiry were captured on every line and enforced on none, so a
+        # batch-tracked drug could be received with no batch number and no expiry
+        # date. Only checked on a GRN: at the gate nobody has opened the carton yet.
+        if not at_gate and received > ZERO:
+            if item.is_batch_tracked and not (line.batch_no or "").strip():
+                raise ValidationError(
+                    f"Line {index}: {item.code} is batch tracked — enter a batch number"
+                )
+            if item.has_expiry and line.expiry_date is None:
+                # One flag, two words for it: a consumable expires, an asset's
+                # warranty ends. The item master says "Has Expiry / Warranty".
+                what = "warranty end date" if item.is_asset else "expiry date"
+                raise ValidationError(
+                    f"Line {index}: {item.code} needs a {what}"
+                )
+            if (line.expiry_date is not None and line.mfg_date is not None
+                    and line.expiry_date < line.mfg_date):
+                raise ValidationError(
+                    f"Line {index}: expiry cannot be before the manufacturing date"
+                )
+
         accepted = received if line.accepted_qty is None else min(_d(line.accepted_qty), received)
         rejected = received - accepted
         ordered = _d(line.ordered_qty)
@@ -591,6 +648,7 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             rejection_reason=line.rejection_reason,
             remarks=line.remarks,
             serial_numbers=serials or None,
+            imei_numbers=imeis or None,
         ))
     _receipt_totals(receipt)
 
@@ -1492,6 +1550,7 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             parameters=[p.model_dump() for p in line.parameters] if line.parameters else None,
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers=serials or None,
+            imei_numbers=imeis or None,
         ))
     _inspection_totals(inspection)
 
@@ -2852,9 +2911,26 @@ async def _reserve_issue_serials(
             setattr(line, "serial_numbers", [])
             continue
         issued = _d(line.issued_qty)
-        if issued != issued.to_integral_value() or len(serials) != int(issued):
+        if issued != issued.to_integral_value():
             raise ValidationError(
-                f"{item.code}: select {int(issued)} serial numbers for the issued quantity"
+                f"{item.code}: a serialized quantity must be a whole number"
+            )
+        # A draft may hold fewer serials than units, and usually holds none.
+        #
+        # These drafts are created for the storekeeper by
+        # create_fulfilment_drafts_for_allocation, which runs when INVENTORY approves
+        # an allocation. Inventory approves quantities; it has no idea which physical
+        # units will be picked, and no screen on which to say. Demanding the full set
+        # here made "Approve and reserve" fail with "select 5 serial numbers for the
+        # issued quantity" — an error about a warehouse detail, raised on an inventory
+        # screen, against a document the approver could not edit.
+        #
+        # The full set is required at post_issue, which is where stock actually moves
+        # and where the storekeeper has the goods in hand. Same shape as the gate
+        # entry / GRN split on inbound.
+        if len(serials) > int(issued):
+            raise ValidationError(
+                f"{item.code}: {len(serials)} serial numbers for {int(issued)} units"
             )
         expected_status = (
             SerialStatus.AVAILABLE.value
@@ -3446,6 +3522,26 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
 
     outward = issue.direction == IssueDirection.OUT.value
     direction = StockDirection.OUT.value if outward else StockDirection.IN.value
+
+    # The serial set has to be complete before anything leaves the shelf. Checked
+    # here rather than at draft creation: this is the first moment the storekeeper
+    # has actually handled the units. Every line is reported at once so a picker
+    # holding a trolley is not sent back for one item at a time.
+    incomplete = []
+    for line in issue.items:
+        qty = _d(line.issued_qty)
+        if qty <= ZERO:
+            continue
+        item = await _item_snapshot(db, line.item_id)
+        if not item.is_serial_tracked:
+            continue
+        captured = len(getattr(line, "serial_numbers", None) or [])
+        if captured != int(qty):
+            incomplete.append(
+                f"{item.code}: {captured} of {int(qty)} serial numbers captured")
+    if incomplete:
+        raise ValidationError(
+            "Serial numbers are incomplete — " + "; ".join(incomplete))
 
     for line in issue.items:
         qty = _d(line.issued_qty)
@@ -5828,6 +5924,10 @@ async def item_options(db: AsyncSession, search: str | None = None) -> list[dict
         "uom_code": r.uom_code,
         "is_batch_tracked": bool(r.is_batch_tracked),
         "is_serial_tracked": bool(r.is_serial_tracked),
+        # The GRN form reads this to decide whether to show the IMEI column, the
+        # same way it reads is_serial_tracked for serials.
+        "is_imei_tracked": bool(r.is_imei_tracked),
+        "has_expiry": bool(r.has_expiry),
         "is_asset": bool(r.is_asset),
         "requires_qi": bool(r.requires_qi),
     } for r in rows]

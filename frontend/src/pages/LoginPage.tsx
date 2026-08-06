@@ -56,7 +56,10 @@ export function LoginPage() {
               onValueChange={setUsername}
               autoFocus
               autoComplete="username"
-              inputMode="numeric"
+              inputMode="text"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck="false"
               placeholder="Enter your employee ID"
             />
             <Input

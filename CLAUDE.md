@@ -203,6 +203,10 @@ built against a different backend contract and is to be rewritten (see
   `mst_items.purchase_price` survives as the stock-valuation cost fallback, fed by
   GRN and hidden from the item form.
 - A brand carries its manufacturers inline; there is no Brand-Manufacturer screen.
+  A general name carries its brands the same way (`mst_brand_general_names`), so the
+  item form narrows the whole chain: Category → General Name → Brand → Manufacturer.
+  An **unmapped** general name falls back to every brand rather than to none — the
+  mapping starts empty, and narrowing strictly would block every item create.
   Category names are unique **within a parent** (checked in Python — MySQL counts
   NULL `parent_id` values as distinct, so an index cannot do it).
 - `mst_category_tags` is the one tagging surface for attributes, specs and features.
@@ -213,4 +217,19 @@ built against a different backend contract and is to be rewritten (see
 - Asset vs consumable is a per-item flag. The asset/consumable **code** is generated
   during putaway in the warehouse module, never in masters.
 - Projects are read-only (HCM owns them): the write routes are not registered.
-  Price lists left the API entirely; the tables remain.
+  Price lists left the API entirely; the tables remain, and are staying out.
+- **Every master gets template/export/import for free** (`shared/masters/bulk.py`):
+  `GET {base}/template`, `GET {base}/export`, `POST {base}/import`, all derived from
+  the same Pydantic schema CRUD validates against. Import is **all-or-nothing** — every
+  row is validated first and a single bad row rejects the file with the full problem
+  list, because a half-applied master cannot be re-uploaded safely. An empty cell means
+  "say nothing about this column" (the schema default applies), never `None`.
+- `GET {base}/{id}/usage` counts what points at a row before it is deactivated.
+  Declared in `MasterDef.usage` as `(label, table, column)` strings, not models —
+  most referents live in `app.modules` and shared may not import a module (rule 5).
+- `mst_vendor_items` (vendor rate, lead time, MOQ, preferred supplier) is a master
+  with a screen. At most one preferred vendor per item, enforced in `apply_vendor_item`
+  — "at most one TRUE per item" is not something a unique index can express.
+- **69 of 90 live items predate the mandatory general-name/brand/manufacturer rule**
+  and hold NULLs, so exporting the item master and re-importing it rejects those rows
+  with "Field required". That is the data being incomplete, not the importer.

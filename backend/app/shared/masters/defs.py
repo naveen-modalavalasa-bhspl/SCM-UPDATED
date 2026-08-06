@@ -5,6 +5,7 @@ RBAC/settings concerns and are served by platform/admin, which imports the same
 factory — platform may import shared, but not the other way round (rule 5).
 """
 from datetime import date
+from decimal import Decimal
 import re
 
 from pydantic import BaseModel, Field
@@ -19,10 +20,10 @@ from app.shared.enums import (
 )
 from app.shared.masters.crud import MasterDef
 from app.shared.models.master import (
-    Attribute, Bom, BomItem, Brand, BrandManufacturer, CategoryTag,
+    Attribute, Bom, BomItem, Brand, BrandGeneralName, BrandManufacturer, CategoryTag,
     DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory, ItemClass,
     ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer, Packaging,
-    Project, Spec, Uom, UomConversion, Vendor,
+    Project, Spec, Uom, UomConversion, Vendor, VendorItem,
 )
 from app.shared.models.warehouse import Bin, Warehouse
 
@@ -560,20 +561,94 @@ async def apply_project(db: AsyncSession, p: Project, data: ProjectIn) -> None:
 class VendorIn(BaseModel):
     code: str
     name: str
+    # Free text rather than an enum: the live column is a plain VARCHAR the DB team
+    # already fills with values SCM does not own.
+    vendor_type: str = "MATERIAL"
     contact_person: str | None = None
     phone: str | None = None
     email: str | None = None
+    address: str | None = None
     city: str | None = None
     state: str | None = None
+    pincode: str | None = None
     gstin: str | None = None
+    pan: str | None = None
+    payment_terms_days: int | None = Field(default=None, ge=0, le=365)
+    credit_limit: Decimal | None = Field(default=None, ge=0)
+    rating: Decimal | None = Field(default=None, ge=0, le=5)
+    is_approved: bool = False
+    is_blacklisted: bool = False
     is_active: bool = True
 
 
 def vendor_out(v: Vendor) -> dict:
     return {"id": v.id, "code": v.code, "name": v.name,
+            "vendor_type": v.vendor_type,
             "contact_person": v.contact_person, "phone": v.phone, "email": v.email,
-            "city": v.city, "state": v.state, "gstin": v.gstin,
+            "address": v.address, "city": v.city, "state": v.state,
+            "pincode": v.pincode, "gstin": v.gstin, "pan": v.pan,
+            "payment_terms_days": v.payment_terms_days,
+            "credit_limit": v.credit_limit, "rating": v.rating,
+            "is_approved": v.is_approved, "is_blacklisted": v.is_blacklisted,
             "is_active": v.is_active}
+
+
+class VendorItemIn(BaseModel):
+    vendor_id: int
+    item_id: int
+    vendor_item_code: str | None = None
+    last_rate: Decimal | None = Field(default=None, ge=0)
+    lead_time_days: int | None = Field(default=None, ge=0, le=3650)
+    min_order_qty: Decimal | None = Field(default=None, ge=0)
+    is_preferred: bool = False
+
+
+def vendor_item_out(row: VendorItem) -> dict:
+    return {"id": row.id, "vendor_id": row.vendor_id, "item_id": row.item_id,
+            "vendor_name": row.vendor.name if row.vendor else None,
+            "vendor_code": row.vendor.code if row.vendor else None,
+            "item_code": row.item_code, "item_name": row.item_name,
+            "vendor_item_code": row.vendor_item_code,
+            "last_rate": row.last_rate, "lead_time_days": row.lead_time_days,
+            "min_order_qty": row.min_order_qty,
+            "is_preferred": row.is_preferred}
+
+
+async def apply_vendor_item(db: AsyncSession, row: VendorItem,
+                            data: VendorItemIn) -> None:
+    """Snapshots the item's code and name, and keeps 'preferred' to one vendor.
+
+    Two preferred vendors for one item is not a preference, so ticking a new one
+    unticks the old. Done here rather than with a unique index: the constraint is
+    "at most one TRUE per item", which an index cannot express.
+    """
+    vendor = await db.get(Vendor, data.vendor_id)
+    if vendor is None:
+        raise ValidationError("That vendor does not exist")
+    item = await db.get(Item, data.item_id)
+    if item is None:
+        raise ValidationError("That item does not exist")
+
+    clash = (await db.execute(
+        select(VendorItem).where(VendorItem.vendor_id == data.vendor_id,
+                                 VendorItem.item_id == data.item_id)
+    )).scalars().first()
+    if clash is not None and clash.id != row.id:
+        raise ValidationError(
+            f"{vendor.name} already has a rate for {item.code}. Edit that row instead.")
+
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.item_code, row.item_name = item.code, item.name
+
+    if data.is_preferred:
+        others = (await db.execute(
+            select(VendorItem).where(VendorItem.item_id == data.item_id,
+                                     VendorItem.is_preferred.is_(True))
+        )).scalars().all()
+        for other in others:
+            if other.id != row.id:
+                other.is_preferred = False
 
 
 # --------------------------------------------------------------------------- #
@@ -604,6 +679,60 @@ def named_code_apply(model: type, label: str):
         for key, value in data.model_dump().items():
             setattr(row, key, value)
     return apply
+
+
+class GeneralNameIn(NamedCodeIn):
+    # The brands that sell this general name, edited here rather than on a mapping
+    # screen of its own — the same call as brands carrying their manufacturers.
+    brand_ids: list[int] = Field(default_factory=list)
+
+
+def general_name_out(row: GeneralName) -> dict:
+    links = [b for b in (row.brands or []) if b.is_active]
+    return {"id": row.id, "code": row.code, "name": row.name,
+            "description": row.description,
+            "brand_ids": [b.brand_id for b in links],
+            "brand_names": [b.brand_name for b in links],
+            "is_active": row.is_active}
+
+
+async def apply_general_name(db: AsyncSession, row: GeneralName,
+                             data: GeneralNameIn) -> None:
+    """Writes the general name and reconciles its mst_brand_general_names rows."""
+    if row.id is None:
+        # See apply_brand: marks the collection loaded on a row that has never been
+        # queried, so the first read after the create-flush is not a lazy load.
+        row.brands = []
+    await require_unique(db, GeneralName, "name", data.name, row, "A general name")
+    await require_unique(db, GeneralName, "code", data.code, row, "General name code")
+    wanted = list(dict.fromkeys(data.brand_ids))    # de-dupe, keep order
+    rows = (await db.execute(
+        select(Brand).where(Brand.id.in_(wanted))
+    )).scalars().all() if wanted else []
+    if len(rows) != len(wanted):
+        raise ValidationError("One of the selected brands does not exist")
+
+    for key, value in data.model_dump(exclude={"brand_ids"}).items():
+        setattr(row, key, value)
+
+    by_id = {link.brand_id: link for link in (row.brands or [])}
+    for brand in rows:
+        link = by_id.get(brand.id)
+        if link is None:
+            row.brands.append(BrandGeneralName(
+                general_name_code=data.code, general_name_name=data.name,
+                brand_id=brand.id, brand_code=brand.code, brand_name=brand.name,
+                is_active=True))
+        else:
+            link.is_active = True
+            link.brand_code, link.brand_name = brand.code, brand.name
+    # Unticked links are deactivated, never deleted: items already carry this
+    # general-name/brand pair and the row proves the pair was once legal.
+    for brand_id, link in by_id.items():
+        if brand_id not in set(wanted):
+            link.is_active = False
+    for link in row.brands:
+        link.general_name_code, link.general_name_name = data.code, data.name
 
 
 class BrandIn(BaseModel):
@@ -1217,38 +1346,72 @@ async def apply_bom_item(db: AsyncSession, row: BomItem, data: BomItemIn) -> Non
 # --------------------------------------------------------------------------- #
 #  The registry
 # --------------------------------------------------------------------------- #
+# Where a master shows up once it is in use. Strings, not models: most of these
+# tables belong to app.modules, and shared may not import a module (rule 5). Only the
+# references an admin would weigh before deactivating a row are listed — the point is
+# a readable warning, not a full dependency graph.
+ITEM_USAGE = (
+    ("Indent lines", "ind_indent_items", "item_id"),
+    ("Purchase order lines", "pro_po_items", "item_id"),
+    ("Goods receipt lines", "inb_receipt_items", "item_id"),
+    ("Issue lines", "out_issue_items", "item_id"),
+    ("Stock balances", "stk_balance", "item_id"),
+    ("Vendor rates", "mst_vendor_items", "item_id"),
+    ("BOM lines", "mst_bom_items", "item_id"),
+)
+VENDOR_USAGE = (
+    ("Purchase orders", "pro_purchase_orders", "vendor_id"),
+    ("Goods receipts", "inb_receipts", "vendor_id"),
+    ("Vendor rates", "mst_vendor_items", "vendor_id"),
+)
+WAREHOUSE_USAGE = (
+    ("Stock balances", "stk_balance", "warehouse_id"),
+    ("Indents", "ind_indents", "warehouse_id"),
+    ("Goods receipts", "inb_receipts", "warehouse_id"),
+    ("Issues", "out_issues", "warehouse_id"),
+)
+USED_BY_ITEMS = ("Items", "mst_items")
+
 MASTERS: list[MasterDef] = [
     MasterDef(path="items", name="Item", model=Item, schema=ItemIn,
               manage_perm=perms.MASTER_ITEM_MANAGE, serialize=item_out,
               search_cols=("name", "code"), apply=apply_item,
               default_active_only=True,
               scope_to_user=restrict_items_to_my_groups,
-              filters=("category_id", "item_class_id", "brand_id", "hsn_id")),
+              filters=("category_id", "item_class_id", "brand_id", "hsn_id"),
+              usage=ITEM_USAGE),
 
     MasterDef(path="item-categories", name="Category", model=ItemCategory,
               schema=CategoryIn, manage_perm=perms.MASTER_CATEGORY_MANAGE,
               serialize=category_out, search_cols=("name", "code"),
-              apply=apply_category),
+              apply=apply_category,
+              usage=((*USED_BY_ITEMS, "category_id"), ("Category tags", "mst_category_tags", "category_id"),)),
 
+    # Carries its brands inline, so there is no General-name/Brand mapping screen.
+    # The item form reads this list to narrow the brand dropdown.
     MasterDef(path="general-names", name="General name", model=GeneralName,
-              schema=NamedCodeIn, manage_perm=perms.MASTER_ITEM_MANAGE,
-              serialize=named_code_out, search_cols=("name", "code"),
-              apply=named_code_apply(GeneralName, "A general name")),
+              schema=GeneralNameIn, manage_perm=perms.MASTER_ITEM_MANAGE,
+              serialize=general_name_out, search_cols=("name", "code"),
+              apply=apply_general_name,
+              usage=((*USED_BY_ITEMS, "general_name_id"), ("Brand mappings", "mst_brand_general_names", "general_name_id"),)),
 
     MasterDef(path="manufacturers", name="Manufacturer", model=Manufacturer,
               schema=NamedCodeIn, manage_perm=perms.MASTER_BRAND_MANAGE,
               serialize=named_code_out, search_cols=("name", "code"),
-              apply=named_code_apply(Manufacturer, "A manufacturer")),
+              apply=named_code_apply(Manufacturer, "A manufacturer"),
+              usage=((*USED_BY_ITEMS, "manufacturer_id"), ("Brand mappings", "mst_brand_manufacturers", "manufacturer_id"),)),
 
     MasterDef(path="dosage-forms", name="Dosage form", model=DosageForm,
               schema=NamedCodeIn, manage_perm=perms.MASTER_ITEM_MANAGE,
               serialize=named_code_out, search_cols=("name", "code"),
-              apply=named_code_apply(DosageForm, "A dosage form")),
+              apply=named_code_apply(DosageForm, "A dosage form"),
+              usage=((*USED_BY_ITEMS, "dosage_form_id"),)),
 
     MasterDef(path="uom", name="UOM", model=Uom, schema=UomIn,
               manage_perm=perms.MASTER_UOM_MANAGE, serialize=uom_out,
               search_cols=("name", "code"), order_col="code", paginated=False,
-              apply=apply_uom, filters=("uom_class",)),
+              apply=apply_uom, filters=("uom_class",),
+              usage=((*USED_BY_ITEMS, "uom_id"), ("Indent lines", "ind_indent_items", "uom_id"), ("Packages", "mst_packaging", "uom_id"),)),
 
     # mst_uom_conversions has no is_active column, so this master cannot be
     # deactivated; the DELETE route still registers and returns a clear 400.
@@ -1259,7 +1422,8 @@ MASTERS: list[MasterDef] = [
 
     MasterDef(path="warehouses", name="Warehouse", model=Warehouse, schema=WarehouseIn,
               manage_perm=perms.MASTER_LOCATION_MANAGE, serialize=warehouse_out,
-              search_cols=("name", "code"), apply=apply_warehouse),
+              search_cols=("name", "code"), apply=apply_warehouse,
+              usage=WAREHOUSE_USAGE),
 
     MasterDef(path="bins", name="Bin", model=Bin, schema=BinIn,
               manage_perm=perms.MASTER_LOCATION_MANAGE, serialize=bin_out,
@@ -1274,7 +1438,16 @@ MASTERS: list[MasterDef] = [
 
     MasterDef(path="vendors", name="Vendor", model=Vendor, schema=VendorIn,
               manage_perm=perms.MASTER_VENDOR_MANAGE, serialize=vendor_out,
-              search_cols=("name", "code"), default_active_only=True),
+              search_cols=("name", "code"), default_active_only=True,
+              usage=VENDOR_USAGE),
+
+    # No is_active column on the live table, so this master cannot be deactivated;
+    # the DELETE route still registers and returns a clear 400.
+    MasterDef(path="vendor-items", name="Vendor item", model=VendorItem,
+              schema=VendorItemIn, manage_perm=perms.MASTER_VENDOR_MANAGE,
+              serialize=vendor_item_out, search_cols=("item_code", "item_name"),
+              order_col="item_name", apply=apply_vendor_item,
+              filters=("vendor_id", "item_id")),
 
     # ---- simple lookups ----
     # A brand carries its manufacturers inline, so there is no separate mapping
@@ -1282,7 +1455,8 @@ MASTERS: list[MasterDef] = [
     # manufacturer dropdown to the chosen brand.
     MasterDef(path="brands", name="Brand", model=Brand, schema=BrandIn,
               manage_perm=perms.MASTER_BRAND_MANAGE, serialize=brand_out,
-              search_cols=("name", "code"), apply=apply_brand),
+              search_cols=("name", "code"), apply=apply_brand,
+              usage=((*USED_BY_ITEMS, "brand_id"), ("Manufacturer mappings", "mst_brand_manufacturers", "brand_id"), ("General name mappings", "mst_brand_general_names", "brand_id"),)),
 
     MasterDef(path="brand-manufacturers", name="Brand manufacturer",
               model=BrandManufacturer, schema=BrandManufacturerIn,
@@ -1294,12 +1468,14 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="item-classes", name="Item class", model=ItemClass,
               schema=ItemClassIn, manage_perm=perms.MASTER_CLASS_MANAGE,
               serialize=item_class_out, search_cols=("name", "code"),
-              apply=apply_item_class),
+              apply=apply_item_class,
+              usage=((*USED_BY_ITEMS, "item_class_id"), ("Subclasses", "mst_item_sub_classes", "item_class_id"),)),
 
     MasterDef(path="item-sub-classes", name="Item subclass", model=ItemSubClass,
               schema=ItemSubClassIn, manage_perm=perms.MASTER_CLASS_MANAGE,
               serialize=item_sub_class_out, search_cols=("name", "code"),
-              apply=apply_item_sub_class, filters=("item_class_id",)),
+              apply=apply_item_sub_class, filters=("item_class_id",),
+              usage=((*USED_BY_ITEMS, "item_sub_class_id"),)),
 
     MasterDef(path="packaging", name="Packaging", model=Packaging,
               schema=PackagingIn, manage_perm=perms.MASTER_PACKAGING_MANAGE,
@@ -1356,7 +1532,8 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="hsn-codes", name="HSN code", model=HsnCode, schema=HsnIn,
               manage_perm=perms.MASTER_HSN_MANAGE, serialize=hsn_out,
               search_cols=("code", "description"), order_col="code",
-              apply=apply_hsn),
+              apply=apply_hsn,
+              usage=((*USED_BY_ITEMS, "hsn_id"),)),
 
     # ---- bills of material ----
     MasterDef(path="boms", name="BOM", model=Bom, schema=BomIn,

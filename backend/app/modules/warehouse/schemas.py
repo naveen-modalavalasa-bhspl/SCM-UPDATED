@@ -190,6 +190,7 @@ class ReceiptItemWrite(BaseModel):
     rejection_reason: str | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
 
     @field_validator("received_qty", "ordered_qty")
     @classmethod
@@ -253,6 +254,7 @@ class ReceiptItemRead(_Read):
     rejection_reason: str | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
 
 
 class ReceiptRead(_Read):
@@ -348,6 +350,7 @@ class InspectionItemWrite(BaseModel):
     rejection_reason: str | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
 
 
 class InspectionWrite(BaseModel):
@@ -378,6 +381,7 @@ class InspectionItemRead(_Read):
     rejection_reason: str | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
 
 
 class InspectionRead(_Read):
@@ -447,6 +451,7 @@ class PutawayRead(_Read):
     completed_at: datetime | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
     is_serial_tracked: bool = False
     is_asset: bool = False
     created_at: datetime | None = None
@@ -486,6 +491,7 @@ class PutawayConfirm(BaseModel):
     qty: Decimal | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
 
 
 class StockMovementWrite(BaseModel):
@@ -497,6 +503,7 @@ class StockMovementWrite(BaseModel):
     batch_id: int | None = None
     quantity: Decimal = Field(gt=0)
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
     remarks: str | None = Field(default=None, max_length=500)
 
 
@@ -615,6 +622,7 @@ class IssueItemWrite(BaseModel):
     rate: Decimal | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
 
 
 class IssueWrite(BaseModel):
@@ -655,6 +663,7 @@ class IssueItemRead(_Read):
     amount: Decimal | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
+    imei_numbers: list[str] | None = None
 
 
 class IssueRead(_Read):
@@ -1119,6 +1128,8 @@ class ItemOption(Option):
     uom_code: str | None = None
     is_batch_tracked: bool = False
     is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
+    has_expiry: bool = False
     is_asset: bool = False
     requires_qi: bool = False
 

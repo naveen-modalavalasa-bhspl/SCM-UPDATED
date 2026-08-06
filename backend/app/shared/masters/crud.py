@@ -6,12 +6,13 @@ model, input schema, permission, searchable columns, how a row is serialised —
 data, so it lives in `defs.py` and this module stays the only place the behaviour is
 written down. Adding a master is a new MasterDef, not a new file.
 """
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +21,12 @@ from app.core.dependencies import get_current_user, require_permission
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.shared.enums import AuditAction
+from app.shared.masters.bulk import register_bulk_routes
+
+
+# A usage declaration names a table and a column. Nothing from a request is ever
+# interpolated into SQL, but the check keeps that true if defs.py is edited carelessly.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 async def _audit(db: AsyncSession, **kwargs) -> None:
@@ -62,6 +69,11 @@ class MasterDef:
     # Optional guard for masters whose active rows form an ordered structure. Item
     # packaging, for example, may remove only its highest level.
     before_deactivate: Callable | None = None
+    # Where this master is referenced, as (label, table, column). Declared as plain
+    # strings rather than models because most referents live in app.modules, and
+    # shared may not import a module (rule 5). Powers GET {base}/{id}/usage, so the
+    # admin is told "used by 42 items" before deactivating rather than after.
+    usage: Sequence[tuple[str, str, str]] = ()
 
 
 async def _write(db: AsyncSession, defn: MasterDef, commit: bool = False) -> None:
@@ -114,6 +126,10 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
     schema = defn.schema
     base = f"/api/{defn.path}"
 
+    # Every master gets template/export/import for free, from the same schema the
+    # CRUD routes validate against — so a new MasterDef is still just a MasterDef.
+    register_bulk_routes(router, defn, write=_write, audit=_audit)
+
     # Reading masters is open to any authenticated user: every module's dropdowns
     # depend on them. Writing needs the master's own manage permission (rule 6).
     @router.get(base, name=f"list_{defn.path}")
@@ -152,6 +168,30 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         page = await paginate(db, stmt, params)
         page["items"] = [defn.serialize(r) for r in page["items"]]
         return page
+
+    @router.get(base + "/{row_id}/usage", name=f"usage_{defn.path}")
+    async def row_usage(
+        row_id: int,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(get_current_user),
+    ):
+        """Who points at this row. Read before offering to deactivate it, so the
+        admin decides knowing the blast radius instead of discovering it later."""
+        counts = []
+        for label, table, column in defn.usage:
+            if not (_IDENTIFIER.match(table) and _IDENTIFIER.match(column)):
+                raise ValidationError(f"Bad usage declaration for {defn.path}")
+            # Interpolated, not bound: an identifier cannot be a bind parameter. The
+            # values are constants from defs.py checked against _IDENTIFIER above —
+            # nothing from the request reaches this string.
+            total = await db.scalar(
+                text(f"SELECT COUNT(*) FROM {table} WHERE {column} = :row_id"),
+                {"row_id": row_id},
+            )
+            if total:
+                counts.append({"label": label, "count": int(total)})
+        return {"id": row_id, "total": sum(c["count"] for c in counts),
+                "used_by": counts}
 
     if defn.read_only:
         return

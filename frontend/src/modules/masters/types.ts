@@ -89,13 +89,39 @@ export interface MasterVendor {
   id: number;
   code: string;
   name: string;
+  vendor_type?: string | null;
   contact_person?: string | null;
   phone?: string | null;
   email?: string | null;
+  address?: string | null;
   city?: string | null;
   state?: string | null;
+  pincode?: string | null;
   gstin?: string | null;
+  pan?: string | null;
+  payment_terms_days?: number | null;
+  credit_limit?: number | null;
+  rating?: number | null;
+  is_approved?: boolean;
+  is_blacklisted?: boolean;
   is_active: boolean;
+}
+
+/** What a vendor charges for an item and how long they take. The live table has
+ *  carried these rows since before there was a screen for them. */
+export interface MasterVendorItem {
+  id: number;
+  vendor_id: number;
+  item_id: number;
+  vendor_name?: string | null;
+  vendor_code?: string | null;
+  item_code?: string | null;
+  item_name?: string | null;
+  vendor_item_code?: string | null;
+  last_rate?: number | null;
+  lead_time_days?: number | null;
+  min_order_qty?: number | null;
+  is_preferred: boolean;
 }
 
 export type UomClass =
@@ -197,6 +223,18 @@ export interface MasterBrand {
    *  on the brand itself rather than on a mapping screen of their own. */
   manufacturer_ids: number[];
   manufacturer_names: string[];
+  is_active: boolean;
+}
+
+export interface MasterGeneralName {
+  id: number;
+  code: string;
+  name: string;
+  description?: string | null;
+  /** The brands that sell this general name. Same call as MasterBrand above: edited
+   *  on the general name itself, and read by the item form to narrow Brand. */
+  brand_ids: number[];
+  brand_names: string[];
   is_active: boolean;
 }
 

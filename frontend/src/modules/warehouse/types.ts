@@ -255,6 +255,7 @@ export interface ReceiptItem {
   uom_code?: string | null;
   is_asset?: boolean;
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   ordered_qty: number;
   received_qty: number;
   accepted_qty: number;
@@ -272,6 +273,7 @@ export interface ReceiptItem {
   rejection_reason?: string | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  imei_numbers?: string[] | null;
 }
 
 export interface ReceiptItemWrite {
@@ -286,6 +288,7 @@ export interface ReceiptItemWrite {
   uom_code?: string | null;
   is_asset?: boolean;
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   ordered_qty?: number;
   received_qty: number;
   accepted_qty?: number;
@@ -298,6 +301,7 @@ export interface ReceiptItemWrite {
   rejection_reason?: string | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  imei_numbers?: string[] | null;
 }
 
 export interface ReceiptWrite {
@@ -372,6 +376,7 @@ export interface InspectionItem {
   rejection_reason?: string | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  imei_numbers?: string[] | null;
 }
 
 export interface InspectionItemWrite {
@@ -388,6 +393,7 @@ export interface InspectionItemWrite {
   rejection_reason?: string | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  imei_numbers?: string[] | null;
 }
 
 export interface InspectionWrite {
@@ -436,8 +442,10 @@ export interface Putaway {
   completed_at?: string | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  imei_numbers?: string[] | null;
   /** Serials are optional upstream but mandatory here — the screen asks when this is set. */
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   is_asset?: boolean;
   created_at?: string;
 }
@@ -447,6 +455,7 @@ export interface PutawayConfirm {
   qty?: number;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  imei_numbers?: string[] | null;
 }
 
 /** A GRN line offered to the manual putaway picker. */
@@ -505,6 +514,7 @@ export interface PickingItem {
   item_name?: string | null;
   uom_code?: string | null;
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   bin_id?: number | null;
   bin_code?: string | null;
   batch_id?: number | null;
@@ -610,6 +620,7 @@ export interface IssueItem {
   item_name?: string | null;
   uom_code?: string | null;
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   bin_id?: number | null;
   bin_code?: string | null;
   batch_id?: number | null;
@@ -622,6 +633,7 @@ export interface IssueItem {
   amount?: number | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  imei_numbers?: string[] | null;
 }
 
 export interface IssueItemWrite {
@@ -631,6 +643,7 @@ export interface IssueItemWrite {
   item_code?: string | null;
   item_name?: string | null;
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   bin_id?: number | null;
   batch_id?: number | null;
   requested_qty: number;
@@ -638,6 +651,7 @@ export interface IssueItemWrite {
   rate?: number | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
+  imei_numbers?: string[] | null;
 }
 
 export interface StockMovement {
@@ -877,6 +891,7 @@ export interface ConsignmentPackageItemWrite {
   serial_no?: string | null;
   serial_numbers?: string[];
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   quantity: number;
   rate?: number | null;
   remarks?: string | null;
@@ -925,6 +940,7 @@ export interface IssueDispatchSourceItem extends DispatchItemWrite {
   uom_code?: string | null;
   batch_no?: string | null;
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   serial_numbers?: string[];
 }
 
@@ -1125,6 +1141,7 @@ export interface ItemOption extends Option {
   uom_code?: string | null;
   is_batch_tracked?: boolean;
   is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   is_asset?: boolean;
   requires_qi?: boolean;
 }

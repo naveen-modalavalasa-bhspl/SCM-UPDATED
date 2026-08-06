@@ -7,6 +7,8 @@ import { Plus, Search } from "lucide-react";
 import {
   Button, Can, Field, Input, ResponsiveList, Select, type Column,
 } from "@/shared/components";
+import { BulkBar } from "./BulkBar";
+import type { BulkApi, MasterUsage } from "../api";
 
 export type FieldType = "text" | "number" | "select" | "switch" | "multiselect";
 export interface Option { value: string | number; label: string }
@@ -18,6 +20,9 @@ export interface FormField {
   options?: Option[];
   required?: boolean;
   placeholder?: string;
+  /** Shown under the field. For rules the label cannot carry, e.g. what an empty
+   *  multiselect means downstream. */
+  hint?: string;
   maxLength?: number;
   /** Checked against the trimmed value. Pair it with `patternMessage`, or the user
    *  is told a regular expression rather than what to type. */
@@ -141,6 +146,11 @@ interface Props<T extends { id: number }> {
   onDeactivate?: (id: number) => Promise<unknown>;
   searchable?: boolean;
   readOnly?: boolean;
+  /** The master's own api object. Supplying it turns on Template/Export/Import;
+   *  omit it for the two HCM mirrors, which are read-only upstream. */
+  bulk?: BulkApi;
+  /** Supplying it shows what points at a row before it can be deactivated. */
+  usage?: (id: number) => Promise<MasterUsage>;
 }
 
 function buildPayload(fields: FormField[], values: Values): Values {
@@ -172,6 +182,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const [values, setValues] = useState<Values>(p.emptyForm);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [sortKey, setSortKey] = useState("");
 
   // loadError is surfaced, never swallowed. Defaulting a failed list to [] made a
   // broken request look like an empty master, which hid a 422 on every tab that asked
@@ -200,9 +211,35 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
     onError: (e: Error) => setError(e.message),
   });
 
+  // What already points at the row being edited. Read while the modal is open so the
+  // count is on screen before Deactivate is pressed, not discovered afterwards from a
+  // document that lost its master.
+  const { data: usage } = useQuery({
+    queryKey: ["masters", p.queryKey, "usage", editingId],
+    queryFn: () => p.usage!(editingId!),
+    enabled: open && editingId != null && p.usage != null && p.onDeactivate != null,
+  });
+
   const reset = () => { setError(null); setFieldErrors({}); };
   const openNew = () => { setEditingId(null); setValues(p.emptyForm); reset(); setOpen(true); };
   const openEdit = (row: T) => { setEditingId(row.id); setValues(p.toForm(row)); reset(); setOpen(true); };
+
+  // Sorting is done here rather than in ResponsiveList: the list is a shared
+  // component used by every module, and a master's list is already fully loaded, so
+  // there is nothing a server round-trip would add.
+  const sorted = sortKey
+    ? [...data].sort((a, b) => {
+        const column = p.columns.find((c) => c.key === sortKey);
+        if (!column) return 0;
+        const text = (row: T) => {
+          const value = column.render(row);
+          return typeof value === "string" || typeof value === "number"
+            ? String(value)
+            : String((row as Record<string, unknown>)[sortKey] ?? "");
+        };
+        return text(a).localeCompare(text(b), undefined, { numeric: true });
+      })
+    : data;
 
   const canEdit = !p.readOnly;
   // Clearing the field's own error as it is edited keeps a stale message from
@@ -243,6 +280,17 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
             />
           </div>
         )}
+        <select
+          aria-label={`Sort ${p.title.toLowerCase()}`}
+          value={sortKey}
+          onChange={(e) => setSortKey(e.target.value)}
+          className="h-11 rounded-xl border border-line bg-content1 px-3 text-sm outline-none focus:border-brand"
+        >
+          <option value="">Default order</option>
+          {p.columns.filter((c) => c.header).map((c) => (
+            <option key={c.key} value={c.key}>Sort by {c.header}</option>
+          ))}
+        </select>
         <div className="ml-auto">
           {canEdit && (
             <Can do={p.managePerm}>
@@ -251,6 +299,11 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
           )}
         </div>
       </div>
+
+      {p.bulk && (
+        <BulkBar api={p.bulk} managePerm={p.managePerm} queryKey={p.queryKey}
+                 label={p.title} />
+      )}
 
       {loadError ? (
         <div className="rounded-xl border border-bad/30 bg-bad-bg px-4 py-3">
@@ -264,7 +317,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
         </div>
       ) : (
         <ResponsiveList
-          data={data}
+          data={sorted}
           loading={isLoading}
           keyOf={(r) => r.id}
           columns={p.columns}
@@ -288,10 +341,13 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                   const fieldError = fieldErrors[f.key] || undefined;
                   if (f.type === "switch") {
                     return (
-                      <div key={f.key} className="flex items-center justify-between py-1">
-                        <span className="text-sm font-medium text-body">{f.label}</span>
-                        <Switch isSelected={Boolean(val)} onValueChange={(b) => set(f, b)}
-                                color="primary" size="sm" />
+                      <div key={f.key} className="py-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium text-body">{f.label}</span>
+                          <Switch isSelected={Boolean(val)} onValueChange={(b) => set(f, b)}
+                                  color="primary" size="sm" />
+                        </div>
+                        {f.hint && <p className="mt-1 text-xs text-muted">{f.hint}</p>}
                       </div>
                     );
                   }
@@ -303,9 +359,9 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                           value={Array.isArray(val) ? val : []}
                           isInvalid={Boolean(fieldError)}
                           onChange={(next) => set(f, next)} />
-                        {fieldError && (
-                          <span className="mt-1 block text-xs text-bad">{fieldError}</span>
-                        )}
+                        {fieldError
+                          ? <span className="mt-1 block text-xs text-bad">{fieldError}</span>
+                          : f.hint && <span className="mt-1 block text-xs text-muted">{f.hint}</span>}
                       </Field>
                     );
                   }
@@ -348,6 +404,12 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                     by reflex. Records are deactivated, never deleted: documents
                     reference them by id. */}
                 <div>
+                  {usage != null && usage.total > 0 && Boolean(values.is_active) && (
+                    <p className="mb-2 max-w-md text-xs text-muted">
+                      Used by {usage.used_by.map((u) => `${u.count} ${u.label.toLowerCase()}`).join(", ")}.
+                      Deactivating hides it from new documents; existing ones keep it.
+                    </p>
+                  )}
                   {editingId != null && p.onDeactivate && Boolean(values.is_active) && (
                     <Can do={p.managePerm}>
                       <Button variant="ghost"

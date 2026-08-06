@@ -10,8 +10,10 @@ import {
 } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { mastersApi } from "../api";
+import { BulkBar } from "./BulkBar";
 import type {
-  MasterBrandManufacturer, MasterCategoryTag, MasterItem, MasterItemComponent,
+  MasterBrand, MasterBrandManufacturer, MasterCategoryTag, MasterGeneralName,
+  MasterItem, MasterItemComponent,
   MasterItemPackaging, NamedMaster, PackagingBreakdown, UomClass,
 } from "../types";
 
@@ -56,6 +58,22 @@ export function manufacturersForBrand(
     mappings.filter((row) => row.is_active).map((row) => row.manufacturer_id),
   );
   return manufacturers.filter((row) => allowed.has(row.id));
+}
+
+/** The rung above: which brands sell the chosen general name.
+ *
+ *  An unmapped general name falls back to every brand rather than to none. The
+ *  mapping starts empty on the day it ships, and narrowing strictly would mean no
+ *  item could be created until someone had mapped all of them first. Narrowing
+ *  begins the moment a general name is given brands, one at a time. */
+export function brandsForGeneralName(
+  brands: MasterBrand[],
+  general?: MasterGeneralName,
+) {
+  const allowed = general?.brand_ids ?? [];
+  if (!general || allowed.length === 0) return brands;
+  const ids = new Set(allowed);
+  return brands.filter((row) => ids.has(row.id));
 }
 
 /** What the code will look like. The four-digit serial is allocated by the server
@@ -220,6 +238,7 @@ export function ItemMasterTab() {
   );
   const chosenCategory = cats.find((row) => row.id === Number(form.category_id));
   const chosenGeneral = general.data?.find((row) => row.id === Number(form.general_name_id));
+  const brandRows = brandsForGeneralName(brands.data ?? [], chosenGeneral);
   const chosenBrand = brands.data?.find((row) => row.id === Number(form.brand_id));
   const chosenManufacturer = manufacturerRows.find(
     (row) => row.id === Number(form.manufacturer_id),
@@ -367,6 +386,10 @@ export function ItemMasterTab() {
           </Can>
         </div>
       </div>
+      {/* The item master has its own tab component rather than MasterCrud, so the
+          bulk bar is placed by hand here instead of coming with the factory. */}
+      <BulkBar api={mastersApi.items} managePerm="master.item.manage"
+               queryKey="items" label="Items" />
       <ResponsiveList data={items.data?.items ?? []} loading={items.isLoading}
         keyOf={(row) => row.id} columns={columns}
         onRowClick={canManage ? openEdit : undefined}
@@ -400,11 +423,17 @@ export function ItemMasterTab() {
                   worth showing before the code itself exists. */}
               <Field label="Category Path"><Input value={chosenCategory?.path ?? ""} disabled /></Field>
               <Field label="General Name *"><Select value={form.general_name_id}
-                options={opt(general.data ?? [])} onChange={(v) => set("general_name_id", v)} /></Field>
-              <Field label="Brand *"><Select value={form.brand_id}
-                options={opt(brands.data ?? [])} onChange={(v) => {
-                  set("brand_id", v); set("manufacturer_id", "");
+                options={opt(general.data ?? [])} onChange={(v) => {
+                  // Same clear-the-rung-below rule the brand already follows: the
+                  // brand list is about to change, so a stale pick must not survive.
+                  set("general_name_id", v); set("brand_id", ""); set("manufacturer_id", "");
                 }} /></Field>
+              <Field label="Brand *"><Select value={form.brand_id}
+                options={opt(brandRows)} onChange={(v) => {
+                  set("brand_id", v); set("manufacturer_id", "");
+                }}
+                isDisabled={!form.general_name_id}
+                placeholder="Select general name first" /></Field>
               <Field label="Manufacturer *"><Select value={form.manufacturer_id}
                 options={opt(manufacturerRows)} onChange={(v) => set("manufacturer_id", v)}
                 isDisabled={!form.brand_id} placeholder="Select brand first" /></Field>
@@ -1028,7 +1057,10 @@ function ToggleGrid({ form, set }: { form: Form; set: (k:keyof Form,v:Form[keyof
     <Toggle label="Has Batch" value={form.is_batch_tracked} onChange={(v)=>set("is_batch_tracked",v)} />
     <Toggle label="Has Serial" value={form.is_serial_tracked} onChange={(v)=>set("is_serial_tracked",v)} />
     <Toggle label="Has IMEI" value={form.is_imei_tracked} onChange={(v)=>set("is_imei_tracked",v)} />
-    <Toggle label="Has Expiry" value={form.has_expiry} onChange={(v)=>set("has_expiry",v)} />
+    {/* One flag, two words for it: a consumable expires, an asset's warranty ends.
+        The warehouse already labels the same date "Expiry / Warranty" on the GRN
+        line, so the master says it the same way. */}
+    <Toggle label="Has Expiry / Warranty" value={form.has_expiry} onChange={(v)=>set("has_expiry",v)} />
     <Toggle label="Requires QI" value={form.requires_qi} onChange={(v)=>set("requires_qi",v)} />
   </div>;
 }

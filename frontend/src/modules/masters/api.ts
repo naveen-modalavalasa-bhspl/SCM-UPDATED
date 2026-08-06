@@ -5,9 +5,9 @@ import type {
   MasterCategory, MasterCategoryTag, MasterFeature, MasterItem,
   MasterHsnCode, MasterItemClass, MasterItemComponent, MasterItemGroup,
   MasterItemPackaging, MasterItemSpec, MasterPackaging, MasterSpec,
-  MasterUom, MasterUomConversion, MasterVendor, PackagingBreakdown,
+  MasterUom, MasterUomConversion, MasterVendor, MasterVendorItem, PackagingBreakdown,
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
-  MasterBrandManufacturer, MasterItemSubClass, NamedMaster,
+  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, NamedMaster,
 } from "./types";
 
 type ListParams = {
@@ -25,13 +25,57 @@ const all = <T>(url: string) => api.get<{ items: T[] }>(url).then((r) => r.data.
  * the same four calls with a different path. `crud` builds them once instead of
  * repeating the block per master.
  */
+/** Saves a downloaded workbook. The browser cannot be sent straight to the URL: the
+ *  endpoint needs the Authorization header, so the bytes come back through axios and
+ *  are handed to a throwaway object URL. */
+function saveBlob(data: Blob, filename: string) {
+  const url = URL.createObjectURL(data);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+export interface ImportResult {
+  success: boolean; created: number; updated: number; total: number;
+}
+
+export interface MasterUsage {
+  id: number; total: number; used_by: { label: string; count: number }[];
+}
+
+/** The three bulk calls, as `BulkBar` consumes them. Named here rather than
+ *  re-described at each use so the two sides cannot drift. */
+export interface BulkApi {
+  template: () => Promise<void>;
+  export: (p?: ListParams) => Promise<void>;
+  import: (file: File) => Promise<ImportResult>;
+}
+
 function crud<T>(path: string) {
+  const slug = path.replace("/api/", "");
   return {
     list: (p: ListParams = {}) => page<T>(path, p),
     create: (body: Partial<T>) => api.post<T>(path, body).then((r) => r.data),
     update: (id: number, body: Partial<T>) =>
       api.put<T>(`${path}/${id}`, body).then((r) => r.data),
     deactivate: (id: number) => api.delete(`${path}/${id}`).then((r) => r.data),
+    /** Who points at this row, read before offering to deactivate it. */
+    usage: (id: number) =>
+      api.get<MasterUsage>(`${path}/${id}/usage`).then((r) => r.data),
+    template: () => api.get(`${path}/template`, { responseType: "blob" })
+      .then((r) => saveBlob(r.data as Blob, `${slug}-template.xlsx`)),
+    export: (p: ListParams = {}) =>
+      api.get(`${path}/export`, { params: p, responseType: "blob" })
+        .then((r) => saveBlob(r.data as Blob, `${slug}-export.xlsx`)),
+    import: (file: File) => {
+      const body = new FormData();
+      body.append("file", file);
+      return api.post<ImportResult>(`${path}/import`, body).then((r) => r.data);
+    },
   };
 }
 
@@ -39,6 +83,7 @@ export const mastersApi = {
   items: crud<MasterItem>("/api/items"),
   categories: crud<MasterCategory>("/api/item-categories"),
   vendors: crud<MasterVendor>("/api/vendors"),
+  vendorItems: crud<MasterVendorItem>("/api/vendor-items"),
   warehouses: crud<MasterWarehouse>("/api/warehouses"),
   bins: crud<MasterBin>("/api/bins"),
   // HCM owns projects, so the backend registers only the list route (see
@@ -46,7 +91,7 @@ export const mastersApi = {
   projects: { list: (p: ListParams = {}) => page<Project>("/api/projects", p) },
   brands: crud<MasterBrand>("/api/brands"),
   manufacturers: crud<NamedMaster>("/api/manufacturers"),
-  generalNames: crud<NamedMaster>("/api/general-names"),
+  generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
   brandManufacturers: crud<MasterBrandManufacturer>("/api/brand-manufacturers"),
   itemClasses: crud<MasterItemClass>("/api/item-classes"),

@@ -67,6 +67,33 @@ class GeneralName(Base):
     name = Column(String(200), nullable=False)
     description = Column(String(300), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
+    # Same shape and same rules as Brand.manufacturers below: eager because a lazy
+    # load on an async session raises, and save-update only so an unticked brand is
+    # deactivated rather than deleted.
+    brands = relationship(
+        "BrandGeneralName", lazy="selectin", cascade="save-update, merge",
+        primaryjoin="GeneralName.id == BrandGeneralName.general_name_id",
+    )
+
+
+class BrandGeneralName(Base):
+    """Which brands sell a given general name. Mirrors mst_brand_manufacturers: the
+    item form narrows Brand by the chosen General Name, exactly as it narrows
+    Manufacturer by the chosen Brand."""
+    __tablename__ = "mst_brand_general_names"
+    id = pk()
+    general_name_id = Column(ForeignKey("mst_general_names.id"), index=True,
+                             nullable=False)
+    general_name_code = Column(String(10), nullable=True)
+    general_name_name = Column(String(200), nullable=True)
+    brand_id = Column(ForeignKey("mst_brands.id"), index=True, nullable=False)
+    brand_code = Column(String(10), nullable=True)
+    brand_name = Column(String(200), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("general_name_id", "brand_id",
+                         name="uq_general_name_brand"),
+    )
 
 
 class Manufacturer(Base):
@@ -168,34 +195,56 @@ Index("ix_mst_items_is_active", Item.is_active)
 
 
 class Vendor(Base):
-    # Maps only the columns the app reads/writes. The live table has more (vendor_type,
-    # rating, credit_limit, is_approved, is_blacklisted, pincode, payment_terms_days,
-    # pan, address) — some NOT NULL with DB defaults (e.g. vendor_type='MATERIAL').
-    # Those are left UNMAPPED so their defaults apply on insert; mapping a NOT-NULL
-    # column and passing None sends an explicit NULL that overrides the default.
+    """Every column the live table has. The three NOT-NULL ones with DB defaults
+    (vendor_type, is_approved, is_blacklisted) are mapped WITH the same default
+    repeated — that is what makes mapping them safe. Mapping a NOT-NULL column and
+    leaving it unset sends an explicit NULL that overrides the DB default; repeating
+    the default here means an insert that says nothing still sends the right value."""
     __tablename__ = "mst_vendors"
     id = pk()
     code = Column(String(50), unique=True, nullable=False)
     name = Column(String(200), nullable=False, index=True)
+    vendor_type = Column(String(30), nullable=False, default="MATERIAL")
     contact_person = Column(String(150), nullable=True)
     phone = Column(String(30), nullable=True)
     email = Column(String(200), nullable=True)
+    address = Column(String(500), nullable=True)
     city = Column(String(100), nullable=True)
     state = Column(String(100), nullable=True)
+    pincode = Column(String(10), nullable=True)
     gstin = Column(String(20), nullable=True)
+    pan = Column(String(20), nullable=True)
+    payment_terms_days = Column(Integer, nullable=True)
+    credit_limit = Column(Numeric(16, 2), nullable=True)
+    rating = Column(Numeric(4, 2), nullable=True)
+    is_approved = Column(Boolean, nullable=False, default=False)
+    is_blacklisted = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True, index=True)
     created_at = created_at_col()
     updated_at = updated_at_col()
 
 
 class VendorItem(Base):
+    """What a vendor charges for an item and how long they take to supply it. The
+    live table has carried rows since before there was a screen for it; procurement
+    reads this to price a PO and to pick a preferred supplier."""
     __tablename__ = "mst_vendor_items"
     id = pk()
     vendor_id = Column(ForeignKey("mst_vendors.id", ondelete="CASCADE"), index=True, nullable=False)
     item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
-    last_rate = Column(Numeric(14, 2), nullable=True)
-    lead_time_days = Column(Numeric(6, 0), nullable=True)
+    # Snapshots, so the list renders without joining the item master.
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    # The vendor's own part number for the item — what appears on their invoice.
+    vendor_item_code = Column(String(50), nullable=True)
+    last_rate = Column(Numeric(16, 4), nullable=True)
+    lead_time_days = Column(Integer, nullable=True)
+    min_order_qty = Column(Numeric(16, 3), nullable=True)
     is_preferred = Column(Boolean, nullable=False, default=False)
+    # The table carries no vendor snapshot, and the list has to show a vendor name on
+    # every row. Eager (selectin): a lazy load on an async session raises rather than
+    # emitting SQL.
+    vendor = relationship("Vendor", lazy="selectin")
 
 
 class UomConversion(Base):

@@ -35,6 +35,7 @@ export function SerialNumbersModal({
   partial = false,
   available = null,
   pickMode = "reject",
+  noun = "serial",
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -44,6 +45,10 @@ export function SerialNumbersModal({
   /** How many serials the line requires. Ignored in pick mode. */
   quantity: number;
   itemLabel: string;
+  /** What one captured code is called. An IMEI obeys the same rules as a serial —
+   *  one per unit, unique, mandatory on a GRN — so it reuses this modal rather
+   *  than cloning it, and only the wording changes. */
+  noun?: string;
   readOnly?: boolean;
   /** Allow saving fewer serials than the quantity. Capture mode only. */
   partial?: boolean;
@@ -53,6 +58,9 @@ export function SerialNumbersModal({
   pickMode?: "reject" | "select";
 }) {
   const [serials, setSerials] = useState<string[]>([]);
+  // "a serial" but "an IMEI": the article follows the sound, not the spelling.
+  const article = /^[aeiou]/i.test(noun) ? "an" : "a";
+  const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
   const [entry, setEntry] = useState("");
   const [bulkEntry, setBulkEntry] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -321,8 +329,8 @@ export function SerialNumbersModal({
                       add(entry);
                     }
                   }}
-                  placeholder="Scan or type a serial"
-                  aria-label="Serial number"
+                  placeholder={`Scan or type ${article} ${noun}`}
+                  aria-label={`${Noun} number`}
                   className="min-h-11 w-full rounded-md border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
                 />
               </label>
@@ -331,8 +339,8 @@ export function SerialNumbersModal({
                 <textarea
                   value={bulkEntry}
                   onChange={(e) => setBulkEntry(e.target.value)}
-                  placeholder="Paste serial numbers"
-                  aria-label="Bulk serial numbers"
+                  placeholder={`Paste ${noun} numbers`}
+                  aria-label={`Bulk ${noun} numbers`}
                   rows={4}
                   className="min-h-28 w-full resize-y rounded-md border border-line bg-content1 px-3 py-2 font-mono text-sm text-ink outline-none placeholder:font-sans placeholder:text-muted focus:border-brand"
                 />
@@ -376,7 +384,7 @@ export function SerialNumbersModal({
 
         <ModalFooter>
           <Button variant="subtle" onClick={onClose}>{readOnly ? "Close" : "Cancel"}</Button>
-          {!readOnly && <Button onClick={save}>Save serials</Button>}
+          {!readOnly && <Button onClick={save}>Save {noun}s</Button>}
         </ModalFooter>
       </ModalContent>
     </Modal>

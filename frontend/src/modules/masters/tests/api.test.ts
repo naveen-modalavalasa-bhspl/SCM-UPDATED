@@ -8,7 +8,7 @@ const CRUD_MASTERS = [
   "brandManufacturers", "itemClasses", "itemSubClasses",
   "packaging", "features", "attributes",
   "specs", "categoryTags", "itemGroups", "itemComponents", "itemPackaging",
-  "boms", "bomItems",
+  "boms", "bomItems", "vendorItems",
 ] as const;
 
 describe("masters api", () => {
@@ -20,8 +20,19 @@ describe("masters api", () => {
       "itemClasses", "itemComponents", "itemGroups", "itemPackaging",
       "itemSpecs", "itemSubClasses", "items", "manufacturers",
       "packaging", "projects", "specs", "uom", "uomConversions", "userGroups",
-      "vendors", "warehouses",
+      "vendorItems", "vendors", "warehouses",
     ]);
+  });
+
+  it("every factory-backed master can be templated, exported and imported", () => {
+    // The three bulk calls come from the same backend factory as list/create, so a
+    // master that has CRUD but no template is a wiring mistake, not a design choice.
+    for (const key of CRUD_MASTERS) {
+      expect(typeof mastersApi[key].template).toBe("function");
+      expect(typeof mastersApi[key].export).toBe("function");
+      expect(typeof mastersApi[key].import).toBe("function");
+      expect(typeof mastersApi[key].usage).toBe("function");
+    }
   });
 
   it("factory-backed masters expose list, create, update and deactivate", () => {

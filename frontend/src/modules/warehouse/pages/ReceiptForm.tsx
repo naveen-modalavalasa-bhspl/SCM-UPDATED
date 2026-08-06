@@ -49,6 +49,7 @@ const emptyLine = (): ReceiptItemWrite => ({
   uom_code: null,
   is_asset: false,
   is_serial_tracked: false,
+  is_imei_tracked: false,
   ordered_qty: 0,
   received_qty: 0,
   accepted_qty: 0,
@@ -60,6 +61,7 @@ const emptyLine = (): ReceiptItemWrite => ({
   bin_id: null,
   remarks: null,
   serial_numbers: null,
+  imei_numbers: null,
 });
 
 /** Line columns a gate entry does not ask for — they belong to the GRN, after the
@@ -109,6 +111,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   // Documents picked before the first save: they have no receipt to hang off yet.
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   const [serialLine, setSerialLine] = useState<number | null>(null);
+  const [imeiLine, setImeiLine] = useState<number | null>(null);
   const [confirming, setConfirming] = useState<"submit" | "complete" | null>(null);
 
   const { data: doc, isLoading } = useQuery({
@@ -159,6 +162,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         uom_code: l.uom_code,
         is_asset: l.is_asset,
         is_serial_tracked: l.is_serial_tracked,
+        is_imei_tracked: l.is_imei_tracked,
         ordered_qty: num(l.ordered_qty),
         received_qty: num(l.received_qty),
         accepted_qty: num(l.accepted_qty),
@@ -171,6 +175,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         rejection_reason: l.rejection_reason,
         remarks: l.remarks,
         serial_numbers: l.serial_numbers,
+        imei_numbers: l.imei_numbers,
       })),
     });
   }, [doc]);
@@ -209,6 +214,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           uom_code: line.uom_code,
           is_asset: line.is_asset,
           is_serial_tracked: line.is_serial_tracked,
+          is_imei_tracked: line.is_imei_tracked,
           ordered_qty: num(line.ordered_qty),
           received_qty: num(line.received_qty),
           accepted_qty: num(line.received_qty),
@@ -221,6 +227,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           rejection_reason: null,
           remarks: line.remarks,
           serial_numbers: line.serial_numbers,
+          imei_numbers: line.imei_numbers,
         })),
       });
     },
@@ -271,6 +278,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       }
       if (!isGrn && actual > required) {
         throw new Error(`Line ${index + 1}: ${actual} serial numbers for ${required} received units.`);
+      }
+    }
+
+    // Same three rules for IMEIs. The backend enforces them too; this only saves the
+    // storekeeper a round-trip once the lines are already on screen.
+    for (const [index, line] of form.items.entries()) {
+      if (!line.is_imei_tracked) continue;
+      const required = Math.floor(num(line.received_qty));
+      if (num(line.received_qty) !== required) {
+        throw new Error(`Line ${index + 1}: IMEI-tracked received quantity must be a whole number.`);
+      }
+      const actual = line.imei_numbers?.length ?? 0;
+      if (isGrn && actual !== required) {
+        throw new Error(`Line ${index + 1}: enter exactly ${required} IMEI numbers before saving.`);
+      }
+      if (!isGrn && actual > required) {
+        throw new Error(`Line ${index + 1}: ${actual} IMEI numbers for ${required} received units.`);
       }
     }
   };
@@ -384,7 +408,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 uom_code: item?.uom_code ?? null,
                 is_asset: item?.is_asset ?? false,
                 is_serial_tracked: item?.is_serial_tracked ?? false,
+                is_imei_tracked: item?.is_imei_tracked ?? false,
                 serial_numbers: item?.is_serial_tracked ? l.serial_numbers : null,
+                imei_numbers: item?.is_imei_tracked ? l.imei_numbers : null,
               });
             }}
             placeholder="Pick an item"
@@ -548,6 +574,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           onChange={(v) => patchLine(i, { rate: v })}
         />
       ),
+    },
+    {
+      key: "imeis",
+      header: "IMEIs",
+      width: "w-28",
+      hideOnNarrow: true,
+      render: (l, i) => {
+        if (!l.is_imei_tracked) return <span className="text-xs text-muted">—</span>;
+        const captured = l.imei_numbers?.length ?? 0;
+        const required = Math.floor(num(l.received_qty));
+        return (
+          <Button variant="ghost" onClick={() => setImeiLine(i)}>
+            <ScanLine className="h-4 w-4" />
+            {captured || required ? `${captured}/${required}` : "Add"}
+          </Button>
+        );
+      },
     },
     {
       key: "serials",
@@ -821,6 +864,24 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         readOnly={locked}
         partial={!isGrn}
         onSave={(serials) => serialLine !== null && patchLine(serialLine, { serial_numbers: serials })}
+      />
+
+      <SerialNumbersModal
+        noun="IMEI"
+        isOpen={imeiLine !== null}
+        onClose={() => setImeiLine(null)}
+        quantity={imeiLine === null ? 0 : num(form.items[imeiLine]?.received_qty)}
+        initial={imeiLine === null ? [] : form.items[imeiLine]?.imei_numbers ?? []}
+        itemLabel={
+          imeiLine === null
+            ? ""
+            : savedLine(imeiLine)?.item_name
+              ?? form.items[imeiLine]?.item_name
+              ?? `Line ${imeiLine + 1}`
+        }
+        readOnly={locked}
+        partial={!isGrn}
+        onSave={(imeis) => imeiLine !== null && patchLine(imeiLine, { imei_numbers: imeis })}
       />
 
       <ConfirmModal

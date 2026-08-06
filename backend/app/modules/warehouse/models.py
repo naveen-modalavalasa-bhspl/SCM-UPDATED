@@ -157,6 +157,9 @@ class ReceiptItem(Base):
     rejection_reason = Column(String(300), nullable=True)
     remarks = Column(String(500), nullable=True)
     serial_numbers = Column(JSON, nullable=True)
+    # Same shape as serial_numbers above: an IMEI names the same physical unit a
+    # serial does, so one storage idea rather than two.
+    imei_numbers = Column(JSON, nullable=True)
 
     receipt = relationship("Receipt", back_populates="items")
 
