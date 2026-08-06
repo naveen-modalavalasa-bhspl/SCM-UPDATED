@@ -301,6 +301,24 @@ export interface Ladder extends LadderPolicy {
   in_flight: number;
 }
 
+/** One document still climbing a ladder that has since been replaced. Correct
+ *  behaviour — the chain is frozen at submit — but worth being able to see. */
+export interface StaleInstance {
+  instance_id: number;
+  doc_type: string;
+  doc_no: string | null;
+  doc_id: number;
+  raised_by: string | null;
+  started_at: string | null;
+  stage_name: string | null;
+  stage_sequence: number;
+  ladder_code: string;
+  project_name: string | null;
+  running_version: number;
+  live_version: number;
+  versions_behind: number;
+}
+
 export interface LadderOptions {
   projects: { id: number; name: string }[];
   doc_types: { code: string; label: string; module: string }[];

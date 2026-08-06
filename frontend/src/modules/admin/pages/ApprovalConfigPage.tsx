@@ -295,6 +295,23 @@ export function ApprovalConfigPage() {
         <div className="mb-4 rounded-lg bg-bad-bg px-3 py-2 text-sm text-bad">{error}</div>
       )}
 
+      {/* Warnings from the last save. A rung at a rank no reporting line climbs
+          through saves fine and then silently approves nothing, so the only place
+          this can be said usefully is right after the save that caused it. */}
+      {(save.data?.warnings ?? []).length > 0 && (
+        <div className="mb-4 rounded-lg bg-warn-bg px-3 py-2 text-sm text-warn">
+          <p className="mb-1 inline-flex items-center gap-1.5 font-medium">
+            <AlertTriangle className="h-4 w-4" />
+            Saved, but check these rungs
+          </p>
+          <ul className="list-disc pl-5">
+            {save.data!.warnings.map((line) => <li key={line}>{line}</li>)}
+          </ul>
+        </div>
+      )}
+
+      <StaleLadderPanel />
+
       <Card className="mb-5 p-4">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field
@@ -631,5 +648,84 @@ export function ApprovalConfigPage() {
         </ModalContent>
       </Modal>
     </div>
+  );
+}
+
+/** Documents still climbing a ladder that has since been replaced.
+ *
+ *  This is not a fault list. Freezing the chain at submit is the correct behaviour —
+ *  it is what stops an edit moving a document that is already halfway through. But it
+ *  is invisible, and "I fixed the ladder, so why is it still sitting with the old
+ *  approver" is the question it answers. Collapsed by default: on a healthy setup it
+ *  is noise, and on an unhealthy one the count in the header is the whole message.
+ *
+ *  Deliberately NOT scoped to the project on screen. The point is to see all of them
+ *  at once, which is the opposite of the rest of this page. */
+function StaleLadderPanel() {
+  const [open, setOpen] = useState(false);
+  const stale = useQuery({
+    queryKey: ["admin", "ladders", "stale"],
+    queryFn: () => adminApi.ladders.staleInFlight(),
+    staleTime: 60 * 1000,
+  });
+
+  const total = stale.data?.total ?? 0;
+  if (total === 0) return null;
+
+  return (
+    <Card className="mb-5 p-4">
+      <button
+        type="button"
+        onClick={() => setOpen((wasOpen) => !wasOpen)}
+        className="flex min-h-11 w-full items-center gap-2 text-left text-sm"
+      >
+        <ListOrdered className="h-4 w-4 text-muted" />
+        <span className="font-medium">
+          {total} document{total > 1 ? "s are" : " is"} running on a replaced ladder
+        </span>
+        <span className="ml-auto text-muted">{open ? "Hide" : "Show"}</span>
+      </button>
+
+      {open && (
+        <div className="mt-3 overflow-x-auto border-t border-line pt-3">
+          <p className="mb-3 text-xs text-muted">
+            Each of these entered approval before the ladder was last saved, so it
+            finishes on the version it started with. Nothing here needs fixing — cancel
+            and re-raise a document only if it must follow the new ladder.
+          </p>
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs uppercase text-muted">
+              <tr>
+                <th className="py-1 pr-3">Document</th>
+                <th className="py-1 pr-3">Project</th>
+                <th className="py-1 pr-3">Raised by</th>
+                <th className="py-1 pr-3">Waiting at</th>
+                <th className="py-1 pr-3">Running</th>
+                <th className="py-1">Live</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stale.data!.items.map((row) => (
+                <tr key={row.instance_id} className="border-t border-line">
+                  <td className="py-1.5 pr-3">{row.doc_no ?? `#${row.doc_id}`}</td>
+                  <td className="py-1.5 pr-3">{row.project_name ?? "—"}</td>
+                  <td className="py-1.5 pr-3">{row.raised_by ?? "—"}</td>
+                  <td className="py-1.5 pr-3">{row.stage_name ?? "—"}</td>
+                  <td className="py-1.5 pr-3">
+                    v{row.running_version}
+                    {row.versions_behind > 0 && (
+                      <span className="ml-1 text-muted">
+                        ({row.versions_behind} behind)
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-1.5">v{row.live_version}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }

@@ -385,7 +385,34 @@ async def save_ladder(db: AsyncSession, data: LadderIn, user) -> dict:
     await db.commit()
     logger.info("Approval ladder %s saved as version %s by %s",
                 wf.code, version, getattr(user, "full_name", user))
-    return await get_ladder(db, data.project_id, data.doc_type)
+
+    saved = await get_ladder(db, data.project_id, data.doc_type)
+    saved["warnings"] = [*await _unreachable_warnings(db, data, wf.code, version),
+                         *saved.get("warnings", [])]
+    return saved
+
+
+async def _unreachable_warnings(db: AsyncSession, data: LadderIn, code: str,
+                                version: int) -> list[str]:
+    """Rungs that were saved against ranks no reporting line can reach.
+
+    Computed AFTER the commit, and never allowed to fail the request: the ladder is
+    already durably version N+1 by this point. An admin configuring a project before
+    its HCM data lands must be able to save a ladder that resolves to nobody today —
+    this only says so out loud, on the screen and in the log, the same way the
+    fallback path already announces itself.
+    """
+    try:
+        warnings = await ladder.unreachable_rung_warnings(
+            db, data.project_id, data.rungs)
+    except Exception:  # noqa: BLE001 - a warning must never undo a saved ladder
+        logger.exception("Could not check ladder %s v%s for unreachable rungs",
+                         code, version)
+        return []
+    for line in warnings:
+        logger.warning("Approval ladder %s v%s has an unreachable rung: %s",
+                       code, version, line)
+    return warnings
 
 
 async def copy_ladder(db: AsyncSession, data: LadderCopyIn, user) -> dict:
@@ -419,6 +446,58 @@ async def copy_ladder(db: AsyncSession, data: LadderCopyIn, user) -> dict:
         ), user)
         copied.append(project_id)
     return {"copied_to": copied}
+
+
+async def stale_instances(db: AsyncSession) -> dict:
+    """Documents still in approval that are climbing a ladder since replaced.
+
+    This is correct behaviour, not a fault: `resolved_chain` is frozen at submit so an
+    edit never moves a document already in flight. But it is invisible, and "I fixed
+    the ladder, why is it still going to the old person" is the question it answers.
+
+    Superseded is read straight off `is_active`: saving writes version N+1 and retires
+    N, so an in-flight instance whose workflow row is inactive is by definition on an
+    old version. No snapshot column is needed, and none exists.
+    """
+    current = (
+        select(Workflow.code, func.max(Workflow.version).label("live_version"))
+        .where(Workflow.is_active.is_(True))
+        .group_by(Workflow.code)
+        .subquery()
+    )
+    rows = (await db.execute(
+        select(
+            Instance.id, Instance.doc_type, Instance.doc_no, Instance.doc_id,
+            Instance.started_by_name, Instance.started_at,
+            Instance.current_stage_name, Instance.current_sequence,
+            Workflow.code, Workflow.version, Workflow.project_name,
+            current.c.live_version,
+        )
+        .join(Workflow, Workflow.id == Instance.workflow_id)
+        .join(current, current.c.code == Workflow.code)
+        .where(
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+            Workflow.is_active.is_(False),
+        )
+        .order_by(Instance.started_at)
+    )).all()
+
+    items = [{
+        "instance_id": r.id,
+        "doc_type": r.doc_type,
+        "doc_no": r.doc_no,
+        "doc_id": r.doc_id,
+        "raised_by": r.started_by_name,
+        "started_at": r.started_at.isoformat() if r.started_at else None,
+        "stage_name": r.current_stage_name,
+        "stage_sequence": r.current_sequence,
+        "ladder_code": r.code,
+        "project_name": r.project_name,
+        "running_version": r.version,
+        "live_version": r.live_version,
+        "versions_behind": max(0, (r.live_version or 0) - (r.version or 0)),
+    } for r in rows]
+    return {"items": items, "total": len(items)}
 
 
 def _validate_doc_type(doc_type: str) -> None:

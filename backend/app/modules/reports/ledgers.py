@@ -1,27 +1,34 @@
 """One declarative spec per report ledger.
 
 Everything the API does — list, filter, search, sort, filter-option dropdowns and
-CSV export — is driven from these four specs, so adding a ledger is adding a
+CSV export — is driven from these specs, so adding a ledger is adding a
 `LedgerSpec` and nothing else. No SQL lives in `router.py` and no column list lives
 in the frontend.
 
 A spec's `source()` returns a SELECT whose columns are already named the way the
 report shows them. `service.py` wraps that in a subquery and filters the subquery,
 which is why the warehouse ledger (a UNION of seven document tables) filters and
-searches exactly like the three single-table ones.
+searches exactly like the single-table ones.
 """
 from dataclasses import dataclass, field
 from typing import Callable
 
-from sqlalchemy import Numeric, String, Select, cast, func, literal, null, select, union_all
+from sqlalchemy import (
+    Numeric, String, Select, case, cast, func, literal, literal_column, null,
+    select, union_all,
+)
+from sqlalchemy.orm import aliased
 
 from app.modules.indents.models import Indent
-from app.modules.inventory.models import StockMovement
+from app.modules.inventory.models import Stock, StockMovement
+from app.modules.reports.enums import AgeBucket, Breach, ExpiryBucket, LedgerKey
+from app.modules.warehouse.enums import IssueDirection, IssueStatus
 from app.modules.warehouse.models import (
-    Dispatch, Inspection, MaterialIssue, Picking, PurchaseReturn, PutawayTask, Receipt,
+    Dispatch, Inspection, MaterialIssue, MaterialIssueLine, Picking, PurchaseReturn,
+    PutawayTask, Receipt,
 )
 from app.platform.rbac import permissions as perms
-from app.platform.workflow.models import Action, Instance
+from app.platform.workflow.models import Action, Instance, Pending
 
 
 @dataclass(frozen=True)
@@ -379,6 +386,450 @@ WAREHOUSE = LedgerSpec(
 )
 
 
+# --------------------------------------------------------------------------- #
+# Stock — what is physically on hand right now, with the ageing and valuation
+# figures the inventory screens already show. The bucket cut points are the ones
+# in `inventory.service.get_stock_ageing`, so the report and the screen can never
+# disagree. The screen computes them in Python over a loaded list; here they are
+# computed by the database, because a report has to be exportable in one query.
+# --------------------------------------------------------------------------- #
+
+def _stock_source() -> Select:
+    # Against the database's own clock, not Python's: a report run tomorrow must
+    # bucket by tomorrow, and a cached NOW() from process start would not.
+    # `last_movement_at` is NULL for a balance that has never moved — coalescing to
+    # now makes that read as zero days old, which is what the ageing screen does.
+    days_in_stock = func.datediff(
+        func.now(), func.coalesce(Stock.last_movement_at, func.now()))
+    days_to_expiry = func.datediff(Stock.expiry_date, func.curdate())
+    return select(
+        Stock.id.label("id"),
+        Stock.item_code.label("item_code"),
+        Stock.item_name.label("item_name"),
+        Stock.warehouse_name.label("warehouse"),
+        Stock.bin_code.label("bin_code"),
+        Stock.batch_no.label("batch_no"),
+        Stock.project_name.label("project"),
+        Stock.uom_code.label("uom"),
+        Stock.total_qty.label("total_qty"),
+        Stock.available_qty.label("available_qty"),
+        Stock.reserved_qty.label("reserved_qty"),
+        Stock.transit_qty.label("transit_qty"),
+        Stock.valuation_rate.label("rate"),
+        Stock.stock_value.label("stock_value"),
+        days_in_stock.label("days_in_stock"),
+        case(
+            (days_in_stock <= 30, AgeBucket.D0_30.value),
+            (days_in_stock <= 60, AgeBucket.D31_60.value),
+            (days_in_stock <= 90, AgeBucket.D61_90.value),
+            else_=AgeBucket.D90_PLUS.value,
+        ).label("age_bucket"),
+        Stock.expiry_date.label("expiry_date"),
+        days_to_expiry.label("days_to_expiry"),
+        # The NULL branch has to come first and be explicit. DATEDIFF(NULL, x) is
+        # NULL, and `NULL <= 30` is NULL rather than false, so every comparison below
+        # would fall through and label an item with no expiry date as "90+".
+        case(
+            (Stock.expiry_date.is_(None), cast(null(), String(20))),
+            (days_to_expiry < 0, ExpiryBucket.EXPIRED.value),
+            (days_to_expiry <= 30, ExpiryBucket.D0_30.value),
+            (days_to_expiry <= 60, ExpiryBucket.D31_60.value),
+            (days_to_expiry <= 90, ExpiryBucket.D61_90.value),
+            else_=ExpiryBucket.D90_PLUS.value,
+        ).label("expiry_bucket"),
+        Stock.last_movement_at.label("last_movement_at"),
+        Stock.updated_at.label("updated_at"),
+    )
+
+
+STOCK = LedgerSpec(
+    key=LedgerKey.STOCK.value,
+    label="Stock",
+    subtitle="Balance on hand with ageing and valuation — one row per item, "
+             "warehouse, bin and batch",
+    permission=perms.STOCK_VIEW,
+    source=_stock_source,
+    columns=[
+        Col("item_code", "Item code"),
+        Col("item_name", "Item"),
+        Col("warehouse", "Warehouse"),
+        Col("bin_code", "Bin", narrow=True),
+        Col("batch_no", "Batch", narrow=True),
+        Col("project", "Project", narrow=True),
+        Col("total_qty", "Total", "qty"),
+        Col("available_qty", "Available", "qty"),
+        Col("reserved_qty", "Reserved", "qty"),
+        Col("transit_qty", "In transit", "qty", narrow=True),
+        Col("uom", "UoM", narrow=True),
+        Col("rate", "Rate", "number", narrow=True),
+        Col("stock_value", "Value", "number"),
+        Col("days_in_stock", "Days in stock", "number", narrow=True),
+        Col("age_bucket", "Age", "status", narrow=True),
+        Col("expiry_date", "Expiry", "date", narrow=True),
+        Col("days_to_expiry", "Days to expiry", "number", narrow=True),
+        Col("expiry_bucket", "Expiry band", "status", narrow=True),
+        Col("last_movement_at", "Last movement", "datetime"),
+    ],
+    filters=[
+        Filt("warehouse", "Warehouse"),
+        Filt("age_bucket", "Age band"),
+        Filt("expiry_bucket", "Expiry band"),
+        Filt("project", "Project"),
+        Filt("item_code", "Item code", kind="text"),
+        Filt("batch_no", "Batch", kind="text"),
+    ],
+    search=["item_code", "item_name", "warehouse", "bin_code", "batch_no", "project"],
+    date_col="updated_at",
+    order_col="updated_at",
+    key_cols=["id"],
+)
+
+
+# --------------------------------------------------------------------------- #
+# Acknowledgements — material that left the warehouse and has not been signed for.
+# This is a chase list, so it holds only the outstanding ones: the moment somebody
+# acknowledges, the row leaves the report. A return (direction IN) is excluded —
+# it exists to reverse an issue, and nobody acknowledges receipt of a return.
+# --------------------------------------------------------------------------- #
+
+def _acknowledgements_source() -> Select:
+    days_pending = func.datediff(func.curdate(), MaterialIssue.issue_date)
+    return (
+        select(
+            MaterialIssue.id.label("id"),
+            MaterialIssue.issue_no.label("doc_no"),
+            MaterialIssue.issue_date.label("doc_date"),
+            MaterialIssue.status.label("status"),
+            MaterialIssue.indent_no.label("indent_no"),
+            Indent.requested_by_name.label("raised_by"),
+            Indent.office_name.label("office"),
+            Indent.project_name.label("project"),
+            Indent.department_name.label("department"),
+            MaterialIssue.warehouse_name.label("warehouse"),
+            MaterialIssue.issued_to_name.label("issued_to"),
+            MaterialIssue.total_items.label("total_items"),
+            MaterialIssue.total_qty.label("total_qty"),
+            days_pending.label("days_pending"),
+            MaterialIssue.issued_by_name.label("issued_by"),
+            MaterialIssue.created_at.label("created_at"),
+        )
+        # Outer join: an issue raised straight against a department carries no
+        # indent, and it still needs acknowledging.
+        .join(Indent, Indent.id == MaterialIssue.indent_id, isouter=True)
+        .where(
+            MaterialIssue.acknowledged_at.is_(None),
+            MaterialIssue.direction == IssueDirection.OUT.value,
+            MaterialIssue.status.in_(
+                [IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value]),
+        )
+    )
+
+
+ACKNOWLEDGEMENTS = LedgerSpec(
+    key=LedgerKey.ACKNOWLEDGEMENTS.value,
+    label="Acknowledgement pending",
+    subtitle="Material issued or dispatched that nobody has signed for yet",
+    permission=perms.INDENT_VIEW,
+    source=_acknowledgements_source,
+    columns=[
+        Col("doc_no", "Issue No"),
+        Col("doc_date", "Issued on", "date"),
+        Col("status", "Status", "status"),
+        Col("days_pending", "Days pending", "number", narrow=True),
+        Col("indent_no", "Indent No"),
+        Col("raised_by", "Raised by"),
+        Col("issued_to", "Issued to"),
+        Col("department", "Department"),
+        Col("project", "Project", narrow=True),
+        Col("office", "Office", narrow=True),
+        Col("warehouse", "Warehouse"),
+        Col("total_items", "Items", "number", narrow=True),
+        Col("total_qty", "Qty", "qty"),
+        Col("issued_by", "Issued by"),
+    ],
+    filters=[
+        Filt("status", "Status"),
+        Filt("warehouse", "Warehouse"),
+        Filt("department", "Department"),
+        Filt("project", "Project"),
+        Filt("raised_by", "Raised by"),
+        Filt("issued_to", "Issued to"),
+    ],
+    search=["doc_no", "indent_no", "raised_by", "issued_to", "department", "warehouse"],
+    date_col="doc_date",
+    order_col="doc_date",
+    key_cols=["id"],
+)
+
+
+# --------------------------------------------------------------------------- #
+# Indent tracker — the monthly view the indent team keeps by hand today.
+#
+# The process document groups this by REGION. There is no region column anywhere
+# on `ind_indents`, and adding one is a schema change, so this groups by the
+# dimensions that do exist — office, project and department. Swap in region here
+# once the column lands; nothing else in this file has to change.
+# --------------------------------------------------------------------------- #
+
+def _indent_tracker_source() -> Select:
+    return select(
+        Indent.id.label("id"),
+        func.date_format(Indent.indent_date, "%Y-%m").label("month"),
+        Indent.indent_no.label("doc_no"),
+        Indent.indent_date.label("doc_date"),
+        Indent.required_date.label("required_date"),
+        Indent.status.label("status"),
+        Indent.priority.label("priority"),
+        Indent.requested_by_name.label("raised_by"),
+        Indent.office_name.label("office"),
+        Indent.project_name.label("project"),
+        Indent.department_name.label("department"),
+        Indent.total_items.label("total_items"),
+        Indent.total_qty.label("total_qty"),
+        Indent.current_approver_name.label("pending_with"),
+        Indent.approved_at.label("approved_at"),
+        func.datediff(func.curdate(), Indent.indent_date).label("days_open"),
+        Indent.created_at.label("created_at"),
+    )
+
+
+INDENT_TRACKER = LedgerSpec(
+    key=LedgerKey.INDENT_TRACKER.value,
+    label="Monthly indent tracker",
+    subtitle="Every indent by month, office, project and department, and where it "
+             "got to",
+    permission=perms.INDENT_VIEW,
+    source=_indent_tracker_source,
+    columns=[
+        Col("month", "Month", "status", narrow=True),
+        Col("doc_no", "Indent No"),
+        Col("doc_date", "Raised on", "date"),
+        Col("required_date", "Required by", "date", narrow=True),
+        Col("status", "Status", "status"),
+        Col("priority", "Priority", "status", narrow=True),
+        Col("raised_by", "Raised by"),
+        Col("office", "Office"),
+        Col("project", "Project"),
+        Col("department", "Department"),
+        Col("total_items", "Items", "number", narrow=True),
+        Col("total_qty", "Qty", "qty"),
+        Col("pending_with", "Pending with"),
+        Col("days_open", "Days open", "number", narrow=True),
+        Col("approved_at", "Approved at", "datetime", narrow=True),
+    ],
+    filters=[
+        Filt("month", "Month"),
+        Filt("status", "Status"),
+        Filt("office", "Office"),
+        Filt("project", "Project"),
+        Filt("department", "Department"),
+        Filt("priority", "Priority"),
+    ],
+    search=["doc_no", "raised_by", "office", "project", "department", "pending_with"],
+    date_col="doc_date",
+    order_col="doc_date",
+    key_cols=["id"],
+)
+
+
+# --------------------------------------------------------------------------- #
+# Approval SLA — how long each rung actually sat on somebody's desk.
+#
+# A stage starts when the previous decision was taken, so the clock for stage N is
+# the gap between action N-1 and action N; stage 1 runs from submission. That is a
+# correlated MAX over the same instance rather than a window function, because the
+# live server's MySQL version is not something this file should assume.
+#
+# `wf_pending` rows are removed once acted on, so `due_at` — and therefore the
+# breach flag — survives only for stages still open. NULL there means "no due date
+# on record", never "on time".
+# --------------------------------------------------------------------------- #
+
+def _approval_sla_source() -> Select:
+    prior = aliased(Action)
+    stage_started = func.coalesce(
+        select(func.max(prior.acted_at))
+        .where(prior.instance_id == Action.instance_id, prior.id < Action.id)
+        .scalar_subquery(),
+        Instance.started_at,
+    )
+    due_at = (
+        select(func.min(Pending.due_at))
+        .where(Pending.instance_id == Action.instance_id,
+               Pending.stage_sequence == Action.stage_sequence)
+        .scalar_subquery()
+    )
+    return (
+        select(
+            Action.id.label("id"),
+            Instance.doc_type.label("doc_type"),
+            Instance.doc_no.label("doc_no"),
+            Action.stage_sequence.label("stage_no"),
+            Action.stage_name.label("stage"),
+            Action.action.label("action"),
+            Action.actor_name.label("approver"),
+            Action.actor_position.label("position"),
+            Instance.started_by_name.label("raised_by"),
+            Instance.started_at.label("submitted_at"),
+            stage_started.label("stage_started_at"),
+            Action.acted_at.label("acted_at"),
+            func.timestampdiff(
+                literal_column("HOUR"), stage_started, Action.acted_at,
+            ).label("hours_taken"),
+            due_at.label("due_at"),
+            case(
+                (due_at.is_(None), cast(null(), String(10))),
+                (Action.acted_at > due_at, Breach.YES.value),
+                else_=Breach.NO.value,
+            ).label("breached"),
+            Instance.status.label("instance_status"),
+            Action.comments.label("comments"),
+        )
+        .join(Instance, Instance.id == Action.instance_id, isouter=True)
+    )
+
+
+APPROVAL_SLA = LedgerSpec(
+    key=LedgerKey.APPROVAL_SLA.value,
+    label="Approval SLA",
+    subtitle="Hours each approval stage actually took, and whether it ran past due",
+    permission=perms.INDENT_VIEW,
+    source=_approval_sla_source,
+    columns=[
+        Col("acted_at", "Decided at", "datetime"),
+        Col("doc_type", "Doc type", "status", narrow=True),
+        Col("doc_no", "Document"),
+        Col("stage_no", "Stage", "number", narrow=True),
+        Col("stage", "Stage name"),
+        Col("approver", "Approver"),
+        Col("position", "Position", narrow=True),
+        Col("action", "Action", "status", narrow=True),
+        Col("hours_taken", "Hours taken", "number"),
+        Col("breached", "Past due", "status", narrow=True),
+        Col("raised_by", "Raised by"),
+        Col("submitted_at", "Submitted at", "datetime", narrow=True),
+        Col("stage_started_at", "Stage started", "datetime", narrow=True),
+        Col("due_at", "Due at", "datetime", narrow=True),
+        Col("instance_status", "Doc state", "status", narrow=True),
+        Col("comments", "Comments"),
+    ],
+    filters=[
+        Filt("doc_type", "Document type"),
+        Filt("action", "Action"),
+        Filt("approver", "Approver"),
+        Filt("position", "Position"),
+        Filt("breached", "Past due"),
+        Filt("stage", "Stage name"),
+    ],
+    search=["doc_no", "approver", "position", "raised_by", "stage", "comments"],
+    date_col="acted_at",
+    order_col="acted_at",
+    key_cols=["id"],
+)
+
+
+# --------------------------------------------------------------------------- #
+# Consumption — what was actually drawn down, per item, per month, per consumer.
+#
+# READ THIS BEFORE TRUSTING THE NUMBER. "Consumption" in the process document means
+# what the field actually USED, and nothing in this system records that: there is no
+# field usage return, so the honest measure available today is what physically left
+# the warehouse and was not sent back. That is what this ledger reports.
+#
+# So `net_qty` is issued minus returned on posted issues only (`is_stock_posted`) —
+# an issue still sitting in approval has consumed nothing. It over-reports where
+# stock is sitting unused at an MDP or in a vehicle, and it cannot see wastage or
+# expiry at the field at all. When field usage reporting exists, this spec is where
+# it plugs in; until then the column is named `net_qty`, not `consumed_qty`, on
+# purpose.
+# --------------------------------------------------------------------------- #
+
+def _consumption_source() -> Select:
+    net_qty = MaterialIssueLine.issued_qty - func.coalesce(
+        MaterialIssueLine.returned_qty, 0)
+    return (
+        select(
+            MaterialIssueLine.id.label("id"),
+            func.date_format(MaterialIssue.issue_date, "%Y-%m").label("month"),
+            MaterialIssueLine.item_code.label("item_code"),
+            MaterialIssueLine.item_name.label("item_name"),
+            MaterialIssueLine.uom_code.label("uom"),
+            MaterialIssueLine.issued_qty.label("issued_qty"),
+            MaterialIssueLine.returned_qty.label("returned_qty"),
+            net_qty.label("net_qty"),
+            MaterialIssueLine.rate.label("rate"),
+            MaterialIssueLine.amount.label("amount"),
+            MaterialIssue.issue_type.label("issue_type"),
+            MaterialIssue.department_name.label("department"),
+            MaterialIssue.project_name.label("project"),
+            MaterialIssue.vehicle_number.label("vehicle"),
+            MaterialIssue.issued_to_name.label("issued_to"),
+            MaterialIssue.warehouse_name.label("warehouse"),
+            MaterialIssue.issue_no.label("doc_no"),
+            MaterialIssue.issue_date.label("doc_date"),
+            MaterialIssue.indent_no.label("indent_no"),
+            MaterialIssueLine.batch_no.label("batch_no"),
+            MaterialIssueLine.expiry_date.label("expiry_date"),
+            MaterialIssue.status.label("status"),
+        )
+        .join(MaterialIssue, MaterialIssue.id == MaterialIssueLine.issue_id)
+        .where(
+            MaterialIssue.direction == IssueDirection.OUT.value,
+            # The flag the issue itself sets when stock actually moved. Filtering on
+            # status instead would count an approved-but-unposted issue as consumed.
+            MaterialIssue.is_stock_posted.is_(True),
+        )
+    )
+
+
+CONSUMPTION = LedgerSpec(
+    key=LedgerKey.CONSUMPTION.value,
+    label="Consumption",
+    subtitle="Issued minus returned, per item and month — what left the warehouse "
+             "and stayed out",
+    permission=perms.STOCK_VIEW,
+    source=_consumption_source,
+    columns=[
+        Col("month", "Month", "status", narrow=True),
+        Col("item_code", "Item code"),
+        Col("item_name", "Item"),
+        Col("net_qty", "Net qty", "qty"),
+        Col("uom", "UoM", narrow=True),
+        Col("issued_qty", "Issued", "qty", narrow=True),
+        Col("returned_qty", "Returned", "qty", narrow=True),
+        Col("rate", "Rate", "number", narrow=True),
+        Col("amount", "Value", "number"),
+        Col("issue_type", "Type", "status", narrow=True),
+        Col("department", "Department"),
+        Col("project", "Project"),
+        Col("vehicle", "Vehicle", narrow=True),
+        Col("issued_to", "Issued to"),
+        Col("warehouse", "Warehouse"),
+        Col("doc_no", "Issue No"),
+        Col("doc_date", "Issued on", "date"),
+        Col("indent_no", "Indent No", narrow=True),
+        Col("batch_no", "Batch", narrow=True),
+        Col("expiry_date", "Expiry", "date", narrow=True),
+    ],
+    filters=[
+        Filt("month", "Month"),
+        Filt("issue_type", "Type"),
+        Filt("department", "Department"),
+        Filt("project", "Project"),
+        Filt("warehouse", "Warehouse"),
+        Filt("item_code", "Item code", kind="text"),
+    ],
+    search=["item_code", "item_name", "doc_no", "indent_no", "department", "project",
+            "issued_to", "vehicle"],
+    date_col="doc_date",
+    order_col="doc_date",
+    key_cols=["id"],
+)
+
+
 LEDGERS: dict[str, LedgerSpec] = {
-    spec.key: spec for spec in (INDENTS, APPROVALS, INVENTORY, WAREHOUSE)
+    spec.key: spec for spec in (
+        INDENTS, APPROVALS, INVENTORY, WAREHOUSE,
+        STOCK, ACKNOWLEDGEMENTS, INDENT_TRACKER, APPROVAL_SLA, CONSUMPTION,
+    )
 }

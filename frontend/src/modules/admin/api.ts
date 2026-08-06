@@ -5,6 +5,7 @@ import type {
   LadderDepartment, LadderOptions, LadderPolicy, LadderPosition, LadderPost,
   LadderPreview, LadderRank,
   LadderRung, NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult,
+  StaleInstance,
   SyncResult, SyncStatus, WorkflowDefinition, WorkflowOptions,
 } from "./types";
 
@@ -137,6 +138,12 @@ export const adminApi = {
       api.post<{ copied_to: number[] }>("/api/workflow/ladders/copy", {
         from_project_id: fromProjectId, doc_type: docType, to_project_ids: toProjectIds,
       }).then((r) => r.data),
+    /** Documents still climbing a ladder that has since been replaced. Not scoped to
+     *  the project on screen: the point is to see every one of them in one place. */
+    staleInFlight: () =>
+      api.get<{ items: StaleInstance[]; total: number }>(
+        "/api/workflow/ladders/in-flight-stale",
+      ).then((r) => r.data),
   },
   // ---- Build your own ladder: departments, then the posts inside one ----
   // A department is a dozen posts, not three thousand, which is why this screen shows

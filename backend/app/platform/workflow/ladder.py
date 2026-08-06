@@ -303,6 +303,93 @@ async def _depths(db: AsyncSession, positions: list) -> dict[int, int]:
     return depths
 
 
+async def _roles_of(db: AsyncSession,
+                    position_ids: set[int]) -> dict[int, int | None]:
+    """position -> rank, for ACTIVE posts only.
+
+    resolve_chain refuses an inactive ancestor (`parent.is_active`) but keeps climbing
+    past it, so an inactive post is walked through and never collected. Leaving it out
+    of this map reproduces exactly that.
+    """
+    out: dict[int, int | None] = {}
+    for chunk in _chunks(list(position_ids)):
+        rows = (await db.execute(
+            select(HcmPosition.id, HcmPosition.role_id)
+            .where(HcmPosition.id.in_(chunk), HcmPosition.is_active.is_(True))
+        )).all()
+        out.update({row[0]: row[1] for row in rows})
+    return out
+
+
+async def reachable_positions(db: AsyncSession,
+                              project_id: int | None) -> dict[int, set[int]]:
+    """rank -> the posts at it a real climb actually passes through.
+
+    The same walk resolve_chain does at submit time, run from every post a raiser in
+    this scope could be sitting in instead of from one document's raiser: start at the
+    post, follow `parent_position_id` upward, stop at MAX_CLIMB or on a cycle. A rank no
+    walk ever passes through can be switched on all day and will never approve anything.
+
+    That is not a hypothetical. The live mirror holds 3,733 active posts, of which 41
+    are islands — no parent AND no children — and only 8 of its 18 ranks lie on anybody's
+    reporting line at all.
+    """
+    rows = await _project_position_rows(db, project_id)
+    if not rows:
+        return {}
+    parent_of = await _parent_map(db, rows)
+    role_of = await _roles_of(db, set(parent_of))
+
+    reached: dict[int, set[int]] = {}
+    for row in rows:
+        seen = {row.id}
+        current = row.id
+        for _hop in range(MAX_CLIMB):
+            parent = parent_of.get(current)
+            if parent is None or parent in seen:
+                break
+            seen.add(parent)
+            role_id = role_of.get(parent)
+            if role_id is not None:
+                reached.setdefault(role_id, set()).add(parent)
+            current = parent
+    return reached
+
+
+async def unreachable_rung_warnings(db: AsyncSession, project_id: int | None,
+                                    rungs: list) -> list[str]:
+    """One line per switched-on rung no reporting line can reach. A warning, not a bar.
+
+    Saving must still succeed: an administrator setting a ladder up before HCM data
+    lands has to be able to save it. But a rung nobody climbs through is silently
+    skipped at submit, and a ladder made entirely of those strands the document on the
+    ADMIN_SAFETY_NET fallback — which is how fifteen documents in two days ended up
+    routed to System Admin.
+    """
+    live = [rung for rung in rungs
+            if getattr(rung, "is_enabled", False) or getattr(rung, "conditions", None)]
+    if not live:
+        return []
+    reached = await reachable_positions(db, project_id)
+
+    warnings: list[str] = []
+    for rung in live:
+        candidates = reached.get(rung.position_role_id, set())
+        narrowed = getattr(rung, "selected_position_ids", None)
+        if narrowed is not None:
+            candidates = candidates & set(narrowed)
+        if candidates:
+            continue
+        warnings.append(
+            f"{rung.name}: no reporting line climbs through it — "
+            + ("none of the positions picked for this rung has"
+               if narrowed is not None else "no position at this rank has")
+            + " anyone reporting up through it, so this rung will be skipped at "
+              "submit and cannot approve anything."
+        )
+    return warnings
+
+
 async def project_ranks(db: AsyncSession, project_id: int | None) -> list[dict]:
     """The ranks this project's people hold, highest first — names and counts.
 

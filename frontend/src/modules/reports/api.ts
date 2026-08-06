@@ -18,6 +18,10 @@ export const toParams = (q: LedgerQuery): Record<string, string | number> => {
   if (q.dir) params.dir = q.dir;
   if (q.page) params.page = q.page;
   if (q.size) params.size = q.size;
+  // Only the export reads this, but it rides with the rest so the file matches the
+  // columns on screen. The list endpoint ignores it — the table does its own hiding,
+  // and asking the backend for fewer columns would only make the cache key churn.
+  if (q.cols?.length) params.cols = q.cols.join(",");
   for (const [key, value] of Object.entries(q.filters ?? {})) {
     if (value?.trim()) params[key] = value.trim();
   }

@@ -139,6 +139,32 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
                 f"they sign once per step, switching position each time."
                 for name, posts in by_employee.values() if len(posts) > 1]
 
+    # A hand-built ladder never climbs, so "unreachable" here means one thing only:
+    # nobody sits in the chair. resolve_fixed_chain skips such a step rather than
+    # stranding the document, and a ladder made entirely of them resolves to an empty
+    # chain — which is how a document falls through to the safety-net approver.
+    #
+    # Wrapped, because this is a READ. Everything above it is the ladder the admin
+    # came here to see, and a warning that cannot be computed must not be the reason
+    # the screen fails to open.
+    try:
+        empty = [row.name or str(row.position_id) for row in rows
+                 if not holders_of.get(row.position_id)]
+        if empty:
+            line = (f"{len(empty)} step{'s' if len(empty) > 1 else ''} "
+                    f"({', '.join(empty)}) {'have' if len(empty) > 1 else 'has'} nobody "
+                    f"in the chair — {'they' if len(empty) > 1 else 'it'} will be "
+                    f"skipped at submit.")
+            if len(empty) == len(rows):
+                line += (" Every step is empty, so documents will fall through to the "
+                         "fallback approver.")
+            logger.warning("Custom approval ladder for project %s / %s: %s",
+                           project_id, doc_type, line)
+            warnings.append(line)
+    except Exception:  # noqa: BLE001 - a warning must never hide the ladder itself
+        logger.exception("Could not check custom ladder %s / %s for empty steps",
+                         project_id, doc_type)
+
     return {
         "workflow_id": wf.id, "version": wf.version, "project_id": project_id,
         "doc_type": doc_type, "is_new": False, "in_flight": in_flight,

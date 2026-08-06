@@ -8,6 +8,7 @@ import {
   exportLedger, getFilters, getLedgers, getRows, reportKeys, saveFile,
 } from "../api";
 import { LedgerToolbar } from "../components/LedgerToolbar";
+import { SavedViews } from "../components/SavedViews";
 import { LedgerCard, renderValue } from "../components/cells";
 import type { LedgerQuery, ReportRow } from "../types";
 
@@ -18,7 +19,12 @@ import type { LedgerQuery, ReportRow } from "../types";
  *  Filter state lives in the URL, not in component state: an audit finding is only
  *  useful if the view that produced it can be sent to somebody else. */
 
-const CONTROLS = new Set(["page", "size", "search", "date_from", "date_to", "sort", "dir"]);
+// `cols` rides in the URL with the filters so a saved view keeps its layout and a
+// shared link arrives looking the way the sender left it. It is listed here so the
+// filter sweep below does not mistake it for a filter and send it to the backend.
+const CONTROLS = new Set([
+  "page", "size", "search", "date_from", "date_to", "sort", "dir", "cols",
+]);
 const SIZES = [20, 50, 100, 200];
 
 export function ReportLedgerPage() {
@@ -70,6 +76,14 @@ export function ReportLedgerPage() {
   const total = rows.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / size));
 
+  // A `cols` value naming a column this ledger does not have is dropped rather than
+  // rendered blank: a link saved before a ledger changed should degrade to the
+  // columns that still exist. If nothing survives, fall back to the full set.
+  const picked = (params.get("cols") ?? "").split(",").filter(Boolean);
+  const chosen = picked.filter((key) => columns.some((c) => c.key === key));
+  const shownColumns = chosen.length ? columns.filter((c) => chosen.includes(c.key))
+                                     : columns;
+
   /** Every control change resets to page 1 — staying on page 7 of a narrower result
    *  set is how a filter looks like it returned nothing. */
   const update = (changes: Record<string, string>) => {
@@ -88,7 +102,7 @@ export function ReportLedgerPage() {
     setExporting(true);
     try {
       const { blob, filename } = await exportLedger(
-        ledger, { ...query, page: 1 }, format,
+        ledger, { ...query, page: 1, cols: chosen }, format,
       );
       saveFile(blob, filename);
       toast.success(`Downloaded ${filename}`);
@@ -99,7 +113,7 @@ export function ReportLedgerPage() {
     }
   };
 
-  const tableColumns: Column<ReportRow>[] = columns.map((col) => ({
+  const tableColumns: Column<ReportRow>[] = shownColumns.map((col) => ({
     key: col.key,
     header: col.label,
     hideOnNarrow: col.narrow,
@@ -135,6 +149,15 @@ export function ReportLedgerPage() {
 
       <ErrorBanner error={rows.error ?? filters.error ?? catalog.error} />
 
+      <SavedViews
+        ledger={ledger}
+        query={params.toString()}
+        onApply={(saved) => setParams(new URLSearchParams(saved), { replace: true })}
+        columns={columns}
+        visible={chosen}
+        onColumns={(keys) => update({ cols: keys.join(",") })}
+      />
+
       <LedgerToolbar
         search={search}
         onSearch={(value) => update({ search: value })}
@@ -161,7 +184,7 @@ export function ReportLedgerPage() {
         keyOf={keyOf}
         loading={rows.isLoading}
         empty="No entries match these filters."
-        renderCard={(row) => <LedgerCard row={row} columns={columns} />}
+        renderCard={(row) => <LedgerCard row={row} columns={shownColumns} />}
       />
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-muted">

@@ -79,6 +79,15 @@ async def save_ladder(
     return await ladder_config.save_ladder(db, body, user)
 
 
+@router.get("/ladders/in-flight-stale")
+async def ladder_stale_instances(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    """Documents still climbing a ladder that has since been replaced."""
+    return await ladder_config.stale_instances(db)
+
+
 @router.post("/ladders/copy")
 async def copy_ladder(
     body: LadderCopyIn,

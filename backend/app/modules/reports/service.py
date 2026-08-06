@@ -17,7 +17,8 @@ from app.modules.reports.ledgers import LEDGERS, Col, LedgerSpec
 
 # Query params that are controls, not filters. Anything else in the query string is
 # matched against the spec's filters and ignored if it is not one.
-CONTROL_PARAMS = {"page", "size", "search", "date_from", "date_to", "sort", "dir"}
+CONTROL_PARAMS = {"page", "size", "search", "date_from", "date_to", "sort", "dir",
+                  "cols"}
 
 # A DISTINCT over a whole ledger feeds a dropdown, not a report — cap it so a
 # million-row stk_ledger cannot build a million-option select.
@@ -202,13 +203,15 @@ def _date_range(applied: Mapping[str, str], spec: LedgerSpec) -> str:
 
 
 def export_header(spec: LedgerSpec, applied: Mapping[str, str], rows: int,
-                  actor: str | None) -> list[list[str]]:
+                  actor: str | None,
+                  columns: list[Col] | None = None) -> list[list[str]]:
     """The block above the column headings: what this file is, and who pulled it.
 
     Kept as rows rather than a comment prefix so it survives an Excel round-trip.
     """
     generated = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
-    return [
+    shown = list(columns if columns is not None else spec.columns)
+    lines = [
         [f"SCM ERP — {spec.label} Ledger"],
         [spec.subtitle],
         [],
@@ -219,8 +222,18 @@ def export_header(spec: LedgerSpec, applied: Mapping[str, str], rows: int,
         ["Sorted by", f"{applied.get('sort', spec.order_col)} "
                       f"({'descending' if applied.get('dir') != 'asc' else 'ascending'})"],
         ["Rows in this file", str(rows)],
-        [],
     ]
+    # Only worth saying when something is missing. A file that silently holds fewer
+    # columns than the ledger defines has to say so on its face, or the next person
+    # reads an absent column as an absent value.
+    if len(shown) < len(spec.columns):
+        lines.append([
+            "Columns",
+            f"{len(shown)} of {len(spec.columns)} — "
+            + ", ".join(col.label for col in shown),
+        ])
+    lines.append([])
+    return lines
 
 
 async def _export_rows(db: AsyncSession, spec: LedgerSpec,
@@ -228,6 +241,24 @@ async def _export_rows(db: AsyncSession, spec: LedgerSpec,
     stmt, applied = _filtered(spec, query)
     result = await db.execute(stmt.limit(MAX_EXPORT_ROWS))
     return list(result.mappings()), applied
+
+
+def export_columns(spec: LedgerSpec, query: Mapping[str, str]) -> list[Col]:
+    """The columns the screen was showing, in the ledger's own order.
+
+    `cols` is the same URL parameter the column picker writes, so the file matches
+    what the person was looking at when they pressed Export — an export that quietly
+    contains columns the screen was hiding is a different document.
+
+    Order comes from the spec rather than from the parameter: the ledger decides what
+    reads left to right, and a hand-edited `cols` should not be able to shuffle it.
+    Unknown keys are ignored, and asking for nothing at all means everything.
+    """
+    picked = {key for key in (query.get("cols") or "").split(",") if key}
+    if not picked:
+        return list(spec.columns)
+    chosen = [col for col in spec.columns if col.key in picked]
+    return chosen or list(spec.columns)
 
 
 def _filename(spec: LedgerSpec, extension: str) -> str:
@@ -241,15 +272,16 @@ async def export_csv(db: AsyncSession, key: str, query: Mapping[str, str],
     screen — an export that does not match what was on screen is not evidence."""
     spec = get_spec(key)
     rows, applied = await _export_rows(db, spec, query)
+    columns = export_columns(spec, query)
 
     buffer = io.StringIO()
     # Excel on Windows opens \r\n cleanly; \n alone puts everything on one line.
     writer = csv.writer(buffer, lineterminator="\r\n")
-    writer.writerows(export_header(spec, applied, len(rows), actor))
-    writer.writerow([c.label for c in spec.columns])
+    writer.writerows(export_header(spec, applied, len(rows), actor, columns))
+    writer.writerow([c.label for c in columns])
     for row in rows:
         writer.writerow(["" if (v := _clean(row.get(c.key))) is None else v
-                         for c in spec.columns])
+                         for c in columns])
 
     return _filename(spec, "csv"), buffer.getvalue()
 
@@ -277,12 +309,13 @@ async def export_xlsx(db: AsyncSession, key: str, query: Mapping[str, str],
 
     spec = get_spec(key)
     rows, applied = await _export_rows(db, spec, query)
+    columns = export_columns(spec, query)
 
     book = Workbook()
     sheet = book.active
     sheet.title = spec.label[:31]
 
-    header_block = export_header(spec, applied, len(rows), actor)
+    header_block = export_header(spec, applied, len(rows), actor, columns)
     for line in header_block:
         sheet.append(line)
     sheet["A1"].font = Font(bold=True, size=14, color=_TITLE_COLOUR)
@@ -294,18 +327,18 @@ async def export_xlsx(db: AsyncSession, key: str, query: Mapping[str, str],
     head_row = len(header_block) + 1
     fill = PatternFill("solid", start_color=_HEADER_FILL, end_color=_HEADER_FILL)
     edge = Side(style="thin", color="D5DAE2")
-    for index, col in enumerate(spec.columns, start=1):
+    for index, col in enumerate(columns, start=1):
         cell = sheet.cell(row=head_row, column=index, value=col.label)
         cell.fill = fill
         cell.font = Font(bold=True, color="FFFFFF")
         cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     for row in rows:
-        sheet.append([_clean(row.get(col.key)) for col in spec.columns])
+        sheet.append([_clean(row.get(col.key)) for col in columns])
 
     # Width from the widest value actually present, capped — a remarks column left
     # unclamped pushes every other column off the screen.
-    for index, col in enumerate(spec.columns, start=1):
+    for index, col in enumerate(columns, start=1):
         widest = max(
             [len(col.label)] +
             [len(str(_clean(r.get(col.key)) or "")) for r in rows[:500]]
@@ -315,7 +348,7 @@ async def export_xlsx(db: AsyncSession, key: str, query: Mapping[str, str],
         for row_index in range(head_row + 1, head_row + 1 + len(rows)):
             sheet.cell(row=row_index, column=index).border = Border(bottom=edge)
 
-    last_col = get_column_letter(len(spec.columns))
+    last_col = get_column_letter(len(columns))
     sheet.freeze_panes = f"A{head_row + 1}"
     sheet.auto_filter.ref = f"A{head_row}:{last_col}{head_row + len(rows)}"
 

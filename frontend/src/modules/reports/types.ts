@@ -60,4 +60,7 @@ export interface LedgerQuery {
   page?: number;
   size?: number;
   filters?: Record<string, string>;
+  /** Column keys the picker left showing. Empty means the ledger's full set. Sent on
+   *  export so the file has the same columns the screen had. */
+  cols?: string[];
 }
