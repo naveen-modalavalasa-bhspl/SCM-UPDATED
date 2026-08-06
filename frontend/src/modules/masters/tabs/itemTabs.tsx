@@ -5,7 +5,8 @@ import type { Option } from "../components/MasterCrud";
 import type { MasterBrand, MasterCategory, MasterGeneralName, MasterHsnCode, MasterItemClass, MasterItemSubClass } from "../types";
 import type { Column } from "@/shared/components";
 import { useQuery } from "@tanstack/react-query";
-import { Active, CODE_RULE, Code, RATE_RULE } from "./common";
+import { Active, Code } from "./common";
+import { CODE_RULE, RATE_RULE } from "./constants";
 
 export function ItemsTab() {
   return <ItemMasterTab />;

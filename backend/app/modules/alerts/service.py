@@ -393,6 +393,18 @@ _DEFINITIONS: list[AlertDef] = [
         "{number} has gone back to procurement.",
     ),
     _alert(
+        "allocation.saved", AlertVariant.SUCCESS, "Allocation sent for approval",
+        "What you have given is recorded. Nothing is reserved until it is approved.",
+    ),
+    _alert(
+        "allocation.approved", AlertVariant.SUCCESS, "Allocation approved",
+        "The allocated stock is now reserved against the indent.",
+    ),
+    _alert(
+        "allocation.rejected", AlertVariant.SUCCESS, "Allocation rejected",
+        "It goes back to the store to be allocated again. Nothing was reserved.",
+    ),
+    _alert(
         "material_request.approved", AlertVariant.SUCCESS, "Request approved",
         "{number} is approved and stock is reserved.",
     ),

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { createAllocation, getAllocationProposal } from "../api";
+import { alerts } from "@/modules/alerts";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
 
 /** One "give this much, out of this warehouse" row. A line can carry several. */
@@ -76,6 +77,7 @@ export function AllocationPage() {
       return createAllocation(id, payload, remarks || undefined);
     },
     onSuccess: async () => {
+      void alerts.success("allocation.saved");
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["fulfillment-queue"] }),
         qc.invalidateQueries({ queryKey: ["allocations", "PENDING_APPROVAL"] }),

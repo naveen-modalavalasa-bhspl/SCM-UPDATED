@@ -7,13 +7,9 @@ import type { Column } from "@/shared/components";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Active, Code } from "./common";
+import { UOM_CLASS_OPTS } from "./constants";
 
-export const UOM_CLASSES: UomClass[] = ["COUNT", "LENGTH", "AREA", "VOLUME", "WEIGHT",
-  "TEMPERATURE", "TIME", "PRESSURE", "ENERGY", "PACKAGING"];
 
-export const UOM_CLASS_OPTS: Option[] = UOM_CLASSES.map((v) => ({
-  value: v, label: v.charAt(0) + v.slice(1).toLowerCase(),
-}));
 
 /** Pick a class, tick the standard units, create them in one call.
  *

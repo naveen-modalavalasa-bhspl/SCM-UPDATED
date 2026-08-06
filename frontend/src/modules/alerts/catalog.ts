@@ -311,6 +311,18 @@ const DEFINITIONS: AlertDef[] = [
   alert("po.approved", "success", "Purchase order approved", "{number} is ready to send."),
   alert("po.rejected", "success", "Purchase order rejected", "{number} has gone back to procurement."),
   alert(
+    "allocation.saved", "success", "Allocation sent for approval",
+    "What you have given is recorded. Nothing is reserved until it is approved.",
+  ),
+  alert(
+    "allocation.approved", "success", "Allocation approved",
+    "The allocated stock is now reserved against the indent.",
+  ),
+  alert(
+    "allocation.rejected", "success", "Allocation rejected",
+    "It goes back to the store to be allocated again. Nothing was reserved.",
+  ),
+  alert(
     "material_request.approved", "success", "Request approved",
     "{number} is approved and stock is reserved.",
   ),

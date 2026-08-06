@@ -13,6 +13,7 @@ import {
   getPendingInventoryApprovals, rejectAllocation,
 } from "../api";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
+import { alerts } from "@/modules/alerts";
 import type { Allocation } from "../types";
 
 const fmt = (value: number) =>
@@ -62,7 +63,8 @@ export function AllocationApprovalsPage() {
       approve
         ? approveAllocation(selected!.id, comments)
         : rejectAllocation(selected!.id, comments),
-    onSuccess: () => {
+    onSuccess: (_result, { approve }) => {
+      void alerts.success(approve ? "allocation.approved" : "allocation.rejected");
       setSelected(null);
       setComments("");
       setError(null);

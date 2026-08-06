@@ -5,14 +5,8 @@ import type { MasterVendor, MasterVendorItem } from "../types";
 import type { Column } from "@/shared/components";
 import { useQuery } from "@tanstack/react-query";
 import { Active, Code } from "./common";
+import { VENDOR_TYPES } from "./constants";
 
-// The live column is free text, not an enum. These are the values already in it —
-// offered as a dropdown so a third spelling of "TRANSPORT" never appears.
-export const VENDOR_TYPES: Option[] = [
-  { value: "MATERIAL", label: "Material" },
-  { value: "TRANSPORT", label: "Transport" },
-  { value: "SERVICE", label: "Service" },
-];
 
 /** What each vendor charges for each item. Fifty of these rows were already in the
  *  live table with no screen to show them; procurement prices a PO off this. */

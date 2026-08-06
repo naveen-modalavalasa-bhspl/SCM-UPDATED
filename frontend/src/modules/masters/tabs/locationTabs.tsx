@@ -4,12 +4,9 @@ import type { Option } from "../components/MasterCrud";
 import type { MasterBin, MasterWarehouse, Project } from "../types";
 import type { Column } from "@/shared/components";
 import { Active, Code, ReadOnlyTab } from "./common";
+import { BIN_TYPES, WAREHOUSE_TYPES } from "./constants";
 
-export const WAREHOUSE_TYPES: Option[] = ["MAIN", "LIP", "MDP", "TRANSIT", "QUARANTINE", "SCRAP"]
-  .map((v) => ({ value: v, label: v }));
 
-export const BIN_TYPES: Option[] = ["ZONE", "RACK", "SHELF", "STORAGE", "STAGING"]
-  .map((v) => ({ value: v, label: v }));
 
 export function WarehousesTab({ facilities }: { facilities: Option[] }) {
   const columns: Column<MasterWarehouse>[] = [

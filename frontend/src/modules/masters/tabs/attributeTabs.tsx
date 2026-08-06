@@ -5,9 +5,8 @@ import type { CategoryTagType, MasterAttribute, MasterCategoryTag, MasterFeature
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Active, Code } from "./common";
+import { DATA_TYPES } from "./constants";
 
-export const DATA_TYPES: Option[] = ["TEXT", "NUMBER", "BOOLEAN", "DATE", "LIST"]
-  .map((v) => ({ value: v, label: v }));
 
 export function FeaturesTab() {
   return (

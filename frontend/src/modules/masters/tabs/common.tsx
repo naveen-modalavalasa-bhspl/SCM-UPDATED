@@ -2,6 +2,7 @@ import type { BulkApi, MasterUsage } from "../api";
 import { MasterCrud } from "../components/MasterCrud";
 import type { NamedMaster } from "../types";
 import type { Column } from "@/shared/components";
+import { CODE_RULE } from "./constants";
 
 export const Active = ({ on }: { on: boolean }) => (
   <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
@@ -18,14 +19,7 @@ export const Code = ({ children }: { children: React.ReactNode }) => (
 
 /** A short item-identity code. Imported masters use segments such as GN-003. */
 
-/** A short item-identity code. Imported masters use segments such as GN-003. */
-export const CODE_RULE = {
-  maxLength: 10,
-  pattern: /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/,
-  patternMessage: "Use letters, numbers and internal hyphens only",
-} as const;
 
-export const RATE_RULE = { type: "number", min: 0, max: 100 } as const;
 
 export function NamedLookupTab({
   title, queryKey, api, managePerm = "master.item.manage",
