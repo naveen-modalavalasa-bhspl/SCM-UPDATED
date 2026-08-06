@@ -9,6 +9,7 @@ import {
   listStockAdjustments, createStockAdjustment, approveStockAdjustment, rejectStockAdjustment,
   getWarehouses, getCatalogItems,
 } from "../api";
+import { alerts } from "@/modules/alerts";
 
 const REASONS = [
   { value: "DAMAGE", label: "Damage" },
@@ -46,6 +47,9 @@ export function StockAdjustmentsView() {
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["stock-adjustments"] });
   const fail = (e: any) => setError(e?.response?.data?.error ?? "The action failed");
+  /** The alert names the item, not its id — the id means nothing to a storekeeper. */
+  const itemName = (id: string) =>
+    items.find((i) => String(i.id) === String(id))?.name ?? "the item";
 
   const create = useMutation({
     mutationFn: () =>
@@ -60,16 +64,42 @@ export function StockAdjustmentsView() {
           unit_cost: Number(form.unit_cost || 0),
         }],
       }),
-    onSuccess: () => { setOpen(false); setForm({ ...BLANK }); setError(""); refresh(); },
+    onSuccess: () => {
+      void alerts.success("adjustment.posted", { item: itemName(form.item_id), qty: form.quantity });
+      setOpen(false); setForm({ ...BLANK }); setError(""); refresh();
+    },
     onError: fail,
   });
 
   const decide = useMutation({
-    mutationFn: ({ id, approve }: { id: number; approve: boolean }) =>
+    mutationFn: ({ id, approve }: { id: number; approve: boolean; row: Adjustment }) =>
       approve ? approveStockAdjustment(id) : rejectStockAdjustment(id),
-    onSuccess: () => { setError(""); refresh(); },
+    onSuccess: (_result, { approve, row }) => {
+      if (approve) {
+        void alerts.success("adjustment.approved", {
+          item: row.items?.[0]?.item_name ?? "The item",
+          qty: row.items?.[0]?.quantity ?? "the counted quantity",
+        });
+      } else {
+        void alerts.success("adjustment.rejected");
+      }
+      setError(""); refresh();
+    },
     onError: fail,
   });
+
+  const askThenCreate = async () => {
+    if (!(await alerts.confirm("stock.adjust", {
+      item: itemName(form.item_id), qty: form.quantity,
+    }))) return;
+    create.mutate();
+  };
+  const askThenDecide = async (row: Adjustment, approve: boolean) => {
+    if (approve && !(await alerts.confirm("adjustment.approve", {
+      item: row.items?.[0]?.item_name ?? "this item",
+    }))) return;
+    decide.mutate({ id: row.id, approve, row });
+  };
 
   const valid = form.warehouse_id && form.item_id && Number(form.quantity) > 0;
 
@@ -77,10 +107,10 @@ export function StockAdjustmentsView() {
     r.status === "PENDING_APPROVAL" ? (
       <Can do="stock.adjust">
         <div className="flex gap-2">
-          <Button onClick={() => decide.mutate({ id: r.id, approve: true })}>
+          <Button onClick={() => void askThenDecide(r, true)}>
             <Check size={14} /> Approve
           </Button>
-          <Button variant="ghost" onClick={() => decide.mutate({ id: r.id, approve: false })}>
+          <Button variant="ghost" onClick={() => void askThenDecide(r, false)}>
             <X size={14} /> Reject
           </Button>
         </div>
@@ -189,7 +219,7 @@ export function StockAdjustmentsView() {
           </ModalBody>
           <ModalFooter>
             <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button disabled={!valid || create.isPending} onClick={() => create.mutate()}>
+            <Button disabled={!valid || create.isPending} onClick={() => void askThenCreate()}>
               {create.isPending ? "Saving…" : "Create"}
             </Button>
           </ModalFooter>

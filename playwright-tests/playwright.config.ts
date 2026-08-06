@@ -20,6 +20,9 @@ export default defineConfig({
     ["html", { outputFolder: "reports/html", open: "never" }],
     ["json", { outputFile: "reports/results.json" }],
     ["./src/reporter.ts"],
+    // Writes reports/BUG-STATUS.md when the run verified bug sheet rows, and
+    // stays silent when it did not.
+    ["./src/bugReporter.ts"],
   ],
 
   outputDir: "reports/artifacts",

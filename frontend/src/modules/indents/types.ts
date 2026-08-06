@@ -37,6 +37,17 @@ export interface Indent {
   can_submit: boolean;
   can_approve: boolean;
   can_reject: boolean;
+  can_return_for_correction?: boolean;
+  can_edit_correction?: boolean;
+  can_resubmit_correction?: boolean;
+  correction_owner?: {
+    employee_id: number;
+    employee_name?: string | null;
+    position_id?: number | null;
+  } | null;
+  returned_from_stage?: string | null;
+  resubmit_target_stage?: string | null;
+  correction_comment?: string | null;
   created_at: string;
   items: IndentItem[];
 }
@@ -232,6 +243,7 @@ export interface TemplateLineItem {
 }
 
 export interface IndentJourneyStage {
+  event_id?: string | null;
   sequence: number;
   title: string;
   status: "SUBMITTED" | "APPROVED" | "REJECTED" | "PENDING" | "NOT_REQUIRED" | string;
@@ -242,6 +254,10 @@ export interface IndentJourneyStage {
   comments?: string | null;
   duration_seconds?: number | null;
   stage_type: string;
+  approval_mode?: string | null;
+  reference_no?: string | null;
+  quantity_summary?: string | null;
+  evidence_source?: string | null;
 }
 
 export interface IndentJourneyHistoryEvent {
@@ -253,9 +269,12 @@ export interface IndentJourneyHistoryEvent {
   position_name?: string | null;
   timestamp: string;
   comments?: string | null;
+  reference_no?: string | null;
+  quantity_summary?: string | null;
 }
 
 export interface IndentJourney {
+  contract_version?: 5;
   indent_id: number;
   indent_no: string;
   status: string;
@@ -266,5 +285,7 @@ export interface IndentJourney {
   current_stage_message: string;
   final_any_one_outcome?: string | null;
   stages: IndentJourneyStage[];
+  phases: IndentJourneyStage[];
   history: IndentJourneyHistoryEvent[];
+  missing_sources: string[];
 }

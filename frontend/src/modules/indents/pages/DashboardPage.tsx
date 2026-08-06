@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { CalendarDays, CheckCircle2, Clock, FileText, Package, PencilLine, XCircle } from "lucide-react";
-import { Card, StatCard, StatusPill } from "@/shared/components";
+import { Card, StatCard } from "@/shared/components";
 import {
   INDENT_QUERY_GC_TIME,
   INDENT_QUERY_STALE_TIME,
@@ -12,11 +12,11 @@ import {
   useIndentAccountCacheIsolation,
   useIndentAccountScope,
 } from "../api";
-import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
+import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge";
 import { StatusBreakdownChart } from "../components/StatusBreakdownChart";
 import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
-import { INDENT_REQUEST_STATUS_FILTER_OPTIONS, INDENT_STATUS } from "../constants";
+import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
 
 function IndentDashboardContent() {
   const nav = useNavigate();
@@ -157,10 +157,7 @@ function IndentDashboardContent() {
                   <span className="mono block text-sm font-semibold text-ink">{indent.indent_no}</span>
                   <span className="text-xs text-muted">{indent.requested_by_name || indent.department_name || "Unknown"}</span>
                 </span>
-                {indent.status === INDENT_STATUS.ALLOCATED
-                  || indent.status === INDENT_STATUS.AWAITING_ALLOCATION
-                  ? <IndentStatusBadge status={indent.status} />
-                  : <StatusPill status={indent.status} />}
+                <IndentSummaryStatusBadge status={indent.status} />
               </button>
             ))}
             {!recentLoading && recent?.items.length === 0 && (

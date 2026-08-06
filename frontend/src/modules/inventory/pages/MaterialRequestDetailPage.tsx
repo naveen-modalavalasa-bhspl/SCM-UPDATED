@@ -6,6 +6,7 @@ import {
   type Column,
 } from "@/shared/components";
 import { approveMaterialRequest, getMaterialRequest, rejectMaterialRequest } from "../api";
+import { alerts } from "@/modules/alerts";
 import type { MaterialRequestItem } from "../types";
 
 /**
@@ -28,11 +29,29 @@ export function MaterialRequestDetailPage() {
   const act = useMutation({
     mutationFn: (approve: boolean) =>
       approve ? approveMaterialRequest(mrId, comments) : rejectMaterialRequest(mrId, comments),
-    onSuccess: () => {
+    onSuccess: (_result, approve) => {
+      const number = data?.mr_no ?? "The request";
+      void alerts.success(
+        approve ? "material_request.approved" : "material_request.rejected",
+        { number },
+      );
       qc.invalidateQueries({ queryKey: ["material-request", mrId] });
       qc.invalidateQueries({ queryKey: ["material-requests"] });
     },
   });
+
+  const decide = async (approve: boolean) => {
+    if (act.isPending || !data) return;
+    const first = data.items[0];
+    const asked = approve
+      ? await alerts.confirm("material_request.approve", {
+        number: data.mr_no,
+        qty: first ? `${first.quantity} ${first.uom_code ?? ""}`.trim() : "the requested quantity",
+        item: first?.item_name ?? first?.item_code ?? "the requested items",
+      })
+      : await alerts.confirm("material_request.reject", { number: data.mr_no });
+    if (asked) act.mutate(approve);
+  };
 
   if (isLoading) return <p className="p-6 text-muted">Loading…</p>;
   if (error) return <p className="p-6 text-danger">{(error as Error).message}</p>;
@@ -119,12 +138,12 @@ export function MaterialRequestDetailPage() {
           {act.error && <p className="text-danger">{(act.error as Error).message}</p>}
           <div className="flex gap-2">
             <Can do="mr.approve">
-              <Button onClick={() => act.mutate(true)} disabled={act.isPending}>
+              <Button onClick={() => void decide(true)} disabled={act.isPending}>
                 Approve
               </Button>
             </Can>
             <Can do="mr.reject">
-              <Button variant="ghost" onClick={() => act.mutate(false)} disabled={act.isPending}>
+              <Button variant="ghost" onClick={() => void decide(false)} disabled={act.isPending}>
                 Reject
               </Button>
             </Can>

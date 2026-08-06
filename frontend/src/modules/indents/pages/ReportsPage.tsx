@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ResponsiveList, StatusPill, type Column } from "@/shared/components";
+import { ResponsiveList, type Column } from "@/shared/components";
 import {
   INDENT_QUERY_GC_TIME,
   INDENT_QUERY_STALE_TIME,
@@ -35,6 +35,7 @@ const EVENT_LABELS: Record<string, string> = {
   REJECTED: "Request rejected",
   REQUEST_RETURNED: "Request returned",
   RETURNED: "Request returned",
+  RETURNED_FOR_CORRECTION: "Returned for correction",
   APPROVAL_ROUTED_AUTOMATICALLY: "Approval routed automatically",
   FALLBACK: "Approval routed automatically",
   STOCK_ALLOCATED: "Stock allocated",
@@ -49,9 +50,14 @@ const RESULT_LABELS: Record<string, string> = {
   APPROVED: "Approved",
   REJECTED: "Rejected",
   RETURNED: "Returned",
+  RETURNED_FOR_CORRECTION: "Returned for correction",
   ROUTED_AUTOMATICALLY: "Routed Automatically",
+  AWAITING_ALLOCATION: "Awaiting Allocation",
   ALLOCATED: "Allocated",
   PARTIALLY_ALLOCATED: "Partially Allocated",
+  PARTIALLY_FULFILLED: "Partially Fulfilled",
+  FULFILLED: "Fulfilled",
+  CLOSED: "Fulfilled",
   PENDING_APPROVAL: "Pending Approval",
   BOOKMARKED: "Bookmarked",
   BOOKMARK_REMOVED: "Bookmark Removed",
@@ -68,11 +74,31 @@ const LEGACY_EVENT_RESULTS: Record<string, string> = {
   REJECTED: "Rejected",
   REQUEST_RETURNED: "Returned",
   RETURNED: "Returned",
+  RETURNED_FOR_CORRECTION: "Returned for correction",
   APPROVAL_ROUTED_AUTOMATICALLY: "Routed Automatically",
   FALLBACK: "Routed Automatically",
   PROCUREMENT_REQUEST_CREATED: "Pending Approval",
   BOOKMARK_ADDED: "Bookmarked",
   BOOKMARK_REMOVED: "Bookmark Removed",
+};
+
+const RESULT_TONE: Record<string, string> = {
+  DRAFT: "bg-neutral-bg text-neutral",
+  SUBMITTED: "bg-info-bg text-info",
+  APPROVED: "bg-ok-bg text-ok",
+  REJECTED: "bg-bad-bg text-bad",
+  RETURNED: "bg-warn-bg text-warn",
+  RETURNED_FOR_CORRECTION: "bg-warn-bg text-warn",
+  ROUTED_AUTOMATICALLY: "bg-info-bg text-info",
+  AWAITING_ALLOCATION: "bg-info-bg text-info",
+  ALLOCATED: "bg-purple-50 text-purple-600",
+  PARTIALLY_ALLOCATED: "bg-warn-bg text-warn",
+  PARTIALLY_FULFILLED: "bg-warn-bg text-warn",
+  FULFILLED: "bg-ok-bg text-ok",
+  PENDING_APPROVAL: "bg-warn-bg text-warn",
+  BOOKMARKED: "bg-brand-050 text-brand",
+  BOOKMARK_REMOVED: "bg-neutral-bg text-neutral",
+  STATUS_UNAVAILABLE: "bg-neutral-bg text-neutral",
 };
 
 const HEADER_CURSOR_CLASS = "[&:is(th)]:cursor-default";
@@ -212,6 +238,16 @@ function occurredAtLabel(row: ActivityRow) {
   return timestamp ? (formatIndentDateTime(timestamp) ?? "Time unavailable") : "Time unavailable";
 }
 
+function ActivityResultBadge({ label }: { label: string }) {
+  const code = normalizedCode(label) ?? "STATUS_UNAVAILABLE";
+  const tone = RESULT_TONE[code] ?? "bg-neutral-bg text-neutral";
+  return (
+    <span className={`inline-flex h-6 items-center whitespace-nowrap rounded-full px-2 text-[11px] font-semibold uppercase tracking-wide ${tone}`}>
+      {label}
+    </span>
+  );
+}
+
 function OccurredAtCell({ row }: { row: ActivityRow }) {
   const timestamp = nonEmptyText(row.occurred_at) ?? nonEmptyText(row.event_at);
   const parsed = parseIndentTimestamp(timestamp);
@@ -337,7 +373,7 @@ function IndentReportsContent({
     { key: "details", header: "DETAILS", className: HEADER_CURSOR_CLASS, render: (row) => <DetailCell row={row} /> },
     { key: "qty", header: "QTY", className: HEADER_CURSOR_CLASS, render: (row) => <span className="tabular-nums">{formatQuantity(row)}</span> },
     { key: "dept", header: "DEPARTMENT", className: HEADER_CURSOR_CLASS, render: (row) => <DepartmentCell row={row} /> },
-    { key: "result", header: "RESULT", className: HEADER_CURSOR_CLASS, render: (row) => <StatusPill status={resultLabel(row)} /> },
+    { key: "result", header: "RESULT", className: HEADER_CURSOR_CLASS, render: (row) => <ActivityResultBadge label={resultLabel(row)} /> },
   ];
 
   const hasBlockingError = Boolean(error && !data);
@@ -401,7 +437,7 @@ function IndentReportsContent({
                   <div className="space-y-1 text-xs">
                     <div className="flex items-center justify-between gap-3">
                       <span className="mono text-sm font-semibold text-ink">{requestLabel(row)}</span>
-                      <StatusPill status={resultLabel(row)} />
+                      <ActivityResultBadge label={resultLabel(row)} />
                     </div>
                     <p className="font-medium text-body">{eventLabel(row)}</p>
                     <DetailCell row={row} />

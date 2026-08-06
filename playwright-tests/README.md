@@ -42,9 +42,15 @@ Both servers must already be running (`backend` on :8000, `frontend` on :5173).
 
 ### users.json
 
-`raiser` creates the indent. `approvers` is a **pool, not an order** — at each rung
-the run asks `/api/workflow/pending` which of these accounts actually holds the
-document, then drives that person's inbox. Re-configuring the approval ladder in
+**One account is enough for the Indent module sweep.** `tests/indent-module/` reads
+`tester` (falling back to `raiser`) and needs nothing else: it seeds its own data
+under that account and recomputes every expectation from what that account can
+see, so the same run is correct for a store keeper, a manager or an administrator.
+
+The cross-login journey suites need the rest. `raiser` creates the indent, and
+`approvers` is a **pool, not an order** — at each rung the run asks
+`/api/workflow/pending` which of these accounts actually holds the document, then
+drives that person's inbox. Re-configuring the approval ladder in
 *Settings > Approvals Config* therefore needs no change to any test; just make sure
 every possible approver has an entry here.
 
@@ -55,6 +61,8 @@ queue"*, the message names the person the backend is waiting on — add them.
 
 ```powershell
 npm test                 # headless, writes the report
+npm run test:indents     # the Indent module on its own — see tests/indent-module/README.md
+npm run test:bugs        # the bug sheet — writes reports/BUG-STATUS.md
 npm run test:headed      # watch it click (set SLOW_MO=400 in .env to follow along)
 npm run test:debug       # step through with the inspector
 npm run report           # open the HTML report
@@ -68,7 +76,9 @@ One folder per kind of question, so a failure tells you which kind of thing brok
 | Folder | Asks |
 | --- | --- |
 | `tests/indent-approval-flow/` | Does the business journey complete? Raise → every ladder rung → Inventory. Crosses several logins. |
+| `tests/indent-module/` | Does *everything* on one module's screens work, and show the **right** answer? A full functional sweep of Indent from a single login: every screen, control and validation, with each filter cross-checked against the API. [Details](tests/indent-module/README.md). |
 | `tests/ui-checks/` | Is each screen correct on its own? Buttons, validation, empty and disabled states, per module. No document needed. |
+| `tests/bug-sheet/` | Of the defects on the bug sheet, which are still there? One scenario per row; writes its own answer sheet to `reports/BUG-STATUS.md`. [Details](tests/bug-sheet/README.md). |
 
 Add a folder per new question, not per new screen. Playwright picks up nested
 directories automatically.

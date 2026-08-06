@@ -12,7 +12,9 @@ def _utc_iso(value: datetime | None) -> str | None:
 
 class ApprovalQuantityIn(BaseModel):
     line_id: int = Field(gt=0)
-    approved_quantity: float = Field(ge=0)
+    # allow_inf_nan: `inf` satisfies `ge=0` and would sail past the ceiling check as
+    # Decimal("Infinity"). NaN already fails `ge=0`.
+    approved_quantity: float = Field(ge=0, allow_inf_nan=False)
 
 
 class IndentApprovalActionIn(BaseModel):
@@ -92,6 +94,9 @@ class ApprovalIndentLineOut(BaseModel):
     uom_code: str | None = None
     requested_quantity: float
     approved_quantity: float
+    # The ceiling for this approver: the request at the first level, and whatever the
+    # level below approved after that. Approvers may only reduce.
+    max_quantity: float
     remarks: str | None = None
 
 
@@ -106,6 +111,7 @@ class ApprovalIndentOut(BaseModel):
     office_name: str | None = None
     current_stage_name: str | None = None
     current_approver_name: str | None = None
+    can_return_for_correction: bool = False
     created_at: datetime
     items: list[ApprovalIndentLineOut]
 

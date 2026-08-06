@@ -15,6 +15,7 @@ import {
   updateInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
+import { alerts } from "@/modules/alerts";
 import type { Inspection, InspectionItemWrite, InspectionParameter, InspectionWrite } from "../types";
 
 /**
@@ -228,6 +229,9 @@ export default function QualityInspectionForm({
       return completeInspection(Number(id));
     },
     onSuccess: () => {
+      void alerts.success("inspection.completed", {
+        number: doc?.inspection_no ?? "The inspection",
+      });
       qc.invalidateQueries({ queryKey: ["wh-inspection", id] });
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       setConfirming(false);

@@ -2,8 +2,11 @@ export const INDENT_STATUS = {
   DRAFT: "DRAFT",
   SUBMITTED: "SUBMITTED",
   PENDING_APPROVAL: "PENDING_APPROVAL",
+  RETURNED: "RETURNED",
+  RETURNED_FOR_CORRECTION: "RETURNED_FOR_CORRECTION",
   APPROVED: "APPROVED",
   REJECTED: "REJECTED",
+  CANCELLED: "CANCELLED",
   AWAITING_ALLOCATION: "AWAITING_ALLOCATION",
   ALLOCATED: "ALLOCATED",
   PARTIALLY_FULFILLED: "PARTIALLY_FULFILLED",
@@ -12,6 +15,35 @@ export const INDENT_STATUS = {
   ORDERED: "ORDERED",
   CLOSED: "CLOSED",
 } as const;
+
+/** An indent is with procurement, not with the warehouse, in these statuses. */
+export const INDENT_PROCUREMENT_STATUSES: readonly string[] = [
+  INDENT_STATUS.PENDING_PROCUREMENT,
+  INDENT_STATUS.PARTIALLY_ORDERED,
+  INDENT_STATUS.ORDERED,
+];
+
+/**
+ * The lifecycle the progress card renders, and the contract `journey.phases`
+ * is read against: `sequence` is 1-based against this list. The approval ladder
+ * is aggregated into the single `approvals` phase, so a ladder of any length —
+ * and any rank names — fits without changing this list.
+ */
+export const INDENT_PHASES = [
+  { key: "draft", label: "Draft" },
+  { key: "submitted", label: "Submitted" },
+  { key: "approvals", label: "Approvals" },
+  { key: "allocation", label: "Allocation" },
+  { key: "warehouse", label: "Warehouse" },
+  { key: "delivery", label: "Delivery" },
+  { key: "acknowledgement", label: "Acknowledgement" },
+] as const;
+
+export const INDENT_APPROVALS_PHASE_INDEX = INDENT_PHASES
+  .findIndex((phase) => phase.key === "approvals");
+
+/** `stage_type` values that make up one rung of the configured approval ladder. */
+export const INDENT_APPROVAL_STAGE_TYPES: readonly string[] = ["approval", "final"];
 
 export const INDENT_PRIORITY = {
   NORMAL: "NORMAL",
@@ -22,6 +54,7 @@ export const INDENT_STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: INDENT_STATUS.DRAFT, label: "Draft" },
   { value: INDENT_STATUS.SUBMITTED, label: "Submitted" },
   { value: INDENT_STATUS.PENDING_APPROVAL, label: "In approval" },
+  { value: INDENT_STATUS.RETURNED_FOR_CORRECTION, label: "Returned for correction" },
   { value: INDENT_STATUS.REJECTED, label: "Rejected" },
   { value: INDENT_STATUS.APPROVED, label: "Approved" },
   { value: INDENT_STATUS.AWAITING_ALLOCATION, label: "Awaiting allocation" },
@@ -37,8 +70,11 @@ export const INDENT_REQUEST_STATUS_FILTER_OPTIONS: { value: string; label: strin
   { value: INDENT_STATUS.PENDING_APPROVAL, label: "Pending approvals" },
   { value: INDENT_STATUS.ALLOCATED, label: "Allocated" },
   { value: INDENT_STATUS.DRAFT, label: "Draft" },
+  { value: INDENT_STATUS.RETURNED_FOR_CORRECTION, label: "Returned for correction" },
   { value: INDENT_STATUS.REJECTED, label: "Rejected" },
   { value: INDENT_STATUS.AWAITING_ALLOCATION, label: "Awaiting allocation" },
+  { value: INDENT_STATUS.PARTIALLY_FULFILLED, label: "Partially fulfilled" },
+  { value: INDENT_STATUS.CLOSED, label: "Fulfilled" },
 ];
 
 export const INDENT_ACTIVITY_EVENT_FILTER_OPTIONS: { value: string; label: string }[] = [
@@ -58,6 +94,7 @@ export const INDENT_STATUS_GROUPS: { label: string; options: { value: string; la
       INDENT_STATUS.DRAFT,
       INDENT_STATUS.SUBMITTED,
       INDENT_STATUS.PENDING_APPROVAL,
+      INDENT_STATUS.RETURNED_FOR_CORRECTION,
       INDENT_STATUS.REJECTED,
     ]),
   },

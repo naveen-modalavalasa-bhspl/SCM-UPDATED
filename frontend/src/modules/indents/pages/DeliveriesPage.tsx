@@ -6,7 +6,8 @@ import {
   StatusPill, type Column,
 } from "@/shared/components";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
-import { indentApi } from "../api";
+import { indentApi, useIndentAccountScope } from "../api";
+import { cancelIndentReceiptReads, commitConfirmedIndentReceipt } from "../receiptRefresh";
 import type { Delivery, DeliveryLine, ReceiptAttachment } from "../types";
 
 /**
@@ -94,6 +95,7 @@ function AttachmentRow({ attachment, onDelete, busy }: {
  */
 function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () => void }) {
   const qc = useQueryClient();
+  const accountScope = useIndentAccountScope();
   const [received, setReceived] = useState<Record<number, string>>(() =>
     Object.fromEntries(
       delivery.lines
@@ -128,7 +130,9 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
           }))
           .filter((line) => line.received_quantity > 0),
       ),
-    onSuccess: () => {
+    onMutate: () => cancelIndentReceiptReads(qc, accountScope, delivery.indent_id),
+    onSuccess: async (updated) => {
+      await commitConfirmedIndentReceipt(qc, accountScope, updated);
       qc.invalidateQueries({ queryKey: ["indent-deliveries"] });
       qc.invalidateQueries({ queryKey: ["indent-fulfilment"] });
       onClose();

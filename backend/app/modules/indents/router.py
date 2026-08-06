@@ -156,7 +156,7 @@ async def journey(indent_id: int, db: AsyncSession = Depends(get_db),
 
 @indent_router.put("/{indent_id}", response_model=IndentOut)
 async def update(indent_id: int, data: IndentUpdate, db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission("indent.edit"))):
+                 user=Depends(require_permission("indent.view"))):
     return await service.update_indent(db, indent_id, data, user)
 
 
@@ -170,6 +170,21 @@ async def delete_draft(indent_id: int, db: AsyncSession = Depends(get_db),
 async def submit(indent_id: int, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.submit"))):
     return await service.submit_indent(db, indent_id, user)
+
+
+@indent_router.post("/{indent_id}/return-for-correction", response_model=IndentOut)
+async def return_for_correction(indent_id: int, body: ActionIn = ActionIn(),
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission("indent.approve"))):
+    return await service.return_indent_for_correction(
+        db, indent_id, body.comments, user,
+    )
+
+
+@indent_router.post("/{indent_id}/resubmit-correction", response_model=IndentOut)
+async def resubmit_correction(indent_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission("indent.view"))):
+    return await service.resubmit_indent_correction(db, indent_id, user)
 
 
 @indent_router.post("/{indent_id}/acknowledge", response_model=IndentOut)

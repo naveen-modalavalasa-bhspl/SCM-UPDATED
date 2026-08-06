@@ -102,6 +102,12 @@ _DEFINITIONS: list[AlertDef] = [
         confirm="Yes, Delete",
     ),
     _confirm(
+        "indent.delete", AlertVariant.DANGER, "Delete draft indent?",
+        "{number} has not been submitted, so nothing downstream points at it yet. "
+        "Deleting throws away every line on it and cannot be undone.",
+        confirm="Yes, Delete", cancel="Keep Draft",
+    ),
+    _confirm(
         "indent.cancel", AlertVariant.DANGER, "Cancel indent?",
         "{number} will be closed and any stock reserved against it released back to "
         "available. This cannot be undone.",
@@ -164,6 +170,12 @@ _DEFINITIONS: list[AlertDef] = [
         confirm="Approve",
     ),
     _confirm(
+        "po.reject", AlertVariant.WARNING, "Reject this purchase order?",
+        "{number} goes back to procurement and nothing is committed against the "
+        "budget. Add a comment so they know what to change.",
+        confirm="Reject",
+    ),
+    _confirm(
         "po.send_vendor", AlertVariant.WARNING, "Send to vendor?",
         "{number} is sent to {vendor} and locked for editing. Goods can only be "
         "received against a PO that has been sent.",
@@ -207,6 +219,19 @@ _DEFINITIONS: list[AlertDef] = [
         "Approving {number} reserves {qty} of {item} against it, so that stock stops "
         "being available to anyone else.",
         confirm="Approve",
+    ),
+    _confirm(
+        "material_request.reject", AlertVariant.WARNING,
+        "Reject this material request?",
+        "{number} is refused and no stock is reserved against it. The shortfall it "
+        "was raised for stays unfilled.",
+        confirm="Reject",
+    ),
+    _confirm(
+        "master.deactivate", AlertVariant.WARNING, "Deactivate this record?",
+        "{name} stops appearing on new documents. Anything that already references "
+        "it keeps working — masters are deactivated, never deleted.",
+        confirm="Deactivate",
     ),
     _confirm(
         "putaway.confirm", AlertVariant.WARNING, "Confirm put-away?",
@@ -288,6 +313,14 @@ _DEFINITIONS: list[AlertDef] = [
         action="View Indent",
     ),
     _alert(
+        "indent.submitted", AlertVariant.SUCCESS, "Sent for approval",
+        "{number} is with {approver} and can no longer be edited.",
+    ),
+    _alert(
+        "indent.updated", AlertVariant.SUCCESS, "Indent saved",
+        "Your changes to {number} have been saved.",
+    ),
+    _alert(
         "indent.approved", AlertVariant.SUCCESS, "Approved",
         "{number} has moved to the next stage.",
     ),
@@ -295,6 +328,14 @@ _DEFINITIONS: list[AlertDef] = [
         "grn.posted", AlertVariant.SUCCESS, "Receipt posted",
         "{number} is complete and stock has been updated.",
         action="View Receipt",
+    ),
+    _alert(
+        "stock.transfer_raised", AlertVariant.SUCCESS, "Transfer raised",
+        "{number} is waiting for approval before anything moves.",
+    ),
+    _alert(
+        "stock.transfer_advanced", AlertVariant.SUCCESS, "Transfer updated",
+        "{number} is now {status}.",
     ),
     _alert(
         "stock.transferred", AlertVariant.SUCCESS, "Transfer complete",
@@ -348,12 +389,36 @@ _DEFINITIONS: list[AlertDef] = [
         "{number} is ready to send.",
     ),
     _alert(
+        "po.rejected", AlertVariant.SUCCESS, "Purchase order rejected",
+        "{number} has gone back to procurement.",
+    ),
+    _alert(
         "material_request.approved", AlertVariant.SUCCESS, "Request approved",
         "{number} is approved and stock is reserved.",
     ),
     _alert(
+        "material_request.rejected", AlertVariant.SUCCESS, "Request rejected",
+        "{number} has been refused and nothing was reserved.",
+    ),
+    _alert(
         "adjustment.approved", AlertVariant.SUCCESS, "Adjustment approved",
         "{item} now reads {qty}.",
+    ),
+    _alert(
+        "adjustment.rejected", AlertVariant.SUCCESS, "Adjustment rejected",
+        "The counted quantity was not written to the ledger.",
+    ),
+    _alert(
+        "master.deactivated", AlertVariant.SUCCESS, "Deactivated",
+        "{name} no longer appears on new documents.",
+    ),
+    _alert(
+        "receipt.submitted", AlertVariant.SUCCESS, "Sent for inspection",
+        "{number} is with quality and cannot be edited until they are done.",
+    ),
+    _alert(
+        "receipt.saved", AlertVariant.SUCCESS, "Receipt saved",
+        "{number} has been saved as a draft. Nothing is in stock yet.",
     ),
     _alert(
         "inspection.completed", AlertVariant.SUCCESS, "Inspection complete",

@@ -17,6 +17,7 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, toTimeline } from "../components/Timeline";
 import { addDispatchEvent, cancelDispatch, dispatchGateOut, getDispatch, listConsignments } from "../api";
 import { fmtDate, fmtMoney, fmtQty, humanise, num } from "../format";
+import { alerts } from "@/modules/alerts";
 import type { Dispatch, DispatchItem, DispatchPackage } from "../types";
 
 const EVENTS = [
@@ -101,6 +102,7 @@ export default function DispatchForm() {
   const gateOut = useMutation({
     mutationFn: () => dispatchGateOut(Number(id), gatePass || undefined),
     onSuccess: () => {
+      void alerts.success("dispatch.gated_out", { number: doc?.dispatch_no ?? "The dispatch" });
       qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
       qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
       qc.invalidateQueries({ queryKey: ["wh-consignments"] });

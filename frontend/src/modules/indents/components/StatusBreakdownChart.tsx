@@ -11,8 +11,11 @@ import type { SectorProps } from "recharts";
 
 const PRIMARY_STATUSES = [
   { status: "PENDING_APPROVAL", label: "Pending approval" },
+  { status: "RETURNED_FOR_CORRECTION", label: "Returned for correction" },
   { status: "AWAITING_ALLOCATION", label: "Awaiting allocation" },
   { status: "ALLOCATED", label: "Allocated" },
+  { status: "PARTIALLY_FULFILLED", label: "Partially fulfilled" },
+  { status: "CLOSED", label: "Fulfilled" },
   { status: "REJECTED", label: "Rejected" },
   { status: "DRAFT", label: "Draft" },
 ] as const;
@@ -24,31 +27,33 @@ const TOOLTIP_FALLBACK_HEIGHT = 72;
 export const STATUS_INDICATOR: Record<string, string> = {
   DRAFT: "bg-neutral",
   PENDING_APPROVAL: "bg-warn",
+  RETURNED_FOR_CORRECTION: "bg-warn",
   SUBMITTED: "bg-warn",
   APPROVED: "bg-ok",
   AWAITING_ALLOCATION: "bg-info",
-  ALLOCATED: "bg-ok",
-  PARTIALLY_FULFILLED: "bg-info",
+  ALLOCATED: "bg-purple-500",
+  PARTIALLY_FULFILLED: "bg-warn",
   PENDING_PROCUREMENT: "bg-purple-500",
   PARTIALLY_ORDERED: "bg-blue-600",
   ORDERED: "bg-blue-600",
   REJECTED: "bg-bad",
-  CLOSED: "bg-neutral",
+  CLOSED: "bg-ok",
 };
 
 export const STATUS_COLOR: Record<string, string> = {
   DRAFT: "var(--color-neutral)",
   PENDING_APPROVAL: "var(--color-warn)",
+  RETURNED_FOR_CORRECTION: "var(--color-warn)",
   SUBMITTED: "var(--color-warn)",
   APPROVED: "var(--color-ok)",
   AWAITING_ALLOCATION: "var(--color-info)",
-  ALLOCATED: "var(--color-ok)",
-  PARTIALLY_FULFILLED: "var(--color-info)",
+  ALLOCATED: "#8b5cf6",
+  PARTIALLY_FULFILLED: "var(--color-warn)",
   PENDING_PROCUREMENT: "#8b5cf6",
   PARTIALLY_ORDERED: "#2563eb",
   ORDERED: "#2563eb",
   REJECTED: "var(--color-bad)",
-  CLOSED: "var(--color-neutral)",
+  CLOSED: "var(--color-ok)",
 };
 
 const DEFAULT_STATUS_COLOR = "var(--color-neutral)";

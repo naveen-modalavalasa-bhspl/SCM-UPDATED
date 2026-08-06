@@ -1,0 +1,2830 @@
+{
+  "comment": "Generated from the LOCAL test database (127.0.0.1:3306/scm_erp) by replicating platform/workflow/ladder.resolve_chain. Each entry is one storekeeper's reporting tree: the posts the INDENT ladder resolves to when that storekeeper raises a request, in order. Regenerate whenever HCM's position tree or the ladder changes.",
+  "password": "Bavya@123",
+  "source": {
+    "database": "mysql://127.0.0.1:3306/scm_erp",
+    "indent_workflow_id": 49,
+    "indent_workflow_code": "LADDER-INDENT-4",
+    "allocation_workflow_id": 50,
+    "allocation_workflow_code": "CUSTOM-ALLOCATION-4",
+    "project": {
+      "id": 4,
+      "name": "AP 104 - Mobile Medical Unit"
+    }
+  },
+  "inventory": {
+    "employeeId": "HR-EMP-10420",
+    "name": "SIVA KRISHNA",
+    "label": "Inventory (SIVA KRISHNA)",
+    "hats": [
+      {
+        "position_id": 4490,
+        "position_name": "Assisstant MANAGER"
+      },
+      {
+        "position_id": 4461,
+        "position_name": "INVENTORY MANAGER"
+      }
+    ]
+  },
+  "trees": [
+    {
+      "index": 1,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15948",
+        "name": "Pavan",
+        "position_id": 2953,
+        "position_name": "STORE KEEPER - AP 104 MMU - PULIVENDULA",
+        "office": "104-MMU-AP-Pulivendula"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 500,
+          "position_name": "OE-AP-104-MMU-PULIVENDULA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07576",
+              "name": "Arikela Maheswara reddy"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 160,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07264",
+              "name": "S V Sesha Sayana Reddy"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "shape": "OE > DISTRICT MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15197",
+        "name": "Kiran Kumar",
+        "position_id": 2989,
+        "position_name": "STORE KEEPER - AP 104 MMU - CHITTOOR",
+        "office": "104-MMU-AP-Chittoor Dst Back Up"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 409,
+          "position_name": "OE-AP-104-MMU-NUZVID",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07566",
+              "name": "L Harish"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 2133,
+          "position_name": "DISTRICT-AP-104-MMU-MANAGER-ELURU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "shape": "DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15029",
+        "name": "Naresh Kumar",
+        "position_id": 3049,
+        "position_name": "STORE KEEPER - AP 104 MMU - GOURAVARAM",
+        "office": "104-MMU-AP-Gouravaram"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 169,
+          "position_name": "DIVISIONAL MANAGER-AP-104-MMU-ANAKAPALLI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07298",
+              "name": "Rudra Vamsikrishna"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "shape": "OE > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15339",
+        "name": "Lakshmi",
+        "position_id": 3321,
+        "position_name": "STORE KEEPER - AP 104 MMU - CHEBROLU",
+        "office": "104-MMU-AP-Chebrolu"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 411,
+          "position_name": "OE-AP-104-MMU-TUNI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07559",
+              "name": "Gorrepati Ravikumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 3,
+          "position_name": "REGIONAL-AP-104-MMU-MANAGER-VIJAYAWADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "shape": "OE > DISTRICT MANAGER",
+      "raiser": {
+        "employeeId": "HR-EMP-15594",
+        "name": "Kavya",
+        "position_id": 3527,
+        "position_name": "STORE KEEPER - AP 104 MMU - YELLAVARAM",
+        "office": "104-MMU-AP-Yellavaram"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 423,
+          "position_name": "OE-AP-104-MMU-RAMPACHODAVARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07347",
+              "name": "Munaga Satish Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 394,
+          "position_name": "DISTRICT-AP-104-MMU-MANAGER-POLAVARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07260",
+              "name": "G E Ravi Kishore"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "shape": "OE",
+      "raiser": {
+        "employeeId": "HR-EMP-15816",
+        "name": "Naresh Kumar",
+        "position_id": 3705,
+        "position_name": "STORE KEEPER - AP 104 MMU - TALLAVALASA",
+        "office": "104-MMU-AP-R Tallavalasa"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 2134,
+          "position_name": "OE-AP-104-MMU-VIZAG",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07322",
+              "name": "Nagabathula Syam Sagar"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "shape": "MANAGER",
+      "raiser": {
+        "employeeId": "HR-EMP-15941",
+        "name": "Mahesh Reddy",
+        "position_id": 3786,
+        "position_name": "STORE KEEPER - AP 104 MMU - ONIPENTA",
+        "office": "104-MMU-AP-Vonipenta"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "MANAGER",
+          "position_id": 4461,
+          "position_name": "INVENTORY MANAGER",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10420",
+              "name": "SIVA KRISHNA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 8,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15509",
+        "name": "Naveen",
+        "position_id": 2954,
+        "position_name": "STORE KEEPER - AP 104 MMU - ATMAKUR",
+        "office": "104-MMU-AP-Athmakur"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 499,
+          "position_name": "OE-AP-104-MMU-ATMAKUR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-09144",
+              "name": "G Ravi Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 155,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-NANDYAL",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07266",
+              "name": "Mulla Mohammed Rafi"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 9,
+      "shape": "OE > DISTRICT MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15274",
+        "name": "Mahesh Reddy",
+        "position_id": 3260,
+        "position_name": "STORE KEEPER - AP 104 MMU - DEVAPUDI",
+        "office": "104-MMU-AP-Devapudi Aam"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 408,
+          "position_name": "OE-AP-104-MMU-ELURU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07565",
+              "name": "K Karthik"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 2133,
+          "position_name": "DISTRICT-AP-104-MMU-MANAGER-ELURU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 10,
+      "shape": "DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15925",
+        "name": "Rajesh",
+        "position_id": 3090,
+        "position_name": "STORE KEEPER - AP 104 MMU - YERRAGUNTLA",
+        "office": "104-MMU-AP-Yerraguntla 2"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 160,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07264",
+              "name": "S V Sesha Sayana Reddy"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 11,
+      "shape": "OE > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15341",
+        "name": "Pavan",
+        "position_id": 3323,
+        "position_name": "STORE KEEPER - AP 104 MMU - DUGGUDURRU",
+        "office": "104-MMU-AP-Duggudurru"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 410,
+          "position_name": "OE-AP-104-MMU-KAKINADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07557",
+              "name": "Piratla Suresh"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 3,
+          "position_name": "REGIONAL-AP-104-MMU-MANAGER-VIJAYAWADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 12,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15507",
+        "name": "Naresh Kumar",
+        "position_id": 2955,
+        "position_name": "STORE KEEPER - AP 104 MMU - NANDYAL",
+        "office": "104-MMU-AP-Nandyal"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 470,
+          "position_name": "OE-AP-104-MMU-NANDYAL",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-09141",
+              "name": "V Praveen Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 155,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-NANDYAL",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07266",
+              "name": "Mulla Mohammed Rafi"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 13,
+      "shape": "DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15212",
+        "name": "Pavan",
+        "position_id": 3208,
+        "position_name": "STORE KEEPER - AP 104 MMU - NAGARAM",
+        "office": "104-MMU-AP-NAGARAM-M"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 151,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-KONASEEMA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-16149",
+              "name": "Dasari Venkatesh"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 3,
+          "position_name": "REGIONAL-AP-104-MMU-MANAGER-VIJAYAWADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 14,
+      "shape": "OE > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15829",
+        "name": "Naresh Kumar",
+        "position_id": 3718,
+        "position_name": "STORE KEEPER - AP 104 MMU - BADANGI",
+        "office": "104-MMU-AP-Badangi"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 438,
+          "position_name": "OE-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-16150",
+              "name": "Kolli Venkata Surya Srikanth"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 15,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15949",
+        "name": "Rajesh",
+        "position_id": 2957,
+        "position_name": "STORE KEEPER - AP 104 MMU - BADVEL",
+        "office": "104-MMU-AP-Badvel"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 445,
+          "position_name": "OE-AP-104-MMU-BADVEL",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07356",
+              "name": "RHarisankar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 160,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07264",
+              "name": "S V Sesha Sayana Reddy"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 16,
+      "shape": "DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15246",
+        "name": "Naresh Kumar",
+        "position_id": 3237,
+        "position_name": "STORE KEEPER - AP 104 MMU - DOWLAISWARAM",
+        "office": "104-MMU-AP-Backup"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 148,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-EAST-GODAVARI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07260",
+              "name": "G E Ravi Kishore"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 3,
+          "position_name": "REGIONAL-AP-104-MMU-MANAGER-VIJAYAWADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 17,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15744",
+        "name": "Srikanth",
+        "position_id": 2965,
+        "position_name": "STORE KEEPER - AP 104 MMU - PALASA",
+        "office": "104-MMU-AP-Palasa"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 434,
+          "position_name": "OE-AP-104-MMU-PALASA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07351",
+              "name": "Kondala Mukunda Rao"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 158,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-SRIKAKULAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10882",
+              "name": "Kolluru Venkata Narasimha Murthy"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 18,
+      "shape": "DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15337",
+        "name": "Lakshmi",
+        "position_id": 3319,
+        "position_name": "STORE KEEPER - AP 104 MMU - VETLAPALEM",
+        "office": "104-MMU-AP-Vetlapalem"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 150,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-KAKINADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06894",
+              "name": "Bala Subrahmanyam"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 3,
+          "position_name": "REGIONAL-AP-104-MMU-MANAGER-VIJAYAWADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 19,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15759",
+        "name": "Divya",
+        "position_id": 2966,
+        "position_name": "STORE KEEPER - AP 104 MMU - TEKKALI",
+        "office": "104-MMU-AP-Backup"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 433,
+          "position_name": "OE-AP-104-MMU-TEKKALI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07191",
+              "name": "Korlam Anand Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 158,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-SRIKAKULAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10882",
+              "name": "Kolluru Venkata Narasimha Murthy"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 20,
+      "shape": "DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15375",
+        "name": "Teja",
+        "position_id": 3356,
+        "position_name": "STORE KEEPER - AP 104 MMU - PEDANA",
+        "office": "104-MMU-AP-Holagunda"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 141,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-KRISHNA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07258",
+              "name": "Dayam William Chand"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 3,
+          "position_name": "REGIONAL-AP-104-MMU-MANAGER-VIJAYAWADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 21,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15771",
+        "name": "Anusha",
+        "position_id": 2968,
+        "position_name": "STORE KEEPER - AP 104 MMU - SRIKAKULAM",
+        "office": "104-MMU-AP-Srikakulam"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 431,
+          "position_name": "OE-AP-104-MMU-SRIKAKULAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07349",
+              "name": "Maddu Jagadeeswara Rao"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 158,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-SRIKAKULAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10882",
+              "name": "Kolluru Venkata Narasimha Murthy"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 22,
+      "shape": "DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15460",
+        "name": "Prasad",
+        "position_id": 3426,
+        "position_name": "STORE KEEPER - AP 104 MMU - ARDHAVEEDU",
+        "office": "104-MMU-AP-Ardhaveedu"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 162,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-PRAKASAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07274",
+              "name": "Jujjarapu Nageswara Rao"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 136,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-ONGOLE",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06884",
+              "name": "Kaleem    Mohammed"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 23,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15719",
+        "name": "Srikanth",
+        "position_id": 2969,
+        "position_name": "STORE KEEPER - AP 104 MMU - KADIRI",
+        "office": "104-MMU-AP-Kadiri"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 430,
+          "position_name": "OE-AP-104-MMU-KADIRI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07338",
+              "name": "N Adi Narayana"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 143,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-SRI-SATYA-SAI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07192",
+              "name": "A Raveendra prasad"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 24,
+      "shape": "DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15836",
+        "name": "Naveen",
+        "position_id": 3720,
+        "position_name": "STORE KEEPER - AP 104 MMU - BONDAPALLI",
+        "office": "104-MMU-AP-Bondapalle"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 159,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-16150",
+              "name": "Kolli Venkata Surya Srikanth"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 25,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15720",
+        "name": "Teja",
+        "position_id": 2970,
+        "position_name": "STORE KEEPER - AP 104 MMU - HINDUPUR",
+        "office": "104-MMU-AP-Hindupur"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 429,
+          "position_name": "OE-AP-104-MMU-HINDUPUR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07333",
+              "name": "C RAMAKRISHNA"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 143,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-SRI-SATYA-SAI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07192",
+              "name": "A Raveendra prasad"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 26,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15592",
+        "name": "Chaitanya",
+        "position_id": 2975,
+        "position_name": "STORE KEEPER - AP 104 MMU - PARVATHIPURAM",
+        "office": "104-MMU-AP-Parvathipuram"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 422,
+          "position_name": "OE-AP-104-MMU-PARVATHIPURAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07345",
+              "name": "Nallana Murali"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 157,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-PARVATHIPURAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07193",
+              "name": "S CH Krishna"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 27,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15565",
+        "name": "Naveen",
+        "position_id": 2976,
+        "position_name": "STORE KEEPER - AP 104 MMU - PALAKONDA",
+        "office": "104-MMU-AP-Palakonda"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 421,
+          "position_name": "OE-AP-104-MMU-PALAKONDA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07344",
+              "name": "B Rajasekhar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 157,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-PARVATHIPURAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07193",
+              "name": "S CH Krishna"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 28,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15508",
+        "name": "Srikanth",
+        "position_id": 2978,
+        "position_name": "STORE KEEPER - AP 104 MMU - DHONE",
+        "office": "104-MMU-AP-Dhone"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 419,
+          "position_name": "OE-AP-104-MMU-DHONE-TWO",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-15063",
+              "name": "N mohan reddy"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 155,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-NANDYAL",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07266",
+              "name": "Mulla Mohammed Rafi"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 29,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15458",
+        "name": "Srikanth",
+        "position_id": 2979,
+        "position_name": "STORE KEEPER - AP 104 MMU - KANIGIRI",
+        "office": "104-MMU-AP-Kanigiri"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 418,
+          "position_name": "OE-AP-104-MMU-KANIGIRI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10260",
+              "name": "S gireesh Maruthi Sai"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 154,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-MARKAPURAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07279",
+              "name": "Sk Mahammad Rasool Jilani"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 136,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-ONGOLE",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06884",
+              "name": "Kaleem    Mohammed"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 30,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15446",
+        "name": "Chaitanya",
+        "position_id": 2980,
+        "position_name": "STORE KEEPER - AP 104 MMU - ADONI",
+        "office": "104-MMU-AP-Adoni"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 417,
+          "position_name": "OE-AP-104-MMU-ADONI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07539",
+              "name": "Boya Mahanandi"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 153,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-KURNOOL",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07263",
+              "name": "Kota Rajasekhar"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 31,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15163",
+        "name": "Divya",
+        "position_id": 2981,
+        "position_name": "STORE KEEPER - AP 104 MMU - PATHIKONDA",
+        "office": "104-MMU-AP-Pathikonda"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 405,
+          "position_name": "OE-AP-104-MMU-PALAMANER",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10419",
+              "name": "C Mahesh"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 147,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-CHITTO0R",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07552",
+              "name": "V Suresh Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 32,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15445",
+        "name": "Ramesh",
+        "position_id": 2982,
+        "position_name": "STORE KEEPER - AP 104 MMU - KURNOOL",
+        "office": "104-MMU-AP-Kurnool"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 415,
+          "position_name": "OE-AP-104-MMU-KURNOOL",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07540",
+              "name": "Shaik Mahaboob Basha"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 153,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-KURNOOL",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07263",
+              "name": "Kota Rajasekhar"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 33,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15119",
+        "name": "Chaitanya",
+        "position_id": 2991,
+        "position_name": "STORE KEEPER - AP 104 MMU - PADERU",
+        "office": "104-MMU-AP-Paderu"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 402,
+          "position_name": "OE-AP-104-MMU-PADERU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-09627",
+              "name": "Munaga Ajith Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 2130,
+          "position_name": "DISTRICT-AP-104-MMU-MANAGER-ASR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07296",
+              "name": "Potnuru Naresh"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 34,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15108",
+        "name": "Suresh Babu",
+        "position_id": 2992,
+        "position_name": "STORE KEEPER - AP 104 MMU - RAYACHOTI",
+        "office": "104-MMU-AP-Rayachoti"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 401,
+          "position_name": "OE-AP-104-MMU-RAYACHOTI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07580",
+              "name": "G Ravi Prakash"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 145,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-ANNAMAYYA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10846",
+              "name": "Komara Venugopal"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 35,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15199",
+        "name": "Naveen",
+        "position_id": 3000,
+        "position_name": "STORE KEEPER - AP 104 MMU - NAGARI",
+        "office": "104-MMU-AP-Buffer Nagari"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 406,
+          "position_name": "OE-AP-104-MMU-CHITTOOR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-16395",
+              "name": "T BETHAIAH"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 147,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-CHITTO0R",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07552",
+              "name": "V Suresh Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 36,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15563",
+        "name": "Harish",
+        "position_id": 3002,
+        "position_name": "STORE KEEPER - AP 104 MMU - SATTENAPALLI",
+        "office": "104-MMU-AP-K Basavanahalli"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 183,
+          "position_name": "OE-AP-104-MMU-SATTENAPALLI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07548",
+              "name": "Yarraguntla Daveedu"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 142,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-PALNADU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07278",
+              "name": "Vinjamuri Vijay Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 136,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-ONGOLE",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06884",
+              "name": "Kaleem    Mohammed"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 37,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15403",
+        "name": "Naresh Kumar",
+        "position_id": 3006,
+        "position_name": "STORE KEEPER - AP 104 MMU - KANKIPADU",
+        "office": "104-MMU-AP-Palakur"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 179,
+          "position_name": "OE-AP-104-MMU-KANKIPADU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-15466",
+              "name": "GOUSU BABU SONTI"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 141,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-KRISHNA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07258",
+              "name": "Dayam William Chand"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 3,
+          "position_name": "REGIONAL-AP-104-MMU-MANAGER-VIJAYAWADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 38,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15002",
+        "name": "Chaitanya",
+        "position_id": 3023,
+        "position_name": "STORE KEEPER - AP 104 MMU - K.D.PETA",
+        "office": "104-MMU-AP-Kd Peta"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 396,
+          "position_name": "OE-AP-104-MMU-NARSIPATNAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07354",
+              "name": "Karri Venkat Apparao"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 169,
+          "position_name": "DIVISIONAL MANAGER-AP-104-MMU-ANAKAPALLI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07298",
+              "name": "Rudra Vamsikrishna"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 39,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15377",
+        "name": "Prasad",
+        "position_id": 3035,
+        "position_name": "STORE KEEPER - AP 104 MMU - TALLAPALEM",
+        "office": "104-MMU-AP-Kalludevakuntla"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 180,
+          "position_name": "OE-AP-104-MMU-KRISHNA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-16404",
+              "name": "Devara Avinash"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 141,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-KRISHNA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07258",
+              "name": "Dayam William Chand"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 3,
+          "position_name": "REGIONAL-AP-104-MMU-MANAGER-VIJAYAWADA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06889",
+              "name": "Himaja Sai Vaani Ganta"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 40,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15016",
+        "name": "Pavan",
+        "position_id": 3036,
+        "position_name": "STORE KEEPER - AP 104 MMU - RAMBILLI",
+        "office": "104-MMU-AP-Rambilli"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 395,
+          "position_name": "OE-AP-104-MMU-ANAKAPALLI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07341",
+              "name": "Kolla Santhosh Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 169,
+          "position_name": "DIVISIONAL MANAGER-AP-104-MMU-ANAKAPALLI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07298",
+              "name": "Rudra Vamsikrishna"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 41,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15043",
+        "name": "Sravani",
+        "position_id": 3062,
+        "position_name": "STORE KEEPER - AP 104 MMU - BUKKARAYA SAMUDRAM",
+        "office": "104-MMU-AP--bukkaraya Samudram"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 397,
+          "position_name": "OE-AP-104-MMU-ANANTAPUR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10869",
+              "name": "B.THIRUPATHI NAIDU"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 144,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-ANANTHAPUR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07297",
+              "name": "B Kishore Naidu"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 42,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15075",
+        "name": "Kiran Kumar",
+        "position_id": 3071,
+        "position_name": "STORE KEEPER - AP 104 MMU - KAMBADUR",
+        "office": "104-MMU-AP--kambadur"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 398,
+          "position_name": "OE-AP-104-MMU-KALYANDURG",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-09375",
+              "name": "Dileep Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 144,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-ANANTHAPUR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07297",
+              "name": "B Kishore Naidu"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 43,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15055",
+        "name": "Kiran Kumar",
+        "position_id": 3072,
+        "position_name": "STORE KEEPER - AP 104 MMU - GOOTY",
+        "office": "104-MMU-AP--gooty"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 399,
+          "position_name": "OE-AP-104-MMU-TADIPATRI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07538",
+              "name": "B Venkataramana"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 144,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-ANANTHAPUR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07297",
+              "name": "B Kishore Naidu"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 44,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15685",
+        "name": "Sravani",
+        "position_id": 3080,
+        "position_name": "STORE KEEPER - AP 104 MMU - NAGASAMUDRAM",
+        "office": "104-MMU-AP-Nagasamudram Gate"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 420,
+          "position_name": "OE-AP-104-MMU-DHARMAVARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07348",
+              "name": "Bandi Chaithanya"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 143,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-SRI-SATYA-SAI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07192",
+              "name": "A Raveendra prasad"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 45,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15089",
+        "name": "Divya",
+        "position_id": 3104,
+        "position_name": "STORE KEEPER - AP 104 MMU - ramapuram",
+        "office": "104-MMU-AP-Ramapuram"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 436,
+          "position_name": "OE-AP-104-MMU-NAIDUPETA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07554",
+              "name": "Dasari Rakesh"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 163,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-TIRUPATHI",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07555",
+              "name": "Nakka Rajesh"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 136,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-ONGOLE",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06884",
+              "name": "Kaleem    Mohammed"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 46,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15090",
+        "name": "Kiran Kumar",
+        "position_id": 3105,
+        "position_name": "STORE KEEPER - AP 104 MMU - SAMBEPALLE",
+        "office": "104-MMU-AP-Back Up"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 400,
+          "position_name": "OE-AP-104-MMU-MADANAPALLE",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07355",
+              "name": "N Praveen Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 145,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-ANNAMAYYA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10846",
+              "name": "Komara Venugopal"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 47,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15122",
+        "name": "Kavya",
+        "position_id": 3127,
+        "position_name": "STORE KEEPER - AP 104 MMU - ARAKU VALLEY",
+        "office": "104-MMU-AP-Arakuvalley"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 403,
+          "position_name": "OE-AP-104-MMU-ITDA-ARAKUVALLEY",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07195",
+              "name": "S Ravikumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 2130,
+          "position_name": "DISTRICT-AP-104-MMU-MANAGER-ASR",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07296",
+              "name": "Potnuru Naresh"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 137,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-VIZIANAGARAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10866",
+              "name": "Laxman Rao   Allam"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 48,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15132",
+        "name": "Srikanth",
+        "position_id": 3134,
+        "position_name": "STORE KEEPER - AP 104 MMU - CHANDOLU",
+        "office": "104-MMU-AP-Gangavaram"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 175,
+          "position_name": "OE-AP-104-MMU-CHIRALA-DIVISION",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07556",
+              "name": "Chappidi Krupa Sagar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 139,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-BAPATLA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-15257",
+              "name": "Galla satyanarayana"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 136,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-ONGOLE",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06884",
+              "name": "Kaleem    Mohammed"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 49,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15134",
+        "name": "Rajesh",
+        "position_id": 3136,
+        "position_name": "STORE KEEPER - AP 104 MMU - EPURUPALEM",
+        "office": "104-MMU-AP-Irala"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 174,
+          "position_name": "OE-AP-104-MMU-BAPATLA-DIVISION",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-10829",
+              "name": "Vishnuvardhan Gunti"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 139,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-BAPATLA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-15257",
+              "name": "Galla satyanarayana"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 136,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-ONGOLE",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06884",
+              "name": "Kaleem    Mohammed"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 50,
+      "shape": "OE > DISTRICT MANAGER > REGIONAL MANAGER > SPH",
+      "raiser": {
+        "employeeId": "HR-EMP-15165",
+        "name": "Harish",
+        "position_id": 3164,
+        "position_name": "STORE KEEPER - AP 104 MMU - BAIREDDYPALLI",
+        "office": "104-MMU-AP-Baireddypalli"
+      },
+      "rungs": [
+        {
+          "sequence": 1,
+          "role_name": "OE",
+          "position_id": 404,
+          "position_name": "OE-AP-104-MMU-KUPPAM",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-09258",
+              "name": "N Ashok Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "role_name": "DISTRICT MANAGER",
+          "position_id": 147,
+          "position_name": "DISTRICT MANAGER-AP-104-MMU-CHITTO0R",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-07552",
+              "name": "V Suresh Kumar"
+            }
+          ]
+        },
+        {
+          "sequence": 3,
+          "role_name": "REGIONAL MANAGER",
+          "position_id": 138,
+          "position_name": "REGIONAL MANAGER-AP-104-MMU-YSR-KADAPA",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-06887",
+              "name": "Shaik Ikbal Hussain  Naddimulla"
+            }
+          ]
+        },
+        {
+          "sequence": 4,
+          "role_name": "SPH",
+          "position_id": 2,
+          "position_name": "SPH-AP-104-MMU",
+          "holders": [
+            {
+              "employeeId": "HR-EMP-17065",
+              "name": "NARESH BABU METTA"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

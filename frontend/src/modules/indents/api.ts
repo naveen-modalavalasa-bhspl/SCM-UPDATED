@@ -35,6 +35,7 @@ export interface IndentQueryParams {
 export const INDENT_QUERY_STALE_TIME = 45_000;
 export const INDENT_QUERY_GC_TIME = 5 * 60_000;
 export const INDENT_QUERY_ROOT = "indents-module";
+export const INDENT_JOURNEY_CONTRACT_VERSION = 5;
 
 export interface IndentAccountScope {
   employeeId: number | null;
@@ -63,7 +64,7 @@ export const indentKeys = {
   offices: (scope: IndentAccountScope) =>
     [...indentKeys.all(scope), "offices"] as const,
   journey: (scope: IndentAccountScope, id: number) =>
-    [...indentKeys.all(scope), "journey", id] as const,
+    [...indentKeys.all(scope), "journey", INDENT_JOURNEY_CONTRACT_VERSION, id] as const,
   items: (scope: IndentAccountScope, context: unknown = "default") =>
     [...indentKeys.all(scope), "items", context] as const,
   bomChoices: (scope: IndentAccountScope) =>
@@ -199,13 +200,20 @@ export const indentApi = {
       signal,
     }).then((r) => r.data),
   offices: () => api.get<{ items: Option[] }>("/api/indents/options/offices").then((r) => r.data.items),
-  get: (id: number) => api.get<Indent>(`/api/indents/${id}`).then((r) => r.data),
-  journey: (id: number) => api.get<IndentJourney>(`/api/indents/${id}/journey`).then((r) => r.data),
+  get: (id: number, signal?: AbortSignal) =>
+    api.get<Indent>(`/api/indents/${id}`, { signal }).then((r) => r.data),
+  journey: (id: number, signal?: AbortSignal) =>
+    api.get<IndentJourney>(`/api/indents/${id}/journey`, { signal }).then((r) => r.data),
   create: (data: IndentCreate) => api.post<Indent>("/api/indents", data).then((r) => r.data),
   update: (id: number, data: IndentUpdate) =>
     api.put<Indent>(`/api/indents/${id}`, data).then((r) => r.data),
   delete: (id: number) => api.delete<void>(`/api/indents/${id}`).then((r) => r.data),
   submit: (id: number) => api.post<Indent>(`/api/indents/${id}/submit`).then((r) => r.data),
+  returnForCorrection: (id: number, comments: string) =>
+    api.post<Indent>(`/api/indents/${id}/return-for-correction`, { comments })
+      .then((r) => r.data),
+  resubmitCorrection: (id: number) =>
+    api.post<Indent>(`/api/indents/${id}/resubmit-correction`).then((r) => r.data),
   approve: (id: number, comments: string) =>
     api.post<Indent>(`/api/indents/${id}/approve`, { comments }).then((r) => r.data),
   reject: (id: number, comments: string) =>

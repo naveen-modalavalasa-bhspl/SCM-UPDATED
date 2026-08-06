@@ -1,16 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
 import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
+import { alerts } from "@/modules/alerts";
 import {
   indentApi, indentKeys, isIndentModuleQuery, masterApi,
   useIndentAccountCacheIsolation, useIndentAccountScope,
 } from "../api";
 import { ItemCombobox } from "../components/ItemCombobox";
 import { ChooseBomModal } from "../components/ChooseBomModal";
+import { INDENT_STATUS } from "../constants";
 import type { IndentCreate, IndentUpdate, TemplateLineItem } from "../types";
 
 interface Line {
@@ -24,6 +26,28 @@ const REQUIRED_DATE_MANDATORY_ERROR = "Required date is mandatory.";
 const DUPLICATE_ITEM_ERROR = "This item is already added to the indent.";
 const MISSING_QTY_ERROR = "Quantity is required for this item.";
 const UOM_UNAVAILABLE = "UOM unavailable";
+/**
+ * Hides the browser's native number spinner. It stays `type="number"` — only the
+ * arrows go; stepping 0.001 at a time was never a useful way to enter a quantity.
+ */
+const NO_SPINNER = "[&_input]:[appearance:textfield] " +
+  "[&_input::-webkit-outer-spin-button]:m-0 [&_input::-webkit-outer-spin-button]:appearance-none " +
+  "[&_input::-webkit-inner-spin-button]:m-0 [&_input::-webkit-inner-spin-button]:appearance-none";
+
+/**
+ * Hiding the arrows does not stop a `type="number"` field from stepping: the mouse
+ * wheel and the up/down keys still move it, one whole `step` at a time, with nothing
+ * on screen to say it happened. Scrolling the page with the cursor resting on a
+ * focused Qty box is enough to walk a quantity away from what was typed — which is how
+ * quantities nobody entered (9 → 7.999, 20 → 17.999) reached the database. The wheel
+ * blurs the field so the page scrolls instead, and the arrows do nothing.
+ */
+const NO_SILENT_STEPPING = {
+  onWheel: (event: WheelEvent<HTMLInputElement>) => event.currentTarget.blur(),
+  onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault();
+  },
+};
 
 function localDateString(date = new Date()) {
   const year = date.getFullYear();
@@ -57,6 +81,25 @@ function clearResolvedDuplicateErrors(lines: Line[]) {
     delete validLine.duplicateItemId;
     return validLine;
   });
+}
+
+function DeliveryOfficeSelector({
+  value,
+  onChange,
+  options,
+}: {
+  value: number | "";
+  onChange: (value: number | "") => void;
+  options: { value: number; label: string }[];
+}) {
+  return (
+    <Select
+      placeholder="Office is assigned from your position"
+      value={value}
+      onChange={(nextValue) => onChange(nextValue === "" ? "" : Number(nextValue))}
+      options={options}
+    />
+  );
 }
 
 export function IndentFormPage() {
@@ -97,7 +140,7 @@ export function IndentFormPage() {
   const { data: offices = [] } = useQuery({
     queryKey: indentKeys.offices(accountScope),
     queryFn: () => indentApi.offices(),
-    enabled: isEditing,
+    enabled: !isEditing,
   });
 
   const {
@@ -109,9 +152,25 @@ export function IndentFormPage() {
     queryFn: () => indentApi.get(editId!),
     enabled: isEditing,
   });
+  const hasExistingIndent = (editId !== null && Number.isFinite(editId)) || Boolean(draft?.id);
+
+  const canEditLoadedIndent = Boolean(
+    draft
+    && (
+      draft.status === INDENT_STATUS.DRAFT
+      || (
+        draft.status === INDENT_STATUS.RETURNED_FOR_CORRECTION
+        && draft.can_edit_correction
+      )
+    ),
+  );
+  const isCorrectionEdit = Boolean(
+    draft?.status === INDENT_STATUS.RETURNED_FOR_CORRECTION
+    && draft.can_edit_correction,
+  );
 
   useEffect(() => {
-    if (!draft || draft.status !== "DRAFT" || initializedDraftId.current === draft.id) return;
+    if (!draft || !canEditLoadedIndent || initializedDraftId.current === draft.id) return;
     initializedDraftId.current = draft.id;
     setPriority(draft.priority || "NORMAL");
     setRequiredDate(draft.required_date ?? "");
@@ -121,7 +180,7 @@ export function IndentFormPage() {
       item_id: item.item_id,
       quantity: Number(item.quantity),
     })));
-  }, [draft]);
+  }, [canEditLoadedIndent, draft]);
 
   const payload = (): IndentCreate => ({
     priority,
@@ -134,7 +193,7 @@ export function IndentFormPage() {
 
   const updatePayload = (): IndentUpdate => ({
     ...payload(),
-    office_id: deliveryOfficeId === "" ? null : Number(deliveryOfficeId),
+    office_id: draft?.office_id ?? null,
   });
 
   const save = useMutation({
@@ -143,6 +202,12 @@ export function IndentFormPage() {
       : indentApi.create(payload()),
     onSuccess: (indent) => {
       qc.invalidateQueries({ predicate: isIndentModuleQuery });
+      // Not awaited: the alert closes itself, and holding the navigation behind it
+      // would leave the person on a form they have already finished with.
+      void alerts.success(
+        isEditing ? "indent.updated" : "indent.created",
+        { number: indent.indent_no },
+      );
       nav(`/indents/${indent.id}`);
     },
     onError: (e: Error) => setError(e.message),
@@ -224,17 +289,15 @@ export function IndentFormPage() {
   const hasMissingQtyError = missingQtyRows.size > 0;
 
   const itemOptions = items.map((it) => ({ value: it.id, label: `${it.code} — ${it.name}` }));
-  const deliveryOptions = isEditing
-    ? [
-        ...(draft?.office_id && !offices.some((office) => office.id === draft.office_id)
-          ? [{ id: draft.office_id, name: draft.office_name ?? "Current office" }]
-          : []),
-        ...offices,
-      ].map((office) => ({ value: office.id, label: office.name }))
-    : deliveryOfficeId ? [{
-        value: deliveryOfficeId,
-        label: me?.active_position?.office_name ?? me?.employee.office_name ?? "Tagged office",
-      }] : [];
+  const deliveryOptions = [
+    ...(deliveryOfficeId && !offices.some((office) => office.id === deliveryOfficeId)
+      ? [{
+          id: deliveryOfficeId,
+          name: me?.active_position?.office_name ?? me?.employee.office_name ?? "Tagged office",
+        }]
+      : []),
+    ...offices,
+  ].map((office) => ({ value: office.id, label: office.name }));
 
   if (isEditing && isDraftLoading) return <Skeleton className="h-40 rounded-2xl" />;
 
@@ -251,11 +314,15 @@ export function IndentFormPage() {
     );
   }
 
-  if (isEditing && draft?.status !== "DRAFT") {
+  if (isEditing && draft && !canEditLoadedIndent) {
     return (
       <Card>
         <CardBody className="gap-4 p-5">
-          <p className="text-sm font-semibold text-body">Only Draft indents can be edited.</p>
+          <p className="text-sm font-semibold text-body">
+            {draft.status === INDENT_STATUS.RETURNED_FOR_CORRECTION
+              ? "This indent is not available for correction editing."
+              : "Only Draft indents can be edited."}
+          </p>
           <Button variant="secondary" onClick={() => nav(`/indents/${editId}`)}>Back to indent</Button>
         </CardBody>
       </Card>
@@ -266,7 +333,9 @@ export function IndentFormPage() {
     <>
       <PageHeader
         eyebrow="Indents"
-        title={isEditing ? `Edit ${draft?.indent_no ?? "indent"}` : "New request"}
+        title={isCorrectionEdit
+          ? `Edit correction ${draft?.indent_no ?? "indent"}`
+          : isEditing ? `Edit ${draft?.indent_no ?? "indent"}` : "New request"}
         actions={!isEditing ? (
           <Button variant="primary" onClick={() => setBomPickerOpen(true)}>
             <LibraryBig className="h-4 w-4" /> Choose BOM
@@ -325,9 +394,10 @@ export function IndentFormPage() {
                           aria-describedby={showMissingQtyError ? missingQtyErrorId : undefined}
                           disabled={line.item_id === ""}
                           placeholder={line.item_id === "" ? "—" : undefined}
-                          className={line.item_id === "" ? "[&_input]:text-center" : undefined}
+                          className={`${NO_SPINNER}${line.item_id === "" ? " [&_input]:text-center" : ""}`}
                           value={String(line.quantity)}
                           onChange={(e) => setLine(i, { quantity: e.target.value ? Number(e.target.value) : "" })}
+                          {...NO_SILENT_STEPPING}
                           isInvalid={showMissingQtyError}
                           {...(uom ? {
                             endContent: (
@@ -416,13 +486,15 @@ export function IndentFormPage() {
               <Input value={me?.active_position?.name ?? "No position assigned"} disabled />
             </Field>
             <Field label="Delivery location">
-              <Select
-                placeholder="Office is assigned from your position"
-                value={deliveryOfficeId}
-                onChange={(value) => setDeliveryOfficeId(value === "" ? "" : Number(value))}
-                isDisabled={!isEditing}
-                options={deliveryOptions}
-              />
+              {hasExistingIndent ? (
+                <Input value={draft?.office_name ?? "—"} disabled />
+              ) : (
+                <DeliveryOfficeSelector
+                  value={deliveryOfficeId}
+                  onChange={setDeliveryOfficeId}
+                  options={deliveryOptions}
+                />
+              )}
             </Field>
             <Field label="Remarks">
               <Input value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Optional" />
@@ -470,7 +542,7 @@ export function IndentFormPage() {
         >
           {save.isPending
             ? (isEditing ? "Saving…" : "Creating…")
-            : (isEditing ? "Save changes" : "Create indent")}
+            : (isCorrectionEdit ? "Save correction" : isEditing ? "Save changes" : "Create indent")}
         </Button>
       </div>
 

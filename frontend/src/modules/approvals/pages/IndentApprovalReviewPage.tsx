@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Check, RotateCcw, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, Check, RotateCcw, X } from "lucide-react";
 import { Button, Card, ConfirmModal, PageHeader, StatusPill } from "@/shared/components";
 import { approvalsApi } from "../api";
+import {
+  allowedRange, approvalCeiling, formatQuantity, quantityError,
+  quantityValue, wasReducedBelow,
+} from "../quantityRules";
+import { isIndentModuleQuery } from "@/modules/indents/api";
+import { alerts } from "@/modules/alerts";
 
 type Decision = "approve" | "reject" | "return" | null;
 const CHECKS = [
@@ -11,8 +17,6 @@ const CHECKS = [
   "I checked the business need and priority.",
   "I checked the approved quantities shown below.",
 ];
-const asNumber = (value: string | undefined) =>
-  value === "" || value == null ? 0 : Number(value);
 
 /** Normal page-based review. This is deliberately not a drawer or overlay. */
 export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { indentId?: number } = {}) {
@@ -39,25 +43,45 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
 
   useEffect(() => {
     if (!indent.data) return;
+    // Prefilled with the ceiling, so "approve as asked" is the no-edit path and the
+    // approver only touches the lines they mean to cut.
     setQuantities(Object.fromEntries(
-      indent.data.items.map((line) => [line.id, String(line.approved_quantity)]),
+      indent.data.items.map((line) => [line.id, formatQuantity(approvalCeiling(line))]),
     ));
   }, [indent.data]);
 
-  const invalidQuantity = useMemo(() => (indent.data?.items ?? []).some((line) => {
-    const value = asNumber(quantities[line.id]);
-    return !Number.isFinite(value) || value < 0 || value > line.requested_quantity;
-  }), [indent.data, quantities]);
+  const errorByLine = useMemo(() => Object.fromEntries(
+    (indent.data?.items ?? []).map((line) => [line.id, quantityError(line, quantities[line.id])]),
+  ), [indent.data, quantities]);
+  const invalidCount = Object.values(errorByLine).filter(Boolean).length;
+  const invalidQuantity = invalidCount > 0;
+  const anyReducedBelow = (indent.data?.items ?? []).some(wasReducedBelow);
+  const checksDone = checks.every(Boolean);
 
-  const needsReason = confirming === "reject" || confirming === "return";
+  // Every keystroke is kept; the message under the field does the correcting. Refusing
+  // the key instead leaves the approver staring at a box that will not take their 16.
+  const setQuantity = (line: { id: number }, raw: string) => {
+    setQuantities((current) => ({ ...current, [line.id]: raw }));
+  };
 
-  const finish = () => {
-    // Drop this indent's detail cache rather than refetching it. The decision just
-    // took the document out of approval, so a refetch answers 422 ("Indent is not
-    // awaiting approval") and paints an error over a screen that succeeded.
+  /** Announced before the queries are dropped, so the number is still readable. */
+  const announce = (decision: "approve" | "reject" | "return") => {
+    const number = indent.data?.indent_no ?? "The indent";
+    const raiser = indent.data?.requested_by_name || "the raiser";
+    if (decision === "approve") void alerts.success("indent.approved", { number });
+    else if (decision === "reject") void alerts.success("indent.rejected", { number, raiser });
+    else void alerts.success("indent.returned", { number, raiser });
+  };
+
+  const finish = (decision: "approve" | "reject" | "return") => () => {
+    announce(decision);
+    // Dropped rather than invalidated: the decision just took the document out of
+    // approval, so a refetch answers 422 ("Indent is not awaiting approval") and
+    // paints an error over a screen that succeeded.
     qc.removeQueries({ queryKey: ["approvals", "indent", indentId] });
     qc.removeQueries({ queryKey: ["approvals", "history", "INDENT", indentId] });
-    qc.invalidateQueries({ queryKey: ["approvals", "pending"] });
+    qc.invalidateQueries({ queryKey: ["approvals"], refetchType: "all" });
+    qc.invalidateQueries({ predicate: isIndentModuleQuery, refetchType: "all" });
     nav("/approvals");
   };
   const approve = useMutation({
@@ -65,25 +89,28 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       indentId,
       (indent.data?.items ?? []).map((line) => ({
         line_id: line.id,
-        approved_quantity: asNumber(quantities[line.id]),
+        approved_quantity: quantityValue(quantities[line.id]),
       })),
       comments,
     ),
-    onSuccess: finish,
+    onSuccess: finish("approve"),
   });
   const reject = useMutation({
     mutationFn: () => approvalsApi.rejectIndent(indentId, reason),
-    onSuccess: finish,
+    onSuccess: finish("reject"),
   });
   const returnForCorrection = useMutation({
-    mutationFn: () => approvalsApi.returnIndent(indentId, reason),
-    onSuccess: finish,
+    mutationFn: () => approvalsApi.returnIndent(indentId, reason.trim()),
+    onSuccess: finish("return"),
   });
   const busy = approve.isPending || reject.isPending || returnForCorrection.isPending;
   const actionError = approve.error || reject.error || returnForCorrection.error;
+  const canReturnForCorrection = Boolean(indent.data?.can_return_for_correction);
 
   const confirm = () => {
-    if (needsReason && !reason.trim()) return;
+    if ((confirming === "reject" || confirming === "return") && !reason.trim()) return;
+    if (confirming === "return" && !canReturnForCorrection) return;
+    if (busy) return;
     if (confirming === "approve") approve.mutate();
     if (confirming === "reject") reject.mutate();
     if (confirming === "return") returnForCorrection.mutate();
@@ -101,13 +128,34 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       <Card className="p-4"><dl className="grid gap-3 text-sm sm:grid-cols-3"><div><dt className="text-muted">Requested by</dt><dd className="font-semibold text-ink">{indent.data.requested_by_name ?? "—"}</dd></div><div><dt className="text-muted">Department</dt><dd>{indent.data.department_name ?? "—"}</dd></div><div><dt className="text-muted">Priority</dt><dd><StatusPill status={indent.data.priority} /></dd></div></dl></Card>
 
       <section>
-        <h2 className="mb-2 font-semibold text-ink">Quantity comparison</h2>
-        <div className="overflow-x-auto rounded-xl border border-line"><table className="w-full text-left text-sm"><thead className="bg-content2 text-xs text-muted"><tr><th className="p-3">Item</th><th className="p-3 text-right">Requested</th><th className="p-3 text-right">Approved at this level</th><th className="p-3 text-right">Difference</th></tr></thead><tbody className="divide-y divide-line">{indent.data.items.map((line) => {
-          const proposed = asNumber(quantities[line.id]);
-          const difference = proposed - line.requested_quantity;
-          return <tr key={line.id}><td className="p-3"><strong className="text-ink">{line.item_name}</strong><p className="font-mono text-xs text-muted">{line.item_code}</p></td><td className="p-3 text-right">{line.requested_quantity} {line.uom_code}</td><td className="p-3 text-right"><input type="number" min={0} max={line.requested_quantity} step="0.001" aria-label={`Approved quantity for ${line.item_name ?? line.id}`} value={quantities[line.id] ?? ""} onChange={(event) => setQuantities((current) => ({ ...current, [line.id]: event.target.value }))} className="h-11 w-28 rounded-lg border border-line bg-content1 px-3 text-right text-ink" /><span className="ml-1 text-xs text-muted">{line.uom_code}</span></td><td className={`p-3 text-right ${difference < 0 ? "font-semibold text-warning" : "text-muted"}`}>{difference === 0 ? "No change" : difference}</td></tr>;
+        <h2 className="font-semibold text-ink">Quantity comparison</h2>
+        <p className="mb-2 max-w-3xl text-xs leading-relaxed text-muted">A quantity may be reduced down to zero, never increased, and what you approve becomes the maximum the next approver can pass on. {anyReducedBelow ? "Lines already cut by an earlier approver are capped at that lower quantity, not at the original request." : "Each field shows the range you may enter."}</p>
+        <div className="overflow-x-auto rounded-xl border border-line"><table className="w-full min-w-[980px] table-fixed text-left text-sm"><colgroup><col className="w-[34%]" /><col className="w-[13%]" /><col className="w-[22%]" /><col className="w-[19%]" /><col className="w-[12%]" /></colgroup><thead className="bg-content2 text-xs text-muted"><tr><th className="px-4 py-3 text-left font-semibold">Item</th><th className="px-4 py-3 text-right font-semibold">Requested</th><th className="px-4 py-3 text-right font-semibold">Most you can approve</th><th className="px-4 py-3 text-right font-semibold">Approved at this level</th><th className="px-4 py-3 text-right font-semibold">Difference</th></tr></thead><tbody className="divide-y divide-line">{indent.data.items.map((line) => {
+          const ceiling = approvalCeiling(line);
+          const raw = quantities[line.id] ?? "";
+          const lineError = errorByLine[line.id];
+          const difference = lineError ? null : quantityValue(raw) - ceiling;
+          const reduced = wasReducedBelow(line);
+          return <tr key={line.id}><td className="px-4 py-3 align-top"><strong className="block truncate text-ink" title={line.item_name ?? undefined}>{line.item_name}</strong><p className="font-mono text-xs text-muted">{line.item_code}</p></td><td className="whitespace-nowrap px-4 py-3 text-right align-top tabular-nums">{formatQuantity(line.requested_quantity)} {line.uom_code}</td><td className="px-4 py-3 text-right align-top"><span className={`whitespace-nowrap tabular-nums ${reduced ? "font-semibold text-warning" : "text-body"}`}>{formatQuantity(ceiling)} {line.uom_code}</span>{reduced && <p className="text-xs text-muted">Cut by a previous approver</p>}</td><td className="px-4 py-3 text-right align-top">
+            {/* One right-aligned block per cell, the same width as the column's
+                right-aligned header: the input, its unit and the help line share
+                the block's left and right edges, so nothing drifts out from under
+                the field. The unit sits inside the field rather than beside it —
+                hung outside, it pushed the box left of the header above it. */}
+            <div className="ml-auto w-32">
+              <div className="relative">
+                <input type="text" inputMode="decimal" autoComplete="off" aria-label={`Approved quantity for ${line.item_name ?? line.id}`} aria-invalid={Boolean(lineError)} aria-describedby={`qty-help-${line.id}`} value={raw} onChange={(event) => setQuantity(line, event.target.value)} className={`h-10 w-full rounded-lg border bg-content1 py-2 pl-3 pr-10 text-right tabular-nums text-ink outline-none transition focus:ring-2 ${lineError ? "border-danger bg-danger/5 focus:ring-danger/30" : "border-line focus:border-brand focus:ring-brand/25"}`} />
+                <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted">{line.uom_code}</span>
+              </div>
+              {/* The range is on screen before anything goes wrong, and repeated inside
+                  the error when it does — the approver never has to work out the cap. */}
+              <p id={`qty-help-${line.id}`} className={`mt-1.5 flex items-start gap-1.5 text-left text-xs leading-snug ${lineError ? "text-danger" : "text-muted"}`} role={lineError ? "alert" : undefined}>
+                {lineError && <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />}
+                <span>{lineError ?? `You can approve ${allowedRange(line)}.`}</span>
+              </p>
+            </div>
+          </td><td className={`whitespace-nowrap px-4 py-3 text-right align-top tabular-nums ${difference != null && difference < 0 ? "font-semibold text-warning" : "text-muted"}`}>{difference == null ? "—" : difference === 0 ? "No change" : `${formatQuantity(difference)} ${line.uom_code ?? ""}`.trim()}</td></tr>;
         })}</tbody></table></div>
-        {invalidQuantity && <p className="mt-2 text-sm text-danger">Every quantity must be between zero and the requested quantity.</p>}
       </section>
 
       <section><h2 className="mb-2 font-semibold text-ink">Approval checklist</h2><Card className="space-y-2 p-4">{CHECKS.map((label, index) => <label key={label} className="flex min-h-11 cursor-pointer items-center gap-3 text-sm text-body"><input type="checkbox" checked={checks[index]} onChange={(event) => setChecks((current) => current.map((value, item) => item === index ? event.target.checked : value))} className="h-5 w-5" />{label}</label>)}</Card></section>
@@ -116,11 +164,15 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
 
       <section><h2 className="mb-2 font-semibold text-ink">Previous approvals</h2><Card className="divide-y divide-line p-0">{history.isLoading && <p className="p-4 text-sm text-muted">Loading history…</p>}{(history.data ?? []).map((row) => <div key={row.id} className="p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><strong className="text-ink">{row.actor_name ?? "System"}</strong><p className="text-xs text-muted">{row.stage_name ?? `Stage ${row.stage_sequence}`} · {row.actor_position ?? "Position unavailable"}</p></div><StatusPill status={row.action} /></div>{row.comments && <p className="mt-2 text-sm text-body">{row.comments}</p>}<p className="mt-1 text-xs text-muted">{row.acted_at ? new Date(row.acted_at).toLocaleString() : "—"}</p></div>)}{!history.isLoading && !(history.data ?? []).length && <p className="p-4 text-sm text-muted">No previous approval actions.</p>}</Card></section>
 
-      <div className="flex flex-wrap justify-end gap-2 border-t border-line py-4"><Button variant="ghost" disabled={busy} onClick={() => { setReason(""); setConfirming("return"); }}><RotateCcw className="h-4 w-4" /> Return for correction</Button><Button variant="danger" disabled={busy} onClick={() => { setReason(""); setConfirming("reject"); }}><X className="h-4 w-4" /> Reject</Button><Button disabled={busy || invalidQuantity || !checks.every(Boolean)} onClick={() => setConfirming("approve")}><Check className="h-4 w-4" /> Approve</Button></div>
+      <div className="border-t border-line py-4">
+        {/* A greyed-out Approve with no reason is the other half of the same confusion. */}
+        {(invalidQuantity || !checksDone) && <div className={`mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-sm ${invalidQuantity ? "border-danger/30 bg-danger/10 text-danger" : "border-line bg-content2 text-muted"}`} role="status"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span>{invalidQuantity ? `Correct the ${invalidCount === 1 ? "highlighted quantity" : `${invalidCount} highlighted quantities`} before approving.` : "Confirm every item on the checklist before approving."}</span></div>}
+        <div className="flex flex-wrap justify-end gap-2">{canReturnForCorrection && <Button variant="ghost" disabled={busy} onClick={() => { setReason(""); setConfirming("return"); }}><RotateCcw className="h-4 w-4" /> Return for correction</Button>}<Button variant="danger" disabled={busy} onClick={() => { setReason(""); setConfirming("reject"); }}><X className="h-4 w-4" /> Reject</Button><Button disabled={busy || invalidQuantity || !checksDone} onClick={() => setConfirming("approve")}><Check className="h-4 w-4" /> Approve</Button></div>
+      </div>
     </div>
 
-    <ConfirmModal isOpen={confirming !== null} title={confirming === "approve" ? "Approve this request?" : confirming === "reject" ? "Reject this request?" : "Return for correction?"} message={confirming === "approve" ? "The saved quantities move to the next approval level or complete the approval." : confirming === "reject" ? "The request will stop and the requester will see your reason." : "Your correction instructions will be recorded in approval history."} confirmLabel={confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return"} danger={confirming === "reject"} busy={busy} confirmDisabled={needsReason && !reason.trim()} error={actionError} onClose={() => setConfirming(null)} onConfirm={confirm}>
-      {needsReason && <label className="text-sm font-semibold text-ink">{confirming === "reject" ? "Rejection reason" : "What must be corrected?"}<textarea autoFocus value={reason} onChange={(event) => setReason(event.target.value)} className="mt-2 min-h-24 w-full rounded-lg border border-line bg-content1 p-3 text-sm text-ink" placeholder="Required" />{!reason.trim() && <p className="mt-1 text-xs text-danger">A reason is required.</p>}</label>}
+    <ConfirmModal isOpen={confirming !== null} title={confirming === "approve" ? "Approve this request?" : confirming === "reject" ? "Reject this request?" : "Return for correction?"} message={confirming === "approve" ? "The saved quantities move to the next approval level or complete the approval." : confirming === "reject" ? "The request will stop and the requester will see your reason." : "Your correction instructions will be recorded in approval history."} confirmLabel={confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return for correction"} danger={confirming === "reject"} busy={busy || ((confirming === "reject" || confirming === "return") && !reason.trim())} error={actionError} onClose={() => !busy && setConfirming(null)} onConfirm={confirm}>
+      {(confirming === "reject" || confirming === "return") && <label className="text-sm font-semibold text-ink">{confirming === "reject" ? "Rejection reason" : "What must be corrected?"}<textarea autoFocus value={reason} onChange={(event) => setReason(event.target.value)} className="mt-2 min-h-24 w-full rounded-lg border border-line bg-content1 p-3 text-sm text-ink" placeholder="Required" />{!reason.trim() && <p className="mt-1 text-xs text-danger">A reason is required.</p>}</label>}
     </ConfirmModal>
   </>;
 }

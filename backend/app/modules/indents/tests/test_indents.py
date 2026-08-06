@@ -12,7 +12,9 @@ from app.core.security import hash_password
 from app.modules.indents import service
 from app.modules.indents.models import IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
-from app.modules.indents.enums import AllocationStatus, ApprovalAction, IndentItemStatus
+from app.modules.indents.enums import (
+    AllocationStatus, ApprovalAction, IndentItemStatus, IndentStatus,
+)
 from app.modules.inventory.models import Allocation, AllocationItem
 from app.modules.inventory.schemas import AllocationIn
 from app.platform.hcm.models import (
@@ -21,7 +23,7 @@ from app.platform.hcm.models import (
 from app.platform.rbac.models import Permission, Role, RolePermission, UserRole
 from app.platform.settings.models import UserCredential
 from app.platform.workflow.models import Action, Instance, Pending, Stage, Workflow
-from app.shared.enums import ApproverType, IndentStatus
+from app.shared.enums import ApproverType
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom
 
@@ -103,6 +105,8 @@ async def _world(db):
                  approver_type=ApproverType.REPORTING_MANAGER.value,
                  approval_mode="ANY_ONE"))
     await db.commit()
+    requester.active_position_id = 101
+    approver.active_position_id = 100
     return requester, approver, it1, it2
 
 
@@ -297,7 +301,7 @@ async def _production_visibility_world(db):
     return {**employees, "item": item, "positions": positions, "indents": indents}
 
 
-async def _approval_ladder_world(db):
+async def _approval_ladder_world(db, *, correction_ladder: bool = False):
     uom = Uom(code="NOS", name="Numbers")
     db.add(uom)
     await db.flush()
@@ -306,20 +310,27 @@ async def _approval_ladder_world(db):
     db.add(HcmOffice(id=801, name="Branch Office", is_active=True, synced_at=utcnow()))
     db.add(HcmDepartment(id=601, name="Operations", synced_at=utcnow()))
     db.add_all([
-        HcmPosition(id=1000, name="Pilot", parent_position_id=1001,
-                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
-        HcmPosition(id=1001, name="OE", parent_position_id=1002,
-                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
-        HcmPosition(id=1002, name="DM", parent_position_id=1003,
-                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
-        HcmPosition(id=1003, name="RM", parent_position_id=1004,
-                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
-        HcmPosition(id=1004, name="SPH", parent_position_id=1005,
-                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
-        HcmPosition(id=1005, name="COO", department_id=601, office_id=801,
+        HcmPosition(id=1000, name="Pilot", role_id=6, role_name="Pilot",
+                    parent_position_id=1001, department_id=601, office_id=801,
                     is_active=True, synced_at=utcnow()),
-        HcmPosition(id=1006, name="Sibling OE", parent_position_id=1002,
-                    department_id=601, office_id=801, is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1001, name="OE", role_id=5, role_name="OE",
+                    parent_position_id=1002, department_id=601, office_id=801,
+                    is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1002, name="DM", role_id=4, role_name="DM",
+                    parent_position_id=1003, department_id=601, office_id=801,
+                    is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1003, name="RM", role_id=3, role_name="RM",
+                    parent_position_id=1004, department_id=601, office_id=801,
+                    is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1004, name="SPH", role_id=2, role_name="SPH",
+                    parent_position_id=1005, department_id=601, office_id=801,
+                    is_active=True, synced_at=utcnow()),
+        HcmPosition(id=1005, name="COO", role_id=1, role_name="COO",
+                    department_id=601, office_id=801, is_active=True,
+                    synced_at=utcnow()),
+        HcmPosition(id=1006, name="Sibling OE", role_id=5, role_name="OE",
+                    parent_position_id=1002, department_id=601, office_id=801,
+                    is_active=True, synced_at=utcnow()),
     ])
     employees = {
         "pilot": HcmEmployee(id=51, full_name="Pilot", emp_code="PILOT",
@@ -361,18 +372,37 @@ async def _approval_ladder_world(db):
     wf = Workflow(code="WF-INDENT", name="Indent", doc_type="INDENT", is_active=True)
     db.add(wf)
     await db.flush()
-    db.add(Stage(workflow_id=wf.id, sequence=1, name="Reporting Manager",
-                 approver_type=ApproverType.REPORTING_MANAGER.value,
-                 approval_mode="ANY_ONE"))
+    if correction_ladder:
+        for sequence, role_id, name in [
+            (1, 5, "OE"),
+            (2, 4, "DM"),
+            (3, 3, "RM"),
+            (4, 2, "SPH"),
+            (5, 1, "COO"),
+        ]:
+            db.add(Stage(
+                workflow_id=wf.id, sequence=sequence, name=name,
+                approver_type=ApproverType.REPORTING_MANAGER.value,
+                position_role_id=role_id, approval_mode="ANY_ONE",
+            ))
+    else:
+        db.add(Stage(workflow_id=wf.id, sequence=1, name="Reporting Manager",
+                     approver_type=ApproverType.REPORTING_MANAGER.value,
+                     approval_mode="ANY_ONE"))
     await db.commit()
 
     for key, position_id in assignments:
         employees[key].active_position_id = position_id
-    await _grant_login(db, employees["pilot"], "pilot", ["indent.view", "indent.submit"])
+    await _grant_login(
+        db, employees["pilot"], "pilot",
+        ["indent.view", "indent.submit", "indent.edit"],
+    )
     for key in ("oe", "dm", "rm", "sph", "coo", "sibling_oe"):
         await _grant_login(
             db, employees[key], key, ["indent.view", "indent.approve", "indent.reject"],
         )
+    for key, position_id in assignments:
+        employees[key].active_position_id = position_id
 
     indent = await service.create_indent(db, _create_data(item.id), employees["pilot"])
     return {**employees, "item": item, "indent": indent}
@@ -734,6 +764,266 @@ async def test_reporting_manager_ladder_advances_oe_to_dm_to_rm_to_final_group(d
     assert {row.approver_id for row in pending} == {world["sph"].id, world["coo"].id}
 
 
+async def test_first_stage_return_for_correction_assigns_requester_and_no_pending(db):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    instance_id = (await db.execute(
+        select(Instance.id).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+
+    returned = await service.return_indent_for_correction(
+        db, submitted.id, "fix quantity", world["oe"],
+    )
+    state = await service.engine.get_correction_state(db, "INDENT", submitted.id)
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == submitted.id)
+    )).scalars().all()
+    requester_detail = await service.get_indent(db, submitted.id, world["pilot"])
+    requester_can_edit = requester_detail.can_edit_correction
+    requester_can_resubmit = requester_detail.can_resubmit_correction
+    requester_can_approve = requester_detail.can_approve
+    requester_can_reject = requester_detail.can_reject
+    oe_detail = await service.get_indent(db, submitted.id, world["oe"])
+    same_instance_id = (await db.execute(
+        select(Instance.id).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+
+    assert returned.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+    assert state["correction_owner_employee_id"] == world["pilot"].id
+    assert state["correction_owner_position_id"] == 1000
+    assert state["resubmit_target_sequence"] == 1
+    assert state["correction_comment"] == "fix quantity"
+    assert pending == []
+    assert requester_can_edit is True
+    assert requester_can_resubmit is True
+    assert requester_can_approve is False
+    assert requester_can_reject is False
+    assert oe_detail.can_edit_correction is False
+    assert oe_detail.can_resubmit_correction is False
+    assert same_instance_id == instance_id
+
+
+async def test_correction_owner_can_edit_same_indent_items_and_quantities(db):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    await service.return_indent_for_correction(
+        db, submitted.id, "increase quantity", world["oe"],
+    )
+
+    updated = await service.update_indent(
+        db,
+        submitted.id,
+        IndentUpdate(
+            required_date=date.today(),
+            remarks="corrected",
+            items=[IndentItemIn(item_id=world["item"].id, quantity=9)],
+        ),
+        world["pilot"],
+    )
+
+    assert updated.id == submitted.id
+    assert updated.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+    assert updated.remarks == "corrected"
+    assert float(updated.total_qty) == 9
+    assert [float(line.quantity) for line in updated.items] == [9]
+
+
+async def test_non_owner_cannot_edit_or_resubmit_and_wrong_position_is_blocked(db):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    await service.return_indent_for_correction(
+        db, submitted.id, "requester correction", world["oe"],
+    )
+
+    with pytest.raises(NotFoundError):
+        await service.update_indent(
+            db,
+            submitted.id,
+            IndentUpdate(required_date=date.today(), remarks="not mine"),
+            world["sibling_oe"],
+        )
+    with pytest.raises(NotFoundError):
+        await service.resubmit_indent_correction(db, submitted.id, world["sibling_oe"])
+
+    world["pilot"].active_position_id = 1001
+    with pytest.raises(NotFoundError):
+        await service.resubmit_indent_correction(db, submitted.id, world["pilot"])
+
+
+async def test_correction_blocks_delete_normal_submit_approve_and_reject(db):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    await service.return_indent_for_correction(
+        db, submitted.id, "requester correction", world["oe"],
+    )
+
+    with pytest.raises(ValidationError):
+        await service.delete_indent(db, submitted.id, world["pilot"])
+    with pytest.raises(ValidationError):
+        await service.submit_indent(db, submitted.id, world["pilot"])
+    with pytest.raises(ValidationError):
+        await service.act_on_indent(
+            db, submitted.id, ApprovalAction.APPROVED, "approve", world["oe"],
+        )
+    with pytest.raises(ValidationError):
+        await service.act_on_indent(
+            db, submitted.id, ApprovalAction.REJECTED, "reject", world["oe"],
+        )
+
+
+async def test_resubmit_correction_reopens_returning_stage_on_same_instance(db):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    instance_id = (await db.execute(
+        select(Instance.id).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+    await service.return_indent_for_correction(
+        db, submitted.id, "requester correction", world["oe"],
+    )
+
+    resubmitted = await service.resubmit_indent_correction(
+        db, submitted.id, world["pilot"],
+    )
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == submitted.id)
+    )).scalars().all()
+    same_instance_id = (await db.execute(
+        select(Instance.id).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+
+    assert resubmitted.status == IndentStatus.PENDING_APPROVAL.value
+    assert resubmitted.current_approver_name == "OE"
+    assert {row.approver_id for row in pending} == {world["oe"].id}
+    assert same_instance_id == instance_id
+    assert await service.engine.get_correction_state(db, "INDENT", submitted.id) is None
+
+
+async def test_later_stage_return_assigns_exact_dm_actor_and_preserves_history(db):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    alternate_dm = HcmEmployee(
+        id=58, full_name="Alternate DM", emp_code="ALTDM",
+        department_id=601, office_id=801, is_active=True, synced_at=utcnow(),
+    )
+    db.add(alternate_dm)
+    db.add(HcmPositionAssignment(
+        id=2010, employee_id=alternate_dm.id,
+        employee_name=alternate_dm.full_name, position_id=1002,
+        department_id=601, office_id=801, is_primary=True,
+        is_active=True, synced_at=utcnow(),
+    ))
+    alternate_dm.active_position_id = 1002
+    await db.commit()
+    alternate_dm.active_position_id = 1002
+
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    await service.act_on_indent(
+        db, submitted.id, ApprovalAction.APPROVED, "oe ok", world["oe"],
+    )
+    await service.act_on_indent(
+        db, submitted.id, ApprovalAction.APPROVED, "dm ok", world["dm"],
+    )
+
+    returned = await service.return_indent_for_correction(
+        db, submitted.id, "dm must correct", world["rm"],
+    )
+    state = await service.engine.get_correction_state(db, "INDENT", submitted.id)
+    instance_id = (await db.execute(
+        select(Instance.id).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+    actions = (await db.execute(
+        select(Action).where(Action.instance_id == instance_id).order_by(Action.id)
+    )).scalars().all()
+    approval_actions = [
+        row for row in actions
+        if row.action in {ApprovalAction.APPROVED.value, ApprovalAction.RETURNED.value}
+    ]
+
+    assert returned.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+    assert state["correction_owner_employee_id"] == world["dm"].id
+    assert state["correction_owner_employee_id"] != alternate_dm.id
+    assert state["correction_owner_position_id"] == 1002
+    assert state["resubmit_target_sequence"] == 3
+    assert [row.action for row in approval_actions] == [
+        ApprovalAction.APPROVED.value,
+        ApprovalAction.APPROVED.value,
+        ApprovalAction.RETURNED.value,
+    ]
+    assert [row.comments for row in approval_actions] == [
+        "oe ok", "dm ok", "dm must correct",
+    ]
+
+
+async def test_dm_return_gives_oe_dynamic_correction_edit_and_resubmit(db):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    await service.act_on_indent(
+        db, submitted.id, ApprovalAction.APPROVED, "oe ok", world["oe"],
+    )
+
+    returned = await service.return_indent_for_correction(
+        db, submitted.id, "oe must correct", world["dm"],
+    )
+    state = await service.engine.get_correction_state(db, "INDENT", submitted.id)
+    oe_detail = await service.get_indent(db, submitted.id, world["oe"])
+
+    edited = await service.update_indent(
+        db,
+        submitted.id,
+        IndentUpdate(required_date=date.today(), remarks="corrected by oe"),
+        world["oe"],
+    )
+    resubmitted = await service.resubmit_indent_correction(
+        db, submitted.id, world["oe"],
+    )
+
+    assert returned.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+    assert state["correction_owner_employee_id"] == world["oe"].id
+    assert state["correction_owner_position_id"] == 1001
+    assert state["resubmit_target_sequence"] == 2
+    assert oe_detail.can_edit_correction is True
+    assert oe_detail.can_resubmit_correction is True
+    assert edited.remarks == "corrected by oe"
+    assert resubmitted.status == IndentStatus.PENDING_APPROVAL.value
+    assert resubmitted.current_approver_name == "DM"
+
+
+async def test_repeated_return_resubmit_refreshes_correction_state_and_blocks_duplicate(db):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    await service.return_indent_for_correction(
+        db, submitted.id, "first correction", world["oe"],
+    )
+    first_state = await service.engine.get_correction_state(db, "INDENT", submitted.id)
+    await service.resubmit_indent_correction(db, submitted.id, world["pilot"])
+
+    with pytest.raises(ValidationError):
+        await service.resubmit_indent_correction(db, submitted.id, world["pilot"])
+
+    await service.return_indent_for_correction(
+        db, submitted.id, "second correction", world["oe"],
+    )
+    second_state = await service.engine.get_correction_state(db, "INDENT", submitted.id)
+
+    assert second_state["return_action_id"] != first_state["return_action_id"]
+    assert second_state["correction_comment"] == "second correction"
+    assert second_state["resubmit_target_sequence"] == 1
+
+
 async def test_sph_final_approval_moves_to_allocation(db):
     world = await _approval_ladder_world(db)
     await service.submit_indent(db, world["indent"].id, world["pilot"])
@@ -782,9 +1072,13 @@ async def test_journey_uses_requester_specific_stages_and_final_any_one(db):
     journey = await service.indent_journey(db, world["indent"].id, world["pilot"])
 
     titles = [stage["title"] for stage in journey["stages"]]
-    assert titles[:5] == [
-        "Request Raised", "OE Review", "DM Review", "RM Review",
+    assert titles[:6] == [
+        "Draft created", "Request submitted", "OE Review", "DM Review", "RM Review",
         "Final Approval - SPH or COO",
+    ]
+    assert [phase["title"] for phase in journey["phases"]] == [
+        "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+        "Delivery", "Acknowledgement",
     ]
     assert any(
         stage["status"] == "NOT_REQUIRED" and stage["approver_name"] == "COO"
@@ -1514,7 +1808,7 @@ async def test_invalid_active_assignment_grants_no_subtree_visibility(db):
 
     page = await service.list_indents(db, PageParams(page=1, size=100), user=world["dm1"])
 
-    assert {row.id for row in page["items"]} == {world["indents"]["dm1"].id}
+    assert {row.id for row in page["items"]} == set()
 
 
 async def test_missing_manager_project_context_grants_no_subtree_visibility(db):

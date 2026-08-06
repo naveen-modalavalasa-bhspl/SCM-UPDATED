@@ -25,8 +25,9 @@ from app.modules.inventory.models import (
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
+from app.platform.notifications import service as notification_service
 from app.platform.rules import evaluator as rules
-from app.platform.workflow import engine
+from app.platform.workflow import engine, ladder
 from app.platform.workflow.models import Action, Instance, Stage
 from app.platform.workflow.models import Pending
 from app.platform.settings import attachments
@@ -34,7 +35,6 @@ from app.platform.settings.service import write_audit
 from app.platform.settings.models import AuditLog
 from app.platform.rbac import service as rbac_service
 from app.platform.rbac import permissions as perms
-from app.shared.scope import scope_condition
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
 from app.shared.numbering import next_number
@@ -58,6 +58,18 @@ REQUIRED_BY_DATE_RANGE_ERROR = (
     "required_by_from must be the same as or earlier than required_by_to."
 )
 FILTER_DATE_RANGE_ERROR = "date_from must be the same as or earlier than date_to."
+
+
+@dataclass(frozen=True)
+class _JourneyDocumentGraph:
+    """Deterministic IDs for documents genuinely connected to one indent."""
+
+    indent_items: tuple[IndentItem, ...]
+    allocation_ids: frozenset[int]
+    material_request_ids: frozenset[int]
+    picking_ids: frozenset[int]
+    material_issue_ids: frozenset[int]
+    dispatch_ids: frozenset[int]
 
 
 def _validate_required_date(required_date: date | None) -> None:
@@ -231,6 +243,44 @@ def _values(values) -> list[str]:
 def unknown_indent_statuses(statuses) -> set[str]:
     known = {status.value for status in IndentStatus}
     return {str(status) for status in statuses if status is not None and str(status) not in known}
+
+
+def _workflow_context_for_indent(indent: Indent) -> dict:
+    return {
+        "doc_no": indent.indent_no,
+        "doc_summary": f"Indent {indent.indent_no}",
+        "department_id": indent.department_id,
+        "project_id": getattr(indent, "project_id", None),
+        "requester_position_id": indent.position_id,
+        "requester_position_name": indent.position_name,
+        "total_quantity": float(indent.total_qty or 0),
+    }
+
+
+async def _indent_correction_state(db: AsyncSession, indent: Indent) -> dict | None:
+    return await engine.get_correction_state(db, DocType.INDENT.value, indent.id)
+
+
+def _correction_owner_payload(state: dict | None) -> dict | None:
+    if not state:
+        return None
+    employee_id = state.get("correction_owner_employee_id")
+    if employee_id is None:
+        return None
+    return {
+        "employee_id": int(employee_id),
+        "employee_name": state.get("correction_owner_name"),
+        "position_id": state.get("correction_owner_position_id"),
+    }
+
+
+def _is_correction_owner(state: dict | None, user) -> bool:
+    if not state:
+        return False
+    if int(state.get("correction_owner_employee_id") or 0) != int(user.id):
+        return False
+    position_id = state.get("correction_owner_position_id")
+    return position_id is None or getattr(user, "active_position_id", None) == int(position_id)
 
 
 def _clean_search(search: str | None) -> str | None:
@@ -506,24 +556,15 @@ def _has_global_indent_read(scope_code: str | None, role_codes: set[str]) -> boo
 
 
 async def _scm_stage_statuses(db: AsyncSession, user) -> list[str]:
-    """Statuses at which a fulfiller may read an indent raised by anyone.
-
-    This branch is unscoped by design — inventory picks the warehouse that fills a
-    request, so it cannot be limited to the reader's own office or reporting line.
-    That makes the permission guarding it the only thing standing between a
-    storekeeper and every indent in the company, so it must be a permission only
-    fulfillers hold.
-
-    It used to be `stock.view | mr.view | allocation.view`. All 25 roles hold at
-    least one of those — stock.view alone is the required_permission for nine pages
-    across Inventory AND Warehouse — so every login, DEO and pilot included, could
-    read all 67 approved-or-later indents. Now it is one dedicated code, granted to
-    nobody by default.
-    """
     user_perms = await rbac_service.get_user_permissions(
         db, user, getattr(user, "active_position_id", None),
     )
-    if perms.INDENT_VIEW_FULFILMENT not in user_perms:
+    scm_codes = {
+        perms.ALLOCATION_VIEW,
+        perms.STOCK_VIEW,
+        perms.MR_VIEW,
+    }
+    if not (user_perms & scm_codes):
         return []
     return [
         IndentStatus.APPROVED.value,
@@ -602,24 +643,11 @@ async def indent_access_condition(db: AsyncSession, user):
 
 
 async def _assert_can_view_indent(db: AsyncSession, indent_id: int, user) -> Indent:
-    # Both filters, the same pair the list applies. With only the access rule, a
-    # document hidden from All Requests was still readable by typing its id into
-    # the URL — the list narrowed and the detail did not, which is the worse half
-    # of the leak because it returns one specific document rather than a page.
     stmt = (
         select(Indent)
         .options(selectinload(Indent.items))
         .where(Indent.id == indent_id)
-        .where(
-            await indent_access_condition(db, user),
-            await scope_condition(
-                db, user,
-                owner_col=Indent.requested_by_id,
-                position_col=Indent.position_id,
-                office_col=Indent.office_id,
-                project_col=Indent.project_id,
-            ),
-        )
+        .where(await indent_access_condition(db, user))
     )
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if not indent:
@@ -644,10 +672,89 @@ async def _assert_active_workflow_task(db: AsyncSession, indent_id: int, user_id
         raise PermissionError_("This indent is not currently assigned to you for approval")
 
 
+def _current_workflow_link(instance: Instance) -> dict | None:
+    for link in instance.resolved_chain or []:
+        if not isinstance(link, dict):
+            continue
+        try:
+            sequence = int(link.get("sequence", 0))
+        except (TypeError, ValueError):
+            continue
+        if sequence == int(instance.current_sequence or 0):
+            return link
+    return None
+
+
+async def _pending_indent_return_instance(
+    db: AsyncSession, indent_id: int, user_id: int,
+) -> Instance | None:
+    return (await db.execute(
+        select(Instance)
+        .join(Pending, Pending.instance_id == Instance.id)
+        .where(
+            Instance.doc_type == DocType.INDENT.value,
+            Instance.doc_id == indent_id,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+            Pending.doc_type == DocType.INDENT.value,
+            Pending.doc_id == indent_id,
+            Pending.stage_sequence == Instance.current_sequence,
+            Pending.approver_id == user_id,
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+
+
+async def _active_position_matches_return_task(
+    db: AsyncSession, instance: Instance, user,
+) -> bool:
+    active_position_id = getattr(user, "active_position_id", None)
+    if active_position_id is None:
+        return False
+    assignment, position = await _current_assignment(db, user)
+    if assignment is None or position is None or not position.is_active:
+        return False
+
+    link = _current_workflow_link(instance)
+    if link is None:
+        return False
+
+    allowed_positions = ladder.allowed_position_ids(link)
+    approver_ids = {int(value) for value in link.get("approver_ids", [])}
+    if allowed_positions and int(user.id) in approver_ids:
+        return int(active_position_id) in allowed_positions
+    return True
+
+
+async def can_return_indent_for_correction(
+    db: AsyncSession, indent: Indent, user, user_perms: set[str] | None = None,
+) -> bool:
+    if indent.status != IndentStatus.PENDING_APPROVAL.value:
+        return False
+    if indent.requested_by_id == user.id:
+        return False
+    if await _indent_correction_state(db, indent):
+        return False
+
+    user_perms = user_perms or await rbac_service.get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    if perms.INDENT_APPROVE not in user_perms:
+        return False
+
+    instance = await _pending_indent_return_instance(db, indent.id, user.id)
+    if instance is None:
+        return False
+    return await _active_position_matches_return_task(db, instance, user)
+
+
 async def _attach_capabilities(db: AsyncSession, indent: Indent, user) -> Indent:
     user_perms = await rbac_service.get_user_permissions(
         db, user, getattr(user, "active_position_id", None),
     )
+    correction_state = None
+    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        correction_state = await _indent_correction_state(db, indent)
+    is_correction_owner = _is_correction_owner(correction_state, user)
     is_requester = indent.requested_by_id == user.id
     is_pending_user = (
         indent.status == IndentStatus.PENDING_APPROVAL.value
@@ -661,6 +768,27 @@ async def _attach_capabilities(db: AsyncSession, indent: Indent, user) -> Indent
     )
     indent.can_approve = is_pending_user and perms.INDENT_APPROVE in user_perms
     indent.can_reject = is_pending_user and perms.INDENT_REJECT in user_perms
+    indent.can_return_for_correction = await can_return_indent_for_correction(
+        db, indent, user, user_perms,
+    )
+    indent.can_edit_correction = (
+        indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+        and is_correction_owner
+    )
+    indent.can_resubmit_correction = (
+        indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+        and is_correction_owner
+    )
+    indent.correction_owner = _correction_owner_payload(correction_state)
+    indent.returned_from_stage = (
+        correction_state or {}
+    ).get("returned_from_stage")
+    indent.resubmit_target_stage = (
+        correction_state or {}
+    ).get("resubmit_target_stage")
+    indent.correction_comment = (
+        correction_state or {}
+    ).get("correction_comment")
     return indent
 
 
@@ -691,19 +819,7 @@ async def _get_indent_for_journey(db: AsyncSession, indent_id: int, user) -> Ind
             Indent.remarks,
         ))
         .where(Indent.id == indent_id)
-        # Same pair as the detail and the list. The journey exposes the approval
-        # chain, the actors and the audit trail, so reading it for a document you
-        # cannot see is a bigger disclosure than the document itself.
-        .where(
-            await indent_access_condition(db, user),
-            await scope_condition(
-                db, user,
-                owner_col=Indent.requested_by_id,
-                position_col=Indent.position_id,
-                office_col=Indent.office_id,
-                project_col=Indent.project_id,
-            ),
-        )
+        .where(await indent_access_condition(db, user))
     )
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if not indent:
@@ -777,21 +893,7 @@ async def list_indents(
     )
     stmt = select(Indent).options(selectinload(Indent.items))
     if user is not None:
-        # Two filters, ANDed, doing two different jobs. indent_access_condition says
-        # what KIND of document this login may read (mine, my approvals, the
-        # fulfilment queue); scope_condition says WHOSE, from the profile's rung.
-        # AND, never OR: the scope filter must only ever narrow, so adding it can
-        # never hand anyone a row they could not already see.
-        stmt = stmt.where(
-            await indent_access_condition(db, user),
-            await scope_condition(
-                db, user,
-                owner_col=Indent.requested_by_id,
-                position_col=Indent.position_id,
-                office_col=Indent.office_id,
-                project_col=Indent.project_id,
-            ),
-        )
+        stmt = stmt.where(await indent_access_condition(db, user))
     stmt = _apply_indent_filters(
         stmt, search=search, date_from=date_from, date_to=date_to,
         required_by_from=required_by_from, required_by_to=required_by_to,
@@ -830,9 +932,19 @@ async def set_indent_bookmark(
 
 async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, user) -> Indent:
     indent = await get_indent(db, indent_id, user)
-    if indent.requested_by_id != user.id:
-        raise PermissionError_("Only the requester can edit this indent")
-    if indent.status != IndentStatus.DRAFT.value:
+    if indent.status == IndentStatus.DRAFT.value:
+        if indent.requested_by_id != user.id:
+            raise PermissionError_("Only the requester can edit this indent")
+        user_perms = await rbac_service.get_user_permissions(
+            db, user, getattr(user, "active_position_id", None),
+        )
+        if perms.INDENT_EDIT not in user_perms:
+            raise PermissionError_(f"Missing permission: {perms.INDENT_EDIT}")
+    elif indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        correction_state = await _indent_correction_state(db, indent)
+        if not _is_correction_owner(correction_state, user):
+            raise ValidationError(f"Cannot edit an indent in {indent.status} status")
+    else:
         raise ValidationError(f"Cannot edit an indent in {indent.status} status")
 
     _validate_required_date(data.required_date)
@@ -896,6 +1008,8 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
 
 async def delete_indent(db: AsyncSession, indent_id: int, user) -> None:
     indent = await get_indent(db, indent_id, user)
+    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError("Cannot delete an indent returned for correction")
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot delete an indent in {indent.status} status")
     if indent.requested_by_id != user.id:
@@ -918,22 +1032,42 @@ async def delete_indent(db: AsyncSession, indent_id: int, user) -> None:
     await db.commit()
 
 
+def _seed_approval_quantities(indent: Indent, *, only_uninitialised: bool = False) -> None:
+    """Put the raised quantity on the table before the first approver sees it.
+
+    `approved_qty` is what one level passes to the next, and every rung reads it as
+    its own ceiling. Left at 0 until an approver edits a quantity, an approval taken
+    through the plain approve endpoint — the indent screen's one-click Approve, or an
+    API client — recorded nothing at all, and the NEXT approver opened a screen whose
+    ceiling had collapsed to zero: a number nobody entered, wiping out the request
+    between two people who both meant to pass it on.
+
+    Seeding here makes the column mean one thing at every rung: the quantity currently
+    on the table. An approval that changes nothing passes it through unchanged, and 0
+    can only mean a level deliberately approved none of that line.
+
+    `only_uninitialised` is for the resubmit-after-correction path, where a rung below
+    may already have cut a line: correcting an indent must not hand back quantity an
+    approver had taken off it. Only lines the correction rebuilt from scratch (and so
+    reset to 0) are seeded there.
+    """
+    for line in indent.items:
+        if only_uninitialised and _d(line.approved_quantity) > 0:
+            continue
+        line.approved_quantity = line.quantity
+
+
 async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
     indent = await get_indent(db, indent_id, user)
+    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError("Use correction resubmit for an indent returned for correction")
     if indent.requested_by_id != user.id:
         raise PermissionError_("Only the requester can submit this indent")
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit an indent in {indent.status} status")
 
-    workflow_context = {
-        "doc_no": indent.indent_no,
-        "doc_summary": f"Indent {indent.indent_no}",
-        "department_id": indent.department_id,
-        "project_id": indent.project_id,
-        "requester_position_id": indent.position_id,
-        "requester_position_name": indent.position_name,
-        "total_quantity": float(sum(i.quantity for i in indent.items)),
-    }
+    _seed_approval_quantities(indent)
+    workflow_context = _workflow_context_for_indent(indent)
     await engine.start(
         db, doc_type=DocType.INDENT.value, doc_id=indent.id,
         context=workflow_context,
@@ -1105,6 +1239,8 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
                         comments: str, user) -> Indent:
     """APPROVE / REJECT / RETURN. Engine owns the chain; the module owns the status."""
     indent = await get_indent(db, indent_id, user)
+    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError("Indent is returned for correction")
     if indent.status != IndentStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Indent is not awaiting approval (status {indent.status})")
     if indent.requested_by_id == user.id:
@@ -1116,14 +1252,7 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
             raise ValidationError(REJECTION_REASON_REQUIRED_ERROR)
 
     before_status = indent.status
-    context = {
-        "doc_no": indent.indent_no,
-        "doc_summary": f"Indent {indent.indent_no}",
-        "department_id": indent.department_id,
-        "requester_position_id": indent.position_id,
-        "requester_position_name": indent.position_name,
-        "total_quantity": float(indent.total_qty),
-    }
+    context = _workflow_context_for_indent(indent)
     instance = await engine.act(
         db, DocType.INDENT.value, indent.id, action.value, user, comments,
         context=context,
@@ -1148,6 +1277,85 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
         action=AuditAction.UPDATE, actor=user,
         before={"status": before_status}, after={"status": indent.status},
         summary=f"{action.value.title()} indent",
+    )
+    await db.commit()
+    await db.refresh(indent)
+    return await _attach_capabilities(db, indent, user)
+
+
+async def return_indent_for_correction(
+    db: AsyncSession, indent_id: int, comments: str, user,
+) -> Indent:
+    indent = await get_indent(db, indent_id, user)
+    if indent.status != IndentStatus.PENDING_APPROVAL.value:
+        raise ValidationError(f"Indent is not awaiting approval (status {indent.status})")
+    if indent.requested_by_id == user.id:
+        raise ValidationError("Requester cannot return their own indent for correction")
+    await _assert_active_workflow_task(db, indent.id, user.id)
+
+    before_status = indent.status
+    await engine.return_for_correction(
+        db,
+        DocType.INDENT.value,
+        indent.id,
+        user,
+        comments,
+        context=_workflow_context_for_indent(indent),
+    )
+    indent.status = IndentStatus.RETURNED_FOR_CORRECTION.value
+    indent.current_approver_name = None
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": indent.status},
+        summary="Returned indent for correction",
+    )
+    # The correction owner is whoever the engine parked the correction on — the
+    # requester at the first rung, the approver below at any rung above it.
+    correction = await engine.get_correction_state(db, DocType.INDENT.value, indent.id)
+    owner_id = (correction or {}).get("correction_owner_employee_id")
+    if owner_id:
+        await notification_service.notify(
+            db, [owner_id],
+            title=f"{indent.indent_no} returned for correction",
+            body=comments,
+            # Not /approvals: the correction owner may not be an approver at all, so
+            # that route bounces them to Home and the notification leads nowhere. The
+            # correction form is served under indents, which they can reach.
+            deep_link=f"/indents/{indent.id}/correction",
+            entity_type=DocType.INDENT.value,
+            entity_id=indent.id,
+        )
+    await db.commit()
+    await db.refresh(indent)
+    return await _attach_capabilities(db, indent, user)
+
+
+async def resubmit_indent_correction(
+    db: AsyncSession, indent_id: int, user,
+) -> Indent:
+    indent = await get_indent(db, indent_id, user)
+    if indent.status != IndentStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"Indent is not returned for correction (status {indent.status})")
+
+    before_status = indent.status
+    # A correction that edited the lines rebuilt them, which resets approved_qty to 0.
+    # Without this the rung the document returns to would open at a zero ceiling.
+    _seed_approval_quantities(indent, only_uninitialised=True)
+    await engine.resubmit_correction(
+        db,
+        DocType.INDENT.value,
+        indent.id,
+        user,
+        context=_workflow_context_for_indent(indent),
+    )
+    indent.status = IndentStatus.PENDING_APPROVAL.value
+    await _refresh_current_approver(db, indent)
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": indent.status},
+        summary="Resubmitted indent correction",
     )
     await db.commit()
     await db.refresh(indent)
@@ -1582,7 +1790,13 @@ def _submitted_action(actions: list[Action]) -> Action | None:
     return next((a for a in actions if a.action == ApprovalAction.SUBMITTED.value), None)
 
 
-def _journey_history(indent: Indent, actions: list[Action], audits: list[AuditLog]) -> list[dict]:
+def _journey_history(
+    indent: Indent,
+    actions: list[Action],
+    audits: list[AuditLog],
+    operational_events: list[dict] | None = None,
+    resolved_chain: list[dict] | None = None,
+) -> list[dict]:
     events: list[dict] = []
     seen_ids: set[str] = set()
 
@@ -1598,28 +1812,38 @@ def _journey_history(indent: Indent, actions: list[Action], audits: list[AuditLo
         seen_ids.add(event_id)
         events.append(event)
 
+    chain_by_sequence = {
+        int(link.get("sequence", index + 1)): link
+        for index, link in enumerate(resolved_chain or [])
+        if isinstance(link, dict)
+    }
+
     add({
         "id": f"indent:{indent.id}:created",
         "event_type": "CREATED",
-        "title": "Request created",
+        "title": "Draft created",
         "description": f"{indent.indent_no} created",
         "actor_name": indent.requested_by_name,
         "position_name": indent.position_name,
         "timestamp": indent.created_at,
         "comments": indent.remarks,
+        "stage_type": "draft",
+        "approval_mode": None,
+        "_sort_order": 10,
     })
     for action in actions:
+        link = chain_by_sequence.get(int(getattr(action, "stage_sequence", 0)))
         if action.action == ApprovalAction.SUBMITTED.value:
             title = "Request submitted"
             event_type = "SUBMITTED"
         elif action.action == ApprovalAction.APPROVED.value:
-            title = f"{action.stage_name or 'Approval'} completed"
+            title = _occurred_action_title(action, link, "Request")
             event_type = "APPROVED"
         elif action.action == ApprovalAction.REJECTED.value:
-            title = f"{action.stage_name or 'Approval'} rejected"
+            title = "Request rejected"
             event_type = "REJECTED"
         elif action.action == ApprovalAction.RETURNED.value:
-            title = f"{action.stage_name or 'Approval'} returned"
+            title = "Request returned"
             event_type = "RETURNED"
         else:
             continue
@@ -1635,30 +1859,43 @@ def _journey_history(indent: Indent, actions: list[Action], audits: list[AuditLo
             "position_name": action.actor_position,
             "timestamp": action.acted_at,
             "comments": action.comments,
+            "workflow_sequence": getattr(action, "stage_sequence", None),
+            "stage_type": "submission" if event_type == "SUBMITTED" else "approval",
+            "approval_mode": (link or {}).get("approval_mode"),
+            "_sort_order": 20 if event_type == "SUBMITTED" else 30,
         })
     for audit in audits:
-        changed = audit.changed_fields or {}
-        status_change = changed.get("status") if isinstance(changed, dict) else None
+        changed = audit.changed_fields if isinstance(audit.changed_fields, dict) else {}
+        status_change = changed.get("status")
         new_status = status_change.get("to") if isinstance(status_change, dict) else None
-        if new_status not in {
-            IndentStatus.ALLOCATED.value,
-            IndentStatus.ORDERED.value,
-            IndentStatus.CLOSED.value,
-            IndentStatus.PARTIALLY_FULFILLED.value,
-        }:
-            continue
-        add({
-            "id": f"audit:{audit.id}",
-            "event_type": new_status,
-            "title": new_status.replace("_", " ").title(),
-            "description": f"{indent.indent_no} status changed",
-            "actor_name": audit.actor_name,
-            "position_name": None,
-            "timestamp": audit.created_at,
-            "comments": None,
-        })
+        if new_status == IndentStatus.AWAITING_ALLOCATION.value:
+            add({
+                "id": f"ready-for-allocation:{audit.id}",
+                "event_type": "READY_FOR_ALLOCATION",
+                "title": "Ready for allocation",
+                "description": f"{indent.indent_no} sent to inventory",
+                "actor_name": audit.actor_name,
+                "position_name": None,
+                "timestamp": audit.created_at,
+                "comments": None,
+                "reference_no": None,
+                "quantity_summary": None,
+                "stage_type": "allocation",
+                "approval_mode": None,
+                "_sort_order": 40,
+            })
+    for event in operational_events or []:
+        add(dict(event))
 
-    return sorted(events, key=lambda row: row["timestamp"], reverse=True)
+    # Ascending order makes this a journey rather than an activity feed.  The source
+    # identifier is a stable tie-breaker for actions recorded in the same DB tick.
+    ordered = sorted(
+        events,
+        key=lambda row: (row["timestamp"], row.get("_sort_order", 50), row["id"]),
+    )
+    for event in ordered:
+        event.pop("_sort_order", None)
+    return ordered
 
 
 def _workflow_stage_sequence(row) -> int:
@@ -1685,6 +1922,24 @@ def _stage_status_from_action(action: Action) -> str:
 def _display_action_for_stage(actions: list[Action]) -> Action:
     approved = [action for action in actions if action.action == ApprovalAction.APPROVED.value]
     return approved[-1] if approved and _is_final_stage_name(approved[-1].stage_name) else actions[-1]
+
+
+def _latest_action_for_stage(
+    actions: list[Action],
+    action_value: str,
+) -> Action | None:
+    return next((row for row in reversed(actions) if row.action == action_value), None)
+
+
+def _terminal_or_active_stage_action(
+    actions: list[Action],
+    indent_status: str,
+) -> Action | None:
+    if indent_status == IndentStatus.REJECTED.value:
+        return _latest_action_for_stage(actions, ApprovalAction.REJECTED.value)
+    if indent_status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        return _latest_action_for_stage(actions, ApprovalAction.RETURNED.value)
+    return None
 
 
 def _positions_for_approvers(positions: list[dict], approver_ids: set[int]) -> list[dict]:
@@ -1721,6 +1976,14 @@ def _resolved_stage_title(link: dict, action: Action | None, *, final: bool) -> 
     return f"{_position_label(source_title)} Review"
 
 
+def _waiting_for_stage(title: str) -> str:
+    display_title = (
+        f"{title[:-len(' Review')]} review"
+        if title.endswith(" Review") else title
+    )
+    return f"Waiting for {display_title}"
+
+
 def _resolved_approver_names(link: dict) -> str | None:
     names = link.get("approver_names")
     if not isinstance(names, list):
@@ -1752,14 +2015,930 @@ def _holder_names_for_ids(positions: list[dict], holder_ids: set[int]) -> str | 
     return ", ".join(name for name in names if name) or None
 
 
+def _quantity_text(moved: Decimal, total: Decimal) -> str:
+    return f"{float(moved):g} of {float(total):g}"
+
+
+def _occurred_action_title(action: Action, link: dict | None, domain: str) -> str:
+    """Name an occurred workflow action from its frozen/action snapshots."""
+    action_label = action.stage_name
+    frozen_label = (link or {}).get("role_name") or (link or {}).get("position_name")
+    if action_label and _normalised_scope_text(action_label) in {
+        "APPROVAL", "REPORTING MANAGER", f"{domain.upper()} APPROVAL",
+    }:
+        action_label = None
+    label = (
+        action_label
+        or frozen_label
+        or f"{domain} approval"
+    )
+    if action.action == ApprovalAction.APPROVED.value:
+        generic_labels = {
+            "approval", domain.lower(), f"{domain.lower()} approval",
+        }
+        if str(label).strip().lower() in generic_labels:
+            return (
+                "Approval completed"
+                if domain == "Request" else f"{domain} approval completed"
+            )
+        return label if str(label).lower().endswith("approved") else f"{label} approved"
+    if action.action == ApprovalAction.REJECTED.value:
+        return f"{domain} rejected"
+    if action.action == ApprovalAction.RETURNED.value:
+        return f"{domain} returned"
+    return f"{domain} submitted"
+
+
+async def _resolve_journey_document_graph(
+    db: AsyncSession,
+    indent: Indent,
+) -> _JourneyDocumentGraph:
+    """Resolve downstream documents through every persisted linkage available.
+
+    Header links are useful but not universal in legacy data, so line links and
+    fulfilment/source references are resolved in batches as equal evidence.  The
+    returned frozen sets make duplicate paths harmless and keep later queries stable.
+    """
+    from app.modules.warehouse.models import (
+        Dispatch, DispatchItem, MaterialIssue, MaterialIssueLine, Picking,
+    )
+
+    indent_items = tuple((await db.execute(
+        select(IndentItem)
+        .where(IndentItem.indent_id == indent.id)
+        .order_by(IndentItem.id.asc())
+    )).scalars().all())
+    indent_item_ids = {row.id for row in indent_items}
+
+    allocation_rows = (await db.execute(
+        select(Allocation.id, Allocation.allocation_no)
+        .outerjoin(AllocationItem, AllocationItem.allocation_id == Allocation.id)
+        .where(or_(
+            Allocation.indent_id == indent.id,
+            AllocationItem.indent_item_id.in_(indent_item_ids),
+        ))
+        .distinct()
+        .order_by(Allocation.id.asc())
+    )).all()
+    allocation_ids = {int(row.id) for row in allocation_rows}
+    allocation_nos = {row.allocation_no for row in allocation_rows if row.allocation_no}
+
+    mr_rows = (await db.execute(
+        select(MaterialRequest.id, MaterialRequest.mr_no)
+        .outerjoin(
+            MaterialRequestItem,
+            MaterialRequestItem.mr_id == MaterialRequest.id,
+        )
+        .where(or_(
+            MaterialRequest.indent_id == indent.id,
+            MaterialRequestItem.indent_item_id.in_(indent_item_ids),
+        ))
+        .distinct()
+        .order_by(MaterialRequest.id.asc())
+    )).all()
+    material_request_ids = {int(row.id) for row in mr_rows}
+    material_request_nos = {row.mr_no for row in mr_rows if row.mr_no}
+
+    picking_conditions = [
+        and_(Picking.ref_type == "INDENT", Picking.ref_id == indent.id),
+        Picking.ref_no == indent.indent_no,
+    ]
+    if allocation_ids:
+        picking_conditions.append(and_(
+            func.upper(Picking.ref_type).in_(("ALLOCATION", "ALLOC")),
+            Picking.ref_id.in_(allocation_ids),
+        ))
+    if material_request_ids:
+        picking_conditions.append(and_(
+            func.upper(Picking.ref_type).in_(("MATERIAL_REQUEST", "MR")),
+            Picking.ref_id.in_(material_request_ids),
+        ))
+    source_nos = allocation_nos | material_request_nos
+    if source_nos:
+        picking_conditions.append(Picking.ref_no.in_(source_nos))
+    picking_ids = set((await db.execute(
+        select(Picking.id)
+        .where(or_(*picking_conditions))
+        .distinct()
+        .order_by(Picking.id.asc())
+    )).scalars().all())
+
+    issue_conditions = [
+        MaterialIssue.indent_id == indent.id,
+        MaterialIssueLine.indent_item_id.in_(indent_item_ids),
+    ]
+    if picking_ids:
+        issue_conditions.append(MaterialIssue.picking_id.in_(picking_ids))
+    issue_rows = (await db.execute(
+        select(MaterialIssue.id, MaterialIssue.issue_no)
+        .outerjoin(
+            MaterialIssueLine,
+            MaterialIssueLine.issue_id == MaterialIssue.id,
+        )
+        .where(or_(*issue_conditions))
+        .distinct()
+        .order_by(MaterialIssue.id.asc())
+    )).all()
+    material_issue_ids = {int(row.id) for row in issue_rows}
+    issue_nos = {row.issue_no for row in issue_rows if row.issue_no}
+
+    dispatch_conditions = [DispatchItem.indent_id == indent.id]
+    if material_issue_ids:
+        dispatch_conditions.append(and_(
+            func.upper(Dispatch.ref_type).in_(("ISSUE", "WH_ISSUE")),
+            Dispatch.ref_id.in_(material_issue_ids),
+        ))
+    if issue_nos:
+        dispatch_conditions.append(Dispatch.ref_no.in_(issue_nos))
+    dispatch_ids = set((await db.execute(
+        select(Dispatch.id)
+        .outerjoin(DispatchItem, DispatchItem.dispatch_id == Dispatch.id)
+        .where(or_(*dispatch_conditions))
+        .distinct()
+        .order_by(Dispatch.id.asc())
+    )).scalars().all())
+
+    return _JourneyDocumentGraph(
+        indent_items=indent_items,
+        allocation_ids=frozenset(allocation_ids),
+        material_request_ids=frozenset(material_request_ids),
+        picking_ids=frozenset(int(row) for row in picking_ids),
+        material_issue_ids=frozenset(material_issue_ids),
+        dispatch_ids=frozenset(int(row) for row in dispatch_ids),
+    )
+
+
+async def _related_workflow_events(
+    db: AsyncSession,
+    *,
+    doc_type: str | None = None,
+    doc_ids: list[int],
+    domain: str,
+    stage_type: str,
+    include_submission: bool,
+    sort_order: int,
+    references: dict[int, str] | None = None,
+) -> tuple[list[dict], set[int]]:
+    """Return only timestamped actions for related frozen workflow instances."""
+    if not doc_ids:
+        return [], set()
+    exact_document_conditions = [
+        and_(Instance.doc_id == doc_id, Instance.doc_no == reference_no)
+        for doc_id, reference_no in (references or {}).items()
+        if doc_id in doc_ids and reference_no
+    ]
+    instance_conditions = list(exact_document_conditions)
+    if doc_type:
+        legacy_type_condition = and_(
+            Instance.doc_type == doc_type,
+            Instance.doc_id.in_(doc_ids),
+        )
+        if exact_document_conditions:
+            legacy_type_condition = and_(
+                legacy_type_condition,
+                Instance.doc_no.is_(None),
+            )
+        instance_conditions.append(legacy_type_condition)
+    if not instance_conditions:
+        return [], set()
+    instances = list((await db.execute(
+        select(Instance)
+        .options(load_only(
+            Instance.id, Instance.doc_type, Instance.doc_id, Instance.doc_no,
+            Instance.resolved_chain,
+        ))
+        .where(or_(*instance_conditions))
+        .order_by(Instance.id.asc())
+    )).scalars().all())
+    if not instances:
+        return [], set()
+
+    by_instance = {row.id: row for row in instances}
+    submitted_doc_ids: set[int] = set()
+    events: list[dict] = []
+    actions = list((await db.execute(
+        select(Action)
+        .options(load_only(
+            Action.id, Action.instance_id, Action.stage_sequence,
+            Action.stage_name, Action.actor_name, Action.actor_position,
+            Action.action, Action.comments, Action.acted_at,
+        ))
+        .where(Action.instance_id.in_(list(by_instance)))
+        .order_by(Action.acted_at.asc(), Action.id.asc())
+    )).scalars().all())
+    for action in actions:
+        instance = by_instance[action.instance_id]
+        if action.action == ApprovalAction.SUBMITTED.value:
+            submitted_doc_ids.add(instance.doc_id)
+            if not include_submission:
+                continue
+        elif action.action not in {
+            ApprovalAction.APPROVED.value,
+            ApprovalAction.REJECTED.value,
+            ApprovalAction.RETURNED.value,
+        }:
+            continue
+
+        chain = [
+            link for link in (instance.resolved_chain or [])
+            if isinstance(link, dict)
+        ]
+        link = next((
+            row for index, row in enumerate(chain)
+            if int(row.get("sequence", index + 1)) == action.stage_sequence
+        ), None)
+        event_type = {
+            ApprovalAction.SUBMITTED.value: f"{stage_type.upper()}_SUBMITTED",
+            ApprovalAction.APPROVED.value: f"{stage_type.upper()}_APPROVED",
+            ApprovalAction.REJECTED.value: f"{stage_type.upper()}_REJECTED",
+            ApprovalAction.RETURNED.value: f"{stage_type.upper()}_RETURNED",
+        }[action.action]
+        events.append({
+            "id": f"workflow:{action.instance_id}:{action.id}",
+            "event_type": event_type,
+            "title": _occurred_action_title(action, link, domain),
+            "description": f"{domain} workflow action recorded",
+            "actor_name": action.actor_name,
+            "position_name": action.actor_position or (link or {}).get("position_name"),
+            "timestamp": action.acted_at,
+            "comments": action.comments,
+            "reference_no": (references or {}).get(instance.doc_id),
+            "quantity_summary": None,
+            "stage_type": stage_type,
+            "approval_mode": (link or {}).get("approval_mode"),
+            "_sort_order": sort_order,
+        })
+    return events, submitted_doc_ids
+
+
+def _receipt_audit_events(
+    indent: Indent,
+    audits: list[AuditLog],
+    required_total: Decimal = Decimal("0"),
+    target_item_ids: set[int] | frozenset[int] | None = None,
+) -> list[dict]:
+    """Recover every requester acknowledgement from the immutable indent audit rows."""
+    events: list[dict] = []
+    for audit in audits:
+        changed = audit.changed_fields if isinstance(audit.changed_fields, dict) else {}
+        received = Decimal("0")
+        for field, change in changed.items():
+            if not str(field).isdigit() or not isinstance(change, dict):
+                continue
+            if target_item_ids is not None and int(field) not in target_item_ids:
+                continue
+            before = _d(change.get("from"))
+            after = _d(change.get("to"))
+            if after > before:
+                received += after - before
+        if received <= 0:
+            continue
+        status_change = changed.get("status")
+        new_status = status_change.get("to") if isinstance(status_change, dict) else None
+        fully_received = new_status == IndentStatus.CLOSED.value
+        shared = {
+            "description": f"{float(received):g} units confirmed received",
+            "actor_name": audit.actor_name,
+            "position_name": None,
+            "timestamp": audit.created_at,
+            "comments": None,
+            "reference_no": None,
+            "quantity_summary": (
+                _quantity_text(received, required_total)
+                if required_total > 0 else f"{float(received):g} received"
+            ),
+            "stage_type": "acknowledgement",
+            "approval_mode": None,
+        }
+        events.append({
+            "id": f"acknowledgement:{audit.id}",
+            "event_type": "ACKNOWLEDGEMENT_SUBMITTED",
+            "title": "Acknowledgement submitted",
+            **shared,
+            "_sort_order": 100,
+        })
+        events.append({
+            "id": f"receipt:{audit.id}",
+            "event_type": "FULLY_RECEIVED" if fully_received else "PARTIALLY_RECEIVED",
+            "title": "Fully received" if fully_received else "Partially received",
+            **shared,
+            "_sort_order": 110,
+        })
+    return events
+
+
+def _closed_transition_audit(audits: list[AuditLog]) -> AuditLog | None:
+    """Return the latest exact audit transition that put the indent in CLOSED."""
+    matches = []
+    for audit in audits:
+        changed = audit.changed_fields if isinstance(audit.changed_fields, dict) else {}
+        status_change = changed.get("status")
+        if (
+            isinstance(status_change, dict)
+            and status_change.get("to") == IndentStatus.CLOSED.value
+        ):
+            matches.append(audit)
+    return matches[-1] if matches else None
+
+
+async def _journey_operational_evidence(
+    db: AsyncSession,
+    indent: Indent,
+    audits: list[AuditLog],
+) -> dict:
+    """Aggregate genuine downstream records without treating lifecycle status as proof.
+
+    Imports stay local because Indents does not own the Inventory/Warehouse models.  The
+    Journey endpoint has already applied the normal indent visibility predicate before
+    this function runs, so these joins cannot broaden access to another indent.
+    """
+    from app.modules.warehouse.enums import DispatchStatus, IssueDirection
+    from app.modules.warehouse.models import Dispatch, MaterialIssue
+
+    graph = await _resolve_journey_document_graph(db, indent)
+    target_item_ids = {row.id for row in graph.indent_items}
+    target_line_by_item_id = {row.item_id: row.id for row in graph.indent_items}
+    required_by_line = {
+        row.id: (_d(row.approved_quantity) or _d(row.quantity))
+        for row in graph.indent_items
+    }
+    received_by_line = {
+        row.id: _d(row.received_quantity) for row in graph.indent_items
+    }
+
+    allocations = list((await db.execute(
+        select(Allocation)
+        .options(selectinload(Allocation.items))
+        .where(Allocation.id.in_(graph.allocation_ids))
+        .order_by(Allocation.created_at.asc(), Allocation.id.asc())
+    )).scalars().all())
+    allocations_found = [
+        row for row in allocations
+        if row.status == AllocationStatus.APPROVED.value and row.approved_at is not None
+    ]
+    material_requests = list((await db.execute(
+        select(MaterialRequest)
+        .options(selectinload(MaterialRequest.items))
+        .where(
+            MaterialRequest.id.in_(graph.material_request_ids),
+            MaterialRequest.status.notin_((
+                MRStatus.REJECTED.value, MRStatus.CANCELLED.value,
+            )),
+        )
+        .order_by(MaterialRequest.created_at.asc(), MaterialRequest.id.asc())
+    )).scalars().all())
+    all_issues = list((await db.execute(
+        select(MaterialIssue)
+        .options(selectinload(MaterialIssue.items))
+        .where(
+            MaterialIssue.id.in_(graph.material_issue_ids),
+            MaterialIssue.direction == IssueDirection.OUT.value,
+        )
+        .order_by(MaterialIssue.created_at.asc(), MaterialIssue.id.asc())
+    )).scalars().all())
+    issues = [
+        row for row in all_issues
+        if row.is_stock_posted and row.posted_at is not None
+    ]
+
+    dispatches = list((await db.execute(
+        select(Dispatch)
+        .options(selectinload(Dispatch.items))
+        .where(Dispatch.id.in_(graph.dispatch_ids))
+        .order_by(Dispatch.created_at.asc(), Dispatch.id.asc())
+    )).scalars().all())
+
+    approved_total = sum(required_by_line.values(), Decimal("0"))
+    received_total = sum(received_by_line.values(), Decimal("0"))
+
+    events: list[dict] = []
+    stages: list[dict] = []
+    missing_sources: list[str] = []
+
+    allocation_workflow_events, submitted_allocation_ids = await _related_workflow_events(
+        db,
+        doc_ids=[row.id for row in allocations],
+        domain="Allocation",
+        stage_type="allocation_approval",
+        include_submission=True,
+        sort_order=45,
+        references={row.id: row.allocation_no for row in allocations},
+    )
+    events.extend(allocation_workflow_events)
+    for row in allocations:
+        if row.id in submitted_allocation_ids:
+            continue
+        events.append({
+            "id": f"allocation-created:{row.id}",
+            "event_type": "ALLOCATION_CREATED",
+            "title": "Allocation created",
+            "description": "Allocation document recorded",
+            "actor_name": row.allocated_by_name,
+            "position_name": None,
+            "timestamp": row.created_at,
+            "comments": row.remarks,
+            "reference_no": row.allocation_no,
+            "quantity_summary": None,
+            "stage_type": "allocation",
+            "approval_mode": None,
+            "_sort_order": 40,
+        })
+
+    warehouse_workflow_events, _ = await _related_workflow_events(
+        db,
+        doc_ids=[row.id for row in all_issues],
+        domain="Warehouse",
+        stage_type="warehouse_approval",
+        include_submission=False,
+        sort_order=55,
+        references={row.id: row.issue_no for row in all_issues},
+    )
+    events.extend(warehouse_workflow_events)
+    for row in all_issues:
+        events.append({
+            "id": f"material-issue-created:{row.id}",
+            "event_type": "MATERIAL_ISSUE_CREATED",
+            "title": "Material issue created",
+            "description": "Warehouse material issue recorded",
+            "actor_name": row.created_by_name,
+            "position_name": None,
+            "timestamp": row.created_at,
+            "comments": row.remarks,
+            "reference_no": row.issue_no,
+            "quantity_summary": None,
+            "stage_type": "warehouse",
+            "approval_mode": None,
+            "_sort_order": 50,
+        })
+
+    dispatch_workflow_events, _ = await _related_workflow_events(
+        db,
+        doc_ids=[row.id for row in dispatches],
+        domain="Dispatch",
+        stage_type="dispatch_approval",
+        include_submission=False,
+        sort_order=65,
+        references={row.id: row.dispatch_no for row in dispatches},
+    )
+    events.extend(dispatch_workflow_events)
+    for row in dispatches:
+        events.append({
+            "id": f"dispatch-created:{row.id}",
+            "event_type": "DISPATCH_CREATED",
+            "title": "Dispatch created",
+            "description": "Dispatch document recorded",
+            "actor_name": row.created_by_name,
+            "position_name": None,
+            "timestamp": row.created_at,
+            "comments": row.remarks,
+            "reference_no": row.dispatch_no,
+            "quantity_summary": None,
+            "stage_type": "delivery",
+            "approval_mode": None,
+            "_sort_order": 60,
+        })
+
+    def stage(
+        title: str,
+        status: str,
+        stage_type: str,
+        *,
+        current: bool = False,
+        actor: str | None = None,
+        timestamp: datetime | None = None,
+        comments: str | None = None,
+        reference: str | None = None,
+        quantity: str | None = None,
+        source: str,
+    ) -> None:
+        stages.append({
+            "title": title,
+            "status": status,
+            "is_current": current,
+            "approver_name": actor,
+            "position_name": None,
+            "timestamp": _utc_datetime(timestamp),
+            "comments": comments,
+            "duration_seconds": None,
+            "stage_type": stage_type,
+            "approval_mode": None,
+            "reference_no": reference,
+            "quantity_summary": quantity,
+            "evidence_source": source,
+        })
+
+    def lines_complete(actual_by_line: dict[int, Decimal]) -> bool:
+        return bool(required_by_line) and all(
+            actual_by_line.get(line_id, Decimal("0")) >= required
+            for line_id, required in required_by_line.items()
+        )
+
+    allocation_by_line: dict[int, Decimal] = defaultdict(Decimal)
+    allocation_completed_by = None
+    for row in sorted(
+        allocations_found,
+        key=lambda value: (value.approved_at or value.created_at, value.id),
+    ):
+        for item in row.items:
+            if item.indent_item_id in target_item_ids:
+                allocation_by_line[item.indent_item_id] += _d(item.quantity)
+        if allocation_completed_by is None and lines_complete(allocation_by_line):
+            allocation_completed_by = row
+    allocated_total = sum(allocation_by_line.values(), Decimal("0"))
+    allocation_complete = lines_complete(allocation_by_line)
+    if allocations_found:
+        latest = allocations_found[-1]
+        stage(
+            "Stock allocated",
+            "COMPLETED",
+            "allocation",
+            actor=latest.allocated_by_name,
+            timestamp=latest.approved_at,
+            comments=latest.remarks,
+            reference=", ".join(row.allocation_no for row in allocations_found),
+            quantity=_quantity_text(allocated_total, approved_total),
+            source="inv_allocations.status=APPROVED",
+        )
+        for row in allocations_found:
+            quantity = sum((
+                _d(item.quantity) for item in row.items
+                if item.indent_item_id in target_item_ids
+            ), Decimal("0"))
+            if row.approved_at is None:
+                continue
+            events.append({
+                "id": f"allocation:{row.id}",
+                "event_type": "STOCK_ALLOCATED",
+                "title": "Stock allocated",
+                "description": f"{float(quantity):g} units allocated",
+                "actor_name": row.allocated_by_name,
+                "position_name": None,
+                "timestamp": row.approved_at,
+                "comments": row.remarks,
+                "reference_no": row.allocation_no,
+                "quantity_summary": _quantity_text(quantity, approved_total),
+                "stage_type": "allocation",
+                "approval_mode": None,
+                "_sort_order": 50,
+            })
+        if allocation_completed_by and allocation_completed_by.approved_at is not None:
+            events.append({
+                "id": f"allocation-completed:{allocation_completed_by.id}",
+                "event_type": "ALLOCATION_COMPLETED",
+                "title": "Allocation completed",
+                "description": "Required quantity fully allocated",
+                "actor_name": allocation_completed_by.allocated_by_name,
+                "position_name": None,
+                "timestamp": allocation_completed_by.approved_at,
+                "comments": None,
+                "reference_no": allocation_completed_by.allocation_no,
+                "quantity_summary": _quantity_text(allocated_total, approved_total),
+                "stage_type": "allocation",
+                "approval_mode": None,
+                "_sort_order": 51,
+            })
+
+    def issue_target_line(row: MaterialIssue, item) -> int | None:
+        if item.indent_item_id in target_item_ids:
+            return int(item.indent_item_id)
+        if item.indent_item_id is None and row.indent_id == indent.id:
+            return target_line_by_item_id.get(item.item_id)
+        return None
+
+    issued_by_line: dict[int, Decimal] = defaultdict(Decimal)
+    issue_completed_by = None
+    for row in sorted(
+        issues,
+        key=lambda value: (value.posted_at or value.created_at, value.id),
+    ):
+        for item in row.items:
+            line_id = issue_target_line(row, item)
+            if line_id is not None:
+                issued_by_line[line_id] += _d(item.issued_qty) - _d(item.returned_qty)
+        if issue_completed_by is None and lines_complete(issued_by_line):
+            issue_completed_by = row
+    issued_total = sum(issued_by_line.values(), Decimal("0"))
+    issue_complete = lines_complete(issued_by_line)
+    if issues:
+        latest = issues[-1]
+        stage(
+            "Issued from warehouse",
+            "COMPLETED",
+            "warehouse",
+            actor=latest.issued_by_name,
+            timestamp=latest.posted_at,
+            comments=latest.remarks,
+            reference=", ".join(row.issue_no for row in issues),
+            quantity=_quantity_text(issued_total, approved_total),
+            source="out_issues.is_stock_posted=true",
+        )
+        for row in issues:
+            quantity = sum(
+                (
+                    _d(item.issued_qty) - _d(item.returned_qty)
+                    for item in row.items
+                    if issue_target_line(row, item) is not None
+                ),
+                Decimal("0"),
+            )
+            if row.posted_at is None:
+                continue
+            events.append({
+                "id": f"warehouse-issue:{row.id}",
+                "event_type": "WAREHOUSE_ISSUED",
+                "title": "Issued from warehouse",
+                "description": f"{float(quantity):g} units issued",
+                "actor_name": row.issued_by_name,
+                "position_name": None,
+                "timestamp": row.posted_at,
+                "comments": row.remarks,
+                "reference_no": row.issue_no,
+                "quantity_summary": _quantity_text(quantity, approved_total),
+                "stage_type": "warehouse",
+                "approval_mode": None,
+                "_sort_order": 60,
+            })
+            if row.acknowledged_at is not None:
+                events.append({
+                    "id": f"issue-acknowledgement:{row.id}",
+                    "event_type": "ACKNOWLEDGEMENT_SUBMITTED",
+                    "title": "Acknowledgement submitted",
+                    "description": "Recipient acknowledged the warehouse issue",
+                    "actor_name": row.acknowledged_by_name,
+                    "position_name": None,
+                    "timestamp": row.acknowledged_at,
+                    "comments": row.remarks,
+                    "reference_no": row.issue_no,
+                    "quantity_summary": _quantity_text(quantity, approved_total),
+                    "stage_type": "acknowledgement",
+                    "approval_mode": None,
+                    "_sort_order": 90,
+                })
+        if issue_completed_by and issue_completed_by.posted_at is not None:
+            events.append({
+                "id": f"warehouse-issue-completed:{issue_completed_by.id}",
+                "event_type": "WAREHOUSE_ISSUE_COMPLETED",
+                "title": "Warehouse issue completed",
+                "description": "Required quantity fully issued",
+                "actor_name": issue_completed_by.issued_by_name,
+                "position_name": None,
+                "timestamp": issue_completed_by.posted_at,
+                "comments": None,
+                "reference_no": issue_completed_by.issue_no,
+                "quantity_summary": _quantity_text(issued_total, approved_total),
+                "stage_type": "warehouse",
+                "approval_mode": None,
+                "_sort_order": 61,
+            })
+
+    active_dispatch_statuses = {
+        DispatchStatus.DISPATCHED.value,
+        DispatchStatus.IN_TRANSIT.value,
+        DispatchStatus.DELIVERED.value,
+        DispatchStatus.ACKNOWLEDGED.value,
+    }
+    dispatched = [
+        row for row in dispatches
+        if row.status in active_dispatch_statuses and row.gate_out_at is not None
+    ]
+    issues_by_id = {row.id: row for row in all_issues}
+
+    def dispatch_target_line(row: Dispatch, item) -> int | None:
+        if item.indent_id == indent.id:
+            return target_line_by_item_id.get(item.item_id)
+        if item.indent_id is not None:
+            return None
+        if str(row.ref_type or "").upper() not in {"ISSUE", "WH_ISSUE"}:
+            return None
+        source_issue = issues_by_id.get(row.ref_id)
+        if source_issue is None:
+            return None
+        matching_target_lines = {
+            issue_target_line(source_issue, source_item)
+            for source_item in source_issue.items
+            if source_item.item_id == item.item_id
+            and issue_target_line(source_issue, source_item) is not None
+        }
+        contains_other_indent = any(
+            source_item.item_id == item.item_id
+            and source_item.indent_item_id is not None
+            and source_item.indent_item_id not in target_item_ids
+            for source_item in source_issue.items
+        )
+        if contains_other_indent or len(matching_target_lines) != 1:
+            return None
+        return matching_target_lines.pop()
+
+    dispatched_by_line: dict[int, Decimal] = defaultdict(Decimal)
+    for row in dispatched:
+        for item in row.items:
+            line_id = dispatch_target_line(row, item)
+            if line_id is not None:
+                dispatched_by_line[line_id] += _d(item.quantity)
+    dispatched_total = sum(dispatched_by_line.values(), Decimal("0"))
+    if dispatched:
+        latest = dispatched[-1]
+        stage(
+            "Dispatched",
+            "COMPLETED",
+            "delivery",
+            actor=latest.security_by_name or latest.created_by_name,
+            timestamp=latest.gate_out_at,
+            comments=latest.remarks,
+            reference=", ".join(row.dispatch_no for row in dispatched),
+            quantity=_quantity_text(dispatched_total, approved_total),
+            source="out_dispatches.gate_out_at",
+        )
+        for row in dispatched:
+            quantity = sum((
+                _d(item.quantity) for item in row.items
+                if dispatch_target_line(row, item) is not None
+            ), Decimal("0"))
+            events.append({
+                "id": f"dispatch:{row.id}",
+                "event_type": "DISPATCHED",
+                "title": "Dispatched",
+                "description": "Goods left the warehouse",
+                "actor_name": row.security_by_name or row.created_by_name,
+                "position_name": None,
+                "timestamp": row.gate_out_at,
+                "comments": row.remarks,
+                "reference_no": row.dispatch_no,
+                "quantity_summary": _quantity_text(quantity, approved_total),
+                "stage_type": "delivery",
+                "approval_mode": None,
+                "_sort_order": 70,
+            })
+
+    delivered = [row for row in dispatches if row.delivered_at is not None]
+    delivered_by_line: dict[int, Decimal] = defaultdict(Decimal)
+    for row in delivered:
+        for item in row.items:
+            line_id = dispatch_target_line(row, item)
+            if line_id is not None:
+                delivered_by_line[line_id] += _d(item.delivered_qty)
+    delivered_total = sum(delivered_by_line.values(), Decimal("0"))
+    delivery_complete = lines_complete(delivered_by_line)
+    if delivered:
+        latest = delivered[-1]
+        stage(
+            "Delivered",
+            "COMPLETED",
+            "delivery",
+            actor=latest.acknowledged_by_name,
+            timestamp=latest.delivered_at,
+            comments=latest.remarks,
+            reference=", ".join(row.dispatch_no for row in delivered),
+            quantity=_quantity_text(delivered_total, approved_total),
+            source="out_dispatches.delivered_at",
+        )
+        for row in delivered:
+            quantity = sum((
+                _d(item.delivered_qty) for item in row.items
+                if dispatch_target_line(row, item) is not None
+            ), Decimal("0"))
+            events.append({
+                "id": f"delivery:{row.id}",
+                "event_type": "DELIVERED",
+                "title": "Delivered",
+                "description": "Delivery recorded",
+                "actor_name": None,
+                "position_name": None,
+                "timestamp": row.delivered_at,
+                "comments": row.remarks,
+                "reference_no": row.dispatch_no,
+                "quantity_summary": _quantity_text(quantity, approved_total),
+                "stage_type": "delivery",
+                "approval_mode": None,
+                "_sort_order": 80,
+            })
+            if row.acknowledged_at is not None:
+                events.append({
+                    "id": f"delivery-acknowledgement:{row.id}",
+                    "event_type": "ACKNOWLEDGEMENT_SUBMITTED",
+                    "title": "Acknowledgement submitted",
+                    "description": "Receiver acknowledged the dispatch",
+                    "actor_name": row.acknowledged_by_name,
+                    "position_name": None,
+                    "timestamp": row.acknowledged_at,
+                    "comments": row.remarks,
+                    "reference_no": row.dispatch_no,
+                    "quantity_summary": None,
+                    "stage_type": "acknowledgement",
+                    "approval_mode": None,
+                    "_sort_order": 90,
+                })
+
+    receipt_events = _receipt_audit_events(
+        indent, audits, approved_total, target_item_ids,
+    )
+    events.extend(receipt_events)
+    fully_received = lines_complete(received_by_line)
+    if received_total > 0:
+        latest_receipt = receipt_events[-1] if receipt_events else None
+        stage(
+            "Fully received" if fully_received else "Partially received",
+            "APPROVED" if fully_received else "PENDING",
+            "acknowledgement",
+            current=not fully_received,
+            actor=latest_receipt.get("actor_name") if latest_receipt else None,
+            timestamp=latest_receipt.get("timestamp") if latest_receipt else None,
+            quantity=_quantity_text(received_total, approved_total),
+            source="ind_indent_items.received_qty",
+        )
+
+    closed_audit = _closed_transition_audit(audits)
+    has_genuine_closure = (
+        indent.status == IndentStatus.CLOSED.value and closed_audit is not None
+    )
+    if has_genuine_closure:
+        stage(
+            "Completed",
+            "APPROVED",
+            "completion",
+            actor=closed_audit.actor_name,
+            timestamp=closed_audit.created_at,
+            quantity=_quantity_text(received_total, approved_total),
+            source=f"sys_audit_log.id={closed_audit.id} status.to=CLOSED",
+        )
+        events.append({
+            "id": f"completion:audit:{closed_audit.id}",
+            "event_type": "COMPLETED",
+            "title": "Completed",
+            "description": f"{indent.indent_no} closed",
+            "actor_name": closed_audit.actor_name,
+            "position_name": None,
+            "timestamp": closed_audit.created_at,
+            "comments": None,
+            "reference_no": None,
+            "quantity_summary": _quantity_text(received_total, approved_total),
+            "stage_type": "completion",
+            "approval_mode": None,
+            "_sort_order": 120,
+        })
+    is_complete = has_genuine_closure
+    if not allocations_found:
+        missing_sources.append("inv_allocations.status=APPROVED and approved_at")
+    elif not issues:
+        missing_sources.append("out_issues.is_stock_posted=true and posted_at")
+    elif not issue_complete:
+        missing_sources.append("remaining posted out_issue_items.issued_qty")
+    elif not dispatched:
+        missing_sources.append("out_dispatches.gate_out_at")
+    elif not delivered:
+        missing_sources.append("out_dispatches.delivered_at")
+    elif not delivery_complete:
+        missing_sources.append("remaining out_dispatch_items.delivered_qty")
+    elif received_total <= 0:
+        missing_sources.append(
+            "ind_indent_items.received_qty and acknowledgement audit"
+        )
+    elif not fully_received:
+        missing_sources.append("remaining ind_indent_items.received_qty")
+    elif indent.status == IndentStatus.CLOSED.value and closed_audit is None:
+        missing_sources.append("sys_audit_log status.to=CLOSED")
+    elif not is_complete:
+        missing_sources.append("ind_indents.status=CLOSED audit transition")
+
+    return {
+        "stages": stages,
+        "events": events,
+        "missing_sources": missing_sources,
+        "has_allocation": bool(allocations_found),
+        "allocation_complete": allocation_complete,
+        "has_material_request": bool(material_requests),
+        "has_issue": bool(issues),
+        "issue_complete": issue_complete,
+        "has_dispatch": bool(dispatched),
+        "has_delivery": bool(delivered),
+        "delivery_complete": delivery_complete,
+        "has_acknowledgement": (
+            bool(receipt_events)
+            or any(row.acknowledged_at is not None for row in dispatches)
+            or (
+                not dispatches
+                and any(row.acknowledged_at is not None for row in issues)
+            )
+        ),
+        "has_receipt": received_total > 0,
+        "receipt_complete": fully_received,
+        "is_complete": is_complete,
+    }
+
+
 async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
     indent = await _get_indent_for_journey(db, indent_id, user)
     instance, actions, pending = await _workflow_rows(db, indent.id)
     resolved_chain = getattr(instance, "resolved_chain", None) if instance else None
-    positions = (
-        await _approval_positions(db, indent.position_id)
-        if resolved_chain is None else []
+    # A submitted document's actions/pending rows and resolved_chain are its historical
+    # evidence.  Re-reading today's HCM ladder here used to rewrite old journeys when a
+    # position was disabled, renamed, or moved.
+    positions: list[dict] = []
+    has_workflow_detail = bool(pending) or any(
+        action.action != ApprovalAction.SUBMITTED.value for action in actions
     )
+    if resolved_chain is None and instance is not None and has_workflow_detail:
+        positions = await _approval_positions(db, indent.position_id)
     audits = list((await db.execute(
         select(AuditLog)
         .options(load_only(
@@ -1775,22 +2954,47 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         _workflow_stage_sequence(submitted)
     stages: list[dict] = [{
         "sequence": 1,
-        "title": "Request Raised" if submitted else "Draft Request",
-        "status": "SUBMITTED" if submitted else "PENDING",
-        "approver_name": submitted.actor_name if submitted else indent.requested_by_name,
-        "position_name": submitted.actor_position if submitted else indent.position_name,
-        "timestamp": _utc_datetime(submitted.acted_at if submitted else indent.created_at),
-        "comments": submitted.comments if submitted else indent.remarks,
+        "title": "Draft created",
+        "status": "APPROVED" if submitted else "PENDING",
+        "approver_name": indent.requested_by_name,
+        "position_name": indent.position_name,
+        "timestamp": _utc_datetime(indent.created_at),
+        "comments": indent.remarks,
         "duration_seconds": _duration_seconds(
             indent.created_at,
-            submitted.acted_at if submitted else indent.created_at,
+            indent.created_at,
         ),
-        "stage_type": "request",
+        "stage_type": "draft",
         "is_current": indent.status == IndentStatus.DRAFT.value,
+        "approval_mode": None,
+        "reference_no": None,
+        "quantity_summary": None,
+        "evidence_source": "ind_indents.created_at",
+    }, {
+        "sequence": 2,
+        "title": "Request submitted",
+        "status": "SUBMITTED" if submitted else "PENDING",
+        "approver_name": submitted.actor_name if submitted else None,
+        "position_name": submitted.actor_position if submitted else None,
+        "timestamp": _utc_datetime(submitted.acted_at) if submitted else None,
+        "comments": submitted.comments if submitted else None,
+        "duration_seconds": _duration_seconds(
+            indent.created_at,
+            submitted.acted_at if submitted else None,
+        ),
+        "stage_type": "submission",
+        "is_current": False,
+        "approval_mode": None,
+        "reference_no": None,
+        "quantity_summary": None,
+        "evidence_source": "wf_actions.action=SUBMITTED" if submitted else None,
     }]
 
-    previous_at = stages[0]["timestamp"]
-    current_stage = "Draft request" if indent.status == IndentStatus.DRAFT.value else None
+    previous_at = stages[1]["timestamp"] or stages[0]["timestamp"]
+    current_stage = (
+        "Draft — submit the indent to begin approval"
+        if indent.status == IndentStatus.DRAFT.value else None
+    )
     final_any_one_outcome = None
     has_final_stage = False
 
@@ -1819,17 +3023,44 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         for index, link in enumerate(chain):
             workflow_sequence = int(link.get("sequence", index + 1))
             actions_for_sequence = stage_actions.get(workflow_sequence, [])
-            action = (
-                _display_action_for_stage(actions_for_sequence)
-                if actions_for_sequence else None
-            )
             pending_for_sequence = pending_by_sequence.get(workflow_sequence, [])
             is_final = index == len(chain) - 1
             explicit_status = str(link.get("status") or "").upper()
-            status = (
-                _stage_status_from_action(action)
-                if action else "NOT_REQUIRED"
-                if explicit_status == "NOT_REQUIRED" else "PENDING"
+            terminal_or_active_action = _terminal_or_active_stage_action(
+                actions_for_sequence,
+                indent.status,
+            )
+            approved = _latest_action_for_stage(
+                actions_for_sequence,
+                ApprovalAction.APPROVED.value,
+            )
+            any_one_satisfied = (
+                str(link.get("approval_mode") or "").upper() == "ANY_ONE"
+                and approved is not None
+            )
+            if explicit_status in {"NOT_REQUIRED", "SKIPPED"}:
+                status = "NOT_REQUIRED"
+            elif any_one_satisfied:
+                status = "APPROVED"
+            elif pending_for_sequence:
+                # Important for ALL/MAJORITY stages: one action is not completion while
+                # the workflow still has materialized approvers for this same rung.
+                # A prior RETURNED action is only history after correction resubmission.
+                status = "PENDING"
+            elif terminal_or_active_action:
+                status = _stage_status_from_action(terminal_or_active_action)
+            elif approved:
+                status = "APPROVED"
+            else:
+                status = "PENDING"
+            action = (
+                approved
+                if status == "APPROVED"
+                else terminal_or_active_action
+                if status in {"REJECTED", "RETURNED"}
+                else approved
+                if status == "PENDING" and approved
+                else None
             )
             is_current = (
                 status != "NOT_REQUIRED"
@@ -1846,7 +3077,7 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
             if current_stage is None and is_current:
                 current_stage = (
                     "Waiting for final approval"
-                    if is_final else f"Waiting for {title}"
+                    if is_final else _waiting_for_stage(title)
                 )
             if is_final:
                 has_final_stage = True
@@ -1867,6 +3098,10 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
                 "comments": action.comments if action else None,
                 "duration_seconds": _duration_seconds(previous_at, timestamp),
                 "stage_type": "final" if is_final else "approval",
+                "approval_mode": link.get("approval_mode"),
+                "reference_no": None,
+                "quantity_summary": None,
+                "evidence_source": "wf_instances.resolved_chain",
             })
             if timestamp:
                 previous_at = timestamp
@@ -1898,6 +3133,10 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
                     "comments": action.comments,
                     "duration_seconds": _duration_seconds(previous_at, timestamp),
                     "stage_type": "final",
+                    "approval_mode": None,
+                    "reference_no": None,
+                    "quantity_summary": None,
+                    "evidence_source": "wf_actions",
                 })
                 if timestamp:
                     previous_at = timestamp
@@ -1909,13 +3148,28 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
             is_current = bool(holder_ids & pending_approver_ids)
             timestamp = _utc_datetime(action.acted_at) if action else None
             fallback_title = _fallback_stage_title([position], final=False)
-            title = (
-                action.stage_name
-                if action and action.stage_name and action.stage_name not in {"Reporting Manager", "Approval"}
-                else fallback_title
+            current_title = (
+                instance.current_stage_name
+                if is_current
+                and instance
+                and instance.current_stage_name
+                and instance.current_stage_name not in {
+                    "Reporting Manager", "Approval", "Final authority",
+                }
+                else None
             )
+            if current_title:
+                title = current_title
+            elif (
+                action
+                and action.stage_name
+                and action.stage_name not in {"Reporting Manager", "Approval"}
+            ):
+                title = action.stage_name
+            else:
+                title = fallback_title
             if current_stage is None and is_current:
-                current_stage = f"Waiting for {title}"
+                current_stage = _waiting_for_stage(title)
             stages.append({
                 "sequence": len(stages) + 1,
                 "title": title,
@@ -1993,9 +3247,62 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         for workflow_sequence in sorted(represented_sequences):
             actions_for_sequence = stage_actions.get(workflow_sequence, [])
             pending_for_sequence = pending_by_sequence.get(workflow_sequence, [])
+            if pending_for_sequence:
+                approved = _latest_action_for_stage(
+                    actions_for_sequence,
+                    ApprovalAction.APPROVED.value,
+                )
+                action = approved
+                approver_ids = {row.approver_id for row in pending_for_sequence}
+                pending_positions: list[dict] = []
+                is_final = False
+                has_final_stage = has_final_stage or is_final
+                title = (
+                    getattr(instance, "current_stage_name", None)
+                    if instance and getattr(instance, "current_sequence", None) == workflow_sequence
+                    else None
+                ) or (action.stage_name if action and action.stage_name else None) or "Approval"
+                if current_stage is None:
+                    current_stage = "Waiting for final approval" if is_final else _waiting_for_stage(title)
+                timestamp = _utc_datetime(action.acted_at) if action else None
+                stages.append({
+                    "sequence": len(stages) + 1,
+                    "title": title,
+                    "status": "PENDING",
+                    "is_current": True,
+                    "approver_name": (
+                        action.actor_name if action
+                        else _holder_names_for_ids(pending_positions, approver_ids)
+                    ),
+                    "position_name": (
+                        action.actor_position if action
+                        else " / ".join(position["name"] for position in pending_positions) or None
+                    ),
+                    "timestamp": timestamp,
+                    "comments": action.comments if action else None,
+                    "duration_seconds": _duration_seconds(previous_at, timestamp),
+                    "stage_type": "final" if is_final else "approval",
+                    "approval_mode": None,
+                    "reference_no": None,
+                    "quantity_summary": None,
+                    "evidence_source": "wf_pending plus wf_instances.current_stage_name",
+                })
+                if timestamp:
+                    previous_at = timestamp
+                continue
+
             if actions_for_sequence:
-                display_action = _display_action_for_stage(actions_for_sequence)
-                stage_type = "final" if any(_is_final_stage_name(action.stage_name) for action in actions_for_sequence) else "approval"
+                display_action = (
+                    _terminal_or_active_stage_action(actions_for_sequence, indent.status)
+                    or _display_action_for_stage(actions_for_sequence)
+                )
+                stage_type = (
+                    "final"
+                    if instance
+                    and instance.status == InstanceStatus.APPROVED.value
+                    and workflow_sequence == max(represented_sequences)
+                    else "approval"
+                )
                 has_final_stage = has_final_stage or stage_type == "final"
                 timestamp = _utc_datetime(display_action.acted_at)
                 status = _stage_status_from_action(display_action)
@@ -2017,58 +3324,239 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
                     previous_at = timestamp
                 continue
 
-            approver_ids = {row.approver_id for row in pending_for_sequence}
-            pending_positions = _positions_for_approvers(positions, approver_ids)
-            is_final = len(pending_for_sequence) > 1
-            has_final_stage = has_final_stage or is_final
-            title = _fallback_stage_title(pending_positions, final=is_final)
-            if current_stage is None:
-                current_stage = "Waiting for final approval" if is_final else f"Waiting for {title}"
-            stages.append({
-                "sequence": len(stages) + 1,
-                "title": title,
-                "status": "PENDING",
-                "is_current": True,
-                "approver_name": _holder_names_for_ids(pending_positions, approver_ids),
-                "position_name": " / ".join(position["name"] for position in pending_positions) or None,
-                "timestamp": None,
-                "comments": None,
-                "duration_seconds": None,
-                "stage_type": "final" if is_final else "approval",
-            })
-
+    operational = {
+        "stages": [], "events": [], "missing_sources": [],
+        "has_allocation": False, "allocation_complete": False,
+        "has_material_request": False, "has_issue": False, "issue_complete": False,
+        "has_dispatch": False, "has_delivery": False, "delivery_complete": False,
+        "has_acknowledgement": False,
+        "has_receipt": False,
+        "receipt_complete": False, "is_complete": False,
+    }
     if indent.status in _POST_APPROVAL_STATUSES:
-        if not has_final_stage:
-            raise ValidationError("Workflow final stage_name is required to build indent journey")
-        ready_timestamp = _utc_datetime(indent.approved_at)
-        stages.append({
-            "sequence": len(stages) + 1,
-            "title": "Ready for Allocation",
-            "status": "PENDING" if indent.status == IndentStatus.AWAITING_ALLOCATION.value else "APPROVED",
-            "approver_name": None,
-            "position_name": None,
-            "timestamp": ready_timestamp,
-            "comments": None,
-            "duration_seconds": _duration_seconds(previous_at, ready_timestamp),
-            "stage_type": "allocation",
-            "is_current": indent.status == IndentStatus.AWAITING_ALLOCATION.value,
-        })
-        if indent.status == IndentStatus.AWAITING_ALLOCATION.value:
-            current_stage = "Ready for Allocation"
+        operational = await _journey_operational_evidence(db, indent, audits)
 
-    if indent.status == IndentStatus.REJECTED.value:
+    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        current_stage = "Returned for correction"
+    elif indent.status == IndentStatus.REJECTED.value:
         current_stage = "Request rejected"
     elif indent.status not in {
         IndentStatus.DRAFT.value,
         IndentStatus.PENDING_APPROVAL.value,
         IndentStatus.REJECTED.value,
+        IndentStatus.RETURNED_FOR_CORRECTION.value,
         *_POST_APPROVAL_STATUSES,
     }:
         current_stage = "Status unavailable"
     elif current_stage is None:
         current_stage = "Approval completed"
 
+    approval_stages = [
+        row for row in stages if row["stage_type"] in {"approval", "final"}
+    ]
+    terminal_rejected = indent.status == IndentStatus.REJECTED.value
+    active_returned_for_correction = (
+        indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+    )
+    approval_rejected = any(
+        row["status"] == "REJECTED" for row in approval_stages
+    ) and terminal_rejected
+    approval_returned = any(
+        row["status"] == "RETURNED" for row in approval_stages
+    ) and active_returned_for_correction
+    approval_current = next(
+        (
+            row for row in approval_stages
+            if row.get("is_current") and row["status"] == "PENDING"
+        ),
+        None,
+    )
+    approvals_complete = bool(instance) and instance.status == InstanceStatus.APPROVED.value
+    request_submitted = submitted is not None
+
+    def phase(sequence: int, title: str, status: str, *, current: bool = False,
+              message: str | None = None) -> dict:
+        return {
+            "sequence": sequence,
+            "title": title,
+            "status": status,
+            "is_current": current,
+            "approver_name": message,
+            "position_name": None,
+            "timestamp": None,
+            "comments": None,
+            "duration_seconds": None,
+            "stage_type": "phase",
+            "approval_mode": None,
+            "reference_no": None,
+            "quantity_summary": None,
+            "evidence_source": None,
+        }
+
+    if approval_rejected:
+        approval_status, approval_is_current = "REJECTED", False
+    elif approval_returned:
+        approval_status, approval_is_current = "RETURNED", False
+    elif approvals_complete:
+        approval_status, approval_is_current = "APPROVED", False
+    elif approval_current:
+        approval_status, approval_is_current = "PENDING", True
+    else:
+        approval_status, approval_is_current = "PENDING", False
+
+    draft_current = indent.status == IndentStatus.DRAFT.value
+    submitted_current = (
+        request_submitted
+        and not draft_current
+        and not approval_rejected
+        and not approval_returned
+        and not approvals_complete
+        and not approval_is_current
+    )
+    stages[0]["is_current"] = draft_current
+
+    allocation_done = bool(operational["has_allocation"])
+    warehouse_done = bool(operational["issue_complete"])
+    delivery_done = bool(operational["delivery_complete"])
+    acknowledgement_done = bool(operational["is_complete"])
+    allocation_current = approvals_complete and not allocation_done
+    warehouse_current = allocation_done and not warehouse_done
+    delivery_current = warehouse_done and not delivery_done and not operational["has_receipt"]
+    acknowledgement_current = (
+        (delivery_done or operational["has_receipt"]) and not acknowledgement_done
+    )
+
+    phases = [
+        phase(1, "Draft", "APPROVED" if request_submitted else "PENDING",
+              current=draft_current),
+        phase(2, "Submitted", "APPROVED" if request_submitted else "PENDING",
+              current=submitted_current),
+        phase(
+            3, "Approvals", approval_status, current=approval_is_current,
+            message=(approval_current or {}).get("title") if approval_current else None,
+        ),
+        phase(4, "Allocation", "APPROVED" if allocation_done else "PENDING",
+              current=allocation_current),
+        phase(5, "Warehouse", "APPROVED" if warehouse_done else "PENDING",
+              current=warehouse_current),
+        phase(6, "Delivery", "APPROVED" if delivery_done else "PENDING",
+              current=delivery_current),
+        phase(7, "Acknowledgement", "APPROVED" if acknowledgement_done else "PENDING",
+              current=acknowledgement_current),
+    ]
+
+    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
+        current_stage = "Returned for correction"
+    elif approval_rejected:
+        current_stage = "Request rejected"
+    elif draft_current:
+        current_stage = "Draft — submit the indent to begin approval"
+    elif submitted_current:
+        current_stage = "Request submitted — waiting for approval"
+    elif approval_is_current and approval_current:
+        current_stage = _waiting_for_stage(approval_current["title"])
+    elif allocation_current:
+        current_stage = "Waiting for allocation"
+    elif warehouse_current:
+        current_stage = "Waiting for warehouse issue"
+    elif delivery_current:
+        current_stage = "In delivery" if operational["has_dispatch"] else "Waiting for dispatch"
+    elif acknowledgement_current:
+        current_stage = (
+            "Partially received"
+            if operational["has_receipt"] else "Waiting for acknowledgement"
+        )
+    elif acknowledgement_done:
+        current_stage = "Completed"
+
+    history = _journey_history(
+        indent,
+        actions,
+        audits,
+        operational["events"],
+        resolved_chain,
+    )
+    chain_by_sequence = {
+        int(link.get("sequence", index + 1)): link
+        for index, link in enumerate(resolved_chain or [])
+        if isinstance(link, dict)
+    }
+    final_sequence = max(chain_by_sequence, default=None)
+    stage_type_by_event = {
+        "CREATED": "draft",
+        "SUBMITTED": "submission",
+        "APPROVED": "approval",
+        "REJECTED": "approval",
+        "RETURNED": "approval",
+        "READY_FOR_ALLOCATION": "allocation",
+        "STOCK_ALLOCATED": "allocation",
+        "WAREHOUSE_ISSUED": "warehouse",
+        "DISPATCHED": "delivery",
+        "DELIVERED": "delivery",
+        "ACKNOWLEDGEMENT_SUBMITTED": "acknowledgement",
+        "PARTIALLY_RECEIVED": "acknowledgement",
+        "FULLY_RECEIVED": "acknowledgement",
+        "COMPLETED": "completion",
+    }
+
+    # Timeline cards are projections of immutable history events. They remain useful
+    # internally, but the public `stages` contract is the detailed journey assembled
+    # above: every resolved workflow rung, including pending and skipped rungs, must
+    # stay visible rather than being collapsed into evidence-only actions.
+    evidence_stages: list[dict] = []
+    evidence_previous_at: datetime | None = None
+    for event in history:
+        event_type = event["event_type"]
+        workflow_sequence = event.get("workflow_sequence")
+        link = chain_by_sequence.get(int(workflow_sequence)) if workflow_sequence is not None else None
+        event_stage_type = event.get("stage_type") or stage_type_by_event.get(
+            event_type, "activity",
+        )
+        if event_type == "APPROVED" and final_sequence == workflow_sequence:
+            event_stage_type = "final"
+        status = {
+            "CREATED": "COMPLETED",
+            "SUBMITTED": "SUBMITTED",
+            "REJECTED": "REJECTED",
+            "RETURNED": "RETURNED",
+            "APPROVED": "APPROVED",
+            "ACKNOWLEDGEMENT_SUBMITTED": "ACKNOWLEDGED",
+        }.get(event_type)
+        if status is None:
+            if event_type.endswith("_REJECTED"):
+                status = "REJECTED"
+            elif event_type.endswith("_RETURNED"):
+                status = "RETURNED"
+            elif event_type.endswith("_SUBMITTED"):
+                status = "SUBMITTED"
+            elif event_type.endswith("_APPROVED"):
+                status = "APPROVED"
+            else:
+                status = "COMPLETED"
+        timestamp = event["timestamp"]
+        evidence_stages.append({
+            "event_id": event["id"],
+            "sequence": len(evidence_stages) + 1,
+            "title": event["title"],
+            "status": status,
+            "is_current": False,
+            "approver_name": event.get("actor_name"),
+            "position_name": event.get("position_name"),
+            "timestamp": timestamp,
+            "comments": event.get("comments"),
+            "duration_seconds": _duration_seconds(evidence_previous_at, timestamp),
+            "stage_type": event_stage_type,
+            "approval_mode": event.get("approval_mode") or (
+                link.get("approval_mode") if link else None
+            ),
+            "reference_no": event.get("reference_no"),
+            "quantity_summary": event.get("quantity_summary"),
+            "evidence_source": event.get("id"),
+        })
+        evidence_previous_at = timestamp
+
     return {
+        "contract_version": 5,
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
         "status": indent.status,
@@ -2079,7 +3567,9 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         "current_stage_message": current_stage,
         "final_any_one_outcome": final_any_one_outcome,
         "stages": stages,
-        "history": _journey_history(indent, actions, audits),
+        "phases": phases,
+        "history": history,
+        "missing_sources": operational["missing_sources"],
     }
 
 
@@ -2103,20 +3593,7 @@ async def indent_stats(
     )
     base = select(Indent.id)
     if user is not None:
-        # The SAME two filters the list uses. A KPI card and the list beneath it are
-        # two readings of one question, so any predicate missing from one shows up
-        # as a contradiction on screen: the dashboard read 79 while All Requests
-        # read 2, because this query had the access rule but not the scope rung.
-        base = base.where(
-            await indent_access_condition(db, user),
-            await scope_condition(
-                db, user,
-                owner_col=Indent.requested_by_id,
-                position_col=Indent.position_id,
-                office_col=Indent.office_id,
-                project_col=Indent.project_id,
-            ),
-        )
+        base = base.where(await indent_access_condition(db, user))
     filtered_ids = _apply_indent_filters(
         base, search=search, date_from=date_from, date_to=date_to,
         required_by_from=required_by_from, required_by_to=required_by_to,
@@ -2833,7 +4310,8 @@ async def list_notifications(
         IndentStatus.AWAITING_ALLOCATION.value, IndentStatus.ALLOCATED.value,
         IndentStatus.PARTIALLY_FULFILLED.value,
         IndentStatus.PENDING_PROCUREMENT.value,
-        IndentStatus.REJECTED.value, IndentStatus.PARTIALLY_ORDERED.value,
+        IndentStatus.REJECTED.value, IndentStatus.RETURNED_FOR_CORRECTION.value,
+        IndentStatus.PARTIALLY_ORDERED.value,
         IndentStatus.ORDERED.value, IndentStatus.CLOSED.value,
     ]
     title = case(
@@ -2847,6 +4325,7 @@ async def list_notifications(
         ),
         (Indent.status == IndentStatus.PENDING_PROCUREMENT.value, "Going to procurement"),
         (Indent.status == IndentStatus.REJECTED.value, "Request rejected"),
+        (Indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value, "Correction requested"),
         (Indent.status == IndentStatus.PARTIALLY_ORDERED.value, "Ordering started"),
         (Indent.status == IndentStatus.ORDERED.value, "Items ordered"),
         (Indent.status == IndentStatus.CLOSED.value, "Request completed"),
@@ -2889,6 +4368,10 @@ async def list_notifications(
         (
             Indent.status == IndentStatus.REJECTED.value,
             Indent.indent_no + literal(" has been rejected."),
+        ),
+        (
+            Indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value,
+            Indent.indent_no + literal(" has been returned for correction."),
         ),
         (
             Indent.status == IndentStatus.PARTIALLY_ORDERED.value,

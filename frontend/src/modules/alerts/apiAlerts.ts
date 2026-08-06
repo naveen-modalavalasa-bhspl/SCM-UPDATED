@@ -1,3 +1,4 @@
+import axios from "axios";
 import { api } from "@/shared/api/client";
 import { alerts } from "./alerts";
 
@@ -31,6 +32,13 @@ export function installApiAlerts(): void {
   api.interceptors.response.use(
     (response) => response,
     (error) => {
+      // Nobody cancelled anything by hand: TanStack Query aborts a read when the
+      // screen unmounts or a filter changes, which is every navigation and every
+      // keystroke in a search box. An abort carries no response, so without this
+      // it lands in the `!error.response` branch below and announces a dropped
+      // connection on a page that is working perfectly.
+      if (axios.isCancel(error)) return Promise.reject(error);
+
       const status = error.response?.status;
 
       // The catalog fetch is a silent best-effort read behind the bundled defaults

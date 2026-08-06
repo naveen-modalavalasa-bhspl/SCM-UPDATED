@@ -365,9 +365,12 @@ describe("IndentFormPage", () => {
     });
     expect(screen.getByLabelText("Required date")).toHaveValue("2026-08-02");
     expect(screen.getByPlaceholderText("Optional")).toHaveValue("Original remarks");
-    expect(screen.getByRole("combobox", {
+    // Editing an existing indent locks the delivery location: it is shown read-only
+    // rather than as the picker a brand-new request gets.
+    expect(screen.queryByRole("combobox", {
       name: "Office is assigned from your position",
-    })).not.toBeDisabled();
+    })).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Main Office")).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText("Required date"), { target: { value: "" } });
     expect(screen.queryByText("Required date is mandatory.")).not.toBeInTheDocument();

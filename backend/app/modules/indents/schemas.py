@@ -38,6 +38,12 @@ class ActionIn(BaseModel):
     comments: str = ""
 
 
+class CorrectionOwnerOut(BaseModel):
+    employee_id: int
+    employee_name: str | None = None
+    position_id: int | None = None
+
+
 class IndentItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -79,6 +85,13 @@ class IndentOut(BaseModel):
     can_submit: bool = False
     can_approve: bool = False
     can_reject: bool = False
+    can_return_for_correction: bool = False
+    can_edit_correction: bool = False
+    can_resubmit_correction: bool = False
+    correction_owner: CorrectionOwnerOut | None = None
+    returned_from_stage: str | None = None
+    resubmit_target_stage: str | None = None
+    correction_comment: str | None = None
     created_at: datetime
     items: list[IndentItemOut] = []
 
@@ -228,6 +241,7 @@ class IndentNotificationRow(BaseModel):
 
 
 class IndentJourneyStage(BaseModel):
+    event_id: str | None = None
     sequence: int
     title: str
     status: str
@@ -238,6 +252,10 @@ class IndentJourneyStage(BaseModel):
     comments: str | None = None
     duration_seconds: int | None = None
     stage_type: str
+    approval_mode: str | None = None
+    reference_no: str | None = None
+    quantity_summary: str | None = None
+    evidence_source: str | None = None
 
     @field_serializer("timestamp", when_used="json")
     def serialize_datetime(self, value: datetime | None):
@@ -253,6 +271,8 @@ class IndentJourneyHistoryEvent(BaseModel):
     position_name: str | None = None
     timestamp: datetime
     comments: str | None = None
+    reference_no: str | None = None
+    quantity_summary: str | None = None
 
     @field_serializer("timestamp", when_used="json")
     def serialize_datetime(self, value: datetime):
@@ -260,6 +280,7 @@ class IndentJourneyHistoryEvent(BaseModel):
 
 
 class IndentJourneyOut(BaseModel):
+    contract_version: int = 5
     indent_id: int
     indent_no: str
     status: str
@@ -270,7 +291,9 @@ class IndentJourneyOut(BaseModel):
     current_stage_message: str
     final_any_one_outcome: str | None = None
     stages: list[IndentJourneyStage]
+    phases: list[IndentJourneyStage]
     history: list[IndentJourneyHistoryEvent]
+    missing_sources: list[str] = Field(default_factory=list)
 
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):

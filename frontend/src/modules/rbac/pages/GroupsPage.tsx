@@ -6,6 +6,7 @@ import {
 import { ChevronDown, ChevronRight, MapPin, Pencil, Plus, Users } from "lucide-react";
 import { Button, Can, Field, Input, PageHeader, Select } from "@/shared/components";
 import { rbacApi } from "../api";
+import { alerts } from "@/modules/alerts";
 import type { UserGroup } from "../types";
 
 /**
@@ -68,7 +69,10 @@ export function GroupsPage() {
         role_id: Number(id),
       });
     },
-    onSuccess: () => { setCreating(false); refresh(); },
+    onSuccess: (g) => {
+      void alerts.success("role.saved", { name: g.name });
+      setCreating(false); refresh();
+    },
     onError: fail,
   });
 
@@ -92,15 +96,27 @@ export function GroupsPage() {
 
   const rename = useMutation({
     mutationFn: () => rbacApi.groups.update(renaming!.id, { ...renaming!, name: renameText }),
-    onSuccess: () => { setRenaming(null); refresh(); },
+    onSuccess: () => {
+      void alerts.success("role.saved", { name: renameText });
+      setRenaming(null); refresh();
+    },
     onError: fail,
   });
 
   const remove = useMutation({
-    mutationFn: (g: UserGroup) => rbacApi.groups.deactivate(g.id),
-    onSuccess: () => refresh(),
+    mutationFn: (g: UserGroup) => rbacApi.groups.deactivate(g.id).then(() => g.name),
+    onSuccess: (name) => {
+      void alerts.success("master.deactivated", { name });
+      refresh();
+    },
     onError: fail,
   });
+
+  const askThenRemove = async (g: UserGroup) => {
+    if (!(await alerts.confirm("master.deactivate", { name: g.name }))) return;
+    setRenaming(null);
+    remove.mutate(g);
+  };
 
   const items = (groups.data?.items ?? []).filter((g) => g.is_active);
   const parents = items.filter((g) => g.parent_id == null);
@@ -276,7 +292,7 @@ export function GroupsPage() {
               </ModalBody>
               <ModalFooter className="justify-between">
                 <Button variant="ghost" className="text-bad hover:bg-bad-bg"
-                        onClick={() => { remove.mutate(renaming!); setRenaming(null); }}>
+                        onClick={() => void askThenRemove(renaming!)}>
                   Remove group
                 </Button>
                 <div className="flex gap-2">

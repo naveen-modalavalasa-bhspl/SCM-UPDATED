@@ -24,6 +24,11 @@ class IndentStatus(str, Enum):
     PARTIALLY_ORDERED = "PARTIALLY_ORDERED"
     ORDERED = "ORDERED"
     CLOSED = "CLOSED"
+    # An approver handed the request back for a fix without ending the approval:
+    # the wf_instance stays IN_PROGRESS and resumes at the same rung on resubmit
+    # (workflow.engine.return_for_correction / resubmit_correction). Not DRAFT —
+    # a draft has no live approval behind it.
+    RETURNED_FOR_CORRECTION = "RETURNED_FOR_CORRECTION"
 
 
 class POStatus(str, Enum):

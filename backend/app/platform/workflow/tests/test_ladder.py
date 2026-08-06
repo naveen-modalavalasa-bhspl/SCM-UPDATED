@@ -16,12 +16,14 @@ Regional Manager.
 """
 import pytest
 
+from sqlalchemy import select
+
 from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm.models import (
     HcmEmployee, HcmPosition, HcmPositionAssignment,
 )
 from app.platform.workflow import engine, ladder, ladder_config
-from app.platform.workflow.models import Instance, Workflow
+from app.platform.workflow.models import Action, Instance, Pending, Workflow
 from app.platform.workflow.schemas import LadderCopyIn, LadderIn
 from app.shared.enums import ApprovalAction, ConditionOperator, InstanceStatus
 from app.shared.models.base import utcnow
@@ -294,6 +296,137 @@ async def test_rejecting_ends_the_document(db):
 
     assert instance.status == InstanceStatus.REJECTED.value
     assert not await engine.current_approvers(db, "INDENT", 1)
+
+
+async def test_return_for_correction_first_stage_assigns_requester_without_pending(db):
+    holders = await _org(db)
+    await _save(db, holders[601])
+    instance = await engine.start(db, "INDENT", 51, {
+        "requester_position_id": 606,
+    }, holders[606])
+    assert instance.current_sequence == 1
+
+    returned = await engine.return_for_correction(
+        db, "INDENT", 51, holders[605], "fix quantity",
+        context={"requester_position_id": 606},
+    )
+
+    state = await engine.get_correction_state(db, "INDENT", 51)
+    assert returned.id == instance.id
+    assert returned.status == InstanceStatus.IN_PROGRESS.value
+    assert returned.current_sequence == 1
+    assert state["correction_owner_employee_id"] == holders[606].id
+    assert state["correction_owner_position_id"] == 606
+    assert state["resubmit_target_sequence"] == 1
+    assert state["correction_comment"] == "fix quantity"
+    assert not await engine.current_approvers(db, "INDENT", 51)
+
+
+async def test_return_for_correction_later_stage_assigns_exact_previous_actor(db):
+    holders = await _org(db)
+    second_dm = HcmEmployee(
+        id=1604, full_name="DM Alternate", emp_code="E1604",
+        project_id=PROJECT, project_name=PROJECT_NAME,
+        is_active=True, synced_at=utcnow(),
+    )
+    db.add(second_dm)
+    await db.flush()
+    db.add(HcmPositionAssignment(
+        id=1604, employee_id=second_dm.id, position_id=604,
+        is_active=True, is_primary=True, synced_at=utcnow(),
+    ))
+    second_dm.active_position_id = 604
+    await db.flush()
+    await _save(db, holders[601])
+    instance = await engine.start(db, "INDENT", 52, {
+        "requester_position_id": 606,
+    }, holders[606])
+
+    await engine.act(db, "INDENT", 52, "APPROVE", holders[605])
+    await engine.act(db, "INDENT", 52, "APPROVE", holders[604])
+    returned = await engine.return_for_correction(
+        db, "INDENT", 52, holders[603], "dm to correct",
+        context={"requester_position_id": 606},
+    )
+
+    state = await engine.get_correction_state(db, "INDENT", 52)
+    assert returned.id == instance.id
+    assert state["correction_owner_employee_id"] == holders[604].id
+    assert state["correction_owner_employee_id"] != second_dm.id
+    assert state["correction_owner_position_id"] == 604
+    assert state["returned_from_sequence"] == 3
+    assert not (await db.execute(
+        select(Pending).where(Pending.instance_id == instance.id)
+    )).scalars().all()
+
+
+async def test_resubmit_correction_reopens_returning_stage_on_same_instance(db):
+    holders = await _org(db)
+    await _save(db, holders[601])
+    instance = await engine.start(db, "INDENT", 53, {
+        "requester_position_id": 606,
+    }, holders[606])
+    await engine.return_for_correction(
+        db, "INDENT", 53, holders[605], "requester fix",
+        context={"requester_position_id": 606},
+    )
+
+    resubmitted = await engine.resubmit_correction(
+        db, "INDENT", 53, holders[606],
+        context={"requester_position_id": 606},
+    )
+    pending = (await db.execute(
+        select(Pending).where(Pending.instance_id == instance.id)
+    )).scalars().all()
+    actions = (await db.execute(
+        select(Action).where(Action.instance_id == instance.id)
+    )).scalars().all()
+
+    assert resubmitted.id == instance.id
+    assert resubmitted.current_sequence == 1
+    assert [row.approver_id for row in pending] == [holders[605].id]
+    assert await engine.get_correction_state(db, "INDENT", 53) is None
+    assert [row.action for row in actions].count(ApprovalAction.RETURNED.value) == 1
+
+
+async def test_resubmit_correction_blocks_non_owner_wrong_position_and_duplicate(db):
+    holders = await _org(db)
+    await _save(db, holders[601])
+    await engine.start(db, "INDENT", 54, {
+        "requester_position_id": 606,
+    }, holders[606])
+    await engine.return_for_correction(
+        db, "INDENT", 54, holders[605], "requester fix",
+        context={"requester_position_id": 606},
+    )
+
+    with pytest.raises(PermissionError_):
+        await engine.resubmit_correction(db, "INDENT", 54, holders[605])
+
+    holders[606].active_position_id = 605
+    with pytest.raises(PermissionError_):
+        await engine.resubmit_correction(db, "INDENT", 54, holders[606])
+
+    holders[606].active_position_id = 606
+    await engine.resubmit_correction(
+        db, "INDENT", 54, holders[606],
+        context={"requester_position_id": 606},
+    )
+    with pytest.raises(ValidationError):
+        await engine.resubmit_correction(db, "INDENT", 54, holders[606])
+
+
+async def test_existing_return_action_behavior_is_unchanged_for_non_indent(db):
+    holders = await _org(db)
+    await _save(db, holders[601], doc_type="MR")
+    await engine.start(db, "MR", 55, {"requester_position_id": 606}, holders[606])
+
+    returned = await engine.act(db, "MR", 55, "RETURN", holders[605])
+    pending = await engine.current_approvers(db, "MR", 55)
+
+    assert returned.current_sequence == 1
+    assert [employee.id for employee in pending] == [holders[605].id]
+    assert await engine.get_correction_state(db, "MR", 55) is None
 
 
 async def test_someone_not_on_the_current_rung_cannot_approve(db):

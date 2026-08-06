@@ -4,6 +4,7 @@ import { ArrowLeft, Check, X } from "lucide-react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Button, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { poApi } from "../api";
+import { alerts } from "@/modules/alerts";
 
 const money = (value: number) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2,
@@ -30,12 +31,25 @@ export function PODetailPage() {
     mutationFn: (action: "approve" | "reject") => action === "approve"
       ? poApi.approve(poId, comments)
       : poApi.reject(poId, comments),
-    onSuccess: () => {
+    onSuccess: (_result, action) => {
+      const number = po.data?.po_no ?? "The purchase order";
+      void alerts.success(action === "approve" ? "po.approved" : "po.rejected", { number });
       qc.invalidateQueries({ queryKey: ["purchase-order", poId] });
       qc.invalidateQueries({ queryKey: ["approvals"] });
       nav("/approvals");
     },
   });
+
+  const decideWithConfirm = async (action: "approve" | "reject") => {
+    if (decide.isPending || !po.data) return;
+    const asked = action === "approve"
+      ? await alerts.confirm("po.approve", {
+        number: po.data.po_no,
+        amount: money(po.data.total_amount ?? 0),
+      })
+      : await alerts.confirm("po.reject", { number: po.data.po_no });
+    if (asked) decide.mutate(action);
+  };
 
   if (po.isLoading) return <p className="p-6 text-sm text-muted">Loading purchase order…</p>;
   if (po.error) return <p className="rounded-lg bg-danger/10 p-4 text-danger">{(po.error as Error).message}</p>;
@@ -82,8 +96,8 @@ export function PODetailPage() {
       </Field>
       {decide.error && <p className="text-sm text-danger">{(decide.error as Error).message}</p>}
       <div className="flex justify-end gap-2">
-        <Button variant="danger" disabled={decide.isPending} onClick={() => decide.mutate("reject")}><X className="h-4 w-4" /> Reject</Button>
-        <Button disabled={decide.isPending} onClick={() => decide.mutate("approve")}><Check className="h-4 w-4" /> Approve</Button>
+        <Button variant="danger" disabled={decide.isPending} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4" /> Reject</Button>
+        <Button disabled={decide.isPending} onClick={() => void decideWithConfirm("approve")}><Check className="h-4 w-4" /> Approve</Button>
       </div>
     </Card>}
   </>;

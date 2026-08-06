@@ -4,6 +4,7 @@ import { Save } from "lucide-react";
 import { Button, Card, Field, Input, PageHeader, Select } from "@/shared/components";
 import { mastersApi } from "@/modules/masters/api";
 import { settingsApi } from "../api";
+import { alerts } from "@/modules/alerts";
 import type { AppSettings } from "../types";
 
 const DATE_FORMATS = ["DD-MM-YYYY", "YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"]
@@ -51,6 +52,11 @@ export function SettingsPage() {
     onSuccess: (data) => {
       setForm(data);
       qc.invalidateQueries({ queryKey: ["settings"] });
+      // Offers a refresh: date format and currency are read at render time all over
+      // the app, and screens already mounted keep the old ones until reloaded.
+      void alerts.info("settings.changed").then((refreshNow) => {
+        if (refreshNow) window.location.reload();
+      });
     },
   });
 

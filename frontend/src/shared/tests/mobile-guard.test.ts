@@ -32,8 +32,11 @@ const SOURCES = walk(join(ROOT, "modules"));
 const DENSE_GRID = /\bgrid-cols-[3-9]\b/;
 /** A hardcoded width wider than the narrowest phone forces a sideways page scroll.
  *  `max-w-` is excluded deliberately — it is a ceiling, not a floor, so `w-full
- *  max-w-[540px]` still collapses to the viewport on a phone. */
-const WIDE_FIXED = /(?<![\w-])(?:w|min-w)-\[(\d{3,})px\]/;
+ *  max-w-[540px]` still collapses to the viewport on a phone. A breakpoint prefix
+ *  (`:` before the utility, as in `lg:min-w-[420px]`) is excluded for the same
+ *  reason: the smallest breakpoint is `sm` at 640px, so a prefixed width never
+ *  applies on the 375px screen this guard protects. */
+const WIDE_FIXED = /(?<![\w:-])(?:w|min-w)-\[(\d{3,})px\]/;
 /** Handed to `LinesEditor`, which applies it inside its own scroll box. */
 const SCROLL_SURFACE_PROP = /minTableWidth/;
 

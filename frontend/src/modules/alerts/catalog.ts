@@ -79,6 +79,11 @@ const DEFINITIONS: AlertDef[] = [
     "Yes, Delete",
   ),
   confirm(
+    "indent.delete", "danger", "Delete draft indent?",
+    "{number} has not been submitted, so nothing downstream points at it yet. Deleting throws away every line on it and cannot be undone.",
+    "Yes, Delete", "Keep Draft",
+  ),
+  confirm(
     "indent.cancel", "danger", "Cancel indent?",
     "{number} will be closed and any stock reserved against it released back to available. This cannot be undone.",
     "Yes, Cancel Indent", "Keep Indent",
@@ -131,6 +136,11 @@ const DEFINITIONS: AlertDef[] = [
     "Approve",
   ),
   confirm(
+    "po.reject", "warning", "Reject this purchase order?",
+    "{number} goes back to procurement and nothing is committed against the budget. Add a comment so they know what to change.",
+    "Reject",
+  ),
+  confirm(
     "po.send_vendor", "warning", "Send to vendor?",
     "{number} is sent to {vendor} and locked for editing. Goods can only be received against a PO that has been sent.",
     "Send",
@@ -164,6 +174,16 @@ const DEFINITIONS: AlertDef[] = [
     "material_request.approve", "warning", "Approve this material request?",
     "Approving {number} reserves {qty} of {item} against it, so that stock stops being available to anyone else.",
     "Approve",
+  ),
+  confirm(
+    "material_request.reject", "warning", "Reject this material request?",
+    "{number} is refused and no stock is reserved against it. The shortfall it was raised for stays unfilled.",
+    "Reject",
+  ),
+  confirm(
+    "master.deactivate", "warning", "Deactivate this record?",
+    "{name} stops appearing on new documents. Anything that already references it keeps working — masters are deactivated, never deleted.",
+    "Deactivate",
   ),
   confirm(
     "putaway.confirm", "warning", "Confirm put-away?",
@@ -235,11 +255,27 @@ const DEFINITIONS: AlertDef[] = [
     "{number} has been created and sent for approval.",
     "View Indent",
   ),
+  alert(
+    "indent.submitted", "success", "Sent for approval",
+    "{number} is with {approver} and can no longer be edited.",
+  ),
+  alert(
+    "indent.updated", "success", "Indent saved",
+    "Your changes to {number} have been saved.",
+  ),
   alert("indent.approved", "success", "Approved", "{number} has moved to the next stage."),
   alert(
     "grn.posted", "success", "Receipt posted",
     "{number} is complete and stock has been updated.",
     "View Receipt",
+  ),
+  alert(
+    "stock.transfer_raised", "success", "Transfer raised",
+    "{number} is waiting for approval before anything moves.",
+  ),
+  alert(
+    "stock.transfer_advanced", "success", "Transfer updated",
+    "{number} is now {status}.",
   ),
   alert(
     "stock.transferred", "success", "Transfer complete",
@@ -273,11 +309,29 @@ const DEFINITIONS: AlertDef[] = [
   alert("indent.rejected", "success", "Indent rejected", "{number} has gone back to {raiser}."),
   alert("indent.returned", "success", "Returned for correction", "{number} is with {raiser} to edit."),
   alert("po.approved", "success", "Purchase order approved", "{number} is ready to send."),
+  alert("po.rejected", "success", "Purchase order rejected", "{number} has gone back to procurement."),
   alert(
     "material_request.approved", "success", "Request approved",
     "{number} is approved and stock is reserved.",
   ),
+  alert(
+    "material_request.rejected", "success", "Request rejected",
+    "{number} has been refused and nothing was reserved.",
+  ),
   alert("adjustment.approved", "success", "Adjustment approved", "{item} now reads {qty}."),
+  alert(
+    "adjustment.rejected", "success", "Adjustment rejected",
+    "The counted quantity was not written to the ledger.",
+  ),
+  alert("master.deactivated", "success", "Deactivated", "{name} no longer appears on new documents."),
+  alert(
+    "receipt.submitted", "success", "Sent for inspection",
+    "{number} is with quality and cannot be edited until they are done.",
+  ),
+  alert(
+    "receipt.saved", "success", "Receipt saved",
+    "{number} has been saved as a draft. Nothing is in stock yet.",
+  ),
   alert(
     "inspection.completed", "success", "Inspection complete",
     "{number} is inspected and sent for put-away.",

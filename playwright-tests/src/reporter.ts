@@ -21,6 +21,31 @@ export default class SummaryReporter implements Reporter {
     });
   }
 
+  /** Every check the run made, grouped by the scenario that made it. */
+  private checkRoster(checks: LogEvent[]): string[] {
+    if (!checks.length) return ["No checks were recorded."];
+    const byTest = new Map<string, LogEvent[]>();
+    for (const event of checks) {
+      byTest.set(event.test, [...(byTest.get(event.test) ?? []), event]);
+    }
+    const lines: string[] = [];
+    for (const [title, events] of byTest) {
+      const failed = events.filter((event) => event.level === "error").length;
+      lines.push(`### ${title} — ${events.length - failed} passed, ${failed} failed`, "");
+      let step: string | null | undefined;
+      for (const event of events) {
+        if (event.step !== step) {
+          step = event.step;
+          if (step) lines.push(`**${step}**`, "");
+        }
+        const outcome = event.level === "error" ? "FAIL" : "PASS";
+        lines.push(`- \`${outcome}\` ${event.message.replace(/^(PASS|FAIL) — /, "")}`);
+      }
+      lines.push("");
+    }
+    return lines;
+  }
+
   onEnd() {
     const path = eventsFile();
     const events: LogEvent[] = existsSync(path)
@@ -38,6 +63,10 @@ export default class SummaryReporter implements Reporter {
         ? [`### ${title} (${rows.length})`, "", ...rows.map((event) => `- ${render(event)}`), ""].join("\n")
         : `### ${title}\n\nNone.\n`;
 
+    const checks = by("check").filter((event) => !event.message.startsWith("NOTE"));
+    const failedChecks = checks.filter((event) => event.level === "error");
+    const notes = by("check").filter((event) => event.message.startsWith("NOTE"));
+
     const lines = [
       "# Functional run report",
       "",
@@ -45,6 +74,10 @@ export default class SummaryReporter implements Reporter {
       `Finished: ${new Date().toLocaleString()}`,
       "",
       "## Result",
+      "",
+      checks.length
+        ? `**Checks: ${checks.length - failedChecks.length} passed, ${failedChecks.length} failed** (of ${checks.length}).`
+        : "",
       "",
       ...this.results.map((r) =>
         `- **${r.status === "passed" ? "PASS" : "FAIL"}** — ${r.title} (${Math.round(r.duration / 1000)}s)`
@@ -57,8 +90,19 @@ export default class SummaryReporter implements Reporter {
         .filter((event) => event.message.startsWith("✓") || event.message.startsWith("✗"))
         .map((event) => `- ${event.message}${event.durationMs ? ` _(${event.durationMs}ms)_` : ""}`),
       "",
+      // Every check, passed and failed, grouped by scenario. A list of failures
+      // alone tells you what broke but not what was actually covered, and "what
+      // was covered" is the question a green run has to be able to answer.
+      "## Every check, by scenario",
+      "",
+      ...this.checkRoster(checks),
+      "",
       "## Findings",
       "",
+      section("Failed functional checks", failedChecks, (e) =>
+        `**${e.test}** › ${e.step ?? "-"} — ${e.message}`
+        + `\n  \`\`\`\n  ${String((e.data as { detail?: string })?.detail ?? "").replace(/\n/g, "\n  ")}\n  \`\`\``),
+      section("Observations", notes, (e) => `**${e.test}** — ${e.message.replace(/^NOTE — /, "")}`),
       section("JavaScript errors on the page", by("pageerror"), (e) => `${e.message} — \`${e.url}\``),
       section("Console errors and warnings", by("console"), (e) => `[${e.level}] ${e.message} — \`${e.url}\``),
       section("Failed API calls", [...by("http-error"), ...by("request-failed")], (e) =>

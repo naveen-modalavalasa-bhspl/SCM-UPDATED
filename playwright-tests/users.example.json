@@ -1,5 +1,13 @@
 {
-  "comment": "Copy to users.json and fill in real logins. 'raiser' creates the indent. Every account in 'approvers' is tried against /api/workflow/pending at each rung, so the ladder can change without touching the test. Add the whole approval population here. Optional 'position' picks which hat the person wears — scope and permissions follow the active position, so someone can be blind to a document under one and own it under another.",
+  "comment": "Copy to users.json and fill in real logins. The Indent module sweep (tests/indent-module) needs ONE account: it reads 'tester', falling back to 'raiser'. Everything it asserts is recomputed from what that account can see, so the same run is correct for a store keeper, a manager or an administrator. 'approvers' and 'inventory' are needed only by the cross-login journey suites (tests/indent-approval-flow, tests/inventory-warehouse-flow); every account in 'approvers' is tried against /api/workflow/pending at each rung, so the ladder can change without touching a test. Optional 'position' picks which hat the person wears — scope and permissions follow the active position, so someone can be blind to a document under one and own it under another.",
+
+  "tester": {
+    "employeeId": "1001",
+    "password": "change-me",
+    "label": "Store Keeper",
+    "position": "STORE KEEPER"
+  },
+
   "raiser": {
     "employeeId": "1001",
     "password": "change-me",

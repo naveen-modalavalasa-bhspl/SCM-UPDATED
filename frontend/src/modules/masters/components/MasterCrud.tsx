@@ -8,6 +8,7 @@ import {
   Button, Can, Field, Input, ResponsiveList, Select, type Column,
 } from "@/shared/components";
 import { BulkBar } from "./BulkBar";
+import { alerts } from "@/modules/alerts";
 import type { BulkApi, MasterUsage } from "../api";
 
 export type FieldType = "text" | "number" | "select" | "switch" | "multiselect";
@@ -192,10 +193,18 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
     queryFn: () => p.fetchList(search),
   });
 
+  /** What the record is called in an alert. Falls back to the master's own name so
+   *  a table without a `name` column still says something better than "undefined". */
+  const recordLabel = () =>
+    [values.name, values.code, values.title].find(
+      (v): v is string => typeof v === "string" && v.trim() !== "",
+    ) ?? p.title;
+
   const save = useMutation({
     mutationFn: (v: Values) =>
       editingId == null ? p.onCreate(v) : p.onUpdate(editingId, v),
     onSuccess: () => {
+      void alerts.success("master.saved", { name: recordLabel() });
       qc.invalidateQueries({ queryKey: ["masters", p.queryKey] });
       setOpen(false);
     },
@@ -205,11 +214,18 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const deactivate = useMutation({
     mutationFn: (id: number) => p.onDeactivate!(id),
     onSuccess: () => {
+      void alerts.success("master.deactivated", { name: recordLabel() });
       qc.invalidateQueries({ queryKey: ["masters", p.queryKey] });
       setOpen(false);
     },
     onError: (e: Error) => setError(e.message),
   });
+
+  const askThenDeactivate = async (id: number) => {
+    setError(null);
+    if (!(await alerts.confirm("master.deactivate", { name: recordLabel() }))) return;
+    deactivate.mutate(id);
+  };
 
   // What already points at the row being edited. Read while the modal is open so the
   // count is on screen before Deactivate is pressed, not discovered afterwards from a
@@ -414,7 +430,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                     <Can do={p.managePerm}>
                       <Button variant="ghost"
                               className="text-bad hover:bg-bad-bg"
-                              onClick={() => { setError(null); deactivate.mutate(editingId); }}
+                              onClick={() => void askThenDeactivate(editingId)}
                               disabled={deactivate.isPending}>
                         {deactivate.isPending ? "Deactivating…" : "Deactivate"}
                       </Button>

@@ -44,7 +44,7 @@ export const approvalsApi = {
     api.post<ApprovalIndent>(`/api/approvals/indents/${id}/reject`, { comments })
       .then((r) => r.data),
   returnIndent: (id: number, comments: string) =>
-    api.post<ApprovalIndent>(`/api/approvals/indents/${id}/return`, { comments })
+    api.post<ApprovalIndent>(`/api/indents/${id}/return-for-correction`, { comments })
       .then((r) => r.data),
   approveDocument: (docType: string, id: number, comments = "") =>
     api.post(`/api/approvals/documents/${docType}/${id}/approve`, { comments })
@@ -69,5 +69,5 @@ export const approvalsApi = {
     items: Array<{ item_id: number; quantity: number; remarks?: string }>;
   }) => api.put<CorrectionIndent>(`/api/indents/${indentId}`, data).then((r) => r.data),
   resubmitCorrection: (indentId: number) =>
-    api.post<CorrectionIndent>(`/api/indents/${indentId}/submit`).then((r) => r.data),
+    api.post<CorrectionIndent>(`/api/indents/${indentId}/resubmit-correction`).then((r) => r.data),
 };

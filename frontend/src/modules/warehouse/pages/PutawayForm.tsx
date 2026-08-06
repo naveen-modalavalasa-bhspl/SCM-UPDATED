@@ -9,6 +9,7 @@ import { LocationPicker } from "../components/LocationPicker";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import { binOptions, confirmPutaway, getPutaway, startPutaway, suggestBins } from "../api";
 import { fmtDate, fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
+import { alerts } from "@/modules/alerts";
 
 /**
  * One putaway task: take this quantity to this bin and confirm it.
@@ -69,6 +70,10 @@ export default function PutawayForm() {
         serial_numbers: serials,
       }),
     onSuccess: () => {
+      void alerts.success("putaway.completed", {
+        item: task?.item_name ?? task?.item_code ?? "The item",
+        bin: task?.actual_bin_code ?? task?.suggested_bin_code ?? "the chosen bin",
+      });
       invalidate();
       setConfirming(false);
       nav("/warehouse/putaway", { replace: true });

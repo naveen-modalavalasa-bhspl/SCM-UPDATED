@@ -50,7 +50,9 @@ describe("approvals api", () => {
       1, "/api/approvals/indents/12/reject", { comments: "wrong quantity" },
     );
     expect(apiMock.post).toHaveBeenNthCalledWith(
-      2, "/api/approvals/indents/12/return", { comments: "correct the item" },
+      // Return for correction is an indents-module route: it pauses the approval on
+      // the same instance rather than ending it, so the indent owns the transition.
+      2, "/api/indents/12/return-for-correction", { comments: "correct the item" },
     );
   });
 });

@@ -8,49 +8,45 @@ const TOP_ALLOCATION_STATUS_TONE: Partial<Record<string, string>> = {
   [INDENT_STATUS.AWAITING_ALLOCATION]: "bg-info-bg text-info",
 };
 
-function cleanStageName(value: string) {
-  return value.replace(/[A-Za-z]+/g, (word) =>
-    word.length > 3 && word === word.toUpperCase()
-      ? `${word[0]}${word.slice(1).toLowerCase()}`
-      : word
-  );
-}
-
-function stageName(stage?: IndentJourneyStage) {
-  const title = stage?.title.trim().replace(/\s+/g, " ");
-  if (!title) return null;
-  if (/Final Approval/i.test(title)) return "SPH/COO";
-
-  let name = title
-    .replace(/\s+(Review|Approval)$/i, "")
-    .replace(/\s+or\s+/gi, "/")
-    .replace(/\s*\/\s*/g, "/")
-    .trim();
-
-  const positionName = stage?.position_name
-    ?.split("-", 1)[0]
-    .trim()
-    .replace(/\s+/g, " ");
-  if (
-    positionName
-    && (
-      /^(Approval|Review)$/i.test(name)
-      || (/^[A-Z]{1,4}$/.test(name) && positionName.length > name.length)
-    )
-  ) {
-    name = positionName;
-  }
-  return name ? cleanStageName(name) : null;
+/**
+ * Who a stage belongs to, taken straight from the resolved chain. The ladder is
+ * configured per project, so no rank is ever assumed, mapped or abbreviated
+ * here — the only edit is dropping a trailing "Review"/"Approval" from a stage
+ * title so the badge reads "Pending at X" rather than "Pending at X Review".
+ */
+function stageOwner(stage?: IndentJourneyStage) {
+  const approver = stage?.approver_name?.trim().replace(/\s+/g, " ");
+  if (approver) return approver;
+  const position = stage?.position_name?.trim().replace(/\s+/g, " ");
+  if (position) return position;
+  const title = stage?.title?.trim().replace(/\s+/g, " ")
+    .replace(/\s+(Review|Approval)$/i, "").trim();
+  return title || null;
 }
 
 function pendingStageLabel(journey?: IndentJourney) {
-  const name = stageName(journey?.stages.find((stage) => stage.is_current));
-  return name ? `Pending at ${name}` : "Pending Approval";
+  const owner = stageOwner(journey?.stages?.find((stage) => stage.is_current));
+  return owner ? `Pending at ${owner}` : "Pending Approval";
+}
+
+/** Only a real actor names a decision — never a stage title. */
+function decisionActor(stage?: IndentJourneyStage) {
+  return stage?.approver_name?.trim().replace(/\s+/g, " ")
+    || stage?.position_name?.trim().replace(/\s+/g, " ")
+    || null;
 }
 
 function rejectedStageLabel(journey?: IndentJourney) {
-  const name = stageName(journey?.stages.find((stage) => stage.status === "REJECTED"));
-  return name ? `Rejected by ${name}` : null;
+  const actor = decisionActor(journey?.stages?.find((stage) => stage.status === "REJECTED"));
+  return actor ? `Rejected by ${actor}` : null;
+}
+
+function returnedStageLabel(journey?: IndentJourney) {
+  const actor = decisionActor(journey?.stages?.find((stage) => (
+    String(stage.status ?? "").trim().toUpperCase() === "RETURNED"
+    || String(stage.status ?? "").trim().toUpperCase() === INDENT_STATUS.RETURNED_FOR_CORRECTION
+  )));
+  return actor ? `Returned by ${actor}` : "Returned for correction";
 }
 
 export function IndentStatusBadge({ status, journey }: { status: string; journey?: IndentJourney }) {
@@ -71,11 +67,15 @@ export function IndentStatusBadge({ status, journey }: { status: string; journey
     );
   }
 
-  const label = status === "PENDING_APPROVAL"
+  const label = status === INDENT_STATUS.PENDING_APPROVAL
     ? pendingStageLabel(journey)
-    : status === "REJECTED"
+    : status === INDENT_STATUS.REJECTED
       ? rejectedStageLabel(journey)
-      : null;
+      : status === INDENT_STATUS.RETURNED_FOR_CORRECTION
+        ? "Returned for correction"
+      : status === INDENT_STATUS.RETURNED
+        ? returnedStageLabel(journey)
+        : null;
   if (!label) return <StatusPill status={status} />;
 
   return (
@@ -83,10 +83,11 @@ export function IndentStatusBadge({ status, journey }: { status: string; journey
       size="sm"
       radius="full"
       variant="flat"
-      color={status === "REJECTED" ? "danger" : "warning"}
-      classNames={{ content: "text-[11px] font-semibold uppercase tracking-wide" }}
+      color={status === INDENT_STATUS.REJECTED ? "danger" : "warning"}
+      classNames={{ content: `text-[11px] font-semibold uppercase tracking-wide ${status === INDENT_STATUS.RETURNED_FOR_CORRECTION ? "normal-case" : ""}` }}
     >
-      {label}
+      {/* Names come from HCM and can be long — truncate, never abbreviate. */}
+      <span className="block max-w-56 truncate" title={label}>{label}</span>
     </Chip>
   );
 }

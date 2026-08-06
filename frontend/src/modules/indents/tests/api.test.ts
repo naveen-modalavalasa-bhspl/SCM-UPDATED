@@ -24,9 +24,11 @@ describe("indents api", () => {
   it("exposes the indent operations", () => {
     expect(Object.keys(indentApi).sort()).toEqual(
       [
-        "acknowledgments", "activity", "approve", "bookmark", "create", "get", "journey", "list",
-        "delete", "notifications", "offices", "reject", "stats", "submit", "unbookmark",
-        "update",
+        "acknowledge", "acknowledgments", "activity", "approve", "bookmark", "create",
+        "delete", "deleteReceiptAttachment", "fulfilment", "get", "journey", "list",
+        "myDeliveries", "notifications", "offices", "receiptAttachments", "reject",
+        "resubmitCorrection", "returnForCorrection", "stats",
+        "submit", "unbookmark", "update", "uploadReceiptAttachment",
       ].sort(),
     );
   });
@@ -72,6 +74,26 @@ describe("indents api", () => {
       10,
       "list",
       filters,
+    ]);
+  });
+
+  it("versions Journey cache entries so pre-evidence timelines cannot stay authoritative", () => {
+    const scope = { employeeId: 1, activePositionId: 10 };
+
+    expect(indentKeys.journey(scope, 42)).toEqual([
+      "indents-module",
+      1,
+      10,
+      "journey",
+      5,
+      42,
+    ]);
+    expect(indentKeys.journey(scope, 42)).not.toEqual([
+      "indents-module",
+      1,
+      10,
+      "journey",
+      42,
     ]);
   });
 

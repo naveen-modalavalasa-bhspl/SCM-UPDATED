@@ -30,8 +30,11 @@ const EXPECTED_REQUEST_STATUS_FILTERS = [
   ["Pending approvals", "PENDING_APPROVAL"],
   ["Allocated", "ALLOCATED"],
   ["Draft", "DRAFT"],
+  ["Returned for correction", "RETURNED_FOR_CORRECTION"],
   ["Rejected", "REJECTED"],
   ["Awaiting allocation", "AWAITING_ALLOCATION"],
+  ["Partially fulfilled", "PARTIALLY_FULFILLED"],
+  ["Fulfilled", "CLOSED"],
 ] as const;
 
 const EXPECTED_ACTIVITY_EVENT_FILTERS = [
@@ -72,6 +75,23 @@ const mockAccount = vi.hoisted(() => ({
   canDeleteIndent: false,
 }));
 
+// Detail actions announce themselves through the alerts catalog. The real `alerts`
+// resolves only once <AlertProvider> renders the dialog and someone presses a button,
+// so an unstubbed `confirm` never settles and the handler behind it never runs.
+// `confirm` answers yes here; the tests that care about declining say so themselves.
+vi.mock("@/modules/alerts", () => ({
+  alerts: {
+    confirm: vi.fn(async () => true),
+    from: vi.fn(async () => true),
+    show: vi.fn(async () => true),
+    success: vi.fn(async () => true),
+    info: vi.fn(async () => true),
+    warning: vi.fn(async () => true),
+    error: vi.fn(async () => true),
+    clear: vi.fn(),
+  },
+}));
+
 vi.mock("@/shared/auth/AuthContext", () => ({
   useAuth: () => ({
     can: (code: string) => code !== "indent.delete" || mockAccount.canDeleteIndent,
@@ -101,7 +121,7 @@ vi.mock("../api", async () => {
     acknowledgments: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "acknowledgments", filters] as const,
     notifications: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown = {}) => [...scoped(scope), "notifications", filters] as const,
     detail: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "detail", id] as const,
-    journey: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "journey", id] as const,
+    journey: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "journey", 4, id] as const,
     items: (scope: { employeeId: number | null; activePositionId: number | null }, context = "default") => [...scoped(scope), "items", context] as const,
   };
   const isIndentModuleQuery = (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === root;
@@ -331,18 +351,36 @@ function journeyData(overrides: Partial<IndentJourney> = {}): IndentJourney {
     current_stage: "Ready for Allocation",
     current_stage_message: "Ready for Allocation",
     final_any_one_outcome: "Approved by SPH",
+    phases: [
+      { sequence: 1, title: "Draft", status: "APPROVED", stage_type: "phase" },
+      { sequence: 2, title: "Submitted", status: "APPROVED", stage_type: "phase" },
+      { sequence: 3, title: "Approvals", status: "APPROVED", stage_type: "phase" },
+      { sequence: 4, title: "Allocation", status: "PENDING", stage_type: "phase", is_current: true },
+      { sequence: 5, title: "Warehouse", status: "PENDING", stage_type: "phase" },
+      { sequence: 6, title: "Delivery", status: "PENDING", stage_type: "phase" },
+      { sequence: 7, title: "Acknowledgement", status: "PENDING", stage_type: "phase" },
+    ],
     stages: [
       {
         sequence: 1,
-        title: "Request Raised",
+        title: "Draft created",
+        status: "APPROVED",
+        approver_name: "A Anil Kumar",
+        position_name: "DRIVER-AP-104-MMU-CHILMATHUR",
+        timestamp: "2026-07-27T09:30:00Z",
+        stage_type: "draft",
+      },
+      {
+        sequence: 2,
+        title: "Request submitted",
         status: "SUBMITTED",
         approver_name: "A Anil Kumar",
         position_name: "DRIVER-AP-104-MMU-CHILMATHUR",
         timestamp: "2026-07-27T09:30:00Z",
-        stage_type: "request",
+        stage_type: "submission",
       },
       {
-        sequence: 2,
+        sequence: 3,
         title: "OE Review",
         status: "APPROVED",
         approver_name: "C Ramakrishna",
@@ -353,7 +391,7 @@ function journeyData(overrides: Partial<IndentJourney> = {}): IndentJourney {
         stage_type: "approval",
       },
       {
-        sequence: 3,
+        sequence: 4,
         title: "DM Review",
         status: "APPROVED",
         approver_name: "A Raveendra Prasad",
@@ -362,7 +400,7 @@ function journeyData(overrides: Partial<IndentJourney> = {}): IndentJourney {
         stage_type: "approval",
       },
       {
-        sequence: 4,
+        sequence: 5,
         title: "Final Approval - SPH or COO",
         status: "APPROVED",
         approver_name: "SPH",
@@ -371,7 +409,7 @@ function journeyData(overrides: Partial<IndentJourney> = {}): IndentJourney {
         stage_type: "final",
       },
       {
-        sequence: 5,
+        sequence: 6,
         title: "COO Authority",
         status: "NOT_REQUIRED",
         approver_name: "COO",
@@ -381,7 +419,7 @@ function journeyData(overrides: Partial<IndentJourney> = {}): IndentJourney {
         stage_type: "final_any_one_peer",
       },
       {
-        sequence: 6,
+        sequence: 7,
         title: "Ready for Allocation",
         status: "PENDING",
         timestamp: "2026-07-27T10:42:00Z",
@@ -408,6 +446,7 @@ function journeyData(overrides: Partial<IndentJourney> = {}): IndentJourney {
         timestamp: "2026-07-27T09:30:00Z",
       },
     ],
+    missing_sources: [],
     ...overrides,
   };
 }
@@ -522,8 +561,8 @@ describe("indent UI shell", () => {
     );
 
     expect(screen.getAllByRole("navigation", { name: "Indent" })).toHaveLength(1);
-    // Five tabs: Board is parked, so it is no longer one of them.
-    expect(screen.getAllByRole("link")).toHaveLength(5);
+    // Six tabs: Board is parked, while My deliveries remains in the navigation.
+    expect(screen.getAllByRole("link")).toHaveLength(6);
   });
 
   it("marks the current indent tab active", () => {
@@ -668,7 +707,8 @@ describe("indent UI shell", () => {
   it("renders a flat donut with its total, fixed workflow order, values and ERP colours", async () => {
     vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
       DRAFT: 1,
-      CLOSED: 0,
+      CLOSED: 4,
+      PARTIALLY_FULFILLED: 3,
       REJECTED: 3,
       ALLOCATED: 2,
       PENDING_APPROVAL: 4,
@@ -680,10 +720,10 @@ describe("indent UI shell", () => {
     expect(await screen.findByRole("heading", { name: "STATUS BREAKDOWN" })).toBeInTheDocument();
     expect(screen.getByText("Current distribution by workflow status")).toBeInTheDocument();
     const chart = await screen.findByRole("img", {
-      name: "Indent status donut chart. 15 total indents.",
+      name: "Indent status donut chart. 22 total indents.",
     });
-    expect(screen.getByTestId("status-donut-total")).toHaveTextContent("15Total indents");
-    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("15 total indents");
+    expect(screen.getByTestId("status-donut-total")).toHaveTextContent("22Total indents");
+    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("22 total indents");
     expect(container.querySelectorAll(".recharts-pie")).toHaveLength(1);
     expect(container.querySelector(".status-pie-depth")).not.toBeInTheDocument();
     expect(screen.queryAllByTestId(/^status-pie-depth-/)).toHaveLength(0);
@@ -693,7 +733,9 @@ describe("indent UI shell", () => {
       DRAFT: "var(--color-neutral)",
       PENDING_APPROVAL: "var(--color-warn)",
       AWAITING_ALLOCATION: "var(--color-info)",
-      ALLOCATED: "var(--color-ok)",
+      ALLOCATED: "#8b5cf6",
+      PARTIALLY_FULFILLED: "var(--color-warn)",
+      CLOSED: "var(--color-ok)",
       REJECTED: "var(--color-bad)",
     };
     for (const [status, colour] of Object.entries(colours)) {
@@ -710,11 +752,14 @@ describe("indent UI shell", () => {
     const legendRows = within(legend).getAllByTestId(/^status-legend-row-/);
     expect(within(legend).queryAllByRole("button")).toHaveLength(0);
     expect(legendRows.map((row) => row.getAttribute("aria-label"))).toEqual([
-      "Pending approval: 4 indents, 27 percent",
-      "Awaiting allocation: 5 indents, 33 percent",
-      "Allocated: 2 indents, 13 percent",
-      "Rejected: 3 indents, 20 percent",
-      "Draft: 1 indent, 7 percent",
+      "Pending approval: 4 indents, 18 percent",
+      "Returned for correction: 0 indents, 0 percent",
+      "Awaiting allocation: 5 indents, 23 percent",
+      "Allocated: 2 indents, 9 percent",
+      "Partially fulfilled: 3 indents, 14 percent",
+      "Fulfilled: 4 indents, 18 percent",
+      "Rejected: 3 indents, 14 percent",
+      "Draft: 1 indent, 5 percent",
     ]);
     expect(legendRows[0]).toHaveClass(
       "grid-cols-[0.625rem_minmax(0,1fr)_2.5rem_3rem]",
@@ -724,32 +769,39 @@ describe("indent UI shell", () => {
     expect(screen.getByTestId("status-marker-DRAFT")).toHaveClass("bg-neutral");
     expect(screen.getByTestId("status-marker-PENDING_APPROVAL")).toHaveClass("bg-warn");
     expect(screen.getByTestId("status-marker-AWAITING_ALLOCATION")).toHaveClass("bg-info");
-    expect(screen.getByTestId("status-marker-ALLOCATED")).toHaveClass("bg-ok");
+    expect(screen.getByTestId("status-marker-ALLOCATED")).toHaveClass("bg-purple-500");
+    expect(screen.getByTestId("status-marker-PARTIALLY_FULFILLED")).toHaveClass("bg-warn");
+    expect(screen.getByTestId("status-marker-CLOSED")).toHaveClass("bg-ok");
     expect(screen.getByTestId("status-marker-REJECTED")).toHaveClass("bg-bad");
+    expect(within(legend).getByText("Fulfilled")).toBeInTheDocument();
     expect(within(legend).queryByText("Closed")).not.toBeInTheDocument();
     expect(container.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
   });
 
-  it("keeps only the five displayed statuses in order and handles zero safely", () => {
+  it("keeps only the eight displayed statuses in order and handles zero safely", () => {
     const byStatus = {
       DRAFT: 1,
       PENDING_APPROVAL: 2,
       AWAITING_ALLOCATION: 2,
       ALLOCATED: 2,
+      PARTIALLY_FULFILLED: 1,
       REJECTED: 1,
       APPROVED: 1,
       ORDERED: 1,
-      CLOSED: 0,
+      CLOSED: 1,
     };
     const original = { ...byStatus };
 
     const { entries, total } = buildStatusBreakdownData(byStatus);
 
-    expect(total).toBe(8);
+    expect(total).toBe(10);
     expect(entries.map(({ status }) => status)).toEqual([
       "PENDING_APPROVAL",
+      "RETURNED_FOR_CORRECTION",
       "AWAITING_ALLOCATION",
       "ALLOCATED",
+      "PARTIALLY_FULFILLED",
+      "CLOSED",
       "REJECTED",
       "DRAFT",
     ]);
@@ -759,8 +811,11 @@ describe("indent UI shell", () => {
     expect(zeroData.total).toBe(0);
     expect(zeroData.entries.map(({ status }) => status)).toEqual([
       "PENDING_APPROVAL",
+      "RETURNED_FOR_CORRECTION",
       "AWAITING_ALLOCATION",
       "ALLOCATED",
+      "PARTIALLY_FULFILLED",
+      "CLOSED",
       "REJECTED",
       "DRAFT",
     ]);
@@ -846,7 +901,7 @@ describe("indent UI shell", () => {
     expect(within(allocated).getByTestId("status-legend-percentage-ALLOCATED")).toHaveTextContent(/^100%$/);
     const allocatedSlice = within(chart).getByTestId("status-donut-slice-ALLOCATED");
     const allocatedPath = allocatedSlice.querySelector("path");
-    expect(allocatedSlice).toHaveAttribute("fill", "var(--color-ok)");
+    expect(allocatedSlice).toHaveAttribute("fill", "#8b5cf6");
     expect(allocatedSlice).not.toHaveAttribute("stroke");
     expect(allocatedPath).toHaveAttribute("stroke", "none");
     expect(allocatedPath).toHaveAttribute("stroke-width", "0");
@@ -908,7 +963,7 @@ describe("indent UI shell", () => {
     expect(chart).toHaveClass("absolute", "inset-0");
     expect(legend).toHaveClass("max-w-[320px]", "gap-1");
     expect(legend).not.toHaveClass("overflow-y-auto", "md:overflow-y-auto", "max-h-[260px]", "md:max-h-[260px]");
-    expect(within(legend).getAllByTestId(/^status-legend-row-/)).toHaveLength(5);
+    expect(within(legend).getAllByTestId(/^status-legend-row-/)).toHaveLength(8);
     expect(layout.children[0]).toBe(donut);
     expect(layout.children[1]).toBe(legend);
   });
@@ -965,7 +1020,7 @@ describe("indent UI shell", () => {
   it.each([
     ["Overview", <IndentDashboardPage />, "/indents/dashboard"],
     ["All requests", <IndentListPage />, "/indents"],
-  ])("shows the same five ungrouped status options on %s", async (_name, Page, route) => {
+  ])("shows the same eight ungrouped status options on %s", async (_name, Page, route) => {
     renderWithProviders(Page, route);
 
     expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
@@ -1705,11 +1760,11 @@ describe("indent UI shell", () => {
     fireEvent.change(screen.getByRole("searchbox", { name: "Search notifications" }), {
       target: { value: "stock" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Indent status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Status" }));
     fireEvent.click(within(screen.getByRole("menu")).getByText("Draft"));
 
-    expect(screen.getByRole("button", { name: "Indent status (1)" })).toBeInTheDocument();
-    expect(screen.getByText("Indent status: Draft")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Status (1)" })).toBeInTheDocument();
+    expect(screen.getByText("Status: Draft")).toBeInTheDocument();
     expect(indentApi.notifications).toHaveBeenCalledTimes(callsBeforeStatus + 1);
     expect(indentApi.notifications).toHaveBeenLastCalledWith(expect.objectContaining({
       search: "stock",
@@ -1805,7 +1860,7 @@ describe("indent UI shell", () => {
     renderNotificationsFlow("/indents/notifications");
     expect(await screen.findByText("Notification 1")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Indent status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Status" }));
     const menu = screen.getByRole("menu");
     fireEvent.click(within(menu).getByText("Draft"));
     const draftSignal = vi.mocked(indentApi.notifications).mock.calls.at(-1)?.[1] as AbortSignal;
@@ -2118,6 +2173,46 @@ describe("indent UI shell", () => {
     expect(screen.queryByText("NO_WORKFLOW")).not.toBeInTheDocument();
   });
 
+  it("uses simple semantic colors for every Activity result label", async () => {
+    const results = [
+      ["DRAFT", "Draft", "bg-neutral-bg", "text-neutral"],
+      ["SUBMITTED", "Submitted", "bg-info-bg", "text-info"],
+      ["APPROVED", "Approved", "bg-ok-bg", "text-ok"],
+      ["REJECTED", "Rejected", "bg-bad-bg", "text-bad"],
+      ["RETURNED", "Returned", "bg-warn-bg", "text-warn"],
+      ["ROUTED_AUTOMATICALLY", "Routed Automatically", "bg-info-bg", "text-info"],
+      ["AWAITING_ALLOCATION", "Awaiting Allocation", "bg-info-bg", "text-info"],
+      ["ALLOCATED", "Allocated", "bg-purple-50", "text-purple-600"],
+      ["PARTIALLY_ALLOCATED", "Partially Allocated", "bg-warn-bg", "text-warn"],
+      ["PARTIALLY_FULFILLED", "Partially Fulfilled", "bg-warn-bg", "text-warn"],
+      ["CLOSED", "Fulfilled", "bg-ok-bg", "text-ok"],
+      ["PENDING_APPROVAL", "Pending Approval", "bg-warn-bg", "text-warn"],
+      ["BOOKMARKED", "Bookmarked", "bg-brand-050", "text-brand"],
+      ["BOOKMARK_REMOVED", "Bookmark Removed", "bg-neutral-bg", "text-neutral"],
+    ] as const;
+    vi.mocked(indentApi.activity).mockResolvedValueOnce({
+      items: results.map(([result], index) => activityRow({
+        event_id: `result-color:${index}`,
+        indent_id: 500 + index,
+        indent_no: `IND/COLOR/${index}`,
+        result,
+        result_label: null,
+      })),
+      total: results.length,
+      page: 1,
+      size: 20,
+    });
+
+    renderWithProviders(<IndentReportsPage />, "/indents/reports");
+
+    await screen.findAllByText("Draft");
+    for (const [, label, background, foreground] of results) {
+      for (const badge of screen.getAllByText(label)) {
+        expect(badge).toHaveClass(background, foreground);
+      }
+    }
+  });
+
   it("renders the exact sanitised legacy API row shape that previously crashed", async () => {
     const legacyRow: ActivityRow = {
       event_id: "action:<source-id>",
@@ -2306,9 +2401,12 @@ describe("indent UI shell", () => {
     );
 
     const indentNumbers = await screen.findAllByText("IND/2026/0042");
+    // ResponsiveList renders a card as a div with role="button", not a <button> —
+    // the card carries its own action buttons and a button inside a button is
+    // invalid HTML. Match the role, which covers both shapes.
     const mobileCard = indentNumbers
-      .map((element) => element.closest("button"))
-      .find((element): element is HTMLButtonElement => element !== null);
+      .map((element) => element.closest<HTMLElement>('[role="button"], button'))
+      .find((element): element is HTMLElement => element !== null);
     expect(mobileCard).toBeDefined();
     fireEvent.click(mobileCard!);
 
@@ -2798,10 +2896,10 @@ describe("indent UI shell", () => {
       "Search by indent no., title or message...",
     );
     expect(screen.getByRole("button", { name: "Notification date" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Indent status" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Status" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Priority/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^More filters/ })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Indent status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Status" }));
     expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(
       EXPECTED_REQUEST_STATUS_FILTERS.map(([label]) => label),
     );
@@ -2908,7 +3006,7 @@ describe("indent UI shell", () => {
   it("start-aligns the Board grid while preserving mobile horizontal scrolling", async () => {
     const { container } = renderWithProviders(<IndentBoardPage />, "/indents/board");
 
-    expect(await screen.findAllByText("No pinned requests")).toHaveLength(6);
+    expect(await screen.findAllByText("No pinned requests")).toHaveLength(7);
 
     const horizontalScroller = container.querySelector(".overflow-x-auto");
     const boardGrid = horizontalScroller?.firstElementChild;
@@ -2929,7 +3027,7 @@ describe("indent UI shell", () => {
       "gap-4",
       "md:grid",
       "md:min-w-0",
-      "md:grid-cols-6",
+      "md:grid-cols-7",
       "md:items-start",
     );
   });
@@ -2937,10 +3035,10 @@ describe("indent UI shell", () => {
   it("keeps Board columns, bodies and empty states at natural height", async () => {
     const { container } = renderWithProviders(<IndentBoardPage />, "/indents/board");
 
-    expect(await screen.findAllByText("No pinned requests")).toHaveLength(6);
+    expect(await screen.findAllByText("No pinned requests")).toHaveLength(7);
 
-    const columns = Array.from(container.querySelectorAll(".md\\:grid-cols-6 > section"));
-    expect(columns).toHaveLength(6);
+    const columns = Array.from(container.querySelectorAll(".md\\:grid-cols-7 > section"));
+    expect(columns).toHaveLength(7);
 
     columns.forEach((column) => {
       expect(column).toHaveClass("h-fit", "self-start");
@@ -3001,8 +3099,8 @@ describe("indent UI shell", () => {
     expect(within(draftColumn!).getByText("1")).toBeInTheDocument();
     expect(within(draftColumn!).getByRole("button", { name: "Remove from Board" })).toBeInTheDocument();
     expect(within(draftColumn!).queryByText("No pinned requests")).not.toBeInTheDocument();
-    expect(screen.getAllByText("No pinned requests")).toHaveLength(5);
-    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(5);
+    expect(screen.getAllByText("No pinned requests")).toHaveLength(6);
+    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(6);
   });
 
   it("keeps partially fulfilled and closed Board cards in mapped columns", async () => {
@@ -3105,8 +3203,8 @@ describe("indent UI shell", () => {
       await new Promise((resolve) => window.setTimeout(resolve, 220));
     });
     await waitFor(() => expect(screen.queryByText("IND/2026/0042")).not.toBeInTheDocument());
-    expect(screen.getAllByText("No pinned requests")).toHaveLength(6);
-    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(6);
+    expect(screen.getAllByText("No pinned requests")).toHaveLength(7);
+    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(7);
   });
 
   it("restores a Board card and shows an error when unpin fails", async () => {
@@ -3254,27 +3352,127 @@ describe("indent UI shell", () => {
     expect(screen.getByRole("button", { name: "Clear all" })).toBeInTheDocument();
   });
 
-  it("never exposes approve or reject actions from the indent detail", async () => {
-    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
-      can_approve: true,
-      can_reject: true,
-    }));
+  it("shows only server-authorized approve and reject actions", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }));
 
     renderWithProviders(<IndentDetailPage />, "/indents/42");
 
-    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Approve/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Reject/i })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
   });
 
-  it.each([
-    ["OE Review", null, "Rejected by OE"],
-    ["District Manager Review", null, "Rejected by District Manager"],
-    ["Regional Manager Review", null, "Rejected by Regional Manager"],
-    ["DM Review", "DISTRICT MANAGER-AP-104", "Rejected by District Manager"],
-    ["Final Approval - COO", "COO", "Rejected by SPH/COO"],
-    ["Finance Controller Review", null, "Rejected by Finance Controller"],
-  ])("shows the rejected stage %s in the detail badge", async (title, positionName, label) => {
+  it("prevents duplicate approval clicks and writes the confirmed response to cache immediately", async () => {
+    const approval = deferred<Indent>();
+    const detailRefetch = deferred<Indent>();
+    const journeyRefetch = deferred<IndentJourney>();
+    const client = createTestQueryClient();
+    const scope = { employeeId: 1, activePositionId: 10 };
+    vi.mocked(indentApi.get)
+      .mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }))
+      .mockReturnValueOnce(detailRefetch.promise);
+    vi.mocked(indentApi.approve).mockReturnValueOnce(approval.promise);
+    vi.mocked(indentApi.journey).mockReturnValueOnce(journeyRefetch.promise);
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
+    const approve = await screen.findByRole("button", { name: "Approve" });
+    fireEvent.click(approve);
+    fireEvent.click(approve);
+
+    const processing = await screen.findByRole("button", { name: "Approving..." });
+    expect(processing).toBeDisabled();
+    expect(indentApi.approve).toHaveBeenCalledTimes(1);
+
+    const updated = detailIndent({ status: "AWAITING_ALLOCATION", can_approve: false, can_reject: false });
+    await act(async () => {
+      approval.resolve(updated);
+      await approval.promise;
+    });
+
+    await waitFor(() => expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))).toEqual(updated));
+    expect(screen.getByText("AWAITING ALLOCATION")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+
+    detailRefetch.resolve(updated);
+    journeyRefetch.resolve(journeyData());
+  });
+
+  it("closes Reject only after success and refreshes the authoritative rejection action", async () => {
+    const rejection = deferred<Indent>();
+    const detailRefetch = deferred<Indent>();
+    const journeyRefetch = deferred<IndentJourney>();
+    const client = createTestQueryClient();
+    const scope = { employeeId: 1, activePositionId: 10 };
+    const pendingJourney = journeyData({
+      status: "PENDING_APPROVAL",
+      current_stage: "Finance Assurance",
+      current_stage_message: "Waiting for Finance Assurance",
+      phases: journeyData().phases.map((phase, index) => index === 2
+        ? { ...phase, status: "PENDING", is_current: true }
+        : index > 2 ? { ...phase, status: "PENDING", is_current: false } : phase),
+      stages: [
+        { sequence: 1, title: "Request submitted", status: "SUBMITTED", stage_type: "submission", timestamp: "2026-07-27T09:30:00Z" },
+        { sequence: 2, title: "Finance Assurance", status: "PENDING", stage_type: "approval", is_current: true, approver_name: "Finance Holder" },
+        { sequence: 3, title: "Allocation", status: "PENDING", stage_type: "allocation" },
+      ],
+      history: [],
+    });
+    client.setQueryData(indentKeys.journey(scope, 42), pendingJourney);
+    vi.mocked(indentApi.get)
+      .mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }))
+      .mockReturnValueOnce(detailRefetch.promise);
+    vi.mocked(indentApi.reject).mockReturnValueOnce(rejection.promise);
+    vi.mocked(indentApi.journey).mockReturnValueOnce(journeyRefetch.promise);
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
+    fireEvent.click(await screen.findByRole("button", { name: "Reject" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Reason for rejection"), {
+      target: { value: "Budget code is invalid" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reject indent" }));
+
+    expect(await within(dialog).findByRole("button", { name: "Rejecting..." })).toBeDisabled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    const updated = detailIndent({ status: "REJECTED", can_approve: false, can_reject: false });
+    await act(async () => {
+      rejection.resolve(updated);
+      await rejection.promise;
+    });
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))).toEqual(updated);
+    const projected = client.getQueryData<IndentJourney>(indentKeys.journey(scope, 42));
+    expect(projected?.status).toBe("REJECTED");
+    expect(projected?.stages).toHaveLength(1);
+    expect(projected?.stages.some((stage) => stage.status === "REJECTED")).toBe(false);
+    expect(screen.getByText("REJECTED")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+
+    detailRefetch.resolve(updated);
+    journeyRefetch.resolve(projected!);
+  });
+
+  it("keeps Reject open with its reason and the previous cache when rejection fails", async () => {
+    const client = createTestQueryClient();
+    const scope = { employeeId: 1, activePositionId: 10 };
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }));
+    vi.mocked(indentApi.reject).mockRejectedValueOnce(new Error("Server error"));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
+    fireEvent.click(await screen.findByRole("button", { name: "Reject" }));
+    const dialog = await screen.findByRole("dialog");
+    const reason = within(dialog).getByLabelText("Reason for rejection");
+    fireEvent.change(reason, { target: { value: "Keep this reason" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reject indent" }));
+
+    expect(await within(dialog).findByText("Server error")).toBeInTheDocument();
+    expect(reason).toHaveValue("Keep this reason");
+    expect(within(dialog).getByRole("button", { name: "Reject indent" })).toBeEnabled();
+    expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))?.status).toBe("PENDING_APPROVAL");
+  });
+
+  function rejectedJourney(stage: Partial<IndentJourney["stages"][number]>) {
     vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
       status: "REJECTED",
       can_approve: false,
@@ -3286,20 +3484,45 @@ describe("indent UI shell", () => {
       current_stage_message: "Request rejected",
       stages: [{
         sequence: 2,
-        title,
+        title: "Approval",
         status: "REJECTED",
-        approver_name: "Rejecting Approver",
-        position_name: positionName,
         timestamp: "2026-07-27T10:20:00Z",
         comments: "Incorrect quantity",
         stage_type: "approval",
+        ...stage,
       }],
       history: [],
     }));
+  }
+
+  it.each([
+    ["OE Review", null],
+    ["Final Approval - COO", "COO"],
+    ["Custom Assurance Gate", "ASSURANCE-AP-104"],
+  ])("names the real rejecting approver for stage %s, whatever the ladder is called", async (title, positionName) => {
+    rejectedJourney({ title, position_name: positionName, approver_name: "Rejecting Approver" });
 
     renderWithProviders(<IndentDetailPage />, "/indents/42");
 
-    expect(await screen.findByText(label)).toBeInTheDocument();
+    expect(await screen.findByText("Rejected by Rejecting Approver")).toBeInTheDocument();
+  });
+
+  it("falls back to the rejecting position when no approver name was recorded", async () => {
+    rejectedJourney({ title: "DM Review", position_name: "DISTRICT MANAGER-AP-104" });
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("Rejected by DISTRICT MANAGER-AP-104")).toBeInTheDocument();
+  });
+
+  it("never invents a rejecting rank from the stage title alone", async () => {
+    rejectedJourney({ title: "Final Approval - SPH or COO" });
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.queryByText(/Rejected by/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SPH/)).not.toBeInTheDocument();
   });
 
   it("shows Draft actions in the detail header and navigates Edit Indent to edit mode", async () => {
@@ -3525,10 +3748,12 @@ describe("indent UI shell", () => {
     expect(indentApi.unbookmark).not.toHaveBeenCalled();
   });
 
-  it("uses local success and info badge colors only for allocation statuses in All Requests", async () => {
+  it("uses the summary status palette in All Requests", async () => {
     const statuses = [
       "ALLOCATED",
       "AWAITING_ALLOCATION",
+      "PARTIALLY_FULFILLED",
+      "CLOSED",
       "DRAFT",
       "PENDING_APPROVAL",
       "REJECTED",
@@ -3554,22 +3779,37 @@ describe("indent UI shell", () => {
     renderWithProviders(<IndentListPage />, "/indents");
 
     for (const badge of await screen.findAllByText("ALLOCATED")) {
-      expect(badge).toHaveClass("bg-ok-bg", "text-ok");
-      expect(badge).not.toHaveClass("bg-info-bg", "text-info");
+      expect(badge).toHaveClass("bg-purple-50", "text-purple-600");
+      expect(badge).not.toHaveClass("bg-ok-bg", "text-ok");
     }
     for (const badge of screen.getAllByText("AWAITING ALLOCATION")) {
       expect(badge).toHaveClass("bg-info-bg", "text-info");
       expect(badge).not.toHaveClass("bg-ok-bg", "text-ok");
     }
+    for (const badge of screen.getAllByText("PARTIALLY FULFILLED")) {
+      expect(badge).toHaveClass("bg-warn-bg", "text-warn");
+    }
+    for (const badge of screen.getAllByText("FULFILLED")) {
+      expect(badge).toHaveClass("bg-ok-bg", "text-ok");
+    }
+    expect(screen.queryByText("CLOSED")).not.toBeInTheDocument();
     for (const label of ["DRAFT", "PENDING APPROVAL", "REJECTED", "APPROVED"]) {
       for (const badgeContent of screen.getAllByText(label)) {
-        expect(badgeContent).not.toHaveClass("bg-ok-bg", "text-ok", "bg-info-bg", "text-info");
-        expect(badgeContent.parentElement).not.toHaveClass("bg-ok-bg", "text-ok", "bg-info-bg", "text-info");
+        expect(badgeContent).not.toHaveClass(
+          "bg-ok-bg",
+          "text-ok",
+          "bg-info-bg",
+          "text-info",
+          "bg-purple-50",
+          "text-purple-600",
+          "bg-warn-bg",
+          "text-warn",
+        );
       }
     }
   });
 
-  it("opens the approval journey from the progress card by click and keyboard", async () => {
+  it("opens the complete indent journey from the progress card by click and keyboard", async () => {
     vi.mocked(indentApi.get)
       .mockResolvedValueOnce(detailIndent())
       .mockResolvedValueOnce(detailIndent({ id: 43, indent_no: "IND/2026/0043" }));
@@ -3582,7 +3822,7 @@ describe("indent UI shell", () => {
       "/indents/42",
     );
     const card = await screen.findByRole("button", {
-      name: "View complete approval journey for IND/2026/0042",
+      name: "View complete indent journey for IND/2026/0042",
     });
     fireEvent.click(card);
     await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents/42/journey"));
@@ -3596,7 +3836,7 @@ describe("indent UI shell", () => {
       "/indents/43",
     );
     const keyboardCard = await screen.findByRole("button", {
-      name: "View complete approval journey for IND/2026/0043",
+      name: "View complete indent journey for IND/2026/0043",
     });
     keyboardCard.focus();
     fireEvent.keyDown(keyboardCard, { key: "Enter", code: "Enter" });
@@ -3610,18 +3850,20 @@ describe("indent UI shell", () => {
 
     expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
     await waitFor(() => expect(indentApi.journey).toHaveBeenCalledTimes(1));
-    expect(indentApi.journey).toHaveBeenCalledWith(42);
+    expect(indentApi.journey).toHaveBeenCalledWith(42, expect.any(AbortSignal));
   });
 
   it.each([
-    ["OE Review", "Pending at OE"],
-    ["DISTRICT MANAGER Review", "Pending at District Manager"],
-    ["REGIONAL Manager Review", "Pending at Regional Manager"],
-    ["Final Approval - SPH", "Pending at SPH/COO"],
-    ["Final Approval - COO", "Pending at SPH/COO"],
-    ["Final Approval - SPH/COO", "Pending at SPH/COO"],
-    ["Final Approval", "Pending at SPH/COO"],
-  ])("uses current journey stage %s in the pending detail badge", async (stageTitle, badgeLabel) => {
+    // Title only: the one edit is dropping a trailing "Review"/"Approval".
+    [{ title: "OE Review" }, "Pending at OE"],
+    [{ title: "Custom Budget Approval" }, "Pending at Custom Budget"],
+    [{ title: "Final Approval - SPH/COO" }, "Pending at Final Approval - SPH/COO"],
+    // A recorded owner always wins, and is shown exactly as HCM supplies it.
+    [{ title: "Final Approval", position_name: "AREA COORDINATOR-AP-104" },
+      "Pending at AREA COORDINATOR-AP-104"],
+    [{ title: "Final Approval", position_name: "COO", approver_name: "C Ramakrishna" },
+      "Pending at C Ramakrishna"],
+  ])("names the current ladder rung %o in the pending detail badge", async (stage, badgeLabel) => {
     vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
       status: "PENDING_APPROVAL",
       stages: [
@@ -3633,10 +3875,10 @@ describe("indent UI shell", () => {
         },
         {
           sequence: 2,
-          title: stageTitle,
           status: "PENDING",
           is_current: true,
           stage_type: "approval",
+          ...stage,
         },
       ],
     }));
@@ -3666,7 +3908,7 @@ describe("indent UI shell", () => {
     expect(await screen.findByText(label)).toBeInTheDocument();
   });
 
-  it("shows progress loading on first detail open, then renders journey stages", async () => {
+  it("shows progress loading on first detail open, then renders seven journey phases", async () => {
     const journeyRequest = deferred<IndentJourney>();
     vi.mocked(indentApi.journey).mockReturnValueOnce(journeyRequest.promise);
 
@@ -3681,7 +3923,7 @@ describe("indent UI shell", () => {
       await journeyRequest.promise;
     });
 
-    expect(await screen.findByText("OE Review")).toBeInTheDocument();
+    expect(await screen.findByText("Allocation")).toBeInTheDocument();
     expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
   });
 
@@ -3695,7 +3937,7 @@ describe("indent UI shell", () => {
 
     renderWithProviders(<IndentDetailPage />, "/indents/42", client);
 
-    expect(await screen.findByText("OE Review")).toBeInTheDocument();
+    expect(await screen.findByText("Allocation")).toBeInTheDocument();
     expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
     expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
 
@@ -3703,6 +3945,35 @@ describe("indent UI shell", () => {
       refresh.resolve(journeyData({ current_stage_message: "Approval completed" }));
       await refresh.promise;
     });
+  });
+
+  it("ignores the legacy six-phase cache key and fetches the versioned Journey contract", async () => {
+    const client = createTestQueryClient();
+    const scope = { employeeId: 1, activePositionId: 10 };
+    const legacyKey = [...indentKeys.all(scope), "journey", 42] as const;
+    client.setQueryData(legacyKey, journeyData({
+      status: "PENDING_APPROVAL",
+      phases: [
+        { sequence: 1, title: "Request", status: "APPROVED", stage_type: "phase" },
+        { sequence: 2, title: "Approvals", status: "PENDING", stage_type: "phase", is_current: true },
+        { sequence: 3, title: "Allocation", status: "PENDING", stage_type: "phase" },
+        { sequence: 4, title: "Warehouse", status: "PENDING", stage_type: "phase" },
+        { sequence: 5, title: "Delivery", status: "PENDING", stage_type: "phase" },
+        { sequence: 6, title: "Acknowledgement", status: "PENDING", stage_type: "phase" },
+      ],
+    }));
+
+    // The summary reads the indent's own status, not the journey's, so the two
+    // fixtures have to agree or the card lands on a different phase.
+    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({ status: "AWAITING_ALLOCATION" }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
+
+    await waitFor(() => expect(indentApi.journey).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("Stage 4 of 7 · Allocation")).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(7);
+    expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
+    expect(client.getQueryData(indentKeys.journey(scope, 42))).toEqual(journeyData());
   });
 
   it("shows unavailable after the detail journey request fails", async () => {
@@ -3714,8 +3985,25 @@ describe("indent UI shell", () => {
     expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
   });
 
-  it("shows unavailable after the detail journey response is unusable", async () => {
-    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({ stages: [] }));
+  it("uses a safe broad fallback for a recognised response with incomplete phases", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({ phases: [] }));
+    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({ status: "AWAITING_ALLOCATION" }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("Stage 4 of 7 · Allocation")).toBeInTheDocument();
+    expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
+  });
+
+  it("shows unavailable for a genuinely malformed unrecognised response", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "SOMETHING_NEW",
+      phases: [],
+    }));
+    // Both sources have to be unrecognised. A known indent status is enough on its
+    // own to draw the seven phases, so leaving it valid tests nothing.
+    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({ status: "SOMETHING_NEW" }));
 
     renderWithProviders(<IndentDetailPage />, "/indents/42");
 
@@ -3723,7 +4011,7 @@ describe("indent UI shell", () => {
     expect(screen.queryByRole("status", { name: "Loading approval progress" })).not.toBeInTheDocument();
   });
 
-  it("reuses the prefetched journey cache on the journey page", async () => {
+  it("retains the prefetched journey while actively refreshing on page open", async () => {
     const client = createTestQueryClient();
     const first = renderWithProviders(<IndentDetailPage />, "/indents/42", client);
 
@@ -3734,14 +4022,14 @@ describe("indent UI shell", () => {
     renderWithProviders(<IndentJourneyPage />, "/indents/42/journey", client);
 
     expect(await screen.findByText("OE Review")).toBeInTheDocument();
-    expect(indentApi.journey).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(indentApi.journey).toHaveBeenCalledTimes(2));
   });
 
   it("does not duplicate journey requests on progress card interactions", async () => {
     renderWithProviders(<IndentDetailPage />, "/indents/42");
 
     const card = await screen.findByRole("button", {
-      name: "View complete approval journey for IND/2026/0042",
+      name: "View complete indent journey for IND/2026/0042",
     });
     await waitFor(() => expect(indentApi.journey).toHaveBeenCalledTimes(1));
 
@@ -3792,11 +4080,11 @@ describe("indent UI shell", () => {
     });
     expect(screen.getByText("Pending Approval")).toBeInTheDocument();
     expect(screen.getByText("IND/2026/0042")).toBeInTheDocument();
-    expect(screen.getByText("OE Review")).toBeInTheDocument();
+    expect(screen.getByText("Approvals")).toBeInTheDocument();
 
     expect(client.getQueryState(indentKeys.journey(scope, 42))?.isInvalidated).toBe(true);
     expect(indentApi.journey).toHaveBeenCalledTimes(1);
-    expect(indentApi.journey).toHaveBeenCalledWith(42);
+    expect(indentApi.journey).toHaveBeenCalledWith(42, expect.any(AbortSignal));
     await act(async () => {
       detailRefresh.resolve(nextIndent);
       journeyRefresh.resolve(journeyData({ status: "PENDING_APPROVAL" }));
@@ -3860,7 +4148,7 @@ describe("indent UI shell", () => {
     expect(screen.getByRole("button", { name: /Back to All requests/i })).toBeInTheDocument();
   });
 
-  it("renders requester-specific stages and SPH/COO ANY_ONE outcome", async () => {
+  it("renders every resolved ladder rung and explains the ANY_ONE outcome", async () => {
     vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData());
 
     renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
@@ -3869,31 +4157,149 @@ describe("indent UI shell", () => {
     expect(screen.getByText("OE Review")).toBeInTheDocument();
     expect(screen.getByText("DM Review")).toBeInTheDocument();
     expect(screen.getByText("Final Approval - SPH or COO")).toBeInTheDocument();
+    // The stood-down ANY_ONE peer is the only thing that explains why one
+    // authority acted and its peers never did, so it must stay visible.
     expect(screen.getByText("COO Authority")).toBeInTheDocument();
     expect(screen.getByText("Not required")).toBeInTheDocument();
-    expect(screen.getAllByText("Ready for Allocation").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("Final approval · Approved by SPH")).toBeInTheDocument();
+    // Header message plus the "Still to come" card for the same stage.
+    expect(screen.getAllByText("Ready for Allocation")).toHaveLength(2);
     expect(screen.getByText("OE approval completed")).toBeInTheDocument();
     expect(screen.getByText("Approved by C Ramakrishna")).toBeInTheDocument();
+    expect(within(screen.getByText("Draft created").closest("article")!).getByText("Completed")).toBeInTheDocument();
+    expect(within(screen.getByRole("heading", { name: "Request submitted" }).closest("article")!).getByText("Completed")).toBeInTheDocument();
   });
 
-  it("uses the same dynamic stage payload on detail progress and complete journey", async () => {
+  it("shows only genuine creation evidence for an unsubmitted draft", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "DRAFT",
+      current_stage: "Draft — submit the indent to begin approval",
+      current_stage_message: "Draft — submit the indent to begin approval",
+      phases: [
+        { sequence: 1, title: "Draft", status: "PENDING", stage_type: "phase", is_current: true },
+        { sequence: 2, title: "Submitted", status: "PENDING", stage_type: "phase" },
+        { sequence: 3, title: "Approvals", status: "PENDING", stage_type: "phase" },
+        { sequence: 4, title: "Allocation", status: "PENDING", stage_type: "phase" },
+        { sequence: 5, title: "Warehouse", status: "PENDING", stage_type: "phase" },
+        { sequence: 6, title: "Delivery", status: "PENDING", stage_type: "phase" },
+        { sequence: 7, title: "Acknowledgement", status: "PENDING", stage_type: "phase" },
+      ],
+      stages: [
+        {
+          sequence: 1,
+          title: "Draft created",
+          status: "COMPLETED",
+          approver_name: "A Anil Kumar",
+          position_name: "DRIVER-AP-104-MMU-CHILMATHUR",
+          timestamp: "2026-07-27T09:30:00Z",
+          stage_type: "draft",
+          is_current: false,
+        },
+      ],
+      history: [{
+        id: "indent:42:created",
+        event_type: "CREATED",
+        title: "Draft created",
+        actor_name: "A Anil Kumar",
+        position_name: "DRIVER-AP-104-MMU-CHILMATHUR",
+        timestamp: "2026-07-27T09:30:00Z",
+      }],
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    const draftCard = (await screen.findByRole("heading", { name: "Draft created" })).closest("article");
+    expect(draftCard).toHaveTextContent("Completed");
+    expect(draftCard).toHaveTextContent("A Anil Kumar · DRIVER-AP-104-MMU-CHILMATHUR");
+    expect(screen.queryByRole("heading", { name: "Request submitted" })).not.toBeInTheDocument();
+    expect(screen.queryByText("OE Review")).not.toBeInTheDocument();
+  });
+
+  it("renders separate post-allocation batches and the outstanding wait card", async () => {
+    const occurred = [
+      { title: "Draft created", stage_type: "draft", timestamp: "2026-07-27T09:00:00Z" },
+      { title: "Request submitted", stage_type: "submission", timestamp: "2026-07-27T09:05:00Z", status: "SUBMITTED" },
+      { title: "Approval completed", stage_type: "approval", timestamp: "2026-07-27T10:00:00Z" },
+      { title: "Stock allocated", stage_type: "allocation", timestamp: "2026-07-27T11:00:00Z", reference_no: "ALLOC-1", quantity_summary: "6 allocated" },
+      { title: "Issued from warehouse", stage_type: "warehouse", timestamp: "2026-07-27T12:00:00Z", reference_no: "ISS-1", quantity_summary: "6 issued" },
+      { title: "Dispatched", stage_type: "delivery", timestamp: "2026-07-27T13:00:00Z", reference_no: "DSP-1", quantity_summary: "3 dispatched" },
+      { title: "Delivered", stage_type: "delivery", timestamp: "2026-07-27T14:00:00Z", reference_no: "DSP-1", quantity_summary: "3 delivered" },
+      { title: "Acknowledgement submitted", stage_type: "acknowledgement", timestamp: "2026-07-27T15:00:00Z", quantity_summary: "3 received" },
+      { title: "Partially received", stage_type: "acknowledgement", timestamp: "2026-07-27T15:00:00Z", quantity_summary: "3 received" },
+      { title: "Dispatched", stage_type: "delivery", timestamp: "2026-07-28T09:00:00Z", reference_no: "DSP-2", quantity_summary: "3 dispatched" },
+      { title: "Delivered", stage_type: "delivery", timestamp: "2026-07-28T10:00:00Z", reference_no: "DSP-2", quantity_summary: "3 delivered" },
+    ];
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "PARTIALLY_FULFILLED",
+      current_stage_message: "Waiting for acknowledgement",
+      stages: [
+        ...occurred.map((stage, index) => ({
+          ...stage,
+          sequence: index + 1,
+          status: stage.status ?? "APPROVED",
+          is_current: false,
+        })),
+        {
+          sequence: occurred.length + 1,
+          title: "Waiting for acknowledgement",
+          status: "PENDING",
+          stage_type: "acknowledgement",
+          is_current: true,
+        },
+      ],
+      history: [],
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    expect(await screen.findAllByRole("heading", { name: "Delivered" })).toHaveLength(2);
+    expect(screen.getAllByRole("heading", { name: "Dispatched" })).toHaveLength(2);
+    expect(screen.getByText("Ref ALLOC-1")).toBeInTheDocument();
+    expect(screen.getAllByText("3 received")).toHaveLength(2);
+    // What is still owed is stated once, under "Still to come".
+    expect(screen.getByText("Still to come")).toBeInTheDocument();
+    expect(screen.getByText("Current")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Waiting for acknowledgement" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Fully received" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Completed" })).not.toBeInTheDocument();
+  });
+
+  it("uses phase aggregation on detail and the dynamic stages on complete journey", async () => {
     const client = createTestQueryClient();
     const dynamicJourney = journeyData({
       status: "PENDING_APPROVAL",
       current_stage: "Waiting for final approval",
       current_stage_message: "Waiting for final approval",
+      phases: [
+        { sequence: 1, title: "Draft", status: "APPROVED", stage_type: "phase" },
+        { sequence: 2, title: "Submitted", status: "APPROVED", stage_type: "phase" },
+        { sequence: 3, title: "Approvals", status: "PENDING", stage_type: "phase", is_current: true, approver_name: "Final Approval - SPH/COO" },
+        { sequence: 4, title: "Allocation", status: "PENDING", stage_type: "phase" },
+        { sequence: 5, title: "Warehouse", status: "PENDING", stage_type: "phase" },
+        { sequence: 6, title: "Delivery", status: "PENDING", stage_type: "phase" },
+        { sequence: 7, title: "Acknowledgement", status: "PENDING", stage_type: "phase" },
+      ],
       stages: [
         {
           sequence: 1,
-          title: "Request Raised",
-          status: "SUBMITTED",
+          title: "Draft created",
+          status: "APPROVED",
           approver_name: "A Anil Kumar",
           timestamp: "2026-07-27T09:30:00Z",
-          stage_type: "request",
+          stage_type: "draft",
           is_current: false,
         },
         {
           sequence: 2,
+          title: "Request submitted",
+          status: "SUBMITTED",
+          approver_name: "A Anil Kumar",
+          timestamp: "2026-07-27T09:30:00Z",
+          stage_type: "submission",
+          is_current: false,
+        },
+        {
+          sequence: 3,
           title: "OE Review",
           status: "APPROVED",
           approver_name: "C Ramakrishna",
@@ -3903,7 +4309,7 @@ describe("indent UI shell", () => {
           is_current: false,
         },
         {
-          sequence: 3,
+          sequence: 4,
           title: "Final Approval - SPH/COO",
           status: "PENDING",
           approver_name: "SPH / COO",
@@ -3920,12 +4326,13 @@ describe("indent UI shell", () => {
       client,
     );
 
-    expect(await screen.findByText("OE Review")).toBeInTheDocument();
+    expect(await screen.findByText("Approvals")).toBeInTheDocument();
     expect(screen.getByText("Final Approval - SPH/COO")).toBeInTheDocument();
-    expect(screen.getByText("Pending at SPH/COO")).toBeInTheDocument();
+    expect(screen.getByText("Pending at SPH / COO")).toBeInTheDocument();
+    // The ladder position is counted from the resolved chain, not assumed.
+    expect(screen.getByText("Approval 2 of 2 · SPH / COO")).toBeInTheDocument();
     expect(screen.queryByText("Pending Approval")).not.toBeInTheDocument();
-    expect(screen.queryByText("DM Review")).not.toBeInTheDocument();
-    expect(screen.queryByText("RM Review")).not.toBeInTheDocument();
+    expect(screen.queryByText("OE Review")).not.toBeInTheDocument();
     detail.unmount();
 
     renderWithProviders(
@@ -3935,12 +4342,14 @@ describe("indent UI shell", () => {
     );
 
     expect(await screen.findByText("OE Review")).toBeInTheDocument();
-    expect(screen.getByText("Final Approval - SPH/COO")).toBeInTheDocument();
-    expect(screen.getByText("Pending at SPH/COO")).toBeInTheDocument();
+    // The rung that holds the indent now is named on the journey too.
+    expect(screen.getByRole("heading", { name: "Final Approval - SPH/COO" })).toBeInTheDocument();
+    expect(screen.getByText("Still to come")).toBeInTheDocument();
+    expect(screen.getByText("Pending at SPH / COO")).toBeInTheDocument();
     expect(screen.queryByText("Pending Approval")).not.toBeInTheDocument();
     expect(screen.queryByText("DM Review")).not.toBeInTheDocument();
     expect(screen.queryByText("RM Review")).not.toBeInTheDocument();
-    expect(indentApi.journey).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(indentApi.journey).toHaveBeenCalledTimes(2));
   });
 
   it("keeps Pending Approval in the complete journey header when no stage is current", async () => {
@@ -4005,9 +4414,93 @@ describe("indent UI shell", () => {
     expect(within(approvedCard!).queryByText("Rejection reason")).not.toBeInTheDocument();
     const historyCard = screen.getByText("Regional Manager rejected").closest("article");
     expect(historyCard).not.toBeNull();
-    expect(within(historyCard!).queryByText("Incorrect quantity")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Incorrect quantity")).toHaveLength(1);
-    expect(screen.queryByText("Approved after review")).not.toBeInTheDocument();
+    expect(within(historyCard!).getByText("Incorrect quantity")).toBeInTheDocument();
+    expect(screen.getAllByText("Incorrect quantity")).toHaveLength(2);
+    expect(within(approvedCard!).getByText("Approved after review")).toBeInTheDocument();
+  });
+
+  it("shows a correction request without dressing it up as a rejection", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "RETURNED",
+      current_stage: "Returned for correction",
+      current_stage_message: "Returned for correction",
+      final_any_one_outcome: null,
+      stages: [{
+        sequence: 3,
+        title: "DM Review",
+        status: "RETURNED",
+        approver_name: "A Raveendra Prasad",
+        position_name: "District Manager",
+        timestamp: "2026-07-27T10:20:00Z",
+        comments: "Quantity looks wrong, please revise and resubmit",
+        stage_type: "approval",
+      }],
+      history: [],
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    const card = (await screen.findByRole("heading", { name: "DM Review" })).closest("article");
+    expect(within(card!).getByText("Correction requested")).toBeInTheDocument();
+    expect(within(card!).getByText("Quantity looks wrong, please revise and resubmit")).toBeInTheDocument();
+    expect(within(card!).queryByText("Rejection reason")).not.toBeInTheDocument();
+    expect(within(card!).getByText("Returned for correction")).toBeInTheDocument();
+    expect(screen.getByText("Returned by A Raveendra Prasad")).toBeInTheDocument();
+  });
+
+  it("warns when the journey was built from incomplete sources", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      missing_sources: ["warehouse issues", "dispatches"],
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    expect(await screen.findByText(
+      /Some records could not be read \(warehouse issues, dispatches\)/,
+    )).toBeInTheDocument();
+  });
+
+  it("offers a retry instead of an endless skeleton when the journey fails", async () => {
+    vi.mocked(indentApi.journey).mockRejectedValueOnce(new Error("Journey service unavailable"));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    expect(await screen.findByText("The indent journey could not be loaded")).toBeInTheDocument();
+    expect(screen.getByText("Journey service unavailable")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Try again/i }));
+
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+  });
+
+  it("offers a retry instead of an endless skeleton when the indent fails to load", async () => {
+    vi.mocked(indentApi.get).mockRejectedValueOnce(new Error("Detail service unavailable"));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("This indent could not be loaded")).toBeInTheDocument();
+    expect(screen.getByText("Detail service unavailable")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Try again/i }));
+
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+  });
+
+  it("orders the timeline chronologically whatever order the API returns", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      stages: [
+        { sequence: 3, title: "Third", status: "APPROVED", timestamp: "2026-07-27T12:00:00Z", stage_type: "approval" },
+        { sequence: 1, title: "First", status: "COMPLETED", timestamp: "2026-07-27T09:00:00Z", stage_type: "draft" },
+        { sequence: 2, title: "Second", status: "SUBMITTED", timestamp: "2026-07-27T10:00:00Z", stage_type: "submission" },
+      ],
+      history: [],
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    const timeline = await screen.findByRole("list", { name: "Complete indent journey timeline" });
+    expect(within(timeline).getAllByRole("heading").map((row) => row.textContent))
+      .toEqual(["First", "Second", "Third"]);
   });
 
   it("shows a fallback reason for older rejected journey stages", async () => {
@@ -4040,7 +4533,7 @@ describe("indent UI shell", () => {
 
     renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
 
-    const timeline = await screen.findByLabelText("Approval journey timeline");
+    const timeline = await screen.findByLabelText("Complete indent journey timeline");
     expect(timeline).toHaveClass("space-y-0");
     expect(screen.getByText("OE-AP-104-MMU-Hindupur")).toHaveClass("break-words");
   });
@@ -4075,21 +4568,30 @@ describe("indent UI shell", () => {
     expect(groups[0][1].map((event) => event.id)).toEqual(["workflow:2", "workflow:1"]);
   });
 
-  it("marks exactly one journey stage current and leaves future stages grey", async () => {
+  it("separates what has happened from the rungs still owed a decision", async () => {
     vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
       current_stage_message: "Waiting for DM review",
       stages: [
         {
           sequence: 1,
-          title: "Request Raised",
-          status: "SUBMITTED",
+          title: "Draft created",
+          status: "APPROVED",
           approver_name: "A Anil Kumar",
           timestamp: "2026-07-27T09:30:00Z",
-          stage_type: "request",
+          stage_type: "draft",
           is_current: false,
         },
         {
           sequence: 2,
+          title: "Request submitted",
+          status: "SUBMITTED",
+          approver_name: "A Anil Kumar",
+          timestamp: "2026-07-27T09:30:00Z",
+          stage_type: "submission",
+          is_current: false,
+        },
+        {
+          sequence: 3,
           title: "OE Review",
           status: "APPROVED",
           approver_name: "C Ramakrishna",
@@ -4098,7 +4600,7 @@ describe("indent UI shell", () => {
           is_current: false,
         },
         {
-          sequence: 3,
+          sequence: 4,
           title: "DM Review",
           status: "PENDING",
           approver_name: "A Raveendra Prasad",
@@ -4106,7 +4608,7 @@ describe("indent UI shell", () => {
           is_current: true,
         },
         {
-          sequence: 4,
+          sequence: 5,
           title: "RM Review",
           status: "PENDING",
           approver_name: "Regional Manager",
@@ -4118,11 +4620,18 @@ describe("indent UI shell", () => {
 
     renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
 
-    const current = (await screen.findByText("DM Review")).closest("article");
-    const future = screen.getByText("RM Review").closest("article");
-    expect(current).toHaveClass("border-brand/40");
-    expect(future).toHaveClass("border-line");
-    expect(future).not.toHaveClass("border-brand/40");
+    const occurred = await screen.findByRole("list", { name: "Complete indent journey timeline" });
+    const remaining = screen.getByRole("list", { name: "Remaining indent journey stages" });
+
+    // Completed rungs stay in the timeline; the live and future rungs are named
+    // separately, so neither can be read as something that already happened.
+    expect(within(occurred).getByRole("heading", { name: "OE Review" })).toBeInTheDocument();
+    expect(within(occurred).queryByRole("heading", { name: "DM Review" })).not.toBeInTheDocument();
+    expect(within(remaining).getByRole("heading", { name: "DM Review" })).toBeInTheDocument();
+    expect(within(remaining).getByRole("heading", { name: "RM Review" })).toBeInTheDocument();
+    expect(within(remaining).getByText("Current")).toBeInTheDocument();
+    expect(within(remaining).getByText("Pending")).toBeInTheDocument();
+    expect(within(remaining).getByText("A Raveendra Prasad")).toBeInTheDocument();
   });
 
   describe("All Requests restoration", () => {
@@ -4304,8 +4813,8 @@ describe("indent UI shell", () => {
       expect(indentApi.activity).not.toHaveBeenCalled();
 
       const mobileCard = screen.getAllByText("IND/ACTIVITY-PAGE-4")
-        .map((element) => element.closest("button"))
-        .find((element): element is HTMLButtonElement => element !== null);
+        .map((element) => element.closest<HTMLElement>('[role="button"], button'))
+        .find((element): element is HTMLElement => element !== null);
       expect(mobileCard).toBeDefined();
       fireEvent.click(mobileCard!);
       await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents/42"));
@@ -4329,8 +4838,8 @@ describe("indent UI shell", () => {
 
       expect(await screen.findByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
       const mobileCard = screen.getAllByText("IND/ACTIVITY-PAGE-4")
-        .map((element) => element.closest("button"))
-        .find((element): element is HTMLButtonElement => element !== null);
+        .map((element) => element.closest<HTMLElement>('[role="button"], button'))
+        .find((element): element is HTMLElement => element !== null);
       fireEvent.click(mobileCard!);
       await screen.findByRole("button", { name: "Browser back test" });
       fireEvent.click(screen.getByRole("button", { name: "Browser back test" }));

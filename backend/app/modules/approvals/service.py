@@ -1,6 +1,6 @@
 """Business logic for the approver's operational workspace."""
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -344,11 +344,61 @@ async def _load_indent_task(
         Action.instance_id == instance.id,
         Action.action == ApprovalAction.APPROVED.value,
     ))
-    return indent, instance, bool(previous_approval)
+    # An approval only lowers the ceiling if it actually recorded quantities. An indent
+    # submitted before submit-time seeding existed, and approved through the plain
+    # `POST /indents/{id}/approve` (the indent screen's Approve button, or an API
+    # client), carries approved_qty 0 on every line — it recorded nothing. Reading that
+    # as "the level below approved none of it" collapsed the next approver's ceiling to
+    # zero: a number nobody entered, which silently wipes out the whole request. All
+    # lines at zero means nothing was recorded; one line at zero among others is a real
+    # decision and is left alone.
+    recorded_quantities = any(
+        Decimal(str(line.approved_quantity or 0)) > 0 for line in indent.items
+    )
+    return indent, instance, bool(previous_approval) and recorded_quantities
+
+
+def _plain(value: Decimal) -> str:
+    """5.000 reads as 5 in a message an approver has to act on."""
+    trimmed = value.normalize()
+    return f"{trimmed:f}"
+
+
+QUANTITY_STEP = Decimal("0.001")
+
+
+def _quantize(value: Decimal) -> Decimal:
+    """Round to what `ind_indent_items.approved_qty` (NUMERIC(16,3)) can hold.
+
+    Rounding at write time instead would let 4.9995 clear a ceiling of 4.999 and then
+    be stored as 5.000 — an increase, through the one door that must only reduce. We
+    round down so what was validated is exactly what is stored.
+    """
+    return value.quantize(QUANTITY_STEP, rounding=ROUND_DOWN)
+
+
+def _approval_ceiling(line, has_previous_approval: bool) -> Decimal:
+    """The most this approver may pass on.
+
+    Quantities only ever come down the ladder: the first approver is capped by the
+    requested quantity, every later one by what the level below them approved.
+    `has_previous_approval` is false until an approval has actually recorded
+    quantities (see _load_indent_task), so an uninitialised line reads as the request
+    rather than as zero.
+
+    Never above the request, whatever `approved_qty` holds. A row written before this
+    rule existed can carry more than was asked for, and the ceiling is the one number
+    on this screen that must not be able to grow.
+    """
+    requested = _quantize(Decimal(str(line.quantity)))
+    if not has_previous_approval:
+        return requested
+    return min(_quantize(Decimal(str(line.approved_quantity or 0))), requested)
 
 
 def _approval_out(
     indent: Indent, instance: Instance, has_previous_approval: bool,
+    *, can_return_for_correction: bool = False,
 ) -> ApprovalIndentOut:
     items = [
         ApprovalIndentLineOut(
@@ -358,11 +408,8 @@ def _approval_out(
             item_name=line.item_name,
             uom_code=line.uom_code,
             requested_quantity=float(line.quantity),
-            # Existing rows start at zero. Until someone has approved, zero means the
-            # approval quantity has not been initialized, so begin with the request.
-            approved_quantity=float(
-                line.approved_quantity if has_previous_approval else line.quantity
-            ),
+            approved_quantity=float(_approval_ceiling(line, has_previous_approval)),
+            max_quantity=float(_approval_ceiling(line, has_previous_approval)),
             remarks=line.remarks,
         )
         for line in sorted(indent.items, key=lambda item: (item.line_no, item.id))
@@ -378,6 +425,7 @@ def _approval_out(
         office_name=indent.office_name,
         current_stage_name=instance.current_stage_name,
         current_approver_name=indent.current_approver_name,
+        can_return_for_correction=can_return_for_correction,
         created_at=indent.created_at,
         items=items,
     )
@@ -387,17 +435,21 @@ async def get_indent_for_approval(
     db: AsyncSession, indent_id: int, user,
 ) -> ApprovalIndentOut:
     indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
-    return _approval_out(indent, instance, has_previous)
+    can_return = await indent_service.can_return_indent_for_correction(db, indent, user)
+    return _approval_out(
+        indent, instance, has_previous, can_return_for_correction=can_return,
+    )
 
 
 def _validated_quantities(
     indent: Indent, submitted: list[ApprovalQuantityIn],
+    has_previous_approval: bool = False,
 ) -> dict[int, Decimal]:
     by_id: dict[int, Decimal] = {}
     for item in submitted:
         if item.line_id in by_id:
             raise ValidationError(f"Quantity for line {item.line_id} was submitted twice")
-        by_id[item.line_id] = Decimal(str(item.approved_quantity))
+        by_id[item.line_id] = _quantize(Decimal(str(item.approved_quantity)))
 
     expected = {line.id for line in indent.items}
     received = set(by_id)
@@ -413,13 +465,18 @@ def _validated_quantities(
 
     for line in indent.items:
         approved = by_id[line.id]
-        requested = Decimal(str(line.quantity))
+        ceiling = _approval_ceiling(line, has_previous_approval)
+        label = line.item_name or line.item_code or line.id
         if approved < 0:
-            raise ValidationError("Approved quantity cannot be negative")
-        if approved > requested:
+            raise ValidationError(f"Approved quantity for {label} cannot be negative")
+        if approved > ceiling:
+            source = (
+                "the quantity approved at the previous level"
+                if has_previous_approval else "the requested quantity"
+            )
             raise ValidationError(
-                f"Approved quantity for {line.item_name or line.item_code or line.id} "
-                f"cannot exceed requested quantity {requested}"
+                f"Approved quantity for {label} cannot exceed {source} "
+                f"({_plain(ceiling)}). An approver may only reduce it."
             )
     return by_id
 
@@ -429,13 +486,14 @@ async def approve_indent(
     comments: str, user,
 ) -> ApprovalIndentOut:
     indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
-    approved_by_line = _validated_quantities(indent, quantities)
+    approved_by_line = _validated_quantities(indent, quantities, has_previous)
 
     before: dict[str, float] = {}
     after: dict[str, float] = {}
     for line in indent.items:
-        current = line.approved_quantity if has_previous else line.quantity
-        before[f"line_{line.id}_approved_qty"] = float(current)
+        before[f"line_{line.id}_approved_qty"] = float(
+            _approval_ceiling(line, has_previous)
+        )
         line.approved_quantity = approved_by_line[line.id]
         after[f"line_{line.id}_approved_qty"] = float(line.approved_quantity)
 

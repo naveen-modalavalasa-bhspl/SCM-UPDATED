@@ -17,6 +17,7 @@ import {
   warehouseOptions,
 } from "../api";
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
+import { alerts } from "@/modules/alerts";
 import type { Issue, IssueItemWrite, IssueWrite, ItemOption } from "../types";
 
 /**
@@ -278,7 +279,12 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       if (what === "ack") return acknowledgeIssue(numId, reason || undefined);
       return cancelIssue(numId, reason || undefined);
     },
-    onSuccess: () => {
+    onSuccess: (_result, what) => {
+      const number = doc?.issue_no ?? "The issue";
+      // Only the outcomes that change what the storekeeper does next are announced;
+      // submit and approve are already obvious from the status pill moving.
+      if (what === "post") void alerts.success("issue.posted", { number });
+      else if (what === "ack") void alerts.success("issue.acknowledged", { number });
       qc.invalidateQueries({ queryKey: ["wh-issue", id] });
       qc.invalidateQueries({ queryKey: ["wh-issue-approvals", id] });
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });

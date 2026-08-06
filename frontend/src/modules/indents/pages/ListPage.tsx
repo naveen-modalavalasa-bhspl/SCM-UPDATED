@@ -4,7 +4,6 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Spinner, Skeleton, Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { StatusPill } from "@/shared/components";
 import {
   INDENT_QUERY_GC_TIME,
   INDENT_QUERY_STALE_TIME,
@@ -16,6 +15,7 @@ import {
 } from "../api";
 import type { IndentListRow } from "../types";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
+import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge";
 import { IndentFilterValueProvider, useIndentFilters } from "../context/IndentFilterContext";
 import {
   allRequestsReturnState,
@@ -24,7 +24,7 @@ import {
   useAllRequestsUrlState,
 } from "../context/AllRequestsUrlState";
 import { formatIndentShortDate } from "../dateTime";
-import { INDENT_REQUEST_STATUS_FILTER_OPTIONS, INDENT_STATUS } from "../constants";
+import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
 
 interface Column<T> {
   key: string;
@@ -32,22 +32,6 @@ interface Column<T> {
   render: (row: T) => ReactNode;
   className: string;
   hideOnNarrow?: boolean;
-}
-
-function AllRequestsStatusBadge({ status }: { status: string }) {
-  const tone = status === INDENT_STATUS.ALLOCATED
-    ? "bg-ok-bg text-ok"
-    : status === INDENT_STATUS.AWAITING_ALLOCATION
-      ? "bg-info-bg text-info"
-      : null;
-
-  if (!tone) return <StatusPill status={status} />;
-
-  return (
-    <span className={`inline-flex h-6 items-center rounded-full px-2 text-[11px] font-semibold uppercase tracking-wide ${tone}`}>
-      {status.replace(/_/g, " ")}
-    </span>
-  );
 }
 
 function Pager({
@@ -208,7 +192,7 @@ function IndentListContent({
       key: "status",
       header: "Status",
       className: "w-[32%] px-4 text-left align-middle lg:w-[18%]",
-      render: (row) => <AllRequestsStatusBadge status={row.status} />,
+      render: (row) => <IndentSummaryStatusBadge status={row.status} />,
     },
     {
       key: "date",
@@ -311,7 +295,7 @@ function IndentListContent({
                         <span className="mono block truncate font-semibold text-ink">{row.indent_no}</span>
                         <span className="mt-1 block text-xs text-muted">{row.department_name ?? "-"}</span>
                       </span>
-                      <AllRequestsStatusBadge status={row.status} />
+                      <IndentSummaryStatusBadge status={row.status} />
                     </div>
                     <div className="flex items-center justify-between gap-3 text-sm text-muted">
                       <span>{row.requested_by_name ?? "-"}</span>

@@ -66,6 +66,8 @@ export interface ApprovalIndentLine {
   uom_code?: string | null;
   requested_quantity: number;
   approved_quantity: number;
+  /** Ceiling for this approver — the request, or what the level below approved. */
+  max_quantity: number;
   remarks?: string | null;
 }
 
@@ -80,6 +82,7 @@ export interface ApprovalIndent {
   office_name?: string | null;
   current_stage_name?: string | null;
   current_approver_name?: string | null;
+  can_return_for_correction?: boolean;
   created_at: string;
   items: ApprovalIndentLine[];
 }
@@ -118,6 +121,8 @@ export interface CorrectionIndent {
   priority: string;
   remarks?: string | null;
   status: string;
+  can_edit_correction?: boolean;
+  can_resubmit_correction?: boolean;
   items: Array<{
     id: number;
     item_id: number;

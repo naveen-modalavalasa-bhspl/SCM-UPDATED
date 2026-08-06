@@ -12,6 +12,7 @@ export type EventKind =
   | "step"
   | "info"
   | "assert"
+  | "check"
   | "navigation"
   | "console"
   | "pageerror"

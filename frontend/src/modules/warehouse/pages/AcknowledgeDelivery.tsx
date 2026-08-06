@@ -9,6 +9,7 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, toTimeline } from "../components/Timeline";
 import { acknowledgeDispatch, getDispatch, listDispatches, scanCode } from "../api";
 import { fmtDate, fmtQty, num } from "../format";
+import { alerts } from "@/modules/alerts";
 import type { DispatchItem } from "../types";
 
 /**
@@ -81,6 +82,7 @@ export default function AcknowledgeDelivery() {
         lines: Object.entries(delivered).map(([lineId, qty]) => ({ id: Number(lineId), delivered_qty: qty })),
       }),
     onSuccess: () => {
+      void alerts.success("issue.acknowledged", { number: doc?.dispatch_no ?? "The delivery" });
       qc.invalidateQueries({ queryKey: ["wh-dispatch", String(dispatchId)] });
       qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
       qc.invalidateQueries({ queryKey: ["wh-dispatches-inbound"] });

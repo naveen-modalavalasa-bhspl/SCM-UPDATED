@@ -35,6 +35,8 @@ const STATUS_DATA = {
   PENDING_APPROVAL: 4,
   AWAITING_ALLOCATION: 7,
   ALLOCATED: 3,
+  PARTIALLY_FULFILLED: 2,
+  CLOSED: 4,
   REJECTED: 1,
   DRAFT: 2,
   APPROVED: 20,
@@ -42,8 +44,11 @@ const STATUS_DATA = {
 
 const DISPLAYED_STATUSES = [
   "PENDING_APPROVAL",
+  "RETURNED_FOR_CORRECTION",
   "AWAITING_ALLOCATION",
   "ALLOCATED",
+  "PARTIALLY_FULFILLED",
+  "CLOSED",
   "REJECTED",
   "DRAFT",
 ];
@@ -180,7 +185,7 @@ describe("StatusBreakdownChart tooltip interaction", () => {
 });
 
 describe("StatusBreakdownChart presentation", () => {
-  it("shows exactly the five supported statuses in the required order and excludes Other", () => {
+  it("shows exactly the eight supported statuses in the required order and excludes Other", () => {
     render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
 
     expect(screen.getAllByTestId(/^status-legend-row-/).map((row) => (
@@ -199,6 +204,8 @@ describe("StatusBreakdownChart presentation", () => {
       PENDING_APPROVAL: 4,
       AWAITING_ALLOCATION: 5,
       ALLOCATED: 2,
+      PARTIALLY_FULFILLED: 3,
+      CLOSED: 4,
       REJECTED: 3,
       DRAFT: 1,
       APPROVED: 80,
@@ -207,14 +214,14 @@ describe("StatusBreakdownChart presentation", () => {
 
     const { entries, total } = buildStatusBreakdownData(byStatus);
 
-    expect(total).toBe(15);
+    expect(total).toBe(22);
     expect(entries.map(({ status }) => status)).toEqual(DISPLAYED_STATUSES);
-    expect(entries.map(({ percentage }) => percentage)).toEqual([27, 33, 13, 20, 7]);
+    expect(entries.map(({ percentage }) => percentage)).toEqual([18, 0, 23, 9, 14, 18, 14, 5]);
 
     render(<StatusBreakdownChart byStatus={byStatus} />);
-    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("15 total indents");
-    expect(screen.getByTestId("status-legend-percentage-PENDING_APPROVAL")).toHaveTextContent("27%");
-    expect(screen.getByTestId("status-legend-percentage-DRAFT")).toHaveTextContent("7%");
+    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("22 total indents");
+    expect(screen.getByTestId("status-legend-percentage-PENDING_APPROVAL")).toHaveTextContent("18%");
+    expect(screen.getByTestId("status-legend-percentage-DRAFT")).toHaveTextContent("5%");
   });
 
   it("keeps zero-count statuses in the breakdown without creating donut segments", () => {
@@ -224,7 +231,7 @@ describe("StatusBreakdownChart presentation", () => {
       />,
     );
 
-    expect(screen.getAllByTestId(/^status-legend-row-/)).toHaveLength(5);
+    expect(screen.getAllByTestId(/^status-legend-row-/)).toHaveLength(8);
     expect(screen.getByTestId("status-legend-count-DRAFT")).toHaveTextContent(/^0$/);
     expect(screen.getByTestId("status-legend-percentage-DRAFT")).toHaveTextContent(/^0%$/);
     expect(screen.queryByTestId("status-donut-slice-DRAFT")).not.toBeInTheDocument();
@@ -236,6 +243,9 @@ describe("StatusBreakdownChart presentation", () => {
     render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
 
     expect(screen.getByTestId("status-donut-slice-DRAFT")).toHaveAttribute("fill", "var(--color-neutral)");
+    expect(screen.getByTestId("status-donut-slice-ALLOCATED")).toHaveAttribute("fill", "#8b5cf6");
+    expect(screen.getByTestId("status-donut-slice-PARTIALLY_FULFILLED")).toHaveAttribute("fill", "var(--color-warn)");
+    expect(screen.getByTestId("status-donut-slice-CLOSED")).toHaveAttribute("fill", "var(--color-ok)");
     expect(screen.getByTestId("status-donut-container")).toHaveClass(
       "h-[250px]",
       "max-w-[250px]",

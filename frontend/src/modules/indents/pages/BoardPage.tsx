@@ -20,6 +20,7 @@ import { INDENT_STATUS } from "../constants";
 const COLUMNS: { title: string; statuses: string[]; dot: string }[] = [
   { title: "Draft", statuses: [INDENT_STATUS.DRAFT], dot: "bg-neutral" },
   { title: "In approval", statuses: [INDENT_STATUS.PENDING_APPROVAL, INDENT_STATUS.SUBMITTED], dot: "bg-warn" },
+  { title: "Corrections", statuses: [INDENT_STATUS.RETURNED_FOR_CORRECTION], dot: "bg-warn" },
   { title: "Approved", statuses: [INDENT_STATUS.APPROVED, INDENT_STATUS.AWAITING_ALLOCATION, INDENT_STATUS.ALLOCATED, INDENT_STATUS.PARTIALLY_FULFILLED], dot: "bg-ok" },
   { title: "Ordered", statuses: [INDENT_STATUS.ORDERED, INDENT_STATUS.PARTIALLY_ORDERED, INDENT_STATUS.PENDING_PROCUREMENT], dot: "bg-info" },
   { title: "Rejected", statuses: [INDENT_STATUS.REJECTED], dot: "bg-bad" },
@@ -67,6 +68,7 @@ async function unpinRowsInBatches(rows: IndentListRow[]) {
 }
 
 function formatStatus(status: string) {
+  if (status === INDENT_STATUS.RETURNED_FOR_CORRECTION) return "Returned for correction";
   return status
     .toLowerCase()
     .split("_")
@@ -326,7 +328,7 @@ function IndentBoardContent() {
 
       {!isLoading && !error && (
         <div className="-mx-4 overflow-x-auto overflow-y-hidden px-4 pb-3 md:mx-0 md:px-0">
-          <div className="flex min-w-max items-start gap-4 md:grid md:min-w-0 md:grid-cols-6 md:items-start">
+          <div className="flex min-w-max items-start gap-4 md:grid md:min-w-0 md:grid-cols-7 md:items-start">
             {COLUMNS.map((column) => {
               const items = bucket(column.statuses);
               const total = columnTotal(column.statuses);

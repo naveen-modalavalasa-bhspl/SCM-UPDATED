@@ -7,6 +7,10 @@
   "scripts": {
     "install:browsers": "playwright install chromium",
     "test": "playwright test",
+    "test:indents": "playwright test tests/indent-module",
+    "test:bugs": "playwright test tests/bug-sheet",
+    "test:bugs:headed": "playwright test tests/bug-sheet --headed",
+    "test:indents:headed": "playwright test tests/indent-module --headed",
     "test:headed": "playwright test --headed",
     "test:debug": "PWDEBUG=1 playwright test",
     "report": "playwright show-report reports/html",

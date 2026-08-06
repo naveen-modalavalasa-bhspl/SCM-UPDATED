@@ -27,6 +27,27 @@ export const config = {
   slowMo: num("SLOW_MO", 0),
   screenshotEveryStep: bool("SCREENSHOT_EVERY_STEP", true),
   reportsDir: resolve(ROOT, "reports"),
+
+  /* ---------------------------------------------- indent-module suite settings */
+
+  /**
+   * How many drafts the Indent suite raises before it starts.
+   *
+   * Must exceed the list page size (20) or "page 2" is a control the run can
+   * never touch, and every pagination assertion becomes decoration.
+   */
+  seedCount: num("SEED_COUNT", 24),
+
+  /**
+   * Whether the run may actually confirm a delivery.
+   *
+   * Confirming receipt writes `received_qty` and can close a real indent — it is
+   * the one irreversible thing in the module. Off by default: the run still opens
+   * the modal, checks its arithmetic, uploads and deletes a photo, and proves the
+   * no-photo rule by letting the server refuse the confirm. Turn it on only
+   * against a database you are willing to change.
+   */
+  allowDeliveryConfirm: bool("ALLOW_DELIVERY_CONFIRM", false),
 };
 
 export interface Account {
@@ -50,9 +71,42 @@ export interface Account {
 }
 
 interface Users {
+  /** The single account the Indent module suite drives. Optional; falls back to `raiser`. */
+  tester?: Account;
   raiser: Account;
   approvers: Account[];
   inventory?: Account;
+}
+
+/**
+ * The one login the Indent module suite runs as.
+ *
+ * That suite is a functional sweep of a module's own screens, not a journey
+ * across an approval ladder, so it needs exactly one identity — whichever one you
+ * hand it. Everything it asserts is derived from what *that* account can see:
+ * the dataset is raised under it, and every expectation is recomputed from the
+ * API as the same account, so the run is correct for a store keeper, a manager or
+ * an administrator without a line of it changing.
+ */
+export function loadTester(): Account {
+  const account = readUsersFile().tester ?? readUsersFile().raiser;
+  if (!account?.employeeId || !account.password) {
+    throw new Error(
+      "playwright-tests/users.json needs a 'tester' (or 'raiser') entry with an employeeId and password. "
+        + "The Indent module suite runs as one account and needs nothing else.",
+    );
+  }
+  return account;
+}
+
+function readUsersFile(): Users {
+  const path = resolve(ROOT, "users.json");
+  if (!existsSync(path)) {
+    throw new Error(
+      "playwright-tests/users.json is missing. Copy users.example.json to users.json and fill in real logins.",
+    );
+  }
+  return JSON.parse(readFileSync(path, "utf8")) as Users;
 }
 
 /**
@@ -60,15 +114,12 @@ interface Users {
  * committed file. The approver list is a pool, not an order: the run asks the API
  * who the document is actually waiting on at each rung, so re-configuring the
  * approval ladder does not mean editing a test.
+ *
+ * Only the cross-login journey suites need this. A single-module sweep should use
+ * `loadTester()`, which asks for one account and nothing more.
  */
 export function loadUsers(): Users {
-  const path = resolve(ROOT, "users.json");
-  if (!existsSync(path)) {
-    throw new Error(
-      "playwright-tests/users.json is missing. Copy users.example.json to users.json and fill in real logins.",
-    );
-  }
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as Users;
+  const parsed = readUsersFile();
   if (!parsed.raiser?.employeeId) throw new Error("users.json: 'raiser' needs an employeeId and password.");
   if (!Array.isArray(parsed.approvers) || !parsed.approvers.length) {
     throw new Error("users.json: 'approvers' must list at least one account.");

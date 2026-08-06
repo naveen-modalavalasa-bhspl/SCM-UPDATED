@@ -47,6 +47,11 @@ async def test_update_rejects_missing_required_date(monkeypatch):
         status=IndentStatus.DRAFT.value,
     )
     monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=draft))
+    monkeypatch.setattr(
+        service.rbac_service,
+        "get_user_permissions",
+        AsyncMock(return_value={service.perms.INDENT_EDIT}),
+    )
 
     with pytest.raises(ValidationError, match="Required date is mandatory."):
         await service.update_indent(
@@ -261,10 +266,7 @@ async def test_inventory_sees_requests_that_have_reached_the_scm_stages(monkeypa
     text = await access_sql(
         monkeypatch,
         role_name="MANAGER",
-        # `indent.view.fulfilment`, not allocation.view/stock.view/mr.view. All 25
-        # roles hold one of those three, so gating the queue on them showed every
-        # login every approved indent in the company.
-        permissions=["indent.view.fulfilment"],
+        permissions=["allocation.view"],
     )
 
     assert "ind_indents.status IN ('APPROVED', 'AWAITING_ALLOCATION'" in text
@@ -677,6 +679,11 @@ async def test_update_audit_values_are_json_safe(monkeypatch):
     monkeypatch.setattr(service, "get_indent", AsyncMock(return_value=draft))
     monkeypatch.setattr(service, "write_audit", AsyncMock())
     monkeypatch.setattr(service, "_attach_capabilities", AsyncMock(return_value=draft))
+    monkeypatch.setattr(
+        service.rbac_service,
+        "get_user_permissions",
+        AsyncMock(return_value={service.perms.INDENT_EDIT}),
+    )
 
     await service.update_indent(
         db,
@@ -960,17 +967,6 @@ class EmptyResult:
 
     def one(self):
         return (0, 0)
-
-    def first(self):
-        """Used by profiles.profile_role_for_position, which shared.scope calls to
-        find the login's rung.
-
-        Always None, never `scalar_row`: this double hands the same row back to
-        every query, and the profile lookup is a different question from the one
-        these tests are asking. None means "no profile configured", which is the
-        state each of these predicate tests describes.
-        """
-        return None
 
     def all(self):
         return self.mapping_rows
@@ -1488,6 +1484,260 @@ async def test_notification_filters_visible_content_before_stable_pagination(mon
 
 
 @pytest.mark.asyncio
+async def test_draft_journey_has_seven_phases_without_resolving_approvals(monkeypatch):
+    created = datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        status=IndentStatus.DRAFT.value,
+        requested_by_name="Requester",
+        position_id=101,
+        position_name="Technician",
+        created_at=created,
+        approved_at=None,
+        remarks="Draft note",
+    )
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service, "_workflow_rows", AsyncMock(return_value=(None, [], [])),
+    )
+    operational = AsyncMock(side_effect=AssertionError(
+        "Draft must not query operational journey evidence",
+    ))
+    monkeypatch.setattr(service, "_journey_operational_evidence", operational)
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 77, user())
+
+    assert [row["title"] for row in journey["phases"]] == [
+        "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+        "Delivery", "Acknowledgement",
+    ]
+    assert journey["phases"][0]["status"] == "PENDING"
+    assert journey["phases"][0]["is_current"] is True
+    assert all(
+        row["status"] == "PENDING" and not row["is_current"]
+        for row in journey["phases"][1:]
+    )
+    assert [row["title"] for row in journey["stages"]] == [
+        "Draft created",
+        "Request submitted",
+    ]
+    assert journey["stages"][0]["status"] == "PENDING"
+    assert journey["stages"][0]["is_current"] is True
+    assert journey["stages"][0]["approver_name"] == "Requester"
+    assert journey["stages"][0]["position_name"] == "Technician"
+    assert journey["stages"][0]["timestamp"] == created
+    assert journey["current_stage_message"] == (
+        "Draft — submit the indent to begin approval"
+    )
+    operational.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_submitted_without_pending_workflow_keeps_submission_current(monkeypatch):
+    created = datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc)
+    submitted_at = datetime(2026, 7, 27, 9, 5, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        status=IndentStatus.PENDING_APPROVAL.value,
+        requested_by_name="Requester",
+        position_id=101,
+        position_name="Technician",
+        created_at=created,
+        approved_at=None,
+        remarks=None,
+    )
+    submitted = SimpleNamespace(
+        id=1,
+        stage_sequence=0,
+        actor_id=10,
+        actor_name="Submitter",
+        actor_position="Technician",
+        action=ApprovalAction.SUBMITTED.value,
+        stage_name="Submitted",
+        comments="Please review",
+        acted_at=submitted_at,
+    )
+    instance = SimpleNamespace(
+        id=1,
+        status=InstanceStatus.IN_PROGRESS.value,
+        current_sequence=None,
+        current_stage_name=None,
+        resolved_chain=None,
+    )
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service,
+        "_workflow_rows",
+        AsyncMock(return_value=(instance, [submitted], [])),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 77, user())
+
+    assert journey["phases"][0]["status"] == "APPROVED"
+    assert journey["phases"][1]["status"] == "APPROVED"
+    assert journey["phases"][1]["is_current"] is True
+    assert journey["phases"][2]["status"] == "PENDING"
+    assert journey["phases"][2]["is_current"] is False
+    assert journey["stages"][0]["status"] == "APPROVED"
+    assert journey["stages"][1]["status"] == "SUBMITTED"
+    assert journey["stages"][1]["approver_name"] == "Submitter"
+    assert journey["stages"][1]["comments"] == "Please review"
+    assert journey["stages"][1]["timestamp"] == submitted_at
+    assert journey["stages"][1]["is_current"] is False
+    assert journey["current_stage_message"] == (
+        "Request submitted — waiting for approval"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_approval_preserves_actor_reason_and_pending_downstream(monkeypatch):
+    timestamp = datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        status=IndentStatus.REJECTED.value,
+        requested_by_name="Requester",
+        position_id=101,
+        position_name="Technician",
+        created_at=timestamp,
+        approved_at=None,
+        remarks=None,
+    )
+    submitted = SimpleNamespace(
+        id=1, stage_sequence=0, actor_id=10, actor_name="Requester",
+        actor_position="Technician", action=ApprovalAction.SUBMITTED.value,
+        stage_name="Submitted", comments=None, acted_at=timestamp,
+    )
+    rejected = SimpleNamespace(
+        id=2, stage_sequence=1, actor_id=20, actor_name="Regional Controller",
+        actor_position="Regional Controller", action=ApprovalAction.REJECTED.value,
+        stage_name="Regional Controller", comments="Incorrect quantity",
+        acted_at=timestamp,
+    )
+    instance = SimpleNamespace(
+        id=1,
+        status=InstanceStatus.REJECTED.value,
+        current_sequence=1,
+        current_stage_name=None,
+        resolved_chain=[{
+            "sequence": 1,
+            "position_name": "Regional Controller",
+            "role_name": "Regional Controller",
+            "approver_ids": [20],
+            "approver_names": ["Regional Controller"],
+        }],
+    )
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service,
+        "_workflow_rows",
+        AsyncMock(return_value=(instance, [submitted, rejected], [])),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 77, user())
+    approval_stage = journey["stages"][2]
+
+    assert [row["status"] for row in journey["phases"]] == [
+        "APPROVED", "APPROVED", "REJECTED", "PENDING", "PENDING",
+        "PENDING", "PENDING",
+    ]
+    assert not any(row["is_current"] for row in journey["phases"])
+    assert approval_stage["approver_name"] == "Regional Controller"
+    assert approval_stage["comments"] == "Incorrect quantity"
+    assert journey["current_stage_message"] == "Request rejected"
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_runtime_shape_returns_complete_seven_phase_contract(monkeypatch):
+    created = datetime(2026, 8, 2, 17, 7, 6, tzinfo=timezone.utc)
+    submitted_at = datetime(2026, 8, 2, 17, 33, 53, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=141,
+        indent_no="IND/2026-27/00141",
+        status=IndentStatus.PENDING_APPROVAL.value,
+        requested_by_name="A Anil Kumar",
+        position_id=55,
+        position_name="DRIVER-AP-104-MMU-CHILMATHUR",
+        created_at=created,
+        approved_at=None,
+        remarks=None,
+    )
+    instance = SimpleNamespace(
+        id=184,
+        status=InstanceStatus.IN_PROGRESS.value,
+        current_sequence=1,
+        current_stage_name="OE",
+        resolved_chain=[
+            {
+                "sequence": 1,
+                "role_name": "OE",
+                "position_name": "OE-AP-104-MMU-HINDUPUR",
+                "approver_ids": [7702],
+                "approver_names": ["C RAMAKRISHNA"],
+            },
+            {
+                "sequence": 2,
+                "role_name": "DISTRICT MANAGER",
+                "position_name": "DISTRICT MANAGER-AP-104-MMU-SRI-SATYA-SAI",
+                "approver_ids": [9283],
+                "approver_names": ["A Raveendra prasad"],
+            },
+        ],
+    )
+    submitted = SimpleNamespace(
+        id=528,
+        stage_sequence=0,
+        actor_id=8243,
+        actor_name="A Anil Kumar",
+        actor_position="DRIVER-AP-104-MMU-CHILMATHUR",
+        action=ApprovalAction.SUBMITTED.value,
+        stage_name="Submitted",
+        comments=None,
+        acted_at=submitted_at,
+    )
+    pending = SimpleNamespace(
+        id=368,
+        stage_sequence=1,
+        approver_id=7702,
+        created_at=submitted_at,
+    )
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service,
+        "_workflow_rows",
+        AsyncMock(return_value=(instance, [submitted], [pending])),
+    )
+    monkeypatch.setattr(
+        service,
+        "_approval_positions",
+        AsyncMock(side_effect=AssertionError("Frozen chain must remain authoritative")),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 141, user())
+
+    assert [phase["sequence"] for phase in journey["phases"]] == list(range(1, 8))
+    assert [phase["title"] for phase in journey["phases"]] == [
+        "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+        "Delivery", "Acknowledgement",
+    ]
+    assert [phase["status"] for phase in journey["phases"]] == [
+        "APPROVED", "APPROVED", "PENDING", "PENDING", "PENDING",
+        "PENDING", "PENDING",
+    ]
+    assert [phase["title"] for phase in journey["phases"] if phase["is_current"]] == [
+        "Approvals",
+    ]
+    assert journey["phases"][2]["approver_name"] == "OE Review"
+    assert journey["current_stage_message"] == "Waiting for OE review"
+
+
+@pytest.mark.asyncio
 async def test_journey_uses_frozen_dynamic_chain_and_omits_unavailable_roles(monkeypatch):
     db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
     submitted_at = datetime(2026, 7, 27, 9, 5, tzinfo=timezone.utc)
@@ -1573,7 +1823,8 @@ async def test_journey_uses_frozen_dynamic_chain_and_omits_unavailable_roles(mon
     journey = await service.indent_journey(db, 77, user())
 
     assert [stage["title"] for stage in journey["stages"]] == [
-        "Request Raised",
+        "Draft created",
+        "Request submitted",
         "OE Review",
         "Final Approval - SPH",
     ]
@@ -1581,10 +1832,83 @@ async def test_journey_uses_frozen_dynamic_chain_and_omits_unavailable_roles(mon
         "DM" in stage["title"] or "RM" in stage["title"]
         for stage in journey["stages"]
     )
-    assert journey["stages"][1]["status"] == "APPROVED"
-    assert journey["stages"][2]["status"] == "PENDING"
-    assert journey["stages"][2]["is_current"] is True
+    assert journey["stages"][2]["status"] == "APPROVED"
+    assert journey["stages"][3]["status"] == "PENDING"
+    assert journey["stages"][3]["is_current"] is True
     approval_positions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_journey_supports_custom_titles_multiple_holders_and_explicit_skip(monkeypatch):
+    timestamp = datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77, indent_no="IND/77", status=IndentStatus.PENDING_APPROVAL.value,
+        requested_by_name="Requester", position_id=101, position_name="Technician",
+        created_at=timestamp, approved_at=None, remarks=None,
+    )
+    instance = SimpleNamespace(
+        id=1,
+        status=InstanceStatus.IN_PROGRESS.value,
+        current_sequence=3,
+        current_stage_name="Regional Controller",
+        resolved_chain=[
+            {
+                "sequence": 1, "position_name": "Area Coordinator",
+                "role_name": "Area Coordinator", "approver_ids": [20],
+                "approver_names": ["Coordinator"],
+            },
+            {
+                "sequence": 2, "position_name": "Quality Controller",
+                "role_name": "Quality Controller", "approver_ids": [30],
+                "approver_names": ["Quality Lead"], "status": "SKIPPED",
+            },
+            {
+                "sequence": 3, "position_name": "Regional Controller",
+                "role_name": "Regional Controller", "approver_ids": [40, 41],
+                "approver_names": ["Controller One", "Controller Two"],
+            },
+        ],
+    )
+    actions = [
+        SimpleNamespace(
+            id=1, stage_sequence=0, actor_id=10, actor_name="Requester",
+            actor_position="Technician", action=ApprovalAction.SUBMITTED.value,
+            stage_name="Submitted", comments=None, acted_at=timestamp,
+        ),
+        SimpleNamespace(
+            id=2, stage_sequence=1, actor_id=20, actor_name="Coordinator",
+            actor_position="Area Coordinator", action=ApprovalAction.APPROVED.value,
+            stage_name="Area Coordinator", comments="Approved", acted_at=timestamp,
+        ),
+    ]
+    pending = [SimpleNamespace(
+        id=1, approver_id=40, stage_sequence=3, created_at=timestamp,
+    )]
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service, "_workflow_rows", AsyncMock(return_value=(instance, actions, pending)),
+    )
+    monkeypatch.setattr(
+        service, "_approval_positions",
+        AsyncMock(side_effect=AssertionError("current HCM must not be consulted")),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 77, user())
+
+    assert [row["title"] for row in journey["stages"][2:]] == [
+        "Area Coordinator Review",
+        "Quality Controller Review",
+        "Final Approval - Regional Controller",
+    ]
+    assert any(row["status"] == "NOT_REQUIRED" for row in journey["stages"])
+    assert journey["stages"][-1]["is_current"] is True
+    assert journey["phases"][2]["is_current"] is True
+    assert not any(
+        familiar in row["title"]
+        for familiar in ("OE", "DM", "RM", "SPH", "COO")
+        for row in journey["stages"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1605,7 +1929,12 @@ async def test_journey_current_stage_calculation(monkeypatch):
     dm_holder = service._JourneyPositionHolder(30, "DM One")
     monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
     monkeypatch.setattr(service, "_workflow_rows", AsyncMock(return_value=(
-        SimpleNamespace(id=1, status=InstanceStatus.IN_PROGRESS.value),
+        SimpleNamespace(
+            id=1,
+            status=InstanceStatus.IN_PROGRESS.value,
+            current_sequence=1,
+            current_stage_name="Area Coordinator",
+        ),
         [],
         [SimpleNamespace(id=1, approver_id=20, stage_sequence=1, created_at=indent.created_at)],
     )))
@@ -1615,15 +1944,16 @@ async def test_journey_current_stage_calculation(monkeypatch):
     ]))
 
     journey = await service.indent_journey(db, 77, user())
-    current = [stage for stage in journey["stages"] if stage["is_current"]]
-
-    assert len(current) == 1
-    assert current[0]["title"] == "OE Review"
-    assert all(
-        not stage["is_current"]
-        for stage in journey["stages"]
-        if stage["title"] in {"DM Review", "Ready for Allocation"}
-    )
+    assert [stage["title"] for stage in journey["stages"]] == [
+        "Draft created",
+        "Request submitted",
+        "Area Coordinator",
+        "DISTRICT MANAGER Review",
+    ]
+    assert [stage["title"] for stage in journey["stages"] if stage["is_current"]] == [
+        "Area Coordinator",
+    ]
+    assert journey["current_stage_message"] == "Waiting for Area Coordinator"
 
 
 @pytest.mark.asyncio
@@ -1667,7 +1997,20 @@ async def test_sph_coo_any_one_result_uses_successful_final_approver(monkeypatch
     ]
     monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
     monkeypatch.setattr(service, "_workflow_rows", AsyncMock(return_value=(
-        SimpleNamespace(id=1, status=InstanceStatus.APPROVED.value),
+        SimpleNamespace(
+            id=1,
+            status=InstanceStatus.APPROVED.value,
+            current_sequence=4,
+            current_stage_name=None,
+            resolved_chain=[{
+                "sequence": 4,
+                "position_name": "Executive Authority",
+                "role_name": "Executive Authority",
+                "approver_ids": [55, 56],
+                "approver_names": ["SPH", "COO"],
+                "approval_mode": "ANY_ONE",
+            }],
+        ),
         actions,
         [],
     )))
@@ -1702,7 +2045,7 @@ async def test_sph_coo_any_one_result_uses_successful_final_approver(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_journey_rejects_post_approval_without_identified_final_stage(monkeypatch):
+async def test_old_journey_without_resolved_chain_keeps_recorded_actions(monkeypatch):
     db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
     acted_at = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
     indent = SimpleNamespace(
@@ -1747,8 +2090,13 @@ async def test_journey_rejects_post_approval_without_identified_final_stage(monk
     )))
     monkeypatch.setattr(service, "_approval_positions", AsyncMock(return_value=[]))
 
-    with pytest.raises(ValidationError, match="final stage_name"):
-        await service.indent_journey(db, 77, user())
+    journey = await service.indent_journey(db, 77, user())
+
+    assert [stage["title"] for stage in journey["stages"][:3]] == [
+        "Draft created", "Request submitted", "Approval",
+    ]
+    assert journey["stages"][2]["approver_name"] == "Approver"
+    assert not any(stage["status"] == "PENDING" for stage in journey["stages"])
 
 
 @pytest.mark.asyncio
@@ -1792,7 +2140,12 @@ async def test_journey_completed_stages_use_workflow_actions_not_latest_hcm(monk
     ]
     monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
     monkeypatch.setattr(service, "_workflow_rows", AsyncMock(return_value=(
-        SimpleNamespace(id=1, status=InstanceStatus.IN_PROGRESS.value),
+        SimpleNamespace(
+            id=1,
+            status=InstanceStatus.IN_PROGRESS.value,
+            current_sequence=2,
+            current_stage_name="Regional Controller",
+        ),
         actions,
         [SimpleNamespace(id=1, approver_id=30, stage_sequence=2, created_at=acted_at)],
     )))
@@ -1803,11 +2156,13 @@ async def test_journey_completed_stages_use_workflow_actions_not_latest_hcm(monk
 
     journey = await service.indent_journey(db, 77, user())
     completed = next(stage for stage in journey["stages"] if stage["title"] == "OE Review")
-    current = next(stage for stage in journey["stages"] if stage["is_current"])
 
     assert completed["approver_name"] == "Historical OE"
     assert completed["position_name"] == "OLD OE POSITION"
-    assert current["title"] == "DM Review"
+    assert [stage["title"] for stage in journey["stages"] if stage["is_current"]] == [
+        "Regional Controller",
+    ]
+    assert journey["current_stage_message"] == "Waiting for Regional Controller"
 
 
 def test_journey_history_keeps_same_timestamp_actions_with_same_type():
@@ -1844,3 +2199,440 @@ def test_journey_history_keeps_same_timestamp_actions_with_same_type():
     history = service._journey_history(indent, actions, [])
 
     assert len([event for event in history if event["event_type"] == "APPROVED"]) == 2
+
+
+def test_receipt_audit_events_preserve_multiple_partial_and_full_acknowledgements():
+    first = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    second = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    indent = SimpleNamespace(id=77, indent_no="IND/77")
+    audits = [
+        SimpleNamespace(
+            id=11,
+            actor_name="Requester",
+            created_at=first,
+            changed_fields={"101": {"from": 0, "to": 4}},
+        ),
+        SimpleNamespace(
+            id=12,
+            actor_name="Requester",
+            created_at=second,
+            changed_fields={
+                "101": {"from": 4, "to": 10},
+                "status": {"from": "PARTIALLY_FULFILLED", "to": "CLOSED"},
+            },
+        ),
+    ]
+
+    events = service._receipt_audit_events(indent, audits)
+
+    assert [event["event_type"] for event in events] == [
+        "ACKNOWLEDGEMENT_SUBMITTED", "PARTIALLY_RECEIVED",
+        "ACKNOWLEDGEMENT_SUBMITTED", "FULLY_RECEIVED",
+    ]
+    assert [event["quantity_summary"] for event in events] == [
+        "4 received", "4 received", "6 received", "6 received",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_journey_related_allocation_workflow_returns_each_actual_dynamic_action():
+    timestamp = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    instance = SimpleNamespace(
+        id=501,
+        doc_id=91,
+        resolved_chain=[
+            {
+                "sequence": 1,
+                "role_name": "Inventory Controller",
+                "position_name": "Inventory Controller - South",
+                "approval_mode": "ALL",
+            },
+            {
+                "sequence": 2,
+                "role_name": "Regional Stock Authority",
+                "position_name": "Regional Stock Authority",
+                "approval_mode": "ANY_ONE",
+            },
+        ],
+    )
+    actions = [
+        SimpleNamespace(
+            id=601, instance_id=501, stage_sequence=0, stage_name="Submitted",
+            actor_name="Allocator", actor_position="Stores Executive",
+            action=ApprovalAction.SUBMITTED.value, comments=None, acted_at=timestamp,
+        ),
+        SimpleNamespace(
+            id=602, instance_id=501, stage_sequence=1,
+            stage_name="Inventory Controller", actor_name="Controller One",
+            actor_position="Inventory Controller - South",
+            action=ApprovalAction.APPROVED.value, comments="Checked",
+            acted_at=timestamp,
+        ),
+        SimpleNamespace(
+            id=603, instance_id=501, stage_sequence=2,
+            stage_name="Regional Stock Authority", actor_name="Authority One",
+            actor_position="Regional Stock Authority",
+            action=ApprovalAction.APPROVED.value, comments="Approved",
+            acted_at=timestamp,
+        ),
+    ]
+    db = SimpleNamespace(execute=AsyncMock(side_effect=[
+        EmptyResult(mapping_rows=[instance]),
+        EmptyResult(mapping_rows=actions),
+    ]))
+
+    events, submitted_ids = await service._related_workflow_events(
+        db,
+        doc_type="ALLOCATION",
+        doc_ids=[91],
+        domain="Allocation",
+        stage_type="allocation_approval",
+        include_submission=True,
+        sort_order=45,
+        references={91: "ALLOC-91"},
+    )
+
+    assert submitted_ids == {91}
+    assert [event["title"] for event in events] == [
+        "Allocation submitted",
+        "Inventory Controller approved",
+        "Regional Stock Authority approved",
+    ]
+    assert [event["approval_mode"] for event in events[1:]] == ["ALL", "ANY_ONE"]
+    assert all(event["reference_no"] == "ALLOC-91" for event in events)
+    assert len({event["id"] for event in events}) == 3
+
+
+@pytest.mark.asyncio
+async def test_complete_journey_and_seven_phases_use_operational_evidence(monkeypatch):
+    created = datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc)
+    approved = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    completed = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        status=IndentStatus.CLOSED.value,
+        requested_by_name="Requester",
+        position_id=101,
+        position_name="Field Operator",
+        created_at=created,
+        approved_at=approved,
+        remarks=None,
+    )
+    submitted = SimpleNamespace(
+        id=1, stage_sequence=0, actor_id=10, actor_name="Requester",
+        actor_position="Field Operator", action=ApprovalAction.SUBMITTED.value,
+        stage_name="Submitted", comments=None, acted_at=created,
+    )
+    final = SimpleNamespace(
+        id=2, stage_sequence=1, actor_id=20, actor_name="Controller One",
+        actor_position="Regional Controller", action=ApprovalAction.APPROVED.value,
+        stage_name="Regional Controller", comments="Approved", acted_at=approved,
+    )
+    instance = SimpleNamespace(
+        id=1,
+        status=InstanceStatus.APPROVED.value,
+        current_sequence=1,
+        current_stage_name=None,
+        resolved_chain=[{
+            "sequence": 1,
+            "position_name": "Regional Controller",
+            "role_name": "Regional Controller",
+            "approver_ids": [20, 21],
+            "approver_names": ["Controller One", "Controller Two"],
+            "approval_mode": "ANY_ONE",
+        }],
+    )
+    operational_stages = [
+        {
+            "title": title, "status": "APPROVED", "is_current": False,
+            "approver_name": actor, "position_name": None, "timestamp": completed,
+            "comments": None, "duration_seconds": None, "stage_type": stage_type,
+            "approval_mode": None, "reference_no": reference,
+            "quantity_summary": "10 of 10", "evidence_source": source,
+        }
+        for title, stage_type, actor, reference, source in [
+            ("Stock allocated", "allocation", "Allocator", "ALLOC-1", "inv_allocations"),
+            ("Issued from warehouse", "warehouse", "Storekeeper", "ISS-1", "out_issues"),
+            ("Dispatched", "delivery", "Security", "DSP-1", "out_dispatches.gate_out_at"),
+            ("Delivered", "delivery", "Receiver", "DSP-1", "out_dispatches.delivered_at"),
+            ("Fully received", "acknowledgement", "Requester", None, "received_qty"),
+            ("Completed", "completion", "Requester", None, "status=CLOSED"),
+        ]
+    ]
+    operational_event = {
+        "id": "completion:77", "event_type": "COMPLETED", "title": "Completed",
+        "description": "IND/77 fully received and closed", "actor_name": "Requester",
+        "position_name": None, "timestamp": completed, "comments": None,
+        "reference_no": None, "quantity_summary": "10 of 10",
+    }
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service, "_workflow_rows",
+        AsyncMock(return_value=(instance, [submitted, final], [])),
+    )
+    monkeypatch.setattr(
+        service, "_journey_operational_evidence",
+        AsyncMock(return_value={
+            "stages": operational_stages,
+            "events": [operational_event],
+            "missing_sources": [],
+            "has_allocation": True,
+            "has_issue": True,
+            "issue_complete": True,
+            "has_dispatch": True,
+            "has_delivery": True,
+            "delivery_complete": True,
+            "has_receipt": True,
+            "receipt_complete": True,
+            "is_complete": True,
+        }),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 77, user())
+
+    assert [row["title"] for row in journey["phases"]] == [
+        "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+        "Delivery", "Acknowledgement",
+    ]
+    assert all(row["status"] == "APPROVED" for row in journey["phases"])
+    assert journey["stages"][:2][0]["title"] == "Draft created"
+    assert journey["stages"][:2][1]["title"] == "Request submitted"
+    assert journey["stages"][2]["approval_mode"] == "ANY_ONE"
+    assert journey["stages"][2]["approver_name"] == "Controller One"
+    assert journey["stages"][-1]["title"] == "Final Approval - Regional Controller"
+    assert journey["current_stage_message"] == "Completed"
+    assert journey["history"][-1]["event_type"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_journey_projects_chronological_batches_without_future_cards(monkeypatch):
+    created = datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77, indent_no="IND/77", status=IndentStatus.PARTIALLY_FULFILLED.value,
+        requested_by_name="Requester", position_id=101, position_name="Operator",
+        created_at=created, approved_at=created, remarks=None,
+    )
+    actions = [
+        SimpleNamespace(
+            id=1, stage_sequence=0, actor_id=10, actor_name="Requester",
+            actor_position="Operator", action=ApprovalAction.SUBMITTED.value,
+            stage_name="Submitted", comments=None,
+            acted_at=datetime(2026, 7, 27, 9, 5, tzinfo=timezone.utc),
+        ),
+        SimpleNamespace(
+            id=2, stage_sequence=1, actor_id=20, actor_name="Custom Approver",
+            actor_position="Custom Position", action=ApprovalAction.APPROVED.value,
+            stage_name="Custom Approval", comments="Approved",
+            acted_at=datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc),
+        ),
+    ]
+    instance = SimpleNamespace(
+        id=1, status=InstanceStatus.APPROVED.value, current_sequence=1,
+        current_stage_name=None, resolved_chain=[{
+            "sequence": 1, "position_name": "Custom Position",
+            "role_name": "Custom Approval", "approver_ids": [20],
+            "approver_names": ["Custom Approver"], "approval_mode": "ANY_ONE",
+        }],
+    )
+
+    def event(identifier, event_type, title, hour, reference=None, quantity=None, order=50):
+        return {
+            "id": identifier, "event_type": event_type, "title": title,
+            "description": title, "actor_name": None, "position_name": None,
+            "timestamp": datetime(2026, 7, 27, hour, 0, tzinfo=timezone.utc),
+            "comments": None, "reference_no": reference,
+            "quantity_summary": quantity, "_sort_order": order,
+        }
+
+    operational_events = [
+        event("delivery:2", "DELIVERED", "Delivered", 17, "DSP-2", "3 delivered", 80),
+        event("allocation:1", "STOCK_ALLOCATED", "Stock allocated", 11, "ALLOC-1", "6 allocated", 50),
+        event("issue:1", "WAREHOUSE_ISSUED", "Issued from warehouse", 12, "ISS-1", "6 issued", 60),
+        event("dispatch:1", "DISPATCHED", "Dispatched", 13, "DSP-1", "3 dispatched", 70),
+        event("delivery:1", "DELIVERED", "Delivered", 14, "DSP-1", "3 delivered", 80),
+        event("ack:1", "ACKNOWLEDGEMENT_SUBMITTED", "Acknowledgement submitted", 15, "DSP-1", "3 received", 100),
+        event("receipt:1", "PARTIALLY_RECEIVED", "Partially received", 15, None, "3 received", 110),
+        event("dispatch:2", "DISPATCHED", "Dispatched", 16, "DSP-2", "3 dispatched", 70),
+    ]
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service, "_workflow_rows", AsyncMock(return_value=(instance, actions, [])),
+    )
+    monkeypatch.setattr(
+        service, "_journey_operational_evidence", AsyncMock(return_value={
+            "stages": [], "events": operational_events, "missing_sources": [],
+            "has_allocation": True, "allocation_complete": True,
+            "has_material_request": False, "has_issue": True, "issue_complete": True,
+            "has_dispatch": True, "has_delivery": True, "delivery_complete": True,
+            "has_acknowledgement": True, "has_receipt": True,
+            "receipt_complete": False, "is_complete": False,
+        }),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 77, user())
+
+    occurred = journey["history"]
+    assert [row["title"] for row in occurred] == [
+        "Draft created", "Request submitted", "Custom Approval approved",
+        "Stock allocated", "Issued from warehouse", "Dispatched", "Delivered",
+        "Acknowledgement submitted", "Partially received", "Dispatched", "Delivered",
+    ]
+    assert [row["reference_no"] for row in occurred if row["title"] == "Delivered"] == [
+        "DSP-1", "DSP-2",
+    ]
+    assert not any(row["is_current"] for row in journey["stages"])
+    assert not any(row["status"] == "PENDING" for row in journey["stages"])
+    assert not {"Fully received", "Completed"} & {
+        row["title"] for row in journey["history"]
+    }
+    assert [row["timestamp"] for row in journey["history"]] == sorted(
+        row["timestamp"] for row in journey["history"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("evidence", "current_title", "message", "completed_titles"),
+    [
+        (
+            {"has_allocation": True},
+            "Warehouse",
+            "Waiting for warehouse issue",
+            {"Draft", "Submitted", "Approvals", "Allocation"},
+        ),
+        (
+            {"has_allocation": True, "has_issue": True, "issue_complete": True},
+            "Delivery",
+            "Waiting for dispatch",
+            {"Draft", "Submitted", "Approvals", "Allocation", "Warehouse"},
+        ),
+        (
+            {
+                "has_allocation": True,
+                "has_issue": True,
+                "issue_complete": True,
+                "has_dispatch": True,
+                "has_delivery": True,
+                "delivery_complete": True,
+            },
+            "Acknowledgement",
+            "Waiting for acknowledgement",
+            {
+                "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+                "Delivery",
+            },
+        ),
+        (
+            {
+                "has_allocation": True,
+                "has_issue": True,
+                "issue_complete": True,
+                "has_dispatch": True,
+                "has_delivery": True,
+                "delivery_complete": True,
+                "has_receipt": True,
+            },
+            "Acknowledgement",
+            "Partially received",
+            {
+                "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+                "Delivery",
+            },
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_seven_phase_precedence_uses_only_operational_evidence(
+    monkeypatch, evidence, current_title, message, completed_titles,
+):
+    timestamp = datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77,
+        indent_no="IND/77",
+        status=IndentStatus.PARTIALLY_FULFILLED.value,
+        requested_by_name="Requester",
+        position_id=101,
+        position_name="Field Operator",
+        created_at=timestamp,
+        approved_at=timestamp,
+        remarks=None,
+    )
+    submitted = SimpleNamespace(
+        id=1,
+        stage_sequence=0,
+        actor_id=10,
+        actor_name="Requester",
+        actor_position="Field Operator",
+        action=ApprovalAction.SUBMITTED.value,
+        stage_name="Submitted",
+        comments=None,
+        acted_at=timestamp,
+    )
+    approved = SimpleNamespace(
+        id=2,
+        stage_sequence=1,
+        actor_id=20,
+        actor_name="Controller",
+        actor_position="Regional Controller",
+        action=ApprovalAction.APPROVED.value,
+        stage_name="Regional Controller",
+        comments=None,
+        acted_at=timestamp,
+    )
+    instance = SimpleNamespace(
+        id=1,
+        status=InstanceStatus.APPROVED.value,
+        current_sequence=1,
+        current_stage_name=None,
+        resolved_chain=[{
+            "sequence": 1,
+            "position_name": "Regional Controller",
+            "role_name": "Regional Controller",
+            "approver_ids": [20],
+            "approver_names": ["Controller"],
+        }],
+    )
+    operational = {
+        "stages": [],
+        "events": [],
+        "missing_sources": [],
+        "has_allocation": False,
+        "has_issue": False,
+        "issue_complete": False,
+        "has_dispatch": False,
+        "has_delivery": False,
+        "delivery_complete": False,
+        "has_receipt": False,
+        "receipt_complete": False,
+        "is_complete": False,
+        **evidence,
+    }
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service,
+        "_workflow_rows",
+        AsyncMock(return_value=(instance, [submitted, approved], [])),
+    )
+    monkeypatch.setattr(
+        service,
+        "_journey_operational_evidence",
+        AsyncMock(return_value=operational),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 77, user())
+    phases = {row["title"]: row for row in journey["phases"]}
+
+    assert [row["title"] for row in journey["phases"]] == [
+        "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+        "Delivery", "Acknowledgement",
+    ]
+    assert [row["title"] for row in journey["phases"] if row["is_current"]] == [
+        current_title,
+    ]
+    assert {
+        title for title, row in phases.items() if row["status"] == "APPROVED"
+    } == completed_titles
+    assert journey["current_stage_message"] == message

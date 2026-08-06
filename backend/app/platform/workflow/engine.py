@@ -32,6 +32,11 @@ _ACTION_ALIASES = {
     "RETURN": ApprovalAction.RETURNED.value,
 }
 FINAL_REPORTING_STAGE_NAME = "Final authority"
+# A return-for-correction is parked *inside* the rung it was raised from, so the
+# instance stays IN_PROGRESS and resumes at the same rung. Storing it as its own
+# chain entry would make it look like an extra approval level to everything that
+# walks resolved_chain.
+CORRECTION_KEY = "_correction"
 
 
 def _normalize_action(action: str) -> str:
@@ -94,6 +99,22 @@ async def _load_instance(db: AsyncSession, doc_type: str, doc_id: int) -> Instan
         select(Instance).where(Instance.doc_type == doc_type, Instance.doc_id == doc_id)
         .order_by(Instance.id.desc())
     )).scalars().first()
+
+
+async def _load_active_instance_for_update(
+    db: AsyncSession, doc_type: str, doc_id: int,
+) -> Instance:
+    """Row-lock the live instance. Return and resubmit both rewrite `resolved_chain`,
+    so two concurrent callers must not read the same chain and write it back."""
+    instance = (await db.execute(
+        select(Instance)
+        .where(Instance.doc_type == doc_type, Instance.doc_id == doc_id)
+        .order_by(Instance.id.desc())
+        .with_for_update()
+    )).scalars().first()
+    if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
+        raise ValidationError("No in-progress approval for this document")
+    return instance
 
 
 async def _stage_satisfied(db, instance, stage, approver_ids: set[int]) -> bool:
@@ -363,6 +384,79 @@ def _link(instance: Instance) -> dict | None:
     return chain[index] if 0 <= index < len(chain) else None
 
 
+def _chain_links(instance: Instance) -> list[dict]:
+    """Return only real ladder rungs; metadata lives inside a rung, never as one."""
+    return [
+        link for link in (instance.resolved_chain or [])
+        if isinstance(link, dict) and "sequence" in link
+    ]
+
+
+def _with_correction(instance: Instance, sequence: int, correction: dict | None) -> None:
+    chain = []
+    updated = False
+    for link in _chain_links(instance):
+        row = dict(link)
+        if int(row.get("sequence", 0)) == int(sequence):
+            if correction is None:
+                row.pop(CORRECTION_KEY, None)
+            else:
+                row[CORRECTION_KEY] = dict(correction)
+            updated = True
+        chain.append(row)
+    if not updated:
+        raise ValidationError("Approval stage not found")
+    instance.resolved_chain = chain
+
+
+def _correction_from_instance(instance: Instance) -> dict | None:
+    for link in _chain_links(instance):
+        correction = link.get(CORRECTION_KEY)
+        if isinstance(correction, dict):
+            return dict(correction)
+    return None
+
+
+def _link_by_sequence(instance: Instance, sequence: int) -> dict | None:
+    for link in _chain_links(instance):
+        if int(link.get("sequence", 0)) == int(sequence):
+            return link
+    return None
+
+
+def _single_allowed_position(link: dict | None) -> int | None:
+    if not link:
+        return None
+    allowed = ladder.allowed_position_ids(link)
+    return allowed[0] if len(allowed) == 1 else None
+
+
+def _reliable_actor_position(link: dict | None, actor_id: int | None) -> int | None:
+    """Only pin a correction to a position when the rung leaves no doubt which one.
+
+    A rung held by several positions cannot say which of them the actor was wearing,
+    and guessing would lock the correction owner out of their own document."""
+    if not link or actor_id is None:
+        return None
+    if int(actor_id) not in {int(value) for value in link.get("approver_ids", [])}:
+        return None
+    return _single_allowed_position(link)
+
+
+async def _latest_approved_action(
+    db: AsyncSession, instance: Instance, sequence: int,
+) -> Action | None:
+    return (await db.execute(
+        select(Action)
+        .where(
+            Action.instance_id == instance.id,
+            Action.stage_sequence == sequence,
+            Action.action == ApprovalAction.APPROVED.value,
+        )
+        .order_by(Action.acted_at.desc(), Action.id.desc())
+    )).scalars().first()
+
+
 async def _ladder_approvers(db: AsyncSession, instance: Instance, link: dict) -> list:
     """The rung's holders, plus anyone they have delegated to."""
     employees = [e for e in [
@@ -540,6 +634,166 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
     else:
         await _finish_ladder(db, instance)
         await _notify_outcome(db, instance, True, user, comments)
+    await db.flush()
+    return instance
+
+
+# ---------------- return for correction (ladder only) ----------------
+#
+# Not `act()`: a return for correction is a pause, not a decision that ends the
+# approval. The instance stays IN_PROGRESS and resumes at the rung it left, so the
+# ladder resolved at submit time is never re-resolved and no approver below is asked
+# to decide the same thing twice.
+
+async def return_for_correction(
+    db, doc_type: str, doc_id: int, user, comments: str = "",
+    context: dict | None = None,
+) -> Instance:
+    """Pause a ladder approval on the same instance and hand correction to one owner."""
+    context = context or {}
+    instance = await _load_active_instance_for_update(db, doc_type, doc_id)
+    if not instance.resolved_chain:
+        raise ValidationError("Return for correction requires a resolved approval ladder")
+    if _correction_from_instance(instance):
+        raise ValidationError("This document is already returned for correction")
+
+    link = _link(instance)
+    if link is None:
+        raise ValidationError("Approval stage not found")
+    pending = (await db.execute(
+        select(Pending).where(
+            Pending.instance_id == instance.id,
+            Pending.stage_sequence == instance.current_sequence,
+        )
+    )).scalars().all()
+    if user.id not in {row.approver_id for row in pending}:
+        raise PermissionError_("You are not a valid approver for the current stage")
+
+    active_position_id = getattr(user, "active_position_id", None)
+    allowed_positions = ladder.allowed_position_ids(link)
+    if (allowed_positions
+            and user.id in link.get("approver_ids", [])
+            and active_position_id not in allowed_positions):
+        raise PermissionError_("Switch to the approval position before acting")
+
+    # The correction goes back one rung, not to the raiser every time: at the first
+    # rung that is the requester, above it the person who approved just below.
+    if int(instance.current_sequence or 0) <= 1:
+        correction_owner_employee_id = instance.started_by_id
+        correction_owner_position_id = context.get("requester_position_id")
+        correction_owner_name = instance.started_by_name
+    else:
+        previous_sequence = int(instance.current_sequence) - 1
+        previous_action = await _latest_approved_action(db, instance, previous_sequence)
+        if previous_action is None or previous_action.actor_id is None:
+            raise ValidationError("Previous approval actor not found")
+        previous_link = _link_by_sequence(instance, previous_sequence)
+        correction_owner_employee_id = previous_action.actor_id
+        correction_owner_position_id = _reliable_actor_position(
+            previous_link, previous_action.actor_id,
+        )
+        correction_owner_name = previous_action.actor_name
+
+    if correction_owner_employee_id is None:
+        raise ValidationError("Correction owner not found")
+
+    # The position is snapshotted exactly as `act()` does it for every other action.
+    # It is not decoration: indent visibility for a workflow participant matches
+    # Action.actor_position against the viewer's active position, so a RETURNED row
+    # written without one leaves the returning approver unable to open the document
+    # they just acted on.
+    active_position = await hcm_service.get_position(
+        db, active_position_id) if active_position_id else None
+    action_row = Action(
+        instance_id=instance.id,
+        stage_sequence=instance.current_sequence,
+        stage_name=link["role_name"],
+        actor_id=user.id,
+        actor_name=user.full_name,
+        actor_position=active_position.name if active_position else None,
+        action=ApprovalAction.RETURNED.value,
+        comments=comments,
+    )
+    db.add(action_row)
+    await db.flush()
+
+    returned_at = action_row.acted_at.isoformat() if action_row.acted_at else None
+    correction = {
+        "correction_owner_employee_id": int(correction_owner_employee_id),
+        "correction_owner_position_id": (
+            int(correction_owner_position_id)
+            if correction_owner_position_id is not None else None
+        ),
+        "correction_owner_name": correction_owner_name,
+        "returned_from_sequence": int(instance.current_sequence),
+        "returned_from_stage": link.get("role_name"),
+        "resubmit_target_sequence": int(instance.current_sequence),
+        "resubmit_target_stage": link.get("role_name"),
+        "returned_by_employee_id": user.id,
+        "returned_by_position_id": active_position_id,
+        "returned_by_name": user.full_name,
+        "return_action_id": int(action_row.id),
+        "returned_at": returned_at,
+    }
+    _with_correction(instance, int(instance.current_sequence), correction)
+    await _clear_pending(db, instance.id)
+    await db.flush()
+    return instance
+
+
+async def get_correction_state(db, doc_type: str, doc_id: int) -> dict | None:
+    instance = await _load_instance(db, doc_type, doc_id)
+    if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
+        return None
+    correction = _correction_from_instance(instance)
+    if not correction:
+        return None
+    action_id = correction.get("return_action_id")
+    action = await db.get(Action, action_id) if action_id is not None else None
+    return {
+        **correction,
+        "instance_id": instance.id,
+        "doc_type": instance.doc_type,
+        "doc_id": instance.doc_id,
+        "correction_comment": action.comments if action else None,
+    }
+
+
+async def resubmit_correction(
+    db, doc_type: str, doc_id: int, user, context: dict | None = None,
+) -> Instance:
+    context = context or {}
+    instance = await _load_active_instance_for_update(db, doc_type, doc_id)
+    correction = _correction_from_instance(instance)
+    if not correction:
+        raise ValidationError("This document is not returned for correction")
+
+    if int(correction.get("correction_owner_employee_id") or 0) != int(user.id):
+        raise PermissionError_("Only the correction owner can resubmit this document")
+    owner_position_id = correction.get("correction_owner_position_id")
+    if (
+        owner_position_id is not None
+        and getattr(user, "active_position_id", None) != int(owner_position_id)
+    ):
+        raise PermissionError_("Switch to the correction owner position before resubmitting")
+
+    # Pending rows are cleared on return, so any that exist mean a resubmit already
+    # landed. Without this a double-click reopens the rung twice.
+    pending_count = await db.scalar(
+        select(Pending.id)
+        .where(Pending.instance_id == instance.id)
+        .limit(1)
+    )
+    if pending_count is not None:
+        raise ValidationError("This correction has already been resubmitted")
+
+    target_sequence = int(correction["resubmit_target_sequence"])
+    target = _link_by_sequence(instance, target_sequence)
+    if target is None:
+        raise ValidationError("Resubmit target stage not found")
+    _with_correction(instance, target_sequence, None)
+    await _clear_pending(db, instance.id)
+    await _open_ladder_link(db, instance, target, context)
     await db.flush()
     return instance
 

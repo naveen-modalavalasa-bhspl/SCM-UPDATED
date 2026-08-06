@@ -14,6 +14,7 @@ import {
   updateReceipt, uploadAttachment, vendorOptions, warehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
+import { alerts } from "@/modules/alerts";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
 
 /**
@@ -319,6 +320,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       return saved;
     },
     onSuccess: (saved: Receipt) => {
+      void alerts.success("receipt.saved", { number: saved.grn_no });
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       qc.invalidateQueries({ queryKey: ["wh-gate-entries"] });
       qc.invalidateQueries({ queryKey: ["wh-receipt", String(saved.id)] });
@@ -343,7 +345,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       if (!locked) await updateReceipt(Number(id), form);
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
     },
-    onSuccess: () => {
+    onSuccess: (_result, what) => {
+      const number = doc?.grn_no ?? "The receipt";
+      void alerts.success(what === "complete" ? "grn.posted" : "receipt.submitted", { number });
       qc.invalidateQueries({ queryKey: ["wh-receipt", id] });
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       setConfirming(null);

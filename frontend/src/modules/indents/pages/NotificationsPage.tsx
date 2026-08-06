@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react"
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Bell } from "lucide-react";
-import { Card, StatusPill } from "@/shared/components";
+import { Card } from "@/shared/components";
 import {
   INDENT_QUERY_GC_TIME,
   INDENT_QUERY_STALE_TIME,
@@ -13,6 +13,7 @@ import {
   useIndentAccountScope,
 } from "../api";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
+import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge";
 import { PaginatedResults, useAdjacentPagePrefetch } from "../components/PaginatedResults";
 import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
 import { IndentFilterValueProvider, useIndentFilters } from "../context/IndentFilterContext";
@@ -109,6 +110,7 @@ function IndentNotificationsContent({
         showCreate={false}
         filterMode="notifications"
         statusFilterOptions={INDENT_REQUEST_STATUS_FILTER_OPTIONS}
+        statusFilterLabel="Status"
         separateDateFilters
         showRequiredBy={false}
         showPriority={false}
@@ -158,7 +160,7 @@ function IndentNotificationsContent({
                 <span className="min-w-0 flex-1">
                   <span className="flex flex-wrap items-center justify-between gap-2">
                     <strong className="text-sm text-ink">{note.title}</strong>
-                    <StatusPill status={note.status} />
+                    <IndentSummaryStatusBadge status={note.status} />
                   </span>
                   <span className="mt-1 block text-sm text-body">{note.message}</span>
                   <span className="mt-1 block text-xs text-muted">

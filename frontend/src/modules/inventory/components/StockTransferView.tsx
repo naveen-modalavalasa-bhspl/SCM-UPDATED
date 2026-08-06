@@ -12,6 +12,7 @@ import {
   listSTOs, getSTO, createSTO, approveSTO, dispatchSTO, receiveSTO,
   getWarehouses, getCatalogItems, getStockBalances,
 } from "../api";
+import { alerts } from "@/modules/alerts";
 
 /**
  * Stock transfer orders between warehouses.
@@ -87,10 +88,33 @@ export function StockTransferView() {
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["stos"] });
   const fail = (e: any) => setError(e?.response?.data?.error ?? "The action failed");
+  /** Alerts name things, not ids: "Bolt M8 from Main Store", never "17 from 3". */
+  const itemName = (id: string | number) =>
+    catalog.find((i) => String(i.id) === String(id))?.name ?? "the item";
+  const warehouseName = (id: string | number) =>
+    warehouses.find((w) => String(w.id) === String(id))?.name ?? "the warehouse";
 
   const advance = useMutation({
-    mutationFn: ({ id, run }: { id: number; run: (id: number) => Promise<unknown> }) => run(id),
-    onSuccess: () => { setError(""); setSelected(null); refresh(); },
+    mutationFn: (
+      { id, run }: { id: number; run: (id: number) => Promise<unknown>; row: STO; label: string },
+    ) => run(id),
+    onSuccess: (_result, { row, label }) => {
+      // Receiving is the only step that actually lands the stock, so it gets the
+      // "now at" wording; approve and dispatch only move the paperwork along.
+      if (label === "Receive") {
+        void alerts.success("stock.transferred", {
+          qty: row.total_qty ?? row.items?.[0]?.requested_qty ?? "The stock",
+          item: row.items?.[0]?.item_name ?? "the transferred items",
+          destination: row.to_warehouse_name ?? "the destination",
+        });
+      } else {
+        void alerts.success("stock.transfer_advanced", {
+          number: row.sto_no ?? "The transfer",
+          status: label === "Approve" ? "approved" : "dispatched",
+        });
+      }
+      setError(""); setSelected(null); refresh();
+    },
     onError: fail,
   });
 
@@ -110,7 +134,8 @@ export function StockTransferView() {
           .filter((l) => l.item_id && Number(l.requested_qty) > 0)
           .map((l) => ({ item_id: Number(l.item_id), requested_qty: Number(l.requested_qty) })),
       }),
-    onSuccess: () => {
+    onSuccess: (created: STO) => {
+      void alerts.success("stock.transfer_raised", { number: created?.sto_no ?? "The transfer" });
       setOpen(false);
       setForm({ from_warehouse_id: "", to_warehouse_id: "", remarks: "" });
       setLines([{ ...BLANK_LINE }]);
@@ -119,6 +144,17 @@ export function StockTransferView() {
     },
     onError: fail,
   });
+
+  const askThenCreate = async () => {
+    const first = validLines[0];
+    if (!(await alerts.confirm("stock.transfer", {
+      qty: first?.requested_qty ?? "",
+      item: itemName(first?.item_id ?? ""),
+      source: warehouseName(form.from_warehouse_id),
+      destination: warehouseName(form.to_warehouse_id),
+    }))) return;
+    create.mutate();
+  };
 
   const validLines = lines.filter((l) => l.item_id && Number(l.requested_qty) > 0);
   const sameWarehouse = !!form.from_warehouse_id && form.from_warehouse_id === form.to_warehouse_id;
@@ -129,7 +165,7 @@ export function StockTransferView() {
     if (!step) return null;
     return (
       <Can do="stock.transfer">
-        <Button onClick={() => advance.mutate({ id: r.id, run: step.run })}>{step.label}</Button>
+        <Button onClick={() => advance.mutate({ id: r.id, run: step.run, row: r, label: step.label })}>{step.label}</Button>
       </Can>
     );
   };
@@ -307,7 +343,7 @@ export function StockTransferView() {
           </ModalBody>
           <ModalFooter>
             <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button disabled={!canSubmit || create.isPending} onClick={() => create.mutate()}>
+            <Button disabled={!canSubmit || create.isPending} onClick={() => void askThenCreate()}>
               {create.isPending ? "Raising…" : "Raise Transfer"}
             </Button>
           </ModalFooter>
