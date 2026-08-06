@@ -20,7 +20,8 @@ import {
 import { Button, Card, Field, Input, PageHeader, Select } from "@/shared/components";
 import { adminApi } from "../api";
 import type {
-  LadderHolder, LadderPosition, LadderRung, Operator, WorkflowCondition,
+  LadderHolder, LadderPosition, LadderRung, Operator, ReminderConfig,
+  ReminderRunResult, WorkflowCondition,
 } from "../types";
 import { OPERATOR_LABEL } from "../ruleLanguage";
 
@@ -310,6 +311,7 @@ export function ApprovalConfigPage() {
         </div>
       )}
 
+      <OverdueChasePanel />
       <StaleLadderPanel />
 
       <Card className="mb-5 p-4">
@@ -648,6 +650,186 @@ export function ApprovalConfigPage() {
         </ModalContent>
       </Modal>
     </div>
+  );
+}
+
+/** Overdue-approval chasing: remind the approver, then escalate to their manager.
+ *
+ *  Ships switched OFF and says what it would do before it does anything. This writes
+ *  notifications to real people's inboxes, and the first run against a queue that has
+ *  been quietly ageing for weeks would land on everyone at once — so the count and the
+ *  breakdown are on screen before the switch is, and "Run now" is separate from the
+ *  timer for the same reason.
+ *
+ *  Nothing here touches a document. The worst a misfire can do is send a notification. */
+function OverdueChasePanel() {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<ReminderConfig | null>(null);
+  const [ran, setRan] = useState<ReminderRunResult | null>(null);
+
+  const status = useQuery({
+    queryKey: ["admin", "reminders"],
+    queryFn: () => adminApi.reminders.status(),
+    staleTime: 30 * 1000,
+  });
+
+  const config = draft ?? status.data?.config ?? null;
+  const items = status.data?.items ?? [];
+  const counts = {
+    remind: items.filter((i) => i.next_action === "REMIND").length,
+    escalate: items.filter((i) => i.next_action === "ESCALATE").length,
+  };
+
+  const save = useMutation({
+    mutationFn: (next: ReminderConfig) => adminApi.reminders.save(next),
+    onSuccess: () => {
+      setDraft(null);
+      qc.invalidateQueries({ queryKey: ["admin", "reminders"] });
+    },
+  });
+
+  const runNow = useMutation({
+    mutationFn: () => adminApi.reminders.runNow(),
+    onSuccess: (result) => {
+      setRan(result);
+      qc.invalidateQueries({ queryKey: ["admin", "reminders"] });
+    },
+  });
+
+  if (!config) return null;
+  const set = (patch: Partial<ReminderConfig>) => setDraft({ ...config, ...patch });
+
+  return (
+    <Card className="mb-5 p-4">
+      <button
+        type="button"
+        onClick={() => setOpen((wasOpen) => !wasOpen)}
+        className="flex min-h-11 w-full items-center gap-2 text-left text-sm"
+      >
+        <AlertTriangle className={`h-4 w-4 ${config.enabled ? "text-warn" : "text-muted"}`} />
+        <span className="font-medium">
+          {status.data?.total ?? 0} approval{(status.data?.total ?? 0) === 1 ? "" : "s"} overdue
+        </span>
+        <span className="text-muted">
+          · chasing is {config.enabled ? "on" : "off"}
+        </span>
+        <span className="ml-auto text-muted">{open ? "Hide" : "Settings"}</span>
+      </button>
+
+      {open && (
+        <div className="mt-3 border-t border-line pt-3">
+          <p className="mb-3 text-xs text-muted">
+            An overdue approval is reminded up to {config.max_reminders} time
+            {config.max_reminders === 1 ? "" : "s"}, at most once every {config.gap_hours}h.
+            After that it escalates once to the approver's reporting manager. Approvals
+            carry no due date today, so one is treated as overdue{" "}
+            {config.overdue_after_days} day{config.overdue_after_days === 1 ? "" : "s"} after
+            it reaches the approver.
+          </p>
+
+          <div className="mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Overdue after (days)">
+              <Input type="number" min={0} value={String(config.overdue_after_days)}
+                     onChange={(e) => set({ overdue_after_days: Number(e.target.value) })} />
+            </Field>
+            <Field label="Reminders before escalating">
+              <Input type="number" min={0} value={String(config.max_reminders)}
+                     onChange={(e) => set({ max_reminders: Number(e.target.value) })} />
+            </Field>
+            <Field label="Hours between reminders">
+              <Input type="number" min={0} value={String(config.gap_hours)}
+                     onChange={(e) => set({ gap_hours: Number(e.target.value) })} />
+            </Field>
+            <Field label="Check every (minutes)">
+              <Input type="number" min={0} value={String(config.interval_minutes)}
+                     onChange={(e) => set({ interval_minutes: Number(e.target.value) })} />
+            </Field>
+          </div>
+
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <Switch
+              isSelected={config.enabled}
+              onValueChange={(on) => set({ enabled: on })}
+            >
+              <span className="text-sm">Chase automatically on this schedule</span>
+            </Switch>
+            {status.data?.next_run && (
+              <span className="text-xs text-muted">
+                Next run {new Date(status.data.next_run).toLocaleString()}
+              </span>
+            )}
+          </div>
+
+          {/* The count that matters most before switching on: how many notifications
+              the very next sweep would send. */}
+          <p className="mb-3 rounded-lg bg-warn-bg px-3 py-2 text-sm text-warn">
+            Right now the next sweep would send {counts.remind} reminder
+            {counts.remind === 1 ? "" : "s"} and {counts.escalate} escalation
+            {counts.escalate === 1 ? "" : "s"}.
+          </p>
+
+          {ran && (
+            <p className="mb-3 rounded-lg bg-ok-bg px-3 py-2 text-sm text-ok">
+              Sent {ran.reminded} reminder{ran.reminded === 1 ? "" : "s"} and{" "}
+              {ran.escalated} escalation{ran.escalated === 1 ? "" : "s"}
+              {ran.skipped > 0 && `, skipped ${ran.skipped} with no manager on record`}.
+            </p>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <Button
+              disabled={!draft || save.isPending}
+              onClick={() => draft && save.mutate(draft)}
+            >
+              {save.isPending ? "Saving…" : "Save settings"}
+            </Button>
+            {draft && (
+              <Button variant="ghost" onClick={() => setDraft(null)}>Discard</Button>
+            )}
+            <Button
+              variant="subtle"
+              disabled={runNow.isPending || (status.data?.total ?? 0) === 0}
+              onClick={() => runNow.mutate()}
+            >
+              {runNow.isPending ? "Chasing…" : "Run now"}
+            </Button>
+          </div>
+
+          {items.length > 0 && (
+            <div className="mt-3 max-h-64 overflow-auto border-t border-line pt-3">
+              <table className="w-full text-sm">
+                <thead className="text-left text-xs uppercase text-muted">
+                  <tr>
+                    <th className="py-1 pr-3">Document</th>
+                    <th className="py-1 pr-3">Waiting at</th>
+                    <th className="py-1 pr-3">Overdue</th>
+                    <th className="py-1 pr-3">Reminders</th>
+                    <th className="py-1">Next</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.slice(0, 50).map((row) => (
+                    <tr key={row.pending_id} className="border-t border-line">
+                      <td className="py-1.5 pr-3">{row.doc_no ?? `#${row.doc_id}`}</td>
+                      <td className="py-1.5 pr-3">{row.stage_name ?? "—"}</td>
+                      <td className="py-1.5 pr-3">{row.days_overdue}d</td>
+                      <td className="py-1.5 pr-3">{row.reminders_sent}</td>
+                      <td className="py-1.5">{row.next_action.toLowerCase()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {items.length > 50 && (
+                <p className="pt-2 text-xs text-muted">
+                  Showing the 50 most overdue of {items.length}.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 

@@ -22,6 +22,7 @@ log = logging.getLogger("app")
 async def lifespan(app: FastAPI):
     from app.platform.hcm import scheduler
     from app.platform.settings.service import get_hcm_schedule
+    from app.platform.workflow import scheduler as approval_scheduler
     from app.core.database import SessionLocal
 
     scheduler.start()
@@ -31,6 +32,19 @@ async def lifespan(app: FastAPI):
         scheduler.configure(enabled, interval)
     except Exception as exc:  # don't block startup if settings/DB not ready
         log.warning("HCM scheduler not configured at startup: %s", exc)
+
+    # Overdue-approval chasing. Its own scheduler so a slow HCM sync cannot delay it,
+    # and so turning one off leaves the other alone. Ships disabled: it writes
+    # notifications to real people, and that is an administrator's decision to make.
+    approval_scheduler.start()
+    try:
+        from app.platform.workflow import reminders
+
+        async with SessionLocal() as db:
+            config = await reminders.get_config(db)
+        approval_scheduler.configure(config["enabled"], config["interval_minutes"])
+    except Exception as exc:
+        log.warning("Approval reminder scheduler not configured at startup: %s", exc)
 
     # Register screens added since the last deploy. Additive only — it never drops a
     # page — so unlike scripts.seed this is safe to run against the live database.
@@ -48,6 +62,7 @@ async def lifespan(app: FastAPI):
         log.warning("Page registry sync skipped: %s", exc)
     yield
     scheduler.shutdown()
+    approval_scheduler.shutdown()
 
 
 app = FastAPI(title="SCM ERP", version="0.1.0", lifespan=lifespan)

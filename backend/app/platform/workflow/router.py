@@ -6,11 +6,12 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_permission
 from app.platform.rbac import permissions as perms
 from app.platform.workflow import (
-    custom_ladder, engine, ladder, ladder_config, service,
+    custom_ladder, engine, ladder, ladder_config, reminders, service,
 )
+from app.platform.workflow import scheduler as approval_scheduler
 from app.platform.workflow.schemas import (
     CustomLadderIn, DelegationEndIn, DelegationIn, DelegationOut, LadderCopyIn, LadderIn,
-    WorkflowActionIn, WorkflowActionOut, WorkflowIn,
+    ReminderConfigIn, WorkflowActionIn, WorkflowActionOut, WorkflowIn,
 )
 
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
@@ -77,6 +78,45 @@ async def save_ladder(
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
     return await ladder_config.save_ladder(db, body, user)
+
+
+@router.get("/reminders")
+async def reminder_status(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    """The settings, the next run, and exactly what the next run would do."""
+    data = await reminders.preview(db)
+    data["next_run"] = approval_scheduler.next_run()
+    return data
+
+
+@router.put("/reminders")
+async def save_reminder_config(
+    body: ReminderConfigIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    config = await reminders.save_config(
+        db, enabled=body.enabled, interval_minutes=body.interval_minutes,
+        max_reminders=body.max_reminders, gap_hours=body.gap_hours,
+        overdue_after_days=body.overdue_after_days,
+    )
+    approval_scheduler.configure(config["enabled"], config["interval_minutes"])
+    return {**config, "next_run": approval_scheduler.next_run()}
+
+
+@router.post("/reminders/run")
+async def run_reminders_now(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    """Chase everything overdue now, whatever the schedule says.
+
+    Deliberately ignores the enabled flag: that switch governs the unattended timer,
+    and an admin pressing a button is not unattended.
+    """
+    return await reminders.run(db)
 
 
 @router.get("/ladders/in-flight-stale")

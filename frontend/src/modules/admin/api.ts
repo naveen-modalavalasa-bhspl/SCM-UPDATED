@@ -4,8 +4,8 @@ import type {
   AppLog, AuditRow, Conflict, CustomLadder, CustomLadderStep, DocSeries, Ladder,
   LadderDepartment, LadderOptions, LadderPolicy, LadderPosition, LadderPost,
   LadderPreview, LadderRank,
-  LadderRung, NotificationRule, Rule, RuleVocabulary, Schedule, SimulateResult,
-  StaleInstance,
+  LadderRung, NotificationRule, ReminderConfig, ReminderRunResult, ReminderStatus,
+  Rule, RuleVocabulary, Schedule, SimulateResult, StaleInstance,
   SyncResult, SyncStatus, WorkflowDefinition, WorkflowOptions,
 } from "./types";
 
@@ -144,6 +144,19 @@ export const adminApi = {
       api.get<{ items: StaleInstance[]; total: number }>(
         "/api/workflow/ladders/in-flight-stale",
       ).then((r) => r.data),
+  },
+  // ---- Overdue-approval chasing: remind, then escalate to the approver's manager ----
+  reminders: {
+    status: () =>
+      api.get<ReminderStatus>("/api/workflow/reminders").then((r) => r.data),
+    save: (config: ReminderConfig) =>
+      api.put<ReminderConfig & { next_run: string | null }>(
+        "/api/workflow/reminders", config,
+      ).then((r) => r.data),
+    /** Chases now, whatever the schedule says — the switch governs the timer, and a
+     *  person pressing a button is not the timer. */
+    runNow: () =>
+      api.post<ReminderRunResult>("/api/workflow/reminders/run").then((r) => r.data),
   },
   // ---- Build your own ladder: departments, then the posts inside one ----
   // A department is a dozen posts, not three thousand, which is why this screen shows

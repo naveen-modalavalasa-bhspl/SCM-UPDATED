@@ -301,6 +301,49 @@ export interface Ladder extends LadderPolicy {
   in_flight: number;
 }
 
+/** The overdue-approval chase settings. */
+export interface ReminderConfig {
+  enabled: boolean;
+  interval_minutes: number;
+  max_reminders: number;
+  gap_hours: number;
+  /** Only used when wf_pending.due_at is NULL, which today is every row. */
+  overdue_after_days: number;
+}
+
+/** One overdue approval, and what the next sweep would do about it. */
+export interface OverdueApproval {
+  pending_id: number;
+  doc_type: string;
+  doc_no: string | null;
+  doc_id: number;
+  approver_id: number;
+  raised_by: string | null;
+  stage_name: string | null;
+  due_at: string | null;
+  /** False when the due date was derived rather than set on the task itself. */
+  due_at_is_set: boolean;
+  days_overdue: number;
+  reminders_sent: number;
+  escalated: boolean;
+  next_action: "REMIND" | "ESCALATE" | "WAIT";
+}
+
+export interface ReminderStatus {
+  config: ReminderConfig;
+  items: OverdueApproval[];
+  total: number;
+  next_run: string | null;
+}
+
+export interface ReminderRunResult {
+  overdue: number;
+  reminded: number;
+  escalated: number;
+  skipped: number;
+  enabled: boolean;
+}
+
 /** One document still climbing a ladder that has since been replaced. Correct
  *  behaviour — the chain is frozen at submit — but worth being able to see. */
 export interface StaleInstance {

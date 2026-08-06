@@ -126,3 +126,17 @@ class LadderCopyIn(BaseModel):
     from_project_id: int | None = None
     doc_type: str
     to_project_ids: list[int] = Field(min_length=1)
+
+
+class ReminderConfigIn(BaseModel):
+    """The overdue-approval chase settings.
+
+    `max_reminders` may be 0 — that means escalate on the first sweep with no reminder
+    first, which is a legitimate policy for an urgent document type.
+    """
+    enabled: bool = False
+    interval_minutes: int = Field(default=60, ge=0, le=1440)
+    max_reminders: int = Field(default=2, ge=0, le=10)
+    gap_hours: int = Field(default=24, ge=0, le=720)
+    # Used only when wf_pending.due_at is NULL, which today is every row.
+    overdue_after_days: int = Field(default=3, ge=0, le=90)
