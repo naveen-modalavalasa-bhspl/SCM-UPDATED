@@ -113,6 +113,10 @@ MASTER_BOM_MANAGE = "master.bom.manage"
 MASTER_SPEC_MANAGE = "master.spec.manage"
 MASTER_HSN_MANAGE = "master.hsn.manage"
 
+# --- Reports (cross-module read-only ledgers) ---
+REPORT_VIEW = "report.view"
+REPORT_EXPORT = "report.export"
+
 # --- Admin ---
 ADMIN_ROLES_MANAGE = "admin.roles.manage"
 ADMIN_WORKFLOW_MANAGE = "admin.workflow.manage"
@@ -229,6 +233,10 @@ ALL_PERMISSIONS: list[Perm] = [
          "Manage notification settings"),
     Perm(ADMIN_SETTINGS_MANAGE, "admin", "settings", "manage",
          "Manage system settings"),
+    Perm(REPORT_VIEW, "reports", "report", "view",
+         "View the cross-module report ledgers"),
+    Perm(REPORT_EXPORT, "reports", "report", "export",
+         "Export a report ledger to Excel or CSV"),
 ]
 
 ALL_CODES: list[str] = [p.code for p in ALL_PERMISSIONS]
@@ -289,6 +297,11 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("inv_mr", "inventory", "Inventory · Material Requests"),
     ("inv_labels", "inventory", "Inventory · Labels & Printing"),
     ("masters", "masters", "Masters"),
+    ("grp_reports", "reports", "Reports"),
+    ("rep_indents", "reports", "Reports · Indent Ledger"),
+    ("rep_approvals", "reports", "Reports · Approval Ledger"),
+    ("rep_inventory", "reports", "Reports · Stock Ledger"),
+    ("rep_warehouse", "reports", "Reports · Warehouse Ledger"),
     ("grp_rbac", "rbac", "RBAC"),
     ("rbac_access", "rbac", "RBAC · Roles & Access"),
     ("rbac_groups", "rbac", "RBAC · User Groups"),

@@ -117,6 +117,8 @@ def _include_routers() -> None:
         "app.platform.rules.router",
         "app.platform.admin.router",
         "app.modules.home.router",
+        # Alerts is copy only — no tables, no module imports — so it sits first.
+        "app.modules.alerts.router",
         "app.modules.indents.router",
         "app.modules.procurement.router",
         "app.modules.inventory.router",
@@ -125,6 +127,9 @@ def _include_routers() -> None:
         # Last in the chain: approvals presents tasks from every other module, so it
         # imports them all and nothing imports it back.
         "app.modules.approvals.router",
+        # Reports reads every module's tables and is read-only, so it also imports
+        # them all and nothing imports it back.
+        "app.modules.reports.router",
         "app.shared.masters.router",
     ]
     for path in router_paths:

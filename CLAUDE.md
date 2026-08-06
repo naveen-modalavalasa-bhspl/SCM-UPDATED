@@ -56,7 +56,13 @@ backend/app/
     auth/      login + /api/auth/me
     settings/  sys_ tables (settings, doc numbers, sync log, sessions, credentials)
   modules/     inventory (stk_/inv_), indents (ind_), procurement (pro_),
-               logistics (lgs_)
+               logistics (lgs_),
+               alerts   — no tables: the catalog of popup/confirm copy, served so
+                          every screen announces the same event the same way
+               reports  — no tables: read-only ledgers (`ledgers.py` LedgerSpec) over
+                          indents, wf_actions, stk_ledger and the warehouse documents,
+                          with Excel/CSV export. Registered last: it reads every
+                          module and nothing reads it back
                — each: models.py schemas.py service.py router.py tests/
                inventory is the BASE module: it imports nothing from app.modules, so
                indents can call allocate_for_indent() on approval without inverting

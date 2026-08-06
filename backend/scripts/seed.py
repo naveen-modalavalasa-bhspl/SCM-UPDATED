@@ -190,6 +190,18 @@ PAGE_TREE = [
 
     ("masters", "/masters", "Masters", "database", P.MASTER_ITEM_MANAGE, 60, None),
 
+    # Reports: read-only ledgers over the other modules. One screen serves all four,
+    # so the child rows differ only by the :ledger segment in the path.
+    ("grp_reports", "/reports/indents", "Reports", "bar-chart", P.REPORT_VIEW, 70, None),
+    ("rep_indents", "/reports/indents", "Indent Ledger", "file-text",
+     P.REPORT_VIEW, 71, "grp_reports"),
+    ("rep_approvals", "/reports/approvals", "Approval Ledger", "check-circle",
+     P.REPORT_VIEW, 72, "grp_reports"),
+    ("rep_inventory", "/reports/inventory", "Stock Ledger", "boxes",
+     P.REPORT_VIEW, 73, "grp_reports"),
+    ("rep_warehouse", "/reports/warehouse", "Warehouse Ledger", "truck",
+     P.REPORT_VIEW, 74, "grp_reports"),
+
     ("grp_rbac", "/rbac/access", "RBAC", "shield", P.ADMIN_ROLES_MANAGE, 80, None),
     ("rbac_access", "/rbac/access", "Roles & Access", "shield",
      P.ADMIN_ROLES_MANAGE, 81, "grp_rbac"),

@@ -1,0 +1,347 @@
+import type { AlertDef, AlertVariant } from "./types";
+
+/**
+ * Local mirror of `backend/app/modules/alerts/service.py` `CATALOG`.
+ *
+ * The server owns the wording, but a dialog cannot wait for a network round trip
+ * — a delete confirm has to be right the first time it opens, including on the
+ * login screen and when the API is down. So the table ships with the bundle and
+ * `AlertProvider` overlays whatever `/api/alerts/catalog` returns once it lands.
+ *
+ * The two copies are kept honest by `backend/app/modules/alerts/tests/
+ * test_alerts.py::test_frontend_mirror_has_the_same_codes`.
+ */
+
+const AUTO_CLOSE_MS = 3000;
+
+/** An announcement. Closes itself unless it is a failure or a warning. */
+function alert(
+  code: string,
+  variant: AlertVariant,
+  title: string,
+  message: string,
+  action?: string,
+  sticky?: boolean,
+): AlertDef {
+  const selfClosing = sticky === undefined
+    ? variant === "success" || variant === "info"
+    : !sticky;
+  return {
+    code, variant, mode: "alert", title, message,
+    confirm_label: action ?? null,
+    cancel_label: null,
+    auto_close_ms: selfClosing ? AUTO_CLOSE_MS : null,
+  };
+}
+
+/** A question. Waits for an answer, never closes itself. */
+function confirm(
+  code: string,
+  variant: AlertVariant,
+  title: string,
+  message: string,
+  confirmLabel: string,
+  cancelLabel = "Cancel",
+): AlertDef {
+  return {
+    code, variant, mode: "confirm", title, message,
+    confirm_label: confirmLabel,
+    cancel_label: cancelLabel,
+    auto_close_ms: null,
+  };
+}
+
+const DEFINITIONS: AlertDef[] = [
+  // ------------------------------------------------------------------ danger
+  confirm(
+    "vendor.delete", "danger", "Delete vendor?",
+    "Deleting {name} also removes it from every price list it appears on. Purchase orders already raised against it are kept, but you will not be able to raise new ones.",
+    "Yes, Delete",
+  ),
+  confirm(
+    "item.delete", "danger", "Delete item?",
+    "{name} has stock, ledger rows and documents pointing at its item code. Once deleted, that history can no longer be traced back to an item.",
+    "Yes, Delete",
+  ),
+  confirm(
+    "warehouse.delete", "danger", "Delete location?",
+    "{name} must be empty before it can go. Any bin mapped under it is removed with it and cannot be restored.",
+    "Yes, Delete",
+  ),
+  confirm(
+    "user.delete", "danger", "Delete user?",
+    "{name} loses access immediately. Documents they raised or approved keep their name, but the sign-in is gone and cannot be restored.",
+    "Yes, Delete",
+  ),
+  confirm(
+    "role.delete", "danger", "Delete role?",
+    "{count} user(s) currently hold this role and will lose every permission it grants the moment it is deleted.",
+    "Yes, Delete",
+  ),
+  confirm(
+    "indent.cancel", "danger", "Cancel indent?",
+    "{number} will be closed and any stock reserved against it released back to available. This cannot be undone.",
+    "Yes, Cancel Indent", "Keep Indent",
+  ),
+  confirm(
+    "po.cancel", "danger", "Cancel purchase order?",
+    "{number} has been sent to the vendor. Cancelling stops any further receipt against it; quantities already received stay in stock.",
+    "Yes, Cancel PO", "Keep PO",
+  ),
+  confirm(
+    "grn.discard", "danger", "Discard this receipt?",
+    "Nothing on this draft GRN has been posted yet. Discarding it throws away every line you have entered.",
+    "Yes, Discard", "Keep Editing",
+  ),
+  confirm(
+    "inward.cancel", "danger", "Cancel this material inward?",
+    "{number} is closed and cannot be reopened. Any quality inspection or put-away task raised from it is cancelled with it.",
+    "Yes, Cancel Inward", "Keep Inward",
+  ),
+  confirm(
+    "inspection.cancel", "danger", "Cancel this quality inspection?",
+    "{number} is dropped without a result. The material inward behind it goes back to awaiting inspection.",
+    "Yes, Cancel Inspection", "Keep Inspection",
+  ),
+  confirm(
+    "issue.cancel", "danger", "Cancel this material issue?",
+    "{number} is closed and anything reserved against it returns to available stock. Quantities already issued are not pulled back.",
+    "Yes, Cancel Issue", "Keep Issue",
+  ),
+
+  // ----------------------------------------------------------------- warning
+  confirm(
+    "indent.submit", "warning", "Submit for approval?",
+    "{number} goes to {approver} and can no longer be edited while it is in approval.",
+    "Submit",
+  ),
+  confirm(
+    "indent.approve", "warning", "Approve this indent?",
+    "Approving {number} reserves the requested stock and moves it to the next stage of the chain.",
+    "Approve",
+  ),
+  confirm(
+    "indent.reject", "warning", "Reject this indent?",
+    "{number} returns to the raiser. Add a remark so they know what to change.",
+    "Reject",
+  ),
+  confirm(
+    "po.approve", "warning", "Approve this purchase order?",
+    "{number} commits {amount} against the budget. It becomes ready to send to the vendor.",
+    "Approve",
+  ),
+  confirm(
+    "po.send_vendor", "warning", "Send to vendor?",
+    "{number} is sent to {vendor} and locked for editing. Goods can only be received against a PO that has been sent.",
+    "Send",
+  ),
+  confirm(
+    "indent.return", "warning", "Return for correction?",
+    "{number} goes back to {raiser} to be edited and resubmitted. The approval chain restarts from the first stage once it comes back.",
+    "Return",
+  ),
+  confirm(
+    "grn.post", "warning", "Post this receipt?",
+    "Posting writes a stock ledger row and adds the accepted quantity to {location}. Ledger rows are never deleted, so corrections have to be made as an adjustment.",
+    "Post Receipt",
+  ),
+  confirm(
+    "stock.transfer", "warning", "Confirm transfer?",
+    "Moving {qty} of {item} from {source} to {destination} writes two ledger rows and takes effect immediately.",
+    "Transfer",
+  ),
+  confirm(
+    "stock.adjust", "warning", "Post stock adjustment?",
+    "This changes the on-hand quantity of {item} to {qty} and is recorded against your name in the ledger.",
+    "Post Adjustment",
+  ),
+  confirm(
+    "adjustment.approve", "warning", "Approve this adjustment?",
+    "Approving writes the counted quantity for {item} into the ledger. The ledger is append-only, so a mistake has to be corrected with a second adjustment.",
+    "Approve",
+  ),
+  confirm(
+    "material_request.approve", "warning", "Approve this material request?",
+    "Approving {number} reserves {qty} of {item} against it, so that stock stops being available to anyone else.",
+    "Approve",
+  ),
+  confirm(
+    "putaway.confirm", "warning", "Confirm put-away?",
+    "{qty} of {item} is stored in bin {bin} and becomes available to pick from there.",
+    "Confirm",
+  ),
+  confirm(
+    "putaway.skip", "warning", "Skip this put-away?",
+    "{number} stays unallocated and the stock cannot be picked from any bin until someone puts it away.",
+    "Skip",
+  ),
+  confirm(
+    "inspection.complete", "warning", "Complete quality inspection?",
+    "Accepted quantity goes forward to put-away and rejected quantity is held back for the vendor. The result cannot be edited afterwards.",
+    "Complete Inspection",
+  ),
+  confirm(
+    "dispatch.gate_out", "warning", "Gate out this dispatch?",
+    "{number} is recorded as having left the site. Stock is deducted now and the dispatch can no longer be edited.",
+    "Gate Out",
+  ),
+  confirm(
+    "issue.post", "warning", "Issue material?",
+    "{qty} of {item} is issued to {project} and deducted from stock now.",
+    "Issue",
+  ),
+  confirm(
+    "allocation.override", "warning", "Override allocation?",
+    "You are allocating more than the system suggested for {item}. The override and your reason are logged against the request.",
+    "Override",
+  ),
+  confirm(
+    "vendor.deactivate", "warning", "Deactivate vendor?",
+    "{name} has {count} open purchase order(s). Deactivating stops new POs; the open ones can still be received.",
+    "Deactivate",
+  ),
+  confirm(
+    "bulk.apply", "warning", "Apply to {count} records?",
+    "This runs {action} on every selected record. There is no per-record undo.",
+    "Apply",
+  ),
+  confirm(
+    "workflow.publish", "warning", "Publish this ladder?",
+    "New submissions route by the updated ladder from now on. Documents already in approval keep the chain they were frozen with.",
+    "Publish",
+  ),
+
+  // -------------------------------------------------------------------- info
+  // These interrupt someone who did not ask for them, so they stay to one short
+  // line. A nudge that needs a paragraph is a page, not a dialog.
+  alert(
+    "settings.changed", "info", "Settings updated",
+    "Refresh to apply your changes.",
+    "Refresh",
+  ),
+  alert(
+    "session.expiring", "info", "Session expiring",
+    "Signing out in {minutes} minutes.",
+    undefined, true,
+  ),
+  alert(
+    "hcm.sync_running", "info", "Sync started",
+    "Refreshing employee data now.",
+  ),
+
+  // ----------------------------------------------------------------- success
+  alert(
+    "indent.created", "success", "Indent raised",
+    "{number} has been created and sent for approval.",
+    "View Indent",
+  ),
+  alert("indent.approved", "success", "Approved", "{number} has moved to the next stage."),
+  alert(
+    "grn.posted", "success", "Receipt posted",
+    "{number} is complete and stock has been updated.",
+    "View Receipt",
+  ),
+  alert(
+    "stock.transferred", "success", "Transfer complete",
+    "{qty} of {item} is now at {destination}.",
+  ),
+  alert(
+    "issue.posted", "success", "Material issued",
+    "{number} has been issued and stock deducted.",
+    "View Issue",
+  ),
+  alert(
+    "adjustment.posted", "success", "Adjustment posted",
+    "{item} now reads {qty} in stock.",
+  ),
+  alert(
+    "putaway.completed", "success", "Put-away complete",
+    "{item} is now stored in {bin}.",
+  ),
+  alert(
+    "dispatch.gated_out", "success", "Dispatch gated out",
+    "{number} has left the site.",
+    "Track Dispatch",
+  ),
+  alert("master.saved", "success", "Saved", "Your changes to {name} have been saved."),
+
+  // Routine outcomes. Each one is the *result* of something the user already
+  // clicked, so it announces and gets out of the way after three seconds —
+  // a confirm here would be a second click for a decision already made.
+  alert("excel.exported", "success", "Export ready", "{name} has been downloaded.", "Open File"),
+  alert("indent.deleted", "success", "Indent deleted", "{number} has been removed."),
+  alert("indent.rejected", "success", "Indent rejected", "{number} has gone back to {raiser}."),
+  alert("indent.returned", "success", "Returned for correction", "{number} is with {raiser} to edit."),
+  alert("po.approved", "success", "Purchase order approved", "{number} is ready to send."),
+  alert(
+    "material_request.approved", "success", "Request approved",
+    "{number} is approved and stock is reserved.",
+  ),
+  alert("adjustment.approved", "success", "Adjustment approved", "{item} now reads {qty}."),
+  alert(
+    "inspection.completed", "success", "Inspection complete",
+    "{number} is inspected and sent for put-away.",
+  ),
+  alert("issue.acknowledged", "success", "Receipt acknowledged", "{number} has been confirmed."),
+  alert("reminder.sent", "success", "Reminder sent", "{name} has been nudged."),
+  alert("delegation.created", "success", "Delegation active", "{name} approves on your behalf."),
+  alert("delegation.ended", "success", "Delegation ended", "Approvals come back to you."),
+  alert("user.saved", "success", "User saved", "{name} has been updated."),
+  alert("role.saved", "success", "Role saved", "{name} has been updated."),
+  alert("label.printed", "success", "Sent to printer", "{count} label(s) queued."),
+  alert("clipboard.copied", "success", "Copied", "{name} is on your clipboard."),
+
+  // ------------------------------------------------------------------- error
+  alert(
+    "request.failed", "error", "Something went wrong",
+    "The server could not complete your request. Nothing has been saved.",
+    "Retry",
+  ),
+  alert(
+    "permission.denied", "error", "Not allowed",
+    "Your role does not include {permission}. Ask an administrator if you need it.",
+  ),
+  alert(
+    "session.expired", "error", "Signed out",
+    "Your session has expired. Sign in again to carry on; unsaved work on this screen is lost.",
+    "Sign In",
+  ),
+  alert(
+    "network.unreachable", "error", "Can't reach the server",
+    "Check your connection. Nothing has been saved.",
+    "Retry",
+  ),
+  alert(
+    "hcm.sync_failed", "error", "HCM sync failed",
+    "{entity} could not be synced: {reason}",
+    "Retry",
+  ),
+  alert(
+    "stock.insufficient", "error", "Not enough stock",
+    "{item} has {available} available but {qty} was requested.",
+    "Adjust Quantity",
+  ),
+  alert(
+    "document.duplicate", "error", "Already exists",
+    "{number} has already been recorded against {vendor}.",
+  ),
+  alert(
+    "excel.import_failed", "error", "Excel import failed",
+    "{count} row(s) in {name} could not be read. Nothing was imported — fix the file and upload it again.",
+    "View Errors",
+  ),
+  alert(
+    "print.failed", "error", "Print failed",
+    "The label printer did not respond. The job has not been sent.",
+    "Retry",
+  ),
+];
+
+export const DEFAULT_CATALOG: Record<string, AlertDef> = Object.fromEntries(
+  DEFINITIONS.map((item) => [item.code, item]),
+);
+
+/** Every code the catalog knows, for autocomplete at the call site. */
+export type AlertCode = string;
+
+export { AUTO_CLOSE_MS };

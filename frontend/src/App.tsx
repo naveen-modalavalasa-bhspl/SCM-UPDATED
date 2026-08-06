@@ -55,6 +55,10 @@ import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
 import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
 import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
+// One screen serves all four report ledgers; the ledger key is a route param.
+import { ReportLedgerPage } from "@/modules/reports";
+// Mounts the alert/confirm dialog host and pulls the server's copy catalog once.
+import { AlertProvider } from "@/modules/alerts";
 import { ToastProvider } from "@/shared/components";
 
 const queryClient = new QueryClient({
@@ -142,6 +146,9 @@ function AppRoutes() {
         <Route path="admin/notifications" element={<NotificationsPage />} />
         <Route path="admin/fallback-log" element={<FallbackLogPage />} />
         <Route path="masters" element={<MastersPage />} />
+        {/* /reports lands on the first ledger so the rail entry always has a screen. */}
+        <Route path="reports" element={<Navigate to="/reports/indents" replace />} />
+        <Route path="reports/:ledger" element={<ReportLedgerPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
@@ -154,9 +161,13 @@ function Shell() {
     <HeroUIProvider navigate={navigate} useHref={useHref}>
       {/* Outside AuthProvider so a toast can fire during login too. */}
       <ToastProvider>
-        <AuthProvider>
-          <AppRoutes />
-        </AuthProvider>
+        {/* Outside AuthProvider for the same reason as ToastProvider: the 401 and
+            network dialogs have to work on the login screen too. */}
+        <AlertProvider>
+          <AuthProvider>
+            <AppRoutes />
+          </AuthProvider>
+        </AlertProvider>
       </ToastProvider>
     </HeroUIProvider>
   );
