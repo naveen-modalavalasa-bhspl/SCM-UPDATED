@@ -61,6 +61,7 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.INDENT.value: "Indents",
     DocType.ALLOCATION.value: "Inventory",
     DocType.MR.value: "Inventory",
+    DocType.STOCK_TRANSFER.value: "Inventory",
     DocType.WH_ISSUE.value: "Warehouse",
     DocType.GRN.value: "Warehouse",
     DocType.PO.value: "Procurement",
@@ -70,6 +71,9 @@ DOC_TYPE_LABEL: dict[str, str] = {
     DocType.INDENT.value: "Indent",
     DocType.ALLOCATION.value: "Stock Allocation",
     DocType.MR.value: "Material Request",
+    # Only ever raised for a transfer that crosses a project boundary — a
+    # same-project transfer never starts a workflow, so this ladder stays quiet.
+    DocType.STOCK_TRANSFER.value: "Stock Transfer (cross-project)",
     DocType.WH_ISSUE.value: "Material Issue",
     DocType.GRN.value: "Goods Receipt",
     DocType.PO.value: "Purchase Order",

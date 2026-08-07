@@ -2,12 +2,13 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon } from "lucide-react";
+import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpreadsheet } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect, FilterToggle } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { getStockBalances, getStockDetail, getWarehouses } from "../api";
 import type { StockBalanceItem, StockDetail, StockLot } from "../types";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
 /** Value columns read off stk_balance.valuation_rate / stock_value. Both are 0 across
  *  the live data, so an uncosted row says so rather than printing a confident ₹0.00. */
@@ -29,9 +30,14 @@ function stockState(r: StockBalanceItem) {
 }
 
 const EXPIRY_WINDOWS = [
-  { value: 30, label: "Expiring in 30 days" },
-  { value: 60, label: "Expiring in 60 days" },
-  { value: 90, label: "Expiring in 90 days" },
+  { value: "30", label: "Expiring in next 30 days" },
+  { value: "60", label: "Expiring in next 60 days" },
+  { value: "90", label: "Expiring in next 90 days" },
+  { value: "expired", label: "Already Expired" },
+  { value: "expired_30", label: "Expired in last 30 days" },
+  { value: "expired_60", label: "Expired in last 60 days" },
+  { value: "expired_90", label: "Expired in last 90 days" },
+  { value: "custom", label: "Custom Date Range" },
 ];
 
 /** Warehouse › zone › rack › bin. Wraps rather than scrolls: a deep tree still reads. */
@@ -90,9 +96,13 @@ function LotCard({ lot, uom }: { lot: StockLot; uom?: string }) {
 
 export function StockBalanceView() {
   const navigate = useNavigate();
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState(20);
   const [search, setSearch] = useState("");
   const [warehouseId, setWarehouseId] = useState("");
   const [expiringIn, setExpiringIn] = useState("");
+  const [expiryFrom, setExpiryFrom] = useState("");
+  const [expiryTo, setExpiryTo] = useState("");
   const [includeZero, setIncludeZero] = useState(false);
   const [belowReorder, setBelowReorder] = useState(false);
   const [selected, setSelected] = useState<StockBalanceItem | null>(null);
@@ -107,12 +117,20 @@ export function StockBalanceView() {
     enabled: !!selected,
   });
 
+  const debouncedSearch = useDebouncedValue(search);
+
   const filters = {
-    search,
+    search: debouncedSearch,
     warehouse_id: warehouseId,
-    expiring_in_days: expiringIn ? Number(expiringIn) : undefined,
+    expiring_in_days: ["30", "60", "90"].includes(expiringIn) ? Number(expiringIn) : undefined,
+    expiry_status: expiringIn === "expired" ? "expired" : undefined,
+    expired_in_last_days: expiringIn.startsWith("expired_") ? Number(expiringIn.split("_")[1]) : undefined,
+    expiry_from: expiringIn === "custom" ? expiryFrom : undefined,
+    expiry_to: expiringIn === "custom" ? expiryTo : undefined,
     include_zero: includeZero,
     below_reorder: belowReorder,
+    page,
+    size,
   };
 
   const { data, isLoading } = useQuery({
@@ -120,6 +138,7 @@ export function StockBalanceView() {
     queryFn: () => getStockBalances(filters),
   });
   const rows = data?.items ?? [];
+  const totalPages = data?.total ? Math.ceil(data.total / size) : 0;
 
   const kpis = useMemo(() => {
     let value = 0, low = 0, expiring = 0;
@@ -129,17 +148,41 @@ export function StockBalanceView() {
       items.add(r.item_id);
       if (r.reorder_level > 0 && r.available_qty < r.reorder_level) low++;
       const left = daysTo(r.expiry_date);
-      if (left !== null && left <= 30) expiring++;
+      if (left !== null && left >= 0 && left <= 30) expiring++;
     });
     return { value, low, expiring, items: items.size };
   }, [rows]);
 
   const activeFilters =
-    [search, warehouseId, expiringIn].filter(Boolean).length + (includeZero ? 1 : 0) + (belowReorder ? 1 : 0);
+    [search, warehouseId, expiringIn, expiryFrom, expiryTo].filter(Boolean).length +
+    (includeZero ? 1 : 0) +
+    (belowReorder ? 1 : 0);
 
   const clear = () => {
     setSearch(""); setWarehouseId(""); setExpiringIn("");
+    setExpiryFrom(""); setExpiryTo("");
     setIncludeZero(false); setBelowReorder(false);
+    setPage(1);
+  };
+
+  const exportCsv = () => {
+    const header = ["Item Code", "Item Name", "Category", "Warehouse", "Bin", "Batch", "Expiry", "Available", "Reserved", "On Hand", "Value"];
+    const cell = (v: any) => {
+      if (v == null) return '""';
+      const s = String(v).replace(/"/g, '""');
+      return `"${s}"`;
+    };
+    const body = rows.map((r) => [
+      r.item_code, r.item_name, r.category_name, r.warehouse_name, r.bin_code, r.batch_number, r.expiry_date,
+      r.available_qty, r.reserved_qty, r.physical_qty, r.total_value,
+    ]);
+    const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `stock-balance-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const columns: Column<StockBalanceItem>[] = [
@@ -222,9 +265,14 @@ export function StockBalanceView() {
         eyebrow="Inventory"
         title="Stock Balance"
         actions={
-          <Button variant="primary" onClick={() => navigate("/inventory/labels")}>
-            <TagIcon size={14} /> Labels & Printing
-          </Button>
+          <>
+            <Button variant="subtle" disabled={rows.length === 0} onClick={exportCsv}>
+              <FileSpreadsheet size={14} /> Export CSV
+            </Button>
+            <Button variant="primary" onClick={() => navigate("/inventory/labels")}>
+              <TagIcon size={14} /> Labels & Printing
+            </Button>
+          </>
         }
       />
 
@@ -264,6 +312,36 @@ export function StockBalanceView() {
           placeholder="Any expiry"
           options={EXPIRY_WINDOWS}
         />
+        {expiringIn === "custom" && (
+          <>
+            <input
+              type="date"
+              value={expiryFrom}
+              max={expiryTo || undefined}
+              onChange={(e) => setExpiryFrom(e.target.value)}
+              aria-label="From expiry date"
+              className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
+            />
+            <input
+              type="date"
+              value={expiryTo}
+              min={expiryFrom || undefined}
+              onChange={(e) => setExpiryTo(e.target.value)}
+              aria-label="To expiry date"
+              className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
+            />
+          </>
+        )}
+        <FilterSelect
+          value={size.toString()}
+          onChange={(val) => { setSize(Number(val)); setPage(1); }}
+          placeholder="20 per page"
+          options={[
+            { value: "20", label: "20 per page" },
+            { value: "50", label: "50 per page" },
+            { value: "100", label: "100 per page" },
+          ]}
+        />
         <FilterToggle active={belowReorder} onChange={setBelowReorder}>Below reorder</FilterToggle>
         <FilterToggle active={includeZero} onChange={setIncludeZero}>Include zero stock</FilterToggle>
       </FilterBar>
@@ -275,6 +353,9 @@ export function StockBalanceView() {
           keyOf={(r) => r.id}
           loading={isLoading}
           onRowClick={setSelected}
+          page={page}
+          totalPages={totalPages}
+          onPageChange={setPage}
           empty={
             activeFilters
               ? "No stock matches these filters."
@@ -317,7 +398,7 @@ export function StockBalanceView() {
         }
         footer={
           <>
-            <Button variant="ghost" onClick={() => setSelected(null)}>Close</Button>
+            <Button variant="subtle" onClick={() => setSelected(null)}>Close</Button>
             <Button onClick={() => navigate(`/inventory/ledger?item_id=${selected?.item_id}`)}>
               View movements
             </Button>

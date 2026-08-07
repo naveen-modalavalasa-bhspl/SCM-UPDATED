@@ -76,6 +76,8 @@ interface Users {
   raiser: Account;
   approvers: Account[];
   inventory?: Account;
+  /** Unscoped reader/writer for specs that configure rather than transact. */
+  admin?: Account;
 }
 
 /**

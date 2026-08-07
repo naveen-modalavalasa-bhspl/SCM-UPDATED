@@ -110,6 +110,10 @@ class DocType(str, Enum):
     WH_ISSUE = "WH_ISSUE"
     DISPATCH = "DISPATCH"
     PURCHASE_RETURN = "PURCHASE_RETURN"
+    # Stock moving sideways between two stocking points. Only ever put through the
+    # engine when the two points sit in different projects — a same-project transfer
+    # is the holder's own call and never starts a workflow at all.
+    STOCK_TRANSFER = "STOCK_TRANSFER"
 
 
 class InstanceStatus(str, Enum):

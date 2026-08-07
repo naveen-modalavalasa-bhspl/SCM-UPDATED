@@ -47,11 +47,16 @@ async def list_indents(params: PageParams = Depends(), search: str | None = None
                        region_id: list[int] | None = Query(None),
                        region_unassigned: bool = False,
                        is_bookmarked: str | None = None,
+                       # "Still owes something": approved_qty > allocated_qty on at
+                       # least one line. What the fulfilment queue actually means, and
+                       # the only honest way to ask it now that an approver can serve
+                       # part of an indent from their own point.
+                       has_remainder: bool = False,
                        sort_by: str = "created_at", sort_dir: str = "desc",
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission("indent.view"))):
     return await service.list_indents(
-        db, params, search=search,
+        db, params, search=search, has_remainder=has_remainder,
         date_from=created_date_from or start_date,
         date_to=created_date_to or end_date,
         required_by_from=required_by_from, required_by_to=required_by_to,

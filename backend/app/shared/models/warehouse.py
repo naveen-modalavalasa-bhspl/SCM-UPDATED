@@ -9,7 +9,7 @@ Only the columns the app reads or writes are mapped. Both tables carry NOT NULL
 columns with database defaults (warehouse_type='MAIN', bin_type='STORAGE'); mapping
 one and passing None sends an explicit NULL that overrides the default and raises 1048.
 """
-from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Numeric, String
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Numeric, String
 from sqlalchemy.orm import synonym
 
 from app.core.database import Base
@@ -73,9 +73,8 @@ class WarehouseLocation(Base):
     bin_type = Column("storage_type", String(50), nullable=True)
     storage_type_id = Column(Numeric(20, 0), nullable=True)
     barcode = Column(String(100), nullable=True)
-    # Numbers in the DB team's schema (`int`), not labels: a rack is on floor 2, shelf 3.
-    floor_level = Column(Integer, nullable=True)
-    shelf_level = Column(Integer, nullable=True)
+    floor_level = Column(String(50), nullable=True)
+    shelf_level = Column(String(50), nullable=True)
 
     capacity_weight = Column(Numeric(16, 3), nullable=True)
     capacity_volume = Column(Numeric(16, 3), nullable=True)

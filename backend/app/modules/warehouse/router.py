@@ -304,6 +304,20 @@ async def create_stock_movement(data: s.StockMovementWrite,
     return await service.create_stock_movement(db, data, user)
 
 
+@router.get("/stock-movement-orders", response_model=Page[s.StockMovementOrderRead])
+async def list_stock_movement_orders(params: PageParams = Depends(),
+                                     db: AsyncSession = Depends(get_db),
+                                     _=Depends(require_permission(STOCK_VIEW))):
+    return await service.list_stock_movement_orders(db, params)
+
+
+@router.post("/stock-movement-orders", response_model=s.StockMovementOrderRead, status_code=201)
+async def create_stock_movement_order(data: s.StockMovementOrderWrite,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(STOCK_TRANSFER))):
+    return await service.create_stock_movement_order(db, data, user)
+
+
 @router.get("/stock-movements/availability", response_model=s.StockAvailabilityRead)
 async def stock_availability(warehouse_id: int, source_bin_id: int, item_id: int,
                              batch_id: int | None = None,
@@ -785,10 +799,12 @@ async def warehouse_options(db: AsyncSession = Depends(get_db),
 @router.get("/options/bins", response_model=list[s.Option])
 async def bin_options(warehouse_id: int, search: str | None = None,
                       item_id: int | None = None, batch_id: int | None = None,
+                      storage_type_id: str | None = None,
+                      all_locations: bool = False,
                       db: AsyncSession = Depends(get_db),
                       _=Depends(require_permission(STOCK_VIEW))):
     return await service.bin_options(
-        db, warehouse_id, search, item_id=item_id, batch_id=batch_id
+        db, warehouse_id, search, item_id=item_id, batch_id=batch_id, storage_type_id=storage_type_id, all_locations=all_locations
     )
 
 

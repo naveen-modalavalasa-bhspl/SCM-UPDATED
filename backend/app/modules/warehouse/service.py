@@ -2197,6 +2197,9 @@ async def stock_availability(
     batch_id: int | None = None,
 ) -> dict:
     from app.modules.inventory.models import Stock
+    from app.shared.models.master import Item
+
+    item = await _get(db, Item, item_id, "Item")
 
     stmt = select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
         Stock.warehouse_id == warehouse_id,
@@ -2220,6 +2223,7 @@ async def stock_availability(
     )).scalars().all()
     return {
         "available_qty": available,
+        "is_serial_tracked": item.is_serial_tracked,
         "serial_numbers": [
             row.serial_number
             for row in serials
@@ -2371,6 +2375,171 @@ async def create_stock_movement(
         "moved_at": utcnow(),
         "remarks": data.remarks,
     }
+
+
+async def list_stock_movement_orders(db: AsyncSession, params: PageParams) -> dict:
+    from app.modules.warehouse.models import StockMovementOrder, StockMovementOrderItem
+    
+    stmt = select(StockMovementOrder).order_by(StockMovementOrder.id.desc())
+    page = await paginate(db, stmt, params)
+    
+    for item in page["items"]:
+        # Lazy load won't be fully realized by paginate without a separate pass,
+        # but selectin is used on the model. We can return them directly.
+        pass
+        
+    return page
+
+
+async def create_stock_movement_order(
+    db: AsyncSession,
+    data: s.StockMovementOrderWrite,
+    user,
+) -> dict:
+    from app.modules.inventory.models import Stock
+    from app.modules.warehouse.models import StockMovementOrder, StockMovementOrderItem
+
+    wh = await _warehouse(db, data.warehouse_id)
+    order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT.value)
+
+    order = StockMovementOrder(
+        order_no=order_no,
+        warehouse_id=wh.id,
+        warehouse_name=wh.name,
+        status="COMPLETED",
+        reason=data.reason,
+        created_by_id=getattr(user, "id", None),
+        created_by_name=_name(user)
+    )
+    db.add(order)
+    await db.flush()
+
+    for line in data.items:
+        source = await _get(db, Bin, line.source_bin_id, "Source bin")
+        destination = await _get(db, Bin, line.destination_bin_id, "Destination bin")
+        if source.id == destination.id:
+            raise ValidationError("Source and destination bins must be different")
+        if source.warehouse_id != wh.id or destination.warehouse_id != wh.id:
+            raise ValidationError("Both bins must belong to the selected warehouse")
+        if not source.is_pickable or not destination.is_pickable:
+            raise ValidationError("Stock can move only between stock-holding bins")
+        if not source.is_active or not destination.is_active:
+            raise ValidationError("Source and destination bins must be active")
+
+        item = await _item_snapshot(db, line.item_id)
+        batch_id = line.batch_id or m.NO_BATCH
+        stock = (await db.execute(
+            select(Stock).where(
+                Stock.warehouse_id == wh.id,
+                Stock.bin_id == source.id,
+                Stock.item_id == item.id,
+                Stock.batch_id == batch_id,
+                Stock.project_id == 0,
+            ).with_for_update()
+        )).scalar_one_or_none()
+        if stock is None or _d(stock.available_qty) < _d(line.quantity):
+            available = _d(stock.available_qty) if stock else ZERO
+            raise ValidationError(
+                f"Only {available} is available in source bin {source.code} for item {item.code}"
+            )
+
+        serial_numbers = [
+            value.strip() for value in (line.serial_numbers or []) if value.strip()
+        ]
+        if len(serial_numbers) != len(set(serial_numbers)):
+            raise ValidationError("Movement serial numbers must be unique")
+        serial_rows: list[m.SerialNumber] = []
+        if item.is_serial_tracked:
+            quantity = _d(line.quantity)
+            if quantity != quantity.to_integral_value() \
+                    or len(serial_numbers) != int(quantity):
+                raise ValidationError(
+                    f"Select exactly {int(quantity)} serial numbers for {item.code}"
+                )
+            serial_rows = (await db.execute(
+                select(m.SerialNumber).where(
+                    m.SerialNumber.item_id == item.id,
+                    m.SerialNumber.warehouse_id == wh.id,
+                    m.SerialNumber.bin_id == source.id,
+                    m.SerialNumber.batch_id == (line.batch_id if line.batch_id else None),
+                    m.SerialNumber.serial_number.in_(serial_numbers),
+                    m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+                    m.SerialNumber.is_active.is_(True),
+                ).with_for_update()
+            )).scalars().all()
+            if len(serial_rows) != len(serial_numbers):
+                raise ValidationError(
+                    f"One or more serial numbers are not available in the source bin for {item.code}"
+                )
+            if any((row.remarks or "").startswith("Reserved for issue ") for row in serial_rows):
+                raise ValidationError(f"A selected serial is reserved for a material issue on {item.code}")
+        elif serial_numbers:
+            raise ValidationError(f"{item.code} is not serial tracked")
+
+        # Create movement order item
+        order_item = StockMovementOrderItem(
+            order_id=order.id,
+            item_id=item.id,
+            item_code=item.code,
+            item_name=item.name,
+            uom_code=item.uom_code,
+            batch_id=batch_id,
+            source_bin_id=source.id,
+            destination_bin_id=destination.id,
+            quantity=line.quantity,
+            serial_numbers=",".join(serial_numbers) if serial_numbers else None
+        )
+        db.add(order_item)
+
+        await move_stock(
+            db,
+            item_id=item.id,
+            qty=line.quantity,
+            direction=StockDirection.OUT.value,
+            ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
+            ref_id=order.id,
+            ref_no=order_no,
+            user=user,
+            warehouse_id=wh.id,
+            bin_id=source.id,
+            batch_id=batch_id,
+            project_id=0,
+        )
+        await move_stock(
+            db,
+            item_id=item.id,
+            qty=line.quantity,
+            direction=StockDirection.IN.value,
+            ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
+            ref_id=order.id,
+            ref_no=order_no,
+            user=user,
+            warehouse_id=wh.id,
+            bin_id=destination.id,
+            batch_id=batch_id,
+            project_id=0,
+        )
+        for row in serial_rows:
+            row.bin_id = destination.id
+            row.remarks = f"Moved by {order_no}"
+
+    await write_audit(
+        db,
+        entity="whs_stock_movements",
+        entity_id=order.id,
+        entity_no=order_no,
+        action=AuditAction.CREATE,
+        actor=user,
+        after={
+            "warehouse_id": wh.id,
+            "lines": len(data.items),
+            "remarks": data.reason,
+        },
+    )
+    await db.commit()
+    
+    # Reload with items
+    return await _load(db, StockMovementOrder, order.id, "Stock Movement Order", StockMovementOrder.items)
 
 
 async def list_stock_movements(db: AsyncSession, params: PageParams) -> dict:
@@ -5946,15 +6115,22 @@ async def warehouse_options(db: AsyncSession) -> list[dict]:
     rows = (await db.execute(
         select(Warehouse).where(Warehouse.is_active.is_(True)).order_by(Warehouse.code)
     )).scalars().all()
-    return [{"id": r.id, "code": r.code, "name": r.name} for r in rows]
-
+    return [{"id": r.id, "code": r.code, "name": r.name, "is_bin_managed": r.is_bin_managed} for r in rows]
 
 async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = None,
-                      item_id: int | None = None, batch_id: int | None = None) -> list[dict]:
+                      item_id: int | None = None, batch_id: int | None = None,
+                      storage_type_id: str | None = None,
+                      all_locations: bool = False) -> list[dict]:
     # A picker chooses somewhere to put stock, so offer bins and not the lanes and
-    # racks they hang from.
-    stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True),
-                             Bin.bin_type.in_(m.BIN_TYPES))
+    # racks they hang from, unless all_locations is True.
+    stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True))
+    if not all_locations:
+        stmt = stmt.where(Bin.bin_type.in_(m.BIN_TYPES))
+    if storage_type_id:
+        if storage_type_id.isdigit():
+            stmt = stmt.where(Bin.storage_type_id == int(storage_type_id))
+        else:
+            stmt = stmt.where(Bin.bin_type == storage_type_id)
     if item_id or batch_id:
         from app.modules.inventory.models import Stock
         stmt = stmt.join(Stock, Stock.bin_id == Bin.id).where(

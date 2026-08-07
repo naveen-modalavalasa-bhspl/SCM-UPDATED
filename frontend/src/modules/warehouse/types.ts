@@ -105,8 +105,8 @@ export interface Bin {
   bin_type?: string | null;
   storage_type_id?: number | null;
   barcode?: string | null;
-  floor_level?: number | null;
-  shelf_level?: number | null;
+  floor_level?: string | null;
+  shelf_level?: string | null;
   /** Ancestry, e.g. `block A/flr-1/rack-1`. Derived by the tree endpoint. */
   path?: string | null;
   /** Depth in the tree, 1 at the root. Derived by the tree endpoint. */
@@ -139,9 +139,8 @@ export interface BinWrite {
   capacity_qty?: number | null;
   storage_type_id?: number | null;
   barcode?: string | null;
-  /** Typed into a text box, sent as a string; the column is an integer. */
-  floor_level?: string | number | null;
-  shelf_level?: string | number | null;
+  floor_level?: string | null;
+  shelf_level?: string | null;
   capacity_volume?: number | null;
   max_weight_capacity?: number | null;
   height_cm?: number | null;
@@ -165,8 +164,8 @@ export interface WarehouseLocation {
   name?: string | null;
   description?: string | null;
   barcode?: string | null;
-  floor_level?: number | null;
-  shelf_level?: number | null;
+  floor_level?: string | null;
+  shelf_level?: string | null;
   capacity_weight?: number | null;
   capacity_volume?: number | null;
   max_weight_capacity?: number | null;
@@ -644,6 +643,9 @@ export interface IssueItemWrite {
   item_code?: string | null;
   item_name?: string | null;
   is_serial_tracked?: boolean;
+  // Carried on the line so the form knows whether to ask for a batch. Set from the
+  // chosen item, alongside is_serial_tracked, when the item is picked.
+  is_batch_tracked?: boolean;
   is_imei_tracked?: boolean;
   bin_id?: number | null;
   batch_id?: number | null;
@@ -703,6 +705,7 @@ export interface IssueWrite {
   department_id?: number | null;
   project_id?: number | null;
   vehicle_id?: number | null;
+  vehicle_number?: string | null;
   issued_to_id?: number | null;
   direction?: "OUT" | "IN";
   original_issue_id?: number | null;
@@ -1160,4 +1163,53 @@ export interface PoLineOption {
   rate?: number | null;
   indent_id?: number | null;
   indent_no?: string | null;
+}
+
+export interface StockMovementOrderItem {
+  id: number;
+  order_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  source_bin_id: number;
+  source_bin_code?: string | null;
+  destination_bin_id: number;
+  destination_bin_code?: string | null;
+  quantity: number;
+  batch_id?: number | null;
+  serial_numbers?: string[] | null;
+}
+
+export interface StockAvailability {
+  available_qty: number;
+  is_serial_tracked: boolean;
+  serial_numbers: string[];
+}
+
+export interface StockMovementOrder {
+  id: number;
+  order_no: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  status: string;
+  reason?: string | null;
+  created_by_name?: string | null;
+  created_at?: string | null;
+  items: StockMovementOrderItem[];
+}
+
+export interface StockMovementOrderItemWrite {
+  item_id: number;
+  source_bin_id: number;
+  destination_bin_id: number;
+  quantity: number;
+  batch_id?: number | null;
+  serial_numbers?: string[] | null;
+}
+
+export interface StockMovementOrderWrite {
+  warehouse_id: number;
+  reason?: string | null;
+  items: StockMovementOrderItemWrite[];
 }

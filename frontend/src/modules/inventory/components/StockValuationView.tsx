@@ -94,7 +94,7 @@ export function StockValuationView() {
         eyebrow="Inventory"
         title="Valuation, Ageing & Expiry"
         actions={
-          <Button variant="ghost" onClick={refresh}>
+          <Button variant="subtle" onClick={refresh}>
             <RefreshCw size={14} /> Refresh
           </Button>
         }

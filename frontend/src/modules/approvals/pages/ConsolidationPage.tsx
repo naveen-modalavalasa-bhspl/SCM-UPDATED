@@ -1,10 +1,12 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { ArrowLeft, Check, Layers, RefreshCw, Users } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Check, Layers, RefreshCw, Search, Users } from "lucide-react";
 import {
   Button, Card, PageHeader, ResponsiveList, Select, StatCard, StatusPill, type Column,
 } from "@/shared/components";
 import { approvalsApi } from "../api";
+import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
 import type {
   ConsolidatedItem, ConsolidatedItemAllocation, ConsolidationApprovalResult,
   ConsolidationBatch, ConsolidationDimension, ConsolidationFilterOptions,
@@ -99,15 +101,17 @@ const FILTERS: { dimension: ConsolidationDimension; param: keyof ConsolidationQu
   { dimension: "item", param: "item_id", label: "Item" },
 ];
 
-function FilterBar({ options, value, onChange, onClear }: {
+function FilterBar({ options, value, onChange, onClear, search, onSearch }: {
   options: ConsolidationFilterOptions;
   value: ConsolidationQuery;
   onChange: (next: ConsolidationQuery) => void;
   onClear: () => void;
+  search: string;
+  onSearch: (next: string) => void;
 }) {
   const active = FILTERS.filter((f) => (options[f.dimension] ?? []).length > 0);
   const applied = Object.values(value).filter(Boolean).length;
-  if (active.length === 0) return null;
+  const field = "min-h-11 w-full rounded-xl border border-line bg-content1 px-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand-500";
 
   return (
     <Card className="mb-4 p-4">
@@ -117,6 +121,46 @@ function FilterBar({ options, value, onChange, onClear }: {
           Clear filters{applied > 0 ? ` (${applied})` : ""}
         </Button>
       </div>
+
+      {/* Search and the raised-on window sit above the dropdowns and are always
+          offered: unlike a dimension, they need no values in the queue to be useful. */}
+      <div className="mb-3 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
+        <label className="block">
+          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Search</span>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+            <input
+              className={`${field} pl-9`}
+              type="search"
+              aria-label="Search consolidations"
+              placeholder="Indent no., requester, item, region…"
+              value={search}
+              onChange={(e) => onSearch(e.target.value)}
+            />
+          </div>
+        </label>
+        <label className="block">
+          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Raised from</span>
+          <input
+            className={field}
+            type="date"
+            aria-label="Raised from"
+            value={value.raised_from ?? ""}
+            onChange={(e) => onChange({ ...value, raised_from: e.target.value || undefined })}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Raised to</span>
+          <input
+            className={field}
+            type="date"
+            aria-label="Raised to"
+            value={value.raised_to ?? ""}
+            onChange={(e) => onChange({ ...value, raised_to: e.target.value || undefined })}
+          />
+        </label>
+      </div>
+
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {active.map((filter) => (
           <Select
@@ -246,7 +290,7 @@ function ItemEditor({ item, batchKey, decision, onChange }: {
  *  computed fresh on every request and stored nowhere. This reference is derived from
  *  the cycle it groups, so it is stable for as long as the cycle is, and it never
  *  pretends to be a saved document id. */
-const batchRef = (batch: ConsolidationBatch) => `CONS-${batch.cycle}`;
+export const batchRef = (batch: ConsolidationBatch) => `CONS-${batch.cycle}`;
 
 const batchTotalRequested = (batch: ConsolidationBatch) =>
   batch.consolidated_items.reduce((sum, item) => sum + item.total_requested_quantity, 0);
@@ -314,8 +358,10 @@ function BatchList({ batches, onOpen }: {
   );
 }
 
-function BatchCard({ batch, onBack }: {
+export function BatchCard({ batch, onBack }: {
   batch: ConsolidationBatch;
+  /** Where "everything here is approved" goes. The screen's own header owns the
+   *  visible Back control; this fires when the batch itself is finished with. */
   onBack: () => void;
 }) {
   // Keyed by item id, one per row of the consolidated item table. Local to the screen:
@@ -355,6 +401,9 @@ function BatchCard({ batch, onBack }: {
       // The approved indents leave this approver's queue, so the workspace has to be
       // re-read rather than patched.
       queryClient.invalidateQueries({ queryKey: ["approvals"] });
+      // Nothing failed means nothing is left here — go back rather than leave the
+      // approver staring at a consolidation that is about to empty out.
+      if (data.failed.length === 0) onBack();
     },
   });
 
@@ -373,10 +422,6 @@ function BatchCard({ batch, onBack }: {
 
   return (
     <Card className="mb-4 space-y-4 p-4">
-      <Button variant="ghost" onClick={onBack}>
-        <ArrowLeft className="h-4 w-4" /> All consolidations
-      </Button>
-
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-mono text-xs font-semibold uppercase tracking-wide text-muted">{batchRef(batch)}</p>
@@ -435,6 +480,23 @@ function BatchCard({ batch, onBack }: {
       </div>
 
       <div>
+        {/* Serve-from-stock, per indent. A consolidation is a view over several
+            documents, and stock is issued INTO the raiser's own point — so there is
+            no single "issue the batch": each indent's goods go somewhere different. */}
+        <details className="mb-3 rounded-2xl border border-line/70 bg-content1 p-3">
+          <summary className="cursor-pointer text-sm font-semibold text-ink">
+            Serve these indents from your own stock
+          </summary>
+          <div className="mt-3 space-y-3">
+            {batch.indents.map((row) => (
+              <div key={row.id}>
+                <p className="mb-1 font-mono text-xs text-muted">{row.indent_no}</p>
+                <IssueFromStockPanel indentId={row.id} />
+              </div>
+            ))}
+          </div>
+        </details>
+
         <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Matching indents</p>
         <ResponsiveList
           data={batch.indents}
@@ -456,8 +518,18 @@ function BatchCard({ batch, onBack }: {
 }
 
 export function ConsolidationPage() {
+  const nav = useNavigate();
   const [filters, setFilters] = useState<ConsolidationQuery>({});
-  const [openedKey, setOpenedKey] = useState<string | null>(null);
+  // Typing is debounced into `filters` so every keystroke does not become a request;
+  // the box itself stays instant because it renders from its own state.
+  const [searchText, setSearchText] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(
+      () => setFilters((current) => ({ ...current, search: searchText.trim() || undefined })),
+      300,
+    );
+    return () => clearTimeout(timer);
+  }, [searchText]);
   // Filters are part of the key, so each combination is cached; placeholderData keeps
   // the previous result on screen while the next one loads, so the bar never flickers
   // back to an empty workspace between keystrokes.
@@ -468,11 +540,6 @@ export function ConsolidationPage() {
   });
   const data = query.data;
   const batches = data?.items ?? [];
-  // The open consolidation is held by key, not by object: after an approval the
-  // workspace is re-read, and a stale copy would keep showing indents that have
-  // already moved on. A key that no longer comes back drops the screen to the list,
-  // which is the right answer — that consolidation is done.
-  const opened = batches.find((batch) => batch.batch_key === openedKey) ?? null;
 
   const appliedCount = useMemo(
     () => Object.values(filters).filter(Boolean).length, [filters],
@@ -487,16 +554,10 @@ export function ConsolidationPage() {
       </Button>}
     />
     <p className="mb-4 text-sm text-body">
-      {opened
-        ? <>Set an approved total against any item and it is shared out across the
-            indents that asked for it, in proportion to what each requested; name
-            indents in that item's exclude box and their share goes to the rest.
-            Approve all sends every indent in this consolidation on at those
-            quantities.</>
-        : <>One row per consolidation — every Monthly indent waiting on you, grouped by
-            monthly cycle. Region, project, office, vehicle, requester and item are
-            filters over a cycle; they never split it into separate approvals. Open a
-            consolidation to set quantities and approve it.</>}
+      One row per consolidation — every Monthly indent waiting on you, grouped by
+      monthly cycle. Region, project, office, vehicle, requester and item narrow what
+      is inside a cycle; they never split it into separate approvals. Open a
+      consolidation to set quantities and approve it.
     </p>
 
     {data && <>
@@ -515,7 +576,9 @@ export function ConsolidationPage() {
         options={data.filter_options}
         value={filters}
         onChange={setFilters}
-        onClear={() => setFilters({})}
+        onClear={() => { setSearchText(""); setFilters({}); }}
+        search={searchText}
+        onSearch={setSearchText}
       />
     </>}
 
@@ -531,8 +594,9 @@ export function ConsolidationPage() {
                 : "No Monthly indents are waiting for your consolidated approval."}
               {appliedCount > 0 && <Button variant="ghost" onClick={() => setFilters({})}>Clear filters</Button>}
             </Card>
-          : opened
-            ? <BatchCard key={opened.batch_key} batch={opened} onBack={() => setOpenedKey(null)} />
-            : <BatchList batches={batches} onOpen={(batch) => setOpenedKey(batch.batch_key)} />}
+          : <BatchList
+              batches={batches}
+              onOpen={(batch) => nav(`/approvals/consolidation/${encodeURIComponent(batch.batch_key)}`)}
+            />}
   </>;
 }

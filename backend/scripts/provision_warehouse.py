@@ -36,6 +36,7 @@ PAGES = [
     ("wh_qc", "/warehouse/quality-inspection", "Quality Inspection", "check-circle",
      P.INSPECTION_VIEW, 44),
     ("wh_putaway", "/warehouse/putaway", "Put-away", "package", P.PUTAWAY_VIEW, 45),
+    ("wh_stock_movements", "/warehouse/stock-movements", "Stock Movements", "arrow-right-left", P.STOCK_VIEW, 45),
     ("wh_picklist", "/warehouse/picklist", "Picklists", "list-checks", P.PICKING_VIEW, 46),
     ("wh_issues", "/warehouse/material-issues", "Material Issues", "send", P.ISSUE_VIEW, 47),
     # Packing sits between the issue and the vehicle, so it lists before Dispatch.

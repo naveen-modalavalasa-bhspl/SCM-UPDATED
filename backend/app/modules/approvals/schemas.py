@@ -1,5 +1,5 @@
 """Wire shapes for the operational approvals module."""
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import Query
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
@@ -216,7 +216,13 @@ class ConsolidationFilters:
         office_id: int | None = Query(None),
         requester_id: int | None = Query(None),
         item_id: int | None = Query(None),
+        search: str = Query("", description="Indent no., requester or item"),
+        raised_from: date | None = Query(None),
+        raised_to: date | None = Query(None),
     ):
+        self.search = (search or "").strip()
+        self.raised_from = raised_from
+        self.raised_to = raised_to
         self.cycle = cycle or None
         self.region_id = region_id
         self.project_id = project_id
@@ -230,7 +236,9 @@ class ConsolidationFilters:
             "cycle": self.cycle, "region_id": self.region_id,
             "project_id": self.project_id, "vehicle_id": self.vehicle_id,
             "office_id": self.office_id, "requester_id": self.requester_id,
-            "item_id": self.item_id,
+            "item_id": self.item_id, "search": self.search or None,
+            "raised_from": self.raised_from.isoformat() if self.raised_from else None,
+            "raised_to": self.raised_to.isoformat() if self.raised_to else None,
         }
 
 
@@ -356,3 +364,27 @@ class ConsolidationOut(BaseModel):
     # Monthly indents pending with this approver before any filter — lets the screen
     # say "8 of 24" without a second request.
     unfiltered_indent_count: int = 0
+
+
+# ---------------- Serving an indent from the approver's own stock ----------------
+
+class IssueFromStockLineIn(BaseModel):
+    """One line to serve now, and which of the approver's points it comes out of."""
+    line_id: int = Field(gt=0)
+    warehouse_id: int = Field(gt=0)
+    quantity: float = Field(gt=0, allow_inf_nan=False)
+
+
+class IssueFromStockIn(BaseModel):
+    """Issue what you have against an indent, without leaving the approval screen.
+
+    `reason` is free text and is the ONLY thing the user says about the nature of the
+    move — whether it is an issue, a transfer or a bin change is derived from the two
+    points, never chosen, so it cannot be used to dodge an approval.
+    """
+    lines: list[IssueFromStockLineIn] = Field(min_length=1)
+    reason: str = Field(default="", max_length=500)
+    # Send the indent on to the next rung once what is held has been issued. The
+    # approved quantities are untouched — only the remainder travels — so the next
+    # approver sees exactly what is still owed and nothing is re-decided.
+    forward_remainder: bool = False

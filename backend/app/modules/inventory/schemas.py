@@ -194,9 +194,16 @@ class AdjustmentItemIn(BaseModel):
 
 class AdjustmentIn(BaseModel):
     warehouse_id: int
-    reason: str  # DAMAGE, EXPIRY, COUNT_VARIANCE, FOUND
+    # Validated against AdjustmentReason in the service, not typed as the enum here, so
+    # a bad value comes back as the app's own error shape rather than a Pydantic 422.
+    reason: str
     remarks: str | None = None
     items: list[AdjustmentItemIn]
+
+
+class AdjustmentRejectIn(BaseModel):
+    """Why an adjustment was refused. Optional so the existing call still works."""
+    remarks: str | None = None
 
 
 class AdjustmentItemOut(BaseModel):
@@ -539,3 +546,51 @@ class StockOverviewKPIs(BaseModel):
     total_available_qty: float
     dead_stock_count: int
 
+
+
+# ---------------- Stocking points: tiers, tagging, classification ----------------
+
+class PositionLocationIn(BaseModel):
+    """Tag a position to a stocking point. Many per position — one OE can cover
+    several MDPs — so this creates a row rather than replacing the position's set."""
+    position_id: int = Field(gt=0)
+    warehouse_id: int = Field(gt=0)
+    project_id: int = Field(default=0, ge=0)
+    project_name: str | None = None
+    is_primary: bool = False
+
+
+class PositionLocationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    position_id: int
+    position_name: str | None = None
+    warehouse_id: int
+    warehouse_code: str | None = None
+    warehouse_name: str | None = None
+    # Derived from warehouse_type, never stored — see inventory/locations.py.
+    warehouse_type: str | None = None
+    tier: int
+    tier_label: str
+    project_id: int = 0
+    project_name: str | None = None
+    is_primary: bool = False
+
+
+class MovementClassificationOut(BaseModel):
+    """What a move between two points would be, before anything is created.
+
+    The screen shows this read-only next to the from/to pickers: the user says WHY
+    (`reason`), never WHAT. Letting them pick the kind would make skipping the
+    Inventory Manager on a cross-project transfer a one-click affair.
+    """
+    from_warehouse_id: int | None = None
+    to_warehouse_id: int | None = None
+    from_tier: int
+    to_tier: int
+    movement_kind: str
+    doc_type: str
+    needs_inventory_manager: bool
+    # Plain-language explanation, so the screen never has to restate the rule.
+    explanation: str

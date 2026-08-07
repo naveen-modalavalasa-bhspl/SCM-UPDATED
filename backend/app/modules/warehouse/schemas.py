@@ -9,7 +9,7 @@ caller invent its own document number or mark its own issue approved.
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.warehouse.enums import (
     DispatchEventType, DispatchType, InspectionResult, InspectionType, IssueDirection,
@@ -66,8 +66,8 @@ class BinRead(_Read):
     bin_type: str | None = None
     storage_type_id: int | None = None
     barcode: str | None = None
-    floor_level: int | None = None
-    shelf_level: int | None = None
+    floor_level: str | None = None
+    shelf_level: str | None = None
     # Derived when the tree is built, not stored — see service.bin_tree.
     path: str | None = None
     level: int | None = None
@@ -107,8 +107,8 @@ class BinWrite(BaseModel):
     max_temperature_celsius: Decimal | None = None
     storage_type_id: int | None = None
     barcode: str | None = None
-    floor_level: int | None = None
-    shelf_level: int | None = None
+    floor_level: str | None = None
+    shelf_level: str | None = None
     is_active: bool = True
 
     @field_validator(
@@ -133,8 +133,8 @@ class LocationRead(_Read):
     name: str | None = None
     description: str | None = None
     barcode: str | None = None
-    floor_level: int | None = None
-    shelf_level: int | None = None
+    floor_level: str | None = None
+    shelf_level: str | None = None
     capacity_weight: Decimal | None = None
     capacity_volume: Decimal | None = None
     max_weight_capacity: Decimal | None = None
@@ -532,7 +532,62 @@ class StockMovementRead(BaseModel):
 class StockAvailabilityRead(BaseModel):
     available_qty: Decimal = Decimal("0")
     serial_numbers: list[str] = Field(default_factory=list)
+    is_serial_tracked: bool = False
 
+
+class StockMovementOrderItemWrite(BaseModel):
+    item_id: int
+    source_bin_id: int
+    destination_bin_id: int
+    quantity: Decimal = Field(gt=0)
+    batch_id: int | None = None
+    serial_numbers: list[str] | None = None
+
+    @model_validator(mode='after')
+    def check_bins(self):
+        if self.source_bin_id == self.destination_bin_id:
+            raise ValueError("Source location and destination location must not be the same")
+        return self
+
+
+class StockMovementOrderWrite(BaseModel):
+    warehouse_id: int
+    reason: str | None = Field(default=None, max_length=500)
+    items: list[StockMovementOrderItemWrite] = Field(min_length=1)
+
+
+class StockMovementOrderItemRead(BaseModel):
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    source_bin_id: int
+    destination_bin_id: int
+    quantity: Decimal
+    batch_id: int | None = None
+    serial_numbers: list[str] | str | None = Field(default_factory=list)
+
+    @field_validator("serial_numbers", mode="before")
+    @classmethod
+    def parse_serials(cls, v):
+        if not v:
+            return []
+        if isinstance(v, str):
+            return v.split(",")
+        return v
+
+
+
+class StockMovementOrderRead(BaseModel):
+    id: int
+    order_no: str
+    warehouse_id: int
+    warehouse_name: str | None = None
+    status: str
+    reason: str | None = None
+    created_by_name: str | None = None
+    created_at: datetime | None = None
+    items: list[StockMovementOrderItemRead] = Field(default_factory=list)
 
 # ---------------------------------------------------------------------------
 # Picking
@@ -1122,6 +1177,7 @@ class Option(BaseModel):
     id: int
     code: str | None = None
     name: str
+    is_bin_managed: bool | None = None
 
 
 class ItemOption(Option):

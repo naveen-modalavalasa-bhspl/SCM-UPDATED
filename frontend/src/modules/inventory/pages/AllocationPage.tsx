@@ -123,6 +123,12 @@ export function AllocationPage() {
           const splits = splitsOf(line.indent_item_id);
           const giving = givenOn(line.indent_item_id);
           const short = Math.max(0, line.requested_qty - giving);
+          // Only the part no warehouse can supply becomes procurement demand. Issuing
+          // less than was asked for while stock is still on the shelf is a decision,
+          // not a shortage, and announcing procurement for it sent buyers chasing
+          // stock the branch already had.
+          const unavailable = Math.max(0, short - Math.max(0, line.available_total - giving));
+          const withheld = short - unavailable;
           const overWarehouse = splits.some((s) => {
             const chosen = line.warehouses.find((w) => String(w.warehouse_id) === s.wh);
             return chosen ? Number(s.qty || 0) > chosen.available_qty : Number(s.qty || 0) > 0;
@@ -206,7 +212,7 @@ export function AllocationPage() {
                       )}
                     </div>
                   ))}
-                  <Button variant="ghost" onClick={() => addSplit(line.indent_item_id)}>
+                  <Button variant="subtle" onClick={() => addSplit(line.indent_item_id)}>
                     <Plus size={14} /> Take some from another warehouse
                   </Button>
                 </div>
@@ -214,9 +220,15 @@ export function AllocationPage() {
 
               <p className="mt-2 text-sm text-muted">
                 {giving > 0 ? `Reserving ${giving}. ` : "Giving nothing. "}
-                {short > 0 && (
+                {unavailable > 0 && (
                   <span className="text-warning">
-                    {short} {line.uom_code} goes to procurement as a material request.
+                    {unavailable} {line.uom_code} goes to procurement as a material request.
+                  </span>
+                )}
+                {withheld > 0 && (
+                  <span className="text-muted">
+                    {" "}{withheld} {line.uom_code} not issued — still in stock, so nothing
+                    is sent to procurement.
                   </span>
                 )}
                 {overWarehouse && (
@@ -243,7 +255,7 @@ export function AllocationPage() {
           <Button onClick={() => save.mutate()} disabled={save.isPending}>
             {save.isPending ? "Submitting…" : "Submit for approval"}
           </Button>
-          <Button variant="ghost" onClick={() => nav("/inventory/fulfillment")}>
+          <Button variant="subtle" onClick={() => nav("/inventory/fulfillment")}>
             Cancel
           </Button>
         </div>

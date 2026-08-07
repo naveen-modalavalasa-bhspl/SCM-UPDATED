@@ -195,8 +195,13 @@ export interface ConsolidationFilterOption {
  *  the filter bar hides that control instead of showing an empty dropdown. */
 export type ConsolidationFilterOptions = Record<ConsolidationDimension, ConsolidationFilterOption[]>;
 
+/** `search` and the raised-on window are free-text/date, not dimensions: they have no
+ *  dropdown and are always available, so they live here but never in
+ *  `ConsolidationDimension`. Dates are ISO `YYYY-MM-DD`, what `<input type="date">`
+ *  gives and what FastAPI parses into a `date`. */
 export type ConsolidationQuery = Partial<Record<
-  "cycle" | "region_id" | "project_id" | "vehicle_id" | "office_id" | "requester_id" | "item_id",
+  "cycle" | "region_id" | "project_id" | "vehicle_id" | "office_id" | "requester_id"
+  | "item_id" | "search" | "raised_from" | "raised_to",
   string
 >>;
 
@@ -243,4 +248,54 @@ export interface CorrectionIndent {
     quantity: number;
     remarks?: string | null;
   }>;
+}
+
+/** One line's fulfilment position: what is owed, and what this approver can cover. */
+export interface IndentAvailabilityLine {
+  line_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  requested_quantity: number;
+  approved_quantity: number;
+  allocated_quantity: number;
+  /** approved − allocated: what still has to come from somewhere. */
+  remainder: number;
+  available_at_my_points: number;
+  /** min(remainder, available) — what an Issue now would actually move. */
+  issuable_now: number;
+  sources: Array<{ warehouse_id: number; available_quantity: number }>;
+}
+
+export interface IndentAvailability {
+  indent_id: number;
+  indent_no: string;
+  /** The requester's own point — where an issue lands. Null when untagged. */
+  target_warehouse_id?: number | null;
+  my_warehouse_ids: number[];
+  items: IndentAvailabilityLine[];
+}
+
+export interface IssueFromStockLine {
+  line_id: number;
+  warehouse_id: number;
+  quantity: number;
+}
+
+export interface IssueFromStockResult {
+  /** True when the remainder was handed to the next approver in the same act. */
+  forwarded?: boolean;
+  indent_id: number;
+  issued: Array<{
+    line_id: number;
+    item_name?: string | null;
+    quantity: number;
+    from_warehouse_id: number;
+    to_warehouse_id: number;
+    remainder: number;
+  }>;
+  outstanding_quantity: number;
+  /** Nothing owed anywhere — the indent has no reason to climb further. */
+  fully_served: boolean;
 }

@@ -2,92 +2,83 @@ import { Button, Can, Card, ErrorBanner, Field, Input, PageHeader, Select } from
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ScanLine } from "lucide-react";
-import { batchOptions, binOptions, createStockMovement, getStockAvailability, itemOptions, warehouseOptions } from "../api";
+import { ArrowLeft, Plus, ScanLine, Trash2 } from "lucide-react";
+import {
+  batchOptions,
+  binOptions,
+  createStockMovementOrder,
+  getStockAvailability,
+  itemOptions,
+  listStorageTypes,
+  warehouseOptions
+} from "../api";
 import { Lookup } from "../components/Lookup";
 import { Section } from "../components/DocumentMeta";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import { fmtQty, num } from "../format";
-import type { StockMovementWrite } from "../types";
-
-const MOVEMENT_TYPES = [
-  { value: "BIN_TO_BIN", label: "Bin to bin" },
-  { value: "TRANSFER", label: "Transfer" },
-  { value: "REPLENISHMENT", label: "Replenishment" },
-  { value: "QUARANTINE", label: "Quarantine" },
-];
-
-const EMPTY: StockMovementWrite = {
-  movement_type: "BIN_TO_BIN",
-  warehouse_id: 0,
-  source_bin_id: 0,
-  destination_bin_id: 0,
-  item_id: 0,
-  batch_id: null,
-  quantity: 0,
-  serial_numbers: [],
-  remarks: "",
-};
+import type { StockMovementOrderItemWrite } from "../types";
 
 export default function StockMovementForm() {
   const nav = useNavigate();
   const queryClient = useQueryClient();
-  const [form, setForm] = useState<StockMovementWrite>(EMPTY);
-  const [serialsOpen, setSerialsOpen] = useState(false);
+
+  const [warehouseId, setWarehouseId] = useState<number>(0);
+  const [isBinManaged, setIsBinManaged] = useState<boolean>(true);
+  const [reason, setReason] = useState<string>("");
+  const [lines, setLines] = useState<StockMovementOrderItemWrite[]>([]);
+
   const [touched, setTouched] = useState(false);
 
-  const set = <K extends keyof StockMovementWrite>(
-    key: K,
-    value: StockMovementWrite[K],
-  ) => setForm((current) => ({ ...current, [key]: value }));
-
-  const availability = useQuery({
-    queryKey: [
-      "wh-stock-movement-availability",
-      form.warehouse_id,
-      form.source_bin_id,
-      form.item_id,
-      form.batch_id,
-    ],
-    queryFn: () => getStockAvailability(
-      form.warehouse_id,
-      form.source_bin_id,
-      form.item_id,
-      form.batch_id,
-    ),
-    enabled: !!form.warehouse_id && !!form.source_bin_id && !!form.item_id,
+  const storageTypes = useQuery({
+    queryKey: ["wh-storage-types"],
+    queryFn: () => listStorageTypes(),
   });
 
-  useEffect(() => {
-    set("serial_numbers", []);
-    // Serial choices belong to the exact source dimensions.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.warehouse_id, form.source_bin_id, form.item_id, form.batch_id]);
-
   const save = useMutation({
-    mutationFn: () => createStockMovement(form),
+    mutationFn: () => createStockMovementOrder({ warehouse_id: warehouseId, reason, items: lines }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["wh-stock-movements"] });
+      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-orders"] });
       queryClient.invalidateQueries({ queryKey: ["inventory-stock"] });
       nav("/warehouse/stock-movements", { replace: true });
     },
   });
 
-  const isInvalid = (
-    !form.warehouse_id
-    || !form.source_bin_id
-    || !form.destination_bin_id
-    || !form.item_id
-    || form.quantity <= 0
-    || form.source_bin_id === form.destination_bin_id
-    || form.quantity > num(availability.data?.available_qty)
+  const addLine = () => {
+    setLines([...lines, {
+      item_id: 0,
+      source_bin_id: 0,
+      destination_bin_id: 0,
+      quantity: 0,
+      batch_id: null,
+      serial_numbers: [],
+    }]);
+  };
+
+  const removeLine = (index: number) => {
+    setLines(lines.filter((_, i) => i !== index));
+  };
+
+  const setLine = <K extends keyof StockMovementOrderItemWrite>(index: number, key: K, value: StockMovementOrderItemWrite[K]) => {
+    const newLines = [...lines];
+    newLines[index] = { ...newLines[index], [key]: value };
+    // Clear serial numbers if dimensions change
+    if (key === "item_id" || key === "source_bin_id" || key === "batch_id") {
+      newLines[index].serial_numbers = [];
+    }
+    setLines(newLines);
+  };
+
+  const isInvalid = !warehouseId || lines.length === 0 || lines.some(l =>
+    !l.item_id || !l.source_bin_id || !l.destination_bin_id || l.quantity <= 0 || l.source_bin_id === l.destination_bin_id ||
+    // Strict validation if it's a known serial-tracked line:
+    (l as any)._is_serial_tracked && (l.serial_numbers?.length ?? 0) !== Math.floor(l.quantity)
   );
 
   return (
     <div>
       <PageHeader
         eyebrow="Warehouse"
-        title="New stock movement"
+        title="New Stock Movement Order"
         actions={
           <>
             <Button variant="ghost" onClick={() => nav("/warehouse/stock-movements")}>
@@ -108,138 +99,219 @@ export default function StockMovementForm() {
         }
       />
 
-      <ErrorBanner error={save.error ?? availability.error} />
-      {touched && isInvalid && <ErrorBanner error="Complete the source, destination, item and valid quantity." />}
+      <ErrorBanner error={save.error} />
+      {touched && isInvalid && <ErrorBanner error="Complete all fields for the warehouse and lines. Ensure destination differs from source and quantity is valid." />}
 
-      <Section title="Movement">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Movement type">
-            <Select
-              value={form.movement_type}
-              onChange={(value) => set("movement_type", value || "BIN_TO_BIN")}
-              options={MOVEMENT_TYPES}
-              ariaLabel="Movement type"
-            />
-          </Field>
+      <Section title="Header Details">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-2">
           <Field label="Warehouse">
             <Lookup
               name="movement-warehouse"
               load={warehouseOptions}
-              value={form.warehouse_id || ""}
-              onChange={(value) => set("warehouse_id", value === "" ? 0 : value)}
+              value={warehouseId || ""}
+              onChange={(value, option) => {
+                setWarehouseId(value === "" ? 0 : value);
+                setIsBinManaged((option as any)?.is_bin_managed ?? true);
+                setLines([]);
+              }}
               placeholder="Warehouse"
             />
           </Field>
-          <Field label="Source bin">
-            <Lookup
-              name={`movement-source-${form.warehouse_id}`}
-              load={(search) => binOptions(form.warehouse_id, search)}
-              value={form.source_bin_id || ""}
-              isDisabled={!form.warehouse_id}
-              onChange={(value) => set("source_bin_id", value === "" ? 0 : value)}
-              placeholder="Source bin"
-            />
-          </Field>
-          <Field label="Destination bin">
-            <Lookup
-              name={`movement-destination-${form.warehouse_id}`}
-              load={(search) => binOptions(form.warehouse_id, search)}
-              value={form.destination_bin_id || ""}
-              isDisabled={!form.warehouse_id}
-              onChange={(value) => set("destination_bin_id", value === "" ? 0 : value)}
-              placeholder="Destination bin"
-            />
-          </Field>
-          <Field label="Item">
-            <Lookup
-              name="movement-item"
-              load={itemOptions}
-              value={form.item_id || ""}
-              onChange={(value) => set("item_id", value === "" ? 0 : value)}
-              placeholder="Item"
-            />
-          </Field>
-          <Field label="Batch">
-            <Lookup
-              name={`movement-batch-${form.item_id}-${form.source_bin_id}`}
-              load={() => batchOptions(form.item_id, form.warehouse_id, form.source_bin_id)}
-              value={form.batch_id ?? ""}
-              isDisabled={!form.item_id || !form.source_bin_id}
-              onChange={(value) => set("batch_id", value === "" ? null : value)}
-              placeholder="Batch"
-            />
-          </Field>
-          <Field
-            label="Quantity"
-            hint={`Available: ${fmtQty(availability.data?.available_qty ?? 0)}`}
-          >
+          <Field label="Remarks / Reason">
             <Input
-              type="number"
-              value={String(form.quantity)}
-              onChange={(event) => set("quantity", Number(event.target.value))}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="E.g. Replenishment, Relocation..."
             />
-          </Field>
-          <Field label="Serialized units">
-            <Button
-              variant="subtle"
-              onClick={() => setSerialsOpen(true)}
-              disabled={!availability.data?.serial_numbers.length}
-            >
-              <ScanLine className="h-4 w-4" />
-              {form.serial_numbers?.length ?? 0} selected
-            </Button>
           </Field>
         </div>
       </Section>
 
-      <Card className="p-4">
-        <Field label="Remarks">
-          <Input
-            value={form.remarks ?? ""}
-            onChange={(event) => set("remarks", event.target.value)}
+      <div className="mt-8 mb-4 flex items-center justify-between">
+        <h3 className="text-lg font-medium text-body">Movement Lines</h3>
+        {/* "flat" is a raw HeroUI variant; this project's Button exposes its own set. */}
+        <Button variant="subtle" onClick={addLine}>
+          <Plus className="mr-2 h-4 w-4" />
+          Add Item
+        </Button>
+      </div>
+
+      <div className="space-y-6">
+        {lines.map((line, index) => (
+          <MovementLineEditor
+            key={index}
+            index={index}
+            line={line}
+            warehouseId={warehouseId}
+            isBinManaged={isBinManaged}
+            storageTypes={storageTypes.data ?? []}
+            onChange={(key, value) => setLine(index, key, value)}
+            onRemove={() => removeLine(index)}
+          />
+        ))}
+        {lines.length === 0 && (
+          <div className="rounded-lg border border-dashed p-8 text-center text-muted">
+            No items added yet. Click "Add Item" to start.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MovementLineEditor({
+  index,
+  line,
+  warehouseId,
+  isBinManaged,
+  storageTypes,
+  onChange,
+  onRemove
+}: {
+  index: number;
+  line: StockMovementOrderItemWrite;
+  warehouseId: number;
+  isBinManaged: boolean;
+  storageTypes: any[];
+  onChange: <K extends keyof StockMovementOrderItemWrite>(key: K, val: StockMovementOrderItemWrite[K]) => void;
+  onRemove: () => void;
+}) {
+  const [serialsOpen, setSerialsOpen] = useState(false);
+  const [storageType, setStorageType] = useState<number | string | "">("");
+
+  const STORAGE_ENUMS = [
+    "BLOCK", "FLOOR", "LANE", "RACK", "SHELF", "BIN", "LOT",
+    "COLD_ROOM", "REFRIGERATOR", "COLD_STORAGE_BIN", "PALLET"
+  ];
+
+  const availability = useQuery({
+    queryKey: ["wh-stock-movement-availability", warehouseId, line.source_bin_id, line.item_id, line.batch_id],
+    queryFn: () => getStockAvailability(warehouseId, line.source_bin_id, line.item_id, line.batch_id),
+    enabled: !!warehouseId && (line.source_bin_id !== undefined && (isBinManaged ? !!line.source_bin_id : true)) && !!line.item_id,
+  });
+
+  // Track it locally so the top-level form can validate
+  useEffect(() => {
+    if (availability.data?.is_serial_tracked !== undefined) {
+      (line as any)._is_serial_tracked = availability.data.is_serial_tracked;
+    }
+  }, [availability.data?.is_serial_tracked, line]);
+
+  return (
+    <Card className="relative p-6 bg-content1 shadow-sm transition-all hover:shadow-md">
+      <div className="absolute right-4 top-4">
+        <Button variant="ghost" className="text-danger h-8 w-8 p-0" onClick={onRemove}>
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
+
+      <div className="mb-4 text-sm font-semibold text-muted uppercase tracking-wider">
+        Line {index + 1}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <Field label="Item">
+          <Lookup
+            name={`line-item-${index}`}
+            load={itemOptions}
+            value={line.item_id || ""}
+            onChange={(value) => {
+              onChange("item_id", value === "" ? 0 : value);
+              if (!isBinManaged) {
+                onChange("source_bin_id", 0);
+                onChange("destination_bin_id", 0);
+              }
+            }}
+            placeholder="Select Item"
           />
         </Field>
-      </Card>
+
+        {isBinManaged && (
+          <Field label="Source location">
+            <Lookup
+              name={`line-source-${index}-${warehouseId}`}
+              load={(search) => binOptions(warehouseId, search)}
+              value={line.source_bin_id || ""}
+              isDisabled={!warehouseId}
+              onChange={(value) => onChange("source_bin_id", value === "" ? 0 : value)}
+              placeholder="Source location"
+            />
+          </Field>
+        )}
+
+        <Field label="Batch">
+          <Lookup
+            name={`line-batch-${index}-${line.item_id}-${line.source_bin_id}`}
+            load={() => batchOptions(line.item_id, warehouseId, line.source_bin_id)}
+            value={line.batch_id ?? ""}
+            isDisabled={!line.item_id || (isBinManaged && !line.source_bin_id)}
+            onChange={(value) => onChange("batch_id", value === "" ? null : value)}
+            placeholder="Batch"
+          />
+        </Field>
+
+        <Field
+          label="Quantity"
+          hint={availability.data ? `Available: ${fmtQty(availability.data.available_qty)}` : undefined}
+        >
+          <Input
+            type="number"
+            value={String(line.quantity || "")}
+            onChange={(event) => onChange("quantity", Number(event.target.value))}
+            placeholder="Qty"
+            className={availability.data && Number(line.quantity) > num(availability.data.available_qty) ? "border-danger text-danger" : ""}
+          />
+        </Field>
+
+        <Field label="Destination Storage Type">
+          <Select
+            value={String(storageType)}
+            onChange={(val) => setStorageType(val || "")}
+            options={[
+              ...STORAGE_ENUMS.map(e => ({ value: e, label: e })),
+              ...storageTypes.map(st => ({ value: String(st.id), label: st.name }))
+            ]}
+            ariaLabel="Storage type filter"
+          />
+        </Field>
+
+        {isBinManaged && (
+          <Field label="Destination location">
+            <Lookup
+              name={`line-dest-${index}-${warehouseId}`}
+              load={(search) => binOptions(warehouseId, search, undefined, undefined, String(storageType), true)}
+              value={line.destination_bin_id || ""}
+              isDisabled={!warehouseId}
+              onChange={(value) => onChange("destination_bin_id", value === "" ? 0 : value)}
+              placeholder="Destination location"
+            />
+          </Field>
+        )}
+
+        {availability.data?.is_serial_tracked && (
+          <Field label="Serial Numbers">
+            <Button
+              variant="subtle"
+              onClick={() => setSerialsOpen(true)}
+              className={`w-full justify-start ${(line.serial_numbers?.length ?? 0) !== Math.floor(line.quantity) ? 'border-danger text-danger' : ''}`}
+            >
+              <ScanLine className="mr-2 h-4 w-4" />
+              {line.serial_numbers?.length ?? 0} selected (needs {Math.floor(line.quantity)})
+            </Button>
+          </Field>
+        )}
+      </div>
 
       <SerialNumbersModal
         isOpen={serialsOpen}
         onClose={() => setSerialsOpen(false)}
-        quantity={form.quantity}
-        initial={form.serial_numbers ?? []}
-        itemLabel="Serials currently in the selected source bin"
-        onSave={(serials) => set("serial_numbers", serials)}
+        quantity={line.quantity}
+        initial={line.serial_numbers ?? []}
+        itemLabel="Serials in source bin"
+        onSave={(serials) => onChange("serial_numbers", serials)}
+        available={availability.data?.serial_numbers ?? []}
+        pickMode="select"
       />
-      {availability.data?.serial_numbers.length ? (
-        <div className="mt-3">
-          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
-            Select serials in source bin
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {availability.data.serial_numbers.map((serial) => {
-              const selected = form.serial_numbers?.includes(serial) ?? false;
-              return (
-                <button
-                  key={serial}
-                  type="button"
-                  onClick={() => set(
-                    "serial_numbers",
-                    selected
-                      ? (form.serial_numbers ?? []).filter((value) => value !== serial)
-                      : [...(form.serial_numbers ?? []), serial],
-                  )}
-                  className={`min-h-11 rounded-lg border px-3 font-mono text-xs ${
-                    selected
-                      ? "border-brand bg-brand/10 text-brand"
-                      : "border-line bg-content1 text-body"
-                  }`}
-                >
-                  {serial}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
-    </div>
+    </Card>
   );
 }

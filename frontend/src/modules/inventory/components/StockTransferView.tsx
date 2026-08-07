@@ -8,6 +8,7 @@ import {
 } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
+import { MovementKindStrip } from "../pages/StockingPointsPage";
 import {
   listSTOs, getSTO, createSTO, approveSTO, dispatchSTO, receiveSTO,
   getWarehouses, getCatalogItems, getStockBalances,
@@ -333,16 +334,24 @@ export function StockTransferView() {
               </div>
             </div>
 
-            <Field label="Remarks">
+            {/* What this move IS comes from the two points, never from a dropdown —
+                letting a user pick would make "Movement" a one-click way past the
+                Inventory Manager on a cross-project transfer. They say WHY. */}
+            <MovementKindStrip
+              fromWarehouseId={form.from_warehouse_id ? Number(form.from_warehouse_id) : null}
+              toWarehouseId={form.to_warehouse_id ? Number(form.to_warehouse_id) : null}
+            />
+
+            <Field label="Reason">
               <Input
                 value={form.remarks}
                 onChange={(e) => setForm({ ...form, remarks: e.target.value })}
-                placeholder="Optional"
+                placeholder="Why the stock is moving — e.g. camp restock, rebalancing"
               />
             </Field>
           </ModalBody>
           <ModalFooter>
-            <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="subtle" onClick={() => setOpen(false)}>Cancel</Button>
             <Button disabled={!canSubmit || create.isPending} onClick={() => void askThenCreate()}>
               {create.isPending ? "Raising…" : "Raise Transfer"}
             </Button>
@@ -358,7 +367,7 @@ export function StockTransferView() {
         badge={selected && <StatusPill status={selected.status} />}
         footer={
           <>
-            <Button variant="ghost" onClick={() => setSelected(null)}>Close</Button>
+            <Button variant="subtle" onClick={() => setSelected(null)}>Close</Button>
             {selected && stepButton(selected)}
           </>
         }

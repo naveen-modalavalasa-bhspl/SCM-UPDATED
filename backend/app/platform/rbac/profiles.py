@@ -40,6 +40,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ValidationError
 from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmPositionAssignment
 from app.platform.rbac.models import Page, Permission, Role, RolePermission
+from app.platform.rbac.permissions import PAGE_RESOURCE
+from app.platform.rbac.permissions import PAGE_RESOURCE
 from app.platform.settings.service import write_audit
 from app.shared.enums import AuditAction, ScopeRung
 
@@ -418,11 +420,16 @@ async def list_profiles(db: AsyncSession) -> dict:
             "always_on": p.required_permission is None,
             "required_permission": p.required_permission,
         } for p in pages],
+        # Actions only. Screens are granted in the Pages block above, so a `page.*`
+        # permission has no business here — and, conversely, an action is still an
+        # action even when some screen is gated on it. Filtering on "is this code a
+        # page's required_permission" got both halves wrong: it let through every
+        # page nobody claims, and hid real actions like Adjust stock.
         "features": [{
             "code": f.code, "module": f.module,
             "description": f.description or f.code,
         } for f in sorted(permissions, key=lambda f: (f.module, f.code))
-            if f.code not in page_permission_codes],
+            if f.resource != PAGE_RESOURCE],
         "scopes": [r.value for r in ScopeRung],
     }
 

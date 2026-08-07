@@ -7,15 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
-from app.modules.inventory import service
+from app.modules.inventory import locations, service
 from app.modules.inventory.schemas import (
     ActionIn, MovementRow, MRListRow, MROut, StockRow, TransferIn,
-    AdjustmentIn, AdjustmentOut, AdjustmentListRow, ReplenishmentRow,
+    AdjustmentIn, AdjustmentOut, AdjustmentListRow, AdjustmentRejectIn, ReplenishmentRow,
     ReservationRow, ReservationReleaseOut, ItemAvailabilityOut,
     AgeingSummaryOut, ValuationSummaryOut, NearExpiryAlertRow,
     STOIn, STOOut, STOListRow, CycleCountIn, CycleCountUpdateIn,
     CycleCountOut, CycleCountListRow, StockOverviewKPIs,
     StockDetailOut, ReplenishmentRuleIn, ReplenishmentRuleRow,
+    PositionLocationIn, PositionLocationOut, MovementClassificationOut,
 )
 from app.platform.rbac import permissions as perms
 from app.shared.enums import ApprovalAction
@@ -31,12 +32,15 @@ async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
                      bin_id: int | None = None, search: str | None = None,
                      category_id: int | None = None, batch_no: str | None = None,
                      include_zero: bool = False, expiring_in_days: int | None = None,
+                     expiry_status: str | None = None, expiry_from: date | None = None,
+                     expiry_to: date | None = None, expired_in_last_days: int | None = None,
                      below_reorder: bool = False, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.STOCK_VIEW))):
     return await service.list_stock(db, params, item_id, warehouse_id, project_id,
                                     bin_id, search, category_id, batch_no,
-                                    include_zero, expiring_in_days, below_reorder,
-                                    user=user)
+                                    include_zero, expiring_in_days, expiry_status,
+                                    expiry_from, expiry_to, expired_in_last_days,
+                                    below_reorder, user=user)
 
 
 @stock_router.get("/movements", response_model=Page[MovementRow])
@@ -88,9 +92,11 @@ async def approve_adjustment(id: int, db: AsyncSession = Depends(get_db),
 
 
 @stock_router.post("/adjustments/{id}/reject", response_model=AdjustmentOut)
-async def reject_adjustment(id: int, db: AsyncSession = Depends(get_db),
+async def reject_adjustment(id: int, body: AdjustmentRejectIn | None = None,
+                            db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.STOCK_ADJUST))):
-    return await service.act_on_adjustment(db, id, "REJECT", user)
+    return await service.act_on_adjustment(db, id, "REJECT", user,
+                                           remarks=body.remarks if body else None)
 
 
 @stock_router.get("/replenishment-rules", response_model=list[ReplenishmentRuleRow])
@@ -287,3 +293,54 @@ router.include_router(stock_router)
 router.include_router(res_router)
 router.include_router(mr_router)
 
+
+
+# ---------------- Stocking points: tagging and classification ----------------
+
+points_router = APIRouter(prefix="/api/stocking-points", tags=["inventory"])
+
+
+@points_router.get("/tags", response_model=list[PositionLocationOut])
+async def list_position_locations(position_id: int | None = None,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await locations.list_tags(db, position_id)
+
+
+@points_router.post("/tags", response_model=PositionLocationOut)
+async def tag_position_location(body: PositionLocationIn,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.ADMIN_SETTINGS_MANAGE))):
+    return await locations.tag_position(db, body, user)
+
+
+@points_router.delete("/tags/{tag_id}")
+async def untag_position_location(tag_id: int, db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.ADMIN_SETTINGS_MANAGE))):
+    await locations.untag(db, tag_id)
+    return {"success": True}
+
+
+@points_router.get("/classify", response_model=MovementClassificationOut)
+async def classify_move(from_warehouse_id: int | None = None,
+                        to_warehouse_id: int | None = None,
+                        db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.STOCK_VIEW))):
+    """What a move between these two points would be. Read-only — the screen shows
+    it beside the pickers so the derived type is visible before anything is saved."""
+    return await locations.describe_move(db, from_warehouse_id, to_warehouse_id)
+
+
+@points_router.get("/mine")
+async def my_stocking_points(db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_VIEW))):
+    """The points this login can draw from and see into — its own plus its subtree."""
+    position_id = getattr(user, "active_position_id", None)
+    return {
+        "primary_warehouse_id": await locations.primary_location_for(db, position_id),
+        "warehouse_ids": sorted(await locations.location_ids_for_subtree(db, position_id)),
+        "tags": await locations.list_tags(db, position_id),
+    }
+
+
+router.include_router(points_router)

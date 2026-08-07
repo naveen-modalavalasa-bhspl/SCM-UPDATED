@@ -143,7 +143,7 @@ export function MaterialRequestDetailPage() {
               </Button>
             </Can>
             <Can do="mr.reject">
-              <Button variant="ghost" onClick={() => void decide(false)} disabled={act.isPending}>
+              <Button variant="subtle" onClick={() => void decide(false)} disabled={act.isPending}>
                 Reject
               </Button>
             </Can>

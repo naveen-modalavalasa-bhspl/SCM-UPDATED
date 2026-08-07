@@ -1042,6 +1042,7 @@ async def list_indents(
     region_ids: list[int] | None = None,
     include_unassigned_region: bool = False,
     is_bookmarked: str | None = None,
+    has_remainder: bool = False,
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ) -> dict:
@@ -1059,6 +1060,15 @@ async def list_indents(
         include_unassigned_region=include_unassigned_region,
         is_bookmarked=is_bookmarked,
     )
+    if has_remainder:
+        # At least one line still owes something. EXISTS rather than a join, so an
+        # indent with three unfulfilled lines is still one row in the queue.
+        stmt = stmt.where(exists(
+            select(IndentItem.id).where(
+                IndentItem.indent_id == Indent.id,
+                IndentItem.approved_quantity > IndentItem.allocated_quantity,
+            ).correlate(Indent)
+        ))
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
     stmt = stmt.order_by(_indent_sort(sort_by, sort_dir), id_tie_breaker)
     return await paginate(db, stmt, params)
@@ -1618,8 +1628,17 @@ async def _fulfil(db: AsyncSession, indent: Indent, user) -> None:
     _fulfilment_warehouse_types(actions)
 
     for line in indent.items:
-        line.allocated_quantity = 0
-        line.status = IndentItemStatus.PENDING.value
+        # allocated_quantity is NOT reset here. It used to be, back when nothing could
+        # be served before the ladder finished, so zeroing was just clearing a field
+        # that had to be 0 anyway. An approver can now issue from their own point
+        # part-way up (approvals/fulfilment.py), and wiping it here told inventory the
+        # line was untouched — so the units already handed over would be issued a
+        # second time, with the stk_ledger rows for the first lot still on file.
+        line.status = (
+            IndentItemStatus.ISSUED.value
+            if line.allocated_quantity and line.allocated_quantity >= line.approved_quantity
+            else IndentItemStatus.PENDING.value
+        )
     indent.status = IndentStatus.AWAITING_ALLOCATION.value
 
 

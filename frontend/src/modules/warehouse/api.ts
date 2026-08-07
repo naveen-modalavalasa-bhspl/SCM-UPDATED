@@ -36,6 +36,8 @@ import type {
   StockAvailability,
   StockMovement,
   StockMovementWrite,
+  StockMovementOrder,
+  StockMovementOrderWrite,
   StorageType,
   StorageTypeWrite,
   Warehouse,
@@ -199,6 +201,13 @@ export const listStockMovements = (params: ListParams = {}) =>
 
 export const createStockMovement = (body: StockMovementWrite) =>
   post<StockMovement>(`${BASE}/stock-movements`, body);
+
+export const listStockMovementOrders = (params: ListParams = {}) =>
+  get<Page<StockMovementOrder>>(`${BASE}/stock-movement-orders`, params);
+
+export const createStockMovementOrder = (body: StockMovementOrderWrite) =>
+  post<StockMovementOrder>(`${BASE}/stock-movement-orders`, body);
+
 
 export const getStockAvailability = (
   warehouse_id: number,
@@ -439,8 +448,10 @@ export const binOptions = (
   search?: string,
   item_id?: number | null,
   batch_id?: number | null,
+  storage_type_id?: string | number | null,
+  all_locations?: boolean,
 ) =>
-  get<Option[]>(`${BASE}/options/bins`, { warehouse_id, search, item_id, batch_id });
+  get<Option[]>(`${BASE}/options/bins`, { warehouse_id, search, item_id, batch_id, storage_type_id, all_locations });
 
 export const batchOptions = (item_id: number, warehouse_id: number, bin_id?: number | null) =>
   get<Option[]>(`${BASE}/options/batches`, { item_id, warehouse_id, bin_id });

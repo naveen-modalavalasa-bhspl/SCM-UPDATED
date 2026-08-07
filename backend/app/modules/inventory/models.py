@@ -391,3 +391,36 @@ class CycleCountItem(Base):
 
     cycle_count = relationship("CycleCount", back_populates="items")
 
+
+
+class PositionLocation(Base):
+    """Which stocking points a POSITION draws from — the MDP/LIP tagging.
+
+    Keyed by position, not by employee: people move, the post does not, and the
+    approval ladder already reasons in positions. Many rows per position on purpose —
+    one OE can cover several MDPs.
+
+    `project_id` is snapshotted here because a stocking point has no project of its
+    own: `whs_warehouses` carries office and facility, and HCM keeps the project on
+    the employee. Without it there is nothing to compare for the cross-project rule
+    that decides whether the Inventory Manager has to approve a transfer.
+    """
+    __tablename__ = "inv_position_locations"
+    __table_args__ = (
+        UniqueConstraint("position_id", "warehouse_id", name="uq_inv_position_location"),
+    )
+
+    id = pk()
+    position_id = soft_fk()          # hcm_positions.id — soft, HCM is a mirror
+    warehouse_id = Column(ForeignKey("whs_warehouses.id", ondelete="CASCADE"),
+                          index=True, nullable=False)
+    project_id = Column(BigInteger, nullable=False, default=NO_PROJECT, index=True)
+    project_name = Column(String(200), nullable=True)   # snapshot, never re-synced
+    # The point this position issues from by default when it holds more than one.
+    is_primary = Column(Integer, nullable=False, default=0)
+    is_active = Column(Integer, nullable=False, default=1)
+    created_at = created_at_col()
+
+
+Index("ix_inv_position_locations_active", PositionLocation.position_id,
+      PositionLocation.is_active)

@@ -47,12 +47,16 @@ export function FilterBar({
 
 /** Compact select sized to sit in the filter bar. */
 export function FilterSelect({
-  value, onChange, options, placeholder,
+  value, onChange, options, placeholder, allowEmpty = true,
 }: {
   value: string;
   onChange: (v: string) => void;
   options: { value: string | number; label: string }[];
   placeholder: string;
+  /** False for fields that always need a value (e.g. a label size a render depends
+   * on) — the blank option let a caller land on "" and crash on a lookup that
+   * assumed one of `options` was always selected. */
+  allowEmpty?: boolean;
 }) {
   return (
     <select
@@ -60,7 +64,7 @@ export function FilterSelect({
       onChange={(e) => onChange(e.target.value)}
       className="h-11 min-w-[150px] rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
     >
-      <option value="">{placeholder}</option>
+      {allowEmpty && <option value="">{placeholder}</option>}
       {options.map((o) => (
         <option key={o.value} value={o.value}>{o.label}</option>
       ))}

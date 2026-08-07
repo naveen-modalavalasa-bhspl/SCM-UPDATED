@@ -75,6 +75,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     department_id: null,
     project_id: null,
     vehicle_id: null,
+    vehicle_number: null,
     issued_to_id: null,
     direction,
     original_issue_id: null,
@@ -91,6 +92,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   // Some of the reserved stock was received for another project, or for none.
   // Worth saying out loud — the issue still goes through.
   const [mixedProjects, setMixedProjects] = useState(false);
+  const [isBinManaged, setIsBinManaged] = useState(true);
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-issue", id],
@@ -114,6 +116,12 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   useEffect(() => {
     if (!doc) return;
     setDestination(doc.destination_office_name ?? "");
+    if (doc.warehouse_id) {
+      warehouseOptions().then((opts) => {
+        const w = opts.find(o => o.id === doc.warehouse_id);
+        if (w) setIsBinManaged((w as any).is_bin_managed ?? true);
+      });
+    }
     setForm({
       issue_type: doc.issue_type,
       issue_date: doc.issue_date,
@@ -123,6 +131,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       department_id: doc.department_id ?? null,
       project_id: doc.project_id ?? null,
       vehicle_id: doc.vehicle_id ?? null,
+      vehicle_number: doc.vehicle_number ?? null,
       issued_to_id: doc.issued_to_id ?? null,
       direction: doc.direction,
       original_issue_id: doc.original_issue_id ?? null,
@@ -164,8 +173,8 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const activeSerialLine = serialLine === null ? null : form.items[serialLine];
   const activeSerialLineReady = !!(
     activeSerialLine?.item_id &&
-    activeSerialLine?.batch_id &&
-    activeSerialLine?.bin_id &&
+    ((activeSerialLine as any)?.is_batch_tracked ? activeSerialLine?.batch_id : true) &&
+    (isBinManaged ? activeSerialLine?.bin_id : true) &&
     form.warehouse_id
   );
   const availableSerials = useQuery({
@@ -182,7 +191,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         item_id: activeSerialLine!.item_id,
         batch_id: activeSerialLine!.batch_id ?? undefined,
         warehouse_id: form.warehouse_id,
-        bin_id: activeSerialLine!.bin_id ?? undefined,
+        bin_id: (isBinManaged ? activeSerialLine!.bin_id : 0) ?? undefined,
         status: "available",
         size: 500,
       }),
@@ -354,6 +363,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 item_code: item?.code ?? null,
                 item_name: item?.name ?? null,
                 is_serial_tracked: !!item?.is_serial_tracked,
+                is_batch_tracked: !!item?.is_batch_tracked,
                 batch_id: null,
                 bin_id: null,
                 serial_numbers: [],
@@ -385,12 +395,12 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         />
       ),
     },
-    {
+    ...(isBinManaged ? [{
       key: "bin",
       header: "From bin",
       width: "w-64",
       hideOnNarrow: true,
-      render: (l, i) => (
+      render: (l: IssueItemWrite, i: number) => (
         <Lookup
           name={`bins-${form.warehouse_id}-${l.batch_id ?? 0}`}
           load={(s) => binOptions(form.warehouse_id, s, l.item_id, l.batch_id)}
@@ -400,7 +410,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           placeholder={l.batch_id ? "From bin" : "Pick batch first"}
         />
       ),
-    },
+    } as LineColumn<IssueItemWrite>] : []),
     {
       key: "requested",
       header: "Requested",
@@ -466,7 +476,9 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       hideOnNarrow: true,
       render: (line, index) => {
         if (!line.is_serial_tracked) return <span className="text-xs text-muted">—</span>;
-        const needsSource = !line.batch_id || !line.bin_id;
+        const needsBatch = (line as any).is_batch_tracked && !line.batch_id;
+        const needsBin = isBinManaged && !line.bin_id;
+        const needsSource = needsBatch || needsBin;
         return (
           <Button
             variant="ghost"
@@ -601,7 +613,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           </Field>
           <Field label="From warehouse">
             <Lookup name="warehouses" load={warehouseOptions} value={form.warehouse_id || ""}
-                    isDisabled={locked} onChange={(v) => set("warehouse_id", v === "" ? 0 : v)}
+                    isDisabled={locked || !!form.picking_id || direction === "IN"}
+                    onChange={(v, option) => {
+                      setForm({ ...form, warehouse_id: Number(v) || 0, items: [] });
+                      setIsBinManaged((option as any)?.is_bin_managed ?? true);
+                    }}
                     placeholder="Warehouse" />
           </Field>
           <Field label="Against indent" hint="Loads the approved stock reservation.">
@@ -634,6 +650,10 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           <Field label="Issued to">
             <Lookup name="employees" load={employeeOptions} value={form.issued_to_id ?? ""} isDisabled={locked}
                     onChange={(v) => set("issued_to_id", v === "" ? null : v)} placeholder="Person" />
+          </Field>
+          <Field label="Vehicle">
+            <Input value={form.vehicle_number ?? ""} disabled={locked}
+                   onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
           </Field>
           <Field label="Destination" hint="Office of the issued-to employee from the selected indent.">
             <Input value={destination || "—"} disabled />

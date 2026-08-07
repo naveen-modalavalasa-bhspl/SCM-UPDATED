@@ -10,6 +10,14 @@ import { FilterBar, FilterSelect } from "./FilterBar";
 import { warehouseOptions } from "../api";
 import type { ListParams, Page } from "../types";
 
+/** What each warehouse type is called on screen. LIP and MDP are rungs on the
+ *  distribution chain, not warehouses, and the people holding them do not call them
+ *  warehouses. Anything else is left unlabelled — it is just a warehouse. */
+const POINT_LABEL: Record<string, string> = {
+  MDP: "MDP",
+  LIP: "LIP",
+};
+
 /**
  * The scaffold behind every warehouse document list.
  *
@@ -166,13 +174,20 @@ export function DocumentList<T>({
         )}
         {warehouseFilter && (
           <FilterSelect
-            label="Warehouse"
-            allLabel="All warehouses"
+            label="Stocking point"
+            allLabel="All stocking points"
             value={warehouse}
             onChange={setWarehouse}
+            // A stocking point is called what it IS: an MDP-holder should never be
+            // asked to pick a "warehouse" when the thing they hold is an MDP. The
+            // type comes from the warehouse row, so the label can never disagree
+            // with the tier the classifier reads.
             options={houses.map((w) => ({
               value: w.id,
-              label: w.code ? `${w.code} — ${w.name}` : w.name,
+              label: [
+                w.code ? `${w.code} — ${w.name}` : w.name,
+                POINT_LABEL[(w as { warehouse_type?: string }).warehouse_type ?? ""],
+              ].filter(Boolean).join(" · "),
             }))}
             className="min-w-[220px]"
           />

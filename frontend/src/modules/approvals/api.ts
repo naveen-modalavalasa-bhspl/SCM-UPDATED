@@ -2,6 +2,7 @@ import { api } from "@/shared/api/client";
 import type {
   ApprovalDecisionRow, ApprovalHistoryRow, ApprovalIndent, ApprovalQuantityInput,
   ApprovalReport, ConsolidationApprovalInput, ConsolidationApprovalResult,
+  IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
   CorrectionIndent, PendingApproval, TeamQueueRow,
 } from "./types";
@@ -74,6 +75,20 @@ export const approvalsApi = {
   approveConsolidation: (body: ConsolidationApprovalInput) =>
     api.post<ConsolidationApprovalResult>("/api/approvals/consolidation/approve", body)
       .then((r) => r.data),
+  /** What is still owed on each line, and what this approver holds against it. */
+  indentAvailability: (indentId: number) =>
+    api.get<IndentAvailability>(`/api/approvals/indents/${indentId}/availability`)
+      .then((r) => r.data),
+  /** Serve what you have, from your own point, without leaving the screen. The kind
+   *  of movement is derived server-side from the two points — only `reason` is ours. */
+  issueFromStock: (
+    indentId: number, lines: IssueFromStockLine[], reason = "",
+    forwardRemainder = false,
+  ) =>
+    api.post<IssueFromStockResult>(
+      `/api/approvals/indents/${indentId}/issue-from-stock`,
+      { lines, reason, forward_remainder: forwardRemainder },
+    ).then((r) => r.data),
   getIndent: (id: number) =>
     api.get<ApprovalIndent>(`/api/approvals/indents/${id}`).then((r) => r.data),
   approveIndent: (id: number, items: ApprovalQuantityInput[], comments = "") =>

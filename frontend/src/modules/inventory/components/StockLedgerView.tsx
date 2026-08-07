@@ -8,6 +8,7 @@ import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { getStockLedger, getWarehouses } from "../api";
 import type { StockLedgerItem } from "../types";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
 /**
  * stk_ledger.ref_type — every value that actually reaches the table.
@@ -16,16 +17,23 @@ import type { StockLedgerItem } from "../types";
  * own WarehouseDocType, which move_stock() writes verbatim. Putaway lands as RECEIPT
  * (it is the goods-receipt document being put on a shelf) and a bin-to-bin stock
  * in/out lands as STOCK_MOVEMENT — without these rows the filter hid real movements.
+ *
+ * STO, PUTAWAY_ORDER and VEHICLE_ISSUE were missing even though they are three of the
+ * six ref_types on the live ledger (VEHICLE_ISSUE alone is a third of all rows), so a
+ * user filtering by document type simply could not see them.
  */
 const REF_TYPES = [
   { value: "GRN", label: "Goods Receipt" },
   { value: "ISSUE", label: "Material Issue" },
   { value: "TRANSFER", label: "Stock Transfer" },
+  { value: "STO", label: "Stock Transfer Order (STO)" },
   { value: "ADJUSTMENT", label: "Adjustment" },
   { value: "RESERVATION", label: "Reservation" },
   { value: "RECEIPT", label: "Receipt / Putaway" },
+  { value: "PUTAWAY_ORDER", label: "Putaway Order" },
   { value: "STOCK_MOVEMENT", label: "Stock In / Out (bin move)" },
   { value: "WH_ISSUE", label: "Warehouse Issue" },
+  { value: "VEHICLE_ISSUE", label: "Vehicle Issue" },
   { value: "DISPATCH", label: "Dispatch" },
   { value: "PURCHASE_RETURN", label: "Purchase Return" },
 ];
@@ -34,6 +42,16 @@ const DIRECTIONS = [
   { value: "IN", label: "Stock In (IN)" },
   { value: "OUT", label: "Stock Out (OUT)" },
 ];
+
+/**
+ * The ledger records movements that have already happened, so a future date can only
+ * ever return nothing. Bounding the pickers stops the empty-result confusion rather
+ * than explaining it after the fact. Local date, not toISOString() — that is UTC and
+ * would offer tomorrow to anyone east of Greenwich.
+ */
+const TODAY = new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+  .toISOString()
+  .slice(0, 10);
 
 /** Comma-safe CSV cell. Export is a plain Blob — no library for six columns. */
 const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
@@ -46,6 +64,8 @@ export function StockLedgerView() {
   const [refType, setRefType] = useState("");
   const [direction, setDirection] = useState("");
   const [dateFrom, setDateFrom] = useState("");
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState(20);
   const [dateTo, setDateTo] = useState("");
   const [selected, setSelected] = useState<StockLedgerItem | null>(null);
 
@@ -57,9 +77,12 @@ export function StockLedgerView() {
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
 
+  const debouncedSearch = useDebouncedValue(search);
+
   const filters = {
-    search, item_id: itemId, warehouse_id: warehouseId,
+    search: debouncedSearch, item_id: itemId, warehouse_id: warehouseId,
     ref_type: refType, direction, date_from: dateFrom, date_to: dateTo,
+    page, size,
   };
 
   const { data, isLoading } = useQuery({
@@ -67,6 +90,7 @@ export function StockLedgerView() {
     queryFn: () => getStockLedger(filters),
   });
   const rows = data?.items ?? [];
+  const totalPages = data?.total ? Math.ceil(data.total / size) : 0;
 
   const totals = useMemo(() => {
     let inQty = 0, outQty = 0;
@@ -79,6 +103,7 @@ export function StockLedgerView() {
   const clear = () => {
     setSearch(""); setItemId(""); setWarehouseId("");
     setRefType(""); setDirection(""); setDateFrom(""); setDateTo("");
+    setPage(1);
   };
 
   const exportCsv = () => {
@@ -170,8 +195,8 @@ export function StockLedgerView() {
         eyebrow="Inventory"
         title="Stock Ledger"
         actions={
-          <Button variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
-            <FileSpreadsheet size={14} /> Export CSV
+          <Button variant="primary" disabled={rows.length === 0} onClick={exportCsv}>
+            <FileSpreadsheet size={14} /> Export Excel
           </Button>
         }
       />
@@ -200,6 +225,7 @@ export function StockLedgerView() {
         <input
           type="date"
           value={dateFrom}
+          max={dateTo || TODAY}
           onChange={(e) => setDateFrom(e.target.value)}
           aria-label="From date"
           className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
@@ -207,9 +233,21 @@ export function StockLedgerView() {
         <input
           type="date"
           value={dateTo}
+          min={dateFrom || undefined}
+          max={TODAY}
           onChange={(e) => setDateTo(e.target.value)}
           aria-label="To date"
           className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
+        />
+        <FilterSelect
+          value={size.toString()}
+          onChange={(val) => { setSize(Number(val)); setPage(1); }}
+          placeholder="20 per page"
+          options={[
+            { value: "20", label: "20 per page" },
+            { value: "50", label: "50 per page" },
+            { value: "100", label: "100 per page" },
+          ]}
         />
       </FilterBar>
 
@@ -220,6 +258,9 @@ export function StockLedgerView() {
           keyOf={(r) => r.id}
           loading={isLoading}
           onRowClick={setSelected}
+          page={page}
+          totalPages={totalPages}
+          onPageChange={setPage}
           empty={activeFilters ? "No movements match these filters." : "No stock movements recorded yet."}
           renderCard={(r) => (
             <div className="space-y-1.5">
@@ -247,7 +288,7 @@ export function StockLedgerView() {
         title={selected?.item_name ?? ""}
         subtitle={selected?.transaction_no}
         badge={selected && <Chip size="sm" variant="flat">{selected.transaction_type}</Chip>}
-        footer={<Button variant="ghost" onClick={() => setSelected(null)}>Close</Button>}
+        footer={<Button variant="subtle" onClick={() => setSelected(null)}>Close</Button>}
       >
         {selected && (
           <>

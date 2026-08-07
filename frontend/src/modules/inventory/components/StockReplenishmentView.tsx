@@ -155,8 +155,8 @@ function RulesPanel({ warehouses }: { warehouses: { id: number; name: string }[]
       header: "",
       render: (r) => (
         <div className="flex gap-1">
-          <Button variant="ghost" onClick={() => setDraft(r)}>Edit</Button>
-          <Button variant="ghost" onClick={() => setRuleToDelete(r)} aria-label="Delete rule">
+          <Button variant="subtle" onClick={() => setDraft(r)}>Edit</Button>
+          <Button variant="subtle" onClick={() => setRuleToDelete(r)} aria-label="Delete rule">
             <Trash2 size={14} />
           </Button>
         </div>
@@ -221,7 +221,7 @@ function RulesPanel({ warehouses }: { warehouses: { id: number; name: string }[]
             <Button disabled={invalid || save.isPending} onClick={() => save.mutate(draft)}>
               {save.isPending ? "Saving…" : "Save rule"}
             </Button>
-            <Button variant="ghost" onClick={() => setDraft(null)}>Cancel</Button>
+            <Button variant="subtle" onClick={() => setDraft(null)}>Cancel</Button>
           </div>
         </Card>
       )}
@@ -245,7 +245,7 @@ function RulesPanel({ warehouses }: { warehouses: { id: number; name: string }[]
               <div className="text-sm">
                 Available <strong>{r.available_qty}</strong> · min {r.min_qty} · max {r.max_qty} · reorder {r.reorder_qty}
               </div>
-              <Button variant="ghost" onClick={() => setDraft(r)}>Edit</Button>
+              <Button variant="subtle" onClick={() => setDraft(r)}>Edit</Button>
             </div>
           )}
         />
@@ -369,7 +369,7 @@ export function StockReplenishmentView() {
       key: "action",
       header: "",
       render: (r) => (
-        <Button variant="ghost" onClick={() => raiseIndent(r)}>
+        <Button variant="subtle" onClick={() => raiseIndent(r)}>
           <FilePlus2 size={14} /> Raise request
         </Button>
       ),
@@ -429,7 +429,7 @@ export function StockReplenishmentView() {
                 This list is built from the replenishment rules and, where an item has no rule,
                 its reorder level on the item master. Nothing is below its limit right now.
               </p>
-              <Button variant="ghost" onClick={() => setTab("rules")}>Add a rule</Button>
+              <Button variant="subtle" onClick={() => setTab("rules")}>Add a rule</Button>
             </div>
           }
           renderCard={(r) => (
@@ -446,7 +446,7 @@ export function StockReplenishmentView() {
                 <span className="text-muted">Reorder at {r.reorder_level}</span>
               </div>
               <div className="text-sm">Suggested order: <strong>{r.suggested_order_qty} {r.uom_code}</strong></div>
-              <Button variant="ghost" onClick={() => raiseIndent(r)}>
+              <Button variant="subtle" onClick={() => raiseIndent(r)}>
                 <FilePlus2 size={14} /> Raise request
               </Button>
             </div>

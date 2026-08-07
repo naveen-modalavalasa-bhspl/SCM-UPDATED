@@ -35,6 +35,39 @@ const DIMENSIONS: Record<string, { w: number; h: number; bar: number }> = {
   "100x50": { w: 100, h: 50, bar: 44 },
 };
 
+/**
+ * BUG_SCM_INV_042 / BUG_SCM_INV_058 history: items with no mst_items.barcode_value
+ * fall back to the item code (e.g. "151010-GAUZESWAB-HINDUSTAN-HINDUSTAN-0001", 30-41
+ * chars). Two earlier fixes here both assumed the label could grow to fit the code
+ * (wider sticker, or a rendered-margin correction) — wrong assumption: labels print on
+ * a fixed-width thermal roll, so the sticker can never be wider than the chosen size
+ * no matter what the DOM says. A long code has to fit inside that fixed width instead.
+ *
+ * The fix: shrink the bar module width to fit the roll, down to MIN_MODULE_PX — below
+ * that, Code128 stops being reliably scannable regardless of printer quality. Picking
+ * "Barcode" always renders a barcode (clamped to that floor); it never silently swaps
+ * to QR — QR only ever renders when the user picks QR.
+ *
+ * Module estimate: CODE128B is ~11 modules/char plus ~35 for start/stop/check.
+ * PX_TO_MM converts react-barcode's own px units (bar width, quiet-zone margin) to the
+ * mm the label box is laid out in.
+ */
+const PX_TO_MM = 25.4 / 96;
+const CODE128_MODULES = (chars: number) => chars * 11 + 35;
+const QUIET_ZONE_MM = 2 * 10 * PX_TO_MM; // react-barcode's default margin (10px/side) — fixed, does not scale with module width
+const LABEL_PADDING_MM = 2 * 6 * PX_TO_MM; // p-1.5 = 6px/side of CSS padding inside the box-sizing:border-box label
+const MIN_MODULE_PX = 0.75; // ~0.19mm — the floor below which a handheld scanner can no longer resolve a bar
+
+/** How wide (in px, react-barcode's `width` prop) each module should render so the
+ *  whole code — bars + quiet zone + label padding — fits inside a fixed label width.
+ *  Clamped to MIN_MODULE_PX: a very long code on a small label still renders as a
+ *  barcode, just at the tightest module width that's still meaningfully scannable. */
+function fitBarcodeModulePx(code: string, labelWidthMm: number): number {
+  const availablePx = (labelWidthMm - QUIET_ZONE_MM - LABEL_PADDING_MM) / PX_TO_MM;
+  const idealPx = availablePx / CODE128_MODULES(code.length);
+  return Math.max(MIN_MODULE_PX, Math.min(1, idealPx));
+}
+
 /** A label is a fixed physical size and must never be split across a page. */
 const pageStyle = `
   @page { size: A4; margin: 8mm; }
@@ -77,7 +110,9 @@ export function LabelsPage() {
     [selected, copies],
   );
 
-  const dim = DIMENSIONS[size];
+  // Falls back rather than crashing the page if `size` is ever something other than
+  // one of the three keys — this is what a blank dropdown option used to do.
+  const dim = DIMENSIONS[size] ?? DIMENSIONS["70x40"];
 
   const print = useReactToPrint({
     content: () => sheetRef.current,
@@ -126,7 +161,13 @@ export function LabelsPage() {
           placeholder="All warehouses"
           options={warehouses.map((w) => ({ value: w.id, label: w.name }))}
         />
-        <FilterSelect value={size} onChange={setSize} placeholder="Label size" options={SIZES} />
+        <FilterSelect
+          value={size}
+          onChange={setSize}
+          placeholder="Label size"
+          options={SIZES}
+          allowEmpty={false}
+        />
         <FilterSelect
           value={kind}
           onChange={setKind}
@@ -201,7 +242,10 @@ export function LabelsPage() {
             </p>
           ) : (
             <div ref={sheetRef} className="flex flex-wrap gap-2">
-              {sheet.map(({ row: r, i }) => (
+              {sheet.map(({ row: r, i }) => {
+                const code = codeFor(r);
+                const modulePx = fitBarcodeModulePx(code, dim.w);
+                return (
                 <div
                   key={`${r.id}-${i}`}
                   className="label flex flex-col items-center justify-between overflow-hidden rounded border border-line bg-white p-1.5 text-black"
@@ -217,25 +261,29 @@ export function LabelsPage() {
                   <div className="flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden">
                     {kind === "qr" ? (
                       <QRCodeSVG
-                        value={codeFor(r)}
+                        value={code}
                         size={dim.bar * 2.2}
                         className="block h-auto max-h-full w-auto max-w-full"
                       />
                     ) : (
+                      // No max-w-full / w-auto here on purpose: those classes are what
+                      // originally shrank long codes below a scannable module width.
+                      // `width` is pre-computed per code so the whole barcode already
+                      // fits the fixed label — nothing left to squeeze at render time.
                       <Barcode
-                        value={codeFor(r)}
+                        value={code}
                         format="CODE128"
                         height={dim.bar * 1.6}
-                        width={1}
+                        width={modulePx}
                         fontSize={8}
-                        margin={0}
                         displayValue
-                        className="block h-auto max-h-full w-auto max-w-full"
+                        className="block h-auto max-h-full"
                       />
                     )}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </Card>

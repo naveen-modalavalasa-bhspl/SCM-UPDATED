@@ -30,7 +30,7 @@ export function InventoryOverviewPage() {
         eyebrow="Inventory"
         title="Overview & Analytics"
         actions={
-          <Button variant="ghost" disabled={isFetching} onClick={() => refetch()}>
+          <Button variant="subtle" disabled={isFetching} onClick={() => refetch()}>
             <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} />
             {dataUpdatedAt ? `Updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : "Refresh"}
           </Button>
@@ -74,13 +74,16 @@ export function InventoryOverviewPage() {
               </p>
               <p className="mt-1 text-xs text-muted">Total available across all warehouses: {onHand.toFixed(2)}</p>
             </Card>
+          </div>
 
+          <div className="mt-4">
             <Card className="p-5">
               <div className="mb-3 text-sm font-semibold text-ink">Quick Actions</div>
               <div className="flex flex-wrap gap-2">
                 <Link to="/inventory/stock-balance"><Button>Stock Balance</Button></Link>
-                <Link to="/inventory/ledger"><Button variant="ghost">Stock Ledger</Button></Link>
-                <Link to="/inventory/replenishment"><Button variant="ghost">Replenishment</Button></Link>
+                <Link to="/inventory/ledger"><Button variant="subtle">Stock Ledger</Button></Link>
+                <Link to="/inventory/adjustments"><Button variant="subtle">Stock Adjustments</Button></Link>
+                <Link to="/inventory/replenishment"><Button variant="subtle">Replenishment</Button></Link>
                 {/* Valuation & Ageing is parked — the route and the view are still
                     here, but the screen is off the menu until it is implemented. */}
               </div>

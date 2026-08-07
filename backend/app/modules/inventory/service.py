@@ -5,15 +5,18 @@ through allocation.py. Nothing else assigns to stk_balance.
 """
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import func, select, or_, and_, text, true
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams, paginate
-from app.modules.inventory import allocation, availability
+from app.modules.inventory import allocation, availability, locations
+from app.modules.inventory.enums import AdjustmentStatus, STOStatus
 from app.modules.inventory.models import (
     NO_BATCH, NO_BIN, NO_PROJECT, MaterialRequest, MaterialRequestItem, Stock,
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
@@ -30,8 +33,8 @@ from app.platform.settings.service import get_setting, set_setting, write_audit
 from app.platform.workflow import engine
 from app.shared.scope import scope_condition
 from app.shared.enums import (
-    AuditAction, DocType, IndentStatus, InstanceStatus, MRStatus, Priority, RefType,
-    StockDirection, UserRole as RoleCode,
+    AdjustmentReason, AuditAction, DocType, IndentStatus, InstanceStatus, MRStatus,
+    Priority, RefType, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
@@ -44,6 +47,27 @@ logger = logging.getLogger(__name__)
 
 def _d(value) -> Decimal:
     return Decimal(str(value))
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    """Force a datetime read back from MySQL into UTC-aware.
+
+    `stk_balance.last_movement_at` is a plain DateTime, so aiomysql hands it back
+    naive while `utcnow()` is tz-aware — subtracting the two raised
+    "can't subtract offset-naive and offset-aware datetimes" on every
+    GET /api/stock/ageing. Normalising on read is the fix that needs no migration.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _as_date(value) -> date | None:
+    """`expiry_date` is a DATE, but batch snapshots have landed as datetimes;
+    subtracting one from `date.today()` is the same TypeError one line down."""
+    if value is None:
+        return None
+    return value.date() if isinstance(value, datetime) else value
 
 
 async def _batch_snapshot(db: AsyncSession, batch_id: int) -> tuple[str | None, date | None]:
@@ -90,11 +114,17 @@ async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
             Warehouse.office_id == office_id,
             HcmFacility.office_id == office_id,
         ))
-    return set((await db.execute(
+    by_office = set((await db.execute(
         select(Warehouse.id)
         .outerjoin(HcmFacility, HcmFacility.id == Warehouse.facility_id)
         .where(Warehouse.is_active.is_(True), or_(*conditions))
     )).scalars().all())
+
+    # Plus every point tagged to a position reporting under this one, so a DM can look
+    # down and find which OE below him is holding the stock. Added to the office scope
+    # rather than replacing it: an untagged login keeps exactly what it sees today.
+    subtree = await locations.warehouses_visible_to(db, user)
+    return by_office | subtree if subtree else by_office
 
 
 async def warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
@@ -185,6 +215,20 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         project_id or NO_PROJECT
     batch_no, expiry_date = await _batch_snapshot(db, batch_id)
 
+    # stk_balance.item_id is a hard FK to mst_items. Inserting a row for an item that
+    # is not there raised a bare IntegrityError from deep inside the flush — the
+    # putaway-confirm 500. Check first so the caller is told which item is missing
+    # instead of being handed a driver error, and so nothing half-posts.
+    item = await db.get(Item, item_id)
+    if item is None:
+        raise ValidationError(
+            f"Item {item_id} does not exist in the item master, so no stock movement "
+            f"can be recorded against it. Fix the document's item before retrying."
+        )
+    warehouse = await db.get(Warehouse, warehouse_id)
+    if warehouse is None:
+        raise ValidationError(f"Warehouse {warehouse_id} does not exist")
+
     stock = (await db.execute(
         select(Stock).where(Stock.item_id == item_id,
                             Stock.warehouse_id == warehouse_id,
@@ -195,19 +239,36 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     )).scalar_one_or_none()
 
     if stock is None:
-        item = await db.get(Item, item_id)
-        warehouse = await db.get(Warehouse, warehouse_id)
         stock = Stock(warehouse_id=warehouse_id,
-                      warehouse_name=warehouse.name if warehouse else None,
+                      warehouse_name=warehouse.name,
                       item_id=item_id,
-                      item_code=item.code if item else None,
-                      item_name=item.name if item else None,
-                      uom_code=item.uom_code if item else None,
+                      item_code=item.code,
+                      item_name=item.name,
+                      uom_code=item.uom_code,
                       bin_id=bin_id, batch_id=batch_id, batch_no=batch_no,
                       expiry_date=expiry_date, project_id=project_id,
                       available_qty=Decimal("0"), total_qty=Decimal("0"))
-        db.add(stock)
-        await db.flush()
+        try:
+            # Nested so a lost race rolls back only this INSERT. Two putaways into the
+            # same item/warehouse/bin/batch/project both see no row, both insert, and
+            # the second hits uq_stk_balance_item_wh_bin_batch_proj. The row the winner
+            # created is the one we wanted, so re-read it and carry on. The add() has to
+            # happen inside the savepoint, or the rollback leaves it pending and the
+            # next flush retries the same failing INSERT.
+            async with db.begin_nested():
+                db.add(stock)
+                await db.flush()
+        except IntegrityError:
+            stock = (await db.execute(
+                select(Stock).where(Stock.item_id == item_id,
+                                    Stock.warehouse_id == warehouse_id,
+                                    Stock.bin_id == bin_id,
+                                    Stock.batch_id == batch_id,
+                                    Stock.project_id == project_id)
+                .with_for_update()
+            )).scalar_one_or_none()
+            if stock is None:
+                raise
     elif batch_id != NO_BATCH and batch_no is not None:
         # Repair older snapshot rows when their next real stock movement touches them.
         stock.batch_no = batch_no
@@ -235,9 +296,7 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         )
         # The item-level fallback the masters overhaul kept for exactly this: a
         # cost for screens that value stock without a balance row to read.
-        item = await db.get(Item, item_id)
-        if item is not None:
-            item.purchase_price = unit_cost
+        item.purchase_price = unit_cost
 
     db.add(StockMovement(
         warehouse_id=warehouse_id,
@@ -361,6 +420,8 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
                      bin_id: int | None = None, search: str | None = None,
                      category_id: int | None = None, batch_no: str | None = None,
                      include_zero: bool = False, expiring_in_days: int | None = None,
+                     expiry_status: str | None = None, expiry_from: date | None = None,
+                     expiry_to: date | None = None, expired_in_last_days: int | None = None,
                      below_reorder: bool = False, user=None) -> dict:
     """The stock balance grid.
 
@@ -381,8 +442,19 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
     if not include_zero:
         stmt = stmt.where(Stock.total_qty > 0)
     if expiring_in_days is not None:
-        cutoff = utcnow().date() + timedelta(days=expiring_in_days)
-        stmt = stmt.where(Stock.expiry_date.isnot(None), Stock.expiry_date <= cutoff)
+        today_date = utcnow().date()
+        cutoff = today_date + timedelta(days=expiring_in_days)
+        stmt = stmt.where(Stock.expiry_date.isnot(None), Stock.expiry_date >= today_date, Stock.expiry_date <= cutoff)
+    if expiry_status == "expired":
+        stmt = stmt.where(Stock.expiry_date.isnot(None), Stock.expiry_date < utcnow().date())
+    if expiry_from is not None:
+        stmt = stmt.where(Stock.expiry_date >= expiry_from)
+    if expiry_to is not None:
+        stmt = stmt.where(Stock.expiry_date <= expiry_to)
+    if expired_in_last_days is not None:
+        today_date = utcnow().date()
+        start_date = today_date - timedelta(days=expired_in_last_days)
+        stmt = stmt.where(Stock.expiry_date.isnot(None), Stock.expiry_date >= start_date, Stock.expiry_date < today_date)
     if search:
         # One box covers what a store user actually types: item code or name, the batch,
         # the bin, a serial off a label, or a scanned item barcode.
@@ -655,12 +727,101 @@ async def release_for_indent(db: AsyncSession, indent_id: int) -> Decimal:
 
 
 # ---------------- Stock Adjustments ----------------
+#
+# An adjustment is the one way stock changes without a document behind it, so the
+# approval rules here are the only control on it.
+#
+# Auto-approve used to be "qty <= 100 AND value <= 5000". `unit_cost` is supplied by
+# the caller and is optional, so posting 0 made value 0, the value test always passed,
+# and an OUT of 100 units posted instantly with no approver. Repeated, that writes off
+# unlimited stock leaving nothing but the adjustment rows behind.
+#
+# Two changes close it: an outward adjustment is never auto-approved (destroying stock
+# always needs a second pair of eyes), and the value test falls back to the item's cost
+# when the caller says zero, so a zero cannot buy its way under the threshold.
+AUTO_APPROVE_MAX_QTY = Decimal("100")
+AUTO_APPROVE_MAX_VALUE = Decimal("5000")
+
+
+async def _adjustment_line_value(db: AsyncSession, item: Item, qty: Decimal,
+                                 unit_cost) -> Decimal:
+    """Value a line for the auto-approve test, never trusting a zero cost.
+
+    Falls back to the item's stored purchase price, which is what move_stock() keeps
+    updated from real receipts. If nothing knows the cost the line is treated as
+    un-valued, and an un-valued line cannot clear a value threshold.
+    """
+    cost = _d(unit_cost or 0)
+    if cost <= 0:
+        cost = _d(item.purchase_price or 0)
+    if cost <= 0:
+        return AUTO_APPROVE_MAX_VALUE + 1   # unknown value never auto-approves
+    return qty * cost
+
+
+async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) -> None:
+    """Post an approved adjustment's lines to stock. Used by both the auto-approve
+    path and the explicit approve, so the two cannot drift.
+
+    An outward line goes through move_stock_out(), not move_stock(): the adjustment
+    screen has no bin picker, so `bin_id` arrives as NO_BIN. move_stock() reads that
+    literally as "the bulk bin", finds nothing there once the goods have been put away,
+    and reports "Insufficient stock" against a warehouse that plainly has the item.
+    move_stock_out() treats an unspecified bin as "pick from available", which is what
+    a storekeeper writing off damage actually means.
+    """
+    for adj_item in adj_items:
+        common = dict(
+            ref_type=RefType.ADJUSTMENT.value, ref_id=adjustment.id,
+            ref_no=adjustment.adjustment_no, user=user,
+            warehouse_id=adjustment.warehouse_id, project_id=adj_item.project_id,
+        )
+        if adj_item.direction == StockDirection.OUT.value:
+            await move_stock_out(
+                db, item_id=adj_item.item_id, qty=adj_item.quantity,
+                bin_id=adj_item.bin_id or None, batch_id=adj_item.batch_id or None,
+                **common,
+            )
+        else:
+            await move_stock(
+                db, item_id=adj_item.item_id, qty=adj_item.quantity,
+                direction=StockDirection.IN.value,
+                bin_id=adj_item.bin_id, batch_id=adj_item.batch_id,
+                rate=adj_item.unit_cost, **common,
+            )
+
 
 async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustment:
-    """Create a stock adjustment. Large adjustments (qty > 100 or value > 5000) require approval."""
+    """Create a stock adjustment. Outward lines always need approval; small inward
+    ones post immediately (see AUTO_APPROVE_MAX_QTY / _VALUE above)."""
     warehouse = await db.get(Warehouse, data.warehouse_id)
     if not warehouse:
         raise NotFoundError(f"Warehouse {data.warehouse_id} not found")
+    if not data.items:
+        raise ValidationError("A stock adjustment needs at least one line")
+    # Rule 3: the reason is an enum, not free text. It was unchecked, so a typo — or
+    # anything at all — was stored and reported on as if it were a real category.
+    valid_reasons = [r.value for r in AdjustmentReason]
+    if data.reason not in valid_reasons:
+        raise ValidationError(
+            f"Unknown adjustment reason {data.reason!r}. Use one of: "
+            f"{', '.join(valid_reasons)}")
+
+    # Validated before anything is written. An adjustment naming an item that is not
+    # in the master used to be accepted, snapshot its code as NULL, and then fail on
+    # the FK the moment it posted — after the document already had a number.
+    items_by_id: dict[int, Item] = {}
+    for line in data.items:
+        if line.direction not in (StockDirection.IN.value, StockDirection.OUT.value):
+            raise ValidationError(
+                f"Line direction must be IN or OUT, got {line.direction!r}")
+        if _d(line.quantity) <= 0:
+            raise ValidationError("Adjustment quantity must be positive")
+        if line.item_id not in items_by_id:
+            item = await db.get(Item, line.item_id)
+            if item is None:
+                raise NotFoundError(f"Item {line.item_id} not found in the item master")
+            items_by_id[line.item_id] = item
 
     adj_no = await next_number(db, "adj")
     adjustment = StockAdjustment(
@@ -668,7 +829,7 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
         warehouse_id=data.warehouse_id,
         warehouse_name=warehouse.name,
         reason=data.reason,
-        status="PENDING_APPROVAL",
+        status=AdjustmentStatus.PENDING_APPROVAL.value,
         remarks=data.remarks,
         created_by_id=getattr(user, "id", None),
         created_by_name=getattr(user, "full_name", None),
@@ -677,22 +838,24 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
     await db.flush()
 
     total_qty, total_val = Decimal("0"), Decimal("0")
+    has_outward = False
     # Collected as we go: adjustment.items is a lazy relationship, and touching it
     # before the row is reloaded raises MissingGreenlet under async.
     adj_items: list[StockAdjustmentItem] = []
     for item_data in data.items:
-        item = await db.get(Item, item_data.item_id)
+        item = items_by_id[item_data.item_id]
         qty = _d(item_data.quantity)
         cost = _d(item_data.unit_cost or 0)
         total_qty += qty
-        total_val += (qty * cost)
+        total_val += await _adjustment_line_value(db, item, qty, cost)
+        has_outward = has_outward or item_data.direction == StockDirection.OUT.value
 
         adj_items.append(StockAdjustmentItem(
             adjustment_id=adjustment.id,
             item_id=item_data.item_id,
-            item_code=item.code if item else None,
-            item_name=item.name if item else None,
-            uom_code=item.uom_code if item else None,
+            item_code=item.code,
+            item_name=item.name,
+            uom_code=item.uom_code,
             bin_id=item_data.bin_id or NO_BIN,
             batch_id=item_data.batch_id or NO_BATCH,
             project_id=item_data.project_id or NO_PROJECT,
@@ -703,23 +866,29 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
         ))
     db.add_all(adj_items)
 
-    # Auto-approve if small adjustment (qty <= 100 and value <= 5000)
-    if total_qty <= Decimal("100") and total_val <= Decimal("5000"):
-        adjustment.status = "APPROVED"
+    # Outward stock is never written off unattended, however small: that was the hole
+    # a zero unit_cost walked through. Inward stock under both thresholds still posts
+    # immediately, so the everyday "found one more box" case is unchanged.
+    auto = (not has_outward
+            and total_qty <= AUTO_APPROVE_MAX_QTY
+            and total_val <= AUTO_APPROVE_MAX_VALUE)
+    if auto:
+        adjustment.status = AdjustmentStatus.APPROVED.value
         adjustment.approved_by_id = getattr(user, "id", None)
         adjustment.approved_by_name = getattr(user, "full_name", None)
         adjustment.approved_at = utcnow()
         await db.flush()
-        # Post movement
-        for adj_item in adj_items:
-            await move_stock(
-                db, item_id=adj_item.item_id, qty=adj_item.quantity,
-                direction=adj_item.direction, ref_type="ADJUSTMENT",
-                ref_id=adjustment.id, ref_no=adjustment.adjustment_no, user=user,
-                warehouse_id=adjustment.warehouse_id, bin_id=adj_item.bin_id,
-                batch_id=adj_item.batch_id, project_id=adj_item.project_id,
-            )
+        await _post_adjustment_lines(db, adjustment, adj_items, user)
 
+    await write_audit(
+        db, entity="inv_adjustments", entity_id=adjustment.id,
+        entity_no=adjustment.adjustment_no, action=AuditAction.CREATE, actor=user,
+        after={"status": adjustment.status, "reason": adjustment.reason,
+               "warehouse_id": adjustment.warehouse_id,
+               "total_qty": str(total_qty), "lines": len(adj_items)},
+        summary=(f"Stock adjustment {adjustment.adjustment_no} raised"
+                 + (" and auto-approved" if auto else " for approval")),
+    )
     await db.commit()
     # Name the relationship: a bare refresh expires it, so the first caller to read
     # .items (the response model, for one) would lazy-load outside the greenlet.
@@ -727,36 +896,64 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
     return adjustment
 
 
-async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, user) -> StockAdjustment:
+async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, user,
+                            remarks: str | None = None) -> StockAdjustment:
+    action = (action or "").upper()
+    if action not in ("APPROVE", "REJECT"):
+        raise ValidationError(f"Invalid action {action}")
+
     adjustment = (await db.execute(
-        select(StockAdjustment).where(StockAdjustment.id == adjustment_id)
+        select(StockAdjustment)
+        # .items is a lazy relationship: reading it after a plain select raises
+        # MissingGreenlet under async, so approving an adjustment 500'd before it
+        # posted a single movement. Load it with the parent instead.
+        .options(selectinload(StockAdjustment.items))
+        .where(StockAdjustment.id == adjustment_id)
     )).scalar_one_or_none()
     if not adjustment:
         raise NotFoundError(f"Stock adjustment {adjustment_id} not found")
-    if adjustment.status != "PENDING_APPROVAL":
+    if adjustment.status != AdjustmentStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Adjustment is in status {adjustment.status}, cannot change")
 
-    if action.upper() == "APPROVE":
-        adjustment.status = "APPROVED"
-        adjustment.approved_by_id = getattr(user, "id", None)
+    # Raising and approving are the same permission today (stock.adjust guards both
+    # endpoints), so without this the approval step is decoration — the raiser simply
+    # approves their own write-off. Splitting the permission needs a new code in
+    # platform/rbac, which this module may not edit; refusing self-approval is the part
+    # that can be enforced here, and it is the part that actually stops the abuse.
+    actor_id = getattr(user, "id", None)
+    if actor_id is not None and actor_id == adjustment.created_by_id:
+        raise PermissionError_(
+            "You raised this adjustment, so you cannot approve or reject it. "
+            "Ask another storekeeper or the warehouse in-charge to action it."
+        )
+
+    before = {"status": adjustment.status}
+    if action == "APPROVE":
+        if not adjustment.items:
+            raise ValidationError("This adjustment has no lines to post")
+        adjustment.status = AdjustmentStatus.APPROVED.value
+        adjustment.approved_by_id = actor_id
         adjustment.approved_by_name = getattr(user, "full_name", None)
         adjustment.approved_at = utcnow()
-
-        for adj_item in adjustment.items:
-            await move_stock(
-                db, item_id=adj_item.item_id, qty=adj_item.quantity,
-                direction=adj_item.direction, ref_type="ADJUSTMENT",
-                ref_id=adjustment.id, ref_no=adjustment.adjustment_no, user=user,
-                warehouse_id=adjustment.warehouse_id, bin_id=adj_item.bin_id,
-                batch_id=adj_item.batch_id, project_id=adj_item.project_id,
-            )
-    elif action.upper() == "REJECT":
-        adjustment.status = "REJECTED"
+        await _post_adjustment_lines(db, adjustment, adjustment.items, user)
     else:
-        raise ValidationError(f"Invalid action {action}")
+        adjustment.status = AdjustmentStatus.REJECTED.value
+        # No column exists for a rejection reason and the schema is frozen, so it is
+        # appended to the remarks the document already carries. Without it a rejection
+        # is unexplainable after the fact.
+        if remarks:
+            who = getattr(user, "full_name", None) or "approver"
+            note = f"[Rejected by {who}] {remarks}"
+            adjustment.remarks = f"{adjustment.remarks}\n{note}" if adjustment.remarks else note
 
+    await write_audit(
+        db, entity="inv_adjustments", entity_id=adjustment.id,
+        entity_no=adjustment.adjustment_no, action=AuditAction.UPDATE, actor=user,
+        before=before, after={"status": adjustment.status},
+        summary=f"Stock adjustment {adjustment.adjustment_no} {adjustment.status.lower()}",
+    )
     await db.commit()
-    await db.refresh(adjustment)
+    await db.refresh(adjustment, ["items"])
     return adjustment
 
 
@@ -842,7 +1039,7 @@ async def get_stock_detail(db: AsyncSession, stock_id: int, user=None) -> dict:
     lots = [{
         "id": r.id, "bin_id": r.bin_id, "bin_code": r.bin_code,
         "batch_id": r.batch_id, "batch_no": r.batch_no, "expiry_date": r.expiry_date,
-        "days_to_expiry": (r.expiry_date - today).days if r.expiry_date else None,
+        "days_to_expiry": (_as_date(r.expiry_date) - today).days if r.expiry_date else None,
         "available_qty": float(r.available_qty or 0),
         "reserved_qty": float(r.reserved_qty or 0),
         "total_qty": float(r.total_qty or 0),
@@ -1202,8 +1399,8 @@ async def get_stock_ageing(
     b0_30, b31_60, b61_90, b90_plus = Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0")
 
     for s in stocks:
-        last_mvmt = s.last_movement_at or now_dt
-        days_in_stock = (now_dt - last_mvmt).days
+        last_mvmt = _aware(s.last_movement_at) or now_dt
+        days_in_stock = max((now_dt - last_mvmt).days, 0)
 
         if days_in_stock <= 30:
             age_b = "0-30"
@@ -1220,8 +1417,9 @@ async def get_stock_ageing(
 
         days_to_exp = None
         exp_b = None
-        if s.expiry_date:
-            days_to_exp = (s.expiry_date - today_d).days
+        expiry_d = _as_date(s.expiry_date)
+        if expiry_d:
+            days_to_exp = (expiry_d - today_d).days
             if days_to_exp < 0:
                 exp_b = "EXPIRED"
             elif days_to_exp <= 30:
@@ -1241,7 +1439,7 @@ async def get_stock_ageing(
             "warehouse_id": s.warehouse_id,
             "warehouse_name": s.warehouse_name,
             "batch_no": s.batch_no,
-            "expiry_date": s.expiry_date,
+            "expiry_date": expiry_d,
             "quantity": float(s.available_qty or 0),
             "days_in_stock": days_in_stock,
             "age_bucket": age_b,
@@ -1307,14 +1505,15 @@ async def get_near_expiry_alerts(
 ) -> list[dict]:
     warehouse_ids = await _scoped_warehouse_ids(db, user)
     cutoff = utcnow().date() + timedelta(days=days)
-    stmt = select(Stock).where(Stock.expiry_date.isnot(None), Stock.expiry_date <= cutoff, Stock.available_qty > 0)
+    today_date = utcnow().date()
+    stmt = select(Stock).where(Stock.expiry_date.isnot(None), Stock.expiry_date >= today_date, Stock.expiry_date <= cutoff, Stock.available_qty > 0)
     stmt = _apply_warehouse_scope(stmt, Stock.warehouse_id, warehouse_ids)
     stocks = list((await db.execute(stmt.order_by(Stock.expiry_date.asc()))).scalars().all())
 
     today_d = utcnow().date()
     alerts = []
     for s in stocks:
-        days_rem = (s.expiry_date - today_d).days
+        days_rem = (_as_date(s.expiry_date) - today_d).days
         alerts.append({
             "stock_id": s.id,
             "item_id": s.item_id,
@@ -1338,6 +1537,22 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
     if not from_wh or not to_wh:
         raise NotFoundError("Source or destination warehouse not found")
 
+    # What this move IS comes from the two points, never from the request body, so a
+    # cross-project transfer cannot be relabelled into something that skips approval.
+    # Same-project stays PENDING_APPROVAL for the holder's own sign-off; crossing a
+    # project boundary is what pulls in the Inventory Manager.
+    kind = locations.classify(
+        data.from_warehouse_id, from_wh.warehouse_type,
+        data.to_warehouse_id, to_wh.warehouse_type,
+    )
+    gated = await locations.needs_inventory_manager(
+        db, data.from_warehouse_id, data.to_warehouse_id,
+    )
+    logger.info(
+        "STO %s -> %s classified as %s (inventory manager required: %s)",
+        data.from_warehouse_id, data.to_warehouse_id, kind.value, gated,
+    )
+
     sto_no = await next_number(db, "sto")
     sto = StockTransferOrder(
         sto_no=sto_no,
@@ -1347,10 +1562,17 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
         to_warehouse_name=to_wh.name,
         from_project_id=data.from_project_id or NO_PROJECT,
         to_project_id=data.to_project_id or NO_PROJECT,
-        status="PENDING_APPROVAL",
+        status=STOStatus.PENDING_APPROVAL.value,
         requested_by_id=getattr(user, "id", None),
         requested_by_name=getattr(user, "full_name", None),
-        remarks=data.remarks,
+        # The derived kind and the gate are recorded in the remark rather than in a
+        # new column: no schema change, and the reason a transfer needed the Inventory
+        # Manager stays readable on the document long after the tagging has moved on.
+        remarks=" · ".join(filter(None, (
+            data.remarks,
+            f"[{kind.value}]",
+            "Inventory Manager approval required (crosses projects)" if gated else None,
+        ))) or None,
     )
     db.add(sto)
     await db.flush()
@@ -1374,7 +1596,12 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
 
 async def get_sto(db: AsyncSession, sto_id: int, user=None) -> StockTransferOrder:
     sto = (await db.execute(
-        select(StockTransferOrder).where(
+        select(StockTransferOrder)
+        # .items is lazy, and dispatch/receive both walk it. Without this the walk
+        # raises MissingGreenlet under async and the screen only ever showed
+        # "The action failed", so no transfer could be dispatched at all.
+        .options(selectinload(StockTransferOrder.items))
+        .where(
             StockTransferOrder.id == sto_id,
             # Same scope the list applies. A document hidden from the list must
             # not be readable by putting its id in the URL.
@@ -1403,10 +1630,10 @@ async def list_stos(db: AsyncSession, params: PageParams, status: str | None = N
 
 async def approve_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:
     sto = await get_sto(db, sto_id)
-    if sto.status != "PENDING_APPROVAL":
+    if sto.status != STOStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"STO is in status {sto.status}, cannot approve")
 
-    sto.status = "APPROVED"
+    sto.status = STOStatus.APPROVED.value
     sto.approved_by_name = getattr(user, "full_name", None)
     sto.approved_at = utcnow()
     await db.commit()
@@ -1417,7 +1644,7 @@ async def approve_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder
 async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:
     """Take transfer stock out of the source when it physically leaves."""
     sto = await get_sto(db, sto_id)
-    if sto.status != "APPROVED":
+    if sto.status != STOStatus.APPROVED.value:
         raise ValidationError(f"STO is in status {sto.status}, cannot dispatch")
 
     for sto_item in sto.items:
@@ -1428,7 +1655,7 @@ async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrde
             warehouse_id=sto.from_warehouse_id, project_id=sto.from_project_id,
         )
 
-    sto.status = "DISPATCHED"
+    sto.status = STOStatus.DISPATCHED.value
     sto.dispatched_at = utcnow()
     await db.commit()
     await db.refresh(sto)
@@ -1438,7 +1665,7 @@ async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrde
 async def receive_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:
     """Credit the destination when the dispatched transfer is received."""
     sto = await get_sto(db, sto_id)
-    if sto.status != "DISPATCHED":
+    if sto.status != STOStatus.DISPATCHED.value:
         raise ValidationError(f"STO is in status {sto.status}, cannot receive")
 
     for sto_item in sto.items:
@@ -1450,7 +1677,7 @@ async def receive_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder
             warehouse_id=sto.to_warehouse_id, project_id=sto.to_project_id,
         )
 
-    sto.status = "RECEIVED"
+    sto.status = STOStatus.RECEIVED.value
     sto.received_at = utcnow()
     await db.commit()
     await db.refresh(sto)

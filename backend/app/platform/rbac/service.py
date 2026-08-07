@@ -14,6 +14,7 @@ from app.platform.rbac.models import (
 )
 from app.platform.settings.models import UserCredential
 from app.platform.settings.service import write_audit
+from app.platform.rbac.permissions import PAGE_RESOURCE
 from app.platform.rbac.profiles import PROFILE_PREFIX
 from app.shared.enums import AuditAction, GroupType
 
@@ -197,16 +198,19 @@ async def set_role_page_access(
 
 
 async def get_feature_access_matrix(db: AsyncSession) -> dict:
-    page_permission_codes = set((await db.execute(
-        select(Page.required_permission).where(
-            Page.is_active.is_(True), Page.required_permission.isnot(None),
-        )
-    )).scalars().all())
-    stmt = select(Permission)
-    if page_permission_codes:
-        stmt = stmt.where(Permission.code.notin_(page_permission_codes))
+    # An Action is anything a person DOES; reaching a screen is granted in the Pages
+    # section beside this one. So the one thing excluded here is the `page` resource.
+    #
+    # It deliberately does NOT also drop codes that a page names as its
+    # required_permission. That test cut both ways: it let through the 57 `page.*`
+    # rows no page claims (listing every screen a second time as an action), while
+    # hiding real actions — Adjust stock, View stock, Reserve stock — purely because
+    # some screen happens to be gated on them. A permission being a page's gate does
+    # not stop it being an action.
     features = (await db.execute(
-        stmt.order_by(Permission.module, Permission.code)
+        select(Permission)
+        .where(Permission.resource != PAGE_RESOURCE)
+        .order_by(Permission.module, Permission.code)
     )).scalars().all()
     roles = (await db.execute(select(Role).where(
         Role.is_active.is_(True),
@@ -250,15 +254,11 @@ async def set_role_feature_access(
     role = await db.get(Role, role_id)
     if role is None or not role.is_active:
         raise NotFoundError("Role not found")
-    page_permission_codes = set((await db.execute(
-        select(Page.required_permission).where(
-            Page.is_active.is_(True), Page.required_permission.isnot(None),
-        )
-    )).scalars().all())
-    stmt = select(Permission)
-    if page_permission_codes:
-        stmt = stmt.where(Permission.code.notin_(page_permission_codes))
-    features = (await db.execute(stmt)).scalars().all()
+    # Same definition of "feature" as the matrix above, or saving would accept a page
+    # permission the screen never offered — and reject an action it did.
+    features = (await db.execute(
+        select(Permission).where(Permission.resource != PAGE_RESOURCE)
+    )).scalars().all()
     by_code = {feature.code: feature for feature in features}
     unknown = set(permission_codes) - set(by_code)
     if unknown:

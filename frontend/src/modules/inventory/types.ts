@@ -76,6 +76,10 @@ export interface StockBalanceFilter {
   include_zero?: boolean;
   below_reorder?: boolean;
   expiring_in_days?: number;
+  expiry_status?: string;
+  expiry_from?: string;
+  expiry_to?: string;
+  expired_in_last_days?: number;
   page?: number;
   size?: number;
 }
@@ -649,4 +653,50 @@ export interface AllocationHistoryRow {
   action: string;
   comments?: string | null;
   acted_at?: string | null;
+}
+
+/** A stocking point's rung on the distribution chain. Derived from the warehouse
+ *  type on the server, never stored twice — see backend inventory/locations.py. */
+export type LocationTier = 1 | 2 | 3;   // 1 WAREHOUSE, 2 MDP, 3 LIP
+
+export interface PositionLocationTag {
+  id: number;
+  position_id: number;
+  position_name?: string | null;
+  warehouse_id: number;
+  warehouse_code?: string | null;
+  warehouse_name?: string | null;
+  warehouse_type?: string | null;
+  tier: LocationTier;
+  tier_label: string;
+  project_id: number;
+  project_name?: string | null;
+  is_primary: boolean;
+}
+
+export interface PositionLocationWrite {
+  position_id: number;
+  warehouse_id: number;
+  project_id?: number;
+  project_name?: string | null;
+  is_primary?: boolean;
+}
+
+/** What a move between two points would be. Read-only: the user picks from/to and a
+ *  reason, never the kind — see the note on the backend schema. */
+export interface MovementClassification {
+  from_warehouse_id?: number | null;
+  to_warehouse_id?: number | null;
+  from_tier: LocationTier;
+  to_tier: LocationTier;
+  movement_kind: "MOVEMENT" | "TRANSFER" | "ISSUE" | "RETURN";
+  doc_type: string;
+  needs_inventory_manager: boolean;
+  explanation: string;
+}
+
+export interface MyStockingPoints {
+  primary_warehouse_id?: number | null;
+  warehouse_ids: number[];
+  tags: PositionLocationTag[];
 }

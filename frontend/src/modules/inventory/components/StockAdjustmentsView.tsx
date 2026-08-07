@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip, Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { Plus, Check, X, RefreshCw } from "lucide-react";
+import { Plus, Check, X, RefreshCw, FileSpreadsheet } from "lucide-react";
 import {
   Button, Can, Card, Field, Input, PageHeader, ResponsiveList, Select, StatusPill, type Column,
 } from "@/shared/components";
@@ -10,12 +10,18 @@ import {
   getWarehouses, getCatalogItems,
 } from "../api";
 import { alerts } from "@/modules/alerts";
-
+import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
+// offer COUNT_VARIANCE and FOUND, which are not in that enum — the reason went
+// unvalidated, so they were stored and reported on as if they were real categories.
 const REASONS = [
   { value: "DAMAGE", label: "Damage" },
   { value: "EXPIRY", label: "Expiry" },
-  { value: "COUNT_VARIANCE", label: "Count Variance" },
-  { value: "FOUND", label: "Found Stock" },
+  { value: "CYCLE_COUNT", label: "Count Variance" },
+  { value: "EXCESS", label: "Found Stock" },
+  { value: "SHORTAGE", label: "Shortage" },
+  { value: "QUALITY_REJECTION", label: "Quality Rejection" },
+  { value: "OPENING_BALANCE", label: "Opening Balance" },
+  { value: "OTHER", label: "Other" },
 ];
 
 const DIRECTIONS = [
@@ -24,7 +30,7 @@ const DIRECTIONS = [
 ];
 
 const BLANK = {
-  warehouse_id: "", item_id: "", reason: "COUNT_VARIANCE", direction: "IN",
+  warehouse_id: "", item_id: "", reason: "CYCLE_COUNT", direction: "IN",
   quantity: "", unit_cost: "", remarks: "",
 };
 
@@ -34,6 +40,7 @@ export function StockAdjustmentsView() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ ...BLANK });
   const [error, setError] = useState("");
+  const [selected, setSelected] = useState<Adjustment | null>(null);
   const qc = useQueryClient();
 
   const { data, isLoading } = useQuery({
@@ -110,7 +117,7 @@ export function StockAdjustmentsView() {
           <Button onClick={() => void askThenDecide(r, true)}>
             <Check size={14} /> Approve
           </Button>
-          <Button variant="ghost" onClick={() => void askThenDecide(r, false)}>
+          <Button variant="subtle" onClick={() => void askThenDecide(r, false)}>
             <X size={14} /> Reject
           </Button>
         </div>
@@ -130,6 +137,26 @@ export function StockAdjustmentsView() {
     { key: "actions", header: "", render: actions },
   ];
 
+  const exportCsv = () => {
+    const header = ["Adj No", "Warehouse", "Reason", "Status", "Created By", "Created At"];
+    const cell = (v: any) => {
+      if (v == null) return '""';
+      const s = String(v).replace(/"/g, '""');
+      return `"${s}"`;
+    };
+    const body = rows.map((r) => [
+      r.adjustment_no, r.warehouse_name, r.reason, r.status, r.created_by_name, 
+      r.created_at ? new Date(r.created_at).toLocaleString() : "-"
+    ]);
+    const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `stock-adjustments-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div>
       <PageHeader
@@ -137,7 +164,10 @@ export function StockAdjustmentsView() {
         title="Stock Adjustments"
         actions={
           <>
-            <Button variant="ghost" onClick={refresh}><RefreshCw size={14} /> Refresh</Button>
+            <Button variant="subtle" disabled={rows.length === 0} onClick={exportCsv}>
+              <FileSpreadsheet size={14} /> Export CSV
+            </Button>
+            <Button variant="subtle" onClick={refresh}><RefreshCw size={14} /> Refresh</Button>
             <Can do="stock.adjust">
               <Button onClick={() => setOpen(true)}><Plus size={14} /> New Adjustment</Button>
             </Can>
@@ -155,6 +185,7 @@ export function StockAdjustmentsView() {
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}
+          onRowClick={setSelected}
           empty="No adjustments yet."
           renderCard={(r) => (
             <div className="space-y-1">
@@ -218,13 +249,51 @@ export function StockAdjustmentsView() {
             </Field>
           </ModalBody>
           <ModalFooter>
-            <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="subtle" onClick={() => setOpen(false)}>Cancel</Button>
             <Button disabled={!valid || create.isPending} onClick={() => void askThenCreate()}>
               {create.isPending ? "Saving…" : "Create"}
             </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
+
+      <DetailSheet
+        open={!!selected}
+        onClose={() => setSelected(null)}
+        title={selected?.adjustment_no ?? ""}
+        subtitle={selected?.warehouse_name}
+        badge={selected && <StatusPill status={selected.status} />}
+      >
+        {selected && (
+          <>
+            <SheetSection title="Details">
+              <SheetRow label="Reason" value={selected.reason} />
+              <SheetRow label="Created By" value={selected.created_by_name} />
+              <SheetRow label="Created At" value={selected.created_at ? new Date(selected.created_at).toLocaleString() : "-"} />
+              <SheetRow label="Remarks" value={selected.remarks} />
+            </SheetSection>
+            
+            <SheetSection title="Adjusted Items">
+              {selected.items?.length ? (
+                <div className="space-y-3">
+                  {selected.items.map((item: any, i: number) => (
+                    <div key={i} className="rounded-lg border border-line/70 p-3">
+                      <div className="font-semibold text-ink">{item.item_name || "Unknown Item"}</div>
+                      <div className="mt-1 flex gap-4 text-sm">
+                        <span>Direction: <strong>{item.direction}</strong></span>
+                        <span>Qty: <strong>{item.quantity}</strong></span>
+                        {item.unit_cost > 0 && <span>Cost: ₹{item.unit_cost}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted">No items found.</p>
+              )}
+            </SheetSection>
+          </>
+        )}
+      </DetailSheet>
     </div>
   );
 }

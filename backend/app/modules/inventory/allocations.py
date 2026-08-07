@@ -339,12 +339,23 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
 
         short = _d(line.requested_qty) - _d(line.quantity)
         if short > ZERO:
-            shortfalls.append({
-                "item_id": line.item_id, "item_code": line.item_code,
-                "item_name": line.item_name, "uom_code": line.uom_code,
-                "quantity": short, "project_id": line.project_id,
-                "indent_item_id": line.indent_item_id,
-            })
+            # Only what the warehouse genuinely cannot supply becomes procurement
+            # demand. A storekeeper who deliberately issues less than was asked for
+            # — because the request was generous, or the rest is not needed yet —
+            # used to raise a material request for the difference anyway, so
+            # procurement chased stock that was sitting on the shelf. Availability is
+            # read after this line's own reservation, so it is what is genuinely
+            # spare.
+            spare = _d(await availability.available_for(
+                db, line.item_id, project_id=line.project_id or NO_PROJECT))
+            unavailable = short - spare
+            if unavailable > ZERO:
+                shortfalls.append({
+                    "item_id": line.item_id, "item_code": line.item_code,
+                    "item_name": line.item_name, "uom_code": line.uom_code,
+                    "quantity": unavailable, "project_id": line.project_id,
+                    "indent_item_id": line.indent_item_id,
+                })
 
     if shortfalls:
         ctx = ctx or {}

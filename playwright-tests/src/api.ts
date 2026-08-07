@@ -59,6 +59,37 @@ export class ApiClient {
     return this.get<IndentSnapshot>(`/api/indents/${indentId}`, as);
   }
 
+
+  /* ---- Generic verbs, for endpoints without a purpose-built helper above ---- */
+
+  /** Raw GET as an account. Used by newer specs that probe endpoints this client
+   *  has no reason to model — the stocking-point classifier, say. */
+  async getAs<T>(path: string, as: Account): Promise<T> {
+    return this.get<T>(path, as);
+  }
+
+  async postAs<T>(path: string, body: unknown, as: Account): Promise<T> {
+    const token = await this.login(as);
+    const response = await this.request.post(path, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: body,
+    });
+    if (!response.ok()) {
+      throw new Error(`POST ${path} as ${as.label}: ${response.status()} ${await response.text()}`);
+    }
+    return (await response.json()) as T;
+  }
+
+  async deleteAs(path: string, as: Account): Promise<void> {
+    const token = await this.login(as);
+    const response = await this.request.delete(path, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok()) {
+      throw new Error(`DELETE ${path} as ${as.label}: ${response.status()} ${await response.text()}`);
+    }
+  }
+
   async pending(as: Account): Promise<PendingItem[]> {
     const body = await this.get<{ items: PendingItem[] }>("/api/workflow/pending", as);
     return body.items ?? [];

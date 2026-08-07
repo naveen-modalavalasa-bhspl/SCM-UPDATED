@@ -631,8 +631,29 @@ def _matches(indent: Indent, filters: ConsolidationFilters) -> bool:
         return False
     if filters.requester_id is not None and indent.requested_by_id != filters.requester_id:
         return False
-    if filters.item_id is not None:
-        return any(line.item_id == filters.item_id for line in indent.items)
+    if filters.item_id is not None and not any(
+        line.item_id == filters.item_id for line in indent.items
+    ):
+        return False
+    # Raised-on window, inclusive at both ends. Compared as dates: the filter is a
+    # day, and an indent raised at 18:00 belongs to that day, not to the one after.
+    raised = getattr(indent, "created_at", None)
+    raised_day = raised.date() if raised is not None else None
+    if filters.raised_from and (raised_day is None or raised_day < filters.raised_from):
+        return False
+    if filters.raised_to and (raised_day is None or raised_day > filters.raised_to):
+        return False
+    if filters.search:
+        needle = filters.search.lower()
+        haystack = [
+            indent.indent_no, indent.requested_by_name, indent.requested_by_code,
+            indent.region_name, indent.project_name, indent.office_name,
+            indent.vehicle_number,
+        ]
+        haystack += [line.item_name for line in indent.items]
+        haystack += [line.item_code for line in indent.items]
+        if not any(value and needle in value.lower() for value in haystack):
+            return False
     return True
 
 

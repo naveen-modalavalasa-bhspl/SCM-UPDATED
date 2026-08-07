@@ -755,3 +755,40 @@ from app.platform.settings.models import Attachment  # noqa: E402,F401
 # inventory both need it, and neither may import this module (rule 5). Re-exported so
 # `m.Notification` keeps working across the warehouse service and its screens.
 from app.platform.settings.models import Notification  # noqa: E402,F401
+
+
+class StockMovementOrder(Base):
+    """Multi-line stock movement order."""
+    __tablename__ = "whs_stock_movement_orders"
+    id = pk()
+    order_no = Column(String(30), unique=True, nullable=False)
+    warehouse_id = Column(BigInteger, index=True, nullable=False)
+    warehouse_name = Column(String(200), nullable=True)
+    status = Column(String(30), nullable=False, index=True) # DRAFT, COMPLETED
+    reason = Column(String(500), nullable=True)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("StockMovementOrderItem", back_populates="order",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+class StockMovementOrderItem(Base):
+    """Line item for a stock movement order."""
+    __tablename__ = "whs_stock_movement_order_items"
+    id = pk()
+    order_id = Column(ForeignKey("whs_stock_movement_orders.id", ondelete="CASCADE"),
+                      index=True, nullable=False)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
+    source_bin_id = Column(BigInteger, nullable=False)
+    destination_bin_id = Column(BigInteger, nullable=False)
+    quantity = Column(Numeric(16, 3), nullable=False)
+    serial_numbers = Column(Text, nullable=True) # JSON encoded list or comma-separated
+
+    order = relationship("StockMovementOrder", back_populates="items")

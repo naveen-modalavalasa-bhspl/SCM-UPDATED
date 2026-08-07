@@ -18,7 +18,8 @@ import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPa
 // Approvals is its own module now — the inbox, decisions, team queue, reports and the
 // indent review screen all live there, not inside indents.
 import {
-  ApprovalCorrectionPage, ApprovalsPage, ConsolidationPage, MyDecisionsPage, TeamQueuePage,
+  ApprovalCorrectionPage, ApprovalsPage, ConsolidationDetailPage, ConsolidationPage,
+  MyDecisionsPage, TeamQueuePage,
 } from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
@@ -52,6 +53,8 @@ import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueue
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
 import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
 import { AllocationApprovalsPage } from "@/modules/inventory/pages/AllocationApprovalsPage";
+import { AllocationApprovalDetailPage } from "@/modules/inventory/pages/AllocationApprovalDetailPage";
+import { StockingPointsPage } from "@/modules/inventory/pages/StockingPointsPage";
 import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialRequestDetailPage";
 import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
@@ -105,6 +108,9 @@ function AppRoutes() {
         <Route path="approvals/decisions" element={<MyDecisionsPage />} />
         <Route path="approvals/team-queue" element={<TeamQueuePage />} />
         <Route path="approvals/consolidation" element={<ConsolidationPage />} />
+        {/* Child screen, not a menu entry: it is reached by opening a row, and its
+            :cycle is the group key the list navigated with. */}
+        <Route path="approvals/consolidation/:cycle" element={<ConsolidationDetailPage />} />
         {/* Delegation is retired. The route stays so old links and bookmarks land
             somewhere real instead of on a blank page. */}
         <Route path="approvals/delegations" element={<Navigate to="/approvals" replace />} />
@@ -124,7 +130,12 @@ function AppRoutes() {
         <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
+        {/* Where the MDP/LIP chain is declared — everything downstream reads it. */}
+        <Route path="inventory/stocking-points" element={<StockingPointsPage />} />
         <Route path="inventory/allocation-approvals" element={<AllocationApprovalsPage />} />
+        {/* Child screen, not a menu entry: the list navigates here to review one
+            allocation. Without this route that row click is a dead end. */}
+        <Route path="inventory/allocation-approvals/:id" element={<AllocationApprovalDetailPage />} />
         <Route path="inventory/demand" element={<ItemDemandPage />} />
         <Route path="inventory/labels" element={<LabelsPage />} />
         <Route path="inventory/material-requests/:id" element={<MaterialRequestDetailPage />} />

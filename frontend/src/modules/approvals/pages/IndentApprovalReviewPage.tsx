@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { AlertCircle, ArrowLeft, Check, RotateCcw, X } from "lucide-react";
 import { Button, Card, ConfirmModal, PageHeader, StatusPill } from "@/shared/components";
 import { approvalsApi } from "../api";
+import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
 import {
   allowedRange, approvalCeiling, formatQuantity, quantityError,
   quantityValue, wasReducedBelow,
@@ -126,6 +127,10 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
 
     <div className="space-y-5">
       <Card className="p-4"><dl className="grid gap-3 text-sm sm:grid-cols-3"><div><dt className="text-muted">Requested by</dt><dd className="font-semibold text-ink">{indent.data.requested_by_name ?? "—"}</dd></div><div><dt className="text-muted">Department</dt><dd>{indent.data.department_name ?? "—"}</dd></div><div><dt className="text-muted">Priority</dt><dd><StatusPill status={indent.data.priority} /></dd></div></dl></Card>
+
+      {/* Serve-from-own-stock sits above the decision, not after it: an approver who
+          holds the goods should give them and let only the remainder climb. */}
+      <IssueFromStockPanel indentId={indentId} />
 
       <section>
         <h2 className="font-semibold text-ink">Quantity comparison</h2>

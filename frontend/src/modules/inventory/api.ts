@@ -1,5 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
+  PositionLocationTag, PositionLocationWrite, MovementClassification,
+  MyStockingPoints,
   AllocationDecision,
   AllocationHistoryRow,
   Allocation,
@@ -136,8 +138,12 @@ export const getStockBalances = (params?: StockBalanceFilter) =>
         include_zero: params?.include_zero || undefined,
         below_reorder: params?.below_reorder || undefined,
         expiring_in_days: params?.expiring_in_days,
+        expiry_status: params?.expiry_status,
+        expiry_from: params?.expiry_from,
+        expiry_to: params?.expiry_to,
+        expired_in_last_days: params?.expired_in_last_days,
         page: params?.page ?? 1,
-        size: params?.size ?? 200,
+        size: params?.size ?? 20,
       }),
     })
     .then((r) => ({ items: unwrap(r.data).map(toBalance), total: r.data.total }));
@@ -154,7 +160,7 @@ export const getStockLedger = (params?: StockLedgerFilter) =>
         date_from: params?.date_from,
         date_to: params?.date_to,
         page: params?.page ?? 1,
-        size: params?.size ?? 200,
+        size: params?.size ?? 20,
       }),
     })
     .then((r) => ({ items: unwrap(r.data).map(toLedger), total: r.data.total }));
@@ -194,7 +200,11 @@ export const rejectMaterialRequest = (id: number, comments = "") =>
 export const getFulfillmentQueue = (status = "PARTIALLY_FULFILLED") =>
   api
     .get<Page<Record<string, unknown>>>("/api/indents", {
-      params: { status, size: 100 },
+      // has_remainder: only indents that still owe something (approved > allocated).
+      // Without it the queue kept listing indents an approver had already served
+      // from their own point, because the STATUS does not change when a line is
+      // partly issued — only the remainder does.
+      params: { status, size: 100, has_remainder: true },
     })
     .then((r) => r.data);
 
@@ -299,6 +309,31 @@ export const approveAllocation = (id: number, comments = "") =>
 export const rejectAllocation = (id: number, comments = "") =>
   api.post(`/api/allocations/${id}/reject`, { comments }).then((r) => r.data);
 
+
+/* ---------------- Stocking points: tiers, tagging, classification ---------------- */
+
+/** Every position→point tag, optionally for one position. */
+export const listStockingPointTags = (positionId?: number) =>
+  api.get<PositionLocationTag[]>("/api/stocking-points/tags", {
+    params: positionId ? { position_id: positionId } : {},
+  }).then((r) => r.data);
+
+export const tagStockingPoint = (body: PositionLocationWrite) =>
+  api.post<PositionLocationTag>("/api/stocking-points/tags", body).then((r) => r.data);
+
+export const untagStockingPoint = (tagId: number) =>
+  api.delete(`/api/stocking-points/tags/${tagId}`).then((r) => r.data);
+
+/** What a move between two points would be — shown read-only beside the pickers. */
+export const classifyMove = (fromWarehouseId?: number | null, toWarehouseId?: number | null) =>
+  api.get<MovementClassification>("/api/stocking-points/classify", {
+    params: { from_warehouse_id: fromWarehouseId, to_warehouse_id: toWarehouseId },
+  }).then((r) => r.data);
+
+/** The points this login draws from and can see into — own plus reporting subtree. */
+export const getMyStockingPoints = () =>
+  api.get<MyStockingPoints>("/api/stocking-points/mine").then((r) => r.data);
+
 export const inventoryApi = {
   getWarehouses,
   getCatalogItems,
@@ -327,4 +362,10 @@ export const inventoryApi = {
   approveStockAdjustment,
   rejectStockAdjustment,
   getReplenishments,
+  // Stocking points
+  listStockingPointTags,
+  tagStockingPoint,
+  untagStockingPoint,
+  classifyMove,
+  getMyStockingPoints,
 };

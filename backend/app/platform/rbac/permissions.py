@@ -59,6 +59,10 @@ STOCK_RESERVE = "stock.reserve"
 # Valuation exposes purchase cost, so it is separate from plain stock visibility.
 STOCK_VALUATION_VIEW = "stock.valuation.view"
 STOCK_TRANSFER = "stock.transfer"
+STOCK_VIEW_SUBTREE = "stock.view.subtree"
+# Under `stock`, not a resource of its own: a one-permission resource would open a
+# lone group in Job Profiles beside the real ones, which reads as a mistake.
+STOCK_TRANSFER_APPROVE = "stock.transfer.approve"
 ALLOCATION_VIEW = "allocation.view"
 ALLOCATION_CREATE = "allocation.create"
 ALLOCATION_APPROVE = "allocation.approve"
@@ -167,6 +171,10 @@ ALL_PERMISSIONS: list[Perm] = [
          "View stock valuation and cost"),
     Perm(STOCK_TRANSFER, "inventory", "stock", "transfer",
          "Transfer stock between warehouses"),
+    Perm(STOCK_VIEW_SUBTREE, "inventory", "stock", "view_subtree",
+         "View stock at every point reporting under you, not just your own"),
+    Perm(STOCK_TRANSFER_APPROVE, "inventory", "stock", "transfer_approve",
+         "Approve a stock transfer that crosses a project boundary"),
     Perm(ALLOCATION_VIEW, "inventory", "allocation", "view", "View stock allocations"),
     Perm(ALLOCATION_CREATE, "inventory", "allocation", "create",
          "Decide how much stock an indent gets"),
@@ -325,8 +333,13 @@ def page_view_code(page_code: str) -> str:
     return f"page.{page_code}.view"
 
 
+# The resource every "see this screen" permission carries. Named because two places
+# generate these rows and a third has to exclude them from the Actions list — a
+# literal "page" in all three is one typo away from screens leaking back in.
+PAGE_RESOURCE = "page"
+
 PAGE_VIEW_PERMISSIONS: list[Perm] = [
-    Perm(page_view_code(code), module, "page", "view", f"See the {name} page")
+    Perm(page_view_code(code), module, PAGE_RESOURCE, "view", f"See the {name} page")
     for code, module, name in PAGE_VIEW_CODES
 ]
 

@@ -121,7 +121,7 @@ async def sync_pages(db: AsyncSession) -> dict:
         if required and required not in permission_by_code:
             permission = Permission(
                 code=required, module=spec.module or "admin",
-                resource="page", action="view",
+                resource=perms.PAGE_RESOURCE, action="view",
                 description=f"See the {spec.name} page",
             )
             db.add(permission)

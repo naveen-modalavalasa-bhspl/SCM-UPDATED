@@ -9,12 +9,12 @@ from app.core.dependencies import get_current_user, require_permission
 from app.core.pagination import PageParams
 from app.platform.rbac import permissions as perms
 
-from . import service
+from . import fulfilment, service
 from .schemas import (
     ApprovalActionIn, ApprovalActionOut, ApprovalIndentOut, ApprovalRejectionIn,
     ApprovalReportOut, ConsolidationApprovalIn, ConsolidationApprovalOut,
     ConsolidationFilters, ConsolidationOut, IndentApprovalActionIn,
-    IndentRejectionIn, IndentReturnIn, ReminderOut,
+    IndentRejectionIn, IndentReturnIn, IssueFromStockIn, ReminderOut,
 )
 
 
@@ -125,3 +125,26 @@ async def return_indent(indent_id: int, body: IndentReturnIn,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.return_indent(db, indent_id, body.comments, user)
+
+
+@router.get("/indents/{indent_id}/availability")
+async def indent_availability(indent_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.INDENT_APPROVE))):
+    """What is still owed per line, and what this approver holds against it."""
+    return await fulfilment.availability_for_indent(db, indent_id, user)
+
+
+@router.post("/indents/{indent_id}/issue-from-stock")
+async def issue_from_stock(indent_id: int, body: IssueFromStockIn,
+                           # INDENT_APPROVE, not STOCK_TRANSFER: this is an approver
+                           # serving a document they already hold, from a point they
+                           # already own. Gating it on the warehouse permission meant
+                           # every OE and DM needed stock.transfer before they could
+                           # act on their own indent. The real boundary is enforced in
+                           # the service — the source point must be in this user's
+                           # reporting subtree — and that no permission can hand over.
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.INDENT_APPROVE))):
+    return await fulfilment.issue_from_my_stock(
+        db, indent_id, body.lines, user, body.reason, body.forward_remainder,
+    )
