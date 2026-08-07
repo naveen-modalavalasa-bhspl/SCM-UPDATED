@@ -5,15 +5,14 @@ import { LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
 import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
-import { alerts } from "@/modules/alerts";
 import {
   indentApi, indentKeys, isIndentModuleQuery, masterApi,
   useIndentAccountCacheIsolation, useIndentAccountScope,
 } from "../api";
 import { ItemCombobox } from "../components/ItemCombobox";
 import { ChooseBomModal } from "../components/ChooseBomModal";
-import { INDENT_STATUS } from "../constants";
-import type { IndentCreate, IndentUpdate, TemplateLineItem } from "../types";
+import { INDENT_STATUS, INDENT_TYPE, INDENT_TYPE_OPTIONS } from "../constants";
+import type { IndentCreate, IndentType, IndentUpdate, TemplateLineItem } from "../types";
 
 interface Line {
   item_id: number | "";
@@ -114,6 +113,8 @@ export function IndentFormPage() {
   const qc = useQueryClient();
   const initializedDraftId = useRef<number | null>(null);
   const [priority, setPriority] = useState("NORMAL");
+  const [indentType, setIndentType] = useState<IndentType>(INDENT_TYPE.REGULAR);
+  const [vehicleId, setVehicleId] = useState<number | "">("");
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
   const [deliveryOfficeId, setDeliveryOfficeId] = useState<number | "">(
@@ -173,6 +174,8 @@ export function IndentFormPage() {
     if (!draft || !canEditLoadedIndent || initializedDraftId.current === draft.id) return;
     initializedDraftId.current = draft.id;
     setPriority(draft.priority || "NORMAL");
+    setIndentType((draft.indent_type as IndentType) || INDENT_TYPE.REGULAR);
+    setVehicleId(draft.vehicle_id ?? "");
     setRequiredDate(draft.required_date ?? "");
     setRemarks(draft.remarks ?? "");
     setDeliveryOfficeId(draft.office_id ?? "");
@@ -184,6 +187,8 @@ export function IndentFormPage() {
 
   const payload = (): IndentCreate => ({
     priority,
+    indent_type: indentType,
+    vehicle_id: vehicleId === "" ? null : Number(vehicleId),
     required_date: requiredDate || null,
     remarks: remarks || null,
     items: lines
@@ -202,12 +207,6 @@ export function IndentFormPage() {
       : indentApi.create(payload()),
     onSuccess: (indent) => {
       qc.invalidateQueries({ predicate: isIndentModuleQuery });
-      // Not awaited: the alert closes itself, and holding the navigation behind it
-      // would leave the person on a form they have already finished with.
-      void alerts.success(
-        isEditing ? "indent.updated" : "indent.created",
-        { number: indent.indent_no },
-      );
       nav(`/indents/${indent.id}`);
     },
     onError: (e: Error) => setError(e.message),
@@ -457,6 +456,14 @@ export function IndentFormPage() {
         <Card className="h-fit">
           <CardBody className="gap-4 p-5">
             <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">Details</h2>
+            <Field label="Indent type">
+              <Select
+                ariaLabel="Indent type"
+                value={indentType}
+                onChange={(v) => setIndentType((v || INDENT_TYPE.REGULAR) as IndentType)}
+                options={INDENT_TYPE_OPTIONS}
+              />
+            </Field>
             <Field label="Priority">
               <Select
                 value={priority}

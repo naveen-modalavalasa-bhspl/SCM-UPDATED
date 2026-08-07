@@ -233,6 +233,11 @@ function DepartmentCell({ row }: { row: ActivityRow }) {
   );
 }
 
+/** Region/Location of the indent the event belongs to. Blank for older rows. */
+function RegionCell({ row }: { row: ActivityRow }) {
+  return <p className="text-body">{nonEmptyText(row.region_name) ?? "—"}</p>;
+}
+
 function occurredAtLabel(row: ActivityRow) {
   const timestamp = nonEmptyText(row.occurred_at) ?? nonEmptyText(row.event_at);
   return timestamp ? (formatIndentDateTime(timestamp) ?? "Time unavailable") : "Time unavailable";
@@ -281,6 +286,8 @@ function IndentReportsContent({
     startDate,
     endDate,
     selectedStatuses,
+    selectedRegions,
+    includeUnassignedRegion,
     page,
     setPage,
   } = useIndentFilters();
@@ -289,13 +296,17 @@ function IndentReportsContent({
     search: search || undefined,
     date_from: startDate || undefined,
     date_to: endDate || undefined,
+    region_id: selectedRegions,
+    region_unassigned: includeUnassignedRegion || undefined,
     transaction_type: selectedStatuses[0] || undefined,
     page,
     size,
   }), [
     endDate,
+    includeUnassignedRegion,
     page,
     search,
+    selectedRegions,
     selectedStatuses,
     size,
     startDate,
@@ -373,6 +384,7 @@ function IndentReportsContent({
     { key: "details", header: "DETAILS", className: HEADER_CURSOR_CLASS, render: (row) => <DetailCell row={row} /> },
     { key: "qty", header: "QTY", className: HEADER_CURSOR_CLASS, render: (row) => <span className="tabular-nums">{formatQuantity(row)}</span> },
     { key: "dept", header: "DEPARTMENT", className: HEADER_CURSOR_CLASS, render: (row) => <DepartmentCell row={row} /> },
+    { key: "region", header: "REGION", className: HEADER_CURSOR_CLASS, render: (row) => <RegionCell row={row} /> },
     { key: "result", header: "RESULT", className: HEADER_CURSOR_CLASS, render: (row) => <ActivityResultBadge label={resultLabel(row)} /> },
   ];
 

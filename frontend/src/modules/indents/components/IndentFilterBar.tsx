@@ -1,8 +1,15 @@
-import { useEffect, useRef, useState } from "react";
-import { Calendar, Check, ChevronDown, Filter, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Calendar, Check, ChevronDown, Filter, MapPin, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
 import {
   Button as HButton, Chip, Dropdown, DropdownItem, DropdownMenu, DropdownSection, DropdownTrigger,
 } from "@heroui/react";
+import {
+  INDENT_QUERY_GC_TIME,
+  indentApi,
+  indentKeys,
+  useIndentAccountScope,
+} from "../api";
 import {
   useIndentFilters,
   type DatePreset,
@@ -27,13 +34,17 @@ interface IndentFilterBarProps {
   showDate?: boolean;
   showStatus?: boolean;
   showPriority?: boolean;
+  showRegion?: boolean;
   showTransaction?: boolean;
   showMovement?: boolean;
   showItem?: boolean;
   searchPlaceholder?: string;
 }
 
-type ActiveMenu = "status" | "priority" | "date" | "raisedDate" | "requiredBy" | "transaction" | "movement" | null;
+type ActiveMenu = "status" | "priority" | "region" | "date" | "raisedDate" | "requiredBy" | "transaction" | "movement" | null;
+
+/** Region/Location is nullable, so "no location" needs a filter value of its own. */
+export const UNASSIGNED_REGION_LABEL = "No location";
 
 const MOVEMENT_OPTIONS = [
   { value: "OUTWARD", label: "Outward" },
@@ -382,6 +393,9 @@ export function IndentFilterBar({
   showDate = true,
   showStatus = true,
   showPriority = true,
+  // Only the screens that filter over indents themselves: acknowledgments and
+  // notifications read from wf_actions, which carries no region.
+  showRegion = mode === "indents" || mode === "activity",
   showTransaction = mode === "activity",
   showMovement = false,
   showItem = mode === "activity",
@@ -409,6 +423,11 @@ export function IndentFilterBar({
     setSelectedStatuses,
     selectedPriorities,
     togglePriority,
+    selectedRegions,
+    setSelectedRegions,
+    toggleRegion,
+    includeUnassignedRegion,
+    setIncludeUnassignedRegion,
     transactionType,
     setTransactionType,
     direction,
@@ -418,6 +437,23 @@ export function IndentFilterBar({
     resetFilters,
     activeFilterCount,
   } = useIndentFilters();
+
+  const accountScope = useIndentAccountScope();
+  // The options are the locations present on the caller's own indents, so they change
+  // about as often as the org chart does — cached for the session, never refetched on
+  // a filter change.
+  const { data: regionOptions = [] } = useQuery({
+    queryKey: indentKeys.regions(accountScope),
+    queryFn: () => indentApi.regions(),
+    enabled: showRegion,
+    staleTime: Infinity,
+    gcTime: INDENT_QUERY_GC_TIME,
+  });
+  const regionNameById = useMemo(
+    () => new Map(regionOptions.map((option) => [option.id, option.name])),
+    [regionOptions],
+  );
+  const regionFilterCount = selectedRegions.length + (includeUnassignedRegion ? 1 : 0);
 
   const [localSearch, setLocalSearch] = useState(search);
   const [activeMenu, setActiveMenu] = useState<ActiveMenu>(null);
@@ -796,6 +832,50 @@ export function IndentFilterBar({
           </Dropdown>
         )}
 
+        {showRegion && (
+          <Dropdown
+            isOpen={activeMenu === "region"}
+            onOpenChange={(open) => setActiveMenu(open ? "region" : null)}
+            closeOnSelect={false}
+          >
+            <DropdownTrigger>
+              <HButton
+                variant="bordered"
+                size="sm"
+                className={`h-10 border-line bg-content2 text-xs ${regionFilterCount ? "border-brand text-brand" : "text-body"}`}
+                startContent={<MapPin className="h-3.5 w-3.5 text-muted" />}
+                endContent={<ChevronDown className="h-3.5 w-3.5 text-muted" />}
+              >
+                Region{regionFilterCount ? ` (${regionFilterCount})` : ""}
+              </HButton>
+            </DropdownTrigger>
+            <DropdownMenu
+              aria-label="Region filters"
+              className="max-h-80 overflow-y-auto"
+              emptyContent="No locations on these indents yet."
+            >
+              {[
+                <DropdownItem
+                  key="region-unassigned"
+                  onPress={() => setIncludeUnassignedRegion(!includeUnassignedRegion)}
+                  startContent={includeUnassignedRegion ? <Check className="h-3.5 w-3.5" /> : <span className="h-3.5 w-3.5" />}
+                >
+                  {UNASSIGNED_REGION_LABEL}
+                </DropdownItem>,
+                ...regionOptions.map((option) => (
+                  <DropdownItem
+                    key={`region-${option.id}`}
+                    onPress={() => toggleRegion(option.id)}
+                    startContent={selectedRegions.includes(option.id) ? <Check className="h-3.5 w-3.5" /> : <span className="h-3.5 w-3.5" />}
+                  >
+                    {option.name}
+                  </DropdownItem>
+                )),
+              ]}
+            </DropdownMenu>
+          </Dropdown>
+        )}
+
         {hasMoreFilters && (
           <HButton
             variant="bordered"
@@ -919,6 +999,21 @@ export function IndentFilterBar({
               </Chip>
             )}
           {selectedPriorities.length > 0 && <Chip size="sm" variant="flat" onClose={() => selectedPriorities.forEach(togglePriority)}>Priority: {joinLabel(selectedPriorities, INDENT_PRIORITY_OPTIONS)}</Chip>}
+          {showRegion && includeUnassignedRegion && (
+            <Chip size="sm" variant="flat" onClose={() => setIncludeUnassignedRegion(false)}>
+              Region: {UNASSIGNED_REGION_LABEL}
+            </Chip>
+          )}
+          {showRegion && selectedRegions.length > 0 && (
+            <Chip size="sm" variant="flat" onClose={() => setSelectedRegions([])}>
+              {/* The id is the fallback: a region can be filtered from a shared URL
+                  before the options list has arrived, and dropping the chip then
+                  would leave an invisible filter narrowing the results. */}
+              Region: {selectedRegions
+                .map((id) => regionNameById.get(id) ?? `#${id}`)
+                .join(", ")}
+            </Chip>
+          )}
           {transactionType && <Chip size="sm" variant="flat" onClose={() => setTransactionType("")}>Transaction: {joinLabel([transactionType], INDENT_ACTIVITY_TRANSACTION_OPTIONS)}</Chip>}
           {showMovement && direction && <Chip size="sm" variant="flat" onClose={() => setDirection("")}>Movement: {joinLabel([direction], MOVEMENT_OPTIONS)}</Chip>}
           {itemId && <Chip size="sm" variant="flat" onClose={() => setItemId("")}>Item: {itemId}</Chip>}

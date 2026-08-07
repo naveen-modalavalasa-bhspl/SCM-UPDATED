@@ -17,7 +17,9 @@ import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
 // Approvals is its own module now — the inbox, decisions, team queue, reports and the
 // indent review screen all live there, not inside indents.
-import { ApprovalCorrectionPage, ApprovalsPage, MyDecisionsPage, TeamQueuePage } from "@/modules/approvals";
+import {
+  ApprovalCorrectionPage, ApprovalsPage, ConsolidationPage, MyDecisionsPage, TeamQueuePage,
+} from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 import { PODetailPage } from "@/modules/procurement/pages/PODetailPage";
@@ -102,6 +104,7 @@ function AppRoutes() {
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="approvals/decisions" element={<MyDecisionsPage />} />
         <Route path="approvals/team-queue" element={<TeamQueuePage />} />
+        <Route path="approvals/consolidation" element={<ConsolidationPage />} />
         {/* Delegation is retired. The route stays so old links and bookmarks land
             somewhere real instead of on a blank page. */}
         <Route path="approvals/delegations" element={<Navigate to="/approvals" replace />} />

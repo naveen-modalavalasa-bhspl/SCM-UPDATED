@@ -26,9 +26,9 @@ describe("indents api", () => {
       [
         "acknowledge", "acknowledgments", "activity", "approve", "bookmark", "create",
         "delete", "deleteReceiptAttachment", "fulfilment", "get", "journey", "list",
-        "myDeliveries", "notifications", "offices", "receiptAttachments", "reject",
-        "resubmitCorrection", "returnForCorrection", "stats",
-        "submit", "unbookmark", "update", "uploadReceiptAttachment",
+        "myDeliveries", "notifications", "offices", "receiptAttachments", "regions",
+        "reject", "resubmitCorrection", "returnForCorrection", "stats",
+        "submit", "unbookmark", "update", "uploadReceiptAttachment", "vehicles",
       ].sort(),
     );
   });

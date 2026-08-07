@@ -1,4 +1,5 @@
 export { ApprovalsPage } from "./pages/ApprovalsPage";
+export { ConsolidationPage } from "./pages/ConsolidationPage";
 export { MyDecisionsPage } from "./pages/MyDecisionsPage";
 export { TeamQueuePage } from "./pages/TeamQueuePage";
 export { ApprovalReportsPage } from "./pages/ReportsPage";

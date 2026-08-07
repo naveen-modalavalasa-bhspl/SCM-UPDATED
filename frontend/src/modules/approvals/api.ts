@@ -1,7 +1,9 @@
 import { api } from "@/shared/api/client";
 import type {
   ApprovalDecisionRow, ApprovalHistoryRow, ApprovalIndent, ApprovalQuantityInput,
-  ApprovalReport, CorrectionIndent, PendingApproval, TeamQueueRow,
+  ApprovalReport, ConsolidationApprovalInput, ConsolidationApprovalResult,
+  ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
+  CorrectionIndent, PendingApproval, TeamQueueRow,
 } from "./types";
 import type { Paginated } from "@/shared/types";
 
@@ -15,6 +17,29 @@ async function allPages<T>(path: string): Promise<T[]> {
     items.push(...response.data.items);
   }
   return items;
+}
+
+const EMPTY_FILTER_OPTIONS: ConsolidationFilterOptions = {
+  cycle: [], region: [], project: [], vehicle: [], office: [], requester: [], item: [],
+};
+
+/** Fill in anything the response left out, so every consumer sees the full shape.
+ *  The header counts fall back to the batches themselves rather than to 0 — a stale
+ *  or partial payload should read as "no filter metadata", never as "no indents". */
+function normaliseConsolidation(data: Partial<ConsolidationWorkspace>): ConsolidationWorkspace {
+  const items = data.items ?? [];
+  const indentCount = items.reduce((sum, batch) => sum + (batch.indent_count ?? 0), 0);
+  return {
+    items,
+    filter_options: { ...EMPTY_FILTER_OPTIONS, ...(data.filter_options ?? {}) },
+    applied: data.applied ?? {},
+    total_indent_count: data.total_indent_count ?? indentCount,
+    total_requester_count: data.total_requester_count ?? new Set(
+      items.flatMap((batch) => (batch.indents ?? []).map((row) => row.requested_by_id))
+        .filter((id) => id !== null && id !== undefined),
+    ).size,
+    unfiltered_indent_count: data.unfiltered_indent_count ?? indentCount,
+  };
 }
 
 export interface PendingApprovalQuery {
@@ -35,6 +60,20 @@ export const approvalsApi = {
   decisionsAll: () => allPages<ApprovalDecisionRow>("/api/approvals/my-decisions"),
   teamQueue: () =>
     api.get<{ items: TeamQueueRow[] }>("/api/approvals/team-queue").then((r) => r.data.items),
+  // One request for the whole screen: filtered batches AND the dropdown contents come
+  // back together, so changing a filter never fans out into a call per dimension.
+  //
+  // Normalised on arrival: an older API build answers with `{items}` alone, and the
+  // screen must degrade to "no filters offered" rather than blank out reading
+  // `filter_options` off undefined.
+  consolidation: (filters: ConsolidationQuery = {}) =>
+    api.get<Partial<ConsolidationWorkspace>>("/api/approvals/consolidation", { params: filters })
+      .then((r) => normaliseConsolidation(r.data)),
+  // Approve the whole filtered batch in one call. `lines` carries only the
+  // quantities the split produced; anything absent keeps this approver's ceiling.
+  approveConsolidation: (body: ConsolidationApprovalInput) =>
+    api.post<ConsolidationApprovalResult>("/api/approvals/consolidation/approve", body)
+      .then((r) => r.data),
   getIndent: (id: number) =>
     api.get<ApprovalIndent>(`/api/approvals/indents/${id}`).then((r) => r.data),
   approveIndent: (id: number, items: ApprovalQuantityInput[], comments = "") =>

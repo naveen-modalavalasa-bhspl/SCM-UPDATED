@@ -11,11 +11,26 @@ export interface IndentItem {
   remarks?: string | null;
 }
 
+/**
+ * REGULAR is what every indent raised before the field was exposed carries, so it
+ * stays part of the union — list and detail screens must render it, not fall through
+ * to a blank. It's also the ad-hoc request type; MONTHLY is the recurring one.
+ */
+export type IndentType = "REGULAR" | "MONTHLY";
+
 export interface Indent {
   id: number;
   indent_no: string;
+  /**
+   * Optional for the same reason ActivityRow carries its compatibility aliases: a
+   * deployed backend that predates the field omits it, and the screens must render
+   * rather than break. A current backend always sends it — it defaults to REGULAR.
+   */
+  indent_type?: IndentType | string;
   indent_date?: string | null;
   required_date?: string | null;
+  vehicle_id?: number | null;
+  vehicle_number?: string | null;
   requested_by_id?: number | null;
   requested_by_name?: string | null;
   position_id?: number | null;
@@ -24,6 +39,14 @@ export interface Indent {
   department_name?: string | null;
   office_id?: number | null;
   office_name?: string | null;
+  /**
+   * Region/Location: the HCM location the requester is tagged to, snapshotted when the
+   * indent was raised. Read-only everywhere — there is no field for it on
+   * IndentCreate/IndentUpdate, and the backend ignores one if it is sent. Null on
+   * indents raised before the field existed and on raisers HCM has no location for.
+   */
+  region_id?: number | null;
+  region_name?: string | null;
   project_id?: number | null;
   project_name?: string | null;
   status: string;
@@ -55,14 +78,24 @@ export interface Indent {
 export interface IndentListRow {
   id: number;
   indent_no: string;
+  indent_type?: IndentType | string;
   requested_by_name?: string | null;
   department_name?: string | null;
+  region_id?: number | null;
+  region_name?: string | null;
   status: string;
   priority: string;
   total_items: number;
   current_approver_name?: string | null;
   is_bookmarked: "YES" | "NO" | string;
   created_at: string;
+}
+
+/** One Region/Location bucket of the stats breakdown. Null id = no location. */
+export interface RegionCount {
+  region_id?: number | null;
+  region_name?: string | null;
+  count: number;
 }
 
 export interface IndentStats {
@@ -77,6 +110,8 @@ export interface IndentStats {
   total_qty: number;
   approval_rate: number;
   by_status: Record<string, number>;
+  /** Optional: a backend that predates Region omits it, so screens must tolerate that. */
+  by_region?: RegionCount[];
 }
 
 export interface ActivityRow {
@@ -111,6 +146,8 @@ export interface ActivityRow {
   uom_code?: string | null;
   department_name?: string | null;
   office_name?: string | null;
+  region_id?: number | null;
+  region_name?: string | null;
   remarks?: string | null;
   source_type?: string | null;
   source_id?: number | null;
@@ -204,6 +241,8 @@ export interface IndentNotification {
 export interface IndentCreate {
   required_date?: string | null;
   priority: string;
+  indent_type?: IndentType;
+  vehicle_id?: number | null;
   remarks?: string | null;
   items: { item_id: number; quantity: number; remarks?: string }[];
 }

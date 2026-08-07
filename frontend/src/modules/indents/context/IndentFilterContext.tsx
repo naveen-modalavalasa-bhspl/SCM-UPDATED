@@ -14,6 +14,9 @@ export interface FilterState {
   selectedStatuses: string[];
   selectedPriorities: string[];
   selectedDepartments: number[];
+  selectedRegions: number[];
+  /** Region/Location is nullable, so "no location" is its own opt-in choice. */
+  includeUnassignedRegion: boolean;
   selectedProjects: number[];
   selectedWarehouses: number[];
   selectedItems: number[];
@@ -56,6 +59,12 @@ export interface IndentFilterContextType {
   selectedDepartments: number[];
   setSelectedDepartments: (val: number[]) => void;
   toggleDepartment: (id: number) => void;
+
+  selectedRegions: number[];
+  setSelectedRegions: (val: number[]) => void;
+  toggleRegion: (id: number) => void;
+  includeUnassignedRegion: boolean;
+  setIncludeUnassignedRegion: (val: boolean) => void;
 
   selectedProjects: number[];
   setSelectedProjects: (val: number[]) => void;
@@ -147,6 +156,8 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [selectedPriorities, setSelectedPriorities] = useState<string[]>([]);
   const [selectedDepartments, setSelectedDepartments] = useState<number[]>([]);
+  const [selectedRegions, setSelectedRegions] = useState<number[]>([]);
+  const [includeUnassignedRegion, setIncludeUnassignedRegionState] = useState(false);
   const [selectedProjects, setSelectedProjects] = useState<number[]>([]);
   const [selectedWarehouses, setSelectedWarehouses] = useState<number[]>([]);
   const [selectedItems, setSelectedItems] = useState<number[]>([]);
@@ -218,6 +229,18 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
     setSelectedDepartments((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
+    resetPage();
+  };
+
+  const toggleRegion = (id: number) => {
+    setSelectedRegions((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+    resetPage();
+  };
+
+  const setIncludeUnassignedRegion = (val: boolean) => {
+    setIncludeUnassignedRegionState(val);
     resetPage();
   };
 
@@ -337,6 +360,8 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
     setSelectedStatuses([]);
     setSelectedPriorities([]);
     setSelectedDepartments([]);
+    setSelectedRegions([]);
+    setIncludeUnassignedRegionState(false);
     setSelectedProjects([]);
     setSelectedWarehouses([]);
     setSelectedItems([]);
@@ -357,6 +382,8 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
     selectedStatuses.length +
     selectedPriorities.length +
     selectedDepartments.length +
+    selectedRegions.length +
+    (includeUnassignedRegion ? 1 : 0) +
     selectedProjects.length +
     selectedWarehouses.length +
     selectedItems.length +
@@ -394,6 +421,11 @@ export function IndentFilterProvider({ children }: { children: ReactNode }) {
         selectedDepartments,
         setSelectedDepartments,
         toggleDepartment,
+        selectedRegions,
+        setSelectedRegions,
+        toggleRegion,
+        includeUnassignedRegion,
+        setIncludeUnassignedRegion,
         selectedProjects,
         setSelectedProjects,
         toggleProject,

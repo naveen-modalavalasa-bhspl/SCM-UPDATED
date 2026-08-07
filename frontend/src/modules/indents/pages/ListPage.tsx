@@ -94,6 +94,8 @@ function IndentListContent({
     selectedStatuses,
     selectedPriorities,
     selectedDepartments,
+    selectedRegions,
+    includeUnassignedRegion,
     sortBy,
     sortDir,
     page,
@@ -110,6 +112,10 @@ function IndentListContent({
     status: selectedStatuses,
     priority: selectedPriorities,
     department_id: selectedDepartments,
+    region_id: selectedRegions,
+    // Only when on: sending `false` would put a param in every query key for a
+    // filter nobody asked for.
+    region_unassigned: includeUnassignedRegion || undefined,
     sort_by: sortBy,
     sort_dir: sortDir,
     page,
@@ -117,12 +123,14 @@ function IndentListContent({
   }), [
     endDate,
     hasCompleteDateRange,
+    includeUnassignedRegion,
     page,
     requiredByFrom,
     requiredByTo,
     search,
     selectedDepartments,
     selectedPriorities,
+    selectedRegions,
     selectedStatuses,
     sortBy,
     sortDir,
@@ -166,38 +174,49 @@ function IndentListContent({
     {
       key: "no",
       header: "Indent",
-      className: "w-[26%] px-4 text-left align-middle lg:w-[18%]",
+      className: "w-[26%] px-4 text-left align-middle lg:w-[16%]",
       render: (row) => <span className="mono font-semibold text-ink">{row.indent_no}</span>,
     },
     {
       key: "req",
       header: "Requested by",
-      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[20%]",
+      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[16%]",
       hideOnNarrow: true,
       render: (row) => <span className="block truncate">{row.requested_by_name ?? "-"}</span>,
     },
     {
       key: "dept",
       header: "Department",
-      className: "w-[30%] overflow-hidden px-4 text-left align-middle lg:w-[20%]",
+      className: "w-[30%] overflow-hidden px-4 text-left align-middle lg:w-[16%]",
       render: (row) => <span className="block truncate">{row.department_name ?? "-"}</span>,
+    },
+    {
+      key: "region",
+      header: "Region",
+      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[16%]",
+      hideOnNarrow: true,
+      render: (row) => (
+        <span className="block truncate" title={row.region_name ?? undefined}>
+          {row.region_name ?? "-"}
+        </span>
+      ),
     },
     {
       key: "items",
       header: "Items",
-      className: "w-[12%] px-4 text-center align-middle lg:w-[10%]",
+      className: "w-[12%] px-4 text-center align-middle lg:w-[8%]",
       render: (row) => <span className="block tabular-nums text-muted">{row.total_items}</span>,
     },
     {
       key: "status",
       header: "Status",
-      className: "w-[32%] px-4 text-left align-middle lg:w-[18%]",
+      className: "w-[32%] px-4 text-left align-middle lg:w-[16%]",
       render: (row) => <IndentSummaryStatusBadge status={row.status} />,
     },
     {
       key: "date",
       header: "Raised",
-      className: "w-0 px-4 text-left align-middle lg:w-[14%]",
+      className: "w-0 px-4 text-left align-middle lg:w-[12%]",
       hideOnNarrow: true,
       render: (row) => <span className="whitespace-nowrap text-muted">{formatIndentShortDate(row.created_at)}</span>,
     },
@@ -212,6 +231,7 @@ function IndentListContent({
         statusFilterOptions={INDENT_REQUEST_STATUS_FILTER_OPTIONS}
         separateDateFilters
         searchPlaceholder="Search by indent no., requester, department or status..."
+        showRegion
       />
 
       {error && <p className="mb-4 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}
@@ -293,7 +313,10 @@ function IndentListContent({
                     <div className="flex items-center justify-between gap-3">
                       <span className="min-w-0">
                         <span className="mono block truncate font-semibold text-ink">{row.indent_no}</span>
-                        <span className="mt-1 block text-xs text-muted">{row.department_name ?? "-"}</span>
+                        <span className="mt-1 block truncate text-xs text-muted">
+                          {row.department_name ?? "-"}
+                          {row.region_name ? ` · ${row.region_name}` : ""}
+                        </span>
                       </span>
                       <IndentSummaryStatusBadge status={row.status} />
                     </div>

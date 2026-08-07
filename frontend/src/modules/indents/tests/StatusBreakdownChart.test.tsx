@@ -44,7 +44,6 @@ const STATUS_DATA = {
 
 const DISPLAYED_STATUSES = [
   "PENDING_APPROVAL",
-  "RETURNED_FOR_CORRECTION",
   "AWAITING_ALLOCATION",
   "ALLOCATED",
   "PARTIALLY_FULFILLED",
@@ -185,7 +184,7 @@ describe("StatusBreakdownChart tooltip interaction", () => {
 });
 
 describe("StatusBreakdownChart presentation", () => {
-  it("shows exactly the eight supported statuses in the required order and excludes Other", () => {
+  it("shows exactly the seven supported statuses in the required order and excludes Other", () => {
     render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
 
     expect(screen.getAllByTestId(/^status-legend-row-/).map((row) => (
@@ -216,7 +215,7 @@ describe("StatusBreakdownChart presentation", () => {
 
     expect(total).toBe(22);
     expect(entries.map(({ status }) => status)).toEqual(DISPLAYED_STATUSES);
-    expect(entries.map(({ percentage }) => percentage)).toEqual([18, 0, 23, 9, 14, 18, 14, 5]);
+    expect(entries.map(({ percentage }) => percentage)).toEqual([18, 23, 9, 14, 18, 14, 5]);
 
     render(<StatusBreakdownChart byStatus={byStatus} />);
     expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("22 total indents");
@@ -231,7 +230,7 @@ describe("StatusBreakdownChart presentation", () => {
       />,
     );
 
-    expect(screen.getAllByTestId(/^status-legend-row-/)).toHaveLength(8);
+    expect(screen.getAllByTestId(/^status-legend-row-/)).toHaveLength(7);
     expect(screen.getByTestId("status-legend-count-DRAFT")).toHaveTextContent(/^0$/);
     expect(screen.getByTestId("status-legend-percentage-DRAFT")).toHaveTextContent(/^0%$/);
     expect(screen.queryByTestId("status-donut-slice-DRAFT")).not.toBeInTheDocument();

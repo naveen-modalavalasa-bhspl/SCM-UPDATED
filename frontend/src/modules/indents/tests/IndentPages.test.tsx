@@ -30,7 +30,6 @@ const EXPECTED_REQUEST_STATUS_FILTERS = [
   ["Pending approvals", "PENDING_APPROVAL"],
   ["Allocated", "ALLOCATED"],
   ["Draft", "DRAFT"],
-  ["Returned for correction", "RETURNED_FOR_CORRECTION"],
   ["Rejected", "REJECTED"],
   ["Awaiting allocation", "AWAITING_ALLOCATION"],
   ["Partially fulfilled", "PARTIALLY_FULFILLED"],
@@ -75,23 +74,6 @@ const mockAccount = vi.hoisted(() => ({
   canDeleteIndent: false,
 }));
 
-// Detail actions announce themselves through the alerts catalog. The real `alerts`
-// resolves only once <AlertProvider> renders the dialog and someone presses a button,
-// so an unstubbed `confirm` never settles and the handler behind it never runs.
-// `confirm` answers yes here; the tests that care about declining say so themselves.
-vi.mock("@/modules/alerts", () => ({
-  alerts: {
-    confirm: vi.fn(async () => true),
-    from: vi.fn(async () => true),
-    show: vi.fn(async () => true),
-    success: vi.fn(async () => true),
-    info: vi.fn(async () => true),
-    warning: vi.fn(async () => true),
-    error: vi.fn(async () => true),
-    clear: vi.fn(),
-  },
-}));
-
 vi.mock("@/shared/auth/AuthContext", () => ({
   useAuth: () => ({
     can: (code: string) => code !== "indent.delete" || mockAccount.canDeleteIndent,
@@ -123,6 +105,7 @@ vi.mock("../api", async () => {
     detail: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "detail", id] as const,
     journey: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "journey", 4, id] as const,
     items: (scope: { employeeId: number | null; activePositionId: number | null }, context = "default") => [...scoped(scope), "items", context] as const,
+    regions: (scope: { employeeId: number | null; activePositionId: number | null }) => [...scoped(scope), "regions"] as const,
   };
   const isIndentModuleQuery = (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === root;
   return {
@@ -172,6 +155,7 @@ vi.mock("../api", async () => {
       total_qty: 0,
       approval_rate: 0,
       by_status: {},
+      by_region: [],
     })),
     list: vi.fn(() => Promise.resolve({ items: [], total: 0, page: 1, size: 20 })),
     acknowledgments: vi.fn(() => Promise.resolve({
@@ -190,6 +174,10 @@ vi.mock("../api", async () => {
       size: 20,
     })),
     activity: vi.fn(() => Promise.resolve({ items: [], total: 0, page: 1, size: 20 })),
+    regions: vi.fn(() => Promise.resolve([
+      { id: 654, name: "104-MMU-AP-Hanumanthunipadu" },
+      { id: 937, name: "104-MMU-AP-Markapur" },
+    ])),
     notifications: vi.fn(() => Promise.resolve({ items: [], total: 0, page: 1, size: 20 })),
     get: vi.fn(),
     journey: vi.fn(),
@@ -226,11 +214,13 @@ function renderWithProviders(ui: ReactElement, route = "/indents", client = crea
 function FilterHarness() {
   const { page, search, startDate, endDate, setPage } = useIndentFilters();
   return (
-    <>
+    // The bar loads its Region/Location options through react-query, the same as
+    // every screen that hosts it, so the harness has to supply a client too.
+    <QueryClientProvider client={createTestQueryClient()}>
       <button type="button" onClick={() => setPage(3)}>Set page</button>
       <IndentFilterBar />
       <output aria-label="filter state">{page}:{search}:{startDate}:{endDate}</output>
-    </>
+    </QueryClientProvider>
   );
 }
 
@@ -753,7 +743,6 @@ describe("indent UI shell", () => {
     expect(within(legend).queryAllByRole("button")).toHaveLength(0);
     expect(legendRows.map((row) => row.getAttribute("aria-label"))).toEqual([
       "Pending approval: 4 indents, 18 percent",
-      "Returned for correction: 0 indents, 0 percent",
       "Awaiting allocation: 5 indents, 23 percent",
       "Allocated: 2 indents, 9 percent",
       "Partially fulfilled: 3 indents, 14 percent",
@@ -778,7 +767,7 @@ describe("indent UI shell", () => {
     expect(container.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
   });
 
-  it("keeps only the eight displayed statuses in order and handles zero safely", () => {
+  it("keeps only the seven displayed statuses in order and handles zero safely", () => {
     const byStatus = {
       DRAFT: 1,
       PENDING_APPROVAL: 2,
@@ -797,7 +786,6 @@ describe("indent UI shell", () => {
     expect(total).toBe(10);
     expect(entries.map(({ status }) => status)).toEqual([
       "PENDING_APPROVAL",
-      "RETURNED_FOR_CORRECTION",
       "AWAITING_ALLOCATION",
       "ALLOCATED",
       "PARTIALLY_FULFILLED",
@@ -811,7 +799,6 @@ describe("indent UI shell", () => {
     expect(zeroData.total).toBe(0);
     expect(zeroData.entries.map(({ status }) => status)).toEqual([
       "PENDING_APPROVAL",
-      "RETURNED_FOR_CORRECTION",
       "AWAITING_ALLOCATION",
       "ALLOCATED",
       "PARTIALLY_FULFILLED",
@@ -963,7 +950,7 @@ describe("indent UI shell", () => {
     expect(chart).toHaveClass("absolute", "inset-0");
     expect(legend).toHaveClass("max-w-[320px]", "gap-1");
     expect(legend).not.toHaveClass("overflow-y-auto", "md:overflow-y-auto", "max-h-[260px]", "md:max-h-[260px]");
-    expect(within(legend).getAllByTestId(/^status-legend-row-/)).toHaveLength(8);
+    expect(within(legend).getAllByTestId(/^status-legend-row-/)).toHaveLength(7);
     expect(layout.children[0]).toBe(donut);
     expect(layout.children[1]).toBe(legend);
   });
@@ -1020,7 +1007,7 @@ describe("indent UI shell", () => {
   it.each([
     ["Overview", <IndentDashboardPage />, "/indents/dashboard"],
     ["All requests", <IndentListPage />, "/indents"],
-  ])("shows the same eight ungrouped status options on %s", async (_name, Page, route) => {
+  ])("shows the same seven ungrouped status options on %s", async (_name, Page, route) => {
     renderWithProviders(Page, route);
 
     expect(await screen.findByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
@@ -2401,12 +2388,9 @@ describe("indent UI shell", () => {
     );
 
     const indentNumbers = await screen.findAllByText("IND/2026/0042");
-    // ResponsiveList renders a card as a div with role="button", not a <button> —
-    // the card carries its own action buttons and a button inside a button is
-    // invalid HTML. Match the role, which covers both shapes.
     const mobileCard = indentNumbers
-      .map((element) => element.closest<HTMLElement>('[role="button"], button'))
-      .find((element): element is HTMLElement => element !== null);
+      .map((element) => element.closest("button"))
+      .find((element): element is HTMLButtonElement => element !== null);
     expect(mobileCard).toBeDefined();
     fireEvent.click(mobileCard!);
 
@@ -3006,7 +2990,7 @@ describe("indent UI shell", () => {
   it("start-aligns the Board grid while preserving mobile horizontal scrolling", async () => {
     const { container } = renderWithProviders(<IndentBoardPage />, "/indents/board");
 
-    expect(await screen.findAllByText("No pinned requests")).toHaveLength(7);
+    expect(await screen.findAllByText("No pinned requests")).toHaveLength(6);
 
     const horizontalScroller = container.querySelector(".overflow-x-auto");
     const boardGrid = horizontalScroller?.firstElementChild;
@@ -3027,7 +3011,7 @@ describe("indent UI shell", () => {
       "gap-4",
       "md:grid",
       "md:min-w-0",
-      "md:grid-cols-7",
+      "md:grid-cols-6",
       "md:items-start",
     );
   });
@@ -3035,10 +3019,10 @@ describe("indent UI shell", () => {
   it("keeps Board columns, bodies and empty states at natural height", async () => {
     const { container } = renderWithProviders(<IndentBoardPage />, "/indents/board");
 
-    expect(await screen.findAllByText("No pinned requests")).toHaveLength(7);
+    expect(await screen.findAllByText("No pinned requests")).toHaveLength(6);
 
-    const columns = Array.from(container.querySelectorAll(".md\\:grid-cols-7 > section"));
-    expect(columns).toHaveLength(7);
+    const columns = Array.from(container.querySelectorAll(".md\\:grid-cols-6 > section"));
+    expect(columns).toHaveLength(6);
 
     columns.forEach((column) => {
       expect(column).toHaveClass("h-fit", "self-start");
@@ -3099,8 +3083,8 @@ describe("indent UI shell", () => {
     expect(within(draftColumn!).getByText("1")).toBeInTheDocument();
     expect(within(draftColumn!).getByRole("button", { name: "Remove from Board" })).toBeInTheDocument();
     expect(within(draftColumn!).queryByText("No pinned requests")).not.toBeInTheDocument();
-    expect(screen.getAllByText("No pinned requests")).toHaveLength(6);
-    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(6);
+    expect(screen.getAllByText("No pinned requests")).toHaveLength(5);
+    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(5);
   });
 
   it("keeps partially fulfilled and closed Board cards in mapped columns", async () => {
@@ -3203,8 +3187,8 @@ describe("indent UI shell", () => {
       await new Promise((resolve) => window.setTimeout(resolve, 220));
     });
     await waitFor(() => expect(screen.queryByText("IND/2026/0042")).not.toBeInTheDocument());
-    expect(screen.getAllByText("No pinned requests")).toHaveLength(7);
-    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(7);
+    expect(screen.getAllByText("No pinned requests")).toHaveLength(6);
+    expect(screen.getAllByText("Pin a request from All requests")).toHaveLength(6);
   });
 
   it("restores a Board card and shows an error when unpin fails", async () => {
@@ -3661,12 +3645,15 @@ describe("indent UI shell", () => {
   it("uses one fixed, aligned column layout for the All Requests header and rows", async () => {
     const requester = "A requester name long enough to test fixed table alignment";
     const department = "A department name long enough to test fixed table alignment";
+    const region = "A region name long enough to test fixed table alignment";
     vi.mocked(indentApi.list).mockResolvedValueOnce({
       items: [{
         id: 42,
         indent_no: "IND/2026/0042",
         requested_by_name: requester,
         department_name: department,
+        region_id: 654,
+        region_name: region,
         status: "AWAITING_ALLOCATION",
         priority: "NORMAL",
         total_items: 17,
@@ -3685,13 +3672,16 @@ describe("indent UI shell", () => {
     const headers = within(table).getAllByRole("columnheader");
     const row = within(table).getByRole("row", { name: /IND\/2026\/0042/ });
     const cells = Array.from(row.querySelectorAll("td"));
+    // Indent, Requested by, Department, Region, Items, Status, Raised. The lg widths
+    // still add up to 100 with Region among them.
     const columnClasses = [
-      ["w-[26%]", "lg:w-[18%]", "text-left"],
-      ["w-0", "lg:w-[20%]", "text-left"],
-      ["w-[30%]", "lg:w-[20%]", "text-left"],
-      ["w-[12%]", "lg:w-[10%]", "text-center"],
-      ["w-[32%]", "lg:w-[18%]", "text-left"],
-      ["w-0", "lg:w-[14%]", "text-left"],
+      ["w-[26%]", "lg:w-[16%]", "text-left"],
+      ["w-0", "lg:w-[16%]", "text-left"],
+      ["w-[30%]", "lg:w-[16%]", "text-left"],
+      ["w-0", "lg:w-[16%]", "text-left"],
+      ["w-[12%]", "lg:w-[8%]", "text-center"],
+      ["w-[32%]", "lg:w-[16%]", "text-left"],
+      ["w-0", "lg:w-[12%]", "text-left"],
     ];
 
     expect(table).toHaveClass("table-fixed");
@@ -3703,8 +3693,193 @@ describe("indent UI shell", () => {
     });
     expect(within(cells[1]).getByText(requester)).toHaveClass("block", "truncate");
     expect(within(cells[2]).getByText(department)).toHaveClass("block", "truncate");
-    expect(within(cells[3]).getByText("17")).toHaveClass("block", "tabular-nums");
-    expect(within(cells[4]).getByText("AWAITING ALLOCATION")).toHaveClass("inline-flex");
+    expect(within(cells[3]).getByText(region)).toHaveClass("block", "truncate");
+    expect(within(cells[4]).getByText("17")).toHaveClass("block", "tabular-nums");
+    expect(within(cells[5]).getByText("AWAITING ALLOCATION")).toHaveClass("inline-flex");
+  });
+
+  it("shows the Region column on All Requests and a dash when HCM has no location", async () => {
+    vi.mocked(indentApi.list).mockResolvedValueOnce({
+      items: [
+        {
+          id: 42,
+          indent_no: "IND/2026/0042",
+          requested_by_name: "A Anil Kumar",
+          department_name: "Networking department",
+          region_id: 654,
+          region_name: "104-MMU-AP-Hanumanthunipadu",
+          status: "AWAITING_ALLOCATION",
+          priority: "NORMAL",
+          total_items: 3,
+          is_bookmarked: "NO",
+          created_at: "2026-07-27T10:30:00Z",
+        },
+        {
+          // Raised by an employee HCM has no location for: 33 of the 296 live
+          // indents are in this state, and they must still list.
+          id: 43,
+          indent_no: "IND/2026/0043",
+          requested_by_name: "B Requester",
+          department_name: "Networking department",
+          region_id: null,
+          region_name: null,
+          status: "DRAFT",
+          priority: "NORMAL",
+          total_items: 1,
+          is_bookmarked: "NO",
+          created_at: "2026-07-27T10:31:00Z",
+        },
+      ],
+      total: 2,
+      page: 1,
+      size: 20,
+    });
+
+    renderWithProviders(<IndentListPage />, "/indents");
+
+    const table = await screen.findByLabelText("List");
+    expect(await within(table).findByText("104-MMU-AP-Hanumanthunipadu")).toBeInTheDocument();
+    expect(within(table).getByRole("columnheader", { name: "Region" })).toBeInTheDocument();
+    const withoutRegion = within(table).getByRole("row", { name: /IND\/2026\/0043/ });
+    expect(Array.from(withoutRegion.querySelectorAll("td"))[3]).toHaveTextContent("-");
+  });
+
+  it("sends the region filter from the URL to the list request", async () => {
+    renderAllRequestsFlow("/indents?region_id=654&region_unassigned=1");
+
+    await waitFor(() => expect(indentApi.list).toHaveBeenCalled());
+    const [params] = vi.mocked(indentApi.list).mock.calls.at(-1)!;
+    expect(params).toMatchObject({ region_id: [654], region_unassigned: true });
+  });
+
+  it("omits region parameters when no location filter is active", async () => {
+    renderAllRequestsFlow("/indents");
+
+    await waitFor(() => expect(indentApi.list).toHaveBeenCalled());
+    const [params] = vi.mocked(indentApi.list).mock.calls.at(-1)!;
+    expect(params).not.toHaveProperty("region_id");
+    expect(params).not.toHaveProperty("region_unassigned");
+  });
+
+  it("offers the HCM locations plus an explicit no-location choice", async () => {
+    renderAllRequestsFlow("/indents");
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+
+    // The menu is portalled out of the filter bar, so it is looked up on screen —
+    // the same way the sibling test picks a region to filter by.
+    expect(await screen.findByText("104-MMU-AP-Hanumanthunipadu")).toBeInTheDocument();
+    expect(await screen.findByText("104-MMU-AP-Markapur")).toBeInTheDocument();
+    // Region is nullable, so "no location" is a value a user can pick, not a gap.
+    expect(await screen.findByText("No location")).toBeInTheDocument();
+  });
+
+  it("puts a chosen region into the URL so the filtered list can be shared", async () => {
+    renderAllRequestsFlow("/indents");
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+    fireEvent.click(await screen.findByText("104-MMU-AP-Markapur"));
+
+    await waitFor(() => expect(screen.getByLabelText("location"))
+      .toHaveTextContent("region_id=937"));
+  });
+
+  it("sends the region filter from the URL to the activity ledger", async () => {
+    renderActivityLedgerFlow("/indents/reports?region_id=654");
+
+    await waitFor(() => expect(indentApi.activity).toHaveBeenCalled());
+    const [params] = vi.mocked(indentApi.activity).mock.calls.at(-1)!;
+    expect(params).toMatchObject({ region_id: [654] });
+  });
+
+  it("shows the Region of each activity ledger event", async () => {
+    vi.mocked(indentApi.activity).mockResolvedValueOnce({
+      items: [{
+        event_id: "indent:42",
+        indent_id: 42,
+        indent_no: "IND/2026/0042",
+        event_type: "REQUEST_CREATED",
+        event_label: "Request created",
+        result: "DRAFT",
+        result_label: "Draft",
+        occurred_at: "2026-07-27T10:30:00Z",
+        department_name: "Networking department",
+        office_name: "Regional Office",
+        region_id: 654,
+        region_name: "104-MMU-AP-Hanumanthunipadu",
+        source_type: "ind_indents",
+        source_id: 42,
+      }] as ActivityRow[],
+      total: 1,
+      page: 1,
+      size: 20,
+    });
+
+    renderWithProviders(<IndentReportsPage />, "/indents/reports");
+
+    expect(await screen.findByRole("columnheader", { name: "REGION" })).toBeInTheDocument();
+    expect(await screen.findByText("104-MMU-AP-Hanumanthunipadu")).toBeInTheDocument();
+  });
+
+  it("sends the region filter to the statistics request", async () => {
+    renderWithProviders(<IndentDashboardPage />, "/indents/overview");
+
+    await waitFor(() => expect(indentApi.stats).toHaveBeenCalled());
+    vi.mocked(indentApi.stats).mockClear();
+    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+    fireEvent.click(await screen.findByText("104-MMU-AP-Markapur"));
+
+    await waitFor(() => {
+      const [params] = vi.mocked(indentApi.stats).mock.calls.at(-1)!;
+      expect(params).toMatchObject({ region_id: [937] });
+    });
+  });
+
+  it("breaks the statistics down by region, keeping unassigned indents visible", async () => {
+    vi.mocked(indentApi.stats).mockResolvedValueOnce({
+      total: 10,
+      draft: 0,
+      awaiting_approval: 0,
+      approved_active: 0,
+      rejected: 0,
+      ordered: 0,
+      this_month: 0,
+      total_items: 0,
+      total_qty: 0,
+      approval_rate: 0,
+      by_status: {},
+      by_region: [
+        { region_id: 654, region_name: "104-MMU-AP-Hanumanthunipadu", count: 7 },
+        { region_id: null, region_name: null, count: 3 },
+      ],
+    } as IndentStats);
+
+    renderWithProviders(<IndentDashboardPage />, "/indents/overview");
+
+    const breakdown = await screen.findByRole("list", { name: "Indents by region" });
+    expect(within(breakdown).getByText("104-MMU-AP-Hanumanthunipadu")).toBeInTheDocument();
+    expect(within(breakdown).getByText("No location")).toBeInTheDocument();
+    expect(within(breakdown).getByText("3")).toBeInTheDocument();
+  });
+
+  it("shows Region on the detail screen without offering a way to change it", async () => {
+    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({
+      region_id: 654,
+      region_name: "104-MMU-AP-Hanumanthunipadu",
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("Region / Location")).toBeInTheDocument();
+    expect(screen.getByText("104-MMU-AP-Hanumanthunipadu")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /region/i })).not.toBeInTheDocument();
+  });
+
+  it("does not render a region breakdown when the backend omits by_region", async () => {
+    renderWithProviders(<IndentDashboardPage />, "/indents/overview");
+
+    await waitFor(() => expect(indentApi.stats).toHaveBeenCalled());
+    expect(screen.queryByRole("list", { name: "Indents by region" })).not.toBeInTheDocument();
   });
 
   it("does not render pin controls for any indent in All Requests", async () => {
@@ -3963,10 +4138,6 @@ describe("indent UI shell", () => {
       ],
     }));
 
-    // The summary reads the indent's own status, not the journey's, so the two
-    // fixtures have to agree or the card lands on a different phase.
-    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({ status: "AWAITING_ALLOCATION" }));
-
     renderWithProviders(<IndentDetailPage />, "/indents/42", client);
 
     await waitFor(() => expect(indentApi.journey).toHaveBeenCalledTimes(1));
@@ -3987,7 +4158,6 @@ describe("indent UI shell", () => {
 
   it("uses a safe broad fallback for a recognised response with incomplete phases", async () => {
     vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({ phases: [] }));
-    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({ status: "AWAITING_ALLOCATION" }));
 
     renderWithProviders(<IndentDetailPage />, "/indents/42");
 
@@ -4001,9 +4171,6 @@ describe("indent UI shell", () => {
       status: "SOMETHING_NEW",
       phases: [],
     }));
-    // Both sources have to be unrecognised. A known indent status is enough on its
-    // own to draw the seven phases, so leaving it valid tests nothing.
-    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({ status: "SOMETHING_NEW" }));
 
     renderWithProviders(<IndentDetailPage />, "/indents/42");
 
@@ -4444,7 +4611,7 @@ describe("indent UI shell", () => {
     expect(within(card!).getByText("Correction requested")).toBeInTheDocument();
     expect(within(card!).getByText("Quantity looks wrong, please revise and resubmit")).toBeInTheDocument();
     expect(within(card!).queryByText("Rejection reason")).not.toBeInTheDocument();
-    expect(within(card!).getByText("Returned for correction")).toBeInTheDocument();
+    expect(within(card!).getByText("Returned")).toBeInTheDocument();
     expect(screen.getByText("Returned by A Raveendra Prasad")).toBeInTheDocument();
   });
 
@@ -4813,8 +4980,8 @@ describe("indent UI shell", () => {
       expect(indentApi.activity).not.toHaveBeenCalled();
 
       const mobileCard = screen.getAllByText("IND/ACTIVITY-PAGE-4")
-        .map((element) => element.closest<HTMLElement>('[role="button"], button'))
-        .find((element): element is HTMLElement => element !== null);
+        .map((element) => element.closest("button"))
+        .find((element): element is HTMLButtonElement => element !== null);
       expect(mobileCard).toBeDefined();
       fireEvent.click(mobileCard!);
       await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents/42"));
@@ -4838,8 +5005,8 @@ describe("indent UI shell", () => {
 
       expect(await screen.findByText("Page 4 of 4 (80 total)")).toBeInTheDocument();
       const mobileCard = screen.getAllByText("IND/ACTIVITY-PAGE-4")
-        .map((element) => element.closest<HTMLElement>('[role="button"], button'))
-        .find((element): element is HTMLElement => element !== null);
+        .map((element) => element.closest("button"))
+        .find((element): element is HTMLButtonElement => element !== null);
       fireEvent.click(mobileCard!);
       await screen.findByRole("button", { name: "Browser back test" });
       fireEvent.click(screen.getByRole("button", { name: "Browser back test" }));

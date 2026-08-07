@@ -13,7 +13,9 @@ import pytest
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
 from app.modules.indents import service
-from app.modules.indents.enums import AcknowledgmentStatus, ApprovalAction
+from app.modules.indents.enums import (
+    AcknowledgmentStatus, ApprovalAction, IndentType,
+)
 from app.modules.indents.schemas import IndentCreate, IndentUpdate
 from app.shared.enums import IndentStatus, InstanceStatus, Priority
 
@@ -668,6 +670,10 @@ async def test_update_audit_values_are_json_safe(monkeypatch):
         status=IndentStatus.DRAFT.value,
         required_date=original_date,
         priority=Priority.NORMAL.value,
+        # The audit row records these too, so the stand-in has to carry them.
+        indent_type=IndentType.REGULAR.value,
+        vehicle_id=None,
+        vehicle_number=None,
         office_id=700,
         office_name="Main Office",
         remarks="Original",

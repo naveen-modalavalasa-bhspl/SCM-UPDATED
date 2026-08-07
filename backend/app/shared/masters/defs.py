@@ -1289,7 +1289,9 @@ class BomIn(BaseModel):
 def bom_out(b: Bom) -> dict:
     return {"id": b.id, "code": b.code, "name": b.name,
             "project_id": b.project_id, "project_name": b.project_name,
-            "description": b.description, "total_items": b.total_items,
+            # line_count is counted from mst_bom_items; the stored total_items
+            # column was never maintained and always read 0.
+            "description": b.description, "total_items": b.line_count,
             "is_active": b.is_active}
 
 
@@ -1427,7 +1429,9 @@ MASTERS: list[MasterDef] = [
 
     MasterDef(path="bins", name="Bin", model=Bin, schema=BinIn,
               manage_perm=perms.MASTER_LOCATION_MANAGE, serialize=bin_out,
-              search_cols=("code", "name", "path"), order_col="path",
+              # `path` is derived when a tree is read, not a column — ordering or
+              # searching on it is an AttributeError, not an empty result.
+              search_cols=("code", "name"), order_col="code",
               apply=apply_bin),
 
     # Read-only: HCM owns projects and platform/hcm/sync.py writes them. A local edit

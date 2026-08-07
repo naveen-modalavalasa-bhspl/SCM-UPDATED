@@ -2,6 +2,8 @@ from datetime import date, datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
+from app.modules.indents.enums import IndentType
+
 
 def _utc_iso(value: datetime | None) -> str | None:
     if value is None:
@@ -22,6 +24,10 @@ class IndentItemIn(BaseModel):
 class IndentCreate(BaseModel):
     required_date: date | None = None
     priority: str = "NORMAL"
+    # Defaulted, not required: a caller that predates the field keeps working and
+    # lands on exactly the value the database would have given it anyway.
+    indent_type: IndentType = IndentType.REGULAR
+    vehicle_id: int | None = None
     remarks: str | None = None
     items: list[IndentItemIn]
 
@@ -29,6 +35,8 @@ class IndentCreate(BaseModel):
 class IndentUpdate(BaseModel):
     required_date: date | None = None
     priority: str | None = None
+    indent_type: IndentType | None = None
+    vehicle_id: int | None = None
     office_id: int | None = None
     remarks: str | None = None
     items: list[IndentItemIn] | None = None
@@ -62,8 +70,11 @@ class IndentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     indent_no: str
+    indent_type: str = IndentType.REGULAR.value
     indent_date: date | None = None
     required_date: date | None = None
+    vehicle_id: int | None = None
+    vehicle_number: str | None = None
     requested_by_id: int | None = None
     requested_by_name: str | None = None
     position_id: int | None = None
@@ -72,6 +83,10 @@ class IndentOut(BaseModel):
     department_name: str | None = None
     office_id: int | None = None
     office_name: str | None = None
+    # Region/Location, snapshotted from the requester's HCM location at create.
+    # Read-only on create and edit: there is no matching field on IndentCreate/Update.
+    region_id: int | None = None
+    region_name: str | None = None
     project_id: int | None = None
     project_name: str | None = None
     status: str
@@ -104,8 +119,11 @@ class IndentListRow(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     indent_no: str
+    indent_type: str = IndentType.REGULAR.value
     requested_by_name: str | None = None
     department_name: str | None = None
+    region_id: int | None = None
+    region_name: str | None = None
     status: str
     priority: str
     total_items: int
@@ -116,6 +134,13 @@ class IndentListRow(BaseModel):
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):
         return _utc_iso(value)
+
+
+class RegionCount(BaseModel):
+    """One Region/Location bucket. `region_id` is None for indents with no location."""
+    region_id: int | None = None
+    region_name: str | None = None
+    count: int
 
 
 class IndentStatsOut(BaseModel):
@@ -130,6 +155,7 @@ class IndentStatsOut(BaseModel):
     total_qty: float
     approval_rate: float
     by_status: dict[str, int]
+    by_region: list[RegionCount] = []
 
 
 class ActivityRow(BaseModel):
@@ -152,6 +178,8 @@ class ActivityRow(BaseModel):
     uom_code: str | None = None
     department_name: str | None = None
     office_name: str | None = None
+    region_id: int | None = None
+    region_name: str | None = None
     remarks: str | None = None
     source_type: str
     source_id: int

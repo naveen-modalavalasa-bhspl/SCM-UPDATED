@@ -19,7 +19,11 @@ export interface IndentQueryParams {
   end_date?: string;
   status?: string | string[];
   priority?: string | string[];
+  indent_type?: string | string[];
   department_id?: number | number[];
+  region_id?: number | number[];
+  /** Include indents with no Region/Location. Opt-in: `region_id` alone drops them. */
+  region_unassigned?: boolean;
   project_id?: number | number[];
   office_id?: number | number[];
   warehouse_id?: number | number[];
@@ -63,6 +67,10 @@ export const indentKeys = {
     [...indentKeys.all(scope), "detail", id] as const,
   offices: (scope: IndentAccountScope) =>
     [...indentKeys.all(scope), "offices"] as const,
+  regions: (scope: IndentAccountScope) =>
+    [...indentKeys.all(scope), "regions"] as const,
+  vehicles: (scope: IndentAccountScope, search: string = "") =>
+    [...indentKeys.all(scope), "vehicles", search] as const,
   journey: (scope: IndentAccountScope, id: number) =>
     [...indentKeys.all(scope), "journey", INDENT_JOURNEY_CONTRACT_VERSION, id] as const,
   items: (scope: IndentAccountScope, context: unknown = "default") =>
@@ -169,6 +177,7 @@ export const indentApi = {
     search?: string; date_from?: string; date_to?: string; item_id?: number;
     required_from?: string; required_to?: string;
     status?: string | string[]; priority?: string | string[];
+    region_id?: number | number[]; region_unassigned?: boolean;
     transaction_type?: string; direction?: string;
     page?: number; size?: number;
   }, signal?: AbortSignal) => api.get<Paginated<ActivityRow>>("/api/indents/activity", {
@@ -200,6 +209,20 @@ export const indentApi = {
       signal,
     }).then((r) => r.data),
   offices: () => api.get<{ items: Option[] }>("/api/indents/options/offices").then((r) => r.data.items),
+  /**
+   * The Region/Location values actually present on the caller's visible indents —
+   * not the 1,500-row office master, so every option returns rows.
+   */
+  regions: () =>
+    api.get<{ items: Option[] }>("/api/indents/options/regions").then((r) => r.data.items),
+  /**
+   * Vehicles come from the indents module, not from warehouse's identical endpoint:
+   * raising an indent must not require warehouse permissions.
+   */
+  vehicles: (search?: string) =>
+    api.get<Option[]>("/api/indents/options/vehicles", {
+      params: toSearchParams({ search }),
+    }).then((r) => r.data),
   get: (id: number, signal?: AbortSignal) =>
     api.get<Indent>(`/api/indents/${id}`, { signal }).then((r) => r.data),
   journey: (id: number, signal?: AbortSignal) =>

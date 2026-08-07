@@ -4,11 +4,14 @@ import pytest
 from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
 from app.core.security import hash_password
+from app.modules.approvals import service as approvals_service
 from app.modules.indents import service
 from app.modules.indents.models import IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
@@ -67,6 +70,14 @@ async def _grant_login(db, employee, username: str, permissions: list[str]):
             db.add(perm)
             await db.flush()
         db.add(RolePermission(role_id=role.id, permission_id=perm.id))
+    await db.commit()
+
+
+async def _ensure_pending_unique_index(db):
+    await db.execute(text(
+        "CREATE UNIQUE INDEX uq_pending "
+        "ON wf_pending (instance_id, stage_sequence, approver_id)"
+    ))
     await db.commit()
 
 
@@ -910,7 +921,52 @@ async def test_resubmit_correction_reopens_returning_stage_on_same_instance(db):
     assert await service.engine.get_correction_state(db, "INDENT", submitted.id) is None
 
 
-async def test_later_stage_return_assigns_exact_dm_actor_and_preserves_history(db):
+async def test_approvals_return_endpoint_matches_return_for_correction_semantics(db):
+    """`POST /api/approvals/indents/{id}/return` (approvals_service.return_indent) must
+    behave exactly like the indents-router return-for-correction endpoint the frontend
+    actually calls: RETURNED_FOR_CORRECTION status, pending cleared, same wf_instances
+    row kept IN_PROGRESS so a resubmit resumes the same rung -- not the old DRAFT +
+    cancelled-instance behavior that used to live in this function, which would have
+    forced a resubmit to re-resolve a brand-new chain from scratch.
+    """
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    instance_id = (await db.execute(
+        select(Instance.id).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+
+    returned = await approvals_service.return_indent(
+        db, submitted.id, "fix quantity", world["oe"],
+    )
+    instance = await db.get(Instance, instance_id)
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == submitted.id)
+    )).scalars().all()
+
+    assert returned.status == IndentStatus.RETURNED_FOR_CORRECTION.value
+    assert instance.status == "IN_PROGRESS"
+    assert pending == []
+
+    resubmitted = await service.resubmit_indent_correction(
+        db, submitted.id, world["pilot"],
+    )
+    same_instance_id = (await db.execute(
+        select(Instance.id).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+
+    assert same_instance_id == instance_id
+    assert resubmitted.status == IndentStatus.PENDING_APPROVAL.value
+    assert resubmitted.current_approver_name == "OE"
+
+
+async def test_later_stage_return_still_assigns_original_requester_and_preserves_history(db):
+    """RM returning goes to the original requester (pilot), never to DM."""
     world = await _approval_ladder_world(db, correction_ladder=True)
     alternate_dm = HcmEmployee(
         id=58, full_name="Alternate DM", emp_code="ALTDM",
@@ -954,9 +1010,10 @@ async def test_later_stage_return_assigns_exact_dm_actor_and_preserves_history(d
     ]
 
     assert returned.status == IndentStatus.RETURNED_FOR_CORRECTION.value
-    assert state["correction_owner_employee_id"] == world["dm"].id
+    assert state["correction_owner_employee_id"] == world["pilot"].id
+    assert state["correction_owner_employee_id"] != world["dm"].id
     assert state["correction_owner_employee_id"] != alternate_dm.id
-    assert state["correction_owner_position_id"] == 1002
+    assert state["correction_owner_position_id"] == 1000
     assert state["resubmit_target_sequence"] == 3
     assert [row.action for row in approval_actions] == [
         ApprovalAction.APPROVED.value,
@@ -968,7 +1025,9 @@ async def test_later_stage_return_assigns_exact_dm_actor_and_preserves_history(d
     ]
 
 
-async def test_dm_return_gives_oe_dynamic_correction_edit_and_resubmit(db):
+async def test_dm_return_gives_requester_correction_edit_and_resumes_at_dm(db):
+    """DM returning goes to the original requester (pilot), never to OE; resubmit
+    resumes at DM's rung, not OE's."""
     world = await _approval_ladder_world(db, correction_ladder=True)
     submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
     await service.act_on_indent(
@@ -978,26 +1037,29 @@ async def test_dm_return_gives_oe_dynamic_correction_edit_and_resubmit(db):
     returned = await service.return_indent_for_correction(
         db, submitted.id, "oe must correct", world["dm"],
     )
+    returned_status = returned.status
     state = await service.engine.get_correction_state(db, "INDENT", submitted.id)
-    oe_detail = await service.get_indent(db, submitted.id, world["oe"])
+    pilot_detail = await service.get_indent(db, submitted.id, world["pilot"])
+    pilot_can_edit = pilot_detail.can_edit_correction
+    pilot_can_resubmit = pilot_detail.can_resubmit_correction
 
     edited = await service.update_indent(
         db,
         submitted.id,
-        IndentUpdate(required_date=date.today(), remarks="corrected by oe"),
-        world["oe"],
+        IndentUpdate(required_date=date.today(), remarks="corrected by pilot"),
+        world["pilot"],
     )
     resubmitted = await service.resubmit_indent_correction(
-        db, submitted.id, world["oe"],
+        db, submitted.id, world["pilot"],
     )
 
-    assert returned.status == IndentStatus.RETURNED_FOR_CORRECTION.value
-    assert state["correction_owner_employee_id"] == world["oe"].id
-    assert state["correction_owner_position_id"] == 1001
+    assert returned_status == IndentStatus.RETURNED_FOR_CORRECTION.value
+    assert state["correction_owner_employee_id"] == world["pilot"].id
+    assert state["correction_owner_position_id"] == 1000
     assert state["resubmit_target_sequence"] == 2
-    assert oe_detail.can_edit_correction is True
-    assert oe_detail.can_resubmit_correction is True
-    assert edited.remarks == "corrected by oe"
+    assert pilot_can_edit is True
+    assert pilot_can_resubmit is True
+    assert edited.remarks == "corrected by pilot"
     assert resubmitted.status == IndentStatus.PENDING_APPROVAL.value
     assert resubmitted.current_approver_name == "DM"
 
@@ -1022,6 +1084,179 @@ async def test_repeated_return_resubmit_refreshes_correction_state_and_blocks_du
     assert second_state["return_action_id"] != first_state["return_action_id"]
     assert second_state["correction_comment"] == "second correction"
     assert second_state["resubmit_target_sequence"] == 1
+
+
+@pytest.mark.parametrize(
+    "approvals_before,returner_key,target_name",
+    [
+        ((), "oe", "OE"),
+        (("oe",), "dm", "DM"),
+        (("oe", "dm"), "rm", "RM"),
+    ],
+)
+async def test_return_edit_resubmit_at_oe_dm_and_rm_stages_always_goes_to_requester(
+    db, approvals_before, returner_key, target_name,
+):
+    """Return from any rung goes to the original requester, who resumes at that
+    same rung on resubmit — never to the approver just below."""
+    await _ensure_pending_unique_index(db)
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    for key in approvals_before:
+        await service.act_on_indent(
+            db, submitted.id, ApprovalAction.APPROVED, f"{key} ok", world[key],
+        )
+
+    returned = await service.return_indent_for_correction(
+        db, submitted.id, f"{target_name} correction", world[returner_key],
+    )
+    returned_status = returned.status
+    state = await service.engine.get_correction_state(db, "INDENT", submitted.id)
+    edited = await service.update_indent(
+        db,
+        submitted.id,
+        IndentUpdate(required_date=date.today(), remarks="corrected by pilot"),
+        world["pilot"],
+    )
+    resubmitted = await service.resubmit_indent_correction(
+        db, submitted.id, world["pilot"],
+    )
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == submitted.id)
+    )).scalars().all()
+
+    assert returned_status == IndentStatus.RETURNED_FOR_CORRECTION.value
+    assert state["correction_owner_employee_id"] == world["pilot"].id
+    assert edited.remarks == "corrected by pilot"
+    assert resubmitted.status == IndentStatus.PENDING_APPROVAL.value
+    assert resubmitted.current_approver_name == target_name
+    assert [row.approver_id for row in pending] == [world[returner_key].id]
+
+
+async def test_repeated_return_resubmit_cycles_keep_single_pending_row(db):
+    await _ensure_pending_unique_index(db)
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+
+    for label in ("first", "second", "third"):
+        await service.return_indent_for_correction(
+            db, submitted.id, f"{label} correction", world["oe"],
+        )
+        assert (await db.execute(
+            select(Pending).where(Pending.doc_id == submitted.id)
+        )).scalars().all() == []
+
+        await service.update_indent(
+            db,
+            submitted.id,
+            IndentUpdate(required_date=date.today(), remarks=label),
+            world["pilot"],
+        )
+        await service.resubmit_indent_correction(db, submitted.id, world["pilot"])
+        pending = (await db.execute(
+            select(Pending).where(Pending.doc_id == submitted.id)
+        )).scalars().all()
+        assert [row.approver_id for row in pending] == [world["oe"].id]
+
+
+async def test_one_employee_holding_multiple_positions_collapses_pending_once(db):
+    await _ensure_pending_unique_index(db)
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    dm_assignment = (await db.execute(
+        select(HcmPositionAssignment).where(
+            HcmPositionAssignment.employee_id == world["dm"].id,
+            HcmPositionAssignment.position_id == 1002,
+        )
+    )).scalar_one()
+    dm_assignment.is_active = False
+    db.add(HcmPositionAssignment(
+        id=2999,
+        employee_id=world["oe"].id,
+        employee_name=world["oe"].full_name,
+        position_id=1002,
+        department_id=601,
+        office_id=801,
+        is_primary=False,
+        is_active=True,
+        synced_at=utcnow(),
+    ))
+    await db.commit()
+    world["oe"].active_position_id = 1001
+
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    instance = (await db.execute(
+        select(Instance).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == submitted.id)
+    )).scalars().all()
+
+    assert [row.approver_id for row in pending] == [world["oe"].id]
+    assert instance.resolved_chain[0]["approver_ids"] == [world["oe"].id]
+    assert set(instance.resolved_chain[0]["allowed_position_ids"]) == {1001, 1002}
+
+
+async def test_resubmit_correction_dedupes_duplicate_resolved_approvers_under_mysql_unique_index(
+    db, monkeypatch,
+):
+    await _ensure_pending_unique_index(db)
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    await service.return_indent_for_correction(
+        db, submitted.id, "duplicate approver correction", world["oe"],
+    )
+    instance = (await db.execute(
+        select(Instance).where(
+            Instance.doc_type == "INDENT",
+            Instance.doc_id == submitted.id,
+        )
+    )).scalar_one()
+    chain = [dict(link) for link in instance.resolved_chain]
+    chain[0]["approver_ids"] = [world["oe"].id, world["oe"].id]
+    chain[0]["approver_names"] = [world["oe"].full_name, world["oe"].full_name]
+    instance.resolved_chain = chain
+    flag_modified(instance, "resolved_chain")
+    await db.commit()
+
+    async def duplicate_ladder_approvers(db, instance, link):
+        return [world["oe"], world["oe"]]
+
+    monkeypatch.setattr(service.engine, "_ladder_approvers", duplicate_ladder_approvers)
+    resubmitted = await service.resubmit_indent_correction(
+        db, submitted.id, world["pilot"],
+    )
+    pending = (await db.execute(
+        select(Pending).where(Pending.doc_id == submitted.id)
+    )).scalars().all()
+
+    assert resubmitted.status == IndentStatus.PENDING_APPROVAL.value
+    assert [row.approver_id for row in pending] == [world["oe"].id]
+
+
+async def test_mysql_pending_unique_index_rejects_duplicate_pending_rows(db):
+    await _ensure_pending_unique_index(db)
+    db.add(Pending(
+        instance_id=9001,
+        stage_sequence=2,
+        approver_id=77,
+        doc_type="INDENT",
+        doc_id=8801,
+    ))
+    await db.commit()
+    db.add(Pending(
+        instance_id=9001,
+        stage_sequence=2,
+        approver_id=77,
+        doc_type="INDENT",
+        doc_id=8801,
+    ))
+
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
 
 
 async def test_sph_final_approval_moves_to_allocation(db):
@@ -1349,6 +1584,21 @@ async def test_indent_create_and_list_via_api(client, db, make_user, login):
     lst = await client.get("/api/indents", headers=headers)
     assert lst.status_code == 200
     assert lst.json()["total"] >= 1
+
+
+async def test_get_indents_for_requester_and_approver_accounts(client, db, login):
+    world = await _approval_ladder_world(db, correction_ladder=True)
+    submitted = await service.submit_indent(db, world["indent"].id, world["pilot"])
+    requester_headers = await login("pilot", "pw")
+    approver_headers = await login("oe", "pw")
+
+    requester = await client.get("/api/indents?page=1&size=10", headers=requester_headers)
+    approver = await client.get("/api/indents?page=1&size=10", headers=approver_headers)
+
+    assert requester.status_code == 200, requester.text
+    assert approver.status_code == 200, approver.text
+    assert submitted.id in {row["id"] for row in requester.json()["items"]}
+    assert submitted.id in {row["id"] for row in approver.json()["items"]}
 
 
 async def test_required_date_api_validation_for_create_and_update(

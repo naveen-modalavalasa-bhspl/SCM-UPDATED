@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
+import { parseRegionIds } from "./AllRequestsUrlState";
 import type { DatePreset, IndentFilterContextType } from "./IndentFilterContext";
 
 const DEFAULT_PAGE_SIZE = 20;
@@ -19,6 +20,8 @@ interface SimpleFilterState {
   startDate: string;
   endDate: string;
   selectedStatuses: string[];
+  selectedRegions: number[];
+  includeUnassignedRegion: boolean;
   page: number;
   size: number;
 }
@@ -68,6 +71,8 @@ export function normalizeSimpleIndentFilterSearch(
     .map((option) => option.value)
     .filter((status) => source.getAll(selectionParam).includes(status))
     .slice(0, singleSelection ? 1 : undefined);
+  const selectedRegions = parseRegionIds(source.getAll("region_id"));
+  const includeUnassignedRegion = source.get("region_unassigned") === "1";
   const from = validDate(source.get("date_from"));
   const to = validDate(source.get("date_to"));
   const hasValidCompleteRange = Boolean(from && to && from <= to);
@@ -82,6 +87,8 @@ export function normalizeSimpleIndentFilterSearch(
 
   if (search) params.set("search", search);
   selectedStatuses.forEach((status) => params.append(selectionParam, status));
+  selectedRegions.forEach((regionId) => params.append("region_id", String(regionId)));
+  if (includeUnassignedRegion) params.set("region_unassigned", "1");
   if (hasValidCompleteRange) {
     params.set("date_preset", datePreset);
     params.set("date_from", from);
@@ -98,6 +105,8 @@ export function normalizeSimpleIndentFilterSearch(
       startDate: hasValidCompleteRange ? from : "",
       endDate: hasValidCompleteRange ? to : "",
       selectedStatuses,
+      selectedRegions,
+      includeUnassignedRegion,
       page,
       size,
     },
@@ -224,6 +233,25 @@ export function useSimpleIndentFiltersUrlState({
     selectedDepartments: [],
     setSelectedDepartments: noop,
     toggleDepartment: noop,
+    selectedRegions: state.selectedRegions,
+    setSelectedRegions: (values) => updateFilter((params) => {
+      params.delete("region_id");
+      values.forEach((value) => params.append("region_id", String(value)));
+    }),
+    toggleRegion: (id) => updateFilter((params) => {
+      const value = String(id);
+      const values = params.getAll("region_id");
+      params.delete("region_id");
+      (values.includes(value)
+        ? values.filter((current) => current !== value)
+        : [...values, value]
+      ).forEach((current) => params.append("region_id", current));
+    }),
+    includeUnassignedRegion: state.includeUnassignedRegion,
+    setIncludeUnassignedRegion: (value) => updateFilter((params) => {
+      if (value) params.set("region_unassigned", "1");
+      else params.delete("region_unassigned");
+    }),
     selectedProjects: [],
     setSelectedProjects: noop,
     toggleProject: noop,
@@ -255,7 +283,9 @@ export function useSimpleIndentFiltersUrlState({
     }),
     activeFilterCount: (state.search ? 1 : 0)
       + (state.datePreset !== "all" ? 1 : 0)
-      + state.selectedStatuses.length,
+      + state.selectedStatuses.length
+      + state.selectedRegions.length
+      + (state.includeUnassignedRegion ? 1 : 0),
   }), [clearDate, noop, selectionParam, setPage, singleSelection, state, update, updateFilter]);
 
   const query = normalized.params.toString();

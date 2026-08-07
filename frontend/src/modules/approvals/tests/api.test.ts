@@ -17,11 +17,23 @@ describe("approvals api", () => {
     await approvalsApi.pending();
     await approvalsApi.decisions();
     await approvalsApi.teamQueue();
+    await approvalsApi.consolidation();
     expect(apiMock.get.mock.calls.map((call) => call[0])).toEqual([
       "/api/approvals/pending",
       "/api/approvals/my-decisions",
       "/api/approvals/team-queue",
+      "/api/approvals/consolidation",
     ]);
+  });
+
+  it("sends consolidation filters as query params on the one consolidation call", async () => {
+    // One request carries every applied dimension — the screen must never fan out
+    // into a call per filter, and the dropdown contents ride back on the same response.
+    await approvalsApi.consolidation({ cycle: "2026-08", region_id: "5", item_id: "9" });
+    expect(apiMock.get).toHaveBeenCalledWith("/api/approvals/consolidation", {
+      params: { cycle: "2026-08", region_id: "5", item_id: "9" },
+    });
+    expect(apiMock.get).toHaveBeenCalledTimes(1);
   });
 
   it("sends editable quantities with an indent approval", async () => {

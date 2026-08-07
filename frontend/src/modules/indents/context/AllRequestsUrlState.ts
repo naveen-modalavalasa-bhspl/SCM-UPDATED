@@ -43,6 +43,8 @@ interface ParsedAllRequestsState {
   requiredByTo: string;
   selectedStatuses: string[];
   selectedPriorities: string[];
+  selectedRegions: number[];
+  includeUnassignedRegion: boolean;
   page: number;
   size: number;
 }
@@ -79,6 +81,22 @@ function uniqueAllowed(values: string[], allowed: Set<string>) {
   return [...new Set(values.filter((value) => allowed.has(value)))];
 }
 
+const MAX_REGION_ID = 9_007_199_254_740_991;
+
+/**
+ * Region/Location ids off the URL. Unlike statuses there is no closed option list to
+ * validate against — HCM owns the locations — so this only guarantees they are real
+ * positive integers, sorted and deduped, and leaves rejecting unknown ids to the
+ * backend, which returns no rows for one.
+ */
+export function parseRegionIds(values: string[]) {
+  const ids = values
+    .filter((value) => /^[1-9]\d*$/.test(value))
+    .map(Number)
+    .filter((value) => Number.isSafeInteger(value) && value <= MAX_REGION_ID);
+  return [...new Set(ids)].sort((a, b) => a - b);
+}
+
 export function normalizeAllRequestsSearch(
   input: URLSearchParams | string,
 ): NormalizedAllRequestsState {
@@ -89,6 +107,8 @@ export function normalizeAllRequestsSearch(
   const search = (source.get("search") ?? "").trim();
   const selectedStatuses = uniqueAllowed(source.getAll("status"), ALLOWED_STATUSES);
   const selectedPriorities = uniqueAllowed(source.getAll("priority"), ALLOWED_PRIORITIES);
+  const selectedRegions = parseRegionIds(source.getAll("region_id"));
+  const includeUnassignedRegion = source.get("region_unassigned") === "1";
   const raisedRange = validRange(source, "created_date_from", "created_date_to");
   const requiredByRange = validRange(source, "required_by_from", "required_by_to");
   const rawRaisedPreset = source.get("raised_preset") as DatePreset | null;
@@ -107,6 +127,8 @@ export function normalizeAllRequestsSearch(
   if (search) params.set("search", search);
   selectedStatuses.forEach((status) => params.append("status", status));
   selectedPriorities.forEach((priority) => params.append("priority", priority));
+  selectedRegions.forEach((regionId) => params.append("region_id", String(regionId)));
+  if (includeUnassignedRegion) params.set("region_unassigned", "1");
   if (raisedRange.from) {
     params.set("raised_preset", datePreset);
     params.set("created_date_from", raisedRange.from);
@@ -132,6 +154,8 @@ export function normalizeAllRequestsSearch(
       requiredByTo: requiredByRange.to,
       selectedStatuses,
       selectedPriorities,
+      selectedRegions,
+      includeUnassignedRegion,
       page,
       size,
     },
@@ -319,6 +343,23 @@ export function useAllRequestsUrlState(): {
     selectedDepartments: [],
     setSelectedDepartments: noop,
     toggleDepartment: noop,
+    selectedRegions: state.selectedRegions,
+    setSelectedRegions: (values) =>
+      setArray("region_id", values.map((value) => String(value))),
+    toggleRegion: (id) => updateFilter((params) => {
+      const value = String(id);
+      const values = params.getAll("region_id");
+      params.delete("region_id");
+      (values.includes(value)
+        ? values.filter((current) => current !== value)
+        : [...values, value]
+      ).forEach((current) => params.append("region_id", current));
+    }),
+    includeUnassignedRegion: state.includeUnassignedRegion,
+    setIncludeUnassignedRegion: (value) => updateFilter((params) => {
+      if (value) params.set("region_unassigned", "1");
+      else params.delete("region_unassigned");
+    }),
     selectedProjects: [],
     setSelectedProjects: noop,
     toggleProject: noop,
@@ -352,7 +393,9 @@ export function useAllRequestsUrlState(): {
       + (state.startDate ? 1 : 0)
       + (state.requiredByFrom ? 1 : 0)
       + state.selectedStatuses.length
-      + state.selectedPriorities.length,
+      + state.selectedPriorities.length
+      + state.selectedRegions.length
+      + (state.includeUnassignedRegion ? 1 : 0),
   }), [
     clearRaisedDate,
     clearRequiredByDate,

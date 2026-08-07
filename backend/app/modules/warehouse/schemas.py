@@ -66,8 +66,8 @@ class BinRead(_Read):
     bin_type: str | None = None
     storage_type_id: int | None = None
     barcode: str | None = None
-    floor_level: str | None = None
-    shelf_level: str | None = None
+    floor_level: int | None = None
+    shelf_level: int | None = None
     # Derived when the tree is built, not stored — see service.bin_tree.
     path: str | None = None
     level: int | None = None
@@ -107,8 +107,8 @@ class BinWrite(BaseModel):
     max_temperature_celsius: Decimal | None = None
     storage_type_id: int | None = None
     barcode: str | None = None
-    floor_level: str | None = None
-    shelf_level: str | None = None
+    floor_level: int | None = None
+    shelf_level: int | None = None
     is_active: bool = True
 
     @field_validator(
@@ -133,8 +133,8 @@ class LocationRead(_Read):
     name: str | None = None
     description: str | None = None
     barcode: str | None = None
-    floor_level: str | None = None
-    shelf_level: str | None = None
+    floor_level: int | None = None
+    shelf_level: int | None = None
     capacity_weight: Decimal | None = None
     capacity_volume: Decimal | None = None
     max_weight_capacity: Decimal | None = None

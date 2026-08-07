@@ -10,7 +10,6 @@ import {
 } from "@heroui/react";
 import { PageHeader, Button, Can, Card } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
-import { alerts } from "@/modules/alerts";
 import { FlowStepper } from "../components/FlowStepper";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import { activityLedgerReturnUrlFromState } from "../context/ActivityLedgerUrlState";
@@ -22,7 +21,7 @@ import {
   useIndentAccountScope,
 } from "../api";
 import { cancelIndentDecisionReads, commitConfirmedIndentDecision } from "../approvalRefresh";
-import { INDENT_STATUS } from "../constants";
+import { INDENT_STATUS, indentTypeLabel } from "../constants";
 import type { Indent } from "../types";
 
 const REJECTION_REASON_MAX_LENGTH = 250;
@@ -129,19 +128,11 @@ export function IndentDetailPage() {
     });
   };
   const onErr = (e: Error) => setError(e.message);
-  /** The catalog leaves an unfilled `{approver}` visible, so never pass an empty one. */
-  const approverOf = (updated: Indent) => updated.current_approver_name || "the next approver";
 
   const submit = useMutation({
     mutationFn: () => indentApi.submit(indentId),
     onMutate: () => cancelIndentDecisionReads(qc, accountScope, indentId),
-    onSuccess: (updated) => {
-      refreshAfterAction(updated, true);
-      void alerts.success("indent.submitted", {
-        number: updated.indent_no,
-        approver: approverOf(updated),
-      });
-    },
+    onSuccess: (updated) => refreshAfterAction(updated, true),
     onError: onErr,
   });
   const approve = useMutation({
@@ -150,7 +141,6 @@ export function IndentDetailPage() {
     onSuccess: async (updated) => {
       setError(null);
       await commitConfirmedIndentDecision(qc, accountScope, indentId, updated, "approve");
-      void alerts.success("indent.approved", { number: updated.indent_no });
     },
     onError: onErr,
     onSettled: () => {
@@ -165,10 +155,6 @@ export function IndentDetailPage() {
       await commitConfirmedIndentDecision(qc, accountScope, indentId, updated, "reject", reason);
       setRejectOpen(false);
       setRejectionReason("");
-      void alerts.success("indent.rejected", {
-        number: updated.indent_no,
-        raiser: updated.requested_by_name || "the raiser",
-      });
     },
     onError: onErr,
     onSettled: () => {
@@ -176,14 +162,12 @@ export function IndentDetailPage() {
     },
   });
   const deleteDraft = useMutation({
-    // The number, not the record: by onSuccess the detail query is being torn down.
-    mutationFn: () => indentApi.delete(indentId).then(() => indent?.indent_no ?? "The draft"),
-    onSuccess: (number) => {
+    mutationFn: () => indentApi.delete(indentId),
+    onSuccess: () => {
       setError(null);
       qc.removeQueries({ queryKey: indentKeys.detail(accountScope, indentId) });
       qc.removeQueries({ queryKey: indentKeys.journey(accountScope, indentId) });
       qc.invalidateQueries({ predicate: isIndentModuleQuery });
-      void alerts.success("indent.deleted", { number });
       nav("/indents");
     },
     onError: onErr,
@@ -193,10 +177,6 @@ export function IndentDetailPage() {
     onSuccess: (updated) => {
       refreshAfterAction(updated, true);
       qc.invalidateQueries({ queryKey: ["approvals"], refetchType: "all" });
-      void alerts.success("indent.submitted", {
-        number: updated.indent_no,
-        approver: approverOf(updated),
-      });
     },
     onError: onErr,
   });
@@ -262,25 +242,10 @@ export function IndentDetailPage() {
     setRejectOpen(false);
     setRejectionReason("");
   };
-  const startSubmit = async () => {
-    if (actionPending) return;
-    const approver = indent.current_approver_name || "the next approver";
-    if (!(await alerts.confirm("indent.submit", { number: indent.indent_no, approver }))) return;
-    submit.mutate();
-  };
-  const startApprove = async () => {
+  const startApprove = () => {
     if (actionPending || decisionLocked.current) return;
-    if (!(await alerts.confirm("indent.approve", { number: indent.indent_no }))) return;
-    // Locked only after the answer: taking the lock before the dialog would leave
-    // the page wedged for anyone who says no.
-    if (decisionLocked.current) return;
     decisionLocked.current = true;
     approve.mutate();
-  };
-  const startDeleteDraft = async () => {
-    if (actionPending) return;
-    if (!(await alerts.confirm("indent.delete", { number: indent.indent_no }))) return;
-    deleteDraft.mutate();
   };
   const confirmReject = () => {
     if (!trimmedRejectionReason || actionPending || decisionLocked.current) return;
@@ -328,7 +293,11 @@ export function IndentDetailPage() {
               <Button
                 variant="danger"
                 disabled={actionPending}
-                onClick={() => void startDeleteDraft()}
+                onClick={() => {
+                  if (window.confirm(`Delete draft ${indent.indent_no}? This cannot be undone.`)) {
+                    deleteDraft.mutate();
+                  }
+                }}
               >
                 {deleteDraft.isPending ? <InlineSpinner /> : <Trash2 className="h-4 w-4" />}
                 {deleteDraft.isPending ? "Deleting..." : "Delete Draft"}
@@ -422,10 +391,15 @@ export function IndentDetailPage() {
         <Card className="h-fit">
           <CardBody className="p-5">
             <dl className="grid grid-cols-2 gap-4 lg:grid-cols-1">
+              <Detail label="Type" value={indentTypeLabel(indent.indent_type)} />
               <Detail label="Requested by" value={indent.requested_by_name} />
               <Detail label="Position" value={indent.position_name} />
               <Detail label="Department" value={indent.department_name} />
+              {/* The requester's HCM location, snapshotted at create — what monthly
+                  indents are grouped by. Not editable here or on the form. */}
+              <Detail label="Region / Location" value={indent.region_name} />
               <Detail label="Deliver to" value={indent.office_name} />
+              <Detail label="Vehicle" value={indent.vehicle_number} />
               <Detail label="Priority" value={indent.priority} />
               {indent.current_approver_name && (
                 <Detail label="With" value={indent.current_approver_name} />
@@ -442,7 +416,7 @@ export function IndentDetailPage() {
       {showActions && (
         <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
           {indent.can_submit && (
-            <Button className="flex-1 md:flex-none" disabled={actionPending} onClick={() => void startSubmit()}>
+            <Button className="flex-1 md:flex-none" disabled={actionPending} onClick={() => !actionPending && submit.mutate()}>
               {submit.isPending ? <InlineSpinner /> : <Send className="h-4 w-4" />} {submit.isPending ? "Submitting..." : "Submit for approval"}
             </Button>
           )}
@@ -462,7 +436,7 @@ export function IndentDetailPage() {
             </Button>
           )}
           {indent.can_approve && (
-            <Button className="flex-1 md:flex-none" disabled={actionPending} onClick={() => void startApprove()}>
+            <Button className="flex-1 md:flex-none" disabled={actionPending} onClick={startApprove}>
               {approve.isPending ? <InlineSpinner /> : <Check className="h-4 w-4" />}
               {approve.isPending ? "Approving..." : "Approve"}
             </Button>

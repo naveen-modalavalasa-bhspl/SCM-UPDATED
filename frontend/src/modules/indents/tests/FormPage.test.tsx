@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ReactElement } from "react";
@@ -47,6 +47,10 @@ vi.mock("../api", async () => {
         [...scoped(scope), "detail", id] as const,
       offices: (scope: { employeeId: number | null; activePositionId: number | null }) =>
         [...scoped(scope), "offices"] as const,
+      vehicles: (
+        scope: { employeeId: number | null; activePositionId: number | null },
+        search = "",
+      ) => [...scoped(scope), "vehicles", search] as const,
       bomChoices: (scope: { employeeId: number | null; activePositionId: number | null }) =>
         [...scoped(scope), "bom-choices"] as const,
       bomChoiceItems: (
@@ -67,6 +71,10 @@ vi.mock("../api", async () => {
       offices: vi.fn(() => Promise.resolve([
         { id: 701, name: "Main Office" },
         { id: 702, name: "Branch Office" },
+      ])),
+      vehicles: vi.fn(() => Promise.resolve([
+        { id: 77, code: "AP39-TT-4512", name: "AP39-TT-4512" },
+        { id: 78, code: "TS09-XX-1000", name: "TS09-XX-1000" },
       ])),
       create: vi.fn(() => Promise.resolve({
         id: 42,
@@ -365,12 +373,9 @@ describe("IndentFormPage", () => {
     });
     expect(screen.getByLabelText("Required date")).toHaveValue("2026-08-02");
     expect(screen.getByPlaceholderText("Optional")).toHaveValue("Original remarks");
-    // Editing an existing indent locks the delivery location: it is shown read-only
-    // rather than as the picker a brand-new request gets.
-    expect(screen.queryByRole("combobox", {
+    expect(screen.getByRole("combobox", {
       name: "Office is assigned from your position",
-    })).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("Main Office")).toBeDisabled();
+    })).not.toBeDisabled();
 
     fireEvent.change(screen.getByLabelText("Required date"), { target: { value: "" } });
     expect(screen.queryByText("Required date is mandatory.")).not.toBeInTheDocument();
@@ -787,5 +792,114 @@ describe("IndentFormPage", () => {
       ),
     );
     expect(screen.queryByText("Quantity is required for this item.")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * React Aria only mounts a Select's listbox once it is open, and the page has several
+ * Selects, so the trigger has to be the one belonging to this field. Walking up from
+ * the input to the nearest ancestor that holds a "Show suggestions" button finds it
+ * without depending on HeroUI's internal slot names or on field order.
+ */
+async function openCombobox(name: string) {
+  const field = await screen.findByRole("combobox", { name });
+  for (let node = field.parentElement; node; node = node.parentElement) {
+    const trigger = within(node).queryByLabelText("Show suggestions");
+    if (trigger) {
+      fireEvent.click(trigger);
+      return field;
+    }
+  }
+  throw new Error(`No suggestions trigger found for the "${name}" field`);
+}
+
+async function pickFromCombobox(name: string, typed: string, option: RegExp | string) {
+  const field = await openCombobox(name);
+  fireEvent.change(field, { target: { value: typed } });
+  fireEvent.click(await screen.findByRole("option", { name: option }));
+}
+
+describe("IndentFormPage indent type and vehicle", () => {
+  it("defaults a new indent to Regular so nothing is silently reclassified", async () => {
+    renderForm();
+
+    await selectFirstItemAndQuantity("5");
+    fireEvent.click(screen.getByRole("button", { name: "Create indent" }));
+
+    await waitFor(() =>
+      expect(indentApi.create).toHaveBeenCalledWith(
+        expect.objectContaining({ indent_type: "REGULAR", vehicle_id: null }),
+      ),
+    );
+  });
+
+  it("sends the chosen type and vehicle", async () => {
+    renderForm();
+
+    await pickFromCombobox("Indent type", "Monthly", /Monthly indent/i);
+    await pickFromCombobox("Vehicle", "AP39", /AP39-TT-4512/);
+    await selectFirstItemAndQuantity("5");
+    fireEvent.click(screen.getByRole("button", { name: "Create indent" }));
+
+    await waitFor(() =>
+      expect(indentApi.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          indent_type: "MONTHLY",
+          vehicle_id: 77,
+        }),
+      ),
+    );
+  });
+
+  it("offers every type, legacy Regular included", async () => {
+    renderForm();
+
+    await openCombobox("Indent type");
+
+    expect(await screen.findByRole("option", { name: /Regular/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Monthly indent/ })).toBeInTheDocument();
+  });
+
+  it("hydrates the type and vehicle of a draft being edited", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce({
+      id: 42,
+      indent_no: "IND/2026/0042",
+      indent_type: "MONTHLY",
+      vehicle_id: 78,
+      vehicle_number: "TS09-XX-1000",
+      status: "DRAFT",
+      priority: "NORMAL",
+      required_date: "2026-08-02",
+      total_items: 1,
+      total_qty: 5,
+      is_bookmarked: "NO",
+      can_submit: true,
+      can_approve: false,
+      can_reject: false,
+      created_at: "2026-07-28T10:00:00Z",
+      items: [{
+        id: 1, item_id: 1, item_code: "IT-ML", item_name: "Syrup",
+        uom_code: "ml", quantity: 5, ordered_quantity: 0, received_quantity: 0,
+      }],
+    } as never);
+
+    renderForm("/indents/new?edit=42");
+
+    await waitFor(async () =>
+      expect(await screen.findByRole("combobox", { name: "Indent type" }))
+        .toHaveValue("Monthly indent"),
+    );
+    expect(await screen.findByRole("combobox", { name: "Vehicle" }))
+      .toHaveValue("TS09-XX-1000");
+  });
+
+  it("disables the vehicle picker when the transport register returns nothing", async () => {
+    vi.mocked(indentApi.vehicles).mockResolvedValueOnce([]);
+
+    renderForm();
+
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Vehicle" })).toBeDisabled(),
+    );
   });
 });

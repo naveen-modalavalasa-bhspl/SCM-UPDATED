@@ -109,3 +109,4 @@ def test_operational_approvals_router_declares_required_routes():
     assert "/api/approvals/pending" in paths
     assert "/api/approvals/my-decisions" in paths
     assert "/api/approvals/team-queue" in paths
+    assert "/api/approvals/consolidation" in paths

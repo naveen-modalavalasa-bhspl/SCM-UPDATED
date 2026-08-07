@@ -12,8 +12,9 @@ from app.platform.rbac import permissions as perms
 from . import service
 from .schemas import (
     ApprovalActionIn, ApprovalActionOut, ApprovalIndentOut, ApprovalRejectionIn,
-    ApprovalReportOut, IndentApprovalActionIn, IndentRejectionIn, IndentReturnIn,
-    ReminderOut,
+    ApprovalReportOut, ConsolidationApprovalIn, ConsolidationApprovalOut,
+    ConsolidationFilters, ConsolidationOut, IndentApprovalActionIn,
+    IndentRejectionIn, IndentReturnIn, ReminderOut,
 )
 
 
@@ -47,6 +48,20 @@ async def my_decisions(params: PageParams = Depends(), db: AsyncSession = Depend
 async def team_queue(db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
     return {"items": await service.team_queue(db, user)}
+
+
+@router.get("/consolidation", response_model=ConsolidationOut)
+async def consolidation(filters: ConsolidationFilters = Depends(),
+                        db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.INDENT_APPROVE))):
+    return await service.consolidation_workspace(db, user, filters)
+
+
+@router.post("/consolidation/approve", response_model=ConsolidationApprovalOut)
+async def approve_consolidation(body: ConsolidationApprovalIn,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.INDENT_APPROVE))):
+    return await service.approve_consolidation(db, body, user)
 
 
 @router.get("/reports/summary", response_model=ApprovalReportOut)
@@ -108,5 +123,5 @@ async def reject_indent(indent_id: int, body: IndentRejectionIn,
 @router.post("/indents/{indent_id}/return", response_model=ApprovalIndentOut)
 async def return_indent(indent_id: int, body: IndentReturnIn,
                         db: AsyncSession = Depends(get_db),
-                        user=Depends(require_permission(perms.INDENT_REJECT))):
+                        user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.return_indent(db, indent_id, body.comments, user)

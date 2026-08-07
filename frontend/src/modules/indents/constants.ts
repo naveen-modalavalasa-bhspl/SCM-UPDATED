@@ -50,6 +50,32 @@ export const INDENT_PRIORITY = {
   URGENT: "URGENT",
 } as const;
 
+export const INDENT_TYPE = {
+  REGULAR: "REGULAR",
+  MONTHLY: "MONTHLY",
+} as const;
+
+/**
+ * Regular is the ad-hoc, one-off request; Monthly is the recurring one. Regular is
+ * offered alongside Monthly because it is what all existing indents are, and whether
+ * it is retired is still an open decision. Removing it from the picker would silently
+ * reclassify every request raised from today.
+ */
+export const INDENT_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: INDENT_TYPE.REGULAR, label: "Regular" },
+  { value: INDENT_TYPE.MONTHLY, label: "Monthly indent" },
+];
+
+const INDENT_TYPE_LABELS: Record<string, string> = Object.fromEntries(
+  INDENT_TYPE_OPTIONS.map((option) => [option.value, option.label]),
+);
+
+/** Falls back to the raw value so an unknown type still reads as something. */
+export function indentTypeLabel(value?: string | null) {
+  if (!value) return null;
+  return INDENT_TYPE_LABELS[value] ?? value;
+}
+
 export const INDENT_STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: INDENT_STATUS.DRAFT, label: "Draft" },
   { value: INDENT_STATUS.SUBMITTED, label: "Submitted" },

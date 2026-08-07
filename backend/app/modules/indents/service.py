@@ -3,12 +3,13 @@
 Every state change follows: load -> validate current status -> change -> commit.
 Approvals go ONLY through the workflow engine; there is no approval logic here.
 """
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, Numeric, String, and_, case, cast, exists, false, func, literal, or_, select, union_all
+from sqlalchemy import BigInteger, DateTime, Numeric, String, and_, case, cast, exists, false, func, literal, or_, select, text, union_all
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
@@ -25,7 +26,6 @@ from app.modules.inventory.models import (
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
-from app.platform.notifications import service as notification_service
 from app.platform.rules import evaluator as rules
 from app.platform.workflow import engine, ladder
 from app.platform.workflow.models import Action, Instance, Stage
@@ -40,12 +40,14 @@ from app.shared.models.master import Item
 from app.shared.numbering import next_number
 from app.modules.indents.enums import (
     AcknowledgmentStatus, AllocationStatus, ApprovalAction, AuditAction, DocType,
-    IndentActivityType, IndentItemStatus, IndentStatus, InstanceStatus, MRStatus,
-    MaterialDirection, Priority, RuleActionType,
+    IndentActivityType, IndentItemStatus, IndentStatus, IndentType, InstanceStatus,
+    MRStatus, MaterialDirection, Priority, RuleActionType,
 )
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentUpdate
 
+
+logger = logging.getLogger(__name__)
 
 PAST_REQUIRED_DATE_ERROR = "Required date cannot be earlier than today"
 REQUIRED_DATE_MANDATORY_ERROR = "Required date is mandatory."
@@ -135,6 +137,103 @@ async def list_office_options(db: AsyncSession) -> dict:
     return {"items": [{"id": office.id, "name": office.name} for office in rows]}
 
 
+async def list_region_options(db: AsyncSession, user=None) -> dict:
+    """The Region/Location values actually present on the indents the caller can see.
+
+    Not the whole 1504-row office master: a filter offering 1,500 locations of which a
+    handful ever appear is unusable, and every option here is guaranteed to return
+    rows. Indents with no region are filtered with the explicit "Unassigned" choice on
+    the client rather than an entry in this list.
+    """
+    stmt = (
+        select(Indent.region_id, Indent.region_name)
+        .where(Indent.region_id.is_not(None))
+        .distinct()
+        .order_by(Indent.region_name)
+    )
+    if user is not None:
+        stmt = stmt.where(await indent_access_condition(db, user))
+    rows = (await db.execute(stmt)).all()
+    return {"items": [{"id": region_id, "name": name} for region_id, name in rows]}
+
+
+# ---------------- indent type + vehicle ----------------
+
+INVALID_INDENT_TYPE_ERROR = "Invalid indent type: {value}"
+UNKNOWN_VEHICLE_ERROR = "Unknown vehicle id: {value}"
+VEHICLE_REGISTER_UNAVAILABLE_ERROR = (
+    "The vehicle register is unavailable, so a vehicle cannot be attached right now. "
+    "Save the indent without one and add it later."
+)
+VEHICLE_LOOKUP_LIMIT = 200
+
+
+def _validate_indent_type(indent_type) -> str | None:
+    """Same shape as _validate_priority.
+
+    The router parses the enum, but the service is also called directly (tests, and
+    any future module), so nothing may reach the column that IndentType has no member
+    for — rule 3, applied to a classification rather than a status.
+    """
+    if indent_type is None:
+        return None
+    value = getattr(indent_type, "value", indent_type)
+    if value not in {option.value for option in IndentType}:
+        raise ValidationError(INVALID_INDENT_TYPE_ERROR.format(value=value))
+    return value
+
+
+# `trn_vehicles` belongs to the transport team. It is read by raw text and not mapped,
+# for the reason warehouse.service.vehicle_options gives: declaring a second model for
+# another team's table is a mapper that has to be kept in step for a dropdown's sake.
+# The query is duplicated here rather than imported because warehouse sits AFTER
+# indents in the module chain (inventory -> indents -> procurement -> logistics ->
+# warehouse) and importing it would invert the dependency.
+_VEHICLE_SELECT = "SELECT id, vehicle_number FROM trn_vehicles"
+
+
+async def vehicle_options(db: AsyncSession, search: str | None = None) -> list[dict]:
+    """Vehicles for the indent form's picker."""
+    sql = (f"{_VEHICLE_SELECT} "
+           "WHERE (:search IS NULL OR vehicle_number LIKE :like) "
+           "ORDER BY vehicle_number LIMIT :limit")
+    try:
+        rows = (await db.execute(text(sql), {
+            "search": search, "like": f"%{search or ''}%",
+            "limit": VEHICLE_LOOKUP_LIMIT,
+        })).all()
+    except Exception:  # noqa: BLE001 — another team's table; it may not exist yet
+        logger.warning("trn_vehicles is not available; the vehicle picker will be empty")
+        return []
+    return [{"id": row[0], "code": row[1], "name": row[1]} for row in rows]
+
+
+async def _resolve_vehicle(db: AsyncSession, vehicle_id: int | None) -> tuple:
+    """(id, registration number) for the snapshot, or (None, None).
+
+    Unlike the picker this does NOT swallow a missing table: silently storing an id
+    nobody could verify, with no number beside it, is worse than telling the raiser
+    the register is down. A vehicle is optional, so they can still save.
+    """
+    if vehicle_id is None:
+        return None, None
+    try:
+        row = (await db.execute(
+            text(f"{_VEHICLE_SELECT} WHERE id = :id"), {"id": vehicle_id},
+        )).first()
+    except Exception:  # noqa: BLE001 — see above
+        logger.warning("trn_vehicles is not available; cannot attach vehicle %s",
+                       vehicle_id)
+        # A failed statement leaves the session unusable, and this one is raised
+        # mid-request: without the rollback the caller's next query dies somewhere
+        # far less obvious than here.
+        await db.rollback()
+        raise ValidationError(VEHICLE_REGISTER_UNAVAILABLE_ERROR)
+    if row is None:
+        raise ValidationError(UNKNOWN_VEHICLE_ERROR.format(value=vehicle_id))
+    return row[0], row[1]
+
+
 async def _name(db: AsyncSession, model, pk) -> str | None:
     if pk is None:
         return None
@@ -167,6 +266,15 @@ async def _requester_context(db: AsyncSession, user) -> dict:
         or user.office_id
     )
     project_id = (position.project_id if position else None) or user.project_id
+    # Region/Location comes from the employee record and ONLY from it: HCM tags each
+    # employee to a location on `hcm_employees.office_id`, and that tag is what monthly
+    # indents are grouped by. It is deliberately not the assignment/position office
+    # resolved above (those disagree on 5 of 296 live indents), and never a position
+    # name parsed for a place.
+    region_id = user.office_id
+    region_name = getattr(user, "office_name", None)
+    if region_id is not None and not region_name:
+        region_name = await _name(db, HcmOffice, region_id)
     return {
         "position_id": position.id if position else None,
         "position_name": position.name if position else None,
@@ -174,6 +282,8 @@ async def _requester_context(db: AsyncSession, user) -> dict:
         "department_name": await _name(db, HcmDepartment, department_id),
         "office_id": office_id,
         "office_name": await _name(db, HcmOffice, office_id),
+        "region_id": region_id,
+        "region_name": region_name if region_id is not None else None,
         "project_id": project_id,
         "project_name": (position.project_name if position else None) or user.project_name,
     }
@@ -182,6 +292,8 @@ async def _requester_context(db: AsyncSession, user) -> dict:
 async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     _validate_required_date(data.required_date)
     priority = _validate_priority(data.priority) or Priority.NORMAL.value
+    indent_type = _validate_indent_type(
+        getattr(data, "indent_type", None)) or IndentType.REGULAR.value
 
     if not data.items:
         raise ValidationError("Indent must have at least one item")
@@ -193,12 +305,19 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     if missing:
         raise ValidationError(f"Unknown item ids: {sorted(missing)}")
 
+    # Ahead of next_number(): a rejected vehicle must not burn a document number.
+    vehicle_id, vehicle_number = await _resolve_vehicle(
+        db, getattr(data, "vehicle_id", None))
+
     context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
         indent_no=await next_number(db, "indent"),
+        indent_type=indent_type,
         indent_date=utcnow().date(),
         required_date=data.required_date,
+        vehicle_id=vehicle_id,
+        vehicle_number=vehicle_number,
         requested_by_id=user.id,
         requested_by_name=user.full_name,
         requested_by_code=user.emp_code,
@@ -208,6 +327,8 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         department_name=context["department_name"],
         office_id=context["office_id"],
         office_name=context["office_name"],
+        region_id=context["region_id"],
+        region_name=context["region_name"],
         project_id=context["project_id"],
         project_name=context["project_name"],
         status=IndentStatus.DRAFT.value,
@@ -215,6 +336,8 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         total_items=len(data.items),
         total_qty=total_qty,
         remarks=data.remarks,
+        created_by_id=user.id,
+        created_by_name=user.full_name,
     )
     db.add(indent)
     await db.flush()
@@ -229,7 +352,9 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
         action=AuditAction.CREATE, actor=user,
-        after={"status": indent.status, "total_items": indent.total_items},
+        after={"status": indent.status, "total_items": indent.total_items,
+               "indent_type": indent.indent_type,
+               "vehicle_number": indent.vehicle_number},
     )
     await db.commit()
     await db.refresh(indent)
@@ -827,6 +952,29 @@ async def _get_indent_for_journey(db: AsyncSession, indent_id: int, user) -> Ind
     return indent
 
 
+def _region_predicate(column, region_ids, include_unassigned: bool):
+    """The one place Region/Location narrowing is expressed.
+
+    Region is nullable — every indent raised before this field existed, and every
+    indent whose requester HCM has no location for, reads back NULL. `IN (...)` drops
+    those rows silently, so "Unassigned" is an explicit opt-in choice rather than
+    something a user has to discover by noticing the totals do not add up.
+    """
+    clauses = []
+    if region_ids:
+        clauses.append(column.in_(region_ids))
+    if include_unassigned:
+        clauses.append(column.is_(None))
+    if not clauses:
+        return None
+    return clauses[0] if len(clauses) == 1 else or_(*clauses)
+
+
+def _apply_region_filter(stmt, region_ids, include_unassigned: bool):
+    predicate = _region_predicate(Indent.region_id, region_ids, include_unassigned)
+    return stmt if predicate is None else stmt.where(predicate)
+
+
 def _apply_indent_filters(
     stmt,
     *,
@@ -837,7 +985,10 @@ def _apply_indent_filters(
     required_by_to: date | None = None,
     statuses: list[IndentStatus] | None = None,
     priorities: list[Priority] | None = None,
+    indent_types: list[IndentType] | None = None,
     department_ids: list[int] | None = None,
+    region_ids: list[int] | None = None,
+    include_unassigned_region: bool = False,
     is_bookmarked: str | None = None,
 ):
     term = _clean_search(search)
@@ -861,8 +1012,11 @@ def _apply_indent_filters(
         stmt = stmt.where(Indent.status.in_(_values(statuses)))
     if priorities:
         stmt = stmt.where(Indent.priority.in_(_values(priorities)))
+    if indent_types:
+        stmt = stmt.where(Indent.indent_type.in_(_values(indent_types)))
     if department_ids:
         stmt = stmt.where(Indent.department_id.in_(department_ids))
+    stmt = _apply_region_filter(stmt, region_ids, include_unassigned_region)
     if is_bookmarked:
         bookmark_value = is_bookmarked.strip().upper()
         if bookmark_value not in {"YES", "NO"}:
@@ -883,7 +1037,10 @@ async def list_indents(
     required_by_to: date | None = None,
     statuses: list[IndentStatus] | None = None,
     priorities: list[Priority] | None = None,
+    indent_types: list[IndentType] | None = None,
     department_ids: list[int] | None = None,
+    region_ids: list[int] | None = None,
+    include_unassigned_region: bool = False,
     is_bookmarked: str | None = None,
     sort_by: str = "created_at",
     sort_dir: str = "desc",
@@ -897,7 +1054,9 @@ async def list_indents(
     stmt = _apply_indent_filters(
         stmt, search=search, date_from=date_from, date_to=date_to,
         required_by_from=required_by_from, required_by_to=required_by_to,
-        statuses=statuses, priorities=priorities, department_ids=department_ids,
+        statuses=statuses, priorities=priorities, indent_types=indent_types,
+        department_ids=department_ids, region_ids=region_ids,
+        include_unassigned_region=include_unassigned_region,
         is_bookmarked=is_bookmarked,
     )
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
@@ -952,6 +1111,9 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
     before = {
         "required_date": indent.required_date.isoformat() if indent.required_date else None,
         "priority": indent.priority,
+        "indent_type": indent.indent_type,
+        "vehicle_id": indent.vehicle_id,
+        "vehicle_number": indent.vehicle_number,
         "office_id": indent.office_id,
         "office_name": indent.office_name,
         "remarks": indent.remarks,
@@ -961,6 +1123,16 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
     indent.required_date = data.required_date
     if data.priority is not None:
         indent.priority = _validate_priority(data.priority)
+    if data.indent_type is not None:
+        indent.indent_type = _validate_indent_type(data.indent_type)
+    # Explicitly sent, so a null clears the vehicle. Omitting the key leaves whatever
+    # is already attached — the same contract office_id follows below.
+    if "vehicle_id" in data.model_fields_set:
+        indent.vehicle_id, indent.vehicle_number = await _resolve_vehicle(
+            db, data.vehicle_id)
+    # region_id/region_name are absent from IndentUpdate on purpose. Region is the
+    # requester's HCM location, snapshotted at create; an edit must never move an
+    # indent into another region's monthly grouping, so there is no branch for it here.
     if "office_id" in data.model_fields_set:
         office = await db.get(HcmOffice, data.office_id) if data.office_id is not None else None
         if data.office_id is not None and (office is None or not office.is_active):
@@ -994,6 +1166,9 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
         after={
             "required_date": indent.required_date.isoformat() if indent.required_date else None,
             "priority": indent.priority,
+            "indent_type": indent.indent_type,
+            "vehicle_id": indent.vehicle_id,
+            "vehicle_number": indent.vehicle_number,
             "office_id": indent.office_id,
             "office_name": indent.office_name,
             "remarks": indent.remarks,
@@ -1310,22 +1485,6 @@ async def return_indent_for_correction(
         before={"status": before_status}, after={"status": indent.status},
         summary="Returned indent for correction",
     )
-    # The correction owner is whoever the engine parked the correction on — the
-    # requester at the first rung, the approver below at any rung above it.
-    correction = await engine.get_correction_state(db, DocType.INDENT.value, indent.id)
-    owner_id = (correction or {}).get("correction_owner_employee_id")
-    if owner_id:
-        await notification_service.notify(
-            db, [owner_id],
-            title=f"{indent.indent_no} returned for correction",
-            body=comments,
-            # Not /approvals: the correction owner may not be an approver at all, so
-            # that route bounces them to Home and the notification leads nowhere. The
-            # correction form is served under indents, which they can reach.
-            deep_link=f"/indents/{indent.id}/correction",
-            entity_type=DocType.INDENT.value,
-            entity_id=indent.id,
-        )
     await db.commit()
     await db.refresh(indent)
     return await _attach_capabilities(db, indent, user)
@@ -3584,7 +3743,10 @@ async def indent_stats(
     required_by_to: date | None = None,
     statuses: list[IndentStatus] | None = None,
     priorities: list[Priority] | None = None,
+    indent_types: list[IndentType] | None = None,
     department_ids: list[int] | None = None,
+    region_ids: list[int] | None = None,
+    include_unassigned_region: bool = False,
     is_bookmarked: str | None = None,
 ) -> dict:
     """KPIs for the indent dashboard: counts by status + a few derived numbers."""
@@ -3597,7 +3759,9 @@ async def indent_stats(
     filtered_ids = _apply_indent_filters(
         base, search=search, date_from=date_from, date_to=date_to,
         required_by_from=required_by_from, required_by_to=required_by_to,
-        statuses=statuses, priorities=priorities, department_ids=department_ids,
+        statuses=statuses, priorities=priorities, indent_types=indent_types,
+        department_ids=department_ids, region_ids=region_ids,
+        include_unassigned_region=include_unassigned_region,
         is_bookmarked=is_bookmarked,
     ).subquery()
 
@@ -3607,6 +3771,20 @@ async def indent_stats(
         .group_by(Indent.status)
     )
     counts = {status: n for status, n in (await db.execute(stmt)).all()}
+
+    # Counts per Region/Location, which is what "group the monthly indents by location"
+    # asks the dashboard for. NULL regions are reported under their own bucket rather
+    # than dropped, so the rows always sum back to `total`.
+    region_stmt = (
+        select(Indent.region_id, Indent.region_name, func.count())
+        .join(filtered_ids, filtered_ids.c.id == Indent.id)
+        .group_by(Indent.region_id, Indent.region_name)
+        .order_by(func.count().desc())
+    )
+    by_region = [
+        {"region_id": region_id, "region_name": region_name, "count": n}
+        for region_id, region_name, n in (await db.execute(region_stmt)).all()
+    ]
 
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -3646,6 +3824,7 @@ async def indent_stats(
         "total_qty": float(total_qty or 0),
         "approval_rate": round((approved_active / decided) * 100, 1) if decided else 0,
         "by_status": counts,
+        "by_region": by_region,
     }
 
 
@@ -3669,6 +3848,8 @@ _ACTIVITY_RESPONSE_FIELDS = (
     "uom_code",
     "department_name",
     "office_name",
+    "region_id",
+    "region_name",
     "remarks",
     "source_type",
     "source_id",
@@ -3731,6 +3912,8 @@ def _activity_event_columns(
         _activity_value(uom_code, String).label("uom_code"),
         visible.c.department_name,
         visible.c.office_name,
+        visible.c.region_id,
+        visible.c.region_name,
         _activity_value(remarks, String).label("remarks"),
         _activity_value(source_type, String).label("source_type"),
         _activity_value(source_id, BigInteger).label("source_id"),
@@ -3797,6 +3980,8 @@ async def activity_ledger(
     item_id: int | None = None,
     statuses: list[IndentStatus] | None = None,
     priorities: list[Priority] | None = None,
+    region_ids: list[int] | None = None,
+    include_unassigned_region: bool = False,
     transaction_type: IndentActivityType | None = None,
     direction: MaterialDirection | None = None,
 ) -> dict:
@@ -3813,11 +3998,17 @@ async def activity_ledger(
         Indent.position_name,
         Indent.department_name,
         Indent.office_name,
+        Indent.region_id,
+        Indent.region_name,
         Indent.project_name,
         Indent.created_at,
     )
     if user is not None:
         visible_stmt = visible_stmt.where(await indent_access_condition(db, user))
+    # Narrowed on the CTE, not after the UNION: every branch fans one indent out into
+    # many rows, so filtering the source keeps the four joins off the excluded indents.
+    visible_stmt = _apply_region_filter(
+        visible_stmt, region_ids, include_unassigned_region)
     if required_from:
         visible_stmt = visible_stmt.where(Indent.required_date >= required_from)
     if required_to:
@@ -4043,6 +4234,8 @@ async def activity_ledger(
             visible.c.indent_no,
             visible.c.department_name,
             visible.c.office_name,
+            visible.c.region_id,
+            visible.c.region_name,
             visible.c.requested_by_name,
             visible.c.project_name,
             Allocation.id,

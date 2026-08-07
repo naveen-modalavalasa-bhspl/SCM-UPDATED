@@ -13,7 +13,7 @@ from app.platform.settings.schemas import AttachmentRead
 from app.modules.indents import service
 from app.modules.indents.enums import (
     AcknowledgmentStatus, ApprovalAction, IndentActivityType, IndentStatus,
-    MaterialDirection, Priority,
+    IndentType, MaterialDirection, Priority,
 )
 from app.modules.indents.schemas import (
     AcknowledgeIn, AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
@@ -42,7 +42,10 @@ async def list_indents(params: PageParams = Depends(), search: str | None = None
                        required_by_to: date | None = None,
                        status: list[IndentStatus] | None = Query(None),
                        priority: list[Priority] | None = Query(None),
+                       indent_type: list[IndentType] | None = Query(None),
                        department_id: list[int] | None = Query(None),
+                       region_id: list[int] | None = Query(None),
+                       region_unassigned: bool = False,
                        is_bookmarked: str | None = None,
                        sort_by: str = "created_at", sort_dir: str = "desc",
                        db: AsyncSession = Depends(get_db),
@@ -52,7 +55,9 @@ async def list_indents(params: PageParams = Depends(), search: str | None = None
         date_from=created_date_from or start_date,
         date_to=created_date_to or end_date,
         required_by_from=required_by_from, required_by_to=required_by_to,
-        statuses=status, priorities=priority, department_ids=department_id,
+        statuses=status, priorities=priority, indent_types=indent_type,
+        department_ids=department_id, region_ids=region_id,
+        include_unassigned_region=region_unassigned,
         is_bookmarked=is_bookmarked, sort_by=sort_by, sort_dir=sort_dir, user=user,
     )
 
@@ -71,7 +76,10 @@ async def stats(search: str | None = None, created_date_from: date | None = None
                 required_by_to: date | None = None,
                 status: list[IndentStatus] | None = Query(None),
                 priority: list[Priority] | None = Query(None),
+                indent_type: list[IndentType] | None = Query(None),
                 department_id: list[int] | None = Query(None),
+                region_id: list[int] | None = Query(None),
+                region_unassigned: bool = False,
                 is_bookmarked: str | None = None,
                 db: AsyncSession = Depends(get_db),
                 user=Depends(require_permission("indent.view"))):
@@ -79,7 +87,10 @@ async def stats(search: str | None = None, created_date_from: date | None = None
         db, search=search, date_from=created_date_from or start_date,
         date_to=created_date_to or end_date, required_by_from=required_by_from,
         required_by_to=required_by_to, statuses=status, priorities=priority,
-        department_ids=department_id, is_bookmarked=is_bookmarked, user=user,
+        indent_types=indent_type,
+        department_ids=department_id, region_ids=region_id,
+        include_unassigned_region=region_unassigned,
+        is_bookmarked=is_bookmarked, user=user,
     )
 
 
@@ -91,6 +102,8 @@ async def activity(params: PageParams = Depends(), search: str | None = None,
                    item_id: int | None = None,
                    status: list[IndentStatus] | None = Query(None),
                    priority: list[Priority] | None = Query(None),
+                   region_id: list[int] | None = Query(None),
+                   region_unassigned: bool = False,
                    transaction_type: IndentActivityType | None = None,
                    direction: MaterialDirection | None = None,
                    db: AsyncSession = Depends(get_db),
@@ -98,6 +111,7 @@ async def activity(params: PageParams = Depends(), search: str | None = None,
     return await service.activity_ledger(db, params, user=user, search=search, date_from=date_from,
         date_to=date_to, required_from=required_from, required_to=required_to,
         item_id=item_id, statuses=status, priorities=priority,
+        region_ids=region_id, include_unassigned_region=region_unassigned,
         transaction_type=transaction_type, direction=direction)
 
 
@@ -140,6 +154,19 @@ async def create(data: IndentCreate, db: AsyncSession = Depends(get_db),
 async def office_options(db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission("indent.view"))):
     return await service.list_office_options(db)
+
+
+@indent_router.get("/options/regions")
+async def region_options(db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.INDENT_VIEW))):
+    return await service.list_region_options(db, user)
+
+
+@indent_router.get("/options/vehicles")
+async def vehicle_options(search: str | None = None,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.INDENT_VIEW))):
+    return await service.vehicle_options(db, search)
 
 
 @indent_router.get("/{indent_id}", response_model=IndentOut)

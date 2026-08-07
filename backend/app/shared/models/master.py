@@ -1,9 +1,9 @@
 """mst_ tables — SCM's own master data. Owned by shared/."""
 from sqlalchemy import (
     JSON, Boolean, Column, Date, ForeignKey, Index, Integer, Numeric, String,
-    Text, UniqueConstraint,
+    Text, UniqueConstraint, func, select,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import column_property, relationship
 
 from app.core.database import Base
 from app.shared.models.base import (
@@ -647,6 +647,19 @@ class BomItem(Base):
     is_optional = Column(Boolean, nullable=False, default=False)
     remarks = Column(String(500), nullable=True)
     # estimated_rate / estimated_amount stay unmapped: costing is not wired yet.
+
+
+# `mst_boms.total_items` is a stored counter that nothing has ever maintained —
+# adding or removing a line never touched it, so every BOM read back as "0 items"
+# on both the masters list and the indent's Choose BOM modal. Count the lines
+# instead: a correlated subquery on every SELECT cannot drift. The stored column
+# stays mapped so inserts keep filling it (its DB default), it is just not read.
+Bom.line_count = column_property(
+    select(func.count(BomItem.id))
+    .where(BomItem.bom_id == Bom.id)
+    .correlate_except(BomItem)
+    .scalar_subquery(),
+)
 
 
 class ItemSpec(Base):
