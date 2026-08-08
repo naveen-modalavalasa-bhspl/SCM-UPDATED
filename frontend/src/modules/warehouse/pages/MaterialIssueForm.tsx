@@ -173,12 +173,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
 
   const savedLine = (i: number) => doc?.items?.[i];
   const activeSerialLine = serialLine === null ? null : form.items[serialLine];
-  const activeSerialLineReady = !!(
-    activeSerialLine?.item_id &&
-    ((activeSerialLine as any)?.is_batch_tracked ? activeSerialLine?.batch_id : true) &&
-    (isBinManaged ? activeSerialLine?.bin_id : true) &&
-    form.warehouse_id
-  );
+  // 0 is the "no bin" / "no batch" sentinel the warehouse writes, not a real id, and
+  // an issue drafted from an allocation carries it on every line. Narrowing the
+  // serial list by it would match nothing.
+  const sourceId = (value: number | null | undefined) => (value ? value : undefined);
+  const activeSerialLineReady = !!(activeSerialLine?.item_id && form.warehouse_id);
   const availableSerials = useQuery({
     queryKey: [
       "wh-issue-serials",
@@ -191,9 +190,9 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     queryFn: () =>
       listSerials({
         item_id: activeSerialLine!.item_id,
-        batch_id: activeSerialLine!.batch_id ?? undefined,
+        batch_id: sourceId(activeSerialLine!.batch_id),
         warehouse_id: form.warehouse_id,
-        bin_id: (isBinManaged ? activeSerialLine!.bin_id : 0) ?? undefined,
+        bin_id: isBinManaged ? sourceId(activeSerialLine!.bin_id) : undefined,
         status: "available",
         size: 500,
       }),
@@ -493,7 +492,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         if (!line.is_serial_tracked) return <span className="text-xs text-muted">—</span>;
         const needsBatch = (line as any).is_batch_tracked && !line.batch_id;
         const needsBin = isBinManaged && !line.bin_id;
-        const needsSource = needsBatch || needsBin;
+        // Only while the line is still editable. After approval the batch and bin
+        // pickers are locked, so demanding them here would leave the storekeeper
+        // with no way to name the units — and the serial he picks carries its own
+        // bin and batch anyway.
+        const needsSource = !locked && (needsBatch || needsBin);
         return (
           <Button
             variant="ghost"
