@@ -3260,8 +3260,12 @@ async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
 async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIssue:
     issue = await _load(db, m.MaterialIssue, issue_id, "Issue", m.MaterialIssue.items)
     issue = await _decorate_issue_serials(db, issue)
+    # The doc type the issue actually runs under, not a hardcoded WH_ISSUE: one that
+    # left a point the submitter holds runs under OWN_STOCK_ISSUE, and asking the
+    # engine for the wrong type finds no instance, returns no approvers, and hides the
+    # Approve button from the very person it is waiting on.
     issue = await _decorate_can_approve(
-        db, issue, WarehouseDocType.WH_ISSUE.value, user)
+        db, issue, await _issue_doc_type_of(db, issue.id), user)
     return await _decorate_issue_destination(db, issue)
 
 
