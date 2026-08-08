@@ -5,9 +5,10 @@ import {
   Button, Card, PageHeader, ResponsiveList, Select, StatCard, StatusPill, type Column,
 } from "@/shared/components";
 import {
-  listStockingPointTags, tagStockingPoint, untagStockingPoint, classifyMove, getWarehouses,
+  listStockingPointTags, tagStockingPoint, untagStockingPoint, classifyMove,
+  getWarehouses, searchPositions,
 } from "../api";
-import type { PositionLocationTag } from "../types";
+import type { PositionLocationTag, PositionSearchHit } from "../types";
 
 /** Tier colouring, so the chain reads at a glance rather than by reading numbers. */
 const TIER_TONE: Record<number, string> = {
@@ -35,10 +36,21 @@ function TierBadge({ tier, label }: { tier: number; label: string }) {
 export function StockingPointsPage() {
   const queryClient = useQueryClient();
   const [positionId, setPositionId] = useState("");
+  const [personQuery, setPersonQuery] = useState("");
+  const [picked, setPicked] = useState<PositionSearchHit | null>(null);
   const [warehouseId, setWarehouseId] = useState("");
   const [projectId, setProjectId] = useState("");
   const [projectName, setProjectName] = useState("");
   const [isPrimary, setIsPrimary] = useState(false);
+
+  // Only asks once there are two characters to go on — a one-letter search returns
+  // half the org and is slower than typing the rest.
+  const positionHits = useQuery({
+    queryKey: ["inventory", "position-search", personQuery],
+    queryFn: () => searchPositions(personQuery),
+    enabled: personQuery.trim().length >= 2 && !picked,
+  });
+  const hits = positionHits.data ?? [];
 
   const tags = useQuery({
     queryKey: ["inventory", "stocking-points", "tags"],
@@ -60,6 +72,7 @@ export function StockingPointsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["inventory", "stocking-points"] });
       setPositionId(""); setWarehouseId(""); setProjectId(""); setProjectName("");
+      setPersonQuery(""); setPicked(null);
       setIsPrimary(false);
     },
   });
@@ -136,16 +149,52 @@ export function StockingPointsPage() {
     <Card className="mb-4 p-4">
       <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Tag a position</p>
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Position id</span>
+        {/* A person, not a number. The field used to want hcm_positions.id, which
+            meant looking the id up in the database before anyone could tag anybody —
+            so in practice nobody did, and field staff went untagged. */}
+        <label className="relative block">
+          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Position</span>
           <input
             className={field}
-            type="number"
-            aria-label="Position id"
-            placeholder="hcm_positions.id"
-            value={positionId}
-            onChange={(e) => setPositionId(e.target.value)}
+            aria-label="Search person, employee code or position"
+            placeholder="Name, HR-EMP-… or post"
+            value={personQuery}
+            onChange={(e) => {
+              // Typing again means "I want a different person", so the previous
+              // choice is dropped and the list is allowed to reopen.
+              setPersonQuery(e.target.value);
+              setPositionId("");
+              setPicked(null);
+            }}
           />
+          {picked && <span className="mt-1 block text-xs text-success">
+            {picked.position_name}
+            {picked.tagged_to ? ` · already at ${picked.tagged_to}` : ""}
+          </span>}
+          {!picked && hits.length > 0 && (
+            <ul className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-line bg-content1 shadow-lg">
+              {hits.map((hit) => (
+                <li key={hit.position_id}>
+                  <button
+                    type="button"
+                    className="block w-full px-3 py-2 text-left text-sm hover:bg-content2"
+                    onClick={() => {
+                      setPositionId(String(hit.position_id));
+                      setPicked(hit);
+                      setPersonQuery(hit.employee_name ?? hit.position_name);
+                    }}
+                  >
+                    <strong className="text-ink">{hit.employee_name ?? "Vacant post"}</strong>
+                    {hit.employee_code ? <span className="text-muted"> · {hit.employee_code}</span> : null}
+                    <span className="block text-xs text-muted">{hit.position_name}</span>
+                    {hit.tagged_to && <span className="block text-xs text-warn">
+                      already tagged to {hit.tagged_to}
+                    </span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </label>
         <Select
           label="Stocking point"

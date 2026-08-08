@@ -7,15 +7,21 @@ to "does the Inventory Manager have to approve this?".
 Nothing here is stored on a document. A movement's kind is a function of its two
 endpoints, so it is computed on the way in and can never disagree with them.
 """
-from sqlalchemy import select, update
+import logging
+
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.platform.hcm.models import HcmPosition
+from app.platform.hcm.models import (
+    HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
+)
 from app.shared.enums import DocType, WarehouseType
 from app.shared.models.warehouse import Warehouse
 
 from .enums import LocationTier, MovementKind
 from .models import NO_PROJECT, PositionLocation
+
+logger = logging.getLogger(__name__)
 
 # Only LIP and MDP are rungs on the distribution chain. Everything else a warehouse
 # can be — MAIN, TRANSIT, QUARANTINE, SCRAP — sits at the top: they are all places
@@ -157,6 +163,73 @@ async def primary_location_for(db: AsyncSession, position_id: int | None) -> int
     return rows[0][0] if rows else None
 
 
+async def ensure_point_for_position(db: AsyncSession, position_id: int | None) -> int | None:
+    """The stocking point a position draws into, provisioning one if it has none.
+
+    Field staff — storekeeper, lab technician, DEO — do not get a stocking point
+    assigned to them: the office their POSITION already sits at IS their Local
+    Inventory Point. Making somebody tag each one by hand would mean every new joiner
+    silently cannot receive stock until an administrator noticed, which is exactly how
+    an indent ends up approved with nowhere to deliver.
+
+    So the office is turned into a LIP the first time one is needed: one warehouse per
+    office, `LIP-<office id>`, carrying the office's own name. Idempotent — the second
+    caller finds the row the first one made. An explicit tag always wins, so anyone who
+    has been placed somewhere deliberately keeps that placement.
+    """
+    if position_id is None:
+        return None
+
+    existing = await primary_location_for(db, position_id)
+    if existing is not None:
+        return existing
+
+    office = (await db.execute(
+        select(HcmPosition.office_id, HcmPosition.name)
+        .where(HcmPosition.id == position_id)
+    )).first()
+    if office is None or office[0] is None:
+        return None
+    office_id, position_name = office
+
+    warehouse_id = (await db.execute(
+        select(Warehouse.id).where(
+            Warehouse.office_id == office_id,
+            Warehouse.warehouse_type == WarehouseType.LIP.value,
+            Warehouse.is_active.is_(True),
+        ).limit(1)
+    )).scalar_one_or_none()
+
+    if warehouse_id is None:
+        office_name = (await db.execute(
+            select(HcmOffice.name).where(HcmOffice.id == office_id)
+        )).scalar_one_or_none()
+        label = office_name or f"Office {office_id}"
+        warehouse = Warehouse(
+            code=f"LIP-{office_id}",
+            name=f"{label} — Local Inventory Point",
+            office_id=office_id,
+            office_name=office_name,
+            warehouse_type=WarehouseType.LIP.value,
+            is_bin_managed=False,
+            is_active=True,
+        )
+        db.add(warehouse)
+        await db.flush()
+        warehouse_id = warehouse.id
+        logger.info(
+            "Provisioned LIP %s for office %s, first needed by position %s (%s)",
+            warehouse.code, office_id, position_id, position_name,
+        )
+
+    db.add(PositionLocation(
+        position_id=position_id, warehouse_id=warehouse_id,
+        project_id=NO_PROJECT, is_primary=1, is_active=1,
+    ))
+    await db.flush()
+    return warehouse_id
+
+
 async def warehouses_visible_to(db: AsyncSession, user) -> set[int] | None:
     """Subtree-scoped stocking points for a login, or None when unscoped.
 
@@ -293,3 +366,61 @@ async def untag(db: AsyncSession, tag_id: int) -> None:
         PositionLocation.id == tag_id,
     ).values(is_active=0))
     await db.commit()
+
+
+async def search_positions(db: AsyncSession, query: str, limit: int = 20) -> list[dict]:
+    """Positions matching a person's name, their employee code, or the post's name.
+
+    All three because nobody thinks in `hcm_positions.id`: an administrator knows the
+    person ("Ravi"), the payroll code ("HR-EMP-15905") or the post ("STORE KEEPER —
+    SURABHI"). Making them look the id up in the database first is how the screen sat
+    unusable.
+
+    One row per position, not per person: somebody holding two posts is tagged twice,
+    and scope follows whichever post they are working as.
+    """
+    term = (query or "").strip()
+    if len(term) < 2:
+        return []
+    like = f"%{term}%"
+
+    rows = (await db.execute(
+        select(
+            HcmPosition.id, HcmPosition.name, HcmPosition.office_id,
+            HcmEmployee.emp_code, HcmEmployee.full_name,
+        )
+        .join(HcmPositionAssignment,
+              HcmPositionAssignment.position_id == HcmPosition.id, isouter=True)
+        .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id,
+              isouter=True)
+        .where(or_(
+            HcmPosition.name.like(like),
+            HcmEmployee.full_name.like(like),
+            HcmEmployee.emp_code.like(like),
+        ))
+        .order_by(HcmPosition.name)
+        .limit(limit)
+    )).all()
+
+    # What each one is already tagged to, so the screen can say "already placed"
+    # rather than letting somebody tag the same post twice and wonder why nothing
+    # changed (the unique index makes the second attempt a no-op).
+    position_ids = [r[0] for r in rows]
+    tagged: dict[int, str] = {}
+    if position_ids:
+        for position_id, code in (await db.execute(
+            select(PositionLocation.position_id, Warehouse.code)
+            .join(Warehouse, Warehouse.id == PositionLocation.warehouse_id)
+            .where(PositionLocation.position_id.in_(position_ids),
+                   PositionLocation.is_active == 1)
+        )).all():
+            tagged.setdefault(position_id, code)
+
+    return [{
+        "position_id": r[0],
+        "position_name": r[1],
+        "office_id": r[2],
+        "employee_code": r[3],
+        "employee_name": r[4],
+        "tagged_to": tagged.get(r[0]),
+    } for r in rows]

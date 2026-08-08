@@ -700,3 +700,14 @@ export interface MyStockingPoints {
   warehouse_ids: number[];
   tags: PositionLocationTag[];
 }
+
+/** A position the tagging screen can offer, found by person, code or post name. */
+export interface PositionSearchHit {
+  position_id: number;
+  position_name: string;
+  office_id?: number | null;
+  employee_code?: string | null;
+  employee_name?: string | null;
+  /** Warehouse code it is already tagged to, if any — so the screen can say so. */
+  tagged_to?: string | null;
+}

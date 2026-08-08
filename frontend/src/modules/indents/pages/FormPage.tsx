@@ -82,25 +82,6 @@ function clearResolvedDuplicateErrors(lines: Line[]) {
   });
 }
 
-function DeliveryOfficeSelector({
-  value,
-  onChange,
-  options,
-}: {
-  value: number | "";
-  onChange: (value: number | "") => void;
-  options: { value: number; label: string }[];
-}) {
-  return (
-    <Select
-      placeholder="Office is assigned from your position"
-      value={value}
-      onChange={(nextValue) => onChange(nextValue === "" ? "" : Number(nextValue))}
-      options={options}
-    />
-  );
-}
-
 export function IndentFormPage() {
   const nav = useNavigate();
   const [searchParams] = useSearchParams();
@@ -288,15 +269,17 @@ export function IndentFormPage() {
   const hasMissingQtyError = missingQtyRows.size > 0;
 
   const itemOptions = items.map((it) => ({ value: it.id, label: `${it.code} — ${it.name}` }));
-  const deliveryOptions = [
-    ...(deliveryOfficeId && !offices.some((office) => office.id === deliveryOfficeId)
-      ? [{
-          id: deliveryOfficeId,
-          name: me?.active_position?.office_name ?? me?.employee.office_name ?? "Tagged office",
-        }]
-      : []),
-    ...offices,
-  ].map((office) => ({ value: office.id, label: office.name }));
+  /** The office this indent delivers to, for display only.
+   *
+   *  An existing indent shows what it was raised against; a new one shows the office
+   *  the raiser's position carries. The master list is the last resort — the position
+   *  snapshot can name an office the offices endpoint does not return. */
+  const deliveryOfficeName = hasExistingIndent
+    ? (draft?.office_name ?? "—")
+    : (me?.active_position?.office_name
+      ?? me?.employee.office_name
+      ?? offices.find((office) => office.id === deliveryOfficeId)?.name
+      ?? "No office assigned to your position");
 
   if (isEditing && isDraftLoading) return <Skeleton className="h-40 rounded-2xl" />;
 
@@ -492,16 +475,12 @@ export function IndentFormPage() {
             <Field label="Raised as">
               <Input value={me?.active_position?.name ?? "No position assigned"} disabled />
             </Field>
+            {/* Read-only, like "Raised as" above it. Where the goods land follows the
+                raiser's position — it is not theirs to choose, and letting them pick
+                meant an indent could be delivered to an office they do not work at.
+                The id is still submitted; only the choosing is gone. */}
             <Field label="Delivery location">
-              {hasExistingIndent ? (
-                <Input value={draft?.office_name ?? "—"} disabled />
-              ) : (
-                <DeliveryOfficeSelector
-                  value={deliveryOfficeId}
-                  onChange={setDeliveryOfficeId}
-                  options={deliveryOptions}
-                />
-              )}
+              <Input value={deliveryOfficeName} disabled />
             </Field>
             <Field label="Remarks">
               <Input value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Optional" />

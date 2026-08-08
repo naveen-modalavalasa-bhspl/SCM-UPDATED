@@ -60,6 +60,11 @@ STOCK_RESERVE = "stock.reserve"
 STOCK_VALUATION_VIEW = "stock.valuation.view"
 STOCK_TRANSFER = "stock.transfer"
 STOCK_VIEW_SUBTREE = "stock.view.subtree"
+# Configuring the MDP/LIP chain is inventory's own business. It used to borrow
+# admin.settings.manage, which quietly handed whoever could see the Stocking Points
+# screen the whole admin settings permission — and that one unscopes every stock
+# list. A module's configuration screen gets a module permission.
+STOCK_POINTS_MANAGE = "stock.points.manage"
 # Under `stock`, not a resource of its own: a one-permission resource would open a
 # lone group in Job Profiles beside the real ones, which reads as a mistake.
 STOCK_TRANSFER_APPROVE = "stock.transfer.approve"
@@ -173,6 +178,8 @@ ALL_PERMISSIONS: list[Perm] = [
          "Transfer stock between warehouses"),
     Perm(STOCK_VIEW_SUBTREE, "inventory", "stock", "view_subtree",
          "View stock at every point reporting under you, not just your own"),
+    Perm(STOCK_POINTS_MANAGE, "inventory", "stock", "points_manage",
+         "Tag positions to stocking points (MDP / LIP)"),
     Perm(STOCK_TRANSFER_APPROVE, "inventory", "stock", "transfer_approve",
          "Approve a stock transfer that crosses a project boundary"),
     Perm(ALLOCATION_VIEW, "inventory", "allocation", "view", "View stock allocations"),

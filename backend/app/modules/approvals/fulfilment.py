@@ -65,7 +65,11 @@ async def _requester_point(db: AsyncSession, indent: Indent) -> int | None:
             HcmPositionAssignment.employee_id == indent.requested_by_id,
         ).limit(1)
     )).scalar_one_or_none()
-    return await locations.primary_location_for(db, position_id)
+    # Provisions the raiser's LIP from their position's office if nobody has tagged
+    # one. Field staff are never tagged by hand — the office they sit at IS their
+    # local inventory point — so this is what stops a new joiner's indent being
+    # approved with nowhere to deliver.
+    return await locations.ensure_point_for_position(db, position_id)
 
 
 async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dict:

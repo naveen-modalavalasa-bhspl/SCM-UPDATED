@@ -310,13 +310,13 @@ async def list_position_locations(position_id: int | None = None,
 @points_router.post("/tags", response_model=PositionLocationOut)
 async def tag_position_location(body: PositionLocationIn,
                                 db: AsyncSession = Depends(get_db),
-                                user=Depends(require_permission(perms.ADMIN_SETTINGS_MANAGE))):
+                                user=Depends(require_permission(perms.STOCK_POINTS_MANAGE))):
     return await locations.tag_position(db, body, user)
 
 
 @points_router.delete("/tags/{tag_id}")
 async def untag_position_location(tag_id: int, db: AsyncSession = Depends(get_db),
-                                  user=Depends(require_permission(perms.ADMIN_SETTINGS_MANAGE))):
+                                  user=Depends(require_permission(perms.STOCK_POINTS_MANAGE))):
     await locations.untag(db, tag_id)
     return {"success": True}
 
@@ -341,6 +341,13 @@ async def my_stocking_points(db: AsyncSession = Depends(get_db),
         "warehouse_ids": sorted(await locations.location_ids_for_subtree(db, position_id)),
         "tags": await locations.list_tags(db, position_id),
     }
+
+
+@points_router.get("/positions")
+async def search_positions(q: str = "", db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.STOCK_POINTS_MANAGE))):
+    """Find a position by person, employee code or post name — nobody knows ids."""
+    return await locations.search_positions(db, q)
 
 
 router.include_router(points_router)

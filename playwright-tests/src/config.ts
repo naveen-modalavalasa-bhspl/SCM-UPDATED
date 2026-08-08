@@ -78,6 +78,9 @@ interface Users {
   inventory?: Account;
   /** Unscoped reader/writer for specs that configure rather than transact. */
   admin?: Account;
+  /** One real reporting line, bottom-up: storekeeper first, then each rung above
+   *  them. The cascade spec walks it in order, so the ARRAY ORDER is the ladder. */
+  cascadeChain?: Account[];
 }
 
 /**

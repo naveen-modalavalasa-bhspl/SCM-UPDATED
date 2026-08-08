@@ -173,7 +173,7 @@ PAGE_TREE = [
      "Allocation Approvals", "badge-check",
      P.ALLOCATION_APPROVE, 57, "grp_inventory"),
     ("inv_stocking_points", "/inventory/stocking-points", "Stocking Points", "map-pin",
-     P.ADMIN_SETTINGS_MANAGE, 58, "grp_inventory"),
+     P.STOCK_POINTS_MANAGE, 58, "grp_inventory"),
     # Parked, not deleted: Demand by Item, Adjustments and Valuation & Ageing are
     # off the menu (rbac_pages.is_active = 0) until they are implemented properly.
     # seed_pages sets is_active = True for everything in PAGE_TREE, so leaving the

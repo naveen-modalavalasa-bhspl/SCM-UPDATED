@@ -1,7 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
   PositionLocationTag, PositionLocationWrite, MovementClassification,
-  MyStockingPoints,
+  MyStockingPoints, PositionSearchHit,
   AllocationDecision,
   AllocationHistoryRow,
   Allocation,
@@ -330,6 +330,11 @@ export const classifyMove = (fromWarehouseId?: number | null, toWarehouseId?: nu
     params: { from_warehouse_id: fromWarehouseId, to_warehouse_id: toWarehouseId },
   }).then((r) => r.data);
 
+/** Find a position by person, employee code or post name. Nobody knows raw ids. */
+export const searchPositions = (query: string) =>
+  api.get<PositionSearchHit[]>("/api/stocking-points/positions", { params: { q: query } })
+    .then((r) => r.data);
+
 /** The points this login draws from and can see into — own plus reporting subtree. */
 export const getMyStockingPoints = () =>
   api.get<MyStockingPoints>("/api/stocking-points/mine").then((r) => r.data);
@@ -368,4 +373,5 @@ export const inventoryApi = {
   untagStockingPoint,
   classifyMove,
   getMyStockingPoints,
+  searchPositions,
 };
