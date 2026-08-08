@@ -17,8 +17,10 @@ import { Section } from "../components/DocumentMeta";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import { fmtQty, num } from "../format";
 import type { StockMovementOrderItemWrite } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 export default function StockMovementForm() {
+  const pointLabel = usePointLabel();
   const nav = useNavigate();
   const queryClient = useQueryClient();
 
@@ -77,7 +79,7 @@ export default function StockMovementForm() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title="New Stock Movement Order"
         actions={
           <>

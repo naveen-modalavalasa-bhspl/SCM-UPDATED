@@ -19,6 +19,7 @@ import {
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { Issue, IssueItemWrite, IssueWrite, ItemOption } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * Raise, approve and post a material issue.
@@ -54,6 +55,7 @@ const emptyLine = (): IssueItemWrite => ({
 });
 
 export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "OUT" | "IN" }) {
+  const pointLabel = usePointLabel();
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const nav = useNavigate();
@@ -515,7 +517,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title={editing ? `${doc?.issue_no ?? ""}` : `New material ${noun}`}
         actions={
           <>

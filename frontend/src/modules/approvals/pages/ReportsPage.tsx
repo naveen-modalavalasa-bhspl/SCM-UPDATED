@@ -24,7 +24,8 @@ const COLORS = ["#4169e1", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2"
 const TYPE_LABELS: Record<string, string> = {
   INDENT: "Indent", MR: "Material request", ALLOCATION: "Stock allocation",
   PO: "Purchase order", GRN: "Goods receipt", ISSUE: "Material issue",
-  WH_ISSUE: "Warehouse issue", DISPATCH: "Dispatch",
+  WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
+  OWN_STOCK_ALLOCATION: "Allocation from my point", DISPATCH: "Dispatch",
   PURCHASE_RETURN: "Purchase return",
 };
 const typeLabel = (value: string) => TYPE_LABELS[value] ?? value.replace(/_/g, " ");

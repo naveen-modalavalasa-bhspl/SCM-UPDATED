@@ -29,6 +29,7 @@ import type {
   IssueDispatchSource,
   IssueDispatchSourceItem,
 } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 const PACKAGE_TYPES = [
   { value: "BOX", label: "Box" },
@@ -148,6 +149,7 @@ function ScanCard({ spec }: { spec: ScanCardSpec }) {
 }
 
 export default function ConsignmentForm() {
+  const pointLabel = usePointLabel();
   const { id } = useParams();
   const editing = !!id && id !== "new";
   const nav = useNavigate();
@@ -529,7 +531,7 @@ export default function ConsignmentForm() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title={editing ? `Consignment ${doc?.dispatch_no ?? ""}` : "New consignment"}
         actions={
           <>

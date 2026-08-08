@@ -60,6 +60,8 @@ logger = logging.getLogger(__name__)
 MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.INDENT.value: "Indents",
     DocType.ALLOCATION.value: "Inventory",
+    DocType.OWN_STOCK_ALLOCATION.value: "Inventory",
+    DocType.OWN_STOCK_ISSUE.value: "Warehouse",
     DocType.MR.value: "Inventory",
     DocType.STOCK_TRANSFER.value: "Inventory",
     DocType.WH_ISSUE.value: "Warehouse",
@@ -70,6 +72,8 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
 DOC_TYPE_LABEL: dict[str, str] = {
     DocType.INDENT.value: "Indent",
     DocType.ALLOCATION.value: "Stock Allocation",
+    DocType.OWN_STOCK_ALLOCATION.value: "Stock Allocation (from your own point)",
+    DocType.OWN_STOCK_ISSUE.value: "Material Issue (from your own point)",
     DocType.MR.value: "Material Request",
     # Only ever raised for a transfer that crosses a project boundary — a
     # same-project transfer never starts a workflow, so this ladder stays quiet.
@@ -81,6 +85,17 @@ DOC_TYPE_LABEL: dict[str, str] = {
 
 # The order the modules are listed in on the config screen.
 MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Procurement"]
+
+# Document types whose DEFAULT approver is the raiser's own post, not somebody above
+# it. These are the events where authority comes from holding the thing rather than
+# from rank: the person who owns a stocking point decides what leaves it, and every
+# point under him is his too. A climb would ask his manager about a shelf his manager
+# does not hold. An admin can still configure a real ladder for these on the Approvals
+# Config screen — this is only what happens when nobody has.
+SELF_OWNED_DOC_TYPES = frozenset({
+    DocType.OWN_STOCK_ALLOCATION.value,
+    DocType.OWN_STOCK_ISSUE.value,
+})
 
 LADDER_CODE_PREFIX = "LADDER"
 # A hand-built ladder: an ordered list of POSTS with no climbing, for the documents
@@ -839,6 +854,41 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
                 })
         position = parent
     return dedupe_chain(chain)
+
+
+async def own_post_chain(db: AsyncSession, requester_position_id: int | None,
+                         requester_id: int | None) -> list[dict]:
+    """A one-rung chain on the raiser's OWN post.
+
+    The default for SELF_OWNED_DOC_TYPES. The raiser is deliberately NOT excluded —
+    he is the point owner, and being the one who raised it is exactly why he is the
+    right approver. Returns a real rung rather than nothing, so the document lands in
+    his approval queue as a task he has to look at, instead of being auto-approved
+    behind his back.
+    """
+    if requester_position_id is None:
+        return []
+    post = await db.get(HcmPosition, requester_position_id)
+    if post is None or not post.is_active:
+        return []
+    holders = await _position_holders(db, post.id, exclude_employee_id=None)
+    if not holders and requester_id is not None:
+        # The post exists but HCM has nobody sitting in it. The person who just raised
+        # the document is demonstrably in it, so trust that over the mirror.
+        employee = await db.get(HcmEmployee, requester_id)
+        holders = [employee] if employee is not None else []
+    if not holders:
+        return []
+    return [{
+        "sequence": 1,
+        "position_id": post.id,
+        "position_name": post.name,
+        "role_id": post.role_id,
+        "role_name": post.role_name or post.job_name or post.name,
+        "approver_ids": [h.id for h in holders],
+        "approver_names": [h.full_name for h in holders],
+        "allowed_position_ids": [post.id],
+    }]
 
 
 async def _position_holders(db: AsyncSession, position_id: int,

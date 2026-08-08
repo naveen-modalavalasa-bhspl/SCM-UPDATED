@@ -46,6 +46,11 @@ class ConsolidationApprovalIn(BaseModel):
 class ConsolidationApprovalFailureOut(BaseModel):
     indent_id: int
     reason: str
+    # True when the batch deliberately left this one alone rather than hitting a
+    # problem with it. A fully-served indent has nothing left to approve, so not
+    # approving it is the correct outcome — reporting that in red as a failure taught
+    # approvers to distrust a screen that was doing the right thing.
+    skipped: bool = False
 
 
 class ConsolidationApprovalOut(BaseModel):

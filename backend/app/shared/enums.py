@@ -103,6 +103,17 @@ class UserRole(str, Enum):
 class DocType(str, Enum):
     INDENT = "INDENT"
     ALLOCATION = "ALLOCATION"   # inventory's decision on how much stock to give
+    # The same decision, made by the person who HOLDS the stock rather than by the
+    # inventory desk: an OE serving an indent out of his own MDP or a LIP under him.
+    # A separate event because the approver is a different person for a different
+    # reason — nobody above him owns that shelf, so climbing to a manager asks the
+    # wrong question. Configured on its own row in Approvals Config.
+    OWN_STOCK_ALLOCATION = "OWN_STOCK_ALLOCATION"
+    # The physical issue out of a point you hold, to a point under you. Same document
+    # as WH_ISSUE; different approver, for the same reason as OWN_STOCK_ALLOCATION —
+    # the shelf is yours, so the sign-off is yours. Keeps the ordinary warehouse issue
+    # ladder untouched.
+    OWN_STOCK_ISSUE = "OWN_STOCK_ISSUE"
     MR = "MR"          # material request — the indent -> procurement bridge
     PO = "PO"
     GRN = "GRN"

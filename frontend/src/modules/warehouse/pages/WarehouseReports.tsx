@@ -4,6 +4,7 @@ import { Card, EmptyState, ErrorBanner, Field, Input, PageHeader, ResponsiveList
 import { Lookup } from "../components/Lookup";
 import { runReport, warehouseOptions, type ReportKey } from "../api";
 import { fmtDate, fmtMoney, fmtQty, today } from "../format";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * Warehouse reports.
@@ -34,6 +35,7 @@ interface Row {
 }
 
 export default function WarehouseReports() {
+  const pointLabel = usePointLabel();
   const [report, setReport] = useState<ReportKey>("inward-register");
   const [warehouse, setWarehouse] = useState<number | "">("");
   const [from, setFrom] = useState(() => {
@@ -76,7 +78,7 @@ export default function WarehouseReports() {
 
   return (
     <div>
-      <PageHeader eyebrow="Warehouse" title="Reports" />
+      <PageHeader eyebrow={pointLabel} title="Reports" />
 
       <SubNav
         label="Reports"

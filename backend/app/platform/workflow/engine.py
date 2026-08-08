@@ -570,8 +570,39 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
     return instance
 
 
+async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
+                          context: dict, user, project_id: int | None) -> Instance:
+    """Open an instance on a chain the caller has already worked out.
+
+    Used where the approvers do not come from a configured workflow at all — the
+    point-owner default for SELF_OWNED_DOC_TYPES. It still needs a workflow row to
+    hang off, so it borrows the doc type's fallback one; the chain on the instance is
+    what actually decides who approves, exactly as with a ladder.
+    """
+    wf = await fallback.ensure_workflow(db, doc_type)
+    instance = Instance(
+        doc_type=doc_type, doc_id=doc_id, workflow_id=wf.id,
+        project_id=project_id, resolved_chain=chain,
+        doc_no=context.get("doc_no"),
+        started_by_id=user.id, started_by_name=user.full_name,
+        status=InstanceStatus.IN_PROGRESS.value,
+    )
+    db.add(instance)
+    await db.flush()
+    db.add(Action(
+        instance_id=instance.id, stage_sequence=0, stage_name="Submitted",
+        actor_id=user.id, actor_name=user.full_name,
+        actor_position=context.get("requester_position_name"),
+        action=ApprovalAction.SUBMITTED.value,
+    ))
+    await db.flush()
+    await _open_ladder_link(db, instance, chain[0], context)
+    await db.flush()
+    return instance
+
+
 async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
-                      context: dict) -> Instance:
+                      context: dict, final: bool = False) -> Instance:
     chain = instance.resolved_chain or []
     link = _link(instance)
     if link is None:
@@ -628,7 +659,12 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
         return instance
 
     # APPROVED — one holder per rung is enough (ANY_ONE), so move on.
-    nxt = [c for c in chain if c["sequence"] > instance.current_sequence]
+    #
+    # `final` ends the ladder here even though rungs remain. The module asks for it
+    # when there is nothing left for the rungs above to decide — an approver who
+    # served the whole indent out of their own stock has finished it, and sending it
+    # on asked the DM to approve goods already committed.
+    nxt = [] if final else [c for c in chain if c["sequence"] > instance.current_sequence]
     if nxt:
         await _open_ladder_link(db, instance, nxt[0], context)
     else:
@@ -825,6 +861,15 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
         return await _start_ladder(db, found[0], found[1], doc_type, doc_id, context,
                                    user, project_id, requester_position_id)
 
+    # Nobody has configured this event, and its authority comes from holding the stock
+    # rather than from rank: the point owner approves. Climbing to his manager would
+    # ask the wrong person about a shelf he does not hold.
+    if doc_type in ladder.SELF_OWNED_DOC_TYPES:
+        chain = await ladder.own_post_chain(db, requester_position_id, user.id)
+        if chain:
+            return await _start_resolved(db, doc_type, doc_id, chain, context, user,
+                                         project_id)
+
     wf, used_fallback = await _active_workflow(db, doc_type)
     applicable = await _applicable_stages(db, wf.id, context)
 
@@ -859,7 +904,7 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
 
 
 async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str = "",
-              context: dict | None = None) -> Instance:
+              context: dict | None = None, final: bool = False) -> Instance:
     instance = await _load_instance(db, doc_type, doc_id)
     if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
         raise ValidationError("No in-progress approval for this document")
@@ -867,7 +912,7 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
     action = _normalize_action(action)
     context = context or {}
     if instance.resolved_chain:
-        return await _act_ladder(db, instance, action, user, comments, context)
+        return await _act_ladder(db, instance, action, user, comments, context, final)
     stage = await _get_stage(db, instance.workflow_id, instance.current_sequence)
     pending = (await db.execute(
         select(Pending).where(
@@ -1001,6 +1046,35 @@ async def abandon(db, doc_type: str, doc_id: int, user, reason: str = "") -> Ins
     ))
     await _clear_pending(db, instance.id)
     instance.status = InstanceStatus.CANCELLED.value
+    instance.completed_at = utcnow()
+    instance.current_stage_name = None
+    await db.flush()
+    return instance
+
+
+async def settle(db, doc_type: str, doc_id: int, user, reason: str = "") -> Instance | None:
+    """End an approval because the request it was about has been satisfied.
+
+    Not `abandon()` — nothing was withdrawn; and not `act()` — the person calling this
+    is not necessarily an approver on the chain. An indent served in full out of
+    somebody's own stock has nothing left for the rungs above to decide, so the task
+    must stop existing. Leaving it open kept a settled request sitting in the
+    approver's queue and in every count fed by it.
+
+    Recorded as a real APPROVED action so the history reads honestly rather than the
+    instance silently changing state.
+    """
+    instance = await _load_instance(db, doc_type, doc_id)
+    if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
+        return instance
+    db.add(Action(
+        instance_id=instance.id, stage_sequence=instance.current_sequence,
+        stage_name=instance.current_stage_name,
+        actor_id=getattr(user, "id", None), actor_name=getattr(user, "full_name", None),
+        actor_position=None, action=ApprovalAction.APPROVED.value, comments=reason,
+    ))
+    await _clear_pending(db, instance.id)
+    instance.status = InstanceStatus.APPROVED.value
     instance.completed_at = utcnow()
     instance.current_stage_name = None
     await db.flush()

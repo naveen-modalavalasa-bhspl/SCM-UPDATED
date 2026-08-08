@@ -1,29 +1,36 @@
 """Serving an indent from the approver's own stock, at the moment of approval.
 
 This lives in approvals, not inventory, because it needs BOTH: `ind_indent_items` to
-know what was asked for, and inventory to move the goods. Inventory is the base module
-and may not import indents (rule 5), so the orchestration has to sit on this side of
-the chain. The physical move still goes through `inventory.service.move_stock()` —
-rule 7 holds, nothing here writes `stk_balance`.
+know what was asked for, and inventory to decide what may be given. Inventory is the
+base module and may not import indents (rule 5), so the orchestration has to sit on
+this side of the chain.
+
+NOTHING PHYSICALLY MOVES HERE. "Issue from my stock" records an INTENT: it raises an
+allocation against the source point the approver chose. The allocation climbs its own
+ladder, approval reserves the stock, and the goods only leave the shelf at the
+warehouse material issue. Moving stock the moment the button was clicked handed
+material out before anyone had signed for it, and left the warehouse with nothing to
+pick against.
 
 The remainder is what makes the cascade work: a line is served as far as the current
-approver can serve it, `allocated_qty` records how much, and the SAME indent travels
-on carrying `approved − allocated`. No child documents.
+approver can serve it, `allocated_qty` records how much once the allocation is
+approved, and the SAME indent travels on carrying `approved − allocated`.
 """
 import logging
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.inventory import locations
-from app.modules.inventory import service as inventory_service
-from app.modules.inventory.models import NO_PROJECT, Stock
+from app.modules.inventory.allocations import ACTIVE_ALLOCATION_STATUSES as LIVE_ALLOCATION_STATUSES
+from app.modules.inventory.models import NO_PROJECT, Allocation, AllocationItem, Stock
 from app.platform.hcm.models import HcmPositionAssignment
 from app.platform.settings.service import write_audit
-from app.shared.enums import AuditAction, RefType
+from app.shared.enums import AuditAction
+from app.shared.models.warehouse import Warehouse
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +65,34 @@ async def _stock_at(
     return {wid: qty for wid, qty in totals.items() if qty > 0}
 
 
+async def committed_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
+    """Per indent line, how much a LIVE allocation has already promised.
+
+    `allocated_quantity` only moves when an allocation is APPROVED, so on its own it
+    reads a line an approver just committed as still completely unserved: the queue
+    kept listing it, the same stock could be promised twice, and the indent climbed to
+    the DM for goods somebody downstream had already given. Draft and pending
+    allocations count here — a promise waiting on a signature is still a promise.
+    """
+    rows = (await db.execute(
+        select(AllocationItem.indent_item_id, func.sum(AllocationItem.quantity))
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .where(Allocation.indent_id == indent_id,
+               Allocation.status.in_(LIVE_ALLOCATION_STATUSES))
+        .group_by(AllocationItem.indent_item_id)
+    )).all()
+    return {line_id: _d(qty) for line_id, qty in rows}
+
+
+async def _names_for(db: AsyncSession, warehouse_ids: set[int]) -> dict[int, str]:
+    if not warehouse_ids:
+        return {}
+    rows = (await db.execute(
+        select(Warehouse.id, Warehouse.name).where(Warehouse.id.in_(warehouse_ids))
+    )).all()
+    return {wid: name for wid, name in rows}
+
+
 async def _requester_point(db: AsyncSession, indent: Indent) -> int | None:
     """The LIP the raiser draws into — their own position's primary point."""
     position_id = (await db.execute(
@@ -84,6 +119,10 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
     position_id = getattr(user, "active_position_id", None)
     my_points = await locations.location_ids_for_subtree(db, position_id)
     target = await _requester_point(db, indent)
+    # Names, once, for every point in play. A picker that offers "#12" asks the
+    # approver to know warehouse ids by heart.
+    names = await _names_for(db, my_points | ({target} if target else set()))
+    committed = await committed_by_line(db, indent_id)
 
     lines = (await db.execute(
         select(IndentItem).where(IndentItem.indent_id == indent_id)
@@ -93,7 +132,8 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
     out = []
     for line in lines:
         by_point = await _stock_at(db, line.item_id, my_points)
-        owed = remainder_of(line)
+        owed = max(remainder_of(line) - committed.get(line.id, Decimal("0")),
+                   Decimal("0"))
         on_hand = sum(by_point.values(), Decimal("0"))
         out.append({
             "line_id": line.id,
@@ -104,13 +144,16 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
             "requested_quantity": float(_d(line.quantity)),
             "approved_quantity": float(_d(line.approved_quantity)),
             "allocated_quantity": float(_d(line.allocated_quantity)),
+            # Already promised by an allocation that has not been signed off yet.
+            "committed_quantity": float(committed.get(line.id, Decimal("0"))),
             "remainder": float(owed),
             "available_at_my_points": float(on_hand),
             # What an Issue now would actually move: you cannot give more than is
             # owed, nor more than you hold.
             "issuable_now": float(min(owed, on_hand)),
             "sources": [
-                {"warehouse_id": wid, "available_quantity": float(qty)}
+                {"warehouse_id": wid, "warehouse_name": names.get(wid) or f"Point {wid}",
+                 "available_quantity": float(qty)}
                 for wid, qty in sorted(by_point.items())
             ],
         })
@@ -119,6 +162,7 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
         "target_warehouse_id": target,
+        "target_warehouse_name": names.get(target) if target else None,
         "my_warehouse_ids": sorted(my_points),
         "items": out,
     }
@@ -128,11 +172,12 @@ async def issue_from_my_stock(
     db: AsyncSession, indent_id: int, requests: list, user, reason: str = "",
     forward_remainder: bool = False,
 ) -> dict:
-    """Serve what this approver can, from their own point, right now.
+    """Record what this approver intends to give, from their own point.
 
-    One line at a time, each an ISSUE (a tier drop), so it never needs the workflow
-    engine: giving stock down your own chain is the holder's call. What is left stays
-    on the line as remainder and travels up with the indent.
+    Raises ONE allocation covering every line, against the source points chosen. The
+    allocation is the intent; its approval reserves; the warehouse material issue
+    moves. What is left over stays on the line as remainder and travels up with the
+    indent.
     """
     indent = (await db.execute(
         select(Indent).where(Indent.id == indent_id)
@@ -150,7 +195,9 @@ async def issue_from_my_stock(
     position_id = getattr(user, "active_position_id", None)
     my_points = await locations.location_ids_for_subtree(db, position_id)
 
-    issued = []
+    decisions, issued = [], []
+    committed = await committed_by_line(db, indent_id)
+    planned: dict[int, Decimal] = {}
     for request in requests:
         line = (await db.execute(
             select(IndentItem).where(
@@ -172,7 +219,10 @@ async def issue_from_my_stock(
             )
 
         qty = _d(request.quantity)
-        owed = remainder_of(line)
+        # What is left after anything a live allocation has already promised, so two
+        # approvers cannot each commit the same quantity against the same line.
+        owed = max(remainder_of(line) - committed.get(line.id, Decimal("0")),
+                   Decimal("0")) - planned.get(line.id, Decimal("0"))
         if qty <= 0:
             raise ValidationError("Issue quantity must be positive")
         if qty > owed:
@@ -180,45 +230,65 @@ async def issue_from_my_stock(
                 f"{line.item_name or line.item_code}: only {owed} still owed on this line",
             )
 
-        # Out of the approver's point, into the requester's. Two calls, because
-        # move_stock is per location and the ledger must show both sides.
-        await inventory_service.move_stock(
-            db, item_id=line.item_id, qty=qty, direction="OUT",
-            ref_type=RefType.ISSUE.value, ref_id=indent.id, ref_no=indent.indent_no,
-            user=user, warehouse_id=source, project_id=NO_PROJECT,
-        )
-        await inventory_service.move_stock(
-            db, item_id=line.item_id, qty=qty, direction="IN",
-            ref_type=RefType.ISSUE.value, ref_id=indent.id, ref_no=indent.indent_no,
-            user=user, warehouse_id=target, project_id=NO_PROJECT,
-        )
-
-        before = float(_d(line.allocated_quantity))
-        line.allocated_quantity = _d(line.allocated_quantity) + qty
+        # The decision, not the movement. One allocation line per (indent line,
+        # source point); inventory reserves it when the ladder approves.
+        decisions.append({
+            "indent_item_id": line.id,
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "requested_qty": float(owed),
+            "quantity": float(qty),
+            "warehouse_id": source,
+            "project_id": indent.project_id or NO_PROJECT,
+        })
+        planned[line.id] = planned.get(line.id, Decimal("0")) + qty
         issued.append({
             "line_id": line.id,
             "item_name": line.item_name or line.item_code,
             "quantity": float(qty),
             "from_warehouse_id": source,
             "to_warehouse_id": target,
-            "remainder": float(remainder_of(line)),
+            # `owed` already excludes everything committed and everything planned
+            # earlier in this same submission, so only this line's own quantity comes
+            # off it here.
+            "remainder": float(max(owed - qty, Decimal("0"))),
         })
 
-        await write_audit(
-            db, entity="ind_indent_items", entity_id=indent.id,
-            entity_no=indent.indent_no, action=AuditAction.UPDATE, actor=user,
-            before={f"line_{line.id}_allocated_qty": before},
-            after={f"line_{line.id}_allocated_qty": float(_d(line.allocated_quantity))},
-            summary=(f"Issued {qty} from point {source} to {target}"
-                     + (f" — {reason}" if reason else "")),
-        )
+    # Imported at the call, not at module load: indents imports approvals' schemas for
+    # its own approval payloads, and a top-level import would close the loop.
+    from app.modules.indents import service as indent_service
 
+    alloc = await indent_service.create_allocation_for_indent(
+        db, indent, decisions, user,
+        remarks=(f"Issued from own stock into point {target}."
+                 + (f" {reason}" if reason else "")).strip(),
+    )
+
+    await write_audit(
+        db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
+        action=AuditAction.UPDATE, actor=user,
+        after={"allocation_no": alloc.allocation_no, "lines": len(decisions),
+               "target_warehouse_id": target},
+        summary=(f"Allocation {alloc.allocation_no} raised from own stock"
+                 + (f" — {reason}" if reason else "")),
+    )
     await db.commit()
 
     remaining = (await db.execute(
         select(IndentItem).where(IndentItem.indent_id == indent_id)
     )).scalars().all()
-    outstanding = sum((remainder_of(line) for line in remaining), Decimal("0"))
+    # What is still owed once every live allocation is honoured — the one just raised
+    # included. Counting only `allocated_quantity` would report the full quantity as
+    # outstanding, because nothing is allocated until an allocation is approved, and
+    # send the indent climbing for goods somebody has already committed.
+    settled = await committed_by_line(db, indent_id)
+    outstanding = sum(
+        (max(remainder_of(line) - settled.get(line.id, Decimal("0")), Decimal("0"))
+         for line in remaining),
+        Decimal("0"),
+    )
 
     # Hand the rest upward. The approved quantities are passed through untouched —
     # this approver already decided them, and issuing is not a second decision — so
@@ -238,14 +308,17 @@ async def issue_from_my_stock(
                 )
                 for line in remaining
             ],
-            (f"Issued from own stock. {outstanding} still owed."
-             + (f" {reason}" if reason else "")),
+            (f"Allocated {alloc.allocation_no} from own stock. "
+             f"{outstanding} still owed." + (f" {reason}" if reason else "")),
             user,
         )
         forwarded = True
 
     return {
         "indent_id": indent_id,
+        "allocation_id": alloc.id,
+        "allocation_no": alloc.allocation_no,
+        "allocation_status": alloc.status,
         "issued": issued,
         "outstanding_quantity": float(outstanding),
         # Nothing left owed anywhere: the indent has no reason to climb further.

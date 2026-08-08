@@ -108,9 +108,25 @@ async def ensure_workflow(db: AsyncSession, doc_type: str) -> Workflow:
     current_approvers() all keep working unchanged, and the approval stays fully
     auditable in wf_actions. The definition still comes from code — this only writes
     down what code decided, and an admin can edit it afterwards.
+
+    Idempotent. `wf_workflows` is unique on (code, version), so a second call for the
+    same doc type used to raise IntegrityError rather than reuse the row it had
+    already written. That never bit the original caller — it only runs when no active
+    workflow exists, and the row it creates IS active — but any caller that needs the
+    fallback row unconditionally hit it on the second document.
     """
+    code = f"WF-FALLBACK-{doc_type}"
+    existing = (await db.execute(
+        select(Workflow).where(Workflow.code == code).order_by(Workflow.id.desc())
+    )).scalars().first()
+    if existing is not None:
+        # Reactivate rather than hand back a dead workflow: the caller asked for the
+        # fallback because it has a document that needs one right now.
+        existing.is_active = True
+        return existing
+
     wf = Workflow(
-        code=f"WF-FALLBACK-{doc_type}",
+        code=code,
         name=f"{doc_type.title()} approval (auto-created fallback)",
         doc_type=doc_type, is_active=True, effective_from=utcnow().date(),
     )

@@ -252,6 +252,31 @@ _TIER_LABEL = {
 }
 
 
+# What each stocking-point type is called on screen. LIP and MDP are rungs on the
+# distribution chain, not warehouses, and the people holding them never call them one.
+POINT_LABEL = {
+    WarehouseType.MDP.value: "MDP",
+    WarehouseType.LIP.value: "LIP",
+}
+
+
+async def describe_point(db: AsyncSession, warehouse_id: int | None) -> dict:
+    """Name and screen label for one stocking point. Falls back to "Warehouse"."""
+    if warehouse_id is None:
+        return {"point_type": None, "point_name": None, "point_label": "Warehouse"}
+    row = (await db.execute(
+        select(Warehouse.warehouse_type, Warehouse.name).where(Warehouse.id == warehouse_id)
+    )).first()
+    if row is None:
+        return {"point_type": None, "point_name": None, "point_label": "Warehouse"}
+    warehouse_type = (row.warehouse_type or "").upper()
+    return {
+        "point_type": warehouse_type or None,
+        "point_name": row.name,
+        "point_label": POINT_LABEL.get(warehouse_type, "Warehouse"),
+    }
+
+
 def tier_label(tier: LocationTier) -> str:
     return _TIER_LABEL[tier]
 

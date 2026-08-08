@@ -18,7 +18,9 @@ import type { PendingApproval } from "../types";
 const LABELS: Record<string, string> = {
   INDENT: "Indent", ALLOCATION: "Stock allocation", MR: "Material request",
   PO: "Purchase order", GRN: "Goods receipt", ISSUE: "Material issue",
-  WH_ISSUE: "Warehouse issue", DISPATCH: "Dispatch", PURCHASE_RETURN: "Purchase return",
+  WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
+  OWN_STOCK_ALLOCATION: "Allocation from my point",
+  DISPATCH: "Dispatch", PURCHASE_RETURN: "Purchase return",
 };
 const label = (value: string) => LABELS[value] ?? value.replace(/_/g, " ");
 const DAY = 86_400_000;

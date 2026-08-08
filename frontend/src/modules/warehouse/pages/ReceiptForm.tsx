@@ -16,6 +16,7 @@ import {
 import { fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * One form for both a gate entry and a GRN — they are one `inb_receipts` row at two
@@ -82,6 +83,7 @@ const lifeDateLabel = (line?: Pick<ReceiptItemWrite, "is_asset"> | null) =>
   line?.is_asset ? "Warranty" : "Expiry";
 
 export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" }) {
+  const pointLabel = usePointLabel();
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -624,7 +626,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title={editing ? `${label} ${doc?.grn_no ?? ""}` : `New ${label.toLowerCase()}`}
         actions={
           <>

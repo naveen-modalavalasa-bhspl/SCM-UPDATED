@@ -18,7 +18,7 @@ from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams, paginate
 # inventory is the base module (imports nothing from app.modules), so calling it from
 # here is the legal direction. This is the §3 stock-availability fork.
-from app.modules.inventory import allocations
+from app.modules.inventory import allocations, locations
 from app.modules.inventory import service as inventory_service
 from app.modules.inventory.models import (
     Allocation, AllocationItem, MaterialRequest, MaterialRequestItem,
@@ -1063,10 +1063,26 @@ async def list_indents(
     if has_remainder:
         # At least one line still owes something. EXISTS rather than a join, so an
         # indent with three unfulfilled lines is still one row in the queue.
+        #
+        # Live allocations count against the remainder as well as approved ones:
+        # `allocated_quantity` does not move until an allocation is signed off, so a
+        # line an approver has just committed would otherwise sit in the queue looking
+        # untouched and invite a second allocation for the same goods.
+        committed = (
+            select(func.coalesce(func.sum(AllocationItem.quantity), 0))
+            .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+            .where(
+                AllocationItem.indent_item_id == IndentItem.id,
+                Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES),
+            )
+            .correlate(IndentItem)
+            .scalar_subquery()
+        )
         stmt = stmt.where(exists(
             select(IndentItem.id).where(
                 IndentItem.indent_id == Indent.id,
-                IndentItem.approved_quantity > IndentItem.allocated_quantity,
+                IndentItem.approved_quantity
+                > IndentItem.allocated_quantity + committed,
             ).correlate(Indent)
         ))
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
@@ -1421,8 +1437,12 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
 
 
 async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction,
-                        comments: str, user) -> Indent:
-    """APPROVE / REJECT / RETURN. Engine owns the chain; the module owns the status."""
+                        comments: str, user, final: bool = False) -> Indent:
+    """APPROVE / REJECT / RETURN. Engine owns the chain; the module owns the status.
+
+    `final` ends the ladder at this rung: nothing is left owed, so there is nothing
+    for the approvers above to decide.
+    """
     indent = await get_indent(db, indent_id, user)
     if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
         raise ValidationError("Indent is returned for correction")
@@ -1440,7 +1460,7 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
     context = _workflow_context_for_indent(indent)
     instance = await engine.act(
         db, DocType.INDENT.value, indent.id, action.value, user, comments,
-        context=context,
+        context=context, final=final and action == ApprovalAction.APPROVED,
     )
 
     if instance.status == InstanceStatus.APPROVED.value:
@@ -4712,7 +4732,27 @@ _ALLOCATION_ELIGIBLE_STATUSES = {
     IndentStatus.AWAITING_ALLOCATION.value,
     IndentStatus.PARTIALLY_FULFILLED.value,
     IndentStatus.PENDING_PROCUREMENT.value,
+    # An approver serving the request out of their own stocking point allocates while
+    # the indent is still climbing — that is the whole cascade. Refusing it here is
+    # what sent them to a separate screen to do the same thing.
+    IndentStatus.PENDING_APPROVAL.value,
 }
+
+
+async def _committed_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
+    """Per line, what a live allocation has already promised but not yet delivered.
+
+    `allocated_quantity` only moves when an allocation is APPROVED, so without this a
+    line another rung committed an hour ago still reads as completely unserved.
+    """
+    rows = (await db.execute(
+        select(AllocationItem.indent_item_id, func.sum(AllocationItem.quantity))
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .where(Allocation.indent_id == indent_id,
+               Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES))
+        .group_by(AllocationItem.indent_item_id)
+    )).all()
+    return {line_id: Decimal(str(qty or 0)) for line_id, qty in rows}
 
 
 def _ensure_allocation_eligible(indent: Indent) -> None:
@@ -4722,9 +4762,9 @@ def _ensure_allocation_eligible(indent: Indent) -> None:
         )
 
 
-async def allocation_proposal(db: AsyncSession, indent_id: int) -> dict:
-    """What the allocation screen needs: the indent lines, what is on the shelf for
-    each, split by warehouse, and how much other indents are already waiting on.
+async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> dict:
+    """What the allocation screen needs: the indent lines, what is still owed on each,
+    which stocking points hold it, and how much other indents are already waiting on.
 
     Read-only. Reserves nothing.
     """
@@ -4735,18 +4775,38 @@ async def allocation_proposal(db: AsyncSession, indent_id: int) -> dict:
         raise NotFoundError(f"Indent {indent_id} not found")
     _ensure_allocation_eligible(indent)
 
+    committed = await _committed_by_line(db, indent_id)
+
     lines = [{
         "indent_item_id": line.id,
         "item_id": line.item_id,
         "item_code": line.item_code,
         "item_name": line.item_name,
         "uom_code": line.uom_code,
-        "requested_qty": float(line.approved_quantity or line.quantity or 0),
-        "already_allocated": float(line.allocated_quantity or 0),
+        # What is STILL owed, not what was originally approved. A line another rung has
+        # already committed would otherwise be offered again in full, and the screen
+        # would happily promise the same goods twice.
+        "requested_qty": float(max(
+            Decimal(str(line.approved_quantity or line.quantity or 0))
+            - Decimal(str(line.allocated_quantity or 0))
+            - committed.get(line.id, Decimal("0")),
+            Decimal("0"),
+        )),
+        "already_allocated": float(
+            Decimal(str(line.allocated_quantity or 0)) + committed.get(line.id, Decimal("0"))
+        ),
         "project_id": indent.project_id,
     } for line in indent.items]
 
-    proposal = await allocations.propose(db, indent_id, lines)
+    # Only points this person actually holds, or that report under them. Inventory and
+    # anyone with a company-wide scope has no subtree, and sees every warehouse as
+    # before — the narrowing exists so an OE is offered their own MDP and LIP rather
+    # than every store in the company.
+    my_points = await locations.location_ids_for_subtree(
+        db, getattr(user, "active_position_id", None)) if user is not None else set()
+
+    proposal = await allocations.propose(
+        db, indent_id, lines, warehouse_ids=sorted(my_points) or None)
     return {
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
@@ -4767,19 +4827,55 @@ async def decide_allocation(db: AsyncSession, body, user):
     if indent is None:
         raise NotFoundError(f"Indent {body.indent_id} not found")
     _ensure_allocation_eligible(indent)
+    return await create_allocation_for_indent(
+        db, indent, [d.model_dump() for d in body.decisions], user, body.remarks)
 
+
+async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
+                                       decisions: list[dict], user,
+                                       remarks: str | None = None):
+    """Raise one allocation against an indent and start its ladder.
+
+    Called from the allocation screen and from an approver serving the indent out of
+    their own stocking point. The status gate lives in the callers, not here: an
+    approver commits their own stock while the indent is still PENDING_APPROVAL, which
+    is exactly the moment the allocation screen must refuse.
+    """
     # Imported here, not at module load: warehouse sits after indents in the import
     # chain, so a top-level import would run it backwards.
     from app.modules.warehouse import service as warehouse_service
 
+    # Approved allocations do not block a further one while the indent still owes
+    # something — that IS the cascade, each rung allocating what it holds. Only
+    # inventory knows about allocations and only indents knows the remainder, so the
+    # answer is worked out here and handed over.
+    await db.refresh(indent, attribute_names=["items"])
+    still_owed = any(
+        Decimal(str(line.approved_quantity or 0))
+        > Decimal(str(line.allocated_quantity or 0))
+        for line in indent.items
+    )
+
+    # Which approval event this is. Every source point inside the raiser's own
+    # reporting subtree means he is serving his own stock, and the point owner — not
+    # the inventory desk — is the one with something to say about it. A single source
+    # he does not hold makes it an ordinary inventory allocation.
+    sources = {d.get("warehouse_id") for d in decisions
+               if d.get("warehouse_id") and Decimal(str(d.get("quantity") or 0)) > 0}
+    my_points = await locations.location_ids_for_subtree(
+        db, getattr(user, "active_position_id", None))
+    doc_type = (DocType.OWN_STOCK_ALLOCATION.value
+                if sources and sources <= my_points
+                else DocType.ALLOCATION.value)
+
     alloc = await allocations.create(
-        db, indent.id, indent.indent_no,
-        [d.model_dump() for d in body.decisions], user,
+        db, indent.id, indent.indent_no, decisions, user,
+        allow_additional=still_owed, doc_type=doc_type,
         ctx={
             "department_id": indent.department_id,
             "project_id": indent.project_id,
             "project_name": indent.project_name,
-            "remarks": body.remarks,
+            "remarks": remarks,
             # The code-level ALLOCATION fallback is the allocator's reporting
             # manager. Without this, a perfectly healthy hierarchy was skipped and
             # every allocation fell through to System Admin.
@@ -4795,7 +4891,9 @@ async def decide_allocation(db: AsyncSession, body, user):
     # act_on_allocation path is never reached and the indent would sit in
     # AWAITING_ALLOCATION forever with its stock already reserved.
     if alloc.status == AllocationStatus.APPROVED.value:
+        was_in_approval = indent.status == IndentStatus.PENDING_APPROVAL.value
         await _recalculate_indent_allocation_state(db, indent)
+        await _settle_indent_approval(db, indent, user, was_in_approval)
         await db.commit()
         await db.refresh(alloc)
     return alloc
@@ -4835,10 +4933,43 @@ async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, u
     if alloc.status == AllocationStatus.APPROVED.value:
         indent = await db.get(Indent, alloc.indent_id)
         if indent is not None:
+            # Same reason as in create_allocation_for_indent: an allocation raised by
+            # an approver serving their own stock can be signed off while the indent
+            # is still climbing, and the recalculated status must not end that climb.
+            was_in_approval = indent.status == IndentStatus.PENDING_APPROVAL.value
             await _recalculate_indent_allocation_state(db, indent)
+            await _settle_indent_approval(db, indent, user, was_in_approval)
             await db.commit()
             await db.refresh(alloc)
     return alloc
+
+
+async def _settle_indent_approval(db: AsyncSession, indent: Indent, user,
+                                  was_in_approval: bool) -> None:
+    """After an allocation is approved, decide whether the indent is still climbing.
+
+    Still owed something -> it goes back to PENDING_APPROVAL and carries the remainder
+    up, which is the cascade.
+
+    Nothing owed -> the recalculated status (ALLOCATED / PARTIALLY_FULFILLED) stands
+    and the indent's own approval is settled. Both halves matter: pinning it at
+    PENDING_APPROVAL kept a fully-served request in the approver's queue AND hid it
+    from the raiser's My Deliveries, because PENDING_APPROVAL is not a receivable
+    status — so goods that were already dispatched had nowhere to be acknowledged.
+    """
+    if not was_in_approval:
+        return
+    still_owed = any(
+        Decimal(str(line.approved_quantity or 0)) > Decimal(str(line.allocated_quantity or 0))
+        for line in indent.items
+    )
+    if still_owed:
+        indent.status = IndentStatus.PENDING_APPROVAL.value
+        return
+    await engine.settle(
+        db, DocType.INDENT.value, indent.id, user,
+        "Served in full from stock — nothing left to approve.",
+    )
 
 
 async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent) -> None:

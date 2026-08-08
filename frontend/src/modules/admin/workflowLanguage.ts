@@ -4,6 +4,8 @@ export const DOC_LABEL: Record<string, string> = {
   INDENT: "Indent",
   ALLOCATION: "Inventory allocation",
   WH_ISSUE: "Warehouse material issue",
+  OWN_STOCK_ISSUE: "Material issue from your own point",
+  OWN_STOCK_ALLOCATION: "Stock allocation from your own point",
   DISPATCH: "Warehouse dispatch",
   PURCHASE_RETURN: "Purchase return",
   MR: "Material request",

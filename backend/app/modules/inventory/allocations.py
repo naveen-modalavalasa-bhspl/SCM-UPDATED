@@ -24,6 +24,7 @@ from app.modules.inventory.models import (
 from app.platform.rules import evaluator as rules
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
+from app.platform.workflow.models import Instance
 from app.shared.enums import (
     AllocationStatus, AuditAction, DocType, IndentStatus, InstanceStatus, RefType,
 )
@@ -33,6 +34,12 @@ from app.shared.models.warehouse import Warehouse
 from app.shared.numbering import next_number
 
 ZERO = Decimal("0")
+# The two events an allocation can be raised under. ALLOCATION is the inventory desk
+# deciding for somebody else's stock; OWN_STOCK_ALLOCATION is the person who holds the
+# point serving it himself. Same document, same screens — different approver.
+ALLOCATION_DOC_TYPES = (
+    DocType.ALLOCATION.value, DocType.OWN_STOCK_ALLOCATION.value,
+)
 # An allocation still in play. APPROVED belongs here: an approved allocation is a
 # live claim on stock, not a finished one — it stays live until the warehouse has
 # issued against it. Leaving it out let IND/2026-27/00013 collect four APPROVED
@@ -48,13 +55,25 @@ def _d(value) -> Decimal:
     return Decimal(str(value or 0))
 
 
-async def ensure_no_active(db: AsyncSession, indent_id: int) -> None:
-    """An indent may have only one live allocation at a time."""
+async def ensure_no_active(db: AsyncSession, indent_id: int,
+                           allow_approved: bool = False) -> None:
+    """An indent may have only one live allocation at a time.
+
+    `allow_approved` lifts the bar for the APPROVED ones only, and only when the
+    caller has checked the indent still owes something the approved allocations do
+    not cover. That is the cascade: an OE serves what they hold, their allocation is
+    approved, and the DM above must still be able to allocate the remainder. An
+    unapproved allocation always blocks — two proposals in flight for the same
+    requirement is the duplicate the guard was written for.
+    """
+    statuses = (ACTIVE_ALLOCATION_STATUSES if not allow_approved
+                else (AllocationStatus.DRAFT.value,
+                      AllocationStatus.PENDING_APPROVAL.value))
     existing = (await db.execute(
         select(Allocation.allocation_no, Allocation.status)
         .where(
             Allocation.indent_id == indent_id,
-            Allocation.status.in_(ACTIVE_ALLOCATION_STATUSES),
+            Allocation.status.in_(statuses),
         )
         .limit(1)
     )).first()
@@ -73,7 +92,8 @@ async def ensure_no_active(db: AsyncSession, indent_id: int) -> None:
 # ---------------- propose: read-only ----------------
 
 async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
-                  warehouse_types: list[str] | None = None) -> list[dict]:
+                  warehouse_types: list[str] | None = None,
+                  warehouse_ids: list[int] | None = None) -> list[dict]:
     """What each line wants, and what is actually on the shelf for it.
 
     Writes nothing, reserves nothing. This is the allocation screen's data.
@@ -87,7 +107,8 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
         strategy = availability.pick_strategy_for(item) if item else None
         rows = await availability.candidate_stock(
             db, line["item_id"], line.get("project_id") or NO_PROJECT,
-            warehouse_types, strategy or availability.PickStrategy.FIFO.value)
+            warehouse_types, strategy or availability.PickStrategy.FIFO.value,
+            warehouse_ids=warehouse_ids)
 
         by_warehouse: dict[int, dict] = {}
         for stock in rows:
@@ -124,9 +145,26 @@ async def competing_demand(db: AsyncSession, item_id: int,
 
 # ---------------- the decision ----------------
 
+async def doc_type_for(db: AsyncSession, allocation_id: int) -> str:
+    """Which approval event this allocation was raised under.
+
+    Read back off the instance rather than stored on the row, because there is no
+    column for it and the instance already knows. Newest first: a re-raise after a
+    rejection is the one in play.
+    """
+    found = (await db.execute(
+        select(Instance.doc_type)
+        .where(Instance.doc_id == allocation_id,
+               Instance.doc_type.in_(ALLOCATION_DOC_TYPES))
+        .order_by(Instance.id.desc()).limit(1)
+    )).scalar_one_or_none()
+    return found or DocType.ALLOCATION.value
+
+
 async def create(db: AsyncSession, indent_id: int, indent_no: str,
                  decisions: list[dict], user, ctx: dict | None = None,
-                 on_approved=None) -> Allocation:
+                 on_approved=None, allow_additional: bool = False,
+                 doc_type: str = DocType.ALLOCATION.value) -> Allocation:
     """Record what a person decided to give, and send it for approval.
 
     `decisions` is one entry per (indent line, warehouse) chosen: indent_item_id,
@@ -138,7 +176,7 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
     """
     if not decisions:
         raise ValidationError("An allocation needs at least one line")
-    await ensure_no_active(db, indent_id)
+    await ensure_no_active(db, indent_id, allow_approved=allow_additional)
 
     ctx = ctx or {}
     alloc = Allocation(
@@ -176,7 +214,7 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
     await db.flush()
 
     instance = await engine.start(
-        db, doc_type=DocType.ALLOCATION.value, doc_id=alloc.id,
+        db, doc_type=doc_type, doc_id=alloc.id,
         context={
             "doc_no": alloc.allocation_no,
             "doc_summary": f"Stock allocation for {indent_no}",
@@ -201,7 +239,7 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
         await _settle_approved(db, alloc, user, ctx, on_approved)
     else:
         alloc.status = AllocationStatus.PENDING_APPROVAL.value
-        await _refresh_approver(db, alloc)
+        await _refresh_approver(db, alloc, doc_type)
 
     await write_audit(
         db, entity="inv_allocations", entity_id=alloc.id,
@@ -246,8 +284,10 @@ async def _settle_approved(db: AsyncSession, alloc: Allocation, user,
     )
 
 
-async def _refresh_approver(db: AsyncSession, alloc: Allocation) -> None:
-    approvers = await engine.current_approvers(db, DocType.ALLOCATION.value, alloc.id)
+async def _refresh_approver(db: AsyncSession, alloc: Allocation,
+                            doc_type: str | None = None) -> None:
+    doc_type = doc_type or await doc_type_for(db, alloc.id)
+    approvers = await engine.current_approvers(db, doc_type, alloc.id)
     alloc.current_approver_name = ", ".join(a.full_name for a in approvers) or None
 
 
@@ -287,8 +327,11 @@ async def act(db: AsyncSession, allocation_id: int, action: str, user,
             f"Allocation is not awaiting approval (status {alloc.status})")
 
     before = alloc.status
+    # Whichever event it was raised under — the inventory desk's, or the point
+    # owner's. The instance is the record of that; nothing else needs to know.
+    doc_type = await doc_type_for(db, alloc.id)
     instance = await engine.act(
-        db, DocType.ALLOCATION.value, alloc.id, action, user, comments,
+        db, doc_type, alloc.id, action, user, comments,
         context={"doc_no": alloc.allocation_no, "department_id": alloc.department_id},
     )
 

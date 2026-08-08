@@ -7,6 +7,7 @@ import { LabelSheet, type LabelSpec } from "../components/LabelPrint";
 import { listBatches, listSerials } from "../api";
 import { daysUntil, fmtDate, fmtQty, normaliseStatus } from "../format";
 import type { Batch, SerialNumber } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * Stock segregation — which individual units and batches you are holding, and which
@@ -55,6 +56,7 @@ function expiryTone(days: number | null, label = "Expiry") {
 }
 
 export default function StockSegregation() {
+  const pointLabel = usePointLabel();
   const [tab, setTab] = useState("batches");
   const [search, setSearch] = useState("");
   const [bucket, setBucket] = useState("");
@@ -198,7 +200,7 @@ export default function StockSegregation() {
 
   return (
     <div>
-      <PageHeader eyebrow="Warehouse" title="Stock segregation" />
+      <PageHeader eyebrow={pointLabel} title="Stock segregation" />
 
       <SubNav label="Stock segregation" items={TABS} value={tab} onChange={setTab} />
 

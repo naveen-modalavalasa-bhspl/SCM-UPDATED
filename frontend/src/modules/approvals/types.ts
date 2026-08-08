@@ -227,7 +227,9 @@ export interface ConsolidationApprovalResult {
   approved_count: number;
   approved_indent_ids: number[];
   /** An indent that moved on since the screen loaded — reported, not fatal. */
-  failed: Array<{ indent_id: number; reason: string }>;
+  /** `skipped` means the batch deliberately left it alone (already served in
+   *  full), not that anything went wrong. */
+  failed: Array<{ indent_id: number; reason: string; skipped?: boolean }>;
 }
 
 export interface CorrectionIndent {
@@ -265,7 +267,7 @@ export interface IndentAvailabilityLine {
   available_at_my_points: number;
   /** min(remainder, available) — what an Issue now would actually move. */
   issuable_now: number;
-  sources: Array<{ warehouse_id: number; available_quantity: number }>;
+  sources: Array<{ warehouse_id: number; warehouse_name?: string | null; available_quantity: number }>;
 }
 
 export interface IndentAvailability {
@@ -273,6 +275,7 @@ export interface IndentAvailability {
   indent_no: string;
   /** The requester's own point — where an issue lands. Null when untagged. */
   target_warehouse_id?: number | null;
+  target_warehouse_name?: string | null;
   my_warehouse_ids: number[];
   items: IndentAvailabilityLine[];
 }
@@ -287,6 +290,11 @@ export interface IssueFromStockResult {
   /** True when the remainder was handed to the next approver in the same act. */
   forwarded?: boolean;
   indent_id: number;
+  /** The allocation this raised. Nothing moved — its approval reserves the stock,
+   *  and the warehouse material issue is what finally hands the goods over. */
+  allocation_id: number;
+  allocation_no: string;
+  allocation_status: string;
   issued: Array<{
     line_id: number;
     item_name?: string | null;

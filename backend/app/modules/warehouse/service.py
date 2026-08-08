@@ -26,6 +26,7 @@ from sqlalchemy.orm import selectinload
 from app.core.exceptions import AppException, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation as stock_allocation
+from app.modules.inventory import locations as stock_locations
 from app.modules.inventory.service import move_stock, move_stock_out
 from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
@@ -39,10 +40,11 @@ from app.modules.warehouse.enums import (
 from app.platform.settings import attachments
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
+from app.platform.workflow.models import Instance as WfInstance
 from app.modules.inventory.service import warehouse_ids_for_user
 from app.shared.scope import scope_condition
 from app.shared.enums import (
-    AuditAction, IndentStatus, InstanceStatus, POStatus, ReservationStatus,
+    AuditAction, DocType, IndentStatus, InstanceStatus, POStatus, ReservationStatus,
     RefType as InventoryRefType, StockDirection,
 )
 from app.shared.models.base import utcnow
@@ -3492,6 +3494,40 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
     return await get_issue(db, issue_id)
 
 
+# ---- which approval event a material issue runs under -------------------------
+#
+# WH_ISSUE is the ordinary warehouse issue and keeps whatever ladder is configured for
+# it. OWN_STOCK_ISSUE is the same document when the point it comes OUT of is one the
+# submitter holds — his own MDP, or a LIP reporting under him. Nobody above him owns
+# that shelf, so the default approver is him; configurable on its own row in Approvals
+# Config without touching the WH_ISSUE ladder.
+ISSUE_DOC_TYPES = (DocType.WH_ISSUE.value, DocType.OWN_STOCK_ISSUE.value)
+
+
+async def _issue_doc_type(db: AsyncSession, issue: m.MaterialIssue, user) -> str:
+    """At submit: decide which of the two events this issue is."""
+    my_points = await stock_locations.location_ids_for_subtree(
+        db, getattr(user, "active_position_id", None))
+    return (DocType.OWN_STOCK_ISSUE.value
+            if issue.warehouse_id and issue.warehouse_id in my_points
+            else DocType.WH_ISSUE.value)
+
+
+async def _issue_doc_type_of(db: AsyncSession, issue_id: int) -> str:
+    """Afterwards: read back what it was submitted under.
+
+    Off the instance rather than a column on the issue — there is no column, and the
+    instance is the authority on which chain is actually running.
+    """
+    found = (await db.execute(
+        select(WfInstance.doc_type)
+        .where(WfInstance.doc_id == issue_id,
+               WfInstance.doc_type.in_(ISSUE_DOC_TYPES))
+        .order_by(WfInstance.id.desc()).limit(1)
+    )).scalar_one_or_none()
+    return found or DocType.WH_ISSUE.value
+
+
 async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Hands the document to the workflow engine.
 
@@ -3516,8 +3552,9 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
         "doc_summary": f"Material issue {issue.issue_no}",
         "requester_position_id": getattr(user, "active_position_id", None),
     })
+    doc_type = await _issue_doc_type(db, issue, user)
     instance = await engine.start(
-        db, WarehouseDocType.WH_ISSUE.value, issue.id, context, user
+        db, doc_type, issue.id, context, user
     )
     if instance.status == InstanceStatus.APPROVED.value:
         issue.status = IssueStatus.APPROVED.value
@@ -3525,9 +3562,7 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
         issue.approved_at = utcnow()
         issue.current_approver_name = None
     else:
-        approvers = await engine.current_approvers(
-            db, WarehouseDocType.WH_ISSUE.value, issue.id
-        )
+        approvers = await engine.current_approvers(db, doc_type, issue.id)
         issue.current_approver_name = _approver_label(approvers)
         issue.status = IssueStatus.PENDING_APPROVAL.value
 
@@ -3550,9 +3585,10 @@ async def act_on_issue(
         action.lower(), "issue",
     )
     before = issue.status
+    doc_type = await _issue_doc_type_of(db, issue.id)
     instance = await engine.act(
         db,
-        WarehouseDocType.WH_ISSUE.value,
+        doc_type,
         issue.id,
         action,
         user,
@@ -3576,9 +3612,7 @@ async def act_on_issue(
         issue.current_approver_name = None
     else:
         issue.current_approver_name = _approver_label(
-            await engine.current_approvers(
-                db, WarehouseDocType.WH_ISSUE.value, issue.id
-            )
+            await engine.current_approvers(db, doc_type, issue.id)
         )
 
     await write_audit(
@@ -4014,7 +4048,7 @@ async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user
     # Withdrawing the document has to withdraw the approval behind it. Without
     # this the engine kept handing the task out: WHI/2026-27/00027 sat CANCELLED
     # in an approver's queue for two days with no decision left to make.
-    await engine.abandon(db, WarehouseDocType.WH_ISSUE.value, issue.id, user,
+    await engine.abandon(db, await _issue_doc_type_of(db, issue.id), issue.id, user,
                          reason=reason or "Issue cancelled")
 
     await _clear_issue_serial_reservations(db, issue.id)

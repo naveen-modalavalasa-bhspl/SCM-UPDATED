@@ -272,11 +272,21 @@ export const cancelIssue = (id: number, reason?: string) =>
  * The one call in this module that leaves `/api/warehouse` — deliberately: approval
  * history belongs to `platform/workflow`, which owns it for every document type, and
  * mirroring those rows onto the issue payload would be a second copy of the truth.
- * `WH_ISSUE` is the doc_type the module submits under (modules/warehouse/service.py).
+ * An issue submits under one of two doc types (modules/warehouse/service.py):
+ * `WH_ISSUE` normally, `OWN_STOCK_ISSUE` when it leaves a point the submitter holds.
+ * Which one is not on the issue payload, so both are asked and the non-empty one wins
+ * — cheaper than a round trip to find out which to ask for.
  */
-export const issueApprovalHistory = (id: number) =>
-  get<{ items: ApprovalEvent[] }>(`/api/workflow/history/WH_ISSUE/${id}`)
-    .then((r) => r.items);
+export const issueApprovalHistory = async (id: number) => {
+  const results = await Promise.all(
+    ["WH_ISSUE", "OWN_STOCK_ISSUE"].map((docType) =>
+      get<{ items: ApprovalEvent[] }>(`/api/workflow/history/${docType}/${id}`)
+        .then((r) => r.items)
+        .catch(() => [] as ApprovalEvent[]),
+    ),
+  );
+  return results.flat();
+};
 
 /* ---------------------------------------------------------------- dispatch -- */
 

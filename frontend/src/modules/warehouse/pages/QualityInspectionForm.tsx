@@ -17,6 +17,7 @@ import {
 import { fmtQty, num, percent, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { Inspection, InspectionItemWrite, InspectionParameter, InspectionWrite } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * Inspect a receipt line by line.
@@ -50,6 +51,7 @@ export default function QualityInspectionForm({
 }: {
   type?: "INCOMING" | "OUTGOING";
 }) {
+  const pointLabel = usePointLabel();
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -379,7 +381,7 @@ export default function QualityInspectionForm({
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title={editing ? `Inspection ${doc?.inspection_no ?? ""}` : "New inspection"}
         actions={
           <>

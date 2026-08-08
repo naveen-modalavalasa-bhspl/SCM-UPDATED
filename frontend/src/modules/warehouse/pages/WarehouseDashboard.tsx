@@ -9,6 +9,7 @@ import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { getDashboard, warehouseOptions } from "../api";
 import { fmtDate, fmtMoneyShort, normaliseStatus } from "../format";
 import type { WarehouseDashboard as Dash } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * The warehouse landing screen: what is waiting for someone, right now.
@@ -53,6 +54,7 @@ const DOC_ROUTE: Record<string, string> = {
 };
 
 export default function WarehouseDashboard() {
+  const pointLabel = usePointLabel();
   const [warehouse, setWarehouse] = useState("");
 
   const { data: houses = [] } = useQuery({
@@ -103,7 +105,7 @@ export default function WarehouseDashboard() {
 
   return (
     <div>
-      <PageHeader eyebrow="Warehouse" title="Overview" />
+      <PageHeader eyebrow={pointLabel} title="Overview" />
 
       <FilterBar>
         <FilterSelect

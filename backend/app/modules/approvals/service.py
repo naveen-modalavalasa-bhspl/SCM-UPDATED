@@ -268,16 +268,22 @@ async def act_on_document(
         raise ValidationError("Rejection reason is required")
 
     normalized = doc_type.upper()
-    if normalized == DocType.ALLOCATION.value:
-        from app.modules.inventory import allocations
-        await allocations.act(db, doc_id, action, user, comments)
+    if normalized in (DocType.ALLOCATION.value,
+                      DocType.OWN_STOCK_ALLOCATION.value):
+        # Through indents, not inventory.allocations directly: only this path hands
+        # inventory the indent's project, generates the warehouse fulfilment drafts,
+        # and pushes the indent's own status/allocated quantities forward. Calling
+        # allocations.act() here approved the allocation and left the indent standing
+        # still with nothing for the warehouse to pick against.
+        from app.modules.indents import service as indent_service
+        await indent_service.act_on_allocation(db, doc_id, action, user, comments)
     elif normalized == DocType.MR.value:
         from app.modules.inventory import service as inventory_service
         await inventory_service.act_on_mr(db, doc_id, action, user, comments)
     elif normalized == DocType.PO.value:
         from app.modules.procurement import service as procurement_service
         await procurement_service.act_on_po(db, doc_id, action, comments, user)
-    elif normalized in {"ISSUE", "WH_ISSUE"}:
+    elif normalized in {"ISSUE", "WH_ISSUE", DocType.OWN_STOCK_ISSUE.value}:
         from app.modules.warehouse import service as warehouse_service
         await warehouse_service.act_on_issue(db, doc_id, action, comments, user)
     elif normalized == "DISPATCH":
@@ -895,6 +901,33 @@ def _validated_quantities(
     return by_id
 
 
+async def _nothing_owed(db: AsyncSession, indent) -> bool:
+    """Every line already covered, and something actually covers it.
+
+    Covered means approved-and-allocated OR promised by a live allocation somebody has
+    raised but nobody has signed yet — an approver who commits their whole stock has
+    finished the indent even though `allocated_quantity` will not move until the
+    allocation clears its own ladder.
+
+    The "and something actually covers it" half matters: a fresh indent has 0
+    allocated against 0 approved on every line until this very call sets the
+    quantities, and reading that as "fully served" would end every ladder at the
+    first rung.
+    """
+    from .fulfilment import committed_by_line, remainder_of
+
+    committed = await committed_by_line(db, indent.id)
+    owed = sum(
+        max(remainder_of(line) - committed.get(line.id, Decimal("0")), Decimal("0"))
+        for line in indent.items
+    )
+    covered = sum(
+        Decimal(str(line.allocated_quantity or 0)) + committed.get(line.id, Decimal("0"))
+        for line in indent.items
+    )
+    return covered > 0 and owed == 0
+
+
 async def approve_indent(
     db: AsyncSession, indent_id: int, quantities: list[ApprovalQuantityIn],
     comments: str, user,
@@ -923,8 +956,12 @@ async def approve_indent(
         summary=f"Updated quantities at {instance.current_stage_name or 'approval stage'}",
     )
 
+    # Nothing left owed on any line: everything has been allocated already, so the
+    # rungs above have nothing to decide. Ending the ladder here is what stops a
+    # fully-served indent travelling to the DM for goods that are already committed.
     updated = await indent_service.act_on_indent(
         db, indent_id, ApprovalAction.APPROVED, comments, user,
+        final=await _nothing_owed(db, indent),
     )
 
     # The action may advance to another stage or complete the workflow. Return the
@@ -964,6 +1001,17 @@ async def approve_consolidation(
     for indent_id in body.indent_ids:
         try:
             quantities = quantities_by_indent.get(indent_id)
+            # Already served in full — approving it again would only push a settled
+            # document up the ladder. Reported rather than silently dropped so the
+            # screen can say why it is not in the approved count.
+            indent_now = await db.get(Indent, indent_id, options=[selectinload(Indent.items)])
+            if indent_now is not None and await _nothing_owed(db, indent_now):
+                failed.append(ConsolidationApprovalFailureOut(
+                    indent_id=indent_id,
+                    reason="Already served in full — nothing left to send on.",
+                    skipped=True,
+                ))
+                continue
             if not quantities:
                 # Nothing edited for this indent: hand on what it is already entitled
                 # to rather than sending an empty list, which approve_indent rejects.

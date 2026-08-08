@@ -336,10 +336,14 @@ async def my_stocking_points(db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(perms.STOCK_VIEW))):
     """The points this login can draw from and see into — its own plus its subtree."""
     position_id = getattr(user, "active_position_id", None)
+    primary = await locations.primary_location_for(db, position_id)
     return {
-        "primary_warehouse_id": await locations.primary_location_for(db, position_id),
+        "primary_warehouse_id": primary,
         "warehouse_ids": sorted(await locations.location_ids_for_subtree(db, position_id)),
         "tags": await locations.list_tags(db, position_id),
+        # What this person's own point IS. The warehouse screens call themselves by it,
+        # because somebody who holds an MDP does not call the place a warehouse.
+        **(await locations.describe_point(db, primary)),
     }
 
 

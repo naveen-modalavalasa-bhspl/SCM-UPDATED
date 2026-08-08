@@ -14,7 +14,8 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
     case "PO": return `/pos/${document.doc_id}?approval=1`;
     case "GRN": return `/warehouse/grn/${document.doc_id}`;
     case "ISSUE":
-    case "WH_ISSUE": return `/warehouse/material-issues/${document.doc_id}`;
+    case "WH_ISSUE":
+    case "OWN_STOCK_ISSUE": return `/warehouse/material-issues/${document.doc_id}`;
     case "DISPATCH": return `/warehouse/transactions/dispatch/${document.doc_id}`;
     case "PURCHASE_RETURN": return `/warehouse/purchase-returns/${document.doc_id}`;
     default: return "/approvals";
@@ -35,7 +36,8 @@ export function approvalDecisionDocumentPath(document: ApprovalDocument): string
     case "MR": return `/inventory/material-requests/${document.doc_id}`;
     case "GRN": return `/warehouse/grn/${document.doc_id}`;
     case "ISSUE":
-    case "WH_ISSUE": return `/warehouse/material-issues/${document.doc_id}`;
+    case "WH_ISSUE":
+    case "OWN_STOCK_ISSUE": return `/warehouse/material-issues/${document.doc_id}`;
     case "DISPATCH": return `/warehouse/transactions/dispatch/${document.doc_id}`;
     case "PURCHASE_RETURN": return `/warehouse/purchase-returns/${document.doc_id}`;
     default: return "/approvals/decisions";

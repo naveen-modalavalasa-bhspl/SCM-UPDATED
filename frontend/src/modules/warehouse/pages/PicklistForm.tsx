@@ -13,6 +13,7 @@ import {
 } from "../api";
 import { fmtQty, humanise, num, percent, today } from "../format";
 import type { Picking, PickingItem, PickingWrite } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * A picklist: build it, release it, then pick it line by line.
@@ -35,6 +36,7 @@ const REF_TYPES = [
 ];
 
 export default function PicklistForm() {
+  const pointLabel = usePointLabel();
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -173,7 +175,7 @@ export default function PicklistForm() {
     return (
       <div>
         <PageHeader
-          eyebrow="Warehouse"
+          eyebrow={pointLabel}
           title="New material fulfilment"
           actions={
             <>
@@ -344,7 +346,7 @@ export default function PicklistForm() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title={`Material fulfilment ${doc.pick_no}`}
         actions={
           <>

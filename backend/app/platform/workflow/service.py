@@ -557,6 +557,8 @@ async def _require_action_permission(db: AsyncSession, doc_type: str, user) -> N
     required = {
         DocType.INDENT.value: perms.INDENT_APPROVE,
         DocType.ALLOCATION.value: perms.ALLOCATION_APPROVE,
+        DocType.OWN_STOCK_ALLOCATION.value: perms.ALLOCATION_APPROVE,
+        DocType.OWN_STOCK_ISSUE.value: perms.ISSUE_APPROVE,
         DocType.MR.value: perms.MR_APPROVE,
         DocType.PO.value: perms.PO_APPROVE,
         DocType.GRN.value: perms.GRN_QC,

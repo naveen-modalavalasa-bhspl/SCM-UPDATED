@@ -14,6 +14,7 @@ import {
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import type { PurchaseReturn, PurchaseReturnItemWrite, PurchaseReturnWrite } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * Send stock back to a vendor.
@@ -37,6 +38,7 @@ const emptyLine = (): PurchaseReturnItemWrite => ({
 });
 
 export default function PurchaseReturnForm() {
+  const pointLabel = usePointLabel();
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -251,7 +253,7 @@ export default function PurchaseReturnForm() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title={editing ? `Return ${doc?.return_no ?? ""}` : "New purchase return"}
         actions={
           <>

@@ -8,6 +8,7 @@ import { LabelSheet, type LabelSpec } from "../components/LabelPrint";
 import { Lookup } from "../components/Lookup";
 import { addPackage, deletePackage, getDispatch, listDispatches } from "../api";
 import { fmtQty } from "../format";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * The packing bench: box a dispatch up and print the labels.
@@ -31,6 +32,7 @@ const PACKAGE_TYPES = [
 ];
 
 export default function OutwardLabelling() {
+  const pointLabel = usePointLabel();
   const qc = useQueryClient();
   const [dispatchId, setDispatchId] = useState<number | "">("");
   const [selected, setSelected] = useState<number[]>([]);
@@ -93,7 +95,7 @@ export default function OutwardLabelling() {
 
   return (
     <div>
-      <PageHeader eyebrow="Warehouse" title="Outward labelling" />
+      <PageHeader eyebrow={pointLabel} title="Outward labelling" />
 
       <Card className="mb-4 p-3">
         <div className="max-w-md">

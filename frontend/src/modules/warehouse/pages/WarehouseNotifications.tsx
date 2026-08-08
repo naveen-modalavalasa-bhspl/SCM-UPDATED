@@ -5,6 +5,7 @@ import { Bell, CheckCheck } from "lucide-react";
 import { Button, Card, EmptyState, ErrorBanner, PageHeader, SubNav } from "@/shared/components";
 import { listNotifications, markAllNotificationsRead, markNotificationRead } from "../api";
 import { fmtDateTime } from "../format";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * Warehouse notifications.
@@ -19,6 +20,7 @@ const TABS = [
 ];
 
 export default function WarehouseNotifications() {
+  const pointLabel = usePointLabel();
   const nav = useNavigate();
   const qc = useQueryClient();
   const [tab, setTab] = useState("unread");
@@ -39,7 +41,7 @@ export default function WarehouseNotifications() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title="Notifications"
         actions={
           unread > 0 ? (

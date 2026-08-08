@@ -197,14 +197,19 @@ export const rejectMaterialRequest = (id: number, comments = "") =>
  * endpoint: the indent list already filters by status, and a second way to ask the
  * same question would be a second thing to keep in step.
  */
-export const getFulfillmentQueue = (status = "PARTIALLY_FULFILLED") =>
+/**
+ * Everything that still owes something, whatever status it is sitting in.
+ *
+ * has_remainder alone: only indents whose approved quantity exceeds what has been
+ * allocated. Pairing it with a status hid the whole queue — an indent part-served on
+ * its way up approval is still PENDING_APPROVAL, and one nobody has touched is
+ * AWAITING_ALLOCATION; neither is PARTIALLY_FULFILLED, which is what the filter asked
+ * for. The remainder IS the queue, so it is the only filter.
+ */
+export const getFulfillmentQueue = (status?: string) =>
   api
     .get<Page<Record<string, unknown>>>("/api/indents", {
-      // has_remainder: only indents that still owe something (approved > allocated).
-      // Without it the queue kept listing indents an approver had already served
-      // from their own point, because the STATUS does not change when a line is
-      // partly issued — only the remainder does.
-      params: { status, size: 100, has_remainder: true },
+      params: { size: 100, has_remainder: true, ...(status ? { status } : {}) },
     })
     .then((r) => r.data);
 
@@ -232,9 +237,14 @@ export const getAllocationHistory = (id: number) =>
     .get<{ items: AllocationHistoryRow[] }>(`/api/workflow/history/ALLOCATION/${id}`)
     .then((r) => r.data.items);
 
+// Both allocation events land on the same screen. OWN_STOCK_ALLOCATION is the same
+// document decided by the person who holds the point rather than by the inventory
+// desk — only the approver differs, so there is nothing to separate in the UI.
+const ALLOCATION_DOC_TYPES = ["ALLOCATION", "OWN_STOCK_ALLOCATION"];
+
 export const getPendingInventoryApprovals = () =>
   api.get<{ items: WorkflowPending[] }>("/api/workflow/pending")
-    .then((r) => r.data.items.filter((item) => item.doc_type === "ALLOCATION"));
+    .then((r) => r.data.items.filter((item) => ALLOCATION_DOC_TYPES.includes(item.doc_type)));
 
 // ---- New Inventory Module Endpoints ----
 

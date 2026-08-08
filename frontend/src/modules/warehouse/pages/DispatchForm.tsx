@@ -19,6 +19,7 @@ import { addDispatchEvent, cancelDispatch, dispatchGateOut, getDispatch, listCon
 import { fmtDate, fmtMoney, fmtQty, humanise, num } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { Dispatch, DispatchItem, DispatchPackage } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 const EVENTS = [
   { value: "PICKED_UP", label: "Picked up" },
@@ -63,6 +64,7 @@ const destinationOf = (doc: Dispatch) =>
   ?? "";
 
 export default function DispatchForm() {
+  const pointLabel = usePointLabel();
   const { id } = useParams();
   const nav = useNavigate();
   const [searchParams] = useSearchParams();
@@ -151,7 +153,7 @@ export default function DispatchForm() {
     return (
       <div>
           <PageHeader
-          eyebrow="Warehouse"
+          eyebrow={pointLabel}
           title="Confirm dispatch"
           actions={
             <>
@@ -203,7 +205,7 @@ export default function DispatchForm() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title={`Dispatch ${doc.dispatch_no}`}
         actions={
           <>

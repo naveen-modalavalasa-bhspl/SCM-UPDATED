@@ -9,6 +9,7 @@ import { ErrorBanner } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { warehouseOptions } from "../api";
 import type { ListParams, Page } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /** What each warehouse type is called on screen. LIP and MDP are rungs on the
  *  distribution chain, not warehouses, and the people holding them do not call them
@@ -65,7 +66,7 @@ export interface DocumentListProps<T> {
 }
 
 export function DocumentList<T>({
-  eyebrow = "Warehouse",
+  eyebrow,
   title,
   queryKey,
   fetch,
@@ -135,6 +136,23 @@ export function DocumentList<T>({
 
   const tiles = kpis?.(all) ?? [];
 
+  // The heading says what the point IS, not what the module is called. A DM working
+  // their MDP should read "MDP · Kadapa Store", not "Warehouse" — the picker already
+  // told them the type, and the page they land on ought to agree with it.
+  const myLabel = usePointLabel();
+  const selectedPoint = warehouse
+    ? houses.find((w) => String(w.id) === String(warehouse))
+    : undefined;
+  const selectedLabel = POINT_LABEL[
+    (selectedPoint as { warehouse_type?: string } | undefined)?.warehouse_type ?? ""
+  ];
+  // A specific point is picked: say what THAT point is. Otherwise fall back to what
+  // this person's own point is called — an MDP holder should never be told they are
+  // looking at a "warehouse".
+  const heading = selectedPoint
+    ? [selectedLabel ?? "Warehouse", selectedPoint.name].filter(Boolean).join(" · ")
+    : (eyebrow ?? myLabel);
+
   const openRow = onRowClick ?? ((row: T) => nav(String(keyOf(row))));
 
   const create = (onCreate || createTo) && (
@@ -146,7 +164,7 @@ export function DocumentList<T>({
   return (
     <div>
       <PageHeader
-        eyebrow={eyebrow}
+        eyebrow={heading}
         title={title}
         actions={createPermission && create ? <Can do={createPermission}>{create}</Can> : create}
       />

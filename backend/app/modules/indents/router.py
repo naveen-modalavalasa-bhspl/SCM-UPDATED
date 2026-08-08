@@ -290,7 +290,7 @@ alloc_router = APIRouter(prefix="/api/allocations")
 @alloc_router.get("/proposal/{indent_id}")
 async def allocation_proposal(indent_id: int, db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.ALLOCATION_VIEW))):
-    return await service.allocation_proposal(db, indent_id)
+    return await service.allocation_proposal(db, indent_id, user)
 
 
 @alloc_router.get("", response_model=Page[AllocationListRow])

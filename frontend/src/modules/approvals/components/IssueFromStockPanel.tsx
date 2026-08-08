@@ -81,9 +81,12 @@ export function IssueFromStockPanel({ indentId }: { indentId: number }) {
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">Serve from your own stock</p>
           <p className="mt-1 text-sm text-body">
             {servable.length > 0
-              ? "Issue what you hold now — whatever is left stays on this indent and goes up to the next approver."
+              ? "Commit what you hold now — this raises an allocation for approval; the goods leave the shelf at the warehouse material issue. Whatever is left stays on this indent and goes up to the next approver."
               : "You hold none of what is still owed, so this indent moves up as it is."}
           </p>
+          {data.target_warehouse_name && (
+            <p className="mt-1 text-xs text-muted">Delivering into {data.target_warehouse_name}.</p>
+          )}
         </div>
         {data.target_warehouse_id
           ? <StatusPill status="ISSUE" />
@@ -135,7 +138,7 @@ export function IssueFromStockPanel({ indentId }: { indentId: number }) {
             onClick={() => issue.mutate()}
           >
             <PackageCheck className="h-4 w-4" />
-            {issue.isPending ? "Issuing…" : "Issue now"}
+            {issue.isPending ? "Allocating…" : "Allocate from my stock"}
           </Button>
         </div>
       </div>
@@ -144,9 +147,11 @@ export function IssueFromStockPanel({ indentId }: { indentId: number }) {
         {(issue.error as Error).message}
       </p>}
       {issue.data && <p className={`rounded-xl p-3 text-sm ${issue.data.fully_served ? "bg-success/10 text-success" : "bg-brand-050 text-brand-700"}`}>
-        Issued {issue.data.issued.length} line{issue.data.issued.length === 1 ? "" : "s"}.
+        Allocation {issue.data.allocation_no} raised for {issue.data.issued.length} line
+        {issue.data.issued.length === 1 ? "" : "s"}. Nothing has moved yet — the stock is
+        handed over at the warehouse material issue once this allocation is approved.
         {issue.data.fully_served
-          ? " Nothing is outstanding — this indent is fully served."
+          ? " Nothing else is outstanding on this indent."
           : issue.data.forwarded
             ? ` ${fmt(issue.data.outstanding_quantity)} still owed — sent on to the next approver.`
             : ` ${fmt(issue.data.outstanding_quantity)} still owed, and this indent is still with you.`}
@@ -199,7 +204,11 @@ function LineRow({ line, field, quantity, source, onQuantity, onSource }: {
             onChange={(e) => onQuantity(e.target.value)}
           />
         </label>
-        {line.sources.length > 1 && (
+        {/* Always shown, even with one option: the source is part of what is being
+            committed, so the approver should see which point it comes out of rather
+            than have it chosen silently. Only points in their own reporting subtree
+            are ever listed — the server refuses anything else. */}
+        {line.sources.length > 0 && (
           <label className="block flex-1">
             <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">From</span>
             <select
@@ -210,7 +219,7 @@ function LineRow({ line, field, quantity, source, onQuantity, onSource }: {
             >
               {line.sources.map((option) => (
                 <option key={option.warehouse_id} value={option.warehouse_id}>
-                  #{option.warehouse_id} · {fmt(option.available_quantity)}
+                  {option.warehouse_name ?? `Point ${option.warehouse_id}`} · {fmt(option.available_quantity)}
                 </option>
               ))}
             </select>

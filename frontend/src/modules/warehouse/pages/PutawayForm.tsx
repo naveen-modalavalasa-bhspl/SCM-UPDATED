@@ -10,6 +10,7 @@ import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import { binOptions, confirmPutaway, getPutaway, startPutaway, suggestBins } from "../api";
 import { fmtDate, fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
 import { alerts } from "@/modules/alerts";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * One putaway task: take this quantity to this bin and confirm it.
@@ -22,6 +23,7 @@ import { alerts } from "@/modules/alerts";
  * the common path is scan-and-confirm with no dropdown at all.
  */
 export default function PutawayForm() {
+  const pointLabel = usePointLabel();
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -115,7 +117,7 @@ export default function PutawayForm() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={pointLabel}
         title={`Putaway ${task.putaway_no}`}
         actions={
           <>

@@ -11,6 +11,7 @@ import { acknowledgeDispatch, getDispatch, listDispatches, scanCode } from "../a
 import { fmtDate, fmtQty, num } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { DispatchItem } from "../types";
+import { usePointLabel } from "../usePointLabel";
 
 /**
  * The receiving end: confirm what actually turned up.
@@ -24,6 +25,7 @@ import type { DispatchItem } from "../types";
  * a receiver with a phone never types a document number.
  */
 export default function AcknowledgeDelivery() {
+  const pointLabel = usePointLabel();
   const qc = useQueryClient();
   const [dispatchId, setDispatchId] = useState<number | null>(null);
   const [scan, setScan] = useState("");
@@ -150,7 +152,7 @@ export default function AcknowledgeDelivery() {
 
   return (
     <div>
-      <PageHeader eyebrow="Warehouse" title="Acknowledge delivery" />
+      <PageHeader eyebrow={pointLabel} title="Acknowledge delivery" />
 
       <Card className="mb-4 p-3">
         <div className="flex flex-wrap items-end gap-2">

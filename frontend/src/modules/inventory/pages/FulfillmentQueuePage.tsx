@@ -1,18 +1,24 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Chip, Pagination } from "@heroui/react";
-import { PageHeader, Card, ResponsiveList, StatusPill, type Column } from "@/shared/components";
+import { PageHeader, Card, ResponsiveList, StatusPill, Button, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { getFulfillmentQueue, listAllocations } from "../api";
 
 /**
- * What the availability check decided, per indent.
+ * Everything that still owes something — and the place to do something about it.
  *
- * Reads /api/indents filtered by status rather than a queue endpoint of its own: the
- * indent list already answers this question, and a second route would be a second
- * thing to keep in step. All four buckets are fetched together so each tab can show
- * its own count without a click.
+ * ONE list, not four status buckets. A remainder is a remainder whatever status the
+ * indent is sitting in, and filtering by status on top of it emptied the screen: an
+ * indent part-served on its way up is PENDING_APPROVAL, an untouched one is
+ * AWAITING_ALLOCATION, and neither is PARTIALLY_FULFILLED. Status is still offered as
+ * an optional narrowing, never as the thing that defines the queue.
+ *
+ * Clicking a row opens the allocation screen, which is where the decision is
+ * actually made: how much, out of which stocking point, split across as many as it
+ * takes. Submitting there raises an ALLOCATION — nothing moves; the goods leave the
+ * shelf at the warehouse material issue once that allocation is approved.
  */
 interface QueueRow {
   id: number;
@@ -26,11 +32,12 @@ interface QueueRow {
   created_at: string;
 }
 
-const BUCKETS = [
-  { key: "AWAITING_ALLOCATION", label: "To allocate", hint: "Waiting for someone to decide what to issue." },
-  { key: "ALLOCATED", label: "Ready to issue", hint: "Stock is held; the store can hand it over." },
-  { key: "PARTIALLY_FULFILLED", label: "Part short", hint: "Some lines issued, the rest went to procurement." },
-  { key: "PENDING_PROCUREMENT", label: "Nothing given", hint: "No stock at all; buying starts from here." },
+const STATUS_OPTIONS = [
+  { value: "PENDING_APPROVAL", label: "In approval" },
+  { value: "AWAITING_ALLOCATION", label: "To allocate" },
+  { value: "ALLOCATED", label: "Ready to issue" },
+  { value: "PARTIALLY_FULFILLED", label: "Part short" },
+  { value: "PENDING_PROCUREMENT", label: "Nothing given" },
 ];
 
 const fmtDate = (s?: string | null) =>
@@ -40,7 +47,6 @@ const ageInDays = (s?: string | null) =>
   s ? Math.floor((Date.now() - new Date(s).getTime()) / 86_400_000) : 0;
 
 export function FulfillmentQueuePage() {
-  const [status, setStatus] = useState(BUCKETS[0].key);
   const [search, setSearch] = useState("");
   const [priorityFilter, setPriorityFilter] = useState("");
   const [deptFilter, setDeptFilter] = useState("");
@@ -48,12 +54,12 @@ export function FulfillmentQueuePage() {
   const [page, setPage] = useState(1);
   const nav = useNavigate();
 
-  const results = useQueries({
-    queries: BUCKETS.map((b) => ({
-      queryKey: ["fulfillment-queue", b.key],
-      queryFn: () => getFulfillmentQueue(b.key),
-    })),
+  const queue = useQuery({
+    queryKey: ["fulfillment-queue"],
+    queryFn: () => getFulfillmentQueue(),
   });
+  // An indent whose allocation is already waiting on an approver has been dealt with;
+  // showing it again invites a second allocation the backend will refuse anyway.
   const pending = useQuery({
     queryKey: ["allocations", "PENDING_APPROVAL"],
     queryFn: () => listAllocations({ status: "PENDING_APPROVAL" }),
@@ -63,48 +69,31 @@ export function FulfillmentQueuePage() {
     [pending.data],
   );
 
+  const all = (queue.data?.items ?? []) as unknown as QueueRow[];
+
   const allDepartments = useMemo(() => {
     const depts = new Set<string>();
-    for (const res of results) {
-      const items = (res.data?.items ?? []) as unknown as QueueRow[];
-      for (const item of items) {
-        if (item.department_name) depts.add(item.department_name);
-      }
-    }
-    return Array.from(depts).sort().map(d => ({ value: d, label: d }));
-  }, [results]);
+    for (const item of all) if (item.department_name) depts.add(item.department_name);
+    return Array.from(depts).sort().map((d) => ({ value: d, label: d }));
+  }, [all]);
 
-  const visibleItems = (index: number) => {
-    const items = (results[index]?.data?.items ?? []) as unknown as QueueRow[];
-    let bucketItems = BUCKETS[index].key === "AWAITING_ALLOCATION"
-      ? items.filter((indent) => !pendingIndentIds.has(indent.id))
-      : items;
-
-    if (statusFilter && BUCKETS[index].key !== statusFilter) {
-      bucketItems = [];
-    }
-
-    if (priorityFilter) {
-      bucketItems = bucketItems.filter((r) => r.priority === priorityFilter);
-    }
-    if (deptFilter) {
-      bucketItems = bucketItems.filter((r) => r.department_name === deptFilter);
-    }
-
+  const rows = useMemo(() => {
+    let out = all;
+    if (statusFilter) out = out.filter((r) => r.status === statusFilter);
+    if (priorityFilter) out = out.filter((r) => r.priority === priorityFilter);
+    if (deptFilter) out = out.filter((r) => r.department_name === deptFilter);
     const q = search.trim().toLowerCase();
     if (q) {
-      bucketItems = bucketItems.filter((r) =>
+      out = out.filter((r) =>
         r.indent_no?.toLowerCase().includes(q) ||
         r.requested_by_name?.toLowerCase().includes(q) ||
         r.department_name?.toLowerCase().includes(q)
       );
     }
-    return bucketItems;
-  };
+    return out;
+  }, [all, statusFilter, priorityFilter, deptFilter, search]);
 
-  const activeIndex = BUCKETS.findIndex((b) => b.key === status);
-  const active = results[activeIndex];
-  const rows = visibleItems(activeIndex);
+  const awaitingAllocation = rows.filter((r) => !pendingIndentIds.has(r.id)).length;
 
   const columns: Column<QueueRow>[] = [
     {
@@ -135,7 +124,15 @@ export function FulfillmentQueuePage() {
           <Chip size="sm" variant="flat" color={r.priority === "URGENT" ? "danger" : "default"}>{r.priority}</Chip>
         ) : "—",
     },
-    { key: "status", header: "Outcome", render: (r) => <StatusPill status={r.status} /> },
+    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "held",
+      header: "Allocation",
+      hideOnNarrow: true,
+      render: (r) => pendingIndentIds.has(r.id)
+        ? <span className="text-xs text-warn">Awaiting approval</span>
+        : <span className="text-xs text-muted">—</span>,
+    },
     {
       key: "age",
       header: "Waiting",
@@ -146,45 +143,45 @@ export function FulfillmentQueuePage() {
       },
     },
     {
-      key: "date",
-      header: "Raised",
-      hideOnNarrow: true,
-      render: (r) => <span className="text-muted">{fmtDate(r.created_at)}</span>,
+      key: "open",
+      header: "",
+      render: (r) => (
+        <Button
+          variant="ghost"
+          onClick={(e) => { e.stopPropagation(); nav(`/indents/${r.id}`); }}
+        >
+          Open
+        </Button>
+      ),
     },
   ];
+
+  const paged = rows.slice((page - 1) * 10, page * 10);
 
   return (
     <div>
       <PageHeader eyebrow="Inventory" title="Fulfilment Queue" />
 
-      {/* Counts live on the tabs, so the queue's shape is visible without clicking. */}
-      <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
-        {BUCKETS.map((b, i) => {
-          const count = visibleItems(i).length;
-          const on = b.key === status;
-          return (
-            <button
-              key={b.key}
-              onClick={() => {
-                setStatus(b.key);
-                setStatusFilter(""); // Clear filter so we see the full bucket
-                setPage(1);
-              }}
-              aria-pressed={on}
-              className={`rounded-xl border p-3 text-left ${
-                on ? "border-brand bg-brand/5" : "border-line/70 bg-content1 hover:bg-content2"
-              }`}
-            >
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">{b.label}</div>
-              <div className={`text-2xl font-bold ${on ? "text-brand" : "text-ink"}`}>
-                {results[i]?.isLoading ? "…" : count}
-              </div>
-            </button>
-          );
-        })}
+      <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-3">
+        <Card className="p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Still owed</div>
+          <div className="text-2xl font-bold text-brand">{queue.isLoading ? "…" : rows.length}</div>
+        </Card>
+        <Card className="p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Nothing raised yet</div>
+          <div className="text-2xl font-bold text-ink">{queue.isLoading ? "…" : awaitingAllocation}</div>
+        </Card>
+        <Card className="p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Allocation pending</div>
+          <div className="text-2xl font-bold text-ink">{rows.length - awaitingAllocation}</div>
+        </Card>
       </div>
 
-      <p className="mb-3 text-sm text-muted">{BUCKETS[activeIndex]?.hint}</p>
+      <p className="mb-3 text-sm text-muted">
+        Every indent with a line still owed. Click one to allocate it from a point you
+        hold — that raises an allocation for approval; the goods hand over at the
+        warehouse material issue.
+      </p>
 
       <FilterBar
         search={search}
@@ -201,13 +198,9 @@ export function FulfillmentQueuePage() {
       >
         <FilterSelect
           value={statusFilter}
-          onChange={(v) => { 
-            setStatusFilter(v); 
-            if (v) setStatus(v); // Route to the respective tab automatically
-            setPage(1); 
-          }}
-          options={BUCKETS.map(b => ({ value: b.key, label: b.label }))}
-          placeholder="All Outcomes"
+          onChange={(v) => { setStatusFilter(v); setPage(1); }}
+          options={STATUS_OPTIONS}
+          placeholder="Any status"
         />
         <FilterSelect
           value={priorityFilter}
@@ -226,24 +219,23 @@ export function FulfillmentQueuePage() {
         />
       </FilterBar>
 
-      {active?.error ? (
+      {queue.error ? (
         <p className="rounded-lg border border-danger/40 bg-danger/10 p-4 text-sm text-danger">
-          {(active.error as Error).message}
+          {(queue.error as Error).message}
         </p>
       ) : (
         <Card className="p-2">
           <ResponsiveList
-            data={rows.slice((page - 1) * 10, page * 10)}
-            loading={active?.isLoading || (status === "AWAITING_ALLOCATION" && pending.isFetching)}
+            data={paged}
+            loading={queue.isLoading}
             keyOf={(r) => r.id}
-            // An indent waiting on a decision opens the allocation screen; one already
-            // decided opens the indent itself. Clicking the row should do the thing the
-            // row is actually asking for.
-            onRowClick={(r) =>
-              nav(r.status === "AWAITING_ALLOCATION" ? `/inventory/allocate/${r.id}` : `/indents/${r.id}`)
-            }
+            // Straight to the allocation screen. It already asks the only two
+            // questions worth asking — how much, and out of which point — and does it
+            // per line with splits, so the queue's job is to pick the indent, not to
+            // reimplement the decision inline.
+            onRowClick={(r) => nav(`/inventory/allocate/${r.id}`)}
             columns={columns}
-            empty="Nothing in this bucket. Indents appear once they clear approval and the stock check has run."
+            empty="Nothing owed. Indents appear here the moment a line is approved for more than has been allocated."
             renderCard={(r) => (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
@@ -257,6 +249,7 @@ export function FulfillmentQueuePage() {
               </div>
             )}
           />
+
           {rows.length > 0 && (
             <div className="mt-4 flex justify-center pb-2">
               <Pagination

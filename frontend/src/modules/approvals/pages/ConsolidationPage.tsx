@@ -403,7 +403,9 @@ export function BatchCard({ batch, onBack }: {
       queryClient.invalidateQueries({ queryKey: ["approvals"] });
       // Nothing failed means nothing is left here — go back rather than leave the
       // approver staring at a consolidation that is about to empty out.
-      if (data.failed.length === 0) onBack();
+      // Skips are a normal outcome, not something to stay and look at. Only a real
+      // problem keeps the approver on this screen.
+      if (data.failed.every((f) => f.skipped)) onBack();
     },
   });
 
@@ -454,10 +456,20 @@ export function BatchCard({ batch, onBack }: {
       {approve.error && <p className="rounded-xl bg-danger/10 p-3 text-sm text-danger">
         {(approve.error as Error).message}
       </p>}
-      {result && <p className={`rounded-xl p-3 text-sm ${result.failed.length > 0 ? "bg-warn/10 text-warn" : "bg-success/10 text-success"}`}>
-        Approved {result.approved_count} indent{result.approved_count === 1 ? "" : "s"}.
-        {result.failed.length > 0 && ` ${result.failed.length} could not be approved: ${result.failed.map((f) => f.reason).join("; ")}`}
-      </p>}
+      {result && (() => {
+        // An indent that was already served in full is SKIPPED, not failed: leaving it
+        // where it is was the right call, and colouring that red made the screen look
+        // broken every time the cascade worked.
+        const skipped = result.failed.filter((f) => f.skipped);
+        const problems = result.failed.filter((f) => !f.skipped);
+        return (
+          <p className={`rounded-xl p-3 text-sm ${problems.length > 0 ? "bg-warn/10 text-warn" : "bg-success/10 text-success"}`}>
+            Sent on {result.approved_count} indent{result.approved_count === 1 ? "" : "s"}.
+            {skipped.length > 0 && ` ${skipped.length} already served in full — left where they are.`}
+            {problems.length > 0 && ` ${problems.length} could not be approved: ${problems.map((f) => f.reason).join("; ")}`}
+          </p>
+        );
+      })()}
 
       {/* An editor, not a list — deliberately not <ResponsiveList>. Its table is a
           react-aria grid, and a grid cell swallows the keystrokes an <input> needs,
