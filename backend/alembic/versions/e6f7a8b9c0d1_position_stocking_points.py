@@ -24,7 +24,17 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+TABLE = "inv_position_locations"
+
+
 def upgrade() -> None:
+    bind = op.get_bind()
+    if sa.inspect(bind).has_table(TABLE):
+        # The table was hand-created with raw DDL on the dev copies while the
+        # revision chain was broken. Re-issuing CREATE TABLE would abort the whole
+        # upgrade, so an existing table is treated as this step already done.
+        return
+
     op.create_table(
         "inv_position_locations",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),

@@ -435,6 +435,13 @@ async def post_issue(issue_id: int, db: AsyncSession = Depends(get_db),
     return await service.post_issue(db, issue_id, user)
 
 
+@router.put("/issues/{issue_id}/serials", response_model=s.IssueDetail)
+async def set_issue_serials(issue_id: int, body: s.IssueSerialsIn,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(ISSUE_POST))):
+    return await service.set_issue_serials(db, issue_id, body, user)
+
+
 @router.post("/issues/{issue_id}/acknowledge", response_model=s.IssueDetail)
 async def acknowledge_issue(issue_id: int, body: s.AcknowledgeIssueIn,
                             db: AsyncSession = Depends(get_db),

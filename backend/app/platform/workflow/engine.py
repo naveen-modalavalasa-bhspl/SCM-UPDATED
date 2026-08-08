@@ -117,6 +117,40 @@ async def _load_active_instance_for_update(
     return instance
 
 
+async def _open_instance(db: AsyncSession, doc_type: str, doc_id: int,
+                         **fields) -> Instance:
+    """The document's instance row, restarted in place if it already has one.
+
+    `wf_instances` is UNIQUE on (doc_type, doc_id) — one row per document, for the
+    life of the document. Any second submit therefore cannot INSERT: it dies with an
+    IntegrityError halfway through, leaving the module's status changed and no
+    approval behind it. That is not a rare path — a rejected document raised again,
+    or one whose workflow was cancelled, comes back here.
+
+    So a finished cycle is reopened rather than duplicated. Its `wf_actions` stay
+    exactly where they are (rule 9): the history reads as one document with two
+    cycles, and the new cycle's SUBMITTED row is appended under the same instance.
+    Only the pending queue is cleared — those rows name approvers of a cycle that is
+    over, and leaving them would show the document on their screens forever.
+    """
+    instance = await _load_instance(db, doc_type, doc_id)
+    if instance is None:
+        instance = Instance(doc_type=doc_type, doc_id=doc_id, **fields)
+        db.add(instance)
+        return instance
+    if instance.status == InstanceStatus.IN_PROGRESS.value:
+        raise ValidationError("This document is already awaiting approval")
+
+    await _clear_pending(db, instance.id)
+    for key, value in fields.items():
+        setattr(instance, key, value)
+    instance.current_sequence = 1
+    instance.current_stage_name = None
+    instance.completed_at = None
+    instance.started_at = utcnow()
+    return instance
+
+
 async def _stage_satisfied(db, instance, stage, approver_ids: set[int]) -> bool:
     approved = (await db.execute(
         select(Action.actor_id).where(
@@ -528,14 +562,13 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
                 }]
                 independent_fallback = f"{fallback.REASON_INDEPENDENT_FALLBACK}/{reason}"
 
-    instance = Instance(
-        doc_type=doc_type, doc_id=doc_id, workflow_id=wf.id,
+    instance = await _open_instance(
+        db, doc_type, doc_id, workflow_id=wf.id,
         project_id=project_id, resolved_chain=chain,
         doc_no=context.get("doc_no"),
         started_by_id=user.id, started_by_name=user.full_name,
         status=InstanceStatus.IN_PROGRESS.value,
     )
-    db.add(instance)
     await db.flush()
 
     db.add(Action(
@@ -580,14 +613,13 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
     what actually decides who approves, exactly as with a ladder.
     """
     wf = await fallback.ensure_workflow(db, doc_type)
-    instance = Instance(
-        doc_type=doc_type, doc_id=doc_id, workflow_id=wf.id,
+    instance = await _open_instance(
+        db, doc_type, doc_id, workflow_id=wf.id,
         project_id=project_id, resolved_chain=chain,
         doc_no=context.get("doc_no"),
         started_by_id=user.id, started_by_name=user.full_name,
         status=InstanceStatus.IN_PROGRESS.value,
     )
-    db.add(instance)
     await db.flush()
     db.add(Action(
         instance_id=instance.id, stage_sequence=0, stage_name="Submitted",
@@ -873,11 +905,12 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     wf, used_fallback = await _active_workflow(db, doc_type)
     applicable = await _applicable_stages(db, wf.id, context)
 
-    instance = Instance(
-        doc_type=doc_type, doc_id=doc_id, workflow_id=wf.id,
+    instance = await _open_instance(
+        db, doc_type, doc_id, workflow_id=wf.id,
         doc_no=context.get("doc_no"),
         started_by_id=user.id, started_by_name=user.full_name,
         status=InstanceStatus.IN_PROGRESS.value,
+        resolved_chain=None,
     )
     if applicable:
         instance.current_sequence = applicable[0].sequence
@@ -885,7 +918,6 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     else:  # a workflow with no applicable stage is nothing to approve
         instance.status = InstanceStatus.APPROVED.value
         instance.completed_at = utcnow()
-    db.add(instance)
     await db.flush()
 
     db.add(Action(

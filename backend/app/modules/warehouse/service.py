@@ -3720,6 +3720,56 @@ async def _raise_picking_for_issue(
         return None
 
 
+async def set_issue_serials(db: AsyncSession, issue_id: int,
+                            data: s.IssueSerialsIn, user) -> m.MaterialIssue:
+    """Name the physical units on an approved issue, without reopening the document.
+
+    The rest of the issue stays frozen after approval — quantities, bins and batches
+    are what the approver saw. Only which serials are being handed over is still
+    open, because that is decided at the shelf. `update_issue` cannot do this: it
+    is DRAFT-only by design, and post_issue refuses an incomplete serial set, so an
+    approved serialized issue had no way to reach ISSUED at all.
+    """
+    issue = await get_issue(db, issue_id)
+    _guard(issue.status, {IssueStatus.DRAFT.value, IssueStatus.APPROVED.value},
+           "capture serials on", "issue")
+    if issue.is_stock_posted:
+        raise ValidationError(f"{issue.issue_no} has already been posted")
+
+    by_line = {row.id: row.serial_numbers for row in data.lines}
+    unknown = set(by_line) - {line.id for line in issue.items}
+    if unknown:
+        raise ValidationError(
+            f"Line {sorted(unknown)[0]} is not on {issue.issue_no}")
+
+    # _reserve_issue_serials zips strictly against issue.items, so every line is
+    # restated — the ones not being edited keep the serials already reserved.
+    inputs = [
+        s.IssueItemWrite(
+            item_id=line.item_id,
+            indent_item_id=line.indent_item_id,
+            requested_qty=_d(line.requested_qty),
+            issued_qty=_d(line.issued_qty),
+            rate=_d(line.rate),
+            batch_id=line.batch_id,
+            bin_id=line.bin_id,
+            remarks=line.remarks,
+            serial_numbers=by_line.get(
+                line.id, getattr(line, "serial_numbers", None) or []),
+        )
+        for line in issue.items
+    ]
+    await _clear_issue_serial_reservations(db, issue.id)
+    await _reserve_issue_serials(db, issue, inputs)
+
+    await write_audit(db, entity="out_issues", entity_id=issue.id,
+                      entity_no=issue.issue_no, action=AuditAction.UPDATE, actor=user,
+                      after={"serials": {str(line.id): getattr(line, "serial_numbers", [])
+                                         for line in issue.items}})
+    await db.commit()
+    return await get_issue(db, issue.id)
+
+
 async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Takes the stock off the shelf. The only step here that moves anything."""
     issue = await get_issue(db, issue_id)
@@ -3974,7 +4024,7 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
     from app.modules.indents.models import Indent
     indent = await db.get(Indent, indent_id)
     if indent is None or indent.status in (
-        IndentStatus.CLOSED.value, IndentStatus.CANCELLED.value,
+        IndentStatus.CLOSED.value, IndentStatus.REJECTED.value,
     ):
         return
     outstanding = await db.scalar(

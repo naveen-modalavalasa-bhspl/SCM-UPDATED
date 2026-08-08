@@ -1255,6 +1255,23 @@ class AcknowledgeIssueIn(BaseModel):
     remarks: str | None = None
 
 
+class IssueSerialLineIn(BaseModel):
+    """One line's physical units, named after approval."""
+    id: int
+    serial_numbers: list[str] = Field(default_factory=list)
+
+
+class IssueSerialsIn(BaseModel):
+    """Serial capture on an approved, unposted issue.
+
+    A draft is created by inventory when it approves an allocation, and inventory
+    has no idea which physical units the storekeeper will pick. post_issue demands
+    the full set, so without a way to name them after approval a serialized issue
+    could never be posted at all.
+    """
+    lines: list[IssueSerialLineIn]
+
+
 class DashboardRead(BaseModel):
     """Queue depths, computed server-side so the screen makes one call."""
     pending_gate_entries: int = 0

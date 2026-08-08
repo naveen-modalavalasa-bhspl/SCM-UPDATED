@@ -260,6 +260,12 @@ export const rejectIssue = (id: number, comments = "") =>
 /** Posts the movement — this is the point stock actually leaves the shelf. */
 export const postIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/issue`);
 
+/** Names the physical units after approval — the rest of the issue stays frozen. */
+export const setIssueSerials = (
+  id: number,
+  lines: { id: number; serial_numbers: string[] }[],
+) => put<Issue>(`${BASE}/issues/${id}/serials`, { lines });
+
 export const acknowledgeIssue = (id: number, remarks?: string) =>
   post<Issue>(`${BASE}/issues/${id}/acknowledge`, { remarks });
 

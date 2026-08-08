@@ -13,7 +13,7 @@ import {
   acknowledgeIssue, approveIssue, batchOptions, binOptions, cancelIssue, createIssue, departmentOptions,
   employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory, itemOptions, listSerials, postIssue, projectOptions,
-  returnableIssueOptions, rejectIssue, submitIssue, updateIssue,
+  returnableIssueOptions, rejectIssue, setIssueSerials, submitIssue, updateIssue,
   warehouseOptions,
 } from "../api";
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
@@ -221,6 +221,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
 
   const short = totals.requested - totals.issued;
   const locked = !!doc && doc.status !== "DRAFT";
+  // Serials are the one thing still open after approval: the approver signed off on
+  // quantities, but which physical units go out is decided at the shelf, and
+  // "Issue from stock" refuses an incomplete set. Saved straight away through the
+  // serials endpoint, because the document itself is no longer editable.
+  const serialsLocked = locked && !(doc?.status === "APPROVED" && !doc?.is_stock_posted);
   const payload = (): IssueWrite => ({
     ...form,
     items: form.items.map(({ item_code, item_name, is_serial_tracked, ...line }) => line),
@@ -232,6 +237,14 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       qc.invalidateQueries({ queryKey: ["wh-issue", String(saved.id)] });
       if (!editing) nav(`${listPath}/${saved.id}`, { replace: true });
+    },
+  });
+
+  const saveSerials = useMutation({
+    mutationFn: (line: { id: number; serial_numbers: string[] }) =>
+      setIssueSerials(Number(id), [line]),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
     },
   });
 
@@ -485,7 +498,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           <Button
             variant="ghost"
             onClick={() => setSerialLine(index)}
-            disabled={locked || needsSource}
+            disabled={serialsLocked || needsSource}
             title={needsSource ? "Pick batch and from bin first" : "Select serials"}
           >
             <ScanLine className="h-4 w-4" />
@@ -572,7 +585,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         }
       />
 
-      <ErrorBanner error={save.error ?? pullIndent.error ?? pickingSource.error} />
+      <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pickingSource.error} />
       {mixedProjects && (
         <div className="mb-4 flex items-start gap-2 rounded-xl border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
           <Info className="mt-0.5 h-4 w-4 shrink-0" />
@@ -713,9 +726,14 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
               ?? form.items[serialLine]?.item_name
               ?? `Line ${serialLine + 1}`
         }
-        readOnly={locked}
+        readOnly={serialsLocked}
         onSave={(serials) => {
-          if (serialLine !== null) patchLine(serialLine, { serial_numbers: serials });
+          if (serialLine === null) return;
+          patchLine(serialLine, { serial_numbers: serials });
+          // On a draft the serials ride along with the next save. On an approved
+          // issue there is no save left to ride, so they go to the server now.
+          const lineId = savedLine(serialLine)?.id;
+          if (locked && lineId) saveSerials.mutate({ id: lineId, serial_numbers: serials });
         }}
       />
 

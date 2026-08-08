@@ -65,9 +65,13 @@ export function installApiAlerts(): void {
             : "this action",
         });
       } else if (status >= 500) {
-        alerts.error("request.failed");
+        // Disabled by request: the generic "Something went wrong" popup is not
+        // raised any more. Screens keep their own inline error handling, and the
+        // failure still reaches every onError below via the re-reject.
+        // alerts.error("request.failed");
       } else if (!HANDLED_LOCALLY.has(status)) {
-        alerts.error("request.failed");
+        // Disabled by request — see above.
+        // alerts.error("request.failed");
       }
 
       return Promise.reject(error);
