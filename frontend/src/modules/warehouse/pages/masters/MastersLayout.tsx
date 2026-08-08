@@ -1,6 +1,7 @@
 import { Outlet } from "react-router-dom";
 import { Map, Snowflake, Warehouse } from "lucide-react";
 import { PageHeader, SubNav } from "@/shared/components";
+import { usePointLabel } from "../../usePointLabel";
 
 /**
  * The warehouse master shell.
@@ -17,10 +18,11 @@ const ITEMS = [
 ];
 
 export default function MastersLayout() {
+  const label = usePointLabel();
   return (
     <div>
-      <PageHeader eyebrow="Warehouse" title="Master data" />
-      <SubNav label="Warehouse masters" items={ITEMS} />
+      <PageHeader eyebrow={label} title="Master data" />
+      <SubNav label={`${label} masters`} items={ITEMS} />
       <Outlet />
     </div>
   );

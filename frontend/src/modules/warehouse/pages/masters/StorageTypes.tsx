@@ -5,6 +5,7 @@ import { Pencil, Plus } from "lucide-react";
 import { Button, Can, Card, ErrorBanner, Field, Input, PageHeader } from "@/shared/components";
 import { createStorageType, listStorageTypes, updateStorageType } from "../../api";
 import type { StorageType, StorageTypeWrite } from "../../types";
+import { usePointLabel } from "../../usePointLabel";
 
 const EMPTY: StorageTypeWrite = {
   code: "",
@@ -14,6 +15,7 @@ const EMPTY: StorageTypeWrite = {
 };
 
 export default function StorageTypes() {
+  const label = usePointLabel();
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<StorageType | null>(null);
   const [draft, setDraft] = useState<StorageTypeWrite | null>(null);
@@ -59,7 +61,7 @@ export default function StorageTypes() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse master"
+        eyebrow={`${label} master`}
         title="Refrigeration types"
         actions={
           <Can do="master.location.manage">

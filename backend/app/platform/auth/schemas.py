@@ -45,6 +45,11 @@ class MeOut(BaseModel):
     active_position: PositionBrief | None = None
     permissions: list[str]
     menu: list[MenuItem]
+    # What this login calls the warehouse module: MDP, LIP or Warehouse. Carried on
+    # /me rather than fetched per screen so the rail and every page header say the
+    # same word at the same moment — a second request resolved a beat later and the
+    # header visibly flipped from "Warehouse" to "MDP".
+    warehouse_label: str = "Warehouse"
     # Every page path that exists, granted or not — the client route guard needs the
     # ungranted ones to tell a detail screen (/indents/42, no rbac_pages row) from a
     # page it was not given (/indents/reports).

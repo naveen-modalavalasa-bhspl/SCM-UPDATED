@@ -10,6 +10,7 @@ import { LabelSheet, type LabelSpec } from "../../components/LabelPrint";
 import { createBin, deleteBin, getBinTree, getWarehouse, listStorageTypes, updateBin } from "../../api";
 import { fmtQty } from "../../format";
 import type { Bin, BinWrite } from "../../types";
+import { usePointLabel } from "../../usePointLabel";
 
 /**
  * One warehouse: its details, its bin tree, and the bin labels to stick on the racks.
@@ -72,6 +73,7 @@ const coldDefaultsFrom = (parent: Bin | null) => ({
 const isColdType = (type: string) => ["COLD_ROOM", "REFRIGERATOR", "COLD_STORAGE_BIN"].includes(type);
 
 export default function WarehouseDetail() {
+  const label = usePointLabel();
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -196,7 +198,7 @@ export default function WarehouseDetail() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse master"
+        eyebrow={`${label} master`}
         title={`${warehouse.code} — ${warehouse.name}`}
         actions={
           <>

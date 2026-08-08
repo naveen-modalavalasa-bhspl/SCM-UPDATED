@@ -17,7 +17,9 @@ from app.modules.procurement.models import PurchaseOrder
 from app.modules.warehouse.enums import ReceiptStatus, ReceiptType
 from app.modules.warehouse.models import Receipt
 from app.platform.rbac import permissions as perms
-from app.platform.rbac.service import get_user_menu, get_user_permissions
+from app.platform.rbac.service import (
+    get_user_menu, get_user_permissions, warehouse_menu_label,
+)
 from app.platform.settings.models import AuditLog
 from app.platform.workflow import engine
 from app.shared.enums import IndentStatus, POStatus
@@ -226,7 +228,8 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
         db, user, getattr(user, "active_position_id", None),
     )
     since = _range_start(date_range)
-    menu = await get_user_menu(db, permissions)
+    menu = await get_user_menu(db, permissions, await warehouse_menu_label(
+        db, user, getattr(user, "active_position_id", None)))
     pending = await engine.pending_for_user(db, user)
 
     kpis: list[dict] = []

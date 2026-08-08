@@ -9,6 +9,7 @@ import {
 import { ErrorBanner } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../../components/FilterBar";
 import { listWarehouses } from "../../api";
+import { usePointLabel } from "../../usePointLabel";
 import type { Warehouse } from "../../types";
 
 /**
@@ -30,6 +31,7 @@ const TYPES = [
 
 export default function Warehouses() {
   const nav = useNavigate();
+  const label = usePointLabel();
   const [search, setSearch] = useState("");
   const [type, setType] = useState("");
   const [active, setActive] = useState("");
@@ -108,7 +110,7 @@ export default function Warehouses() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse"
+        eyebrow={label}
         title="Warehouses"
         actions={
           <Can do="master.location.manage">

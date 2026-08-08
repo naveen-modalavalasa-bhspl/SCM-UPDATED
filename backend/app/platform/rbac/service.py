@@ -456,7 +456,55 @@ async def all_page_paths(db: AsyncSession) -> list[str]:
     })
 
 
-async def get_user_menu(db: AsyncSession, permissions: set[str]) -> list[dict]:
+# --------------------------------------------------------------------------- #
+#  What the warehouse module is called depends on who is looking at it.
+#
+#  The same screens are one thing to the org's management line and another to the
+#  people in the field, so the rail label is resolved per user at login:
+#    OE / DM / RM / COO / SPH  -> MDP   (the management-line view)
+#    anyone else in field ops  -> LIP
+#    everyone else             -> Warehouse
+#  Rank comes from the HCM org role on the position (hcm_positions.role_name), the
+#  same signal the approval ladder climbs — not from the position name, which is
+#  free text. Only the label changes; permissions and paths are untouched.
+# --------------------------------------------------------------------------- #
+WAREHOUSE_PAGE_CODE = "grp_warehouse"
+WAREHOUSE_DEFAULT_LABEL = "Warehouse"
+WAREHOUSE_MDP_LABEL = "MDP"
+WAREHOUSE_FIELD_LABEL = "LIP"
+# Compared with spaces, dots and hyphens stripped: the live mirror holds both
+# "REGIONAL MANAGER" and "REGIONALMANAGER".
+MDP_ROLE_NAMES = {"OE", "DM", "RM", "COO", "SPH",
+                  "DISTRICTMANAGER", "REGIONALMANAGER"}
+FIELD_DEPARTMENT_PREFIX = "FIELD"
+
+
+def _normalise_role_name(name: str | None) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
+
+
+async def warehouse_menu_label(db: AsyncSession, user, position_id: int | None) -> str:
+    """MDP for the management line, LIP for field staff, Warehouse for the rest."""
+    stmt = (
+        select(HcmPosition.role_name)
+        .join(HcmPositionAssignment,
+              HcmPositionAssignment.position_id == HcmPosition.id)
+        .where(HcmPositionAssignment.employee_id == user.id,
+               HcmPositionAssignment.is_active.is_(True))
+    )
+    if position_id is not None:
+        stmt = stmt.where(HcmPosition.id == position_id)
+    role_names = (await db.execute(stmt)).scalars().all()
+    if any(_normalise_role_name(n) in MDP_ROLE_NAMES for n in role_names):
+        return WAREHOUSE_MDP_LABEL
+    department = (getattr(user, "department_name", None) or "").upper().strip()
+    if department.startswith(FIELD_DEPARTMENT_PREFIX):
+        return WAREHOUSE_FIELD_LABEL
+    return WAREHOUSE_DEFAULT_LABEL
+
+
+async def get_user_menu(db: AsyncSession, permissions: set[str],
+                        warehouse_label: str | None = None) -> list[dict]:
     """Pages the user may see (required_permission null or held), built into a tree."""
     rows = (await db.execute(
         select(Page).where(Page.is_active.is_(True)).order_by(Page.sort_order)
@@ -504,7 +552,10 @@ async def get_user_menu(db: AsyncSession, permissions: set[str]) -> list[dict]:
     visible = [page for page in rows if page.id in visible_ids]
 
     def node(p: Page) -> dict:
-        return {"code": p.code, "path": p.path, "name": p.name, "icon": p.icon,
+        name = p.name
+        if warehouse_label and p.code == WAREHOUSE_PAGE_CODE:
+            name = warehouse_label
+        return {"code": p.code, "path": p.path, "name": name, "icon": p.icon,
                 "module": p.module, "show_on_mobile": p.show_on_mobile, "children": []}
 
     by_id = {p.id: node(p) for p in visible}
@@ -1122,7 +1173,8 @@ async def view_as_user(db: AsyncSession, employee_id: int) -> dict:
                                  position["id"] if position else None)
     permissions = await get_user_permissions(
         db, employee, position["id"] if position else None)
-    menu = await get_user_menu(db, permissions)
+    menu = await get_user_menu(db, permissions, await warehouse_menu_label(
+        db, employee, position["id"] if position else None))
     return {
         "employee": _employee_brief(employee, employee_id),
         "position": position,

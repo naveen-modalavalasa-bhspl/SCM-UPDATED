@@ -8,6 +8,7 @@ import { Section } from "../../components/DocumentMeta";
 import { Lookup } from "../../components/Lookup";
 import { createWarehouse, employeeOptions, getWarehouse, updateWarehouse } from "../../api";
 import type { WarehouseWrite } from "../../types";
+import { usePointLabel } from "../../usePointLabel";
 
 /**
  * Create or edit a warehouse.
@@ -41,6 +42,7 @@ const EMPTY: WarehouseWrite = {
 };
 
 export default function WarehouseForm() {
+  const label = usePointLabel();
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -98,7 +100,7 @@ export default function WarehouseForm() {
   return (
     <div>
       <PageHeader
-        eyebrow="Warehouse master"
+        eyebrow={`${label} master`}
         title={editing ? `Edit ${existing?.code ?? "warehouse"}` : "New warehouse"}
         actions={
           <>

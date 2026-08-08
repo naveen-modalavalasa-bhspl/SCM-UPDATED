@@ -43,7 +43,8 @@ async def build_me(db: AsyncSession, user: HcmEmployee) -> dict:
     roles = await rbac_service.get_user_roles(db, user.id, position_id)
     permissions = await rbac_service.get_user_permissions(db, user, position_id)
     positions = await rbac_service.get_user_positions(db, user.id)
-    menu = await rbac_service.get_user_menu(db, permissions)
+    warehouse_label = await rbac_service.warehouse_menu_label(db, user, position_id)
+    menu = await rbac_service.get_user_menu(db, permissions, warehouse_label)
     active_position = next((p for p in positions if p["id"] == position_id), None)
     return {
         "employee": {"id": user.id, "name": user.full_name,
@@ -54,6 +55,7 @@ async def build_me(db: AsyncSession, user: HcmEmployee) -> dict:
         "active_position": active_position,
         "permissions": sorted(permissions),
         "menu": menu,
+        "warehouse_label": warehouse_label,
         # Every page path that exists, granted or not. The client needs both halves
         # to tell "this URL is not a page at all" (/indents/42, a detail screen with
         # no rbac_pages row — always allowed) from "this URL is a page you were not

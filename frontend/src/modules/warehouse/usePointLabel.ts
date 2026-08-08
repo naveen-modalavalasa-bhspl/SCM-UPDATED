@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/shared/api/client";
+import { useAuth } from "@/shared/auth/AuthContext";
 
 /**
  * What this login calls the place it works out of.
@@ -27,7 +28,14 @@ export function useMyPoint() {
   });
 }
 
-/** Just the word: "MDP", "LIP", or "Warehouse". Never blank while loading. */
+/**
+ * Just the word: "MDP", "LIP", or "Warehouse".
+ *
+ * Read off `me`, which the app already has before it renders anything, so the header
+ * never paints "Warehouse" and then corrects itself — which is what a separate
+ * request for it did. It is also the same string the left rail shows, because both
+ * come from the one server-side rule (rank first, then field ops).
+ */
 export function usePointLabel(): string {
-  return useMyPoint().data?.point_label || "Warehouse";
+  return useAuth().me?.warehouse_label || "Warehouse";
 }

@@ -32,6 +32,8 @@ export interface Me {
   } | null;
   permissions: string[];
   menu: MenuItem[];
+  /** What this login calls the warehouse module: "MDP", "LIP" or "Warehouse". */
+  warehouse_label?: string;
   /** Every page path that exists, granted or not. Lets the route guard tell an
    *  ungranted page from a detail screen that has no rbac_pages row at all. */
   page_paths?: string[];
