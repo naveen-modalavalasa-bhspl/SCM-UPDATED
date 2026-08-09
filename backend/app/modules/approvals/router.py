@@ -35,6 +35,12 @@ async def pending(params: PageParams = Depends(), db: AsyncSession = Depends(get
     )
 
 
+@router.get("/pending/summary")
+async def pending_summary(db: AsyncSession = Depends(get_db),
+                          user=Depends(get_current_user)):
+    return await service.pending_summary(db, user)
+
+
 @router.get("/my-decisions")
 async def my_decisions(params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user), search: str = "",

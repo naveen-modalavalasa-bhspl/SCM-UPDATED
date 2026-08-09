@@ -3,9 +3,17 @@ import {
   Bell, ClipboardCheck, Gauge, List, PackageCheck, ScrollText,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
+import { useAuth } from "@/shared/auth/AuthContext";
+import type { MenuItem } from "@/shared/types";
 
 /**
  * Sub-navigation for Indent.
+ *
+ * The tab a user gets is decided by `/api/auth/me` menu, exactly like every other
+ * module's tab strip. This list only supplies the label, icon and order — it is NOT
+ * the source of truth for what is visible. It used to be, which is why unticking
+ * "My deliveries" in Job Profiles left the tab on screen and only the route guard
+ * stopped it: the strip advertised four screens the login could not open.
  */
 const destinations = [
   { key: "/indents/dashboard", label: "Overview", icon: Gauge },
@@ -18,8 +26,28 @@ const destinations = [
   { key: "/indents/notifications", label: "Alert & Notification", icon: Bell },
 ];
 
+/** Every path under the Indents group this login was granted. */
+function grantedPaths(menu: MenuItem[] | undefined): Set<string> {
+  const group = (menu ?? []).find((m) => m.code === "grp_indents");
+  const out = new Set<string>();
+  const walk = (nodes: MenuItem[]) => {
+    for (const n of nodes) {
+      out.add(n.path);
+      walk(n.children ?? []);
+    }
+  };
+  walk(group?.children ?? []);
+  return out;
+}
+
 export function IndentsNav({ embedded = false }: { embedded?: boolean }) {
   const prefersReducedMotion = useReducedMotion();
+  const { me } = useAuth();
+  const allowed = grantedPaths(me?.menu);
+  const tabs = destinations.filter((d) => allowed.has(d.key));
+
+  // Nothing granted: render no strip at all rather than an empty bordered row.
+  if (tabs.length === 0) return null;
 
   return (
     <nav
@@ -28,7 +56,7 @@ export function IndentsNav({ embedded = false }: { embedded?: boolean }) {
     >
       <LayoutGroup id="indent-navigation">
         <div className="flex min-w-max items-stretch gap-5">
-          {destinations.map(({ key, label, icon: Icon, end }) => (
+          {tabs.map(({ key, label, icon: Icon, end }) => (
             <NavLink
               key={key}
               to={key}

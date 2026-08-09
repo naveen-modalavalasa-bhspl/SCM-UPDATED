@@ -66,7 +66,7 @@ export const adminApi = {
   },
 
   // ---- Audit, notifications, numbering ----
-  audit: (p: { entity?: string; action?: string; page?: number; size?: number } = {}) =>
+  audit: (p: { entity?: string; action?: string; search?: string; page?: number; size?: number } = {}) =>
     page<AuditRow>("/api/admin/audit", p),
   appLogs: {
     list: (p: {

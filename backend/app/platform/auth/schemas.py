@@ -1,3 +1,5 @@
+from datetime import date, datetime
+
 from pydantic import BaseModel
 
 
@@ -57,3 +59,79 @@ class MeOut(BaseModel):
 
 
 MenuItem.model_rebuild()
+
+
+class RoleBrief(BaseModel):
+    code: str
+    name: str | None = None
+
+
+class ProfilePosition(BaseModel):
+    """One HCM position assignment, with the position's own detail flattened in."""
+    id: int
+    name: str
+    code: str | None = None
+    is_primary: bool = False
+    is_active: bool = True
+    department_id: int | None = None
+    department_name: str | None = None
+    office_id: int | None = None
+    office_name: str | None = None
+    level_id: int | None = None
+    level_name: str | None = None
+    role_id: int | None = None
+    role_name: str | None = None
+    job_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    parent_position_id: int | None = None
+    parent_position_name: str | None = None
+    valid_from: date | None = None
+    valid_to: date | None = None
+
+
+class ProfileOffice(BaseModel):
+    id: int
+    name: str
+    code: str | None = None
+    office_type: str | None = None
+    address: str | None = None
+    city: str | None = None
+    state: str | None = None
+
+
+class ProfileAccount(BaseModel):
+    """The local login row — never the hash, only what the owner may see about it."""
+    last_login_at: datetime | None = None
+    must_change_password: bool = False
+    is_locked: bool = False
+    created_at: datetime | None = None
+
+
+class ProfileOut(BaseModel):
+    """Everything SCM holds about the signed-in employee.
+
+    Read-only by construction: `hcm_*` is a mirror (rule 10), so there is nothing here
+    the app is allowed to write back. Bank/salary/EPFO/health/PAN/DOB are never stored,
+    so they cannot appear.
+    """
+    id: int
+    name: str
+    code: str | None = None
+    email: str | None = None
+    mobile: str | None = None
+    is_active: bool = True
+    department_id: int | None = None
+    department_name: str | None = None
+    section_id: int | None = None
+    section_name: str | None = None
+    office: ProfileOffice | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    synced_at: datetime | None = None
+    positions: list[ProfilePosition] = []
+    active_position_id: int | None = None
+    roles: list[RoleBrief] = []
+    permissions: list[str] = []
+    warehouse_label: str = "Warehouse"
+    account: ProfileAccount | None = None

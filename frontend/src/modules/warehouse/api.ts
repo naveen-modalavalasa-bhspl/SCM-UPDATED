@@ -8,6 +8,7 @@ import type {
   BinWrite,
   Dispatch,
   DispatchEventWrite,
+  DispatchReceiptSource,
   DispatchWrite,
   ConsignmentWrite,
   Inspection,
@@ -43,6 +44,7 @@ import type {
   Warehouse,
   WarehouseDashboard,
   WarehouseLocation,
+  WarehouseOption,
   WarehouseWrite,
 } from "./types";
 
@@ -457,7 +459,33 @@ export const itemOptions = (search?: string) =>
 
 export const vendorOptions = (search?: string) => get<Option[]>(`${BASE}/options/vendors`, { search });
 
-export const warehouseOptions = () => get<Option[]>(`${BASE}/options/warehouses`);
+/* Both take the Lookup's `search` argument and ignore it — the list is small enough
+ * to filter in the box. */
+/** The stocking points this login holds. Scoped by default on the server, so a
+ *  filter or a "where are the goods" field never offers a point its own screens
+ *  would then hide. */
+export const warehouseOptions = (_search?: string) =>
+  get<WarehouseOption[]>(`${BASE}/options/warehouses`);
+
+/** Every active point in the network. ONLY for a destination field — you transfer
+ *  or dispatch TO somewhere you do not hold, so scoping those would break transfers. */
+export const allWarehouseOptions = (_search?: string) =>
+  get<WarehouseOption[]>(`${BASE}/options/warehouses`, { all_points: true });
+
+/** Only the points this login actually holds. For the field that names where the
+ *  goods physically are — the receiving point on an inward, the issuing point on an
+ *  issue. Never for a destination, which is by definition somebody else's. */
+export const myWarehouseOptions = (_search?: string) =>
+  get<WarehouseOption[]>(`${BASE}/options/warehouses`, { mine_only: true });
+
+/** Consignments on their way to this point that nobody has inwarded yet. */
+export const incomingDispatchOptions = (warehouse_id: number, search?: string) =>
+  get<Option[]>(`${BASE}/options/incoming-dispatches`, { warehouse_id, search });
+
+export const dispatchReceiptSource = (dispatch_id: number, warehouse_id: number) =>
+  get<DispatchReceiptSource>(`${BASE}/options/dispatch-receipt-source`, {
+    dispatch_id, warehouse_id,
+  });
 
 export const binOptions = (
   warehouse_id: number,
@@ -474,8 +502,13 @@ export const batchOptions = (item_id: number, warehouse_id: number, bin_id?: num
 
 export const poOptions = (search?: string) => get<Option[]>(`${BASE}/options/purchase-orders`, { search });
 
-export const grnOptions = (search?: string) =>
-  get<Option[]>(`${BASE}/options/receipts`, { search, receipt_type: "PURCHASE" });
+/** GRNs this login can see. `for_putaway` narrows it to the ones with stock actually
+ *  standing on the floor at a bin-managed point — the only ones a putaway can be
+ *  raised against. */
+export const grnOptions = (search?: string, for_putaway?: boolean) =>
+  get<Option[]>(`${BASE}/options/receipts`, {
+    search, receipt_type: "GRN", for_putaway,
+  });
 
 export const gateEntryOptions = (search?: string) =>
   get<Option[]>(`${BASE}/options/receipts`, { search, receipt_type: "GATE_ENTRY" });

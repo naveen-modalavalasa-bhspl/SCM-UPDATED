@@ -17,6 +17,11 @@ class ReceiptType(str, Enum):
     DIRECT = "DIRECT"
     TRANSFER = "TRANSFER"
     RETURN = "RETURN"
+    # Goods arriving at a stocking point from another one — the consignment a
+    # warehouse dispatched to an MDP or a LIP. The receiving point inwards it the
+    # same way it inwards a purchase (GRN, QC, putaway), so stock only exists at
+    # the destination once somebody there says it arrived.
+    DISPATCH = "DISPATCH"
 
 
 class ReceiptStatus(str, Enum):

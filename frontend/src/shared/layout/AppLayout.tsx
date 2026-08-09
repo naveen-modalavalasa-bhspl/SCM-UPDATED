@@ -1,9 +1,20 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LogOut, Boxes, PanelLeftClose, PanelLeftOpen } from "lucide-react";
-import { Avatar, Select, SelectItem, Tab, Tabs } from "@heroui/react";
+import { LogOut, Boxes, PanelLeftClose, PanelLeftOpen, UserRound } from "lucide-react";
+import {
+  Avatar,
+  Dropdown,
+  DropdownItem,
+  DropdownMenu,
+  DropdownTrigger,
+  Select,
+  SelectItem,
+  Tab,
+  Tabs,
+} from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { MenuIcon } from "@/shared/layout/icons";
+import { ForbiddenPage } from "@/pages/NotFoundPage";
 import { NotificationBell } from "@/shared/layout/NotificationBell";
 import type { MenuItem } from "@/shared/types";
 import { IndentsNav } from "@/modules/indents/components/IndentsNav";
@@ -27,12 +38,25 @@ const matches = (path: string, loc: string) =>
  */
 const IN_TRIAL = new Set<string>([]);
 
+/**
+ * Screens that have been retired but still have an `rbac_pages` row.
+ *
+ * The tree is seeded data and `scripts.seed` prunes the live one, so a row cannot be
+ * deleted here — but a menu entry that redirects to a different screen is worse than
+ * no entry at all. "Delegations" landed on "Waiting for Me", which reads as the app
+ * opening the wrong page. Its route still exists so old links resolve; only the
+ * advertisement goes. Keyed by path, because the code is what seed owns.
+ */
+const RETIRED_PATHS = new Set<string>([
+  "/approvals/delegations",   // redirects to the approvals inbox
+  "/inventory/demand",        // Demand by Item was removed; redirects to Overview
+]);
+
 const visible = (nodes: MenuItem[]): MenuItem[] =>
-  import.meta.env.DEV
-    ? nodes
-    : nodes
-        .filter((n) => !IN_TRIAL.has(n.code))
-        .map((n) => ({ ...n, children: visible(n.children ?? []) }));
+  nodes
+    .filter((n) => !RETIRED_PATHS.has(n.path))
+    .filter((n) => import.meta.env.DEV || !IN_TRIAL.has(n.code))
+    .map((n) => ({ ...n, children: visible(n.children ?? []) }));
 
 function moduleHome(root: MenuItem): string {
   return root.children?.length ? root.children[0].path : root.path;
@@ -119,15 +143,18 @@ export function AppLayout() {
   const activeRoot = best?.root ?? menu[0];
   const tabs = activeRoot?.children ?? [];
 
-  // Bounce a URL the login was not granted. The API already refuses its data, so
-  // this is about not rendering a screen that can only ever show errors — which is
-  // exactly what a typed or bookmarked URL used to do.
+  // A URL the login was not granted. The API already refuses its data, so this is
+  // about not rendering a screen that can only ever show errors. It used to bounce
+  // silently to Home, which is indistinguishable from the click not registering —
+  // it now says so, in place, and leaves the address in the bar to be shared.
+  // Retired paths keep their route (old links and notification deep-links still land
+  // somewhere real), so they stay allowed even though they left the rail.
   const allowedPaths = grantedPaths(menu);
+  RETIRED_PATHS.forEach((path) => allowedPaths.add(path));
   const owner = owningPage(loc, me?.page_paths ?? []);
   const blocked = owner !== null && !allowedPaths.has(owner);
-  useEffect(() => {
-    if (blocked) nav("/", { replace: true });
-  }, [blocked, nav]);
+  // `compact` = the header copy. 208px of dropdown does not fit there beside a brand,
+  // a bell and an avatar on a 360px screen — it pushed the avatar half off the edge.
   const positionSelector = (compact = false) => me?.positions.length ? (
     <Select
       aria-label="Working position"
@@ -142,7 +169,7 @@ export function AppLayout() {
           nav("/");
         }
       }}
-      className={compact ? "w-52" : "mt-2 w-full"}
+      className={compact ? "w-32 shrink sm:w-44 md:w-52" : "mt-2 w-full"}
       classNames={{ trigger: "border-line bg-content1" }}
     >
       {me.positions.map((position) => (
@@ -245,20 +272,68 @@ export function AppLayout() {
         }`}
       >
         <header className="sticky top-0 z-20 border-b border-line bg-content1/80 backdrop-blur">
-          <div className="flex items-center justify-between px-4 py-3 md:px-8">
-            <div className="md:hidden">
-              <Brand />
+          <div className="flex items-center justify-between gap-2 px-4 py-3 md:px-8">
+            {/* Phone: the mark only. The wordmark plus a position dropdown plus the
+                bell and avatar do not fit on 360px, and the avatar — the only way to
+                sign out down here — is what fell off the edge. */}
+            <div className="shrink-0 md:hidden">
+              <Brand compact />
             </div>
             <div className="hidden items-center gap-2 md:flex">
               <MenuIcon name={activeRoot?.icon} className="h-4 w-4 text-brand" />
               <span className="font-display text-lg font-bold text-ink">{activeRoot?.name}</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 items-center justify-end gap-2">
               {/* The rail owns this when expanded; collapsed it has nowhere to
                   live, so surface it here rather than lose position switching. */}
-              <div className={collapsed ? undefined : "md:hidden"}>{positionSelector(true)}</div>
-              <NotificationBell />
-              <Avatar size="sm" name={me?.employee.name ?? "U"} className="bg-brand-050 text-brand" />
+              {/* The position dropdown is the only thing here that may shrink; the
+                  bell and the avatar are fixed-size targets. */}
+              <div className={`min-w-0 ${collapsed ? "" : "md:hidden"}`}>
+                {positionSelector(true)}
+              </div>
+              <div className="shrink-0">
+                <NotificationBell />
+              </div>
+              {/* The rail carries profile + sign-out on desktop, but the rail is not
+                  there on a phone — so signing out was impossible below md. This menu
+                  is the one place both sizes can reach. */}
+              <Dropdown placement="bottom-end">
+                <DropdownTrigger>
+                  <button
+                    type="button"
+                    aria-label="Account menu"
+                    className="shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                  >
+                    <Avatar
+                      size="sm"
+                      name={me?.employee.name ?? "U"}
+                      className="cursor-pointer bg-brand-050 text-brand"
+                    />
+                  </button>
+                </DropdownTrigger>
+                <DropdownMenu
+                  aria-label="Account"
+                  onAction={(key) => (key === "logout" ? logout() : nav("/profile"))}
+                >
+                  <DropdownItem key="who" isReadOnly className="opacity-100">
+                    <div className="text-sm font-semibold text-ink">{me?.employee.name}</div>
+                    <div className="text-xs text-muted">
+                      {me?.employee.code ?? `Employee #${me?.employee.id}`}
+                    </div>
+                  </DropdownItem>
+                  <DropdownItem key="profile" startContent={<UserRound className="h-4 w-4" />}>
+                    My profile
+                  </DropdownItem>
+                  <DropdownItem
+                    key="logout"
+                    color="danger"
+                    className="text-bad"
+                    startContent={<LogOut className="h-4 w-4" />}
+                  >
+                    Sign out
+                  </DropdownItem>
+                </DropdownMenu>
+              </Dropdown>
             </div>
           </div>
 
@@ -306,19 +381,24 @@ export function AppLayout() {
         <main className="flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
           {/* Collapsing the rail is a request for room — let the content claim it. */}
           <div className={`mx-auto ${collapsed ? "max-w-7xl" : "max-w-6xl"}`}>
-            {blocked ? null : <Outlet />}
+            {blocked ? <ForbiddenPage /> : <Outlet />}
           </div>
         </main>
       </div>
 
       {/* Mobile bottom bar — modules */}
-      <nav className="fixed inset-x-0 bottom-0 z-30 flex border-t border-line bg-content1/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
-        {menu.slice(0, 5).map((root) => (
+      {/* Every module is here, not the first five: an admin has a dozen and the rest
+          were simply unreachable on a phone. `shrink-0` + a 1/5 basis keeps five
+          across the viewport and lets the sixth onward scroll — without it the flex
+          items compress to fit and nothing ever overflows, which is why swiping did
+          nothing. `snap` so a flick lands on a whole item. */}
+      <nav className="fixed inset-x-0 bottom-0 z-30 flex snap-x snap-mandatory overflow-x-auto border-t border-line bg-content1/95 pb-[env(safe-area-inset-bottom)] backdrop-blur [-ms-overflow-style:none] [scrollbar-width:none] md:hidden [&::-webkit-scrollbar]:hidden">
+        {menu.map((root) => (
           <NavLink
             key={root.code}
             to={moduleHome(root)}
             className={() =>
-              `flex flex-1 flex-col items-center gap-1 py-2.5 text-[10px] font-medium ${
+              `flex shrink-0 grow basis-1/5 snap-start flex-col items-center gap-1 py-2.5 text-[10px] font-medium ${
                 root === activeRoot ? "text-brand" : "text-muted"
               }`
             }

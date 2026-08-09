@@ -8,7 +8,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, select, or_, and_, text, true
+from sqlalchemy import case, func, select, or_, and_, text, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -22,7 +22,7 @@ from app.modules.inventory.models import (
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
     StockTransferOrderItem, CycleCount, CycleCountItem, Reservation,
 )
-from app.platform.hcm.models import HcmFacility
+from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.models import Role, UserRole
 from app.platform.rbac.service import get_user_permissions
@@ -31,10 +31,10 @@ from app.platform.notifications import service as notifications
 from app.platform.rules import evaluator as rules
 from app.platform.settings.service import get_setting, set_setting, write_audit
 from app.platform.workflow import engine
-from app.shared.scope import scope_condition
+from app.shared.scope import rung_for, scope_condition
 from app.shared.enums import (
     AdjustmentReason, AuditAction, DocType, IndentStatus, InstanceStatus, MRStatus,
-    Priority, RefType, StockDirection, UserRole as RoleCode,
+    Priority, RefType, ScopeRung, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
@@ -107,24 +107,55 @@ async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     if perms.STOCK_VIEW_ALL in user_permissions:
         return None
 
+    # The job profile's data scope decides how far down the chain this login sees.
+    # It is the SAME dropdown that governs indents and warehouse documents, so moving
+    # a DM from "own documents" to "reporting line" widens his stock view too, and
+    # taking him off an approval ladder does not narrow it — the ladder says who signs,
+    # the rung says who may look.
+    rung = await rung_for(db, user)
+    if rung is ScopeRung.ALL:
+        return None
+
     office_id = getattr(user, "office_id", None)
-    conditions = [Warehouse.incharge_id == user.id]
+    project_id = getattr(user, "project_id", None)
+
+    # Points this person holds directly: they are its incharge, or it hangs off their
+    # own office. This is the SELF floor — no rung is ever narrower than "mine".
+    own_conditions = [Warehouse.incharge_id == user.id]
     if office_id is not None:
-        conditions.extend((
+        own_conditions.extend((
             Warehouse.office_id == office_id,
             HcmFacility.office_id == office_id,
         ))
-    by_office = set((await db.execute(
+    own = set((await db.execute(
         select(Warehouse.id)
         .outerjoin(HcmFacility, HcmFacility.id == Warehouse.facility_id)
-        .where(Warehouse.is_active.is_(True), or_(*conditions))
+        .where(Warehouse.is_active.is_(True), or_(*own_conditions))
     )).scalars().all())
 
-    # Plus every point tagged to a position reporting under this one, so a DM can look
-    # down and find which OE below him is holding the stock. Added to the office scope
-    # rather than replacing it: an untagged login keeps exactly what it sees today.
-    subtree = await locations.warehouses_visible_to(db, user)
-    return by_office | subtree if subtree else by_office
+    if rung is ScopeRung.PROJECT and project_id is not None:
+        # Everything in the project, however it is tagged.
+        in_project = set((await db.execute(
+            select(Warehouse.id)
+            .outerjoin(HcmFacility, HcmFacility.id == Warehouse.facility_id)
+            .outerjoin(HcmOffice, HcmOffice.id == func.coalesce(
+                Warehouse.office_id, HcmFacility.office_id))
+            .join(HcmEmployee, HcmEmployee.office_id == HcmOffice.id)
+            .where(Warehouse.is_active.is_(True),
+                   HcmEmployee.project_id == project_id)
+        )).scalars().all())
+        return own | in_project
+
+    if rung in (ScopeRung.SUBTREE, ScopeRung.OFFICE):
+        # The REPORTING TREE, walked through hcm_positions.parent_position_id — every
+        # point tagged to a position under this one, so a DM finds the OE and the LIPs
+        # below him. OFFICE gets it too: an office head who cannot see the points
+        # inside his own office is not scoped, he is blindfolded.
+        subtree = await locations.warehouses_visible_to(db, user)
+        return own | subtree if subtree else own
+
+    # SELF, or a rung whose data is missing: only what this login holds itself.
+    return own
 
 
 async def warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
@@ -284,6 +315,14 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     stock.last_movement_at = utcnow()
 
     unit_cost = _d(rate) if rate is not None else Decimal("0")
+    if direction == StockDirection.IN.value and unit_cost <= 0:
+        # No rate on the document. A GRN raised against an indent rather than a PO has
+        # no price to quote, and leaving the cost at zero is not "unknown", it is a
+        # claim that the goods are worthless — which is what put ₹0 against real stock
+        # and made the value tile meaningless. Fall back to the last known cost for
+        # the item (`mst_items.purchase_price`, written here on every priced inward),
+        # so the valuation is the best figure the system actually holds.
+        unit_cost = _d(getattr(item, "purchase_price", None) or 0)
     if direction == StockDirection.IN.value and unit_cost > 0:
         # Weighted average, not "latest wins": a hundred units bought at 10 and ten
         # at 100 are worth 1,910, and overwriting the rate would call them 11,000.
@@ -415,19 +454,19 @@ async def transfer_stock(db: AsyncSession, item_id: int, qty, user,
                      warehouse_id=to_warehouse_id, project_id=to_project_id)
 
 
-async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None = None,
-                     warehouse_id: int | None = None, project_id: int | None = None,
-                     bin_id: int | None = None, search: str | None = None,
-                     category_id: int | None = None, batch_no: str | None = None,
-                     include_zero: bool = False, expiring_in_days: int | None = None,
-                     expiry_status: str | None = None, expiry_from: date | None = None,
-                     expiry_to: date | None = None, expired_in_last_days: int | None = None,
-                     below_reorder: bool = False, user=None) -> dict:
-    """The stock balance grid.
+async def _stock_query(db: AsyncSession, item_id: int | None = None,
+                       warehouse_id: int | None = None, project_id: int | None = None,
+                       bin_id: int | None = None, search: str | None = None,
+                       category_id: int | None = None, batch_no: str | None = None,
+                       include_zero: bool = False, expiring_in_days: int | None = None,
+                       expiry_status: str | None = None, expiry_from: date | None = None,
+                       expiry_to: date | None = None, expired_in_last_days: int | None = None,
+                       below_reorder: bool = False, user=None):
+    """Every filter the stock balance screen offers, applied once.
 
-    Every filter the screen offers is applied here. They used to live in the frontend
-    query object and were dropped before the request went out, so typing in the search
-    box changed nothing — the list has to be filtered where the rows are.
+    The list and its KPI tiles have to agree, so they cannot each build their own
+    WHERE clause — the tiles used to be summed in the browser over whichever page had
+    been fetched, which made every number a function of the page size.
     """
     warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
     stmt = _apply_warehouse_scope(select(Stock), Stock.warehouse_id, warehouse_ids)
@@ -471,8 +510,32 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
         stmt = stmt.where(Stock.item_id.in_(
             select(Item.id).where(Item.category_id == category_id)))
     if below_reorder:
+        # The whole comparison in SQL. It used to select only "items that HAVE a
+        # reorder level" and then drop the rest out of the page in Python, which
+        # rewrote `total` to the size of the page — page 2 of a below-reorder list
+        # showed rows page 1 had already shown, and the count was never the count.
         stmt = stmt.where(Stock.item_id.in_(
-            select(Item.id).where(Item.reorder_level > 0)))
+            select(Item.id).where(Item.reorder_level > 0)
+        )).where(Stock.available_qty < (
+            select(Item.reorder_level).where(Item.id == Stock.item_id).scalar_subquery()
+        ))
+    return stmt
+
+
+async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None = None,
+                     warehouse_id: int | None = None, project_id: int | None = None,
+                     bin_id: int | None = None, search: str | None = None,
+                     category_id: int | None = None, batch_no: str | None = None,
+                     include_zero: bool = False, expiring_in_days: int | None = None,
+                     expiry_status: str | None = None, expiry_from: date | None = None,
+                     expiry_to: date | None = None, expired_in_last_days: int | None = None,
+                     below_reorder: bool = False, user=None) -> dict:
+    """The stock balance grid."""
+    stmt = await _stock_query(
+        db, item_id, warehouse_id, project_id, bin_id, search, category_id, batch_no,
+        include_zero, expiring_in_days, expiry_status, expiry_from, expiry_to,
+        expired_in_last_days, below_reorder, user=user,
+    )
 
     page = await paginate(db, stmt.order_by(Stock.item_name), params)
 
@@ -490,19 +553,69 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
             row.category_name = item.category_name if item else None
             row.reorder_level = float(item.reorder_level or 0) if item else 0.0
             row.barcode_value = item.barcode_value if item else None
-    if below_reorder:
-        page["items"] = [r for r in page["items"]
-                         if float(r.available_qty or 0) < r.reorder_level]
-        page["total"] = len(page["items"])
     return page
 
 
-async def list_movements(db: AsyncSession, params: PageParams,
-                         item_id: int | None = None, warehouse_id: int | None = None,
-                         direction: str | None = None, ref_type: str | None = None,
-                         search: str | None = None, date_from: date | None = None,
-                         date_to: date | None = None, user=None) -> dict:
-    """The stock ledger. Same story as list_stock — the filters have to run here."""
+async def stock_summary(db: AsyncSession, item_id: int | None = None,
+                        warehouse_id: int | None = None, project_id: int | None = None,
+                        bin_id: int | None = None, search: str | None = None,
+                        category_id: int | None = None, batch_no: str | None = None,
+                        include_zero: bool = False, expiring_in_days: int | None = None,
+                        expiry_status: str | None = None, expiry_from: date | None = None,
+                        expiry_to: date | None = None,
+                        expired_in_last_days: int | None = None,
+                        below_reorder: bool = False, user=None) -> dict:
+    """The four tiles above the stock balance grid, counted over every matching row.
+
+    Same filters as `list_stock`, no LIMIT. The browser cannot do this: it only ever
+    holds one page, so "Stock lines 20 / Items 11" was really "rows on this page".
+    """
+    stmt = await _stock_query(
+        db, item_id, warehouse_id, project_id, bin_id, search, category_id, batch_no,
+        include_zero, expiring_in_days, expiry_status, expiry_from, expiry_to,
+        expired_in_last_days, below_reorder, user=user,
+    )
+    rows = stmt.subquery()
+    today_date = utcnow().date()
+    totals = (await db.execute(
+        select(
+            func.count(rows.c.id),
+            func.count(func.distinct(rows.c.item_id)),
+            func.coalesce(func.sum(rows.c.total_qty * rows.c.valuation_rate), 0),
+            # MySQL has no FILTER clause, so the window is a CASE inside the SUM.
+            func.coalesce(func.sum(case((and_(
+                rows.c.expiry_date.isnot(None),
+                rows.c.expiry_date >= today_date,
+                rows.c.expiry_date <= today_date + timedelta(days=30),
+            ), 1), else_=0)), 0),
+        )
+    )).one()
+
+    # "Below reorder" compares stk_balance against mst_items.reorder_level, which is
+    # in another table — a join here rather than the per-page fixup list_stock does.
+    below = int(await db.scalar(
+        select(func.count())
+        .select_from(rows)
+        .join(Item, Item.id == rows.c.item_id)
+        .where(Item.reorder_level > 0, rows.c.available_qty < Item.reorder_level)
+    ) or 0)
+
+    return {
+        "stock_lines": int(totals[0] or 0),
+        "distinct_items": int(totals[1] or 0),
+        "total_value": float(totals[2] or 0),
+        "expiring_30_days": int(totals[3] or 0),
+        "below_reorder": below,
+    }
+
+
+async def _movement_query(db: AsyncSession, item_id: int | None = None,
+                          warehouse_id: int | None = None, direction: str | None = None,
+                          ref_type: str | None = None, search: str | None = None,
+                          date_from: date | None = None, date_to: date | None = None,
+                          user=None):
+    """The stock ledger's filters. Same story as `_stock_query` — one WHERE clause,
+    shared by the page and by the totals above it."""
     warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
     stmt = _apply_warehouse_scope(
         select(StockMovement), StockMovement.warehouse_id, warehouse_ids,
@@ -523,7 +636,39 @@ async def list_movements(db: AsyncSession, params: PageParams,
             StockMovement.item_code.like(like), StockMovement.item_name.like(like),
             StockMovement.ref_no.like(like), StockMovement.batch_no.like(like),
         ))
+    return stmt
+
+
+async def list_movements(db: AsyncSession, params: PageParams,
+                         item_id: int | None = None, warehouse_id: int | None = None,
+                         direction: str | None = None, ref_type: str | None = None,
+                         search: str | None = None, date_from: date | None = None,
+                         date_to: date | None = None, user=None) -> dict:
+    """The stock ledger."""
+    stmt = await _movement_query(db, item_id, warehouse_id, direction, ref_type,
+                                 search, date_from, date_to, user=user)
     return await paginate(db, stmt.order_by(StockMovement.created_at.desc()), params)
+
+
+async def movement_summary(db: AsyncSession, item_id: int | None = None,
+                           warehouse_id: int | None = None, direction: str | None = None,
+                           ref_type: str | None = None, search: str | None = None,
+                           date_from: date | None = None, date_to: date | None = None,
+                           user=None) -> dict:
+    """Movements / total in / total out over the whole filtered ledger, not one page."""
+    stmt = await _movement_query(db, item_id, warehouse_id, direction, ref_type,
+                                 search, date_from, date_to, user=user)
+    rows = stmt.subquery()
+    in_qty = func.sum(case((rows.c.direction == StockDirection.IN.value, rows.c.quantity), else_=0))
+    out_qty = func.sum(case((rows.c.direction == StockDirection.OUT.value, rows.c.quantity), else_=0))
+    totals = (await db.execute(
+        select(func.count(rows.c.id), func.coalesce(in_qty, 0), func.coalesce(out_qty, 0))
+    )).one()
+    return {
+        "movements": int(totals[0] or 0),
+        "total_in": float(totals[1] or 0),
+        "total_out": float(totals[2] or 0),
+    }
 
 
 # ---------------- Material Request ----------------
@@ -1473,12 +1618,20 @@ async def get_stock_valuation(
     val_rows = []
     total_portfolio_val = Decimal("0")
 
+    # One lookup instead of one per row: the fallback cost is the only thing wanted
+    # from mst_items here, and a 90-row balance meant 90 round trips.
+    item_ids = {s.item_id for s in stocks}
+    prices = dict((await db.execute(
+        select(Item.id, Item.purchase_price).where(Item.id.in_(item_ids))
+    )).all()) if item_ids else {}
+
     for s in stocks:
-        item = await db.get(Item, s.item_id)
-        # purchase_price is the only cost mst_items carries. The names tried before
-        # (last_purchase_price / std_cost) are not columns, so every item fell through
-        # to the literal 10.0 and the whole valuation was fiction.
-        cost = _d(getattr(item, "purchase_price", 0) or 0)
+        # stk_balance.valuation_rate is the costed rate the GRN wrote and is what
+        # every other screen multiplies by (the warehouse dashboard, the stock grid,
+        # the balance summary). mst_items.purchase_price is only the fallback for a
+        # row that was never costed — reading it FIRST is what made this screen
+        # disagree with Inventory Overview on the same stock.
+        cost = _d(s.valuation_rate) or _d(prices.get(s.item_id) or 0)
         stock_val = (s.total_qty or Decimal("0")) * cost
         total_portfolio_val += stock_val
 

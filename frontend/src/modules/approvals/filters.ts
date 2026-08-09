@@ -2,13 +2,18 @@ export type RaisedRange = "" | "24h" | "7d" | "30d" | "custom";
 
 export const PRIMARY_APPROVAL_TYPES = ["INDENT", "MR", "ALLOCATION"] as const;
 
-export function approvalTypeCounts(rows: Array<{ doc_type: string }>): Array<[string, number]> {
-  const counts = new Map<string, number>();
-  rows.forEach((row) => counts.set(row.doc_type, (counts.get(row.doc_type) ?? 0) + 1));
-
+/**
+ * The doc-type chips, in a stable order: the three that always show first, then
+ * whatever else is in the queue, alphabetically.
+ *
+ * Takes counts rather than rows — the server counts the queue now, so the browser
+ * never has to hold it. The three primaries appear at 0 on purpose: a chip that
+ * disappears when its queue empties makes the row jump about as work is cleared.
+ */
+export function approvalTypeCounts(counts: Record<string, number>): Array<[string, number]> {
   const ordered = new Set<string>(PRIMARY_APPROVAL_TYPES);
-  [...counts.keys()].sort().forEach((type) => ordered.add(type));
-  return [...ordered].map((type) => [type, counts.get(type) ?? 0]);
+  Object.keys(counts).sort().forEach((type) => ordered.add(type));
+  return [...ordered].map((type) => [type, counts[type] ?? 0]);
 }
 
 const DAY = 86_400_000;

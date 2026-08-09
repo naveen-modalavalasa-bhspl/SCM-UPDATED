@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, Eye, EyeOff } from "lucide-react";
 import { Input, Button } from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
 import loginHero from "@/assets/login-hero.png";
@@ -12,6 +12,7 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -62,14 +63,30 @@ export function LoginPage() {
               spellCheck="false"
               placeholder="Enter your employee ID"
             />
+            {/* aria-label as well as label: HeroUI floats the label into the field
+                until there is a value, and a screen reader landing on an empty
+                password box was told nothing at all about what it was. */}
             <Input
               label="Password"
-              type="password"
+              aria-label="Password"
+              type={showPassword ? "text" : "password"}
               variant="bordered"
               radius="md"
               value={password}
               onValueChange={setPassword}
               autoComplete="current-password"
+              placeholder="Enter your password"
+              endContent={
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  title={showPassword ? "Hide password" : "Show password"}
+                  className="text-muted transition-colors hover:text-ink focus:outline-none"
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              }
             />
 
             {error && (

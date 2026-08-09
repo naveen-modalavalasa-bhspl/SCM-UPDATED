@@ -340,6 +340,18 @@ const DEFINITIONS: AlertDef[] = [
     "receipt.submitted", "success", "Sent for inspection",
     "{number} is with quality and cannot be edited until they are done.",
   ),
+  // A receipt only reaches QC when one of its items is flagged "requires QI". With
+  // none flagged the server posts the stock there and then, and saying "sent for
+  // inspection" sent storekeepers hunting for a draft on the QC screen that was
+  // never going to exist. These two say what actually happened.
+  alert(
+    "receipt.posted_direct", "success", "Goods received",
+    "{number} needed no inspection, so the stock is in and the receipt is closed.",
+  ),
+  alert(
+    "receipt.ready_for_putaway", "success", "Ready for put-away",
+    "{number} needed no inspection. Put the goods away to bring the stock in.",
+  ),
   alert(
     "receipt.saved", "success", "Receipt saved",
     "{number} has been saved as a draft. Nothing is in stock yet.",

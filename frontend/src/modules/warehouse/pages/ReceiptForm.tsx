@@ -9,14 +9,15 @@ import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
-  binOptions, completeReceipt, convertReceiptToGrn, createReceipt, gateEntryOptions,
-  getReceipt, itemOptions, submitReceipt,
-  updateReceipt, uploadAttachment, vendorOptions, warehouseOptions,
+  binOptions, completeReceipt, convertReceiptToGrn, createReceipt,
+  dispatchReceiptSource, gateEntryOptions,
+  getReceipt, incomingDispatchOptions, itemOptions, submitReceipt,
+  myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
-import { usePointLabel } from "../usePointLabel";
+import { useMyPoint, usePointLabel } from "../usePointLabel";
 
 /**
  * One form for both a gate entry and a GRN — they are one `inb_receipts` row at two
@@ -77,6 +78,10 @@ const RECEIPT_TYPES = [
   { value: "DIRECT", label: "Direct receipt" },
   { value: "RETURN", label: "Return receipt" },
   { value: "TRANSFER", label: "Transfer receipt" },
+  // The MDP / LIP end of the chain: goods a warehouse dispatched here, inwarded the
+  // same way a purchase is, so the stock only exists at this point once somebody
+  // standing here says it arrived.
+  { value: "DISPATCH", label: "Inward from consignment" },
 ];
 
 const lifeDateLabel = (line?: Pick<ReceiptItemWrite, "is_asset"> | null) =>
@@ -95,6 +100,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     grn_date: today(),
     po_id: null,
     po_no: "",
+    dispatch_id: null,
     vendor_id: null,
     warehouse_id: 0,
     project_id: null,
@@ -143,6 +149,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       grn_date: doc.grn_date,
       po_id: doc.po_id ?? null,
       po_no: doc.po_no ?? "",
+      // `transfer_id` carries the source document; `receipt_type` says which one.
+      dispatch_id: doc.receipt_type === "DISPATCH" ? doc.transfer_id ?? null : null,
       vendor_id: doc.vendor_id ?? null,
       warehouse_id: doc.warehouse_id,
       project_id: doc.project_id ?? null,
@@ -195,6 +203,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         grn_date: today(),
         po_id: source.po_id ?? null,
         po_no: source.po_no ?? "",
+        dispatch_id: null,
         vendor_id: source.vendor_id ?? null,
         warehouse_id: source.warehouse_id,
         project_id: source.project_id ?? null,
@@ -235,6 +244,49 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       });
     },
   });
+
+  /* Pulling an incoming consignment into the inward form. The lines come off the
+   * dispatch, not off the challan by hand: what was sent is what the receiver has to
+   * confirm or correct, and retyping it is how a shortage gets missed. */
+  const consignment = useMutation({
+    mutationFn: (dispatchId: number) => dispatchReceiptSource(dispatchId, form.warehouse_id),
+    onSuccess: (source) => {
+      setForm((f) => ({
+        ...f,
+        dispatch_id: source.dispatch_id,
+        warehouse_id: source.warehouse_id,
+        project_id: source.project_id ?? null,
+        lr_no: source.lr_no ?? "",
+        vehicle_no: source.vehicle_number ?? "",
+        remarks: f.remarks || `Received against ${source.dispatch_no}`,
+        items: source.items.map((line) => ({ ...emptyLine(), ...line })),
+      }));
+    },
+  });
+
+  /* Whether this point puts things away into bins at all. An MDP or a LIP normally
+   * has no floor/rack/bin structure configured, and asking a storekeeper which shelf
+   * a carton went on when the point has no shelves is noise — so the bin column only
+   * exists where warehouse masters say it does. Shares the warehouse Lookup's cache
+   * key, so this is not a second request. */
+  const { data: warehouses = [] } = useQuery({
+    queryKey: ["wh-lookup", "my-warehouses", ""],
+    queryFn: () => myWarehouseOptions(),
+    staleTime: 5 * 60_000,
+  });
+  const binManaged = !!warehouses.find((w) => w.id === form.warehouse_id)?.is_bin_managed;
+
+  /* A new receipt opens at the point the person is standing in. Left at "pick one",
+   * a storekeeper tagged to a single LIP inwarded a delivery into an unrelated MDP,
+   * and the stock posted correctly to a point his own screens are scoped away from —
+   * every inventory page read empty with the goods sitting in the room. */
+  const { primary_warehouse_id: myPoint } = useMyPoint().data ?? {};
+  useEffect(() => {
+    if (editing || form.warehouse_id) return;
+    const fallback = warehouses.length === 1 ? warehouses[0].id : null;
+    const mine = myPoint ?? fallback;
+    if (mine) setForm((f) => ({ ...f, warehouse_id: mine }));
+  }, [editing, form.warehouse_id, myPoint, warehouses]);
 
   const set = <K extends keyof ReceiptWrite>(key: K, value: ReceiptWrite[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
@@ -347,9 +399,19 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       if (!locked) await updateReceipt(Number(id), form);
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
     },
-    onSuccess: (_result, what) => {
+    onSuccess: (result, what) => {
       const number = doc?.grn_no ?? "The receipt";
-      void alerts.success(what === "complete" ? "grn.posted" : "receipt.submitted", { number });
+      // The server decides where a submitted receipt lands: PENDING_QC only when a
+      // line's item requires inspection, otherwise straight to QC_PASSED (bin-managed
+      // warehouse, put-away next) or COMPLETED (stock already posted). Announce what
+      // it did, not what we assumed — "sent for inspection" on a receipt that closed
+      // itself is how someone ends up searching an empty QC queue.
+      const key =
+        what === "complete" ? "grn.posted"
+        : result?.status === "PENDING_QC" ? "receipt.submitted"
+        : result?.status === "QC_PASSED" ? "receipt.ready_for_putaway"
+        : "receipt.posted_direct";
+      void alerts.success(key, { number });
       qc.invalidateQueries({ queryKey: ["wh-receipt", id] });
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       setConfirming(null);
@@ -617,7 +679,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     },
   ];
 
-  const columns = allColumns.filter((c) => isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key));
+  const columns = allColumns.filter((c) =>
+    (isGrn || !GRN_ONLY_LINE_COLUMNS.has(c.key)) && (c.key !== "bin" || binManaged));
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
@@ -655,7 +718,13 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 </Button>
               </Can>
             )}
-            {editing && isGrn && ["QC_PASSED", "SUBMITTED"].includes(doc?.status ?? "") && !doc?.is_stock_posted && (
+            {/* The same two statuses `complete_receipt` accepts, and nothing else. It
+              * used to offer SUBMITTED (which the backend rejects) and hide itself
+              * once `is_stock_posted` was set — so a GRN whose stock had banked but
+              * whose status had not caught up had no button left to finish it. Posting
+              * is idempotent, so showing it on an already-posted QC_PASSED row is
+              * safe and is exactly the way out of that corner. */}
+            {editing && isGrn && ["QC_PASSED", "PARTIALLY_RECEIVED"].includes(doc?.status ?? "") && (
               <Can do="grn.qc">
                 <Button onClick={() => setConfirming("complete")}>Post to stock</Button>
               </Can>
@@ -664,7 +733,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         }
       />
 
-      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error} />
+      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error ?? consignment.error} />
 
       {doc && (
         <MetaCard title="Document">
@@ -723,18 +792,49 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               />
             </Field>
           )}
-          <Field label="Warehouse">
+          <Field label={pointLabel}>
             <Lookup
-              name="warehouses"
-              load={warehouseOptions}
+              name="my-warehouses"
+              load={myWarehouseOptions}
               value={form.warehouse_id || ""}
               isDisabled={locked}
-              onChange={(v) => set("warehouse_id", v === "" ? 0 : v)}
-              placeholder="Receiving warehouse"
+              onChange={(v) =>
+                setForm((f) => ({
+                  ...f,
+                  warehouse_id: v === "" ? 0 : v,
+                  // The consignment picker lists what is addressed to one point, so a
+                  // different point means a different list and a stale choice.
+                  dispatch_id: null,
+                }))
+              }
+              placeholder={`Receiving ${pointLabel}`}
               isInvalid={invalid.warehouse}
-              errorMessage={invalid.warehouse ? "Pick the receiving warehouse." : undefined}
+              errorMessage={invalid.warehouse ? `Pick the receiving ${pointLabel}.` : undefined}
             />
           </Field>
+          {isGrn && !editing && form.receipt_type === "DISPATCH" && (
+            <Field
+              label="Incoming consignment"
+              hint="Fills the lines from what was dispatched here. Correct the received quantity if the load came short."
+            >
+              <Lookup
+                name={`incoming-dispatches-${form.warehouse_id}`}
+                load={(s) => incomingDispatchOptions(form.warehouse_id, s)}
+                value={form.dispatch_id ?? ""}
+                isDisabled={!form.warehouse_id || consignment.isPending}
+                onChange={(value) => {
+                  const dispatchId = value === "" ? null : value;
+                  set("dispatch_id", dispatchId);
+                  if (dispatchId) consignment.mutate(dispatchId);
+                }}
+                placeholder={
+                  form.warehouse_id
+                    ? "Select the consignment that arrived"
+                    : `Pick the receiving ${pointLabel} first`
+                }
+              />
+            </Field>
+          )}
           {/* Typed, not picked, on the GRN as well as the gate entry: the number comes
             * off the paperwork the driver hands over. Procurement does not raise orders
             * in this system yet, so a picker would offer a list nobody can fill and the

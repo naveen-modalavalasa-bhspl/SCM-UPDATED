@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_permission
+from app.core.pagination import PageParams
 from app.platform.rbac import permissions as perms
 from app.platform.workflow import (
     custom_ladder, engine, ladder, ladder_config, reminders, service,
@@ -234,8 +235,19 @@ async def deactivate_workflow_definition(
 
 
 @router.get("/pending")
-async def my_pending(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    return {"items": await engine.pending_for_user(db, user)}
+async def my_pending(params: PageParams = Depends(), doc_type: str = "",
+                     db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    """Approval tasks waiting on the caller, one page at a time.
+
+    `doc_type` takes a comma-separated list, so a screen that only cares about two
+    document types asks for those two instead of pulling every task and filtering in
+    the browser. It used to answer a bare {items} with no paging at all, which is why
+    it disagreed so loudly with /api/approvals/pending — that one is the approval
+    inbox and deliberately leaves out monthly indents, which are approved as
+    consolidated batches elsewhere. This one is the raw engine queue.
+    """
+    doc_types = [t.strip().upper() for t in doc_type.split(",") if t.strip()]
+    return await engine.pending_page(db, user, params.page, params.size, doc_types)
 
 
 @router.get("/history/{doc_type}/{doc_id}")

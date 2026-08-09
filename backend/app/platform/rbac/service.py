@@ -503,17 +503,48 @@ async def warehouse_menu_label(db: AsyncSession, user, position_id: int | None) 
     return WAREHOUSE_DEFAULT_LABEL
 
 
+def page_permission_code(page_code: str) -> str:
+    """The permission that a page's own tick-box in Job Profiles grants."""
+    return f"{PAGE_RESOURCE}.{page_code}.view"
+
+
 async def get_user_menu(db: AsyncSession, permissions: set[str],
                         warehouse_label: str | None = None) -> list[dict]:
-    """Pages the user may see (required_permission null or held), built into a tree."""
+    """Pages the user may see, built into a tree.
+
+    A page is gated by its OWN `page.<code>.view` permission whenever that permission
+    exists — which is what the tick-boxes on Settings > Job Profiles grant. Only a
+    page with no such permission defined falls back to `required_permission`.
+
+    That order matters and used to be the other way round. `rbac_pages` gates the
+    whole Approvals module on `indent.view`, a business permission every requester
+    must hold to raise an indent at all, so unticking Approvals for a job profile
+    changed nothing: the tick-box removed `page.approvals.view`, and nothing read it.
+    The same was true of 55 of the 63 live pages — the tick-boxes were decoration.
+    Reading the page permission first makes the screen authoritative for every page
+    and every role, with no per-module special case.
+    """
     rows = (await db.execute(
         select(Page).where(Page.is_active.is_(True)).order_by(Page.sort_order)
     )).scalars().all()
 
-    visible_ids = {
-        page.id for page in rows
-        if not page.required_permission or page.required_permission in permissions
-    }
+    # Only codes that actually exist may gate anything. A page whose permission was
+    # never defined (`home`, and a handful of newer screens) must keep its old
+    # required_permission, or it would demand a code nobody can ever be granted and
+    # vanish for everyone including the admin who would have to fix it.
+    defined = set((await db.execute(
+        select(Permission.code).where(Permission.code.like(f"{PAGE_RESOURCE}.%"))
+    )).scalars().all())
+
+    def gate(page: Page) -> str | None:
+        own = page_permission_code(page.code)
+        return own if own in defined else page.required_permission
+
+    visible_ids = set()
+    for page in rows:
+        required = gate(page)
+        if not required or required in permissions:
+            visible_ids.add(page.id)
     # A child is meaningful only inside its visible parent. Repeatedly remove pages
     # whose parent is absent so a hidden group can never leak one of its children into
     # the top-level rail, including for deeper-than-one-level trees.

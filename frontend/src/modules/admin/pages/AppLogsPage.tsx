@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader,
@@ -129,6 +129,16 @@ export function AppLogsPage() {
     setPage(1);
     setSearch(searchInput.trim());
   };
+
+  // Typing used to do nothing until Enter or the button, which reads as a dead box.
+  // Debounced so it still costs one request per pause, not one per keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setPage(1);
+      setSearch(searchInput.trim());
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
   return (
     <>

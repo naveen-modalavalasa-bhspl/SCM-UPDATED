@@ -18,7 +18,7 @@ import {
   updateConsignment,
   vehicleOptions,
   vendorOptions,
-  warehouseOptions,
+  allWarehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import type {
@@ -599,7 +599,9 @@ export default function ConsignmentForm() {
                    onChange={(event) => setForm((f) => ({ ...f, dispatch_date: event.target.value }))} />
           </Field>
           <Field label="To warehouse">
-            <Lookup name="warehouses" load={warehouseOptions} value={form.to_warehouse_id ?? ""} isDisabled={locked}
+            {/* Destination: the whole network, because a transfer goes to a point
+                this login does not hold. */}
+            <Lookup name="warehouses" load={allWarehouseOptions} value={form.to_warehouse_id ?? ""} isDisabled={locked}
                     onChange={(value) => setForm((f) => ({ ...f, to_warehouse_id: value === "" ? null : value }))}
                     placeholder="For transfer only" />
           </Field>

@@ -1,10 +1,19 @@
 """Employee authentication and selected-position session context."""
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.exceptions import AuthenticationError, PermissionError_
 from app.core.security import create_access_token, verify_password
-from app.platform.hcm.models import HcmEmployee
+from app.platform.hcm.models import (
+    HcmDepartment,
+    HcmEmployee,
+    HcmOffice,
+    HcmPosition,
+    HcmPositionAssignment,
+    HcmPositionLevel,
+    HcmSection,
+)
 from app.platform.rbac import service as rbac_service
 from app.platform.settings.models import UserCredential
 from app.shared.models.base import utcnow
@@ -62,6 +71,89 @@ async def build_me(db: AsyncSession, user: HcmEmployee) -> dict:
         # given" (/indents/reports — bounce to Home). With only `menu`, the client
         # cannot distinguish the two and either blocks detail screens or nothing.
         "page_paths": await rbac_service.all_page_paths(db),
+    }
+
+
+def _position_row(row) -> dict:
+    """One (assignment, position, …labels) row flattened for the profile screen.
+
+    The assignment's department/office win over the position's: an assignment is the
+    specific posting, the position is the template it was cut from.
+    """
+    assignment, pos = row[0], row[1]
+    return {
+        "id": pos.id, "name": pos.name, "code": pos.code,
+        "is_primary": assignment.is_primary, "is_active": assignment.is_active,
+        "department_id": assignment.department_id or pos.department_id,
+        "department_name": row.department_name,
+        "office_id": assignment.office_id or pos.office_id,
+        "office_name": row.office_name,
+        "level_id": pos.level_id, "level_name": row.level_name,
+        "role_id": pos.role_id, "role_name": pos.role_name,
+        "job_name": pos.job_name,
+        "project_id": pos.project_id, "project_name": pos.project_name,
+        "parent_position_id": pos.parent_position_id,
+        "parent_position_name": row.parent_name,
+        "valid_from": assignment.valid_from, "valid_to": assignment.valid_to,
+    }
+
+
+async def build_profile(db: AsyncSession, user: HcmEmployee) -> dict:
+    """Everything SCM holds about the caller — their own row, nobody else's.
+
+    No permission code guards this: the subject is always `get_current_user`, so the
+    only thing it can ever disclose is the reader to themselves.
+    """
+    position_id = getattr(user, "active_position_id", None)
+    roles = await rbac_service.get_user_roles(db, user.id, position_id)
+    permissions = await rbac_service.get_user_permissions(db, user, position_id)
+    warehouse_label = await rbac_service.warehouse_menu_label(db, user, position_id)
+
+    office = await db.get(HcmOffice, user.office_id) if user.office_id else None
+    section = await db.get(HcmSection, user.section_id) if user.section_id else None
+    cred = await db.get(UserCredential, user.id)
+
+    parent = aliased(HcmPosition)
+    rows = (await db.execute(
+        select(HcmPositionAssignment, HcmPosition, HcmPositionLevel.name.label("level_name"),
+               HcmDepartment.name.label("department_name"),
+               HcmOffice.name.label("office_name"), parent.name.label("parent_name"))
+        .join(HcmPosition, HcmPosition.id == HcmPositionAssignment.position_id)
+        .outerjoin(HcmPositionLevel, HcmPositionLevel.id == HcmPosition.level_id)
+        .outerjoin(HcmDepartment, HcmDepartment.id == func.coalesce(
+            HcmPositionAssignment.department_id, HcmPosition.department_id))
+        .outerjoin(HcmOffice, HcmOffice.id == func.coalesce(
+            HcmPositionAssignment.office_id, HcmPosition.office_id))
+        .outerjoin(parent, parent.id == HcmPosition.parent_position_id)
+        .where(HcmPositionAssignment.employee_id == user.id)
+        .order_by(HcmPositionAssignment.is_primary.desc(), HcmPosition.name)
+    )).all()
+
+    return {
+        "id": user.id, "name": user.full_name, "code": user.emp_code,
+        "email": user.email, "mobile": user.mobile, "is_active": user.is_active,
+        "department_id": user.department_id, "department_name": user.department_name,
+        "section_id": user.section_id,
+        "section_name": section.name if section else None,
+        "office": {"id": office.id, "name": office.name, "code": office.code,
+                   "office_type": office.office_type, "address": office.address,
+                   "city": office.city, "state": office.state} if office else None,
+        "project_id": user.project_id, "project_name": user.project_name,
+        "synced_at": user.synced_at,
+        "positions": [_position_row(row) for row in rows],
+        "active_position_id": position_id,
+        "roles": [{"code": r.code, "name": getattr(r, "name", None)} for r in roles],
+        "permissions": sorted(permissions),
+        "warehouse_label": warehouse_label,
+        "account": {
+            "last_login_at": cred.last_login_at if cred else None,
+            "must_change_password": bool(cred.must_change) if cred else False,
+            # A lock that expired is not a lock; only say so while it still bites.
+            "is_locked": bool(
+                cred and cred.locked_until and cred.locked_until > utcnow()
+            ),
+            "created_at": cred.created_at if cred else None,
+        },
     }
 
 

@@ -5,12 +5,12 @@ permissions for their active position. The frontend never receives cards, action
 modules, attention items, or activity for a capability the user cannot access.
 """
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.home.schemas import DateRange
 from app.modules.indents import service as indent_service
-from app.shared.scope import scope_condition
+from app.shared.scope import rung_for, scope_condition
 from app.modules.indents.models import Indent
 from app.modules.inventory import service as inventory_service
 from app.modules.procurement.models import PurchaseOrder
@@ -22,7 +22,7 @@ from app.platform.rbac.service import (
 )
 from app.platform.settings.models import AuditLog
 from app.platform.workflow import engine
-from app.shared.enums import IndentStatus, POStatus
+from app.shared.enums import IndentStatus, POStatus, ScopeRung
 
 
 APPROVE_PERMISSIONS = {
@@ -195,14 +195,44 @@ def _is_overdue(row: dict) -> bool:
 
 
 async def _recent_activity(
-    db: AsyncSession, permissions: set[str], since: datetime,
+    db: AsyncSession, user, permissions: set[str], since: datetime,
 ) -> list[dict]:
-    rows = (await db.execute(
+    """The feed at the foot of Home, narrowed to what this login may actually know.
+
+    It used to read the last 40 audit rows company-wide and drop only the ones whose
+    entity_type the login held no permission for, so a SELF-scoped lab technician
+    watched other people's indents move through other people's offices.
+
+    Two bounds now apply, in this order:
+
+      * the rung. At ALL nothing is withheld. Below that, an entry has to be either
+        something this login DID, or a change to an indent it may read — those are
+        resolved through `indents._indent_visibility`, the same predicate the list and
+        the ledger use, so the feed cannot show a document the Indents screen hides.
+      * the existing permission check on entity_type, unchanged.
+
+    Rows about other entity types (stock, receipts, masters) survive only when the
+    login is their actor. That is deliberately strict: `sys_audit_log` stores an
+    entity_type and an id, not an office or a project, so there is nothing to scope a
+    warehouse or master row on without loading each one. Showing only your own is the
+    honest answer; widening it needs those columns.
+    """
+    stmt = (
         select(AuditLog)
         .where(AuditLog.created_at >= since)
         .order_by(AuditLog.created_at.desc())
         .limit(40)
-    )).scalars().all()
+    )
+    if await rung_for(db, user) is not ScopeRung.ALL:
+        visible_indent_ids = select(Indent.id).where(
+            await indent_service._indent_visibility(db, user)
+        )
+        stmt = stmt.where(or_(
+            AuditLog.actor_id == user.id,
+            and_(AuditLog.entity_type.startswith("ind_"),
+                 AuditLog.entity_id.in_(visible_indent_ids)),
+        ))
+    rows = (await db.execute(stmt)).scalars().all()
     visible = []
     for row in rows:
         if not _can_see_audit(row.entity_type, permissions):
@@ -237,18 +267,10 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
     attention: list[dict] = []
 
     if perms.INDENT_VIEW in permissions:
-        # Both filters, exactly as list_indents applies them. With only the access
-        # rule this tile read 79 while the Indents screen read 2.
-        indent_scope = and_(
-            await indent_service.indent_access_condition(db, user),
-            await scope_condition(
-                db, user,
-                owner_col=Indent.requested_by_id,
-                position_col=Indent.position_id,
-                office_col=Indent.office_id,
-                project_col=Indent.project_id,
-            ),
-        )
+        # The one predicate list_indents and indent_stats use. Spelled out here once,
+        # it drifted: the tile read 79 while the Indents screen read 2. Sharing the
+        # helper is what stops that happening again.
+        indent_scope = await indent_service._indent_visibility(db, user)
         # All-time, not date-ranged: the tile has to read the same as "Total indents"
         # on the indent dashboard, which is unfiltered until the user filters it.
         # The date range picker scopes recent activity only.
@@ -397,5 +419,5 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
         "quick_actions": actions,
         "modules": _visible_modules(menu),
         "needs_attention": attention,
-        "recent_activity": await _recent_activity(db, permissions, since),
+        "recent_activity": await _recent_activity(db, user, permissions, since),
     }

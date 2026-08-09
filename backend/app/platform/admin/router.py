@@ -181,11 +181,11 @@ async def delete_notification_rule(
 @router.get("/audit")
 async def list_audit(params: PageParams = Depends(), entity: str | None = None,
                      entity_id: int | None = None, actor_id: int | None = None,
-                     action: str | None = None,
+                     action: str | None = None, search: str | None = None,
                      db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.ADMIN_AUDIT_VIEW))):
     return await settings_service.list_audit(db, params, entity, entity_id,
-                                             actor_id, action)
+                                             actor_id, action, search)
 
 
 # ------------------------- application logs ------------------------- #

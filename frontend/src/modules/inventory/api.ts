@@ -18,6 +18,8 @@ import type {
   StockDetail,
   StockLedgerFilter,
   StockLedgerItem,
+  StockSummary,
+  LedgerSummary,
   StockRow,
   StockTransferCreate,
   VendorOption,
@@ -103,10 +105,17 @@ const toLedger = (r: MovementRow): StockLedgerItem => ({
 
 // ---- masters (shared endpoints, not inventory's own) ----
 
+/** Stocking points for a FILTER on an inventory screen.
+ *
+ * The scoped options endpoint, not the `/api/warehouses` master. The master lists
+ * every point in the company — it is the maintenance screen's data — so Stock Balance
+ * and Stock Ledger offered a lab technician all 200 locations and then returned no
+ * rows for 199 of them. This one returns exactly the points the login's data scope
+ * covers, so the filter and the grid agree. */
 export const getWarehouses = () =>
   api
-    .get<Page<WarehouseOption>>("/api/warehouses", { params: { size: 200 } })
-    .then((r) => unwrap(r.data));
+    .get<WarehouseOption[]>("/api/warehouse/options/warehouses")
+    .then((r) => r.data);
 
 export const getCatalogItems = () =>
   api
@@ -164,6 +173,44 @@ export const getStockLedger = (params?: StockLedgerFilter) =>
       }),
     })
     .then((r) => ({ items: unwrap(r.data).map(toLedger), total: r.data.total }));
+
+// The KPI tiles above both grids. They read the whole filtered set, which the
+// browser never holds — summing `items` counted whatever page happened to be open,
+// so every tile changed when the page size did.
+export const getStockSummary = (params?: StockBalanceFilter) =>
+  api
+    .get<StockSummary>("/api/stock/summary", {
+      params: clean({
+        item_id: params?.item_id,
+        warehouse_id: params?.warehouse_id,
+        category_id: params?.category_id,
+        search: params?.search?.trim(),
+        batch_no: params?.batch_no?.trim(),
+        include_zero: params?.include_zero || undefined,
+        below_reorder: params?.below_reorder || undefined,
+        expiring_in_days: params?.expiring_in_days,
+        expiry_status: params?.expiry_status,
+        expiry_from: params?.expiry_from,
+        expiry_to: params?.expiry_to,
+        expired_in_last_days: params?.expired_in_last_days,
+      }),
+    })
+    .then((r) => r.data);
+
+export const getStockLedgerSummary = (params?: StockLedgerFilter) =>
+  api
+    .get<LedgerSummary>("/api/stock/movements/summary", {
+      params: clean({
+        item_id: params?.item_id,
+        warehouse_id: params?.warehouse_id,
+        direction: params?.direction,
+        ref_type: params?.ref_type,
+        search: params?.search?.trim(),
+        date_from: params?.date_from,
+        date_to: params?.date_to,
+      }),
+    })
+    .then((r) => r.data);
 
 export const createStockTransfer = (payload: StockTransferCreate) =>
   api.post<void>("/api/stock/transfer", payload).then((r) => r.data);
@@ -242,9 +289,13 @@ export const getAllocationHistory = (id: number) =>
 // desk — only the approver differs, so there is nothing to separate in the UI.
 const ALLOCATION_DOC_TYPES = ["ALLOCATION", "OWN_STOCK_ALLOCATION"];
 
+// Filtered by the server: the endpoint pages now (rule 11), so pulling every task
+// this user has and keeping two of the types in the browser would silently drop
+// allocations past the first page.
 export const getPendingInventoryApprovals = () =>
-  api.get<{ items: WorkflowPending[] }>("/api/workflow/pending")
-    .then((r) => r.data.items.filter((item) => ALLOCATION_DOC_TYPES.includes(item.doc_type)));
+  api.get<Page<WorkflowPending>>("/api/workflow/pending", {
+    params: { doc_type: ALLOCATION_DOC_TYPES.join(","), page: 1, size: 500 },
+  }).then((r) => r.data.items ?? []);
 
 // ---- New Inventory Module Endpoints ----
 

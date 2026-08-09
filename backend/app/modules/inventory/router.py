@@ -17,6 +17,7 @@ from app.modules.inventory.schemas import (
     CycleCountOut, CycleCountListRow, StockOverviewKPIs,
     StockDetailOut, ReplenishmentRuleIn, ReplenishmentRuleRow,
     PositionLocationIn, PositionLocationOut, MovementClassificationOut,
+    StockSummaryOut, MovementSummaryOut,
 )
 from app.platform.rbac import permissions as perms
 from app.shared.enums import ApprovalAction
@@ -43,6 +44,23 @@ async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
                                     below_reorder, user=user)
 
 
+@stock_router.get("/summary", response_model=StockSummaryOut)
+async def stock_summary(item_id: int | None = None,
+                        warehouse_id: int | None = None, project_id: int | None = None,
+                        bin_id: int | None = None, search: str | None = None,
+                        category_id: int | None = None, batch_no: str | None = None,
+                        include_zero: bool = False, expiring_in_days: int | None = None,
+                        expiry_status: str | None = None, expiry_from: date | None = None,
+                        expiry_to: date | None = None, expired_in_last_days: int | None = None,
+                        below_reorder: bool = False, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.stock_summary(db, item_id, warehouse_id, project_id,
+                                       bin_id, search, category_id, batch_no,
+                                       include_zero, expiring_in_days, expiry_status,
+                                       expiry_from, expiry_to, expired_in_last_days,
+                                       below_reorder, user=user)
+
+
 @stock_router.get("/movements", response_model=Page[MovementRow])
 async def movements(params: PageParams = Depends(), item_id: int | None = None,
                     warehouse_id: int | None = None, direction: str | None = None,
@@ -52,6 +70,17 @@ async def movements(params: PageParams = Depends(), item_id: int | None = None,
                     user=Depends(require_permission(perms.STOCK_VIEW))):
     return await service.list_movements(db, params, item_id, warehouse_id, direction,
                                         ref_type, search, date_from, date_to, user=user)
+
+
+@stock_router.get("/movements/summary", response_model=MovementSummaryOut)
+async def movement_summary(item_id: int | None = None,
+                           warehouse_id: int | None = None, direction: str | None = None,
+                           ref_type: str | None = None, search: str | None = None,
+                           date_from: date | None = None, date_to: date | None = None,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.STOCK_VIEW))):
+    return await service.movement_summary(db, item_id, warehouse_id, direction,
+                                          ref_type, search, date_from, date_to, user=user)
 
 
 @stock_router.post("/transfer", status_code=204)

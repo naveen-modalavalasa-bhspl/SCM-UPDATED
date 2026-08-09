@@ -44,8 +44,8 @@ router = APIRouter(prefix="/api/warehouse", tags=["warehouse"])
 
 @router.get("/dashboard", response_model=s.DashboardRead)
 async def dashboard(warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
-                    _=Depends(require_permission(STOCK_VIEW))):
-    return await service.dashboard(db, warehouse_id)
+                    user=Depends(require_permission(STOCK_VIEW))):
+    return await service.dashboard(db, warehouse_id, user=user)
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +240,11 @@ async def cancel_inspection(inspection_id: int, body: s.ReasonIn,
 
 @router.get("/putaways", response_model=Page[s.PutawayRead])
 async def list_putaways(params: PageParams = Depends(), status: str | None = None,
-                        warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
+                        warehouse_id: int | None = None, search: str | None = None,
+                        db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(PUTAWAY_VIEW))):
-    return await service.list_putaways(db, params, status=status, warehouse_id=warehouse_id, user=user)
+    return await service.list_putaways(db, params, status=status,
+                                       warehouse_id=warehouse_id, search=search, user=user)
 
 
 # Declared above /putaways/{task_id}: that path param is an int, so "candidates" would
@@ -306,9 +308,10 @@ async def create_stock_movement(data: s.StockMovementWrite,
 
 @router.get("/stock-movement-orders", response_model=Page[s.StockMovementOrderRead])
 async def list_stock_movement_orders(params: PageParams = Depends(),
+                                     search: str | None = None,
                                      db: AsyncSession = Depends(get_db),
                                      _=Depends(require_permission(STOCK_VIEW))):
-    return await service.list_stock_movement_orders(db, params)
+    return await service.list_stock_movement_orders(db, params, search=search)
 
 
 @router.post("/stock-movement-orders", response_model=s.StockMovementOrderRead, status_code=201)
@@ -338,9 +341,11 @@ async def stock_availability(warehouse_id: int, source_bin_id: int, item_id: int
 
 @router.get("/pickings", response_model=Page[s.PickingRead])
 async def list_pickings(params: PageParams = Depends(), status: str | None = None,
-                        warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
+                        warehouse_id: int | None = None, search: str | None = None,
+                        db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(PICKING_VIEW))):
-    return await service.list_pickings(db, params, status=status, warehouse_id=warehouse_id, user=user)
+    return await service.list_pickings(db, params, status=status,
+                                       warehouse_id=warehouse_id, search=search, user=user)
 
 
 @router.get("/pickings/{picking_id}", response_model=s.PickingDetail)
@@ -798,9 +803,11 @@ async def vendor_options(search: str | None = None, db: AsyncSession = Depends(g
 
 
 @router.get("/options/warehouses", response_model=list[s.Option])
-async def warehouse_options(db: AsyncSession = Depends(get_db),
-                            _=Depends(require_permission(STOCK_VIEW))):
-    return await service.warehouse_options(db)
+async def warehouse_options(mine_only: bool = False, all_points: bool = False,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(STOCK_VIEW))):
+    return await service.warehouse_options(
+        db, mine_only=mine_only, all_points=all_points, user=user)
 
 
 @router.get("/options/bins", response_model=list[s.Option])
@@ -838,9 +845,28 @@ async def po_lines(po_id: int = Query(...), db: AsyncSession = Depends(get_db),
 
 @router.get("/options/receipts", response_model=list[s.Option])
 async def receipt_options(search: str | None = None, receipt_type: str | None = None,
+                          warehouse_id: int | None = None, for_putaway: bool = False,
                           db: AsyncSession = Depends(get_db),
-                          _=Depends(require_permission(RECEIPT_VIEW))):
-    return await service.receipt_options(db, search, receipt_type)
+                          user=Depends(require_permission(RECEIPT_VIEW))):
+    return await service.receipt_options(db, search, receipt_type,
+                                         warehouse_id=warehouse_id,
+                                         for_putaway=for_putaway, user=user)
+
+
+@router.get("/options/incoming-dispatches", response_model=list[s.Option])
+async def incoming_dispatch_options(warehouse_id: int = Query(...),
+                                    search: str | None = None,
+                                    db: AsyncSession = Depends(get_db),
+                                    _=Depends(require_permission(RECEIPT_VIEW))):
+    return await service.incoming_dispatch_options(db, warehouse_id, search)
+
+
+@router.get("/options/dispatch-receipt-source", response_model=s.DispatchReceiptSource)
+async def dispatch_receipt_source(dispatch_id: int = Query(...),
+                                  warehouse_id: int = Query(...),
+                                  db: AsyncSession = Depends(get_db),
+                                  _=Depends(require_permission(RECEIPT_CREATE))):
+    return await service.dispatch_receipt_source(db, dispatch_id, warehouse_id)
 
 
 @router.get("/options/indents", response_model=list[s.Option])

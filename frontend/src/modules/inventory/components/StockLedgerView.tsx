@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
@@ -6,7 +6,7 @@ import { ArrowDownLeft, ArrowUpRight, FileSpreadsheet } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
-import { getStockLedger, getWarehouses } from "../api";
+import { getStockLedger, getStockLedgerSummary, getWarehouses } from "../api";
 import type { StockLedgerItem } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
@@ -92,11 +92,16 @@ export function StockLedgerView() {
   const rows = data?.items ?? [];
   const totalPages = data?.total ? Math.ceil(data.total / size) : 0;
 
-  const totals = useMemo(() => {
-    let inQty = 0, outQty = 0;
-    rows.forEach((r) => { inQty += r.in_qty; outQty += r.out_qty; });
-    return { inQty, outQty, net: inQty - outQty };
-  }, [rows]);
+  // Counted on the server across the whole filtered ledger. Summing `rows` summed the
+  // open page, so "Movements 20 / In +423" at 20/page became "100 / +5,196" at 100 —
+  // two different answers to the same question over 219 rows.
+  const { page: _page, size: _size, ...summaryFilters } = filters;
+  const { data: totals, isLoading: totalsLoading } = useQuery({
+    queryKey: ["stock-ledger-summary", summaryFilters],
+    queryFn: () => getStockLedgerSummary(summaryFilters),
+  });
+  const num = (n?: number) =>
+    totalsLoading || n === undefined ? "—" : n.toLocaleString("en-IN");
 
   const activeFilters = [search, itemId, warehouseId, refType, direction, dateFrom, dateTo].filter(Boolean).length;
 
@@ -196,15 +201,15 @@ export function StockLedgerView() {
         title="Stock Ledger"
         actions={
           <Button variant="primary" disabled={rows.length === 0} onClick={exportCsv}>
-            <FileSpreadsheet size={14} /> Export Excel
+            <FileSpreadsheet size={14} /> Export CSV
           </Button>
         }
       />
 
       <ResponsiveGrid cols={3} className="mb-4">
-        <StatCard label="Movements" value={rows.length} />
-        <StatCard label="Total In" value={`+${totals.inQty.toLocaleString("en-IN")}`} icon={<ArrowDownLeft size={16} />} tone="text-success" />
-        <StatCard label="Total Out" value={`−${totals.outQty.toLocaleString("en-IN")}`} icon={<ArrowUpRight size={16} />} tone="text-danger" />
+        <StatCard label="Movements" value={num(totals?.movements)} />
+        <StatCard label="Total In" value={totalsLoading ? "—" : `+${num(totals?.total_in)}`} icon={<ArrowDownLeft size={16} />} tone="text-success" />
+        <StatCard label="Total Out" value={totalsLoading ? "—" : `−${num(totals?.total_out)}`} icon={<ArrowUpRight size={16} />} tone="text-danger" />
       </ResponsiveGrid>
 
       <FilterBar

@@ -88,18 +88,23 @@ export default function QualityInspection({
       createPermission="grn.qc"
       onRowClick={(r) => nav(String(r.id))}
       empty="No inspections match these filters."
-      kpis={(rows) => [
-        { label: "In progress", value: rows.filter((r) => r.status === "IN_PROGRESS").length, tone: "text-warn" },
-        { label: "Completed", value: rows.filter((r) => r.status === "COMPLETED").length },
-        { label: "Failed lines", value: rows.reduce((s, r) => s + r.failed_items, 0), tone: "text-bad" },
-        {
-          label: "Pass rate",
-          value: `${percent(
-            rows.reduce((s, r) => s + r.passed_items, 0),
-            rows.reduce((s, r) => s + r.total_items, 0),
-          )}%`,
-        },
-      ]}
+      kpis={(rows) => {
+        const passed = rows.reduce((s, r) => s + r.passed_items, 0);
+        const failed = rows.reduce((s, r) => s + r.failed_items, 0);
+        return [
+          { label: "In progress", value: rows.filter((r) => r.status === "IN_PROGRESS").length, tone: "text-warn" },
+          { label: "Completed", value: rows.filter((r) => r.status === "COMPLETED").length },
+          { label: "Failed lines", value: failed, tone: "text-bad" },
+          {
+            // Over lines that have actually been judged, not over every line raised.
+            // Against `total_items` an inspection with nothing failed and half its
+            // lines still un-inspected read as a 50% pass rate, so the tile said
+            // "82% pass" directly above "0 failed lines" and neither was wrong.
+            label: "Pass rate",
+            value: passed + failed ? `${percent(passed, passed + failed)}%` : "—",
+          },
+        ];
+      }}
       renderCard={(r) => (
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">

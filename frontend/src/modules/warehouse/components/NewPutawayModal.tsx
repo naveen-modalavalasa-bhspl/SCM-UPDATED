@@ -39,6 +39,17 @@ export function NewPutawayModal({
     }
   }, [isOpen]);
 
+  /* Shares the Lookup's cache key, so this is not a second request. It exists only so
+   * the field can say why it is empty: a storekeeper at an MDP with no bins was left
+   * staring at a picker that listed every GRN in the company and then refused all of
+   * them, one greyed-out line at a time. */
+  const { data: waiting = [] } = useQuery({
+    queryKey: ["wh-lookup", "grns-for-putaway", ""],
+    queryFn: () => grnOptions(undefined, true),
+    staleTime: 5 * 60_000,
+    enabled: isOpen,
+  });
+
   const { data: candidatesData, isFetching } = useQuery({
     queryKey: ["wh-putaway-candidates", grnId],
     queryFn: () => putawayCandidates(Number(grnId)),
@@ -83,16 +94,23 @@ export function NewPutawayModal({
         <ModalBody>
           <ErrorBanner error={create.error} />
 
-          <Field label="GRN">
+          <Field
+            label="GRN"
+            hint={
+              waiting.length
+                ? undefined
+                : "Nothing is waiting on the floor. A point with no bins configured posts its stock straight to the balance at receipt, so there is no putaway step there."
+            }
+          >
             <Lookup
-              name="grns"
-              load={grnOptions}
+              name="grns-for-putaway"
+              load={(s) => grnOptions(s, true)}
               value={grnId}
               onChange={(id) => {
                 setGrnId(id);
                 setPicked([]);
               }}
-              placeholder="Pick a GRN"
+              placeholder={waiting.length ? "Pick a GRN" : "Nothing waiting to be put away"}
             />
           </Field>
 

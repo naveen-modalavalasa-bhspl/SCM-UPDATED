@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
@@ -29,10 +29,16 @@ const POINT_LABEL: Record<string, string> = {
  * filter layouts and three different empty states. Each list page now supplies only
  * what is actually different about it.
  *
- * Status and warehouse filter server-side (they change which rows exist); the free
- * text box filters what came back, because a storekeeper scanning a page of twenty
- * wants it to narrow as they type rather than on a round trip.
+ * Search, status and warehouse all filter server-side, and the list is paged by the
+ * server too — the earlier version pulled 200 rows and did all three in the browser,
+ * so the search box could only find what had already been fetched and anything past
+ * row 200 was unreachable. The box is debounced so typing is still one round trip.
  */
+
+/** How many rows the KPI strip scans. The tiles are aggregates over the filtered
+ *  queue, and no warehouse list endpoint offers a summary route yet; 500 is the
+ *  server's own MAX_PAGE_SIZE, so this asks for the most it will ever give. */
+const KPI_SCAN_SIZE = 500;
 
 export interface DocumentListProps<T> {
   eyebrow?: string;
@@ -43,8 +49,10 @@ export interface DocumentListProps<T> {
   columns: Column<T>[];
   renderCard: (row: T) => ReactNode;
   keyOf: (row: T) => string | number;
-  /** Which fields the free-text box looks at. */
-  searchIn: (row: T) => (string | null | undefined)[];
+  /** Which fields the free-text box looked at while it filtered in the browser.
+   *  The server owns `?search=` now; the prop stays so the eight list pages keep
+   *  documenting what their box is expected to match. */
+  searchIn?: (row: T) => (string | null | undefined)[];
   searchPlaceholder?: string;
   statuses?: { value: string; label: string }[];
   /** Extra server-side filters merged into the request. */
@@ -73,7 +81,6 @@ export function DocumentList<T>({
   columns,
   renderCard,
   keyOf,
-  searchIn,
   searchPlaceholder = "Search…",
   statuses = [],
   extraParams,
@@ -92,13 +99,21 @@ export function DocumentList<T>({
   const [status, setStatus] = useState("");
   const [warehouse, setWarehouse] = useState("");
   const [page, setPage] = useState(1);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const PAGE_SIZE = 20;
+
+  // Now that the box searches the server, a request per keystroke would be a request
+  // per keystroke. A quarter second is under the pause between words.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   // Narrowing the list while sitting on page 4 would otherwise show an empty page
   // with no hint that the rows exist a few pages back.
   useEffect(() => {
     setPage(1);
-  }, [search, status, warehouse]);
+  }, [debouncedSearch, status, warehouse]);
 
   const { data: houses = [] } = useQuery({
     queryKey: ["wh-lookup", "warehouses", ""],
@@ -107,34 +122,36 @@ export function DocumentList<T>({
     enabled: warehouseFilter,
   });
 
-  const params: ListParams = {
-    size: 200,
+  const filters: ListParams = {
+    search: debouncedSearch || undefined,
     status: status || undefined,
     warehouse_id: warehouse ? Number(warehouse) : undefined,
     ...extraParams,
   };
 
+  // The table asks for one page. It used to ask for 200 rows and slice them in the
+  // browser, which meant every warehouse list loaded the whole table on open, the
+  // search box only ever searched what had already been fetched, and row 201 was
+  // invisible with no way to reach it.
   const { data, isLoading, error } = useQuery({
-    queryKey: [queryKey, status, warehouse, extraParams],
-    queryFn: () => fetch(params),
+    queryKey: [queryKey, "page", filters, page],
+    queryFn: () => fetch({ ...filters, page, size: PAGE_SIZE }),
   });
 
-  const all = data?.items ?? [];
+  const pageRows = data?.items ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return all;
-    return all.filter((r) =>
-      searchIn(r).some((v) => (v ?? "").toString().toLowerCase().includes(q)),
-    );
-  }, [all, search, searchIn]);
+  // The tiles describe the queue, not the page, so they read the filtered set rather
+  // than the twenty rows on screen — the same mistake the stock screens made. Capped
+  // at the server's own page ceiling, and skipped entirely when a list has no tiles.
+  const { data: kpiPage } = useQuery({
+    queryKey: [queryKey, "kpis", filters],
+    queryFn: () => fetch({ ...filters, page: 1, size: KPI_SCAN_SIZE }),
+    enabled: Boolean(kpis),
+  });
 
-  // Paginate in the browser over the page the server already sent. The KPI tiles
-  // stay on `all` so they read as the list-wide total and don't jump as you page.
-  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
-  const pageRows = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
-  const tiles = kpis?.(all) ?? [];
+  const tiles = kpis?.(kpiPage?.items ?? []) ?? [];
 
   // The heading says what the point IS, not what the module is called. A DM working
   // their MDP should read "MDP · Kadapa Store", not "Warehouse" — the picker already

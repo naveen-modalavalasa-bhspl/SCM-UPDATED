@@ -94,11 +94,20 @@ export default function MaterialInward() {
       // it as something it no longer is.
       onRowClick={(r) => nav(isDraft(r) ? String(r.id) : `../grn/${r.id}`)}
       empty="No gate entries yet."
-      kpis={(rows) => [
-        { label: "Draft", value: rows.filter(isDraft).length, tone: "text-warn" },
-        { label: "Done", value: rows.filter((r) => !isDraft(r)).length },
-        { label: "Entries", value: rows.length },
-      ]}
+      // "Entries" was Draft + Done restated, so it told nobody anything they could
+      // not already add up. "Arrived today" is the number a gate actually works to.
+      kpis={(rows) => {
+        const today = new Date().toDateString();
+        const arrivedToday = rows.filter((r) => {
+          const when = r.gate_entry_at ?? r.created_at;
+          return when ? new Date(when).toDateString() === today : false;
+        }).length;
+        return [
+          { label: "Draft", value: rows.filter(isDraft).length, tone: "text-warn" },
+          { label: "Done", value: rows.filter((r) => !isDraft(r)).length },
+          { label: "Arrived today", value: arrivedToday },
+        ];
+      }}
       renderCard={(r) => (
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">

@@ -36,6 +36,7 @@ from app.platform.settings.models import AuditLog
 from app.platform.rbac import service as rbac_service
 from app.platform.rbac import permissions as perms
 from app.shared.models.base import utcnow
+from app.shared.scope import scope_condition
 from app.shared.models.master import Item
 from app.shared.numbering import next_number
 from app.modules.indents.enums import (
@@ -144,6 +145,12 @@ async def list_region_options(db: AsyncSession, user=None) -> dict:
     handful ever appear is unusable, and every option here is guaranteed to return
     rows. Indents with no region are filtered with the explicit "Unassigned" choice on
     the client rather than an entry in this list.
+
+    Scoped by the SAME predicate the ledger rows are, rung included — a SELF login sees
+    only the regions its own indents were raised in, a SUBTREE login also sees the ones
+    its reporting line covers. With the access rule alone the dropdown listed regions
+    whose rows the ledger then refused to show, which reads as a broken filter and
+    quietly names locations the login is not entitled to know about.
     """
     stmt = (
         select(Indent.region_id, Indent.region_name)
@@ -152,7 +159,7 @@ async def list_region_options(db: AsyncSession, user=None) -> dict:
         .order_by(Indent.region_name)
     )
     if user is not None:
-        stmt = stmt.where(await indent_access_condition(db, user))
+        stmt = stmt.where(await _indent_visibility(db, user))
     rows = (await db.execute(stmt)).all()
     return {"items": [{"id": region_id, "name": name} for region_id, name in rows]}
 
@@ -767,6 +774,31 @@ async def indent_access_condition(db: AsyncSession, user):
     return or_(*visible)
 
 
+async def _indent_visibility(db: AsyncSession, user):
+    """Both halves of "may this login read this indent": the access rule AND the rung.
+
+    `indent_access_condition` answers "is this document any of my business" — I raised
+    it, I am approving it, it reached the stage my department works. The profile's
+    scope rung (Settings > Job Profiles) answers a different question: "whose rows may
+    I read at all" — only mine, my office, my reporting line, my project, everything.
+
+    Both have to hold. Applying only the first is what let a SELF-scoped lab
+    technician open 102 indents on /indents while Home — which already ANDed the two —
+    showed 2 for the same login. Every indent reader goes through here so the list,
+    the dashboard and the tile can never drift apart again.
+    """
+    return and_(
+        await indent_access_condition(db, user),
+        await scope_condition(
+            db, user,
+            owner_col=Indent.requested_by_id,
+            position_col=Indent.position_id,
+            office_col=Indent.office_id,
+            project_col=Indent.project_id,
+        ),
+    )
+
+
 async def _assert_can_view_indent(db: AsyncSession, indent_id: int, user) -> Indent:
     stmt = (
         select(Indent)
@@ -1051,7 +1083,7 @@ async def list_indents(
     )
     stmt = select(Indent).options(selectinload(Indent.items))
     if user is not None:
-        stmt = stmt.where(await indent_access_condition(db, user))
+        stmt = stmt.where(await _indent_visibility(db, user))
     stmt = _apply_indent_filters(
         stmt, search=search, date_from=date_from, date_to=date_to,
         required_by_from=required_by_from, required_by_to=required_by_to,
@@ -3794,7 +3826,9 @@ async def indent_stats(
     )
     base = select(Indent.id)
     if user is not None:
-        base = base.where(await indent_access_condition(db, user))
+        # Same predicate as list_indents, or the dashboard contradicts the list it
+        # sits above.
+        base = base.where(await _indent_visibility(db, user))
     filtered_ids = _apply_indent_filters(
         base, search=search, date_from=date_from, date_to=date_to,
         required_by_from=required_by_from, required_by_to=required_by_to,

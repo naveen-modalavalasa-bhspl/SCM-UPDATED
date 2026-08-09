@@ -41,7 +41,6 @@ from app.core.exceptions import ValidationError
 from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmPositionAssignment
 from app.platform.rbac.models import Page, Permission, Role, RolePermission
 from app.platform.rbac.permissions import PAGE_RESOURCE
-from app.platform.rbac.permissions import PAGE_RESOURCE
 from app.platform.settings.service import write_audit
 from app.shared.enums import AuditAction, ScopeRung
 
@@ -185,6 +184,18 @@ def _office_level(raw) -> str | None:
         except ValueError:
             return None
     return (raw or {}).get("office_level") if isinstance(raw, dict) else None
+
+
+def _page_gate(page: Page, defined_page_perms: set[str]) -> str | None:
+    """The one permission that decides whether this page is on for a profile.
+
+    Its own `page.<code>.view` when that permission exists, else the legacy
+    `required_permission`. Identical to the rule `rbac.service.get_user_menu` uses to
+    build the rail — the tick-box and the menu MUST agree on what turns a page on, or
+    an admin ticks a box and nothing happens, which is exactly what used to occur.
+    """
+    own = f"{PAGE_RESOURCE}.{page.code}.view"
+    return own if own in defined_page_perms else page.required_permission
 
 
 SCOPE_ORDER = [ScopeRung.SELF, ScopeRung.OFFICE, ScopeRung.SUBTREE,
@@ -358,8 +369,13 @@ async def list_profiles(db: AsyncSession) -> dict:
     pages = (await db.execute(
         select(Page).where(Page.is_active.is_(True)).order_by(Page.sort_order, Page.name)
     )).scalars().all()
-    page_permission_codes = {p.required_permission for p in pages if p.required_permission}
     permissions = (await db.execute(select(Permission))).scalars().all()
+    # Only page permissions that exist may represent a tick-box. A page without one
+    # (`home`, and a few newer screens) still falls back to required_permission, the
+    # same rule rbac.service.get_user_menu applies when it builds the rail.
+    defined_page_perms = {
+        p.code for p in permissions if p.code.startswith(f"{PAGE_RESOURCE}.")
+    }
     held: dict[int, set[str]] = {}
     for role_id, code in (await db.execute(
         select(RolePermission.role_id, Permission.code)
@@ -396,11 +412,19 @@ async def list_profiles(db: AsyncSession) -> dict:
             "hcm_roles": sorted(bucket["hcm_roles"]),
             "office_levels": [lvl for lvl, _ in bucket["office_levels"].most_common()],
             "positions": bucket["positions"],
+            # Exactly the pages ticked, nothing inferred. This used to report every
+            # page whose required_permission the profile happened to hold, so ticking
+            # Approvals (gated on indent.view) lit up all ten indent pages with it and
+            # unticking one was impossible without unticking its siblings.
             "page_codes": sorted(
-                p.code for p in pages
-                if p.required_permission is None or p.required_permission in codes
+                p.code for p in pages if _page_gate(p, defined_page_perms) in codes
+                or _page_gate(p, defined_page_perms) is None
             ),
-            "permission_codes": sorted(codes - page_permission_codes),
+            # Every action, including the ones that double as a page's
+            # required_permission. Those used to be subtracted out and shown only as
+            # page ticks, which is why `indent.view` could not be granted or revoked
+            # on its own.
+            "permission_codes": sorted(codes - defined_page_perms),
         })
     return {
         "items": items,
@@ -454,17 +478,24 @@ async def set_profile_access(
     if unknown_pages:
         raise ValidationError(f"Unknown page code(s): {', '.join(sorted(unknown_pages))}")
 
-    # A page grant is really a grant of the page's required_permission. Several pages
-    # share one (indent.view covers ten), so asking for one of them grants its
-    # siblings — the honest answer is computed back from the permissions, never
-    # echoed from the request.
+    all_permissions = (await db.execute(select(Permission))).scalars().all()
+    defined_page_perms = {
+        p.code for p in all_permissions if p.code.startswith(f"{PAGE_RESOURCE}.")
+    }
+    # One tick-box, one permission. A page grants its OWN `page.<code>.view` and
+    # nothing else, so ticking Approvals no longer drags along the ten other pages
+    # that happen to share `indent.view` — and unticking it no longer requires
+    # unticking its siblings first.
+    #
+    # A page with no permission of its own still grants required_permission, because
+    # that is the only handle it has; those are the four the catalogue never got.
     wanted_codes = {
-        p.required_permission for p in pages
-        if p.code in set(page_codes) and p.required_permission
+        gate for gate in (
+            _page_gate(p, defined_page_perms)
+            for p in pages if p.code in set(page_codes)
+        ) if gate
     }
-    unknown_features = set(permission_codes) - {
-        p.code for p in (await db.execute(select(Permission))).scalars().all()
-    }
+    unknown_features = set(permission_codes) - {p.code for p in all_permissions}
     if unknown_features:
         raise ValidationError(
             f"Unknown permission(s): {', '.join(sorted(unknown_features))}"

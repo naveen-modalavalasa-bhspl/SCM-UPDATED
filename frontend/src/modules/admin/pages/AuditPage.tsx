@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { PageHeader, ResponsiveList, Select, type Column } from "@/shared/components";
+import { Input, PageHeader, ResponsiveList, Select, type Column } from "@/shared/components";
 import { adminApi } from "../api";
 import type { AuditRow } from "../types";
 
@@ -44,11 +44,24 @@ export function AuditPage() {
   const [entity, setEntity] = useState<string>("");
   const [action, setAction] = useState<string>("");
   const [page, setPage] = useState(1);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+
+  // The box filters on the server — who acted, the document number, or the table.
+  // Debounced, and it resets to page 1 so a narrowed log never opens on an empty page.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
   const audit = useQuery({
-    queryKey: ["admin", "audit", entity, action, page],
+    queryKey: ["admin", "audit", entity, action, search, page],
     queryFn: () => adminApi.audit({
-      entity: entity || undefined, action: action || undefined, page, size: 50,
+      entity: entity || undefined, action: action || undefined,
+      search: search || undefined, page, size: 50,
     }),
   });
 
@@ -85,6 +98,14 @@ export function AuditPage() {
         <div className="w-52">
           <Select value={action} options={[{ value: "", label: "All actions" }, ...ACTIONS]}
                   onChange={(v) => { setAction(String(v)); setPage(1); }} />
+        </div>
+        <div className="w-64">
+          <Input
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder="Search who, document or table…"
+            aria-label="Search the audit log"
+          />
         </div>
         <span className="ml-auto text-sm text-muted">
           {audit.data?.total ?? 0} entries

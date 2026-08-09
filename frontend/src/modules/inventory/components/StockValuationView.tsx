@@ -5,7 +5,12 @@ import { IndianRupee, History, TriangleAlert, RefreshCw } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { getStockValuation, getStockAgeing, getNearExpiryAlerts } from "../api";
 
-const inr = (n: number) => `₹${Number(n ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
+const inr = (n: number) => `₹${Number(n ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** Quantities are DECIMAL(16,3) and arrive as raw floats — the ageing tiles printed
+ *  "53611.998" straight onto the screen. Three decimals, grouped, and never more. */
+const qty = (n?: number) =>
+  Number(n ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 3 });
 
 // ponytail: rows are shaped by the report endpoints and used only here — one loose
 // row type beats three near-identical interfaces nobody else imports.
@@ -35,7 +40,7 @@ export function StockValuationView() {
     { key: "item_code", header: "Item Code", render: (r) => <strong>{r.item_code}</strong> },
     { key: "item_name", header: "Item", render: (r) => r.item_name },
     { key: "warehouse_name", header: "Warehouse", render: (r) => r.warehouse_name, hideOnNarrow: true },
-    { key: "total_qty", header: "Qty", render: (r) => r.total_qty },
+    { key: "total_qty", header: "Qty", render: (r) => qty(r.total_qty) },
     { key: "moving_avg_cost", header: "Avg Cost", render: (r) => inr(r.moving_avg_cost) },
     { key: "total_stock_value", header: "Value", render: (r) => <strong>{inr(r.total_stock_value)}</strong> },
   ];
@@ -102,8 +107,8 @@ export function StockValuationView() {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Portfolio Valuation" value={inr(val.data?.total_portfolio_value ?? 0)} icon={<IndianRupee size={16} />} />
-        <StatCard label="Fresh Stock (0-30 d)" value={age.data?.bucket_0_30_qty ?? 0} icon={<History size={16} />} tone="text-success" />
-        <StatCard label="Aged Stock (90+ d)" value={age.data?.bucket_90_plus_qty ?? 0} icon={<History size={16} />} tone="text-danger" />
+        <StatCard label="Fresh Stock (0-30 d)" value={qty(age.data?.bucket_0_30_qty)} icon={<History size={16} />} tone="text-success" />
+        <StatCard label="Aged Stock (90+ d)" value={qty(age.data?.bucket_90_plus_qty)} icon={<History size={16} />} tone="text-danger" />
         <StatCard label="Near-Expiry (≤90 d)" value={expiryRows.length} icon={<TriangleAlert size={16} />} tone="text-warning" />
       </div>
 

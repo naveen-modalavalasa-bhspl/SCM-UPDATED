@@ -212,6 +212,34 @@ SCOPE_EXEMPT = {
     # second, divergent filter over the same data — the very thing this test exists
     # to prevent.
     "_stock_counts",
+    # Personal by construction, like report_summary: every row is counted off
+    # wf_pending.approver_id == user.id, so there is no wider set for a rung to
+    # narrow. Measured against workflow.pending_for_user for a SELF login: both 0.
+    "pending_summary",
+    # The tiles above list_stock / list_movements, built from the SAME
+    # _stock_query / _movement_query the lists use, with the same `user`. Those two
+    # lists are exempt above (a balance is a fact about a warehouse, not a person);
+    # scoping the tile but not the grid under it is the mismatch this file exists to
+    # catch, so the tile follows its list.
+    "stock_summary",
+    "movement_summary",
+    # Queue depths for the warehouse rail: receipts at the gate, GRNs to raise, QC,
+    # put-away, picks, issues, dispatches, returns. Every one is a fact about a
+    # LOCATION, so it is bounded by warehouse_ids_for_user — the same set the lists
+    # those tiles link to use — not by the person rungs. It only became visible to
+    # this test once it took a `user` at all: before that it counted the whole
+    # company and the test could not see it, which is how "At gate: 2" reached a
+    # storekeeper holding one gate entry.
+    "dashboard",
+}
+
+# Helpers that apply scope_condition on a module's behalf. A reader that calls one
+# is scoped — the point of the rule is that the rung is applied, not that every
+# query spells it out. Anything named here must itself call scope_condition.
+SCOPE_DELEGATES = {
+    # indents: access rule AND rung, shared by list_indents and indent_stats so the
+    # dashboard can never disagree with the list under it.
+    "_indent_visibility",
 }
 
 
@@ -260,7 +288,10 @@ def test_every_list_query_applies_the_scope_filter():
         for name, source in _list_functions(service):
             if name in SCOPE_EXEMPT:
                 continue
-            if "scope_condition" not in source:
+            applies = "scope_condition" in source or any(
+                helper in source for helper in SCOPE_DELEGATES
+            )
+            if not applies:
                 offenders.append(f"{service.parent.name}.{name}")
     assert not offenders, (
         "These paginated list services do not apply shared.scope.scope_condition, "
@@ -326,6 +357,28 @@ def test_every_detail_reader_applies_the_scope_filter():
         + ". Take a `user` and apply scope_condition, or add the name to "
           "DETAIL_EXEMPT with the reason."
     )
+
+
+def test_scope_delegates_really_apply_the_rung():
+    """A name in SCOPE_DELEGATES must itself call scope_condition.
+
+    Without this, adding a helper to that set is a way to switch the rule off for a
+    whole module by accident.
+    """
+    sources = "\n".join(
+        p.read_text(encoding="utf-8") for p in MODULES_ROOT.glob("*/service.py")
+    )
+    for helper in SCOPE_DELEGATES:
+        tree = ast.parse(sources)
+        body = next(
+            (ast.unparse(n) for n in ast.walk(tree)
+             if isinstance(n, ast.AsyncFunctionDef) and n.name == helper),
+            None,
+        )
+        assert body is not None, f"SCOPE_DELEGATES names {helper}, which does not exist"
+        assert "scope_condition" in body, (
+            f"{helper} is trusted to apply the rung but never calls scope_condition"
+        )
 
 
 def test_scope_condition_signature_is_stable():

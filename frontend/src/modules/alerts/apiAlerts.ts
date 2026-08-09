@@ -51,9 +51,17 @@ export function installApiAlerts(): void {
       if (!error.response) {
         alerts.error("network.unreachable");
       } else if (status === 401) {
-        // The shared interceptor is already sending the browser to /login. This
-        // only explains why, so the redirect does not look like a random bounce.
-        alerts.error("session.expired");
+        // A rejected sign-in is not an expired session. The login form shows
+        // "Invalid credentials" inline, which is the whole story; raising "Signed
+        // out — your session has expired" on top of it told the user they had been
+        // logged out of an account they had never got into.
+        const url = String(error.config?.url ?? "");
+        const signingIn = url.includes("/api/auth/login") || !localStorage.getItem("token");
+        if (!signingIn) {
+          // The shared interceptor is already sending the browser to /login. This
+          // only explains why, so the redirect does not look like a random bounce.
+          alerts.error("session.expired");
+        }
       } else if (status === 403) {
         // The backend's message names the missing permission code
         // ("Missing permission: indent.view"); fall back to a readable phrase

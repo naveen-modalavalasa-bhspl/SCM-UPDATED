@@ -311,6 +311,9 @@ export interface ReceiptWrite {
   /** Typed on a gate entry, straight off the driver's paperwork. Ignored when
    *  `po_id` is set — a PO-backed receipt takes the order's own number. */
   po_no?: string | null;
+  /** The incoming consignment an MDP / LIP / warehouse is inwarding, on a
+   *  `DISPATCH` receipt. */
+  dispatch_id?: number | null;
   vendor_id?: number | null;
   warehouse_id: number;
   project_id?: number | null;
@@ -383,6 +386,12 @@ export interface InspectionItemWrite {
   id?: number;
   receipt_item_id?: number | null;
   item_id: number;
+  /* Carried off the GRN line purely so a NEW inspection can name its items. The
+   * saved document has its own snapshot columns; before the first save there is no
+   * saved line, and the form fell back to "Item 1" for a row the GRN plainly called
+   * "Dolo 650 Tablet". Ignored by the API. */
+  item_code?: string | null;
+  item_name?: string | null;
   batch_no?: string | null;
   inspected_qty: number;
   accepted_qty: number;
@@ -1139,6 +1148,30 @@ export interface Option {
   id: number;
   code?: string | null;
   name: string;
+}
+
+/** A stocking point in a picker. `is_bin_managed` decides whether the screen asks
+ *  where the goods were put — an MDP or LIP with no bins configured is not. */
+export interface WarehouseOption extends Option {
+  is_bin_managed?: boolean;
+}
+
+/** An incoming consignment, expanded so the inward form fills itself from it. */
+export interface DispatchReceiptSource {
+  dispatch_id: number;
+  dispatch_no: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  is_bin_managed: boolean;
+  from_warehouse_id?: number | null;
+  from_warehouse_name?: string | null;
+  project_id?: number | null;
+  dispatch_date?: string | null;
+  lr_no?: string | null;
+  vehicle_number?: string | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  items: ReceiptItemWrite[];
 }
 
 export interface ItemOption extends Option {

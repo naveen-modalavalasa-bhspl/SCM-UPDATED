@@ -1,7 +1,7 @@
 """sys_settings key-value helpers, the HCM sync schedule, and the audit log."""
 import json
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import PageParams, paginate
@@ -178,7 +178,7 @@ async def write_audit(db: AsyncSession, *, entity: str, action: AuditAction,
 
 async def list_audit(db: AsyncSession, params: PageParams, entity: str | None = None,
                      entity_id: int | None = None, actor_id: int | None = None,
-                     action: str | None = None) -> dict:
+                     action: str | None = None, search: str | None = None) -> dict:
     stmt = select(AuditLog)
     if entity:
         stmt = stmt.where(AuditLog.entity_type == entity)
@@ -188,6 +188,15 @@ async def list_audit(db: AsyncSession, params: PageParams, entity: str | None = 
         stmt = stmt.where(AuditLog.actor_id == actor_id)
     if action:
         stmt = stmt.where(AuditLog.action == action)
+    if search and search.strip():
+        # The three things anyone types into an audit log: a person, a document
+        # number, or the table they are chasing.
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            AuditLog.actor_name.ilike(like),
+            AuditLog.entity_no.ilike(like),
+            AuditLog.entity_type.ilike(like),
+        ))
 
     page = await paginate(db, stmt.order_by(desc(AuditLog.created_at)), params)
     page["items"] = [{

@@ -4,7 +4,7 @@ import type {
   ApprovalReport, ConsolidationApprovalInput, ConsolidationApprovalResult,
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
-  CorrectionIndent, PendingApproval, TeamQueueRow,
+  CorrectionIndent, PendingApproval, PendingSummary, TeamQueueRow,
 } from "./types";
 import type { Paginated } from "@/shared/types";
 
@@ -56,6 +56,10 @@ export const approvalsApi = {
   pending: (page = 1, size = 20, filters: PendingApprovalQuery = {}) =>
     api.get<Paginated<PendingApproval>>("/api/approvals/pending", { params: { page, size, ...filters } }).then((r) => r.data),
   pendingAll: () => allPages<PendingApproval>("/api/approvals/pending"),
+  // The inbox's tiles and doc-type chips. One counted read instead of pulling the
+  // whole queue a second time alongside the page already on screen.
+  pendingSummary: () =>
+    api.get<PendingSummary>("/api/approvals/pending/summary").then((r) => r.data),
   decisions: (page = 1, size = 20, filters: { search?: string; decision?: string } = {}) =>
     api.get<Paginated<ApprovalDecisionRow>>("/api/approvals/my-decisions", { params: { page, size, ...filters } }).then((r) => r.data),
   decisionsAll: () => allPages<ApprovalDecisionRow>("/api/approvals/my-decisions"),

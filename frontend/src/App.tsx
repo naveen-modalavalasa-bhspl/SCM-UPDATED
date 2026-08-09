@@ -5,6 +5,8 @@ import { HeroUIProvider } from "@heroui/react";
 import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
 import { LoginPage } from "@/pages/LoginPage";
+import { NotFoundPage } from "@/pages/NotFoundPage";
+import { ProfilePage } from "@/pages/ProfilePage";
 import { HomePage } from "@/modules/home/pages/HomePage";
 import { IndentListPage } from "@/modules/indents/pages/ListPage";
 import { IndentFormPage } from "@/modules/indents/pages/FormPage";
@@ -87,6 +89,9 @@ function AppRoutes() {
       <Route path="/login" element={me ? <Navigate to="/" replace /> : <LoginPage />} />
       <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
         <Route index element={<HomePage />} />
+        {/* Not in PAGE_TREE on purpose: everyone has a profile, so gating it behind an
+            rbac_pages row would only mean a permission every role must be granted. */}
+        <Route path="profile" element={<ProfilePage />} />
         <Route path="indents" element={<IndentListPage />} />
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
@@ -163,7 +168,9 @@ function AppRoutes() {
         {/* /reports lands on the first ledger so the rail entry always has a screen. */}
         <Route path="reports" element={<Navigate to="/reports/indents" replace />} />
         <Route path="reports/:ledger" element={<ReportLedgerPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+        {/* An address with no screen says so. It used to render Home, which made a
+            typo look like the app had simply ignored the click. */}
+        <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
   );

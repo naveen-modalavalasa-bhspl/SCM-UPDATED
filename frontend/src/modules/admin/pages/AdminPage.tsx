@@ -32,20 +32,28 @@ function latestByEntity(items: SyncResult[]): Record<string, SyncResult> {
 function EntityRow({ label, r }: { label: string; r?: SyncResult }) {
   const status = r?.status;
   return (
-    <div className="flex items-center justify-between border-b border-line/60 py-2.5 last:border-0">
-      <div className="flex items-center gap-2.5">
-        {status === "RUNNING" && <Spinner size="sm" color="primary" />}
-        {status === "SUCCESS" && <Check className="h-4 w-4 text-ok" />}
-        {status === "FAILED" && <AlertTriangle className="h-4 w-4 text-bad" />}
-        {!status && <span className="h-2 w-2 rounded-full bg-line" />}
-        <span className="text-sm font-medium text-body">{label}</span>
+    <div className="border-b border-line/60 py-2.5 last:border-0">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          {status === "RUNNING" && <Spinner size="sm" color="primary" />}
+          {status === "SUCCESS" && <Check className="h-4 w-4 text-ok" />}
+          {status === "FAILED" && <AlertTriangle className="h-4 w-4 text-bad" />}
+          {!status && <span className="h-2 w-2 rounded-full bg-line" />}
+          <span className="text-sm font-medium text-body">{label}</span>
+        </div>
+        <div className="text-xs tabular text-muted">
+          {status === "SUCCESS" && `${r?.records_upserted} synced`}
+          {status === "RUNNING" && "syncing…"}
+          {status === "FAILED" && <span className="text-bad">failed</span>}
+          {!status && "—"}
+        </div>
       </div>
-      <div className="text-xs tabular text-muted">
-        {status === "SUCCESS" && `${r?.records_upserted} synced`}
-        {status === "RUNNING" && "syncing…"}
-        {status === "FAILED" && <span className="text-bad">failed</span>}
-        {!status && "—"}
-      </div>
+      {/* `sys_hcm_sync_log` has stored the reason all along — a bad key, a refused
+          connection, a mapper that met a field HCM renamed. The screen said only
+          "failed", so every diagnosis started with a query against the table. */}
+      {status === "FAILED" && r?.error_message && (
+        <p className="mt-1 break-words pl-6 text-[11px] text-bad">{r.error_message}</p>
+      )}
     </div>
   );
 }

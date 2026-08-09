@@ -45,6 +45,21 @@ body,
   height: 100%;
 }
 
+/*
+ * The page never scrolls sideways.
+ *
+ * On a 390px phone the app measured 426px wide and every screen slid horizontally —
+ * one long document number or a wide table was enough, and the whole layout went with
+ * it. Anything genuinely too wide (a table, a code block, a diagram) has to scroll
+ * inside its own box; `.overflow-x-auto` is exempted below so those keep working.
+ */
+html,
+body,
+#root {
+  overflow-x: clip;
+  max-width: 100%;
+}
+
 body {
   margin: 0;
   background:

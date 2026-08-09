@@ -22,6 +22,19 @@ ORM = ConfigDict(from_attributes=True)
 class _Read(BaseModel):
     model_config = ORM
 
+    @field_validator("status", "result", mode="before", check_fields=False)
+    @classmethod
+    def _upper_status(cls, value):
+        """Statuses leave this module in one case, always.
+
+        The live tables hold both `COMPLETED` and `completed` on `whs_inspections`
+        (rows written before the enum was enforced). Every screen compares against
+        the enum's uppercase value, so the QC tiles counted 14 of 20 inspections and
+        reported an 82% pass rate over rows it had not looked at. Normalising on read
+        is the only fix available without touching the data.
+        """
+        return value.upper() if isinstance(value, str) else value
+
 
 # ---------------------------------------------------------------------------
 # Warehouse master
@@ -209,6 +222,10 @@ class ReceiptWrite(BaseModel):
     # is set the service snapshots the order's own number and ignores this.
     po_no: str | None = Field(default=None, max_length=50)
     transfer_id: int | None = None
+    # The incoming consignment being inwarded, on a DISPATCH receipt. It is stored in
+    # the same `transfer_id`/`transfer_no` pair the STO uses — `receipt_type` says
+    # which document those columns point at, so one source reference serves both.
+    dispatch_id: int | None = None
     vendor_id: int | None = None
     warehouse_id: int
     project_id: int | None = None
@@ -324,6 +341,29 @@ class TransferReceiptSource(BaseModel):
     items: list[ReceiptItemWrite] = Field(default_factory=list)
     indent_id: int | None = None
     indent_no: str | None = None
+
+
+class DispatchReceiptSource(BaseModel):
+    """An incoming consignment, shaped so the inward form fills itself.
+
+    `is_bin_managed` travels with it because it decides how much of the form the
+    receiving point sees: an MDP or a LIP with no bins configured is never asked
+    which shelf the goods went on.
+    """
+    dispatch_id: int
+    dispatch_no: str
+    warehouse_id: int
+    warehouse_name: str | None = None
+    is_bin_managed: bool = False
+    from_warehouse_id: int | None = None
+    from_warehouse_name: str | None = None
+    project_id: int | None = None
+    dispatch_date: date | None = None
+    lr_no: str | None = None
+    vehicle_number: str | None = None
+    indent_id: int | None = None
+    indent_no: str | None = None
+    items: list[ReceiptItemWrite] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

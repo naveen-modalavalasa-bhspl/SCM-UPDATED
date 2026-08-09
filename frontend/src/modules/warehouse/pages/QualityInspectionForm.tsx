@@ -143,6 +143,9 @@ export default function QualityInspectionForm({
         items: (receipt.items ?? []).map((l) => ({
           receipt_item_id: l.id,
           item_id: l.item_id,
+          // Carried through so the line can name itself before the first save.
+          item_code: l.item_code,
+          item_name: l.item_name,
           batch_no: l.batch_no,
           inspected_qty: num(l.received_qty),
           accepted_qty: num(l.received_qty),
@@ -261,11 +264,13 @@ export default function QualityInspectionForm({
         const saved = savedLine(i);
         return (
           <div className="min-w-0">
+            {/* Saved snapshot first, then what the GRN pull carried in. Only a line
+                with neither falls back to the id. */}
             <div className="truncate font-mono text-xs font-semibold text-ink">
-              {saved?.item_code ?? `Item ${l.item_id}`}
+              {saved?.item_code ?? l.item_code ?? `Item ${l.item_id}`}
             </div>
             <div className="truncate text-xs text-muted">
-              {saved?.item_name ?? "—"}
+              {saved?.item_name ?? l.item_name ?? "—"}
               {l.batch_no ? ` · batch ${l.batch_no}` : ""}
             </div>
           </div>

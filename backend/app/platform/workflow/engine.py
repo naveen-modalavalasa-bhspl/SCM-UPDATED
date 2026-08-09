@@ -11,7 +11,7 @@ Engine functions flush but do not commit — the calling module owns the transac
 """
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PermissionError_, ValidationError
@@ -1124,30 +1124,67 @@ async def current_approvers(db, doc_type: str, doc_id: int) -> list:
     return [employee for employee in employees if employee is not None]
 
 
-async def pending_for_user(db, user) -> list[dict]:
-    rows = (await db.execute(
-        select(Pending, Instance)
-        .join(Instance, Instance.id == Pending.instance_id)
-        .where(
-            Pending.approver_id == user.id,
-            # A pending row on a finished instance is stale by definition — every
-            # terminal transition already calls _clear_pending. Reading through the
-            # instance status costs nothing for healthy data and stops rows that
-            # escaped an earlier code path from being handed out as live work.
-            Instance.status == InstanceStatus.IN_PROGRESS.value,
-        )
-        .order_by(Pending.created_at.desc())
-    )).all()
-    return [{
+def _pending_row(row) -> dict:
+    due_at = row.Pending.due_at
+    return {
         "instance_id": row.Pending.instance_id, "doc_type": row.Pending.doc_type,
         "doc_id": row.Pending.doc_id, "stage_sequence": row.Pending.stage_sequence,
         "doc_no": row.Pending.doc_no, "summary": row.Pending.doc_summary,
         "requested_by_name": row.Pending.requested_by_name,
         "amount": float(row.Pending.amount) if row.Pending.amount is not None else None,
         "waiting_since": row.Pending.created_at.isoformat() if row.Pending.created_at else None,
-        "due_at": row.Pending.due_at.isoformat() if row.Pending.due_at else None,
+        "due_at": due_at.isoformat() if due_at else None,
+        # Decided here, not in the browser. These timestamps are naive UTC, so a
+        # client parsing them as local time got a different answer to the server's
+        # own `overdue_only` filter — the tile said 0 while the filter returned a row.
+        "overdue": bool(due_at and due_at < utcnow()),
         "current_stage_name": row.Instance.current_stage_name,
-    } for row in rows]
+    }
+
+
+def _pending_conditions(user, doc_types: list[str] | None = None) -> list:
+    conditions = [
+        Pending.approver_id == user.id,
+        # A pending row on a finished instance is stale by definition — every
+        # terminal transition already calls _clear_pending. Reading through the
+        # instance status costs nothing for healthy data and stops rows that
+        # escaped an earlier code path from being handed out as live work.
+        Instance.status == InstanceStatus.IN_PROGRESS.value,
+    ]
+    if doc_types:
+        conditions.append(Pending.doc_type.in_(doc_types))
+    return conditions
+
+
+async def pending_for_user(db, user, doc_types: list[str] | None = None) -> list[dict]:
+    rows = (await db.execute(
+        select(Pending, Instance)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(*_pending_conditions(user, doc_types))
+        .order_by(Pending.created_at.desc())
+    )).all()
+    return [_pending_row(row) for row in rows]
+
+
+async def pending_page(db, user, page: int, size: int,
+                       doc_types: list[str] | None = None) -> dict:
+    """`pending_for_user` as a page. Rule 11: every list answers {items,total,page,size}."""
+    conditions = _pending_conditions(user, doc_types)
+    total = int(await db.scalar(
+        select(func.count(Pending.id))
+        .select_from(Pending)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(*conditions)
+    ) or 0)
+    rows = (await db.execute(
+        select(Pending, Instance)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(*conditions)
+        .order_by(Pending.created_at.desc())
+        .offset((page - 1) * size).limit(size)
+    )).all()
+    return {"items": [_pending_row(row) for row in rows],
+            "total": total, "page": page, "size": size}
 
 
 async def history(db, doc_type: str, doc_id: int) -> list[Action]:

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
@@ -6,7 +6,7 @@ import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpread
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect, FilterToggle } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
-import { getStockBalances, getStockDetail, getWarehouses } from "../api";
+import { getStockBalances, getStockDetail, getStockSummary, getWarehouses } from "../api";
 import type { StockBalanceItem, StockDetail, StockLot } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
@@ -140,18 +140,17 @@ export function StockBalanceView() {
   const rows = data?.items ?? [];
   const totalPages = data?.total ? Math.ceil(data.total / size) : 0;
 
-  const kpis = useMemo(() => {
-    let value = 0, low = 0, expiring = 0;
-    const items = new Set<number>();
-    rows.forEach((r) => {
-      value += r.total_value;
-      items.add(r.item_id);
-      if (r.reorder_level > 0 && r.available_qty < r.reorder_level) low++;
-      const left = daysTo(r.expiry_date);
-      if (left !== null && left >= 0 && left <= 30) expiring++;
-    });
-    return { value, low, expiring, items: items.size };
-  }, [rows]);
+  // The tiles are counted on the server over every matching row. Summing `rows` here
+  // summed one page: at 20/page the screen claimed 20 stock lines and 11 items over
+  // a 90-row dataset, and the numbers moved whenever the page size changed.
+  // `page`/`size` are deliberately left out of the key so paging does not refetch it.
+  const { page: _page, size: _size, ...summaryFilters } = filters;
+  const { data: summary, isLoading: summaryLoading } = useQuery({
+    queryKey: ["stock-summary", summaryFilters],
+    queryFn: () => getStockSummary(summaryFilters),
+  });
+  const stat = (n?: number) =>
+    summaryLoading || n === undefined ? "—" : n.toLocaleString("en-IN");
 
   const activeFilters =
     [search, warehouseId, expiringIn, expiryFrom, expiryTo].filter(Boolean).length +
@@ -276,20 +275,22 @@ export function StockBalanceView() {
         }
       />
 
+      {/* An em dash while the count is in flight. Rendering 0 0 0 0 read as a real
+          answer — "no stock, nothing expiring" — on a screen that was still loading. */}
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Stock Lines" value={rows.length} icon={<Layers size={16} />} />
-        <StatCard label="Distinct Items" value={kpis.items} icon={<Boxes size={16} />} />
+        <StatCard label="Stock Lines" value={stat(summary?.stock_lines)} icon={<Layers size={16} />} />
+        <StatCard label="Distinct Items" value={stat(summary?.distinct_items)} icon={<Boxes size={16} />} />
         <StatCard
           label="Below Reorder"
-          value={kpis.low}
+          value={stat(summary?.below_reorder)}
           icon={<TriangleAlert size={16} />}
-          tone={kpis.low ? "text-danger" : "text-muted"}
+          tone={summary?.below_reorder ? "text-danger" : "text-muted"}
         />
         <StatCard
           label="Expiring ≤30d"
-          value={kpis.expiring}
+          value={stat(summary?.expiring_30_days)}
           icon={<CalendarClock size={16} />}
-          tone={kpis.expiring ? "text-warning" : "text-muted"}
+          tone={summary?.expiring_30_days ? "text-warning" : "text-muted"}
         />
       </div>
 

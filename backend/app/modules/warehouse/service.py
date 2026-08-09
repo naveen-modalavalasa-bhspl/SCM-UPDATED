@@ -19,7 +19,8 @@ import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import String, and_, func, or_, select
+from sqlalchemy import String, and_, false, func, or_, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -65,6 +66,43 @@ def _d(value) -> Decimal:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return ZERO
+
+
+def _any_case(*values: str) -> list[str]:
+    """Both spellings of a status, for the tables the live data wrote in mixed case.
+
+    `whs_inspections` holds COMPLETED and completed side by side. A collation that
+    ignores case would hide that, but the live server's does not agree with itself
+    across tables, so the comparison says what it means instead of hoping.
+    """
+    out: list[str] = []
+    for value in values:
+        for spelling in (value.upper(), value.lower()):
+            if spelling not in out:
+                out.append(spelling)
+    return out
+
+
+async def _page_or_empty(db: AsyncSession, stmt, params: PageParams, table: str) -> dict:
+    """Paginate, but survive a table the live schema never got.
+
+    The deployed database is older than the ORM in places (`whs_stock_movement_orders`
+    is the current one). MySQL answers those reads with error 1146 and the screen
+    turned into a 500 with no message at all — a dead page for the three warehouse
+    lists a store keeper can open. An empty page plus a loud log is the honest answer:
+    there are no rows, because there is nowhere for rows to live yet.
+    """
+    try:
+        return await paginate(db, stmt, params)
+    except DBAPIError as exc:
+        if getattr(exc.orig, "args", (None,))[0] != 1146:
+            raise
+        await db.rollback()
+        logger.error(
+            "%s is missing from the live schema — returning an empty page. "
+            "Run the migration that creates it.", table,
+        )
+        return {"items": [], "total": 0, "page": params.page, "size": params.size}
 
 
 def _name(user) -> str | None:
@@ -655,6 +693,29 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
     _receipt_totals(receipt)
 
 
+def _receipt_types_for(receipt_type: str) -> tuple[str, ...]:
+    """The stored `receipt_type` values one filter value stands for.
+
+    "GRN" is an umbrella, not a stored value: every inward document that is not a gate
+    entry is a GRN once it has been opened. Older imports called ordinary purchase
+    receipts "direct", so that spelling rides along until the data-hardening migration
+    normalises the rows. Shared with the lookups — a filter that means one thing on the
+    list screen and another in the picker behind it is how a GRN goes missing.
+    """
+    if receipt_type == "GRN":
+        return (
+            ReceiptType.PURCHASE.value,
+            ReceiptType.DIRECT.value,
+            ReceiptType.RETURN.value,
+            ReceiptType.TRANSFER.value,
+            ReceiptType.DISPATCH.value,
+            "direct",
+        )
+    if receipt_type == ReceiptType.PURCHASE.value:
+        return (ReceiptType.PURCHASE.value, "direct")
+    return (receipt_type,)
+
+
 async def list_receipts(db: AsyncSession, params: PageParams, *, receipt_type: str | None = None,
                         status: str | None = None, warehouse_id: int | None = None,
                         search: str | None = None, date_from: date | None = None,
@@ -676,23 +737,7 @@ async def list_receipts(db: AsyncSession, params: PageParams, *, receipt_type: s
         # the gate and carried onto the GRN.
         stmt = stmt.where(m.Receipt.gate_entry_no.is_not(None))
     elif receipt_type:
-        # Older imports called ordinary purchase receipts "direct". Keep them visible
-        # as GRNs while the data-hardening migration normalises existing rows.
-        if receipt_type == "GRN":
-            receipt_types = (
-                ReceiptType.PURCHASE.value,
-                ReceiptType.DIRECT.value,
-                ReceiptType.RETURN.value,
-                ReceiptType.TRANSFER.value,
-                "direct",
-            )
-        else:
-            receipt_types = (
-                (ReceiptType.PURCHASE.value, "direct")
-                if receipt_type == ReceiptType.PURCHASE.value
-                else (receipt_type,)
-            )
-        stmt = stmt.where(m.Receipt.receipt_type.in_(receipt_types))
+        stmt = stmt.where(m.Receipt.receipt_type.in_(_receipt_types_for(receipt_type)))
     if status:
         stmt = stmt.where(m.Receipt.status == status)
     if warehouse_id:
@@ -759,6 +804,85 @@ async def _transfer_for_receipt(
     return transfer
 
 
+_INWARDABLE_DISPATCH_STATUSES = (
+    DispatchStatus.DISPATCHED.value,
+    DispatchStatus.IN_TRANSIT.value,
+    DispatchStatus.DELIVERED.value,
+    DispatchStatus.ACKNOWLEDGED.value,
+)
+
+
+async def _inward_receipt_for_dispatch(
+    db: AsyncSession,
+    dispatch_id: int,
+    *,
+    exclude_receipt_id: int | None = None,
+) -> m.Receipt | None:
+    """The live inward GRN raised against this consignment, if there is one."""
+    stmt = select(m.Receipt).where(
+        m.Receipt.receipt_type == ReceiptType.DISPATCH.value,
+        m.Receipt.transfer_id == dispatch_id,
+        m.Receipt.status != ReceiptStatus.CANCELLED.value,
+    )
+    if exclude_receipt_id is not None:
+        stmt = stmt.where(m.Receipt.id != exclude_receipt_id)
+    return (await db.execute(stmt.limit(1))).scalar_one_or_none()
+
+
+async def _dispatch_for_receipt(
+    db: AsyncSession,
+    *,
+    receipt_type: ReceiptType,
+    dispatch_id: int | None,
+    warehouse_id: int,
+    receipt_id: int | None = None,
+) -> m.Dispatch | None:
+    """Validate and return the consignment behind an inward-from-dispatch receipt.
+
+    This is the MDP/LIP end of the chain: a warehouse issues, packs and dispatches,
+    and the point it was addressed to inwards the same consignment here. Nothing
+    reaches `stk_balance` at the destination until it does — a consignment sitting in
+    a vehicle is not stock anybody can draw on.
+    """
+    if receipt_type != ReceiptType.DISPATCH:
+        if dispatch_id is not None:
+            raise ValidationError(
+                "A consignment can only be used on an inward-from-consignment receipt"
+            )
+        return None
+    if dispatch_id is None:
+        raise ValidationError("Select the incoming consignment being received")
+
+    dispatch = await _get(db, m.Dispatch, dispatch_id, "Consignment")
+    if dispatch.status not in _INWARDABLE_DISPATCH_STATUSES:
+        raise ValidationError(
+            f"{dispatch.dispatch_no} is {dispatch.status}; only a consignment that has "
+            "left the gate can be inwarded"
+        )
+    if dispatch.to_warehouse_id != warehouse_id:
+        raise ValidationError(
+            f"{dispatch.dispatch_no} is addressed to "
+            f"{dispatch.to_warehouse_name or 'another point'}, not the selected point"
+        )
+    existing = await _inward_receipt_for_dispatch(
+        db, dispatch.id, exclude_receipt_id=receipt_id
+    )
+    if existing is not None:
+        raise ValidationError(
+            f"{dispatch.dispatch_no} has already been inwarded on {existing.grn_no}"
+        )
+    # A transfer that was acknowledged before anybody inwarded it has already been
+    # credited to the destination by `acknowledge_dispatch`. Inwarding it now would
+    # book the same goods twice.
+    if (dispatch.dispatch_type == DispatchType.TRANSFER.value
+            and dispatch.status == DispatchStatus.ACKNOWLEDGED.value):
+        raise ValidationError(
+            f"{dispatch.dispatch_no} was acknowledged as a transfer, so its stock is "
+            "already at the destination. Inward it before acknowledging next time."
+        )
+    return dispatch
+
+
 async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Receipt:
     wh = await _warehouse(db, data.warehouse_id)
     is_gate_entry = data.receipt_type == ReceiptType.GATE_ENTRY
@@ -768,6 +892,12 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         db,
         receipt_type=data.receipt_type,
         transfer_id=data.transfer_id,
+        warehouse_id=wh.id,
+    )
+    dispatch = await _dispatch_for_receipt(
+        db,
+        receipt_type=data.receipt_type,
+        dispatch_id=data.dispatch_id,
         warehouse_id=wh.id,
     )
 
@@ -785,8 +915,9 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         grn_date=data.grn_date,
         po_id=data.po_id,
         po_no=await _receipt_po_number(db, data),
-        transfer_id=transfer.id if transfer else None,
-        transfer_no=transfer.sto_no if transfer else None,
+        transfer_id=(transfer.id if transfer else dispatch.id if dispatch else None),
+        transfer_no=(transfer.sto_no if transfer
+                     else dispatch.dispatch_no if dispatch else None),
         vendor_id=data.vendor_id,
         vendor_name=vendor.name if vendor else None,
         vendor_gstin=vendor.gstin if vendor else None,
@@ -843,6 +974,13 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
         transfer_id=data.transfer_id,
         warehouse_id=wh.id,
     )
+    dispatch = await _dispatch_for_receipt(
+        db,
+        receipt_type=data.receipt_type,
+        dispatch_id=data.dispatch_id,
+        warehouse_id=wh.id,
+        receipt_id=receipt.id,
+    )
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     if data.project_id:
         from app.shared.models.master import Project
@@ -853,8 +991,10 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
     receipt.grn_date = data.grn_date
     receipt.po_id = data.po_id
     receipt.po_no = await _receipt_po_number(db, data)
-    receipt.transfer_id = transfer.id if transfer else None
-    receipt.transfer_no = transfer.sto_no if transfer else None
+    receipt.transfer_id = (transfer.id if transfer
+                           else dispatch.id if dispatch else None)
+    receipt.transfer_no = (transfer.sto_no if transfer
+                           else dispatch.dispatch_no if dispatch else None)
     receipt.vendor_id = data.vendor_id
     receipt.vendor_name = vendor.name if vendor else None
     receipt.vendor_gstin = vendor.gstin if vendor else None
@@ -943,7 +1083,7 @@ async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
         receipt.is_stock_posted = True
         receipt.posted_at = utcnow()
         await _sync_po_receipt_status(db, receipt.po_id)
-        await _sync_transfer_receipt_status(db, receipt.transfer_id)
+        await _sync_receipt_source(db, receipt)
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -1001,7 +1141,7 @@ async def complete_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt
     receipt.posted_at = utcnow()
     receipt.status = ReceiptStatus.COMPLETED.value
     await _sync_po_receipt_status(db, receipt.po_id)
-    await _sync_transfer_receipt_status(db, receipt.transfer_id)
+    await _sync_receipt_source(db, receipt)
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -1089,6 +1229,60 @@ async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
     po.status = (
         POStatus.RECEIVED.value if complete else POStatus.PARTIALLY_RECEIVED.value
     )
+
+
+async def _sync_receipt_source(db: AsyncSession, receipt: m.Receipt) -> None:
+    """Reflect a posted receipt back onto the document it was received against.
+
+    `transfer_id` carries either an STO or a consignment — `receipt_type` says
+    which — so the branch lives here rather than at four call sites, where getting
+    it wrong would mark an unrelated STO received.
+    """
+    if receipt.receipt_type == ReceiptType.DISPATCH.value:
+        await _sync_dispatch_receipt_status(db, receipt.transfer_id)
+    else:
+        await _sync_transfer_receipt_status(db, receipt.transfer_id)
+
+
+async def _sync_dispatch_receipt_status(
+    db: AsyncSession,
+    dispatch_id: int | None,
+) -> None:
+    """Inwarding a consignment is the destination saying it landed.
+
+    The delivered quantity is what the receiving point actually booked, so the
+    consignment stops reading "in transit" the moment its GRN posts. The raiser's own
+    acknowledgement is a separate signature and is left alone.
+    """
+    if not dispatch_id:
+        return
+    dispatch = await db.get(m.Dispatch, dispatch_id)
+    if dispatch is None or dispatch.status not in (
+        DispatchStatus.DISPATCHED.value, DispatchStatus.IN_TRANSIT.value,
+    ):
+        return
+    received_rows = (await db.execute(
+        select(
+            m.ReceiptItem.item_id,
+            func.coalesce(func.sum(m.ReceiptItem.accepted_qty), 0),
+        )
+        .join(m.Receipt, m.Receipt.id == m.ReceiptItem.receipt_id)
+        .where(
+            m.Receipt.receipt_type == ReceiptType.DISPATCH.value,
+            m.Receipt.transfer_id == dispatch_id,
+            m.Receipt.is_stock_posted.is_(True),
+            m.Receipt.status != ReceiptStatus.CANCELLED.value,
+        )
+        .group_by(m.ReceiptItem.item_id)
+    )).all()
+    received = {item_id: _d(qty) for item_id, qty in received_rows}
+    for line in dispatch.items:
+        available = received.get(line.item_id, ZERO)
+        booked = min(available, _d(line.quantity))
+        line.delivered_qty = booked
+        received[line.item_id] = max(available - booked, ZERO)
+    dispatch.status = DispatchStatus.DELIVERED.value
+    dispatch.delivered_at = dispatch.delivered_at or utcnow()
 
 
 async def _sync_transfer_receipt_status(
@@ -1491,15 +1685,21 @@ async def list_inspections(db: AsyncSession, params: PageParams, *,
                            warehouse_id: int | None = None, search: str | None = None, user=None) -> dict:
     stmt = select(m.Inspection)
     if user is not None:
+        # Warehouse scope, plus the inspections this person ran. Every other document
+        # here falls back to its owner (see `list_receipts`); this one did not, so an
+        # inspector who QC'd a delivery at a point outside their own scope watched it
+        # vanish the moment they saved it — their own signature on a document they
+        # could no longer open.
         stmt = stmt.where(await scope_condition(
             db, user,
             warehouse_col=m.Inspection.warehouse_id,
             warehouse_ids=await warehouse_ids_for_user(db, user),
+            owner_col=m.Inspection.inspector_id,
         ))
     if inspection_type:
         stmt = stmt.where(m.Inspection.inspection_type == inspection_type)
     if status:
-        stmt = stmt.where(m.Inspection.status == status)
+        stmt = stmt.where(m.Inspection.status.in_(_any_case(status)))
     if warehouse_id:
         stmt = stmt.where(m.Inspection.warehouse_id == warehouse_id)
     if search:
@@ -1519,9 +1719,40 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
     inspection.items.clear()
     await db.flush()
 
+    # What the GRN says arrived. QC decides how much of a delivery is kept, so it can
+    # never be about more than the delivery: inspecting 1 unit of a line that received
+    # 0.999 wrote 1 unit into stock that nobody ever unloaded.
+    received_by_line: dict[int, Decimal] = {}
+    if inspection.receipt_id:
+        received_by_line = {
+            row_id: _d(qty)
+            for row_id, qty in (await db.execute(
+                select(m.ReceiptItem.id, m.ReceiptItem.received_qty)
+                .where(m.ReceiptItem.receipt_id == inspection.receipt_id)
+            )).all()
+        }
+
     for line in lines:
         item = await _item_snapshot(db, line.item_id)
         inspected = _d(line.inspected_qty)
+        if inspected < ZERO:
+            raise ValidationError(f"{item.code}: inspected quantity cannot be negative")
+        if line.receipt_item_id is not None:
+            if line.receipt_item_id not in received_by_line:
+                raise ValidationError(
+                    f"{item.code}: line {line.receipt_item_id} is not on this GRN"
+                )
+            received = received_by_line[line.receipt_item_id]
+            if inspected > received:
+                raise ValidationError(
+                    f"{item.code}: {inspected} inspected but only {received} was "
+                    f"received. QC cannot pass more than arrived."
+                )
+        if _d(line.accepted_qty) > inspected:
+            raise ValidationError(
+                f"{item.code}: {line.accepted_qty} accepted out of {inspected} "
+                f"inspected. Accepted cannot exceed inspected."
+            )
         accepted = min(_d(line.accepted_qty), inspected)
         rejected = inspected - accepted
         result = (line.result.value if line.result != InspectionResult.PENDING
@@ -1529,6 +1760,12 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
+        # IMEIs are checked but not stored: `inb_inspection_items` has no column for
+        # them, and it needs none — an IMEI names the same physical unit its serial
+        # does, and the GRN line it came off already holds the list.
+        imeis = [value.strip() for value in (line.imei_numbers or []) if value.strip()]
+        if len(imeis) != len(set(imeis)):
+            raise ValidationError(f"{item.code}: accepted IMEI numbers must be unique")
         if item.is_serial_tracked and accepted != accepted.to_integral_value():
             raise ValidationError(
                 f"{item.code}: accepted quantity must be a whole number for serialized items"
@@ -1552,7 +1789,6 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             parameters=[p.model_dump() for p in line.parameters] if line.parameters else None,
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers=serials or None,
-            imei_numbers=imeis or None,
         ))
     _inspection_totals(inspection)
 
@@ -1560,6 +1796,27 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
 async def create_inspection(db: AsyncSession, data: s.InspectionWrite, user) -> m.Inspection:
     receipt = await db.get(m.Receipt, data.receipt_id) if data.receipt_id else None
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
+
+    if receipt is not None:
+        # One GRN, one QC. Submitting a receipt raises its inspection automatically, so
+        # this route is only ever a second one — and a second one re-decides quantities
+        # the first already wrote onto the receipt. REC/2026-27/00066 collected three.
+        existing = await db.scalar(
+            select(m.Inspection).where(
+                m.Inspection.receipt_id == receipt.id,
+                m.Inspection.status != InspectionStatus.CANCELLED.value,
+            ).limit(1)
+        )
+        if existing is not None:
+            raise ValidationError(
+                f"{receipt.grn_no} is already inspected on {existing.inspection_no} "
+                f"({existing.status.lower()}). Cancel that one to inspect it again."
+            )
+        if receipt.is_stock_posted:
+            raise ValidationError(
+                f"{receipt.grn_no} is already in stock. QC decides what to keep before "
+                "it is banked, so there is nothing left for an inspection to change."
+            )
 
     inspection = m.Inspection(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
@@ -1682,16 +1939,24 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
         else:
             receipt.status = ReceiptStatus.QC_FAILED.value
 
-        for line in released_lines:
-            await _prepare_receipt_line(db, receipt, line, user)
+        # Posting is guarded, the status is not. A bulk point banks its stock the
+        # moment the GRN is submitted, and an inspection raised against that GRN
+        # afterwards used to run every line through `_prepare_receipt_line` a second
+        # time: one unit received, two in `stk_balance`. But the receipt still has to
+        # reach COMPLETED — gating the status on the same flag left it sitting at
+        # QC_PASSED with its stock already banked, which is a state no screen lists.
+        already_posted = receipt.is_stock_posted
+        if not already_posted:
+            for line in released_lines:
+                await _prepare_receipt_line(db, receipt, line, user)
         wh = await _warehouse(db, receipt.warehouse_id)
         if not wh.is_bin_managed and accepted > ZERO:
             receipt.status = ReceiptStatus.COMPLETED.value
             receipt.is_stock_posted = True
-            receipt.posted_at = utcnow()
-            await _sync_po_receipt_status(db, receipt.po_id)
-            await _sync_transfer_receipt_status(db, receipt.transfer_id)
-            await _sync_transfer_receipt_status(db, receipt.transfer_id)
+            receipt.posted_at = receipt.posted_at or utcnow()
+            if not already_posted:
+                await _sync_po_receipt_status(db, receipt.po_id)
+                await _sync_receipt_source(db, receipt)
 
     inspection.status = InspectionStatus.COMPLETED.value
 
@@ -1823,7 +2088,8 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
 
 
 async def list_putaways(db: AsyncSession, params: PageParams, *, status: str | None = None,
-                        warehouse_id: int | None = None, user=None) -> dict:
+                        warehouse_id: int | None = None, search: str | None = None,
+                        user=None) -> dict:
     stmt = select(m.PutawayTask)
     if user is not None:
         stmt = stmt.where(await scope_condition(
@@ -1835,6 +2101,12 @@ async def list_putaways(db: AsyncSession, params: PageParams, *, status: str | N
         stmt = stmt.where(m.PutawayTask.status == status)
     if warehouse_id:
         stmt = stmt.where(m.PutawayTask.warehouse_id == warehouse_id)
+    if search:
+        # The list screen's search box reaches the server now, so it has to be
+        # answerable here: the task number, the GRN it came from, or the lot code.
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            m.PutawayTask.putaway_no.ilike(like), m.PutawayTask.lot_no.ilike(like)))
 
     page = await paginate(db, stmt.order_by(m.PutawayTask.id.desc()), params)
     page["items"] = [await _decorate_putaway(db, t) for t in page["items"]]
@@ -2379,18 +2651,18 @@ async def create_stock_movement(
     }
 
 
-async def list_stock_movement_orders(db: AsyncSession, params: PageParams) -> dict:
-    from app.modules.warehouse.models import StockMovementOrder, StockMovementOrderItem
-    
-    stmt = select(StockMovementOrder).order_by(StockMovementOrder.id.desc())
-    page = await paginate(db, stmt, params)
-    
-    for item in page["items"]:
-        # Lazy load won't be fully realized by paginate without a separate pass,
-        # but selectin is used on the model. We can return them directly.
-        pass
-        
-    return page
+async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
+                                     search: str | None = None) -> dict:
+    from app.modules.warehouse.models import StockMovementOrder
+
+    stmt = select(StockMovementOrder)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            StockMovementOrder.order_no.ilike(like),
+            StockMovementOrder.warehouse_name.ilike(like)))
+    stmt = stmt.order_by(StockMovementOrder.id.desc())
+    return await _page_or_empty(db, stmt, params, "whs_stock_movement_orders")
 
 
 async def create_stock_movement_order(
@@ -2624,7 +2896,8 @@ async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list
 # ---------------------------------------------------------------------------
 
 async def list_pickings(db: AsyncSession, params: PageParams, *, status: str | None = None,
-                        warehouse_id: int | None = None, user=None) -> dict:
+                        warehouse_id: int | None = None, search: str | None = None,
+                        user=None) -> dict:
     stmt = select(m.Picking)
     if user is not None:
         stmt = stmt.where(await scope_condition(
@@ -2636,6 +2909,11 @@ async def list_pickings(db: AsyncSession, params: PageParams, *, status: str | N
         stmt = stmt.where(m.Picking.status == status)
     if warehouse_id:
         stmt = stmt.where(m.Picking.warehouse_id == warehouse_id)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            m.Picking.pick_no.ilike(like), m.Picking.ref_no.ilike(like),
+            m.Picking.assigned_to_name.ilike(like)))
     return await paginate(db, stmt.order_by(m.Picking.id.desc()), params)
 
 
@@ -5063,7 +5341,12 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
     # A transfer is one physical journey: gate-out removed it from the source, and
     # acknowledgement is the destination receipt. Credit only what actually arrived;
     # shortages remain visible on the dispatch instead of becoming phantom stock.
-    if dispatch.dispatch_type == DispatchType.TRANSFER.value:
+    # Unless the destination inwarded it itself. A point that ran the consignment
+    # through GRN and QC has already posted exactly what it kept; crediting the
+    # dispatch again here would double the stock.
+    inwarded = await _inward_receipt_for_dispatch(db, dispatch.id) is not None
+
+    if dispatch.dispatch_type == DispatchType.TRANSFER.value and not inwarded:
         if not dispatch.to_warehouse_id:
             raise ValidationError("A transfer dispatch has no destination warehouse")
         for line in dispatch.items:
@@ -5714,21 +5997,29 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
 async def deliveries_for_requester(db: AsyncSession, user, *, search: str | None = None,
                                    status: str | None = None,
                                    only_actionable: bool = False) -> list[dict]:
-    """Every indent this person raised that is still owed something.
+    """Every indent this person raised that has reached the delivery stage.
 
     Served from the warehouse module because the evidence — what was issued, what was
     dispatched — lives in `out_issues` and `out_dispatches`. Indents may not import this
     module (rule 5), so the join happens on this side of the line and indents keeps
     ownership of the acknowledgement itself.
+
+    CLOSED is included alongside the still-receiving statuses. Confirming the last line
+    of an indent sets it CLOSED (`indents._fulfilment_status`), so listing only the
+    receivable ones made a delivery vanish from this screen at the exact moment the
+    requester finished with it — no record of what they had confirmed, and no way back
+    to the photo they attached. `can_acknowledge` is already false for them, so they
+    read as history; "Ready to confirm" still narrows to the ones that need work.
     """
     from app.modules.indents.models import Indent, IndentItem
     from app.modules.indents.service import _RECEIVABLE_STATUSES
 
+    visible_statuses = tuple(_RECEIVABLE_STATUSES | {IndentStatus.CLOSED.value})
     stmt = (
         select(Indent)
         .options(selectinload(Indent.items))
         .where(Indent.requested_by_id == getattr(user, "id", 0),
-               Indent.status.in_(tuple(_RECEIVABLE_STATUSES)))
+               Indent.status.in_(visible_statuses))
     )
     if status:
         stmt = stmt.where(Indent.status == status)
@@ -5821,17 +6112,31 @@ async def indent_fulfilment(db: AsyncSession, indent_id: int) -> list[dict]:
 # Dashboard and reports
 # ---------------------------------------------------------------------------
 
-async def dashboard(db: AsyncSession, warehouse_id: int | None = None) -> dict:
+async def dashboard(db: AsyncSession, warehouse_id: int | None = None, user=None) -> dict:
     """Queue depths in one call.
 
     The screen this feeds used to fire eight list requests and count the rows it got
     back, which meant every number was the size of the first page rather than the size
     of the queue.
+
+    Every count is bounded by the warehouses this login may see — the same set
+    `list_receipts`, `list_stock` and the rest of the module already use. Without it
+    these tiles counted the whole network: "At gate 2" for a storekeeper with exactly
+    one gate entry of their own, and no way to reach the other one from any screen.
+    A tile has to agree with the list it links to.
     """
     from app.modules.inventory.models import Stock
 
+    allowed = await warehouse_ids_for_user(db, user)
+
     def scoped(stmt, column):
-        return stmt.where(column == warehouse_id) if warehouse_id else stmt
+        if warehouse_id:
+            return stmt.where(column == warehouse_id)
+        # None means unrestricted (admin, stock.view.all). An empty set means this
+        # login reaches no warehouse at all, and every queue is genuinely zero.
+        if allowed is not None:
+            return stmt.where(column.in_(allowed) if allowed else false())
+        return stmt
 
     async def count(model, column, *conditions) -> int:
         stmt = select(func.count()).select_from(model).where(*conditions)
@@ -5847,8 +6152,8 @@ async def dashboard(db: AsyncSession, warehouse_id: int | None = None) -> dict:
         m.Receipt.status.in_([ReceiptStatus.DRAFT.value, ReceiptStatus.PENDING_QC.value]))
     pending_qc = await count(
         m.Inspection, m.Inspection.warehouse_id,
-        m.Inspection.status.in_([InspectionStatus.DRAFT.value,
-                                 InspectionStatus.IN_PROGRESS.value]))
+        m.Inspection.status.in_(_any_case(InspectionStatus.DRAFT.value,
+                                          InspectionStatus.IN_PROGRESS.value)))
     pending_put = await count(
         m.PutawayTask, m.PutawayTask.warehouse_id,
         m.PutawayTask.status.in_([PutawayStatus.PENDING.value,
@@ -5888,8 +6193,10 @@ async def dashboard(db: AsyncSession, warehouse_id: int | None = None) -> dict:
                .where(Stock.bin_id != m.NO_BIN, Stock.total_qty > 0), Stock.warehouse_id)) or 0)
     utilisation = Decimal(round(bin_used * 100 / bin_total, 2)) if bin_total else ZERO
 
-    recent = await _recent_activity(db, warehouse_id)
-    trend = await _inward_trend(db, warehouse_id)
+    # Both take the same bound as the tiles above: the activity list and the inward
+    # chart sit on the same screen and must describe the same warehouses.
+    recent = await _recent_activity(db, warehouse_id, allowed=allowed)
+    trend = await _inward_trend(db, warehouse_id, allowed=allowed)
 
     return {
         "pending_gate_entries": pending_gate,
@@ -5907,14 +6214,24 @@ async def dashboard(db: AsyncSession, warehouse_id: int | None = None) -> dict:
     }
 
 
-async def _recent_activity(db: AsyncSession, warehouse_id: int | None, limit: int = 10) -> list[dict]:
-    """The last few documents across the whole chain, newest first."""
+async def _recent_activity(db: AsyncSession, warehouse_id: int | None, limit: int = 10,
+                           *, allowed: set[int] | None = None) -> list[dict]:
+    """The last few documents across the whole chain, newest first.
+
+    `allowed` is the caller's warehouse set (None = unrestricted). Without it this
+    listed the newest receipts, issues and dispatches in the company on a screen the
+    reader could not open a single one of them from.
+    """
     out: list[dict] = []
 
     async def collect(model, no_column, doc_type: str) -> None:
         stmt = select(model).order_by(model.id.desc()).limit(limit)
-        if warehouse_id and hasattr(model, "warehouse_id"):
-            stmt = stmt.where(model.warehouse_id == warehouse_id)
+        if hasattr(model, "warehouse_id"):
+            if warehouse_id:
+                stmt = stmt.where(model.warehouse_id == warehouse_id)
+            elif allowed is not None:
+                stmt = stmt.where(
+                    model.warehouse_id.in_(allowed) if allowed else false())
         for row in (await db.execute(stmt)).scalars().all():
             out.append({
                 "id": row.id, "doc_no": getattr(row, no_column),
@@ -5943,7 +6260,8 @@ async def _recent_activity(db: AsyncSession, warehouse_id: int | None, limit: in
     return out[:limit]
 
 
-async def _inward_trend(db: AsyncSession, warehouse_id: int | None, days: int = 14) -> list[dict]:
+async def _inward_trend(db: AsyncSession, warehouse_id: int | None, days: int = 14,
+                        *, allowed: set[int] | None = None) -> list[dict]:
     since = date.today() - timedelta(days=days)
     stmt = (select(m.Receipt.grn_date,
                    func.coalesce(func.sum(m.Receipt.total_received_qty), 0),
@@ -5954,6 +6272,9 @@ async def _inward_trend(db: AsyncSession, warehouse_id: int | None, days: int = 
             .group_by(m.Receipt.grn_date).order_by(m.Receipt.grn_date))
     if warehouse_id:
         stmt = stmt.where(m.Receipt.warehouse_id == warehouse_id)
+    elif allowed is not None:
+        stmt = stmt.where(
+            m.Receipt.warehouse_id.in_(allowed) if allowed else false())
 
     return [{"date": str(row[0]), "received": float(_d(row[1])),
              "accepted": float(_d(row[2])), "rejected": float(_d(row[3]))}
@@ -6199,11 +6520,33 @@ async def vendor_options(db: AsyncSession, search: str | None = None) -> list[di
     return [{"id": r.id, "code": r.code, "name": r.name} for r in rows]
 
 
-async def warehouse_options(db: AsyncSession) -> list[dict]:
-    rows = (await db.execute(
-        select(Warehouse).where(Warehouse.is_active.is_(True)).order_by(Warehouse.code)
-    )).scalars().all()
+async def warehouse_options(db: AsyncSession, *, mine_only: bool = False,
+                            all_points: bool = False, user=None) -> list[dict]:
+    """Stocking points for a picker. Scoped to this login unless asked otherwise.
+
+    Scoping is the DEFAULT, not an opt-in. It used to be the reverse — `mine_only`
+    had to be passed — and every screen that forgot it (the dashboard filter, Material
+    Inward, GRN, Put-away, Material Issues, QC) offered all 1,500 points in the
+    company. A lab technician holding one LIP picked from the whole network, and a
+    storekeeper inwarded a delivery into an unrelated demo MDP: the stock posted
+    correctly and then sat somewhere his own screens are scoped away from, so every
+    inventory page read empty while the goods were plainly in the building.
+
+    `all_points=True` is the deliberate exception for a DESTINATION picker — you
+    dispatch TO a point you do not hold, and a transfer needs the whole network. Only
+    the "to warehouse" fields pass it.
+
+    `mine_only` is kept as an alias for the old callers; it means the same thing the
+    default now does.
+    """
+    stmt = select(Warehouse).where(Warehouse.is_active.is_(True))
+    if not all_points:
+        allowed = await warehouse_ids_for_user(db, user) if user is not None else None
+        if allowed is not None:
+            stmt = stmt.where(Warehouse.id.in_(allowed or {0}))
+    rows = (await db.execute(stmt.order_by(Warehouse.code))).scalars().all()
     return [{"id": r.id, "code": r.code, "name": r.name, "is_bin_managed": r.is_bin_managed} for r in rows]
+
 
 async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = None,
                       item_id: int | None = None, batch_id: int | None = None,
@@ -6281,10 +6624,52 @@ async def receipt_options(
     db: AsyncSession,
     search: str | None = None,
     receipt_type: str | None = None,
+    *,
+    warehouse_id: int | None = None,
+    for_putaway: bool = False,
+    user=None,
 ) -> list[dict]:
     stmt = select(m.Receipt).where(m.Receipt.status != ReceiptStatus.CANCELLED.value)
+    # A lookup is not exempt from scoping. Unscoped, this listed every GRN in the
+    # company, so a storekeeper at one MDP was offered receipts from points they have
+    # never stood in and cannot put anything away at.
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.Receipt.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            owner_col=m.Receipt.created_by_id,
+            project_col=m.Receipt.project_id,
+        ))
+    if warehouse_id:
+        stmt = stmt.where(m.Receipt.warehouse_id == warehouse_id)
     if receipt_type:
-        stmt = stmt.where(m.Receipt.receipt_type == receipt_type)
+        stmt = stmt.where(m.Receipt.receipt_type.in_(_receipt_types_for(receipt_type)))
+    if for_putaway:
+        # Only what a putaway could actually be raised against — see
+        # `_putaway_block_reason`, which is the same set of rules stated once more as
+        # SQL. A bulk point posts its stock at receipt and has no bins to put it in,
+        # so offering its GRNs here promises a step that does not exist.
+        settled = (
+            select(m.PutawayTask.grn_item_id)
+            .where(m.PutawayTask.status.in_(_SETTLED_PUTAWAY_STATUSES))
+        )
+        waiting = (
+            select(m.ReceiptItem.receipt_id)
+            .where(
+                m.ReceiptItem.qc_status == QcStatus.PASSED.value,
+                m.ReceiptItem.accepted_qty > 0,
+                m.ReceiptItem.id.notin_(settled),
+            )
+        )
+        stmt = (
+            stmt.join(Warehouse, Warehouse.id == m.Receipt.warehouse_id)
+            .where(
+                Warehouse.is_bin_managed.is_(True),
+                m.Receipt.is_stock_posted.is_(False),
+                m.Receipt.id.in_(waiting),
+            )
+        )
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(
@@ -6301,8 +6686,98 @@ async def receipt_options(
             if r.receipt_type == ReceiptType.GATE_ENTRY.value
             else r.grn_no
         ),
-        "name": r.vendor_name or r.grn_no,
+        # Who it came from, which is the thing that tells two GRNs apart. Falling back
+        # to the number printed the number twice — "REC/.../00066 — REC/.../00066" —
+        # on every receipt with no vendor behind it, which is every transfer and every
+        # incoming consignment.
+        "name": (r.vendor_name or r.transfer_no or r.po_no
+                 or r.warehouse_name or r.grn_no),
     } for r in rows]
+
+
+async def incoming_dispatch_options(
+    db: AsyncSession,
+    warehouse_id: int,
+    search: str | None = None,
+) -> list[dict]:
+    """Consignments on their way to this point that nobody has inwarded yet.
+
+    This is what an MDP or a LIP opens the inward screen for: not a purchase order,
+    but the lorry the main store sent them.
+    """
+    inwarded = select(m.Receipt.transfer_id).where(
+        m.Receipt.receipt_type == ReceiptType.DISPATCH.value,
+        m.Receipt.status != ReceiptStatus.CANCELLED.value,
+        m.Receipt.transfer_id.is_not(None),
+    )
+    stmt = select(m.Dispatch).where(
+        m.Dispatch.to_warehouse_id == warehouse_id,
+        m.Dispatch.status.in_(_INWARDABLE_DISPATCH_STATUSES),
+        m.Dispatch.id.notin_(inwarded),
+    )
+    # A transfer that was acknowledged has already been credited to this point by
+    # `acknowledge_dispatch`, so offering it here would only lead to a rejection.
+    stmt = stmt.where(or_(
+        m.Dispatch.dispatch_type != DispatchType.TRANSFER.value,
+        m.Dispatch.status != DispatchStatus.ACKNOWLEDGED.value,
+    ))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            m.Dispatch.dispatch_no.ilike(like),
+            m.Dispatch.ref_no.ilike(like),
+            m.Dispatch.warehouse_name.ilike(like),
+            m.Dispatch.lr_no.ilike(like),
+        ))
+    rows = (await db.execute(
+        stmt.order_by(m.Dispatch.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+    return [{
+        "id": r.id,
+        "code": r.dispatch_no,
+        "name": " · ".join(filter(None, [r.warehouse_name, r.ref_no])) or r.dispatch_no,
+    } for r in rows]
+
+
+async def dispatch_receipt_source(
+    db: AsyncSession, dispatch_id: int, warehouse_id: int,
+) -> dict:
+    """The consignment's lines, shaped for the inward form."""
+    dispatch = await _dispatch_for_receipt(
+        db,
+        receipt_type=ReceiptType.DISPATCH,
+        dispatch_id=dispatch_id,
+        warehouse_id=warehouse_id,
+    )
+    wh = await _warehouse(db, warehouse_id)
+    indent_id = next((l.indent_id for l in dispatch.items if l.indent_id), None)
+    indent_no = next((l.indent_no for l in dispatch.items if l.indent_no), None)
+    return {
+        "dispatch_id": dispatch.id,
+        "dispatch_no": dispatch.dispatch_no,
+        "warehouse_id": wh.id,
+        "warehouse_name": wh.name,
+        "is_bin_managed": wh.is_bin_managed,
+        "from_warehouse_id": dispatch.warehouse_id,
+        "from_warehouse_name": dispatch.warehouse_name,
+        "project_id": dispatch.project_id,
+        "dispatch_date": dispatch.dispatch_date,
+        "lr_no": dispatch.lr_no,
+        "vehicle_number": dispatch.vehicle_number,
+        "indent_id": indent_id,
+        "indent_no": indent_no,
+        "items": [{
+            "item_id": line.item_id,
+            "indent_id": line.indent_id,
+            # What was sent is what the receiver is asked to confirm or correct —
+            # typing it back off the challan is how a shortage gets missed.
+            "ordered_qty": _d(line.quantity),
+            "received_qty": _d(line.quantity),
+            "accepted_qty": _d(line.quantity),
+            "rate": line.rate,
+            "batch_no": line.batch_no,
+            "serial_numbers": [line.serial_no] if line.serial_no else None,
+        } for line in dispatch.items],
+    }
 
 
 async def indent_options(

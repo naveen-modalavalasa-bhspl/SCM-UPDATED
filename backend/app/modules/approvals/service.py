@@ -60,6 +60,47 @@ async def pending_for_user(db: AsyncSession, user) -> list[dict]:
     return rows
 
 
+async def pending_summary(db: AsyncSession, user) -> dict:
+    """The tiles and the doc-type chips above the approval inbox, counted in SQL.
+
+    The screen used to answer these by fetching its whole queue a second time (page 1
+    at size 500, on top of the page it was already showing) and counting in the
+    browser. That is two full reads per load, and it stops being possible the moment
+    a queue passes 500 rows.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    base = (
+        select(Pending.doc_type, Pending.doc_id, Pending.due_at, Pending.created_at)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(
+            Pending.approver_id == user.id,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        )
+    )
+    rows = (await db.execute(base)).all()
+
+    # Monthly indents are approved as consolidated batches on another screen, so they
+    # are not in this queue — the same exclusion pending_page applies to the list.
+    monthly = await _monthly_indent_ids(
+        db, [r.doc_id for r in rows if r.doc_type == DocType.INDENT.value],
+    )
+    rows = [
+        r for r in rows
+        if not (r.doc_type == DocType.INDENT.value and r.doc_id in monthly)
+    ]
+
+    by_doc_type: dict[str, int] = {}
+    for row in rows:
+        by_doc_type[row.doc_type] = by_doc_type.get(row.doc_type, 0) + 1
+    waiting = [r.created_at for r in rows if r.created_at]
+    return {
+        "total": len(rows),
+        "past_due": sum(1 for r in rows if r.due_at and r.due_at < now),
+        "oldest_waiting_since": min(waiting).isoformat() if waiting else None,
+        "by_doc_type": by_doc_type,
+    }
+
+
 async def pending_page(
     db: AsyncSession, user, page: int, size: int, *, search: str = "",
     doc_type: str = "", overdue_only: bool = False,
@@ -73,6 +114,7 @@ async def pending_page(
         Pending.approver_id == user.id,
         Instance.status == InstanceStatus.IN_PROGRESS.value,
     ]
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     term = search.strip()
     if term:
         like = f"%{term}%"
@@ -83,7 +125,7 @@ async def pending_page(
     if doc_type:
         conditions.append(Pending.doc_type == doc_type)
     if overdue_only:
-        conditions.append(Pending.due_at < datetime.now(timezone.utc).replace(tzinfo=None))
+        conditions.append(Pending.due_at < now)
     if raised_from:
         conditions.append(Pending.created_at >= raised_from.replace(tzinfo=None))
     if raised_to:
@@ -131,6 +173,10 @@ async def pending_page(
         "amount": float(pending.amount) if pending.amount is not None else None,
         "waiting_since": pending.created_at.isoformat() if pending.created_at else None,
         "due_at": pending.due_at.isoformat() if pending.due_at else None,
+        # Decided here, against the same clock the `overdue_only` filter uses. These
+        # timestamps go out naive, so a browser reading them as local time answered a
+        # different question: "Past due 0" above a filter that returned a row.
+        "overdue": bool(pending.due_at and pending.due_at < now),
         "current_stage_name": instance.current_stage_name,
         "approver_name": user.full_name,
     } for pending, instance in rows]

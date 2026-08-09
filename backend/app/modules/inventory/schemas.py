@@ -60,6 +60,23 @@ class MovementRow(BaseModel):
     created_at: datetime
 
 
+class StockSummaryOut(BaseModel):
+    """The tiles above the stock balance grid. Counted over every matching row, so
+    they do not change when the page size does."""
+    stock_lines: int
+    distinct_items: int
+    total_value: float
+    expiring_30_days: int
+    below_reorder: int
+
+
+class MovementSummaryOut(BaseModel):
+    """Same idea for the stock ledger."""
+    movements: int
+    total_in: float
+    total_out: float
+
+
 class TransferIn(BaseModel):
     item_id: int
     quantity: float = Field(gt=0)

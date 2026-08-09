@@ -84,6 +84,22 @@ export interface StockBalanceFilter {
   size?: number;
 }
 
+/** GET /api/stock/summary — the tiles, counted over every matching row. */
+export interface StockSummary {
+  stock_lines: number;
+  distinct_items: number;
+  total_value: number;
+  expiring_30_days: number;
+  below_reorder: number;
+}
+
+/** GET /api/stock/movements/summary. */
+export interface LedgerSummary {
+  movements: number;
+  total_in: number;
+  total_out: number;
+}
+
 export interface StockAdjustmentInput {
   item_id: number;
   warehouse_id: number;

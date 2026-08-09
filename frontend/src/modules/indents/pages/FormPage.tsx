@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
-import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
+import { PageHeader, Button, Card, Field, FormActions, Input, Select } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import {
   indentApi, indentKeys, isIndentModuleQuery, masterApi,
@@ -493,7 +493,9 @@ export function IndentFormPage() {
         <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>
       )}
 
-      <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
+      {/* FormActions, not a hand-rolled bar: at bottom-0/z-10 this sat UNDER the
+          mobile module nav (bottom-0, z-30) and the Create button was unreachable. */}
+      <FormActions className="mt-6">
         <Button
           variant="subtle"
           className="flex-1 md:flex-none"
@@ -530,7 +532,7 @@ export function IndentFormPage() {
             ? (isEditing ? "Saving…" : "Creating…")
             : (isCorrectionEdit ? "Save correction" : isEditing ? "Save changes" : "Create indent")}
         </Button>
-      </div>
+      </FormActions>
 
       {!isEditing && (
         <ChooseBomModal
