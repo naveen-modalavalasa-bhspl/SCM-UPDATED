@@ -12,12 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.platform.settings.models import DocSeries
 from app.shared.enums import ResetPolicy
+from app.shared.time import now as ist_now, today as ist_today
 
 logger = logging.getLogger(__name__)
 
 
 def _fiscal_year(now: datetime | None = None) -> str:
-    now = now or datetime.now()
+    now = now or ist_now()
     # Indian FY: Apr–Mar, rendered as e.g. 2026-27
     start = now.year if now.month >= 4 else now.year - 1
     return f"{start}-{str(start + 1)[-2:]}"
@@ -63,7 +64,7 @@ def render(pattern: str | None, prefix: str, fiscal_year: str, number: int,
 
 def current_period(policy: str | None, now: datetime | None = None) -> str | None:
     """The period label a counter belongs to, or None when it never resets."""
-    now = now or datetime.now()
+    now = now or ist_now()
     if policy == ResetPolicy.YEARLY.value:
         return _fiscal_year(now)
     if policy == ResetPolicy.MONTHLY.value:

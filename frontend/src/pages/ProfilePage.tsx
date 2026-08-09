@@ -5,6 +5,7 @@ import { CardBody } from "@heroui/react";
 import { api } from "@/shared/api/client";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { Button, Card, ErrorBanner, PageHeader, StatusPill } from "@/shared/components";
+import { fmtDate, fmtDateTime } from "@/shared/datetime";
 
 /** Everything `/api/auth/profile` returns. Read-only: hcm_* is a mirror. */
 type ProfilePosition = {
@@ -68,13 +69,9 @@ type Profile = {
 
 const dash = "—";
 
-function when(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : dash;
-}
+const when = (value: string | null | undefined) => fmtDateTime(value, dash);
 
-function day(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleDateString() : dash;
-}
+const day = (value: string | null | undefined) => fmtDate(value, dash);
 
 /** One label/value pair. `value` falls back to an em dash so a blank row still reads. */
 function Row({ label, value }: { label: string; value: React.ReactNode }) {

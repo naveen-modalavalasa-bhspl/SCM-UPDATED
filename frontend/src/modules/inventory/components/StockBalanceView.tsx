@@ -165,7 +165,8 @@ export function StockBalanceView() {
   };
 
   const exportCsv = () => {
-    const header = ["Item Code", "Item Name", "Category", "Warehouse", "Bin", "Batch", "Expiry", "Available", "Reserved", "On Hand", "Value"];
+    const header = ["Item Code", "Item Name", "Category", "Warehouse", "Bin", "Batch",
+                    "Expiry", "Available", "Reserved", "Serial / Asset code", "Value"];
     const cell = (v: any) => {
       if (v == null) return '""';
       const s = String(v).replace(/"/g, '""');
@@ -173,7 +174,8 @@ export function StockBalanceView() {
     };
     const body = rows.map((r) => [
       r.item_code, r.item_name, r.category_name, r.warehouse_name, r.bin_code, r.batch_number, r.expiry_date,
-      r.available_qty, r.reserved_qty, r.physical_qty, r.total_value,
+      r.available_qty, r.reserved_qty,
+      r.serial_number ?? r.asset_code ?? r.consumable_code, r.total_value,
     ]);
     const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -235,11 +237,20 @@ export function StockBalanceView() {
       ),
     },
     {
-      key: "total",
-      header: "On Hand",
-      className: "text-right",
+      // "On Hand" was available + reserved, and reserved stock is precisely what is
+      // NOT on hand — it belongs to somebody else's indent. Showing it invited people
+      // to allocate against goods that were already spoken for. Available and Reserved
+      // are both above; the sum adds nothing but a wrong word. The serial goes here
+      // instead, which is what the column is actually wanted for.
+      key: "serial",
+      header: "Serial / Asset code",
       hideOnNarrow: true,
-      render: (r) => <span className="text-body">{r.physical_qty}</span>,
+      render: (r) => {
+        const tag = r.serial_number ?? r.asset_code ?? r.consumable_code;
+        return tag
+          ? <span className="font-mono text-xs text-body">{tag}</span>
+          : <span className="text-xs text-muted">—</span>;
+      },
     },
     {
       key: "value",
@@ -265,7 +276,9 @@ export function StockBalanceView() {
         title="Stock Balance"
         actions={
           <>
-            <Button variant="subtle" disabled={rows.length === 0} onClick={exportCsv}>
+            {/* `subtle` rendered as unstyled grey text next to the filters and read as
+                disabled. Export is a real action — give it the secondary treatment. */}
+            <Button variant="secondary" disabled={rows.length === 0} onClick={exportCsv}>
               <FileSpreadsheet size={14} /> Export CSV
             </Button>
             <Button variant="primary" onClick={() => navigate("/inventory/labels")}>
@@ -413,7 +426,10 @@ export function StockBalanceView() {
                 {([
                   ["Available", selected.available_qty, "text-brand"],
                   ["Reserved", selected.reserved_qty, "text-warning"],
-                  ["On hand", selected.physical_qty, "text-ink"],
+                  // Not "On hand": this is available + reserved, and reserved goods
+                  // are committed elsewhere. "Total in stock" says what it is without
+                  // implying any of it is free to give.
+                  ["Total in stock", selected.physical_qty, "text-ink"],
                 ] as const).map(([label, v, tone]) => (
                   <div key={label} className="rounded-lg border border-line/70 p-3">
                     <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</div>

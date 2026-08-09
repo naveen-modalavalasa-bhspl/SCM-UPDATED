@@ -345,7 +345,7 @@ export function SerialNumbersModal({
                   className="min-h-28 w-full resize-y rounded-md border border-line bg-content1 px-3 py-2 font-mono text-sm text-ink outline-none placeholder:font-sans placeholder:text-muted focus:border-brand"
                 />
                 <div className="mt-2 flex justify-end">
-                  <Button variant="subtle" onClick={() => addMany(bulkEntry)}>
+                  <Button variant="soft" onClick={() => addMany(bulkEntry)}>
                     Add pasted
                   </Button>
                 </div>

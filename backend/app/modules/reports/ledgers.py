@@ -67,6 +67,19 @@ class LedgerSpec:
     order_col: str             # default sort, always descending
     key_cols: list[str] = field(default_factory=list)  # what makes a row unique
 
+    # --- Data scope -------------------------------------------------------- #
+    # Which column of THIS ledger the login's rung is applied to. A ledger is a
+    # read-only view over documents someone else owns, so it has to answer the same
+    # "whose rows?" question the source screens do — without these it answered
+    # "everybody's", and a lab technician granted the Indent Ledger read every indent
+    # in the company. `service._scope_conditions` turns these into a WHERE.
+    #
+    # At most one is normally set. A ledger with none is unscoped ON PURPOSE and must
+    # say why in a comment beside the spec.
+    scope_indent_col: str | None = None      # holds ind_indents.id
+    scope_warehouse_name_col: str | None = None  # holds a warehouse NAME
+    scope_actor_col: str | None = None       # holds the acting employee's id
+
     @property
     def column_keys(self) -> list[str]:
         return [c.key for c in self.columns]
@@ -131,6 +144,7 @@ INDENTS = LedgerSpec(
     date_col="created_at",
     order_col="created_at",
     key_cols=["id"],
+    scope_indent_col="id",
 )
 
 
@@ -195,6 +209,7 @@ APPROVALS = LedgerSpec(
     date_col="acted_at",
     order_col="acted_at",
     key_cols=["id"],
+    scope_actor_col="actor_id",
 )
 
 
@@ -259,6 +274,7 @@ INVENTORY = LedgerSpec(
     date_col="txn_date",
     order_col="txn_date",
     key_cols=["id"],
+    scope_warehouse_name_col="warehouse",
 )
 
 
@@ -383,6 +399,7 @@ WAREHOUSE = LedgerSpec(
     date_col="created_at",
     order_col="created_at",
     key_cols=["doc_type", "id"],
+    scope_warehouse_name_col="warehouse",
 )
 
 
@@ -482,6 +499,7 @@ STOCK = LedgerSpec(
     date_col="updated_at",
     order_col="updated_at",
     key_cols=["id"],
+    scope_warehouse_name_col="warehouse",
 )
 
 
@@ -559,6 +577,7 @@ ACKNOWLEDGEMENTS = LedgerSpec(
     date_col="doc_date",
     order_col="doc_date",
     key_cols=["id"],
+    scope_indent_col="id",
 )
 
 
@@ -629,6 +648,7 @@ INDENT_TRACKER = LedgerSpec(
     date_col="doc_date",
     order_col="doc_date",
     key_cols=["id"],
+    scope_indent_col="id",
 )
 
 
@@ -725,6 +745,7 @@ APPROVAL_SLA = LedgerSpec(
     date_col="acted_at",
     order_col="acted_at",
     key_cols=["id"],
+    scope_indent_col="id",
 )
 
 
@@ -824,6 +845,7 @@ CONSUMPTION = LedgerSpec(
     date_col="doc_date",
     order_col="doc_date",
     key_cols=["id"],
+    scope_warehouse_name_col="warehouse",
 )
 
 

@@ -52,6 +52,7 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
+from app.shared.time import now as ist_now, today as ist_today
 
 logger = logging.getLogger(__name__)
 
@@ -1168,7 +1169,7 @@ async def convert_gate_entry(db: AsyncSession, receipt_id: int, user) -> m.Recei
     }
     receipt.receipt_type = ReceiptType.PURCHASE.value
     receipt.grn_no = await next_number(db, WarehouseDocType.RECEIPT.value)
-    receipt.grn_date = date.today()
+    receipt.grn_date = ist_today()
     receipt.status = ReceiptStatus.DRAFT.value
     await write_audit(
         db,
@@ -1655,7 +1656,7 @@ async def _raise_inspection_for(
         # greenlet to run in. Handing it an empty list loads it up front.
         items=[],
         inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
-        inspection_date=date.today(),
+        inspection_date=ist_today(),
         receipt_id=receipt.id, grn_no=receipt.grn_no,
         warehouse_id=receipt.warehouse_id, warehouse_name=receipt.warehouse_name,
         vendor_id=receipt.vendor_id, vendor_name=receipt.vendor_name,
@@ -2921,6 +2922,110 @@ async def get_picking(db: AsyncSession, picking_id: int) -> m.Picking:
     return await _load(db, m.Picking, picking_id, "Material fulfilment", m.Picking.items)
 
 
+# ---------------------------------------------------------------------------
+# How much of an indent is still owed
+#
+# An indent is served over time, not in one shot: ten asked, eight approved, four
+# issued from the store that had them, the rest sent to procurement, and another four
+# issued when that stock lands. A split allocation does the same thing in one go —
+# one document per warehouse. Both are normal.
+#
+# The guards these replace counted DOCUMENTS: one live fulfilment per indent, one
+# live issue per indent. That reads "you already served this indent once, go away",
+# which is wrong on both counts — it refused the second warehouse of a split
+# allocation (so a split could never be approved at all) and the second round after
+# procurement.
+#
+# What actually must not happen is issuing MORE than was approved. So the test is on
+# quantity, and each document type counts only its own kind: a picklist counts other
+# picklists, an issue counts other issues. Counting both would double-count the
+# ordinary picklist -> issue chain, where the same units legitimately appear twice.
+# ---------------------------------------------------------------------------
+
+async def _indent_cap(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
+    """Per item, the most this indent may ever be served — what was approved, or what
+    was asked for when nothing has been approved yet."""
+    from app.modules.indents.models import IndentItem
+
+    caps: dict[int, Decimal] = {}
+    for item_id, approved, requested in (await db.execute(
+        # The ORM names differ from the columns: `quantity` IS requested_qty.
+        select(IndentItem.item_id, IndentItem.approved_quantity, IndentItem.quantity)
+        .where(IndentItem.indent_id == indent_id)
+    )).all():
+        allowed = _d(approved) if _d(approved) > ZERO else _d(requested)
+        caps[item_id] = caps.get(item_id, ZERO) + allowed
+    return caps
+
+
+async def _already_issued(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
+    """Per item, what live issues already cover. Cancelled and rejected issues hold
+    nothing, so they free their quantity back up."""
+    rows = (await db.execute(
+        select(m.MaterialIssueLine.item_id,
+               func.coalesce(func.sum(m.MaterialIssueLine.issued_qty), 0))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .where(
+            m.MaterialIssue.indent_id == indent_id,
+            m.MaterialIssue.direction == IssueDirection.OUT.value,
+            m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+        )
+        .group_by(m.MaterialIssueLine.item_id)
+    )).all()
+    return {item_id: _d(qty) for item_id, qty in rows}
+
+
+async def _already_picking(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
+    """Per item, what open fulfilments already cover. `out_picking_items` carries no
+    indent line, so this matches on the item — which is the level the cap is at too."""
+    rows = (await db.execute(
+        select(m.PickingItem.item_id,
+               func.coalesce(func.sum(m.PickingItem.required_qty), 0))
+        .join(m.Picking, m.Picking.id == m.PickingItem.picking_id)
+        .where(
+            m.Picking.ref_type == "INDENT",
+            m.Picking.ref_id == indent_id,
+            m.Picking.status != PickingStatus.CANCELLED.value,
+        )
+        .group_by(m.PickingItem.item_id)
+    )).all()
+    return {item_id: _d(qty) for item_id, qty in rows}
+
+
+async def _guard_indent_quantity(db: AsyncSession, indent_id: int, indent_no: str,
+                                 wanted: dict[int, Decimal], taken: dict[int, Decimal],
+                                 doc: str) -> None:
+    """Refuses a document that would take an indent past what was approved.
+
+    `taken` is what documents of this same kind already hold — the new document's own
+    lines are not in it yet, so the sum is what the indent would stand at afterwards.
+    """
+    caps = await _indent_cap(db, indent_id)
+    if not caps:
+        return   # nothing to measure against; the indent lines are gone
+    for item_id, qty in wanted.items():
+        if qty <= ZERO:
+            continue
+        cap = caps.get(item_id)
+        if cap is None:
+            continue   # an item the indent never asked for — other guards own that
+        outstanding = cap - taken.get(item_id, ZERO)
+        if qty > outstanding:
+            name = (await db.get(Item, item_id)) if item_id else None
+            label = getattr(name, "name", None) or f"item {item_id}"
+            if outstanding <= ZERO:
+                raise ValidationError(
+                    f"{indent_no} is fully served for {label} — {cap} of {cap} already "
+                    f"covered. Nothing is outstanding, so there is nothing to "
+                    f"{doc.lower()}."
+                )
+            raise ValidationError(
+                f"{indent_no} only has {outstanding} of {label} outstanding "
+                f"({taken.get(item_id, ZERO)} of {cap} already covered). "
+                f"Reduce this {doc.lower()} to {outstanding} or less."
+            )
+
+
 async def _build_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Picking:
     """Build one material-fulfilment draft without committing it.
 
@@ -2936,22 +3041,22 @@ async def _build_picking(db: AsyncSession, data: s.PickingWrite, user) -> m.Pick
         raise ValidationError("An indent fulfilment needs an indent reference")
 
     if data.ref_type == "INDENT" and data.ref_id:
-        # One indent, one open fulfilment. Two pickers working the same indent from
-        # the same reservation pick the same stock twice; IND/2026-27/00142 ended
-        # up with three completed fulfilments against one requirement.
-        clash = (await db.execute(
-            select(m.Picking.pick_no, m.Picking.status).where(
-                m.Picking.ref_type == "INDENT",
-                m.Picking.ref_id == data.ref_id,
-                m.Picking.status != PickingStatus.CANCELLED.value,
-            ).limit(1)
-        )).first()
-        if clash is not None:
-            raise ValidationError(
-                f"This indent already has material fulfilment {clash.pick_no} "
-                f"({clash.status.replace('_', ' ').lower()}). Cancel it before "
-                f"starting another."
-            )
+        # An indent may carry as many fulfilments as it takes to serve it — one per
+        # warehouse in a split, and another round when procurement lands the shortfall.
+        # What it may not do is total more than was approved. See _guard_indent_quantity.
+        from app.modules.indents.models import Indent as _Indent
+
+        indent_row = await db.get(_Indent, data.ref_id)
+        wanted_by_item: dict[int, Decimal] = {}
+        for line in data.items:
+            wanted_by_item[line.item_id] = (
+                wanted_by_item.get(line.item_id, ZERO) + _d(line.required_qty))
+        await _guard_indent_quantity(
+            db, data.ref_id,
+            getattr(indent_row, "indent_no", None) or f"Indent {data.ref_id}",
+            wanted_by_item, await _already_picking(db, data.ref_id),
+            "material fulfilment",
+        )
 
         requested_by_item: dict[int, Decimal] = {}
         for line in data.items:
@@ -3073,7 +3178,7 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
             (v["project_id"] for v in lines.values() if v["project_id"]), None
         )
         data = s.IssueWrite(
-            issue_date=date.today(),
+            issue_date=ist_today(),
             warehouse_id=warehouse_id,
             indent_id=alloc.indent_id,
             project_id=project_id,
@@ -3248,7 +3353,7 @@ async def _raise_consignment_for_picking(
                 # PROJECT, not the TRANSFER default: a transfer needs a destination
                 # warehouse, and nothing upstream of here has chosen one.
                 dispatch_type=DispatchType.PROJECT,
-                dispatch_date=date.today(),
+                dispatch_date=ist_today(),
                 project_id=issue.project_id,
                 packages=[s.ConsignmentPackageWrite(items=lines)],
             ), user)
@@ -3604,30 +3709,20 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     from app.modules.indents.models import Indent
     indent = await db.get(Indent, data.indent_id) if data.indent_id else None
 
-    if data.direction != IssueDirection.IN and indent is not None:
-        # Checked before the lines, deliberately: when the indent is already spoken
-        # for, "add some lines first" is the wrong thing to tell the storekeeper —
-        # no set of lines would have made this issue allowed.
-        #
-        # The picklist guard further down only covers an issue raised FROM a
-        # fulfilment. An issue raised straight against an indent skipped it, and
-        # live data grew indents carrying three issues at once — two of them
-        # stranded in PENDING_APPROVAL, each reserving stock for the same
-        # requirement. A return (direction IN) is exempt: it exists precisely to
-        # point back at an issue already made against the indent.
-        clash = (await db.execute(
-            select(m.MaterialIssue.issue_no, m.MaterialIssue.status).where(
-                m.MaterialIssue.indent_id == indent.id,
-                m.MaterialIssue.direction == IssueDirection.OUT.value,
-                m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
-            ).limit(1)
-        )).first()
-        if clash is not None:
-            raise ValidationError(
-                f"{indent.indent_no} already has material issue {clash.issue_no} "
-                f"({clash.status.replace('_', ' ').lower()}). Cancel it before "
-                f"raising another, or issue the shortfall as a return against it."
-            )
+    if data.direction != IssueDirection.IN and indent is not None and data.items:
+        # An indent is served over several issues: one per warehouse when the
+        # allocation is split, and another round when procurement covers the
+        # shortfall. The cap is the approved quantity, not the document count — see
+        # _guard_indent_quantity. A return (direction IN) is exempt: it exists to
+        # point back at an issue already made.
+        wanted_by_item: dict[int, Decimal] = {}
+        for line in data.items:
+            wanted_by_item[line.item_id] = (
+                wanted_by_item.get(line.item_id, ZERO) + _d(line.issued_qty))
+        await _guard_indent_quantity(
+            db, indent.id, indent.indent_no, wanted_by_item,
+            await _already_issued(db, indent.id), "issue",
+        )
 
     if not data.items:
         raise ValidationError("An issue with no lines has nothing to issue")
@@ -3987,7 +4082,7 @@ async def _raise_picking_for_issue(
     try:
         async with db.begin_nested():
             return await _build_picking(db, s.PickingWrite(
-                pick_date=date.today(),
+                pick_date=ist_today(),
                 warehouse_id=issue.warehouse_id,
                 ref_type="ISSUE",
                 ref_id=issue.id,
@@ -4720,6 +4815,25 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
     return await _decorate_dispatch_destination(db, dispatch)
 
 
+def _guard_expected_delivery(dispatch_date, expected_delivery) -> None:
+    """Goods cannot arrive before they leave.
+
+    Checked here and not only on the form: the date arrives as a plain `date | None`
+    on all three consignment/dispatch write paths and nothing compared it to the
+    dispatch date, so a consignment could be saved promising delivery a week before
+    it shipped. Measured against the dispatch date rather than today, because a
+    consignment may be back-dated and its delivery date has to stay consistent with
+    the day it actually left.
+    """
+    if expected_delivery is None or dispatch_date is None:
+        return
+    if expected_delivery < dispatch_date:
+        raise ValidationError(
+            f"Expected delivery {expected_delivery} is before the consignment leaves "
+            f"({dispatch_date}). Pick a date on or after it."
+        )
+
+
 async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -> m.Dispatch:
     """Build one consignment without committing it — see _build_picking / _build_issue.
 
@@ -4746,6 +4860,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         raise ValidationError("A stock transfer consignment needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
         raise ValidationError("A transfer cannot have the same origin and destination")
+    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
 
@@ -4817,6 +4932,7 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
         raise ValidationError("A stock transfer consignment needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
         raise ValidationError("A transfer cannot have the same origin and destination")
+    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
 
@@ -4870,6 +4986,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         raise ValidationError("A stock transfer needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
         raise ValidationError("A transfer cannot have the same origin and destination")
+    _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
 
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     ref_issue = None
@@ -5769,7 +5886,7 @@ async def list_batches(db: AsyncSession, params: PageParams, *, item_id: int | N
     if item_id:
         stmt = stmt.where(m.Batch.item_id == item_id)
     if expiring_days is not None:
-        cutoff = date.today() + timedelta(days=expiring_days)
+        cutoff = ist_today() + timedelta(days=expiring_days)
         stmt = stmt.where(m.Batch.expiry_date.isnot(None), m.Batch.expiry_date <= cutoff)
     if search:
         like = f"%{search}%"
@@ -6262,7 +6379,7 @@ async def _recent_activity(db: AsyncSession, warehouse_id: int | None, limit: in
 
 async def _inward_trend(db: AsyncSession, warehouse_id: int | None, days: int = 14,
                         *, allowed: set[int] | None = None) -> list[dict]:
-    since = date.today() - timedelta(days=days)
+    since = ist_today() - timedelta(days=days)
     stmt = (select(m.Receipt.grn_date,
                    func.coalesce(func.sum(m.Receipt.total_received_qty), 0),
                    func.coalesce(func.sum(m.Receipt.total_accepted_qty), 0),
@@ -6463,7 +6580,7 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
         if date_to:
             stmt = stmt.where(m.Batch.expiry_date <= date_to)
         rows = (await db.execute(stmt.order_by(m.Batch.expiry_date))).scalars().all()
-        today = date.today()
+        today = ist_today()
         return {
             "columns": [_col("batch_no", "Batch"), _col("item_code", "Item"),
                         _col("item_name", "Description"), _col("vendor_name", "Vendor"),
@@ -7160,3 +7277,140 @@ async def carrier_options(db: AsyncSession, search: str | None = None) -> list[d
         logger.warning("trn_carriers is not available; the carrier dropdown will be empty")
         return []
     return [{"id": r[0], "code": None, "name": r[1]} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Deleting a draft
+#
+# Eight document types can be started and abandoned, and until now nothing could
+# clear them: `cancel_*` leaves a CANCELLED row on the list forever, and most of the
+# eight have no cancel at all. Half-typed GRNs and empty picklists piled up in front
+# of the work that mattered.
+#
+# A draft is deleted, not cancelled, because it never happened: it holds no stock, no
+# ledger row and no reservation, and no later document points back at it. Everything
+# past DRAFT is history and stays — the guards below refuse anything that has moved
+# stock, been submitted, or grown a child document. The audit row is written BEFORE
+# the delete so the trail survives the row (rule 9).
+# ---------------------------------------------------------------------------
+
+class _Draft:
+    """One deletable document type: where it lives, what counts as a draft, and what
+    has to be checked before it can go."""
+
+    __slots__ = ("model", "table", "no_col", "statuses", "label", "children")
+
+    def __init__(self, model, table: str, no_col: str, statuses: set[str], label: str,
+                 children: tuple = ()):
+        self.model = model
+        self.table = table
+        self.no_col = no_col
+        self.statuses = statuses
+        self.label = label
+        #: (model, column, human name) — a row here means something references this
+        #: document and deleting it would orphan that thing.
+        self.children = children
+
+
+DRAFT_KINDS: dict[str, _Draft] = {
+    "receipt": _Draft(
+        m.Receipt, "inb_receipts", "grn_no",
+        {ReceiptStatus.DRAFT.value, ReceiptStatus.GATE_ENTRY.value}, "receipt",
+        children=((m.Inspection, "receipt_id", "quality inspection"),
+                  (m.PutawayTask, "grn_id", "put-away task"),
+                  (m.PurchaseReturn, "grn_id", "purchase return")),
+    ),
+    "inspection": _Draft(
+        m.Inspection, "inb_inspections", "inspection_no",
+        {InspectionStatus.DRAFT.value}, "inspection",
+    ),
+    "putaway": _Draft(
+        m.PutawayTask, "whs_warehouse_items", "putaway_no",
+        {PutawayStatus.DRAFT.value}, "put-away task",
+    ),
+    "picking": _Draft(
+        m.Picking, "out_picking", "pick_no",
+        {PickingStatus.DRAFT.value}, "picklist",
+        children=((m.MaterialIssue, "picking_id", "material issue"),),
+    ),
+    "issue": _Draft(
+        m.MaterialIssue, "out_issues", "issue_no",
+        {IssueStatus.DRAFT.value}, "material issue",
+    ),
+    "dispatch": _Draft(
+        m.Dispatch, "out_dispatches", "dispatch_no",
+        {DispatchStatus.DRAFT.value}, "dispatch",
+    ),
+    "return": _Draft(
+        m.PurchaseReturn, "pro_returns", "return_no",
+        {ReturnStatus.DRAFT.value}, "purchase return",
+    ),
+    "movement": _Draft(
+        m.StockMovementOrder, "whs_stock_movement_orders", "order_no",
+        {"DRAFT"}, "stock movement order",
+    ),
+}
+
+
+async def _draft_in_scope(db: AsyncSession, row, user) -> bool:
+    """Can this person see this document at all?
+
+    Deletion reuses the list's own scope predicate rather than a rule of its own —
+    a draft you cannot see on the list must not be one you can delete by guessing
+    its id, and two separate rules would drift apart the first time one changed.
+    """
+    if user is None:
+        return True
+    model = type(row)
+    cond = await scope_condition(
+        db, user,
+        warehouse_col=getattr(model, "warehouse_id", None),
+        warehouse_ids=await warehouse_ids_for_user(db, user),
+        owner_col=getattr(model, "created_by_id", None),
+        project_col=getattr(model, "project_id", None),
+    )
+    return bool(await db.scalar(
+        select(func.count()).select_from(model).where(model.id == row.id, cond)))
+
+
+async def delete_draft(db: AsyncSession, kind: str, doc_id: int, user) -> None:
+    """Deletes one abandoned draft. Refuses anything that is not one."""
+    spec = DRAFT_KINDS.get(kind)
+    if spec is None:
+        raise ValidationError(f"{kind} is not a document that can be deleted.")
+
+    row = await _get(db, spec.model, doc_id, spec.label.title())
+    doc_no = getattr(row, spec.no_col, None) or f"#{doc_id}"
+
+    if not await _draft_in_scope(db, row, user):
+        raise NotFoundError(f"{spec.label.title()} {doc_id} not found")
+
+    _guard(row.status, spec.statuses, "delete", spec.label)
+
+    # A draft that somehow moved stock is not a draft. Belt and braces: the status
+    # guard above should already have caught it, and if it did not, the row is real.
+    if getattr(row, "is_stock_posted", False):
+        raise ValidationError(
+            f"{doc_no} has already been posted to stock and cannot be deleted.")
+
+    for child_model, column, name in spec.children:
+        used = await db.scalar(
+            select(func.count()).select_from(child_model)
+            .where(getattr(child_model, column) == row.id))
+        if used:
+            raise ValidationError(
+                f"{doc_no} already has a {name} against it. Delete that first — "
+                f"removing this would leave the {name} pointing at nothing.")
+
+    # Written first: a deleted row cannot be audited afterwards, and the trail is
+    # the only remaining record that this document ever existed.
+    await write_audit(db, entity=spec.table, entity_id=row.id, entity_no=doc_no,
+                      action=AuditAction.DEACTIVATE, actor=user,
+                      before={"status": row.status, "deleted": True},
+                      after=None)
+    # Lines go with the parent: every one of these documents declares
+    # `cascade="all, delete-orphan"` on its children.
+    await db.delete(row)
+    await db.commit()
+    logger.info("deleted %s draft %s by employee %s", spec.label, doc_no,
+                getattr(user, "id", None))

@@ -698,7 +698,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             </Button>
             {!locked && (
               <Can do="grn.create">
-                <Button variant="subtle" onClick={submitSave} disabled={save.isPending}>
+                <Button variant="soft" onClick={submitSave} disabled={save.isPending}>
                   {save.isPending ? "Saving…" : "Save"}
                 </Button>
               </Can>

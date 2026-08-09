@@ -9,6 +9,7 @@ import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { getStockLedger, getStockLedgerSummary, getWarehouses } from "../api";
 import type { StockLedgerItem } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { fmtDate, fmtTime } from "@/shared/datetime";
 
 /**
  * stk_ledger.ref_type — every value that actually reaches the table.
@@ -132,8 +133,8 @@ export function StockLedgerView() {
       header: "Date",
       render: (r) => (
         <div>
-          <div className="text-sm text-ink">{new Date(r.transaction_date).toLocaleDateString()}</div>
-          <div className="text-[11px] text-muted">{new Date(r.transaction_date).toLocaleTimeString()}</div>
+          <div className="text-sm text-ink">{fmtDate(r.transaction_date)}</div>
+          <div className="text-[11px] text-muted">{fmtTime(r.transaction_date)}</div>
         </div>
       ),
     },

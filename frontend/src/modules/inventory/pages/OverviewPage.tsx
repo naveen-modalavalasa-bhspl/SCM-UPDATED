@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { IndianRupee, TriangleAlert, CalendarClock, Lock, History, RefreshCw } from "lucide-react";
-import { Button, Card, PageHeader, StatCard } from "@/shared/components";
+import { Button, Can, Card, PageHeader, StatCard } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { getOverviewKPIs } from "../api";
 import type { StockOverviewKPIs } from "../types";
+import { fmtTime } from "@/shared/datetime";
 
 const inr = (n: number) => `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
 
@@ -32,7 +33,7 @@ export function InventoryOverviewPage() {
         actions={
           <Button variant="subtle" disabled={isFetching} onClick={() => refetch()}>
             <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} />
-            {dataUpdatedAt ? `Updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : "Refresh"}
+            {dataUpdatedAt ? `Updated ${fmtTime(dataUpdatedAt)}` : "Refresh"}
           </Button>
         }
       />
@@ -79,11 +80,24 @@ export function InventoryOverviewPage() {
           <div className="mt-4">
             <Card className="p-5">
               <div className="mb-3 text-sm font-semibold text-ink">Quick Actions</div>
+              {/* Gated on the same page permissions as the nav. These used to be
+                  plain links, so a login without Stock Adjustments or Replenishment
+                  was still invited to open them and met the Forbidden screen. */}
               <div className="flex flex-wrap gap-2">
-                <Link to="/inventory/stock-balance"><Button>Stock Balance</Button></Link>
-                <Link to="/inventory/ledger"><Button variant="subtle">Stock Ledger</Button></Link>
-                <Link to="/inventory/adjustments"><Button variant="subtle">Stock Adjustments</Button></Link>
-                <Link to="/inventory/replenishment"><Button variant="subtle">Replenishment</Button></Link>
+                <Can do="page.inv_balance.view">
+                  <Link to="/inventory/stock-balance"><Button>Stock Balance</Button></Link>
+                </Can>
+                <Can do="page.inv_ledger.view">
+                  <Link to="/inventory/ledger"><Button variant="subtle">Stock Ledger</Button></Link>
+                </Can>
+                {/* Adjustments has no rbac_pages row, so it is gated on the action
+                    that screen exists to perform. */}
+                <Can do="stock.adjust">
+                  <Link to="/inventory/adjustments"><Button variant="subtle">Stock Adjustments</Button></Link>
+                </Can>
+                <Can do="page.inv_replenishment.view">
+                  <Link to="/inventory/replenishment"><Button variant="subtle">Replenishment</Button></Link>
+                </Can>
                 {/* Valuation & Ageing is parked — the route and the view are still
                     here, but the screen is off the menu until it is implemented. */}
               </div>

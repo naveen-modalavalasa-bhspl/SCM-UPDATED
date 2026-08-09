@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listReturns } from "../api";
+import { listReturns, deletePurchaseReturn, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, fmtMoneyShort, fmtQty } from "../format";
 import type { PurchaseReturn } from "../types";
 
@@ -96,6 +96,11 @@ export default function PurchaseReturns() {
       createPermission="grn.create"
       onRowClick={(r) => nav(String(r.id))}
       empty="No returns match these filters."
+      onDelete={(r) => deletePurchaseReturn(r.id)}
+      canDelete={(r) => r.status === "DRAFT"}
+      deletePermission={DRAFT_DELETE_PERMISSION.return}
+      deleteLabel="return"
+      labelOf={(r) => r.return_no ?? `Return ${r.id}`}
       kpis={(rows) => [
         { label: "In approval", value: rows.filter((r) => r.status === "PENDING_APPROVAL").length, tone: "text-warn" },
         { label: "Sent back", value: rows.filter((r) => r.status === "DISPATCHED").length },

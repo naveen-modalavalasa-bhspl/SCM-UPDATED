@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.modules.reports.ledgers import LEDGERS, Col, LedgerSpec
+from app.shared.time import now as ist_now, today as ist_today
+from app.shared.time import iso as ist_iso
 
 # Query params that are controls, not filters. Anything else in the query string is
 # matched against the spec's filters and ignored if it is not one.
@@ -42,6 +44,9 @@ def catalog() -> list[dict]:
             "key": spec.key,
             "label": spec.label,
             "subtitle": spec.subtitle,
+            # The router drops ledgers the caller may not read. Kept out of
+            # ReportLedgerInfo, so it never reaches the browser.
+            "permission": spec.permission,
             "date_field": spec.date_col,
             "default_sort": spec.order_col,
             "columns": [_col_out(c) for c in spec.columns],
@@ -67,7 +72,8 @@ def _as_date(value: str, param: str) -> date:
         raise ValidationError(f"{param} must be a date (YYYY-MM-DD)") from exc
 
 
-def _filtered(spec: LedgerSpec, query: Mapping[str, str]) -> tuple[Select, dict]:
+async def _filtered(db: AsyncSession, spec: LedgerSpec, query: Mapping[str, str],
+              user=None) -> tuple[Select, dict]:
     """The spec's SELECT wrapped in a subquery, with every filter applied to it.
 
     Filtering the subquery rather than the source is what lets the warehouse UNION
@@ -110,6 +116,10 @@ def _filtered(spec: LedgerSpec, query: Mapping[str, str]) -> tuple[Select, dict]
             conditions.append(col.in_(values))
         applied[filt.key] = raw
 
+    # The login's data scope, ANDed with the user's own filters. Applied here rather
+    # than in each caller so list, export and the filter dropdowns cannot disagree.
+    conditions.extend(await _scope_conditions(db, spec, cols, user))
+
     if conditions:
         stmt = stmt.where(and_(*conditions))
 
@@ -123,23 +133,74 @@ def _filtered(spec: LedgerSpec, query: Mapping[str, str]) -> tuple[Select, dict]
     return stmt.order_by(order), applied
 
 
+async def _scope_conditions(db: AsyncSession, spec: LedgerSpec, cols, user) -> list:
+    """The login's data scope, expressed against THIS ledger's columns.
+
+    A ledger is a read-only window onto documents other modules own, so it has to
+    answer the same "whose rows may I read?" question they do. It did not: every
+    ledger returned the whole company, and granting somebody the Indent Ledger handed
+    them every indent in the network regardless of their rung.
+
+    Resolution is delegated, never re-implemented — the indent ledgers reuse the exact
+    predicate `/indents` uses, the stock and warehouse ledgers reuse the warehouse set
+    the inventory screens use. A ledger that declares no scope column is left alone.
+    """
+    if user is None:
+        return []
+
+    from app.shared.scope import rung_for
+    from app.shared.enums import ScopeRung
+
+    if await rung_for(db, user) is ScopeRung.ALL:
+        return []
+
+    conditions = []
+
+    if spec.scope_indent_col and spec.scope_indent_col in cols.keys():
+        from app.modules.indents.models import Indent
+        from app.modules.indents.service import _indent_visibility
+
+        visible = select(Indent.id).where(await _indent_visibility(db, user))
+        conditions.append(cols[spec.scope_indent_col].in_(visible))
+
+    if spec.scope_warehouse_name_col and spec.scope_warehouse_name_col in cols.keys():
+        from app.modules.inventory.service import warehouse_ids_for_user
+        from app.modules.warehouse.models import Warehouse
+
+        allowed = await warehouse_ids_for_user(db, user)
+        if allowed is not None:
+            # The ledgers carry the warehouse NAME, not its id — they are snapshot
+            # views. Resolve the ids to names rather than reshaping nine sources.
+            names = list((await db.execute(
+                select(Warehouse.name).where(Warehouse.id.in_(allowed or {0}))
+            )).scalars().all())
+            column = cols[spec.scope_warehouse_name_col]
+            # A NULL warehouse (put-away rows carry none) stays visible: hiding a row
+            # because a snapshot column was never filled is a data gap, not a policy.
+            conditions.append(or_(column.in_(names or [""]), column.is_(None)))
+
+    if spec.scope_actor_col and spec.scope_actor_col in cols.keys():
+        conditions.append(cols[spec.scope_actor_col] == user.id)
+
+    return conditions
+
+
 def _clean(value: Any) -> Any:
     """DB value -> something JSON and CSV can both carry."""
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, datetime):
-        stamped = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return stamped.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return ist_iso(value)
     if isinstance(value, date):
         return value.isoformat()
     return value
 
 
 async def list_rows(db: AsyncSession, key: str, page: int, size: int,
-                    query: Mapping[str, str]) -> dict:
+                    query: Mapping[str, str], user=None) -> dict:
     """One page of a ledger: {items, total, page, size, columns, applied}."""
     spec = get_spec(key)
-    stmt, applied = _filtered(spec, query)
+    stmt, applied = await _filtered(db, spec, query, user)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     result = await db.execute(stmt.offset((page - 1) * size).limit(size))
     items = [{k: _clean(v) for k, v in row.items()} for row in result.mappings()]
@@ -149,7 +210,7 @@ async def list_rows(db: AsyncSession, key: str, page: int, size: int,
     }
 
 
-async def filter_options(db: AsyncSession, key: str) -> list[dict]:
+async def filter_options(db: AsyncSession, key: str, user=None) -> list[dict]:
     """The dropdown values that actually occur in the data.
 
     Read from the ledger instead of from an enum on purpose: a status that no
@@ -159,13 +220,17 @@ async def filter_options(db: AsyncSession, key: str) -> list[dict]:
     """
     spec = get_spec(key)
     sq = spec.source().subquery()
+    # Scoped like the rows are: a dropdown that offers a project or a warehouse whose
+    # rows the ledger then refuses to show reads as a broken filter, and names places
+    # the login is not entitled to know exist.
+    scope = await _scope_conditions(db, spec, sq.c, user)
     out = []
     for filt in spec.filters:
         options: list[str] = []
         if filt.kind == "select" and filt.col in sq.c.keys():
             col = sq.c[filt.col]
             rows = await db.execute(
-                select(col).where(col.isnot(None)).distinct()
+                select(col).where(col.isnot(None), *scope).distinct()
                 .order_by(col).limit(MAX_FILTER_OPTIONS)
             )
             options = [str(v) for (v,) in rows.all() if str(v).strip()]
@@ -209,7 +274,7 @@ def export_header(spec: LedgerSpec, applied: Mapping[str, str], rows: int,
 
     Kept as rows rather than a comment prefix so it survives an Excel round-trip.
     """
-    generated = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    generated = ist_now().strftime("%d %b %Y %H:%M IST")
     shown = list(columns if columns is not None else spec.columns)
     lines = [
         [f"SCM ERP — {spec.label} Ledger"],
@@ -238,7 +303,7 @@ def export_header(spec: LedgerSpec, applied: Mapping[str, str], rows: int,
 
 async def _export_rows(db: AsyncSession, spec: LedgerSpec,
                        query: Mapping[str, str]) -> tuple[list, dict]:
-    stmt, applied = _filtered(spec, query)
+    stmt, applied = await _filtered(db, spec, query, user)
     result = await db.execute(stmt.limit(MAX_EXPORT_ROWS))
     return list(result.mappings()), applied
 
@@ -262,12 +327,12 @@ def export_columns(spec: LedgerSpec, query: Mapping[str, str]) -> list[Col]:
 
 
 def _filename(spec: LedgerSpec, extension: str) -> str:
-    stamp = datetime.now(timezone.utc).strftime("%d-%b-%Y %H%M")
+    stamp = ist_now().strftime("%d-%b-%Y %H%M")
     return f"SCM {spec.label} Ledger {stamp}.{extension}"
 
 
 async def export_csv(db: AsyncSession, key: str, query: Mapping[str, str],
-                     actor: str | None = None) -> tuple[str, str]:
+                     actor: str | None = None, user=None) -> tuple[str, str]:
     """(filename, csv text) for the current filter set. Same rows, same order as the
     screen — an export that does not match what was on screen is not evidence."""
     spec = get_spec(key)
@@ -296,7 +361,7 @@ _MAX_COL_WIDTH = 46
 
 
 async def export_xlsx(db: AsyncSession, key: str, query: Mapping[str, str],
-                      actor: str | None = None) -> tuple[str, bytes]:
+                      actor: str | None = None, user=None) -> tuple[str, bytes]:
     """The same rows as `export_csv`, as a real spreadsheet.
 
     A styled heading row is the only thing CSV cannot carry, and it is what makes a

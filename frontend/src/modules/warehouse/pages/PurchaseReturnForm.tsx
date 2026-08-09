@@ -262,7 +262,7 @@ export default function PurchaseReturnForm() {
             </Button>
             {!locked && (
               <Can do="return.create">
-                <Button variant="subtle" onClick={() => save.mutate()} disabled={save.isPending}>
+                <Button variant="soft" onClick={() => save.mutate()} disabled={save.isPending}>
                   {save.isPending ? "Saving…" : "Save"}
                 </Button>
               </Can>

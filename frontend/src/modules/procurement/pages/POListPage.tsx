@@ -6,6 +6,7 @@ import {
 } from "@/shared/components";
 import { poApi } from "../api";
 import type { POListRow } from "../types";
+import { fmtDate } from "@/shared/datetime";
 
 /** POStatus, as the backend enum spells it. */
 const STATUSES = [
@@ -72,7 +73,7 @@ export function POListPage() {
       hideOnNarrow: true,
       render: (r) => (
         <span className="text-sm text-muted">
-          {r.created_at ? new Date(r.created_at).toLocaleDateString() : "—"}
+          {fmtDate(r.created_at)}
         </span>
       ),
     },

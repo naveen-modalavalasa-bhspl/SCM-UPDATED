@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listConsignments } from "../api";
+import { listConsignments, deleteDispatch, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, fmtQty, humanise, num } from "../format";
 import type { Dispatch } from "../types";
 
@@ -105,6 +105,11 @@ export default function Consignments() {
         createPermission="dispatch.create"
         onRowClick={(row) => nav(String(row.id))}
         empty="No consignments match these filters."
+        onDelete={(row) => deleteDispatch(row.id)}
+        canDelete={(row) => row.status === "DRAFT"}
+        deletePermission={DRAFT_DELETE_PERMISSION.dispatch}
+        deleteLabel="consignment"
+        labelOf={(row) => row.dispatch_no ?? `Consignment ${row.id}`}
         kpis={(rows) => [
           { label: "Ready", value: rows.filter((row) => row.status === "PACKED").length, tone: "text-ok" },
           // num(), not `?? 0`: MySQL DECIMALs arrive as strings, so a bare `+` built

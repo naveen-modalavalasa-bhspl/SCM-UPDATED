@@ -14,6 +14,7 @@ import {
   getWarehouses, getCatalogItems, getStockBalances,
 } from "../api";
 import { alerts } from "@/modules/alerts";
+import { fmtDate } from "@/shared/datetime";
 
 /**
  * Stock transfer orders between warehouses.
@@ -192,7 +193,7 @@ export function StockTransferView() {
     { key: "requested_by_name", header: "Raised By", render: (r) => r.requested_by_name ?? "—", hideOnNarrow: true },
     {
       key: "created_at", header: "Raised On", hideOnNarrow: true,
-      render: (r) => (r.created_at ? new Date(r.created_at).toLocaleDateString() : "—"),
+      render: (r) => fmtDate(r.created_at),
     },
     { key: "action", header: "", render: stepButton },
   ];

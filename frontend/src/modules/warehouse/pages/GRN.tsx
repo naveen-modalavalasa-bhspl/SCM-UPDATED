@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listReceipts } from "../api";
+import { listReceipts, deleteReceipt, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, fmtMoneyShort, fmtQty } from "../format";
 import type { Receipt } from "../types";
 
@@ -104,6 +104,13 @@ export default function GRN() {
       createPermission="grn.create"
       onRowClick={(r) => nav(String(r.id))}
       empty="No receipts match these filters."
+      // A half-typed GRN is a draft: nothing has been received against it and no
+      // stock has moved. Anything past DRAFT is a record of goods arriving and stays.
+      onDelete={(r) => deleteReceipt(r.id)}
+      canDelete={(r) => r.status === "DRAFT"}
+      deletePermission={DRAFT_DELETE_PERMISSION.receipt}
+      deleteLabel="GRN"
+      labelOf={(r) => r.grn_no ?? `GRN ${r.id}`}
       kpis={(rows) => [
         { label: "Awaiting QC", value: rows.filter((r) => r.status === "PENDING_QC").length, tone: "text-warn" },
         { label: "Not posted", value: rows.filter((r) => !r.is_stock_posted && r.status !== "CANCELLED").length },

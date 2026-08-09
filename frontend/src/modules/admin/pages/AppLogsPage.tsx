@@ -6,6 +6,7 @@ import {
 import {
   Button, Input, PageHeader, ResponsiveList, Select, type Column,
 } from "@/shared/components";
+import { fmtDateTime } from "@/shared/datetime";
 import { adminApi } from "../api";
 import type { AppLog } from "../types";
 
@@ -31,12 +32,9 @@ const STATUSES = [
   { value: "503", label: "503" },
 ];
 
-function when(value: string) {
-  return new Date(value).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "medium",
-  });
-}
+// IST, not the browser's zone: a log line is a server event and must read as the
+// time the server saw it. See `@/shared/datetime`.
+const when = (value: string) => fmtDateTime(value);
 
 function location(row: AppLog) {
   if (!row.source_file) return "—";

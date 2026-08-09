@@ -12,14 +12,14 @@ requests, and this is a third responsibility with its own lifecycle.
 """
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation, availability
 from app.modules.inventory.models import (
-    NO_PROJECT, Allocation, AllocationItem,
+    NO_PROJECT, Allocation, AllocationItem, Stock,
 )
 from app.platform.rules import evaluator as rules
 from app.platform.settings.service import write_audit
@@ -199,6 +199,24 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
             raise ValidationError(f"Warehouse {d['warehouse_id']} not found")
         if quantity > ZERO and warehouse is None:
             raise ValidationError("A positive allocation quantity needs a warehouse")
+        # Nothing used to stop a decision to give more than exists. Approval then
+        # reserved what it could and reported the DECISION as given, so an indent for
+        # 10 against 9 on hand closed claiming 10 were issued and the missing unit was
+        # never ordered. Check against available stock at the chosen point — reserved
+        # quantity belongs to somebody else's indent and is not ours to promise.
+        if quantity > ZERO:
+            on_shelf = _d(await db.scalar(
+                select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
+                    Stock.item_id == d["item_id"],
+                    Stock.warehouse_id == d["warehouse_id"],
+                )
+            ))
+            if quantity > on_shelf:
+                raise ValidationError(
+                    f"{d.get('item_name') or d['item_id']}: cannot allocate "
+                    f"{quantity} from {warehouse.name} — only {on_shelf} is available. "
+                    "Allocate what is there; the rest goes to a material request."
+                )
         db.add(AllocationItem(
             allocation_id=alloc.id,
             indent_item_id=d["indent_item_id"], item_id=d["item_id"],
@@ -276,7 +294,12 @@ async def _settle_approved(db: AsyncSession, alloc: Allocation, user,
         {
             "allocation_id": alloc.id,
             "indent_id": alloc.indent_id,
-            "given_qty": float(sum(_d(line.quantity) for line in alloc.items)),
+            # What was actually reserved, not what was decided. These differ when the
+            # shelf ran short mid-approval, and reporting the decision is how an
+            # allocation of 10 against 9 on hand announced that 10 had been given.
+            "given_qty": float(await allocation.reserved_for(
+                db, RefType.RESERVATION.value, alloc.indent_id)),
+            "decided_qty": float(sum(_d(line.quantity) for line in alloc.items)),
             "status": implied_indent_status,
         },
         doc_type=DocType.ALLOCATION.value,
@@ -302,8 +325,23 @@ async def get(db: AsyncSession, allocation_id: int) -> Allocation:
 
 async def list_allocations(db: AsyncSession, params: PageParams,
                            status: str | None = None,
-                           indent_id: int | None = None) -> dict:
+                           indent_id: int | None = None, user=None) -> dict:
     stmt = select(Allocation)
+    if user is not None:
+        # Allocation Approvals used to return every allocation in the company: this
+        # was the last unscoped reader in the module. Bounded by the stocking points
+        # the login's rung reaches, plus the ones they raised themselves.
+        from app.modules.inventory.service import warehouse_ids_for_user
+
+        allowed = await warehouse_ids_for_user(db, user)
+        if allowed is not None:
+            stmt = stmt.where(or_(
+                Allocation.allocated_by_id == user.id,
+                Allocation.id.in_(
+                    select(AllocationItem.allocation_id).where(
+                        AllocationItem.warehouse_id.in_(allowed or {0}))
+                ),
+            ))
     if status:
         stmt = stmt.where(Allocation.status == status)
     if indent_id is not None:

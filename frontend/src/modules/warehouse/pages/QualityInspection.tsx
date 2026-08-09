@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listInspections } from "../api";
+import { listInspections, deleteInspection, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, percent } from "../format";
 import type { Inspection } from "../types";
 
@@ -88,6 +88,11 @@ export default function QualityInspection({
       createPermission="grn.qc"
       onRowClick={(r) => nav(String(r.id))}
       empty="No inspections match these filters."
+      onDelete={(r) => deleteInspection(r.id)}
+      canDelete={(r) => r.status === "DRAFT"}
+      deletePermission={DRAFT_DELETE_PERMISSION.inspection}
+      deleteLabel="inspection"
+      labelOf={(r) => r.inspection_no ?? `Inspection ${r.id}`}
       kpis={(rows) => {
         const passed = rows.reduce((s, r) => s + r.passed_items, 0);
         const failed = rows.reduce((s, r) => s + r.failed_items, 0);

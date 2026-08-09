@@ -10,6 +10,7 @@ import { getDashboard, warehouseOptions } from "../api";
 import { fmtDate, fmtMoneyShort, normaliseStatus } from "../format";
 import type { WarehouseDashboard as Dash } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { useAuth } from "@/shared/auth/AuthContext";
 
 /**
  * The warehouse landing screen: what is waiting for someone, right now.
@@ -29,17 +30,21 @@ interface Tile {
   to: string;
   icon: typeof PackageOpen;
   tone?: string;
+  /** The permission that opens the queue behind the tile. A tile whose list the
+   *  user cannot open is a dead link and a number they were never meant to read —
+   *  the data is already scoped, but scoping is about WHOSE rows, not WHICH queues. */
+  can: string;
 }
 
 const TILES: Tile[] = [
-  { key: "pending_gate_entries", label: "At the gate", to: "transactions/material-inward", icon: PackageOpen },
-  { key: "pending_grn", label: "GRN to raise", to: "transactions/grn", icon: PackageCheck },
-  { key: "pending_inspections", label: "Awaiting QC", to: "transactions/quality-inspection", icon: ClipboardCheck, tone: "text-warn" },
-  { key: "pending_putaways", label: "To put away", to: "transactions/putaway", icon: ArrowLeftRight },
-  { key: "open_picklists", label: "Open fulfilments", to: "transactions/fulfilment", icon: ClipboardCheck },
-  { key: "pending_issues", label: "Issues pending", to: "transactions/material-issues", icon: Send },
-  { key: "in_transit_dispatches", label: "In transit", to: "transactions/dispatch", icon: Truck },
-  { key: "open_returns", label: "Open returns", to: "transactions/purchase-returns", icon: Undo2, tone: "text-bad" },
+  { key: "pending_gate_entries", label: "At the gate", to: "transactions/material-inward", icon: PackageOpen, can: "receipt.view" },
+  { key: "pending_grn", label: "GRN to raise", to: "transactions/grn", icon: PackageCheck, can: "receipt.view" },
+  { key: "pending_inspections", label: "Awaiting QC", to: "transactions/quality-inspection", icon: ClipboardCheck, tone: "text-warn", can: "inspection.view" },
+  { key: "pending_putaways", label: "To put away", to: "transactions/putaway", icon: ArrowLeftRight, can: "putaway.view" },
+  { key: "open_picklists", label: "Open fulfilments", to: "transactions/fulfilment", icon: ClipboardCheck, can: "picking.view" },
+  { key: "pending_issues", label: "Issues pending", to: "transactions/material-issues", icon: Send, can: "issue.view" },
+  { key: "in_transit_dispatches", label: "In transit", to: "transactions/dispatch", icon: Truck, can: "dispatch.view" },
+  { key: "open_returns", label: "Open returns", to: "transactions/purchase-returns", icon: Undo2, tone: "text-bad", can: "return.view" },
 ];
 
 const DOC_ROUTE: Record<string, string> = {
@@ -55,6 +60,10 @@ const DOC_ROUTE: Record<string, string> = {
 
 export default function WarehouseDashboard() {
   const pointLabel = usePointLabel();
+  const { can } = useAuth();
+  // Only the queues this login can actually open. Scoping the numbers was half the
+  // job: a store keeper with no QC grant still saw an "Awaiting QC" tile.
+  const tiles = TILES.filter((t) => can(t.can));
   const [warehouse, setWarehouse] = useState("");
 
   const { data: houses = [] } = useQuery({
@@ -121,7 +130,7 @@ export default function WarehouseDashboard() {
       <ErrorBanner error={error} />
 
       <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {TILES.map((t) => (
+        {tiles.map((t) => (
           <Link key={t.key} to={t.to} className="block focus-visible:outline-none">
             <StatCard
               label={t.label}
@@ -133,6 +142,7 @@ export default function WarehouseDashboard() {
         ))}
       </div>
 
+      {can("stock.view") && (
       <div className="mb-5 grid grid-cols-1 gap-3 lg:grid-cols-2">
         <StatCard
           label="Stock value on hand"
@@ -146,6 +156,7 @@ export default function WarehouseDashboard() {
           tone={(data?.bin_utilisation_percent ?? 0) >= 90 ? "text-bad" : undefined}
         />
       </div>
+      )}
 
       <Card className="p-4 sm:p-5">
         <h2 className="mb-4 font-display text-base font-bold text-ink">Latest activity</h2>

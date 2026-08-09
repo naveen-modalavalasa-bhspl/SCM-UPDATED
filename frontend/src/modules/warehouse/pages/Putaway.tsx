@@ -4,7 +4,7 @@ import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
 import { NewPutawayModal } from "../components/NewPutawayModal";
-import { listPutaways } from "../api";
+import { listPutaways, deletePutaway, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtQty, humanise, normaliseStatus } from "../format";
 import type { Putaway as PutawayTask } from "../types";
 
@@ -110,6 +110,14 @@ export default function Putaway() {
       statuses={STATUSES}
       onRowClick={(r) => nav(String(r.id))}
       empty="Nothing waiting to be put away."
+      // `whs_warehouse_items.status` is a lower-case MySQL ENUM. Only a draft goes:
+      // a PENDING task is real work a GRN created and deleting it would lose the
+      // obligation to put those goods away.
+      onDelete={(r) => deletePutaway(r.id)}
+      canDelete={(r) => r.status === "draft"}
+      deletePermission={DRAFT_DELETE_PERMISSION.putaway}
+      deleteLabel="put-away task"
+      labelOf={(r) => r.putaway_no ?? `Task ${r.id}`}
       kpis={(rows) => [
         { label: "Pending", value: rows.filter((r) => r.status === "pending").length, tone: "text-warn" },
         { label: "In progress", value: rows.filter((r) => r.status === "in_progress").length },

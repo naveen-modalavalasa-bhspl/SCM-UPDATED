@@ -13,14 +13,27 @@ import {
  * these primitives locally. See CLAUDE.md "Frontend module pattern".
  * ------------------------------------------------------------------------- */
 
-type Variant = "primary" | "ghost" | "danger" | "subtle" | "secondary";
+type Variant =
+  | "primary" | "ghost" | "danger" | "subtle" | "secondary" | "soft" | "dangerSoft";
 
+/**
+ * `subtle` and `ghost` used to carry no colour at all, so HeroUI fell back to its
+ * neutral grey. Every secondary action in the app — Save, Back, Cancel, Add line —
+ * rendered as grey-on-white and read as disabled; the warehouse forms, which use
+ * them for nearly every button, looked switched off.
+ *
+ * They are brand-coloured now. `soft` (a filled tint) is for a real action that is
+ * not the primary one on the screen — Save next to Post to stock — and `dangerSoft`
+ * for a destructive secondary, so cancelling a document never looks like Save.
+ */
 const VARIANT: Record<Variant, { color?: any; variant?: any }> = {
   primary: { color: "primary", variant: "solid" },
   secondary: { color: "secondary", variant: "solid" },
   danger: { color: "danger", variant: "solid" },
-  subtle: { variant: "bordered" },
-  ghost: { variant: "light" },
+  soft: { color: "primary", variant: "flat" },
+  dangerSoft: { color: "danger", variant: "flat" },
+  subtle: { color: "primary", variant: "bordered" },
+  ghost: { color: "primary", variant: "light" },
 };
 
 interface BtnProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "color"> {

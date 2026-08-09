@@ -104,6 +104,17 @@ RETURN_VIEW = "return.view"
 RETURN_CREATE = "return.create"
 RETURN_APPROVE = "return.approve"
 WAREHOUSE_REPORT_VIEW = "warehouse.report.view"
+# Deleting an abandoned draft. Separate from create/execute on purpose: a storekeeper
+# who raises documents is not automatically someone who may remove them, and the
+# reverse is true for a supervisor tidying a queue.
+RECEIPT_DELETE = "receipt.delete"
+INSPECTION_DELETE = "inspection.delete"
+PUTAWAY_DELETE = "putaway.delete"
+PICKING_DELETE = "picking.delete"
+ISSUE_DELETE = "issue.delete"
+DISPATCH_DELETE = "dispatch.delete"
+RETURN_DELETE = "return.delete"
+MOVEMENT_DELETE = "movement.delete"
 
 # --- Masters ---
 MASTER_ITEM_MANAGE = "master.item.manage"
@@ -219,6 +230,16 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(RETURN_CREATE, "warehouse", "return", "create", "Create purchase returns"),
     Perm(RETURN_APPROVE, "warehouse", "return", "approve", "Approve a purchase return"),
     Perm(WAREHOUSE_REPORT_VIEW, "warehouse", "report", "view", "View warehouse reports"),
+    Perm(RECEIPT_DELETE, "warehouse", "receipt", "delete", "Delete a draft receipt"),
+    Perm(INSPECTION_DELETE, "warehouse", "inspection", "delete",
+         "Delete a draft inspection"),
+    Perm(PUTAWAY_DELETE, "warehouse", "putaway", "delete", "Delete a draft put-away"),
+    Perm(PICKING_DELETE, "warehouse", "picking", "delete", "Delete a draft picklist"),
+    Perm(ISSUE_DELETE, "warehouse", "issue", "delete", "Delete a draft issue"),
+    Perm(DISPATCH_DELETE, "warehouse", "dispatch", "delete", "Delete a draft dispatch"),
+    Perm(RETURN_DELETE, "warehouse", "return", "delete", "Delete a draft return"),
+    Perm(MOVEMENT_DELETE, "warehouse", "movement", "delete",
+         "Delete a draft stock movement"),
     Perm(MASTER_ITEM_MANAGE, "masters", "item", "manage", "Manage items"),
     Perm(MASTER_VENDOR_MANAGE, "masters", "vendor", "manage", "Manage vendors"),
     Perm(MASTER_CATEGORY_MANAGE, "masters", "category", "manage", "Manage item categories"),

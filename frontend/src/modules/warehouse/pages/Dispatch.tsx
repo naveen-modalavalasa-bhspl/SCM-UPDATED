@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listDispatches } from "../api";
+import { listDispatches, deleteDispatch, DRAFT_DELETE_PERMISSION } from "../api";
 import { daysUntil, fmtDate, fmtQty, humanise } from "../format";
 import type { Dispatch as DispatchDoc } from "../types";
 
@@ -120,6 +120,11 @@ export default function Dispatch() {
         createPermission="dispatch.gate_out"
         onRowClick={(r) => nav(String(r.id))}
         empty="No dispatches match these filters."
+        onDelete={(r) => deleteDispatch(r.id)}
+        canDelete={(r) => r.status === "DRAFT"}
+        deletePermission={DRAFT_DELETE_PERMISSION.dispatch}
+        deleteLabel="dispatch"
+        labelOf={(r) => r.dispatch_no ?? `Dispatch ${r.id}`}
         kpis={(rows) => [
           { label: "In transit", value: rows.filter((r) => ["DISPATCHED", "IN_TRANSIT"].includes(r.status)).length },
           { label: "Awaiting gate-out", value: rows.filter((r) => r.status === "PACKED").length, tone: "text-warn" },

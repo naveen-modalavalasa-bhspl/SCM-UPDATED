@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/shared/api/client";
 import { PageHeader, ResponsiveList, StatusPill, type Column } from "@/shared/components";
+import { fmtDateTime } from "@/shared/datetime";
 
 /**
  * Every time approval configuration failed and the hardcoded ladder took over.
@@ -43,11 +44,7 @@ function explain(fields: Record<string, unknown> | null): { reason: string; who:
   return { reason: label || value || "—", who: who || "—" };
 }
 
-function fmt(s: string | null) {
-  return s ? new Date(s).toLocaleString(undefined, {
-    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
-  }) : "—";
-}
+const fmt = (s: string | null) => fmtDateTime(s);
 
 export function FallbackLogPage() {
   const { data, isLoading, error } = useQuery({

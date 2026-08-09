@@ -1,11 +1,12 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus, Trash2 } from "lucide-react";
 import {
   Button, Can, PageHeader, ResponsiveList, StatCard, type Column,
 } from "@/shared/components";
-import { ErrorBanner } from "@/shared/components";
+import { ConfirmModal, ErrorBanner, useToast } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { warehouseOptions } from "../api";
 import type { ListParams, Page } from "../types";
@@ -71,6 +72,24 @@ export interface DocumentListProps<T> {
   children?: ReactNode;
   /** Hides the warehouse dropdown for lists that are not per-site. */
   warehouseFilter?: boolean;
+  /**
+   * Clearing abandoned drafts.
+   *
+   * Every one of these lists collects half-started documents that nothing could
+   * remove, so the queue that matters ends up behind rows nobody will ever finish.
+   * Supply all three and a trash column appears on the rows `canDelete` accepts —
+   * and only for someone holding `deletePermission`. The backend re-checks both the
+   * permission and the draft status, so hiding the button is convenience, not the
+   * control (rule 6).
+   */
+  onDelete?: (row: T) => Promise<unknown>;
+  /** Which rows are drafts. Must agree with the statuses the server will accept. */
+  canDelete?: (row: T) => boolean;
+  deletePermission?: string;
+  /** What the confirm dialog calls the thing, e.g. "GRN". */
+  deleteLabel?: string;
+  /** Names the row in the dialog, e.g. its document number. */
+  labelOf?: (row: T) => string;
 }
 
 export function DocumentList<T>({
@@ -93,6 +112,11 @@ export function DocumentList<T>({
   empty = "Nothing here yet.",
   children,
   warehouseFilter = true,
+  onDelete,
+  canDelete,
+  deletePermission,
+  deleteLabel = "draft",
+  labelOf,
 }: DocumentListProps<T>) {
   const nav = useNavigate();
   const [search, setSearch] = useState("");
@@ -172,6 +196,66 @@ export function DocumentList<T>({
 
   const openRow = onRowClick ?? ((row: T) => nav(String(keyOf(row))));
 
+  // --- deleting a draft -----------------------------------------------------
+  const { can } = useAuth();
+  const toast = useToast();
+  const qc = useQueryClient();
+  const [pendingDelete, setPendingDelete] = useState<T | null>(null);
+  const mayDelete = Boolean(onDelete && canDelete && deletePermission
+    && can(deletePermission));
+
+  const remove = useMutation({
+    mutationFn: (row: T) => onDelete!(row),
+    onSuccess: () => {
+      // Both the page and the KPI scan read this key root, so the tiles cannot go
+      // on counting a row that is gone.
+      qc.invalidateQueries({ queryKey: [queryKey] });
+      toast.success(`${deleteLabel} deleted.`);
+      setPendingDelete(null);
+    },
+  });
+
+  const deleteButton = (row: T) => (mayDelete && canDelete!(row) ? (
+    <button
+      type="button"
+      aria-label={`Delete ${labelOf?.(row) ?? deleteLabel}`}
+      title="Delete this draft"
+      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg
+                 text-muted transition-colors hover:bg-bad-bg hover:text-bad"
+      onClick={(e) => {
+        // The row itself opens the document; without this the confirm dialog would
+        // appear on top of the detail screen it just navigated to.
+        e.stopPropagation();
+        setPendingDelete(row);
+      }}
+    >
+      <Trash2 className="h-4 w-4" />
+    </button>
+  ) : null);
+
+  // Appended, not inserted: a delete sitting between two data columns is a delete
+  // somebody hits while reaching for the row.
+  const listColumns: Column<T>[] = mayDelete
+    ? [...columns, {
+        key: "__delete",
+        header: "",
+        className: "w-12 text-right",
+        render: deleteButton,
+      } as Column<T>]
+    : columns;
+
+  // Under 768px `<ResponsiveList>` renders cards and ignores columns entirely, so
+  // the trash icon has to be laid alongside the card or half the warehouse — who
+  // work on phones — would have no way to clear a draft.
+  const cardRenderer = mayDelete
+    ? (row: T) => (
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1">{renderCard(row)}</div>
+          {deleteButton(row)}
+        </div>
+      )
+    : renderCard;
+
   const create = (onCreate || createTo) && (
     <Button onClick={onCreate ?? (() => nav(createTo!))}>
       <Plus className="h-4 w-4" /> {createLabel}
@@ -234,15 +318,38 @@ export function DocumentList<T>({
 
       <ResponsiveList
         data={pageRows}
-        columns={columns}
+        columns={listColumns}
         keyOf={keyOf}
         loading={isLoading}
         onRowClick={openRow}
         empty={empty}
-        renderCard={renderCard}
+        renderCard={cardRenderer}
         page={page}
         totalPages={totalPages}
         onPageChange={setPage}
+      />
+
+      <ConfirmModal
+        isOpen={pendingDelete !== null}
+        title={`Delete this ${deleteLabel}?`}
+        message={
+          <>
+            {labelOf && pendingDelete
+              ? <><strong>{labelOf(pendingDelete)}</strong> will be removed permanently. </>
+              : `This ${deleteLabel} will be removed permanently. `}
+            It is still a draft, so nothing depends on it — no stock has moved and no
+            other document points at it. This cannot be undone.
+          </>
+        }
+        confirmLabel="Delete"
+        danger
+        busy={remove.isPending}
+        error={remove.error}
+        onConfirm={() => pendingDelete && remove.mutate(pendingDelete)}
+        onClose={() => {
+          setPendingDelete(null);
+          remove.reset();
+        }}
       />
     </div>
   );

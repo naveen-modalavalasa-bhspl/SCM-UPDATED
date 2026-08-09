@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Progress } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listPickings } from "../api";
+import { listPickings, deletePicking, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, humanise, percent } from "../format";
 import type { Picking } from "../types";
 
@@ -94,6 +94,11 @@ export default function Picklist() {
       createPermission="issue.create"
       onRowClick={(r) => nav(String(r.id))}
       empty="No material fulfilments match these filters."
+      onDelete={(r) => deletePicking(r.id)}
+      canDelete={(r) => r.status === "DRAFT"}
+      deletePermission={DRAFT_DELETE_PERMISSION.picking}
+      deleteLabel="picklist"
+      labelOf={(r) => r.pick_no ?? `Picklist ${r.id}`}
       kpis={(rows) => [
         { label: "Released", value: rows.filter((r) => r.status === "RELEASED").length, tone: "text-warn" },
         { label: "In progress", value: rows.filter((r) => r.status === "IN_PROGRESS").length },

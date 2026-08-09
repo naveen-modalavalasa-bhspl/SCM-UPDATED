@@ -21,18 +21,14 @@ export const humanise = (value?: string | null) => {
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
 
-const DATE_FMT: Intl.DateTimeFormatOptions = { day: "2-digit", month: "short", year: "numeric" };
+// Dates come from `@/shared/datetime`, which pins every screen to IST. These used to
+// format in whatever zone the browser was in, against a backend that serialises IST
+// without an offset — so the same GRN read 09:39 on one machine and 04:09 on another.
+export { fmtDate, fmtDateTime, fmtTime } from "@/shared/datetime";
 
-export const fmtDate = (value?: string | null) =>
-  value ? new Date(value).toLocaleDateString(undefined, DATE_FMT) : "—";
-
-export const fmtDateTime = (value?: string | null) =>
-  value
-    ? new Date(value).toLocaleString(undefined, { ...DATE_FMT, hour: "2-digit", minute: "2-digit" })
-    : "—";
-
-/** Today as `YYYY-MM-DD`, the shape every date input and the API both take. */
-export const today = () => new Date().toISOString().slice(0, 10);
+/** Today as `YYYY-MM-DD`, the shape every date input and the API both take. IST:
+ *  `toISOString()` is UTC, so after 18:30 it handed back yesterday. */
+export { todayIst as today } from "@/shared/datetime";
 
 /** Quantities carry 3 decimals in the schema; trailing zeros are noise on screen. */
 export const fmtQty = (value?: number | string | null) => {

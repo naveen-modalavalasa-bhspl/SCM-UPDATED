@@ -559,3 +559,33 @@ export const departmentOptions = () => get<Option[]>(`${BASE}/options/department
 export const vehicleOptions = (search?: string) => get<Option[]>(`${BASE}/options/vehicles`, { search });
 
 export const carrierOptions = (search?: string) => get<Option[]>(`${BASE}/options/carriers`, { search });
+
+/* ------------------------------------------------------- deleting a draft -- */
+
+/**
+ * Removing an abandoned draft. Only a DRAFT can go — the backend refuses anything
+ * that has been submitted, moved stock, or grown a child document, and it checks the
+ * same RBAC scope the list does, so a draft you cannot see is not one you can delete
+ * by guessing its id.
+ *
+ * One permission per document type, matching the endpoints.
+ */
+export const DRAFT_DELETE_PERMISSION = {
+  receipt: "receipt.delete",
+  inspection: "inspection.delete",
+  putaway: "putaway.delete",
+  picking: "picking.delete",
+  issue: "issue.delete",
+  dispatch: "dispatch.delete",
+  return: "return.delete",
+  movement: "movement.delete",
+} as const;
+
+export const deleteReceipt = (id: number) => del(`${BASE}/receipts/${id}`);
+export const deleteInspection = (id: number) => del(`${BASE}/inspections/${id}`);
+export const deletePutaway = (id: number) => del(`${BASE}/putaways/${id}`);
+export const deletePicking = (id: number) => del(`${BASE}/pickings/${id}`);
+export const deleteIssue = (id: number) => del(`${BASE}/issues/${id}`);
+export const deleteDispatch = (id: number) => del(`${BASE}/dispatches/${id}`);
+export const deletePurchaseReturn = (id: number) => del(`${BASE}/returns/${id}`);
+export const deleteStockMovement = (id: number) => del(`${BASE}/stock-movements/${id}`);

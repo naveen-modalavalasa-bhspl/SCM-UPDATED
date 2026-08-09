@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Input, PageHeader, ResponsiveList, Select, type Column } from "@/shared/components";
 import { adminApi } from "../api";
 import type { AuditRow } from "../types";
+import { fmtDateTime } from "@/shared/datetime";
 
 const ACTIONS = ["CREATE", "UPDATE", "DEACTIVATE", "ACTIVATE", "LOGIN",
                  "ACCESS_GRANTED", "ACCESS_REVOKED"].map((a) => ({ value: a, label: a }));
@@ -15,12 +16,7 @@ const ACTION_TONE: Record<string, string> = {
   ACCESS_GRANTED: "bg-ok-bg text-ok",
 };
 
-function when(iso?: string | null) {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: "medium", timeStyle: "short",
-  });
-}
+const when = (iso?: string | null) => fmtDateTime(iso);
 
 /** The log stores only the fields that changed, so this renders the whole diff. */
 function Changes({ row }: { row: AuditRow }) {

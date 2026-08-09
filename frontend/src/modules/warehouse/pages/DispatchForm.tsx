@@ -357,7 +357,7 @@ export default function DispatchForm() {
         hint="Every scan, stop and temperature reading, in order."
         actions={
           <Can do="dispatch.view">
-            <Button variant="subtle" onClick={() => logEvent.mutate()} disabled={logEvent.isPending}>
+            <Button variant="soft" onClick={() => logEvent.mutate()} disabled={logEvent.isPending}>
               {logEvent.isPending ? "Recording..." : "Record event"}
             </Button>
           </Can>

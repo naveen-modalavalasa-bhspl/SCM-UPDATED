@@ -5,6 +5,7 @@ import { Chip, Pagination } from "@heroui/react";
 import { PageHeader, Card, ResponsiveList, StatusPill, Button, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { getFulfillmentQueue, listAllocations } from "../api";
+import { fmtDate } from "@/shared/datetime";
 
 /**
  * Everything that still owes something — and the place to do something about it.
@@ -40,8 +41,6 @@ const STATUS_OPTIONS = [
   { value: "PENDING_PROCUREMENT", label: "Nothing given" },
 ];
 
-const fmtDate = (s?: string | null) =>
-  s ? new Date(s).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—";
 
 const ageInDays = (s?: string | null) =>
   s ? Math.floor((Date.now() - new Date(s).getTime()) / 86_400_000) : 0;

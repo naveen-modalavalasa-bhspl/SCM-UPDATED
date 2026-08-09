@@ -18,14 +18,21 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
 @router.get("/ledgers", response_model=list[ReportLedgerInfo])
-async def ledgers(user=Depends(require_permission(perms.REPORT_VIEW))):
-    return service.catalog()
+async def ledgers(db: AsyncSession = Depends(get_db),
+                  user=Depends(require_permission(perms.REPORT_VIEW))):
+    # Only the ledgers this login holds the permission for. The catalogue used to
+    # list all nine, so a profile granted the Indent Ledger alone still saw tabs for
+    # Stock and Warehouse and hit an error opening them.
+    from app.platform.rbac.service import get_user_permissions
+
+    held = await get_user_permissions(db, user, getattr(user, "active_position_id", None))
+    return [row for row in service.catalog() if row["permission"] in held]
 
 
 @router.get("/{ledger}/filters")
 async def ledger_filters(ledger: str, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.REPORT_VIEW))):
-    return await service.filter_options(db, ledger)
+    return await service.filter_options(db, ledger, user=user)
 
 
 XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -38,7 +45,7 @@ async def export_ledger(ledger: str, request: Request, format: str = "xlsx",
     """Excel by default (styled heading row); `?format=csv` for a plain file."""
     actor = getattr(user, "full_name", None)
     if format == "csv":
-        filename, text = await service.export_csv(db, ledger, request.query_params, actor)
+        filename, text = await service.export_csv(db, ledger, request.query_params, actor, user=user)
         # The BOM is what makes Excel read a CSV as UTF-8 — without it a vendor name
         # with an accent in it opens as mojibake.
         return Response(
@@ -46,7 +53,7 @@ async def export_ledger(ledger: str, request: Request, format: str = "xlsx",
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
-    filename, body = await service.export_xlsx(db, ledger, request.query_params, actor)
+    filename, body = await service.export_xlsx(db, ledger, request.query_params, actor, user=user)
     return Response(
         content=body, media_type=XLSX_MEDIA,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
@@ -58,4 +65,4 @@ async def ledger_rows(ledger: str, request: Request, params: PageParams = Depend
                       db: AsyncSession = Depends(get_db),
                       user=Depends(require_permission(perms.REPORT_VIEW))):
     return await service.list_rows(db, ledger, params.page, params.size,
-                                   request.query_params)
+                                   request.query_params, user=user)

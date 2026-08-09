@@ -23,6 +23,7 @@ from app.platform.rbac.service import (
 from app.platform.settings.models import AuditLog
 from app.platform.workflow import engine
 from app.shared.enums import IndentStatus, POStatus, ScopeRung
+from app.shared.time import now as ist_now, today as ist_today
 
 
 APPROVE_PERMISSIONS = {
@@ -47,7 +48,7 @@ MODULE_DESCRIPTIONS = {
 
 
 def _range_start(value: DateRange) -> datetime:
-    now = datetime.now(timezone.utc)
+    now = ist_now()
     if value == "month":
         return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     if value == "quarter":
@@ -191,7 +192,7 @@ def _is_overdue(row: dict) -> bool:
         return False
     if due_at.tzinfo is None:
         due_at = due_at.replace(tzinfo=timezone.utc)
-    return due_at < datetime.now(timezone.utc)
+    return due_at < ist_now()
 
 
 async def _recent_activity(

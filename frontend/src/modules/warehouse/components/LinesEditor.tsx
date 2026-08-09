@@ -170,7 +170,7 @@ export function LinesEditor<T>({
 
       {onAdd && (
         <div className="mt-3">
-          <Button variant="subtle" onClick={onAdd}>
+          <Button variant="soft" onClick={onAdd}>
             <Plus className="h-4 w-4" /> {addLabel}
           </Button>
         </div>

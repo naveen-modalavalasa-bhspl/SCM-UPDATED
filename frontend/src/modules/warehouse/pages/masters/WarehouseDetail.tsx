@@ -241,14 +241,14 @@ export default function WarehouseDetail() {
                 <h2 className="font-display text-base font-bold text-ink">Bin tree</h2>
                 <Can do="master.location.manage">
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="subtle" onClick={() => openAdd(null)}>
+                    <Button variant="soft" onClick={() => openAdd(null)}>
                       <Plus className="h-4 w-4" /> Add zone
                     </Button>
                     <Button onClick={() => openAdd(selected)} disabled={!selected}>
                       <Plus className="h-4 w-4" />
                       {selected ? `Add under ${selected.code}` : "Add under…"}
                     </Button>
-                    <Button variant="subtle" onClick={() => selected && openEdit(selected)} disabled={!selected}>
+                    <Button variant="soft" onClick={() => selected && openEdit(selected)} disabled={!selected}>
                       <Pencil className="h-4 w-4" /> Edit
                     </Button>
                     <Button variant="danger" onClick={() => setRemoving(selected)} disabled={!selected}>

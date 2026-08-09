@@ -6,6 +6,7 @@ import { PageHeader, Card, ResponsiveGrid, ResponsiveList, StatCard, StatusPill,
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { listMaterialRequests } from "../api";
 import type { MaterialRequestListRow } from "../types";
+import { fmtDate } from "@/shared/datetime";
 
 /**
  * Material requests raised when an approved indent could not be filled from stock.
@@ -19,8 +20,6 @@ const STATUSES = [
   { value: "ORDERED", label: "Ordered" },
 ];
 
-const fmtDate = (s?: string | null) =>
-  s ? new Date(s).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—";
 
 /** Days until required_by. Negative means the store is already late. */
 const dueIn = (s?: string | null) =>

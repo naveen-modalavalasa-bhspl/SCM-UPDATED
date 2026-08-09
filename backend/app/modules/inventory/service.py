@@ -40,6 +40,8 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item
 from app.shared.models.warehouse import Warehouse, WarehouseLocation
 from app.shared.numbering import next_number
+from app.shared.time import now as ist_now, today as ist_today
+from app.shared.time import to_ist
 
 
 logger = logging.getLogger(__name__)
@@ -59,7 +61,7 @@ def _aware(value: datetime | None) -> datetime | None:
     """
     if value is None:
         return None
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return to_ist(value)
 
 
 def _as_date(value) -> date | None:
@@ -1180,7 +1182,7 @@ async def get_stock_detail(db: AsyncSession, stock_id: int, user=None) -> dict:
         .order_by(Stock.expiry_date.is_(None), Stock.expiry_date.asc(), Stock.bin_id)
     )).scalars().all()
 
-    today = date.today()
+    today = ist_today()
     lots = [{
         "id": r.id, "bin_id": r.bin_id, "bin_code": r.bin_code,
         "batch_id": r.batch_id, "batch_no": r.batch_no, "expiry_date": r.expiry_date,

@@ -27,7 +27,9 @@ from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
 from app.platform.rbac.permissions import INDENT_VIEW
 from app.modules.warehouse.enums import (
-    DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_GATE_OUT, DISPATCH_VIEW,
+    DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
+    DISPATCH_GATE_OUT, DISPATCH_VIEW, INSPECTION_DELETE, ISSUE_DELETE, MOVEMENT_DELETE,
+    PICKING_DELETE, PUTAWAY_DELETE, RECEIPT_DELETE, RETURN_DELETE,
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_POST, ISSUE_VIEW,
     MASTER_LOCATION_MANAGE, PICKING_PICK, PICKING_VIEW, PUTAWAY_EXECUTE, PUTAWAY_VIEW,
     RECEIPT_CREATE, RECEIPT_POST, RECEIPT_VIEW, RETURN_APPROVE, RETURN_CREATE, RETURN_VIEW,
@@ -938,3 +940,59 @@ async def vehicle_options(search: str | None = None, db: AsyncSession = Depends(
 async def carrier_options(search: str | None = None, db: AsyncSession = Depends(get_db),
                           _=Depends(require_permission(DISPATCH_VIEW))):
     return await service.carrier_options(db, search)
+
+
+# ---------------------------------------------------------------------------
+# Deleting a draft
+#
+# One endpoint per document type rather than one generic route: rule 6 wants the
+# permission on the endpoint, and a `/drafts/{kind}` route could only ever declare
+# one code for all eight. The service does the work; these pick the guard.
+# ---------------------------------------------------------------------------
+
+@router.delete("/receipts/{receipt_id}", status_code=204)
+async def delete_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(RECEIPT_DELETE))):
+    await service.delete_draft(db, "receipt", receipt_id, user)
+
+
+@router.delete("/inspections/{inspection_id}", status_code=204)
+async def delete_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(INSPECTION_DELETE))):
+    await service.delete_draft(db, "inspection", inspection_id, user)
+
+
+@router.delete("/putaways/{task_id}", status_code=204)
+async def delete_putaway(task_id: int, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(PUTAWAY_DELETE))):
+    await service.delete_draft(db, "putaway", task_id, user)
+
+
+@router.delete("/pickings/{picking_id}", status_code=204)
+async def delete_picking(picking_id: int, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(PICKING_DELETE))):
+    await service.delete_draft(db, "picking", picking_id, user)
+
+
+@router.delete("/issues/{issue_id}", status_code=204)
+async def delete_issue(issue_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(ISSUE_DELETE))):
+    await service.delete_draft(db, "issue", issue_id, user)
+
+
+@router.delete("/dispatches/{dispatch_id}", status_code=204)
+async def delete_dispatch(dispatch_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(DISPATCH_DELETE))):
+    await service.delete_draft(db, "dispatch", dispatch_id, user)
+
+
+@router.delete("/returns/{return_id}", status_code=204)
+async def delete_return(return_id: int, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(RETURN_DELETE))):
+    await service.delete_draft(db, "return", return_id, user)
+
+
+@router.delete("/stock-movements/{order_id}", status_code=204)
+async def delete_stock_movement(order_id: int, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(MOVEMENT_DELETE))):
+    await service.delete_draft(db, "movement", order_id, user)

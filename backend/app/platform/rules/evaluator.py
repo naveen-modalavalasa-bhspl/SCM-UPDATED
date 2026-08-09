@@ -18,6 +18,7 @@ from app.platform.rules.models import (
     Rule, RuleAction, RuleCondition, RuleExecution,
 )
 from app.platform.workflow.conditions import matches
+from app.shared.time import now as ist_now, today as ist_today
 
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ def _in_effect(rule: Rule, today: date) -> bool:
 
 async def active_rules(db: AsyncSession, event_code: str,
                        today: date | None = None) -> list[Rule]:
-    today = today or date.today()
+    today = today or ist_today()
     rows = (await db.execute(
         select(Rule).where(Rule.event_code == event_code, Rule.is_active.is_(True))
         .order_by(Rule.priority, Rule.id)

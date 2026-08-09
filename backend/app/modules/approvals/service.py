@@ -18,6 +18,7 @@ from app.platform.notifications import service as notification_service
 from app.platform.workflow import engine, service as workflow_service
 from app.platform.workflow.models import Action, Instance, Pending
 from app.shared.enums import AuditAction, DocType, InstanceStatus
+from app.shared.time import now as ist_now, today as ist_today
 
 from .schemas import (
     ApprovalIndentLineOut, ApprovalIndentOut, ApprovalQuantityIn,
@@ -68,7 +69,7 @@ async def pending_summary(db: AsyncSession, user) -> dict:
     browser. That is two full reads per load, and it stops being possible the moment
     a queue passes 500 rows.
     """
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = ist_now()
     base = (
         select(Pending.doc_type, Pending.doc_id, Pending.due_at, Pending.created_at)
         .join(Instance, Instance.id == Pending.instance_id)
@@ -114,7 +115,7 @@ async def pending_page(
         Pending.approver_id == user.id,
         Instance.status == InstanceStatus.IN_PROGRESS.value,
     ]
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = ist_now()
     term = search.strip()
     if term:
         like = f"%{term}%"
@@ -370,7 +371,7 @@ async def report_summary(db: AsyncSession, user) -> dict:
         due = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if due.tzinfo is None:
             due = due.replace(tzinfo=timezone.utc)
-        return due < datetime.now(timezone.utc)
+        return due < ist_now()
 
     return {
         "total_decisions": len(decided),

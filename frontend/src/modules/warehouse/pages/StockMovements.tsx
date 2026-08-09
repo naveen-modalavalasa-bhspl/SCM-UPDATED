@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listStockMovementOrders } from "../api";
+import { listStockMovementOrders, deleteStockMovement, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDateTime } from "../format";
 import type { StockMovementOrder } from "../types";
 
@@ -64,6 +64,11 @@ export default function StockMovements() {
       createPermission="stock.transfer"
       onRowClick={() => undefined}
       empty="No stock movement orders recorded."
+      onDelete={(row) => deleteStockMovement(row.id)}
+      canDelete={(row) => row.status === "DRAFT"}
+      deletePermission={DRAFT_DELETE_PERMISSION.movement}
+      deleteLabel="movement order"
+      labelOf={(row) => row.order_no ?? `Order ${row.id}`}
       renderCard={(row) => (
         <button
           type="button"

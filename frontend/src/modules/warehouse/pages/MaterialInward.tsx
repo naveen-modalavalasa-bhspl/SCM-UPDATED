@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listReceipts } from "../api";
+import { listReceipts, deleteReceipt, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, fmtQty } from "../format";
 import type { Receipt } from "../types";
 
@@ -94,6 +94,13 @@ export default function MaterialInward() {
       // it as something it no longer is.
       onRowClick={(r) => nav(isDraft(r) ? String(r.id) : `../grn/${r.id}`)}
       empty="No gate entries yet."
+      // A gate entry that was never worked on. Once it becomes a GRN its status
+      // moves on and the button disappears with it.
+      onDelete={(r) => deleteReceipt(r.id)}
+      canDelete={(r) => r.status === "DRAFT" || r.status === "GATE_ENTRY"}
+      deletePermission={DRAFT_DELETE_PERMISSION.receipt}
+      deleteLabel="gate entry"
+      labelOf={(r) => r.gate_entry_no ?? r.grn_no ?? `Entry ${r.id}`}
       // "Entries" was Draft + Done restated, so it told nobody anything they could
       // not already add up. "Arrived today" is the number a gate actually works to.
       kpis={(rows) => {

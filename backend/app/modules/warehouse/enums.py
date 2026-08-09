@@ -283,3 +283,14 @@ RETURN_VIEW = "return.view"                      # NEW
 RETURN_CREATE = "return.create"                  # NEW
 RETURN_APPROVE = "return.approve"                # NEW
 WAREHOUSE_REPORT_VIEW = "warehouse.report.view"  # NEW
+
+# Deleting an abandoned draft — one code per document type, so tidying picklists is
+# not the same grant as tidying GRNs.
+RECEIPT_DELETE = "receipt.delete"
+INSPECTION_DELETE = "inspection.delete"
+PUTAWAY_DELETE = "putaway.delete"
+PICKING_DELETE = "picking.delete"
+ISSUE_DELETE = "issue.delete"
+DISPATCH_DELETE = "dispatch.delete"
+RETURN_DELETE = "return.delete"
+MOVEMENT_DELETE = "movement.delete"

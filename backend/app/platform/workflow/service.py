@@ -19,6 +19,7 @@ from app.shared.enums import (
     ConditionOperator, DocType,
 )
 from app.shared.models.base import utcnow
+from app.shared.time import to_ist
 
 
 # This policy is deliberately code, not configuration. Configuration may replace the
@@ -260,9 +261,7 @@ def _utc_datetime(value: datetime | None) -> datetime | None:
     """
     if value is None:
         return None
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    return to_ist(value)
 
 
 async def team_queue(db: AsyncSession, user) -> list[dict]:

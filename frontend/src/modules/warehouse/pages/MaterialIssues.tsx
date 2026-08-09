@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listIssues } from "../api";
+import { listIssues, deleteIssue, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, fmtMoneyShort, fmtQty } from "../format";
 import type { Issue } from "../types";
 
@@ -118,6 +118,11 @@ export default function MaterialIssues({
       createPermission="issue.create"
       onRowClick={(r) => nav(String(r.id))}
       empty="No issues match these filters."
+      onDelete={(r) => deleteIssue(r.id)}
+      canDelete={(r) => r.status === "DRAFT"}
+      deletePermission={DRAFT_DELETE_PERMISSION.issue}
+      deleteLabel="issue"
+      labelOf={(r) => r.issue_no ?? `Issue ${r.id}`}
       kpis={(rows) => [
         { label: "In approval", value: rows.filter((r) => r.status === "PENDING_APPROVAL").length, tone: "text-warn" },
         { label: "Approved, not issued", value: rows.filter((r) => r.status === "APPROVED").length },

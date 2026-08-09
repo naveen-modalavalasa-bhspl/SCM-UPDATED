@@ -395,14 +395,14 @@ export default function QualityInspectionForm({
             </Button>
             {!locked && (
               <Can do="grn.qc">
-                <Button variant="subtle" onClick={() => save.mutate()} disabled={save.isPending}>
+                <Button variant="soft" onClick={() => save.mutate()} disabled={save.isPending}>
                   {save.isPending ? "Saving…" : "Save"}
                 </Button>
               </Can>
             )}
             {editing && !locked && (
               <Can do="grn.qc">
-                <Button variant="subtle" onClick={() => setCancelling(true)}>
+                <Button variant="dangerSoft" onClick={() => setCancelling(true)}>
                   Cancel inspection
                 </Button>
               </Can>

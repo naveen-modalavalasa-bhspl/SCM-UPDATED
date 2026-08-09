@@ -9,6 +9,7 @@ import {
 import { useAuth } from "@/shared/auth/AuthContext";
 import { MenuIcon } from "@/shared/layout/icons";
 import { homeApi, homeKeys } from "../api";
+import { fmtTime, parseIst } from "@/shared/datetime";
 import type {
   AttentionSummary, HomeAction, HomeDateRange, HomeKpi, HomeModule,
   RecentActivity,
@@ -131,7 +132,8 @@ function AttentionRow({ item }: { item: AttentionSummary }) {
 }
 
 function formatActivityTime(value: string) {
-  const date = new Date(value);
+  const date = parseIst(value);
+  if (!date) return "—";
   const today = new Date();
   const yesterday = new Date();
   yesterday.setDate(today.getDate() - 1);
@@ -140,8 +142,9 @@ function formatActivityTime(value: string) {
     && a.getMonth() === b.getMonth()
     && a.getDate() === b.getDate();
   const day = sameDay(date, today) ? "Today" : sameDay(date, yesterday)
-    ? "Yesterday" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return `${day}, ${date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+    ? "Yesterday" : date.toLocaleDateString("en-IN",
+      { month: "short", day: "numeric", timeZone: "Asia/Kolkata" });
+  return `${day}, ${fmtTime(date)}`;
 }
 
 function ActivityItem({ item }: { item: RecentActivity }) {

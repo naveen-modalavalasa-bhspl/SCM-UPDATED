@@ -46,6 +46,8 @@ from app.modules.indents.enums import (
 )
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentUpdate
+from app.shared.time import now as ist_now, today as ist_today
+from app.shared.time import to_ist
 
 
 logger = logging.getLogger(__name__)
@@ -78,7 +80,7 @@ class _JourneyDocumentGraph:
 def _validate_required_date(required_date: date | None) -> None:
     if required_date is None:
         raise ValidationError(REQUIRED_DATE_MANDATORY_ERROR)
-    if required_date < date.today():
+    if required_date < ist_today():
         raise ValidationError(PAST_REQUIRED_DATE_ERROR)
 
 
@@ -1029,12 +1031,12 @@ def _apply_indent_filters(
         stmt = stmt.where(or_(*_main_indent_search_conditions(term, pattern)))
     if date_from:
         stmt = stmt.where(
-            Indent.created_at >= datetime.combine(date_from, time.min, timezone.utc)
+            Indent.created_at >= datetime.combine(date_from, time.min)
         )
     if date_to:
         stmt = stmt.where(
             Indent.created_at
-            < datetime.combine(date_to + timedelta(days=1), time.min, timezone.utc)
+            < datetime.combine(date_to + timedelta(days=1), time.min)
         )
     if required_by_from:
         stmt = stmt.where(Indent.required_date >= required_by_from)
@@ -1729,9 +1731,7 @@ def _duration_seconds(start: datetime | None, end: datetime | None) -> int | Non
 def _utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    return to_ist(value)
 
 
 @dataclass(frozen=True)
@@ -3859,7 +3859,7 @@ async def indent_stats(
         for region_id, region_name, n in (await db.execute(region_stmt)).all()
     ]
 
-    now = datetime.now(timezone.utc)
+    now = ist_now()
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_stmt = (
         select(func.count())
@@ -4681,12 +4681,12 @@ async def list_notifications(
         ))
     if date_from:
         stmt = stmt.where(
-            Indent.updated_at >= datetime.combine(date_from, time.min, timezone.utc)
+            Indent.updated_at >= datetime.combine(date_from, time.min)
         )
     if date_to:
         stmt = stmt.where(
             Indent.updated_at
-            < datetime.combine(date_to + timedelta(days=1), time.min, timezone.utc)
+            < datetime.combine(date_to + timedelta(days=1), time.min)
         )
     if statuses:
         stmt = stmt.where(Indent.status.in_(_values(statuses)))
@@ -4938,8 +4938,9 @@ async def list_allocations(
     params: PageParams,
     status: str | None = None,
     indent_id: int | None = None,
+    user=None,
 ):
-    return await allocations.list_allocations(db, params, status, indent_id)
+    return await allocations.list_allocations(db, params, status, indent_id, user=user)
 
 
 async def get_allocation(db: AsyncSession, allocation_id: int):

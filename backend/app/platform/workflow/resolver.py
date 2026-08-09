@@ -13,6 +13,7 @@ from app.platform.hcm.models import HcmEmployee
 from app.platform.rbac.models import UserRole
 from app.platform.workflow.models import Delegation
 from app.shared.enums import ApproverType
+from app.shared.time import now as ist_now, today as ist_today
 
 
 async def _role_holders(db: AsyncSession, role_id: int | None) -> list[HcmEmployee]:
@@ -43,7 +44,7 @@ async def _expand_delegations(
 ) -> list[HcmEmployee]:
     if not approvers:
         return approvers
-    today = date.today()
+    today = ist_today()
     ids = {a.id for a in approvers}
     rows = (await db.execute(
         select(Delegation).where(

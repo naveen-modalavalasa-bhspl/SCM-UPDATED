@@ -3,16 +3,12 @@ from datetime import date, datetime, timezone
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from app.modules.indents.enums import IndentType
+from app.shared.time import iso as ist_iso
 
 
 def _utc_iso(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    if value.tzinfo is None or value.utcoffset() is None:
-        value = value.replace(tzinfo=timezone.utc)
-    else:
-        value = value.astimezone(timezone.utc)
-    return value.isoformat().replace("+00:00", "Z")
+    """Name kept (every schema below references it); the clock is IST now."""
+    return ist_iso(value)
 
 
 class IndentItemIn(BaseModel):

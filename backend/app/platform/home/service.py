@@ -17,6 +17,7 @@ from app.platform.rbac.service import get_user_permissions
 from app.platform.workflow import engine
 from app.shared.enums import GRNStatus, IndentStatus, MRStatus, POStatus
 from app.shared.models.master import Item
+from app.shared.time import now as ist_now, today as ist_today
 
 
 def _item(id_: str, title: str, module: str, href: str, **extra) -> dict:
@@ -90,7 +91,7 @@ async def _mrs_waiting_procurement(db: AsyncSession) -> list[dict]:
 
 
 async def _pos_due(db: AsyncSession) -> list[dict]:
-    due_by = date.today() + timedelta(days=7)
+    due_by = ist_today() + timedelta(days=7)
     stmt = (
         select(PurchaseOrder)
         .where(PurchaseOrder.status.in_([

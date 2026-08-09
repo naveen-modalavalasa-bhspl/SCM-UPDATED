@@ -56,6 +56,38 @@ export function AllocationPage() {
   const givenOn = (lineId: number) =>
     splitsOf(lineId).reduce((sum, s) => sum + Number(s.qty || 0), 0);
 
+  /** Free stock at one warehouse for one line. No warehouse picked means nothing
+   *  can be taken, so any quantity against it is over. */
+  const shelfAt = (line: AllocationProposalLine, warehouseId: string) =>
+    line.warehouses.find((w) => String(w.warehouse_id) === warehouseId)?.available_qty ?? 0;
+
+  /**
+   * The most this split may hold: what is left of the request, and never more than
+   * the chosen warehouse actually has free.
+   *
+   * The box used to cap at the requested quantity alone, so 10 could be typed against
+   * a warehouse holding 8. The screen said "more than that warehouse holds" in red and
+   * then let the submit through to a backend that rejects it — a dead end with no way
+   * out except guessing the right number.
+   */
+  const ceilingFor = (line: AllocationProposalLine, splits: Split[], index: number) => {
+    const others = splits.reduce(
+      (sum, sp, i) => (i === index ? sum : sum + Number(sp.qty || 0)), 0);
+    return Math.max(0, Math.min(line.requested_qty - others, shelfAt(line, splits[index]?.wh ?? "")));
+  };
+
+  const clampQty = (line: AllocationProposalLine, splits: Split[], index: number, raw: string) => {
+    if (raw === "") return "";
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return "0";
+    return String(Math.max(0, Math.min(n, ceilingFor(line, splits, index))));
+  };
+
+  /** Anything still promising stock that is not there. The backend refuses these, so
+   *  the submit button has no business being live while one is on screen. */
+  const overSplits = (data?.lines ?? []).filter((line: AllocationProposalLine) =>
+    splitsOf(line.indent_item_id).some((s) => Number(s.qty || 0) > shelfAt(line, s.wh)));
+
   const save = useMutation({
     mutationFn: () => {
       // One decision row per split. A line with nothing given still sends a single
@@ -129,10 +161,7 @@ export function AllocationPage() {
           // stock the branch already had.
           const unavailable = Math.max(0, short - Math.max(0, line.available_total - giving));
           const withheld = short - unavailable;
-          const overWarehouse = splits.some((s) => {
-            const chosen = line.warehouses.find((w) => String(w.warehouse_id) === s.wh);
-            return chosen ? Number(s.qty || 0) > chosen.available_qty : Number(s.qty || 0) > 0;
-          });
+          const overWarehouse = splits.some((s) => Number(s.qty || 0) > shelfAt(line, s.wh));
 
           return (
             <Card key={line.indent_item_id} className="p-4">
@@ -143,7 +172,10 @@ export function AllocationPage() {
                 </div>
                 <div className="text-sm text-muted">
                   asked <span className="tabular font-semibold text-ink">{line.requested_qty}</span>{" "}
-                  {line.uom_code} · on hand{" "}
+                  {/* `available_total` is free stock, not everything in the building.
+                      Calling it "on hand" is what let an allocator promise units that
+                      another indent had already reserved. */}
+                  {line.uom_code} · available{" "}
                   <span className="tabular font-semibold text-ink">{line.available_total}</span>
                   {line.competing_demand > 0 && (
                     <>
@@ -172,7 +204,15 @@ export function AllocationPage() {
                           <Select
                             ariaLabel="From warehouse"
                             value={s.wh}
-                            onChange={(v) => set(line.indent_item_id, i, { wh: v })}
+                            // Moving to a smaller warehouse re-clamps what is already
+                            // typed, so switching from a store holding 50 to one
+                            // holding 8 cannot leave 50 sitting in the box.
+                            onChange={(v) => {
+                              const next = [...splits];
+                              next[i] = { ...next[i], wh: v };
+                              set(line.indent_item_id, i,
+                                  { wh: v, qty: clampQty(line, next, i, next[i].qty) });
+                            }}
                             placeholder="— none —"
                             options={line.warehouses.map((w) => ({
                               value: String(w.warehouse_id),
@@ -184,20 +224,10 @@ export function AllocationPage() {
                           <Input
                             type="number"
                             min={0}
-                            max={line.requested_qty - splits.reduce((sum, sp, idx) => idx !== i ? sum + Number(sp.qty || 0) : sum, 0)}
+                            max={ceilingFor(line, splits, i)}
                             value={s.qty}
-                            onChange={(e) => {
-                              let val = e.target.value;
-                              if (val !== "") {
-                                const num = Number(val);
-                                const otherSplitsSum = splits.reduce((sum, sp, idx) => idx !== i ? sum + Number(sp.qty || 0) : sum, 0);
-                                const maxAllowed = line.requested_qty - otherSplitsSum;
-                                if (num > maxAllowed) {
-                                  val = String(Math.max(0, maxAllowed));
-                                }
-                              }
-                              set(line.indent_item_id, i, { qty: val });
-                            }}
+                            onChange={(e) => set(line.indent_item_id, i,
+                                                 { qty: clampQty(line, splits, i, e.target.value) })}
                           />
                         </Field>
                       </div>
@@ -233,7 +263,8 @@ export function AllocationPage() {
                 )}
                 {overWarehouse && (
                   <span className="text-danger">
-                    {" "}More than that warehouse holds.
+                    {" "}More than that warehouse holds — reduce it, or take the rest
+                    from another warehouse.
                   </span>
                 )}
               </p>
@@ -251,8 +282,19 @@ export function AllocationPage() {
           />
         </Field>
         {save.error && <p className="text-danger">{(save.error as Error).message}</p>}
+        {overSplits.length > 0 && (
+          <p className="text-sm text-danger">
+            {overSplits.length === 1
+              ? `${overSplits[0].item_name} is allocating more than its warehouse has free.`
+              : `${overSplits.length} lines are allocating more than their warehouses have free.`}
+            {" "}Nothing can be submitted until that is corrected.
+          </p>
+        )}
         <div className="flex gap-2">
-          <Button onClick={() => save.mutate()} disabled={save.isPending}>
+          {/* Disabled, not just warned: the backend refuses an over-allocation, so
+              leaving the button live only produced a 422 the allocator could do
+              nothing with. */}
+          <Button onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
             {save.isPending ? "Submitting…" : "Submit for approval"}
           </Button>
           <Button variant="subtle" onClick={() => nav("/inventory/fulfillment")}>

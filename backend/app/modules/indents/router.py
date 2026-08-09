@@ -298,7 +298,7 @@ async def list_allocations(params: PageParams = Depends(), status: str | None = 
                            indent_id: int | None = None,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(perms.ALLOCATION_VIEW))):
-    return await service.list_allocations(db, params, status, indent_id)
+    return await service.list_allocations(db, params, status, indent_id, user=user)
 
 
 @alloc_router.post("", response_model=AllocationOut)

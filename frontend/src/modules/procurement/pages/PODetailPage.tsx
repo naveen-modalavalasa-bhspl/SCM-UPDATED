@@ -5,6 +5,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Button, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { poApi } from "../api";
 import { alerts } from "@/modules/alerts";
+import { fmtDate } from "@/shared/datetime";
 
 const money = (value: number) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2,
@@ -72,7 +73,7 @@ export function PODetailPage() {
       <dl className="grid gap-3 text-sm sm:grid-cols-4">
         <div><dt className="text-muted">Vendor</dt><dd className="font-semibold text-ink">{po.data.vendor_name ?? "—"}</dd></div>
         <div><dt className="text-muted">Indent</dt><dd className="font-mono text-ink">{po.data.indent_no ?? "—"}</dd></div>
-        <div><dt className="text-muted">Expected date</dt><dd className="text-ink">{po.data.expected_date ? new Date(po.data.expected_date).toLocaleDateString() : "—"}</dd></div>
+        <div><dt className="text-muted">Expected date</dt><dd className="text-ink">{fmtDate(po.data.expected_date)}</dd></div>
         <div><dt className="text-muted">Total</dt><dd className="font-semibold text-ink">{money(po.data.total_amount)}</dd></div>
       </dl>
     </Card>

@@ -126,7 +126,7 @@ export default function PutawayForm() {
             </Button>
             {!done && task.status === "pending" && (
               <Can do="stock.transfer">
-                <Button variant="subtle" onClick={() => start.mutate()} disabled={start.isPending}>
+                <Button variant="soft" onClick={() => start.mutate()} disabled={start.isPending}>
                   Start
                 </Button>
               </Can>
@@ -293,7 +293,7 @@ export default function PutawayForm() {
                   <span className="text-sm text-muted">None captured yet.</span>
                 )}
               </div>
-              <Button variant="subtle" onClick={() => setEnteringSerials(true)}>
+              <Button variant="soft" onClick={() => setEnteringSerials(true)}>
                 <ScanLine className="h-4 w-4" />
                 {serials.length ? "Edit serials" : "Enter serials"}
               </Button>

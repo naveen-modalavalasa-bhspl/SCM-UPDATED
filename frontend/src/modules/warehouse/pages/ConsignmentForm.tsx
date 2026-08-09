@@ -330,6 +330,23 @@ export default function ConsignmentForm() {
   const locked = !!doc && !["DRAFT", "PACKED"].includes(doc.status);
   const destination = destinationOf(doc, source);
 
+  // Origin: the material issue's warehouse on a new consignment, the saved one on an
+  // existing doc. The server derives the same value, so this is a display of its
+  // decision, not an input.
+  const originId = source?.warehouse_id ?? doc?.warehouse_id ?? null;
+  const { data: allHouses = [] } = useQuery({
+    queryKey: ["wh-lookup", "warehouses", "all"],
+    queryFn: () => allWarehouseOptions(),
+    staleTime: 5 * 60_000,
+  });
+  const originName = doc?.warehouse_name
+    ?? allHouses.find((w) => w.id === originId)?.name
+    ?? "";
+  /** The network minus the origin — a transfer to itself is what the backend
+   *  rejects, so it should never be offered in the first place. */
+  const destinationOptions = (search?: string) =>
+    allWarehouseOptions(search).then((rows) => rows.filter((w) => w.id !== originId));
+
   const allocation = useMemo(() => {
     const map = new Map<string, number>();
     for (const pkg of packages) {
@@ -540,7 +557,7 @@ export default function ConsignmentForm() {
             </Button>
             {doc?.status === "PACKED" && (
               <Can do="dispatch.gate_out">
-                <Button variant="subtle" onClick={() => nav(`/warehouse/dispatch/new?consignment_id=${doc.id}`)}>
+                <Button variant="soft" onClick={() => nav(`/warehouse/dispatch/new?consignment_id=${doc.id}`)}>
                   <Truck className="h-4 w-4" /> Confirm dispatch
                 </Button>
               </Can>
@@ -598,10 +615,17 @@ export default function ConsignmentForm() {
             <Input type="date" value={form.dispatch_date} disabled={locked}
                    onChange={(event) => setForm((f) => ({ ...f, dispatch_date: event.target.value }))} />
           </Field>
+          {/* Where it ships FROM. Derived by the server from the material issue and
+              never editable — but it has to be on screen, because the backend refuses
+              a transfer whose destination equals it and the form used to hide the one
+              value that made the rejection make sense. */}
+          <Field label="From warehouse">
+            <Input value={originName || "—"} disabled />
+          </Field>
           <Field label="To warehouse">
             {/* Destination: the whole network, because a transfer goes to a point
-                this login does not hold. */}
-            <Lookup name="warehouses" load={allWarehouseOptions} value={form.to_warehouse_id ?? ""} isDisabled={locked}
+                this login does not hold — minus the origin, which cannot be both. */}
+            <Lookup name="warehouses" load={destinationOptions} value={form.to_warehouse_id ?? ""} isDisabled={locked}
                     onChange={(value) => setForm((f) => ({ ...f, to_warehouse_id: value === "" ? null : value }))}
                     placeholder="For transfer only" />
           </Field>
@@ -614,7 +638,11 @@ export default function ConsignmentForm() {
                     placeholder="Vendor" />
           </Field>
           <Field label="Expected delivery">
+            {/* Goods cannot arrive before they leave. `min` is the dispatch date, not
+                today: a consignment can be back-dated, and its delivery date has to
+                stay consistent with whatever date it actually went out on. */}
             <Input type="date" value={form.expected_delivery ?? ""} disabled={locked}
+                   min={form.dispatch_date || undefined}
                    onChange={(event) => setForm((f) => ({ ...f, expected_delivery: event.target.value || null }))} />
           </Field>
           <Field label="Mode">
@@ -729,18 +757,21 @@ export default function ConsignmentForm() {
                   </div>
                 )}
                 <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+                  {/* Both identifiers are issued by the server when left blank, and
+                      the barcode is checked for uniqueness there. Letting them be typed
+                      meant a hand-keyed barcode could collide with a generated one and
+                      only fail on save. Read-only; the placeholder shows what you get. */}
                   <Field label="Package no">
-                    <Input value={pkg.package_no ?? ""} disabled={pkgLocked}
-                           onChange={(event) => patchPackage(packageIndex, { package_no: event.target.value })} />
+                    <Input value={pkg.package_no ?? ""} disabled
+                           placeholder={`P${packageIndex + 1} (auto)`} />
                   </Field>
                   <Field label="Package type">
                     <Select value={pkg.package_type ?? "BOX"} options={PACKAGE_TYPES} isDisabled={pkgLocked}
                             onChange={(value) => patchPackage(packageIndex, { package_type: value })} />
                   </Field>
                   <Field label="Barcode">
-                    <Input value={pkg.barcode ?? ""} disabled={pkgLocked}
-                           placeholder={`${source?.issue_no ?? "CONS"}|${pkg.package_no ?? "PKG"}`}
-                           onChange={(event) => patchPackage(packageIndex, { barcode: event.target.value })} />
+                    <Input value={pkg.barcode ?? ""} disabled
+                           placeholder={`${source?.issue_no ?? "CONS"}|${pkg.package_no ?? `P${packageIndex + 1}`} (auto)`} />
                   </Field>
                   <div className="flex items-end">
                     <div className="rounded-lg border border-line bg-content2 px-3 py-2 text-xs text-muted">
