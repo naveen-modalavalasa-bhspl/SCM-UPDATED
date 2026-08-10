@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/shared/api/client";
 import type { Me } from "@/shared/types";
 
@@ -16,6 +17,7 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
   async function loadMe() {
     try {
@@ -46,6 +48,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       "/api/auth/switch-position", { position_id: positionId },
     );
     localStorage.setItem("token", data.access_token);
+    // Every cached response was computed under the OLD hat — permissions, data scope
+    // and "can I sign this" all key off the active position. Serving any of it after a
+    // switch shows the previous position's answer: an Inventory Manager who had just
+    // signed as Assistant Manager still saw the approve buttons dead, because the
+    // batch in cache still said nothing was theirs to sign.
+    queryClient.clear();
     setLoading(true);
     await loadMe();
   }

@@ -143,6 +143,11 @@ export const convertReceiptToGrn = (id: number) =>
 /** Freezes the receipt and raises the inspection tasks behind it. */
 export const submitReceipt = (id: number) => post<Receipt>(`${BASE}/receipts/${id}/submit`);
 
+/** Pass an arrived consignment on to the points below — the MDP leg of WH -> MDP -> LIP.
+ *  Builds one DRAFT issue per indent; the storekeeper still reviews and submits. */
+export const forwardArrival = (id: number) =>
+  post<Issue[]>(`${BASE}/receipts/${id}/forward`);
+
 /** Posts accepted quantity to stock and raises the putaway tasks. */
 export const completeReceipt = (id: number) => post<Receipt>(`${BASE}/receipts/${id}/complete`);
 

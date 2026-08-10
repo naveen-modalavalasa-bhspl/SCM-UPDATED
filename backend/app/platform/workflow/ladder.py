@@ -62,6 +62,7 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.ALLOCATION.value: "Inventory",
     DocType.OWN_STOCK_ALLOCATION.value: "Inventory",
     DocType.OWN_STOCK_ISSUE.value: "Warehouse",
+    DocType.FORWARD_ISSUE.value: "Warehouse",
     DocType.MR.value: "Inventory",
     DocType.STOCK_TRANSFER.value: "Inventory",
     DocType.WH_ISSUE.value: "Warehouse",
@@ -74,6 +75,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
     DocType.ALLOCATION.value: "Stock Allocation",
     DocType.OWN_STOCK_ALLOCATION.value: "Stock Allocation (from your own point)",
     DocType.OWN_STOCK_ISSUE.value: "Material Issue (from your own point)",
+    DocType.FORWARD_ISSUE.value: "Material Issue (forwarding a consignment onward)",
     DocType.MR.value: "Material Request",
     # Only ever raised for a transfer that crosses a project boundary — a
     # same-project transfer never starts a workflow, so this ladder stays quiet.
@@ -95,6 +97,10 @@ MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Procurement"]
 SELF_OWNED_DOC_TYPES = frozenset({
     DocType.OWN_STOCK_ALLOCATION.value,
     DocType.OWN_STOCK_ISSUE.value,
+    # Forwarding is not a decision, but the default must never be "nobody looks at it":
+    # it lands in the forwarder's own queue as a one-click task until an admin sets
+    # NO_APPROVAL on the Approvals Config row.
+    DocType.FORWARD_ISSUE.value,
 })
 
 LADDER_CODE_PREFIX = "LADDER"
@@ -124,7 +130,13 @@ POLICY_INDEPENDENT = "INDEPENDENT"
 # The raiser stays on the ladder and gets the approval task. This is the honest setting
 # for Inventory and Warehouse, where the same twelve people hold every post.
 POLICY_CREATOR_ALLOWED = "CREATOR_ALLOWED"
-POLICIES = (POLICY_INDEPENDENT, POLICY_CREATOR_ALLOWED)
+# Nobody approves it at all: the document is born approved, with a wf_actions row saying
+# so. Unticking every rung does NOT mean this — an empty ladder falls through to the
+# reporting line and then the admin safety net (engine._start_ladder), which is right for
+# a misconfiguration and wrong for a deliberate "this step needs no signature". The
+# forwarding leg of WH -> MDP -> LIP is the case this exists for.
+POLICY_NONE = "NO_APPROVAL"
+POLICIES = (POLICY_INDEPENDENT, POLICY_CREATOR_ALLOWED, POLICY_NONE)
 # Marker rows, not real conditions: never evaluated, never shown to an admin.
 INTERNAL_FIELDS = {APPROVER_SCOPE_FIELD, APPROVER_POSITION_FIELD,
                    POLICY_FIELD, FALLBACK_POSITION_FIELD}

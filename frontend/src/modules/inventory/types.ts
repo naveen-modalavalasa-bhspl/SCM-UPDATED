@@ -359,6 +359,54 @@ export interface AllocationDecision {
   project_id?: number;
 }
 
+/** Outcome of allocating a whole cycle at once. `failed` names the indents that moved
+ *  on since the screen loaded, so the storekeeper can see why a count is short. */
+export interface AllocationBatchResult {
+  created_count: number;
+  created_indent_ids: number[];
+  failed: { indent_id: number; indent_no?: string | null; reason: string }[];
+}
+
+/** One monthly cycle's worth of allocations waiting on this approver. */
+export interface AllocationApprovalBatch {
+  cycle: string;
+  month_label: string;
+  allocation_ids: number[];
+  allocation_count: number;
+  /** The subset this login can sign under the position it is currently working as.
+   *  One person is often both the level-1 and level-2 approver, so "pending" and
+   *  "mine to sign right now" are different questions. */
+  actionable_ids: number[];
+  actionable_count: number;
+  /** Split of the cycle by allocation status, so a finished cycle reads as finished
+   *  rather than simply vanishing from the list. */
+  pending_count: number;
+  approved_count: number;
+  indent_count: number;
+  item_count: number;
+  total_qty: number;
+  allocations: {
+    id: number;
+    allocation_no: string;
+    indent_id: number;
+    indent_no: string | null;
+    requested_by_name?: string | null;
+    office_name?: string | null;
+    priority?: string | null;
+    lines: {
+      item_id: number; item_code?: string | null; item_name?: string | null;
+      uom_code?: string | null; quantity: number;
+      warehouse_id?: number | null; warehouse_name?: string | null;
+    }[];
+  }[];
+}
+
+export interface AllocBatchResult {
+  done_count: number;
+  done_ids: number[];
+  failed: { allocation_id: number; allocation_no?: string | null; reason: string }[];
+}
+
 export interface AllocationListRow {
   id: number;
   allocation_no: string;
@@ -726,4 +774,52 @@ export interface PositionSearchHit {
   employee_name?: string | null;
   /** Warehouse code it is already tagged to, if any — so the screen can say so. */
   tagged_to?: string | null;
+}
+
+/** One indent's claim on an item inside the consolidated view. */
+export interface BatchDemandLine {
+  indent_id: number;
+  indent_no: string;
+  indent_item_id: number;
+  requested_by_name?: string | null;
+  office_name?: string | null;
+  project_name?: string | null;
+  priority?: string | null;
+  pending_qty: number;
+  raised_at?: string | null;
+}
+
+/** One ITEM across every indent still waiting for it. `shortfall` is what has to be
+ *  bought: demand the shelf cannot cover. */
+export interface BatchDemandItem {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  indent_count: number;
+  urgent_count: number;
+  total_demand: number;
+  available_total: number;
+  shortfall: number;
+  /** Where the stock actually sits, fullest first — "give 50" is only half the
+   *  decision; the other half is which shelf it leaves. */
+  warehouses: { warehouse_id: number; warehouse_name: string; available_qty: number }[];
+  demand: BatchDemandLine[];
+}
+
+/** One monthly cycle waiting to be fulfilled, as the queue lists it. */
+export interface FulfilmentBatch {
+  cycle: string;
+  month_label: string;
+  indent_count: number;
+  item_count: number;
+  requester_count: number;
+  urgent_count: number;
+  total_qty: number;
+  oldest_raised_at?: string | null;
+}
+
+export interface BatchDemand {
+  items: BatchDemandItem[];
+  total: number;
 }

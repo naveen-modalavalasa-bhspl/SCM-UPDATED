@@ -18,14 +18,17 @@ from app.modules.indents.enums import (
 from app.modules.indents.schemas import (
     AcknowledgeIn, AcknowledgmentRow, ActionIn, ActivityRow, IndentCreate, IndentListRow,
     IndentJourneyOut, IndentNotificationRow, IndentOut, IndentStatsOut, IndentUpdate,
+    MonthlyCopyIn, MonthlySubmitIn,
 )
 # Allocation is a decision about an indent, so its endpoints live here. The
 # mechanics are in modules/inventory/allocations.py -- indents may import inventory,
 # never the reverse.
 from app.modules.inventory.schemas import (
+    AllocationBatchIn, AllocationBatchOut,
     AllocationIn, AllocationListRow, AllocationOut,
 )
 from app.modules.inventory.schemas import ActionIn as AllocActionIn
+from app.modules.inventory.schemas import AllocBatchActionIn
 from datetime import date
 
 router = APIRouter(tags=["indents"])
@@ -153,6 +156,35 @@ async def notifications(params: PageParams = Depends(), search: str | None = Non
 async def create(data: IndentCreate, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission("indent.create"))):
     return await service.create_indent(db, data, user)
+
+
+# --- raising a monthly cycle in bulk ---------------------------------------
+# Declared above /{indent_id}: "monthly" is not an int, but FastAPI matches in
+# declaration order and a static path behind a typed one is a 422 waiting to happen.
+
+@indent_router.get("/monthly/last-cycle")
+async def last_monthly_cycle(db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.INDENT_CREATE))):
+    """What this person raised last month, ready to reuse."""
+    return await service.last_monthly_cycle(db, user)
+
+
+@indent_router.post("/monthly/copy", response_model=IndentOut)
+async def copy_monthly_cycle(body: MonthlyCopyIn = MonthlyCopyIn(),
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.INDENT_CREATE))):
+    """Last month's indent again, as an editable DRAFT."""
+    return await service.copy_monthly_cycle(
+        db, user, required_date=body.required_date, remarks=body.remarks,
+        overrides={int(k): v for k, v in (body.overrides or {}).items()})
+
+
+@indent_router.post("/monthly/submit")
+async def submit_monthly_cycle(body: MonthlySubmitIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.INDENT_SUBMIT))):
+    """Submit several drafts at once. One workflow instance each."""
+    return await service.submit_monthly_cycle(db, user, body.indent_ids)
 
 
 @indent_router.get("/options/offices")
@@ -307,17 +339,76 @@ async def create_allocation(body: AllocationIn, db: AsyncSession = Depends(get_d
     return await service.decide_allocation(db, body, user)
 
 
+@alloc_router.post("/batch", response_model=AllocationBatchOut)
+async def create_allocations_batch(body: AllocationBatchIn,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(perms.ALLOCATION_CREATE))):
+    """Every indent in a cycle allocated in one request, one allocation each."""
+    return await service.decide_allocations_batch(db, body, user)
+
+
+@alloc_router.get("/batches")
+async def fulfilment_batches(include_done: bool = False,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+    """One row per monthly cycle still owed. `include_done=true` keeps the finished
+    ones in the list so a completed cycle can still be found."""
+    return {"items": await service.fulfilment_batches(
+        db, user, include_done=include_done)}
+
+
+@alloc_router.get("/demand")
+async def fulfilment_batch(indent_type: str | None = None, cycle: str | None = None,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+    """Open demand grouped by ITEM across every visible indent — the batch view.
+
+    Declared above `/demand/{item_id}` so the static path is matched first.
+    """
+    return await service.fulfilment_batch(db, user, indent_type, cycle)
+
+
 @alloc_router.get("/demand/{item_id}")
 async def item_demand(item_id: int, db: AsyncSession = Depends(get_db),
                       user=Depends(require_permission(perms.ALLOCATION_VIEW))):
     """All open demand for one item, so it can be split deliberately."""
-    return await service.item_demand(db, item_id)
+    return await service.item_demand(db, item_id, user)
+
+
+@alloc_router.get("/approval-batches")
+async def allocation_approval_batches(include_done: bool = False,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+    """Allocations grouped into the monthly cycle they serve.
+
+    `include_done=true` keeps cycles that are fully signed in the list, so a finished
+    cycle can still be opened and read.
+    """
+    return {"items": await service.allocation_approval_batches(
+        db, user, include_done=include_done)}
 
 
 @alloc_router.get("/{allocation_id}", response_model=AllocationOut)
 async def get_allocation(allocation_id: int, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.ALLOCATION_VIEW))):
     return await service.get_allocation(db, allocation_id)
+
+
+@alloc_router.post("/approve-batch")
+async def approve_allocations_batch(body: AllocBatchActionIn,
+                                    db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission(perms.ALLOCATION_APPROVE))):
+    """Sign a whole cycle at once — one wf_actions row per allocation, as always."""
+    return await service.act_on_allocations_batch(
+        db, body.allocation_ids, ApprovalAction.APPROVED.value, user, body.comments)
+
+
+@alloc_router.post("/reject-batch")
+async def reject_allocations_batch(body: AllocBatchActionIn,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(perms.ALLOCATION_REJECT))):
+    return await service.act_on_allocations_batch(
+        db, body.allocation_ids, ApprovalAction.REJECTED.value, user, body.comments)
 
 
 @alloc_router.post("/{allocation_id}/approve", response_model=AllocationOut)

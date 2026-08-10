@@ -532,7 +532,11 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
     policy, fallback_position_id = await ladder.read_policy(db, stages)
     # A hand-built ladder names its posts outright, so there is nothing to climb — and
     # for Inventory and Warehouse there is nothing above the raiser to reach anyway.
-    chain = (
+    # NO_APPROVAL skips resolution outright: an admin who said this step needs no
+    # signature must not have the empty chain read as a broken ladder and sent to the
+    # fallback below. It falls through to the self-approved close, which still writes a
+    # real wf_actions row.
+    chain = [] if policy == ladder.POLICY_NONE else (
         await custom_ladder.resolve_fixed_chain(
             db, stages, user.id, policy, requester_position_id)
         if ladder.is_custom_ladder(wf)
@@ -1194,3 +1198,51 @@ async def history(db, doc_type: str, doc_id: int) -> list[Action]:
     return list((await db.execute(
         select(Action).where(Action.instance_id == instance.id).order_by(Action.acted_at, Action.id)
     )).scalars().all())
+
+
+async def actionable_doc_ids(db, doc_type, doc_ids: list[int], user) -> set[int]:
+    """Of these documents, which can this login sign RIGHT NOW.
+
+    `doc_type` takes one type or several — an allocation is raised as ALLOCATION or
+    OWN_STOCK_ALLOCATION depending on whose stock it draws on, and a batch holds both.
+
+    Mirrors the two checks `_act_ladder` makes — is the user on the current stage's
+    pending list, and is their ACTIVE position one the ladder named — so a screen can
+    grey out what it cannot sign instead of offering a button that errors.
+
+    The active position matters because one person often wears two hats: an Assistant
+    Manager who is also the Inventory Manager approves level 1 under one post and
+    level 2 under the other, and the batch screen kept offering level 2 while they
+    were still wearing the level-1 hat.
+    """
+    if not doc_ids:
+        return set()
+
+    rows = (await db.execute(
+        select(Pending.doc_id, Instance)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(
+            Pending.doc_type.in_(
+                [doc_type] if isinstance(doc_type, str) else list(doc_type)),
+            Pending.doc_id.in_(doc_ids),
+            Pending.approver_id == user.id,
+            Pending.stage_sequence == Instance.current_sequence,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        )
+    )).all()
+
+    active_position_id = getattr(user, "active_position_id", None)
+    out: set[int] = set()
+    for doc_id, instance in rows:
+        link = _link(instance)
+        if link is None:
+            continue
+        allowed = ladder.allowed_position_ids(link)
+        # Same exemption as the guard: a fallback rung names people, not a post, so
+        # there is no position to switch to and the holder may act under any hat.
+        if (allowed
+                and user.id in link.get("approver_ids", [])
+                and active_position_id not in allowed):
+            continue
+        out.add(doc_id)
+    return out

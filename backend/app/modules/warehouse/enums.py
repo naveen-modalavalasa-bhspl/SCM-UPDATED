@@ -260,6 +260,8 @@ class RefType(str, Enum):
 ISSUE_VIEW = "issue.view"
 ISSUE_CREATE = "issue.create"
 ISSUE_POST = "issue.issue"
+# Passing an arrived consignment on to a point below (WH -> MDP -> LIP).
+ISSUE_FORWARD = "issue.forward"
 STOCK_VIEW = "stock.view"
 STOCK_TRANSFER = "stock.transfer"
 MASTER_LOCATION_MANAGE = "master.location.manage"

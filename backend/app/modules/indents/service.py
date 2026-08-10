@@ -14,14 +14,18 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
-from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
+import calendar
+
+from app.core.exceptions import (
+    AppException, NotFoundError, PermissionError_, ValidationError,
+)
 from app.core.pagination import PageParams, paginate
 # inventory is the base module (imports nothing from app.modules), so calling it from
 # here is the legal direction. This is the §3 stock-availability fork.
 from app.modules.inventory import allocations, locations
 from app.modules.inventory import service as inventory_service
 from app.modules.inventory.models import (
-    Allocation, AllocationItem, MaterialRequest, MaterialRequestItem,
+    Allocation, AllocationItem, MaterialRequest, MaterialRequestItem, Stock,
 )
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
@@ -38,6 +42,7 @@ from app.platform.rbac import permissions as perms
 from app.shared.models.base import utcnow
 from app.shared.scope import scope_condition
 from app.shared.models.master import Item
+from app.shared.models.warehouse import Warehouse
 from app.shared.numbering import next_number
 from app.modules.indents.enums import (
     AcknowledgmentStatus, AllocationStatus, ApprovalAction, AuditAction, DocType,
@@ -45,7 +50,7 @@ from app.modules.indents.enums import (
     MRStatus, MaterialDirection, Priority, RuleActionType,
 )
 from app.modules.indents.models import Indent, IndentItem
-from app.modules.indents.schemas import IndentCreate, IndentUpdate
+from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.time import to_ist
 
@@ -4865,6 +4870,78 @@ async def decide_allocation(db: AsyncSession, body, user):
         db, indent, [d.model_dump() for d in body.decisions], user, body.remarks)
 
 
+async def decide_allocations_batch(db: AsyncSession, body, user) -> dict:
+    """One allocation per indent for a whole monthly cycle, in one request.
+
+    Each indent goes through `decide_allocation` exactly as if the storekeeper had
+    opened its own screen — same eligibility gate, same ladder, same `stk_reservation`
+    rows (rule 7). The batch screen only fills the numbers in faster.
+
+    Deliberately NOT atomic across indents, for the same reason
+    `approvals.approve_consolidation` is not: one indent that somebody else has already
+    served must not throw away the other 899 decisions. It comes back under `failed`
+    with the reason and the screen re-reads.
+    """
+    created: list[int] = []
+    failed: list[dict] = []
+    for one in body.allocations:
+        try:
+            await decide_allocation(db, one, user)
+            created.append(one.indent_id)
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the batch
+            # One document's problem is not the batch's: record it and carry on. The
+            # rollback empties the identity map, so the next indent starts clean.
+            await db.rollback()
+            # A rollback EXPIRES every object it loaded, including `user`. The next
+            # iteration then touches user.full_name, SQLAlchemy tries to reload it
+            # lazily outside async context, and the whole request dies with
+            # MissingGreenlet — so one already-approved row took the other 899 with it.
+            await db.refresh(user)
+            if not isinstance(exc, AppException):
+                logger.exception("Batch allocation failed on indent %s", one.indent_id)
+            indent = await db.get(Indent, one.indent_id)
+            failed.append({
+                "indent_id": one.indent_id,
+                "indent_no": indent.indent_no if indent else None,
+                "reason": str(getattr(exc, "message", None) or exc),
+            })
+    return {"created_count": len(created), "created_indent_ids": created,
+            "failed": failed}
+
+
+def _reject_over_allocation(indent: Indent, decisions: list[dict]) -> None:
+    """Nobody may be given more than they asked for.
+
+    `allocations.create` already refuses to promise stock that is not on the shelf, but
+    nothing checked the other end: a line asking for 15 could be allocated 181 as long
+    as 181 existed somewhere, and the indent would then close claiming 181 were issued.
+    The stock guard cannot do this one — it lives in `inventory`, which may not read
+    `ind_indent_items` (rule 5) — so the module that owns the document does it.
+
+    Summed per line, because one line legitimately arrives as several decisions when it
+    is served from more than one point.
+    """
+    owed = {line.id: owed_quantity(line) - _d(line.allocated_quantity)
+            for line in indent.items}
+    names = {line.id: line.item_name or line.item_code or line.item_id
+             for line in indent.items}
+
+    wanted: dict[int, Decimal] = defaultdict(Decimal)
+    for decision in decisions:
+        wanted[decision["indent_item_id"]] += _d(decision.get("quantity"))
+
+    for line_id, quantity in wanted.items():
+        if line_id not in owed:
+            raise ValidationError(
+                f"Line {line_id} is not on {indent.indent_no}")
+        remaining = owed[line_id]
+        if quantity > remaining:
+            raise ValidationError(
+                f"{names[line_id]}: cannot allocate {quantity} against "
+                f"{indent.indent_no} — only {remaining} is still owed on that line."
+            )
+
+
 async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
                                        decisions: list[dict], user,
                                        remarks: str | None = None):
@@ -4889,6 +4966,7 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
         > Decimal(str(line.allocated_quantity or 0))
         for line in indent.items
     )
+    _reject_over_allocation(indent, decisions)
 
     # Which approval event this is. Every source point inside the raiser's own
     # reporting subtree means he is serving his own stock, and the point owner — not
@@ -4945,6 +5023,131 @@ async def list_allocations(
 
 async def get_allocation(db: AsyncSession, allocation_id: int):
     return await allocations.get(db, allocation_id)
+
+
+async def allocation_approval_batches(db: AsyncSession, user,
+                                      include_done: bool = False) -> list[dict]:
+    """Allocations awaiting this approver, grouped into the monthly cycle they serve.
+
+    Without this the batch work simply moved the queue one step along: 900 indents
+    consolidated into one approval, allocated in one screen, and then 900 separate
+    allocations to open and sign. Same GROUP BY as everywhere else — nothing stored,
+    each allocation still approved on its own ladder.
+    """
+    rows = (await db.execute(
+        select(Allocation, Indent)
+        .join(Indent, Indent.id == Allocation.indent_id)
+        # `include_done` keeps a signed cycle reachable. Once every allocation was
+        # approved the whole cycle vanished from both this screen and the fulfilment
+        # queue, and search could not bring it back — the work was done but there was
+        # nowhere to confirm what had been decided.
+        .where(Allocation.status.in_(
+            [AllocationStatus.PENDING_APPROVAL.value, AllocationStatus.APPROVED.value]
+            if include_done else [AllocationStatus.PENDING_APPROVAL.value]))
+        .where(Indent.indent_type == IndentType.MONTHLY.value)
+        .where(await _indent_visibility(db, user))
+    )).all()
+
+    groups: dict[str, list] = defaultdict(list)
+    for alloc, indent in rows:
+        groups[cycle_key(indent)].append((alloc, indent))
+
+    # Which of these this login can sign under the hat they are currently wearing.
+    # One person is often both the level-1 and the level-2 approver (Assistant Manager
+    # and Inventory Manager), and the screen used to offer "Approve all" for rows that
+    # had already climbed past their active position — the click then failed with
+    # "Switch to the approval position before acting".
+    all_alloc_ids = [alloc.id for group in groups.values() for alloc, _ in group]
+    actionable = await engine.actionable_doc_ids(
+        db, [DocType.ALLOCATION.value, DocType.OWN_STOCK_ALLOCATION.value],
+        all_alloc_ids, user)
+
+    out = []
+    for cycle, group in groups.items():
+        ids = [alloc.id for alloc, _ in group]
+        lines = (await db.execute(
+            select(AllocationItem).where(AllocationItem.allocation_id.in_(ids))
+        )).scalars().all() if ids else []
+        actionable_ids = [i for i in ids if i in actionable]
+        out.append({
+            "cycle": cycle,
+            "month_label": _month_label(cycle),
+            "allocation_ids": ids,
+            "allocation_count": len(ids),
+            # What the buttons act on. Empty means this hat has already signed
+            # everything here — the next rung is somebody else, or the same person
+            # under another position.
+            "actionable_ids": actionable_ids,
+            "actionable_count": len(actionable_ids),
+            "pending_count": sum(
+                1 for alloc, _ in group
+                if alloc.status == AllocationStatus.PENDING_APPROVAL.value),
+            "approved_count": sum(
+                1 for alloc, _ in group
+                if alloc.status == AllocationStatus.APPROVED.value),
+            "indent_count": len({alloc.indent_id for alloc, _ in group}),
+            "item_count": len({line.item_id for line in lines}),
+            "total_qty": float(sum((_d(line.quantity) for line in lines), Decimal("0"))),
+            "allocations": [{
+                "id": alloc.id,
+                "status": alloc.status,
+                "can_act": alloc.id in actionable,
+                "allocation_no": alloc.allocation_no,
+                "indent_id": alloc.indent_id,
+                "indent_no": alloc.indent_no,
+                "requested_by_name": indent.requested_by_name,
+                "office_name": indent.office_name,
+                "priority": indent.priority,
+                "lines": [{
+                    "item_id": line.item_id,
+                    "item_code": line.item_code,
+                    "item_name": line.item_name,
+                    "uom_code": line.uom_code,
+                    "quantity": float(_d(line.quantity)),
+                    "warehouse_id": line.warehouse_id,
+                    "warehouse_name": line.warehouse_name,
+                } for line in lines if line.allocation_id == alloc.id],
+            } for alloc, indent in group],
+        })
+    out.sort(key=lambda row: row["cycle"], reverse=True)
+    return out
+
+
+async def act_on_allocations_batch(db: AsyncSession, allocation_ids: list[int],
+                                   action: str, user, comments: str = "") -> dict:
+    """Sign a whole cycle's allocations in one act.
+
+    Each still goes through `act_on_allocation` — the engine owns the chain (rule 8),
+    every allocation gets its own `wf_actions` row and reserves its own stock, exactly
+    as if the approver had opened each one. Not atomic across allocations, for the same
+    reason the consolidated indent approval is not: one that has moved on since the
+    screen loaded must not block the other 899.
+    """
+    done: list[int] = []
+    failed: list[dict] = []
+    for allocation_id in allocation_ids:
+        try:
+            await act_on_allocation(db, allocation_id, action, user, comments)
+            done.append(allocation_id)
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the batch
+            # Every exception, not just AppException. An unexpected one used to escape
+            # and 500 the whole request, so a batch where the FIRST allocation was
+            # merely already-approved lost the other 899 decisions with no explanation.
+            await db.rollback()
+            # A rollback EXPIRES every object it loaded, including `user`. The next
+            # iteration then touches user.full_name, SQLAlchemy tries to reload it
+            # lazily outside async context, and the whole request dies with
+            # MissingGreenlet — so one already-approved row took the other 899 with it.
+            await db.refresh(user)
+            if not isinstance(exc, AppException):
+                logger.exception("Batch %s failed on allocation %s", action, allocation_id)
+            alloc = await db.get(Allocation, allocation_id)
+            failed.append({
+                "allocation_id": allocation_id,
+                "allocation_no": alloc.allocation_no if alloc else None,
+                "reason": str(getattr(exc, "message", None) or exc) or exc.__class__.__name__,
+            })
+    return {"done_count": len(done), "done_ids": done, "failed": failed}
 
 
 async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, user,
@@ -5049,12 +5252,15 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
         indent.status = IndentStatus.PARTIALLY_FULFILLED.value
 
 
-async def item_demand(db: AsyncSession, item_id: int) -> dict:
+async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
     """Every indent still waiting on this item, plus what is on the shelf for it.
 
     This is the view Balu described: 60 bags of cement, four projects want it, split
     it. Deciding one indent at a time hides the competition, which is exactly the
     information the allocator needs.
+
+    Scoped by `_indent_visibility` like every other indent reader (rule: the list, the
+    dashboard and this screen must never disagree about which rows a login may see).
     """
     from app.modules.inventory import allocations
 
@@ -5065,6 +5271,8 @@ async def item_demand(db: AsyncSession, item_id: int) -> dict:
                Indent.status == IndentStatus.AWAITING_ALLOCATION.value)
         .order_by(Indent.created_at)
     )
+    if user is not None:
+        stmt = stmt.where(await _indent_visibility(db, user))
     rows = (await db.execute(stmt)).all()
 
     item = await db.get(Item, item_id)
@@ -5092,4 +5300,445 @@ async def item_demand(db: AsyncSession, item_id: int) -> dict:
             "requested_qty": float(line.approved_quantity or line.quantity or 0),
             "raised_at": ind.created_at.isoformat() if ind.created_at else None,
         } for ind, line in rows],
+    }
+
+
+# ---------------- The consolidated (item-first) fulfilment view ----------------
+#
+# 900 lab technicians raise 900 monthly indents. Approvals already group them onto one
+# screen (approvals/service.py, "Monthly indent consolidation"), but everything
+# downstream went back to one document at a time: the fulfilment queue shows 900 rows
+# and nobody can see that between them they want 4,000 gloves against 2,500 on the
+# shelf.
+#
+# Same trick as the approval side, for the same reason: a GROUP BY over rows that are
+# already there, not a new document. Nothing is stored, no indent is merged, and every
+# reservation still lands on its own indent line through inventory.allocation — so
+# rule 7 is untouched and the single-indent screens keep working unchanged.
+
+def split_demand(lines: list[dict], giving: Decimal) -> dict[int, Decimal]:
+    """Divide one item's stock across the indent lines competing for it.
+
+    Urgent lines are filled to the brim first — an URGENT indent asking for 4 beats a
+    NORMAL one asking for 5. Whatever survives that is shared pro-rata by what each
+    line still needs, oldest indent first when rounding leaves a scrap.
+
+    Pure and total: plain dicts in, {indent_item_id: quantity} out. Never hands out
+    more than `giving`, never gives a line more than it asked for.
+    """
+    out: dict[int, Decimal] = {line["indent_item_id"]: Decimal("0") for line in lines}
+    left = max(Decimal("0"), _d(giving))
+
+    urgent = [ln for ln in lines if ln.get("priority") == Priority.URGENT.value]
+    rest = [ln for ln in lines if ln.get("priority") != Priority.URGENT.value]
+
+    for line in urgent:
+        if left <= 0:
+            break
+        take = min(_d(line["pending_qty"]), left)
+        out[line["indent_item_id"]] = take
+        left -= take
+
+    wanted = sum((_d(ln["pending_qty"]) for ln in rest), Decimal("0"))
+    if left > 0 and wanted > 0:
+        # Quantised to 3 dp, the scale stk_balance and the indent lines both use, so a
+        # split can always be stored exactly as it was shown.
+        for line in rest:
+            share = (left * _d(line["pending_qty"]) / wanted).quantize(Decimal("0.001"))
+            out[line["indent_item_id"]] = min(share, _d(line["pending_qty"]))
+        handed = sum((out[ln["indent_item_id"]] for ln in rest), Decimal("0"))
+        # Rounding never invents stock, but it can leave a crumb unallocated. It goes to
+        # whoever has waited longest rather than evaporating.
+        crumb = left - handed
+        for line in sorted(rest, key=lambda ln: ln.get("raised_at") or ""):
+            if crumb <= 0:
+                break
+            take = min(_d(line["pending_qty"]) - out[line["indent_item_id"]], crumb)
+            out[line["indent_item_id"]] += take
+            crumb -= take
+    return out
+
+
+def preview_split(item_row: dict, giving: float) -> list[dict]:
+    """What each indent gets if this item is given `giving` in total.
+
+    Kept beside `split_demand` so the number the allocator is shown and the number the
+    allocation is written with come from one function, never two.
+    """
+    shares = split_demand(item_row["demand"], _d(giving))
+    return [{**line, "give_qty": float(shares.get(line["indent_item_id"], 0))}
+            for line in item_row["demand"]]
+
+
+# Approved and not yet fully served. Narrower than _POST_APPROVAL_STATUSES: an indent
+# already ORDERED or CLOSED is procurement's problem or nobody's, not the store's.
+_BATCH_STATUSES = (
+    IndentStatus.APPROVED.value,
+    IndentStatus.AWAITING_ALLOCATION.value,
+    IndentStatus.PARTIALLY_FULFILLED.value,
+)
+
+#: Cycles that owe nothing more. Out of the queue by default, reachable on request.
+_BATCH_DONE_STATUSES = (
+    IndentStatus.ALLOCATED.value,
+    IndentStatus.CLOSED.value,
+)
+
+
+def cycle_key(indent: Indent) -> str:
+    """Which monthly batch an indent belongs to.
+
+    Deliberately the same key `approvals/service.py::_cycle_key` uses. The approver and
+    the storekeeper must be looking at the same batch, or "approve the March lot" and
+    "issue the March lot" quietly mean different sets of indents.
+    """
+    return indent.indent_date.strftime("%Y-%m") if indent.indent_date else "UNDATED"
+
+
+async def fulfilment_batches(db: AsyncSession, user,
+                             include_done: bool = False) -> list[dict]:
+    """One row per monthly cycle still owed — what the Fulfilment Queue lists instead
+    of 900 identical indent rows.
+
+    Regular indents are not grouped: they are one-off requests and the queue has always
+    shown them individually. Only MONTHLY indents collapse.
+    """
+    indents = (await db.execute(
+        select(Indent)
+        .options(selectinload(Indent.items))
+        .where(await _indent_visibility(db, user))
+        # ALLOCATED and CLOSED are not "still owed", so they leave the queue — which
+        # is right until somebody wants to look back at the cycle they just finished
+        # and finds it gone, with no filter that brings it back.
+        .where(Indent.status.in_(
+            _BATCH_STATUSES + _BATCH_DONE_STATUSES if include_done
+            else _BATCH_STATUSES))
+        .where(Indent.indent_type == IndentType.MONTHLY.value)
+    )).scalars().unique().all()
+
+    groups: dict[str, list[Indent]] = defaultdict(list)
+    for indent in indents:
+        groups[cycle_key(indent)].append(indent)
+
+    rows = []
+    for cycle, group in groups.items():
+        rows.append({
+            "cycle": cycle,
+            "month_label": _month_label(cycle),
+            "indent_count": len(group),
+            "item_count": len({line.item_id for ind in group for line in ind.items}),
+            "requester_count": len({ind.requested_by_id for ind in group}),
+            "urgent_count": sum(1 for ind in group
+                                if ind.priority == Priority.URGENT.value),
+            "total_qty": float(sum((owed_quantity(line)
+                                    for ind in group for line in ind.items),
+                                   Decimal("0"))),
+            "oldest_raised_at": min(
+                (ind.created_at for ind in group if ind.created_at), default=None,
+            ),
+        })
+    rows.sort(key=lambda row: row["cycle"], reverse=True)
+    return rows
+
+
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
+def _month_label(cycle: str) -> str:
+    if cycle == "UNDATED":
+        return "Undated"
+    year, _, month = cycle.partition("-")
+    try:
+        return f"{_MONTH_NAMES[int(month) - 1]} {year}"
+    except (ValueError, IndexError):
+        return cycle
+
+
+async def fulfilment_batch(db: AsyncSession, user,
+                           indent_type: str | None = None,
+                           cycle: str | None = None) -> dict:
+    """The fulfilment queue turned on its side: one row per ITEM, not per indent.
+
+    Reads through `_indent_visibility` and the same "still owed" arithmetic
+    `list_indents(has_remainder=True)` uses, so this screen and the queue beside it can
+    never disagree about what is outstanding.
+    """
+    stmt = (
+        select(Indent)
+        .options(selectinload(Indent.items))
+        .where(await _indent_visibility(db, user))
+        .where(Indent.status.in_(_BATCH_STATUSES))
+    )
+    if cycle:
+        # A cycle is a MONTHLY thing. Without this the screen also pulled in every
+        # regular indent that happened to be raised in the same month, so a row the
+        # queue counted as "2 indents" opened showing 11 — the batch you opened was not
+        # the batch you clicked.
+        stmt = stmt.where(Indent.indent_type == IndentType.MONTHLY.value)
+    elif indent_type:
+        stmt = stmt.where(Indent.indent_type == indent_type)
+    indents = (await db.execute(stmt)).scalars().unique().all()
+    if cycle:
+        # Filtered in Python, not SQL: the key is a formatted month and has to be
+        # derived exactly the way `cycle_key` derives it, or the batch the storekeeper
+        # opens is not the batch the queue counted.
+        indents = [indent for indent in indents if cycle_key(indent) == cycle]
+
+    # Quantities a signed-off or in-flight allocation has already claimed. One grouped
+    # query for the whole screen: a batch of 900 indents must not cost 900 round trips.
+    line_ids = [line.id for indent in indents for line in indent.items]
+    committed: dict[int, Decimal] = {}
+    if line_ids:
+        committed = {row[0]: _d(row[1]) for row in (await db.execute(
+            select(AllocationItem.indent_item_id, func.sum(AllocationItem.quantity))
+            .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+            .where(AllocationItem.indent_item_id.in_(line_ids),
+                   Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES))
+            .group_by(AllocationItem.indent_item_id)
+        )).all()}
+
+    by_item: dict[int, list[dict]] = defaultdict(list)
+    for indent in indents:
+        for line in indent.items:
+            pending = (owed_quantity(line)
+                       - _d(line.allocated_quantity)
+                       - committed.get(line.id, Decimal("0")))
+            if pending <= 0:
+                continue
+            by_item[line.item_id].append({
+                "indent_id": indent.id,
+                "indent_no": indent.indent_no,
+                "indent_item_id": line.id,
+                "requested_by_name": indent.requested_by_name,
+                "office_name": indent.office_name,
+                "project_name": indent.project_name,
+                "priority": indent.priority,
+                "pending_qty": float(pending),
+                "raised_at": indent.created_at.isoformat() if indent.created_at else None,
+            })
+    if not by_item:
+        return {"items": [], "total": 0}
+
+    items = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_(by_item))
+    )).scalars().all()}
+
+    # On-hand per WAREHOUSE, scoped to the points this login may draw from — the same
+    # set every inventory screen uses, so these numbers match the allocation screen's.
+    # Broken down rather than totalled because "give 50" is only half the decision; the
+    # other half is which shelf it leaves.
+    warehouse_ids = await inventory_service.warehouse_ids_for_user(db, user)
+    stock_stmt = (select(Stock.item_id, Stock.warehouse_id,
+                         func.sum(Stock.available_qty))
+                  .where(Stock.item_id.in_(by_item))
+                  .group_by(Stock.item_id, Stock.warehouse_id))
+    if warehouse_ids is not None:
+        stock_stmt = stock_stmt.where(Stock.warehouse_id.in_(warehouse_ids or {0}))
+    stock_rows = (await db.execute(stock_stmt)).all()
+
+    names = {row[0]: row[1] for row in (await db.execute(
+        select(Warehouse.id, Warehouse.name)
+        .where(Warehouse.id.in_({row[1] for row in stock_rows} or {0}))
+    )).all()}
+    shelves: dict[int, list[dict]] = defaultdict(list)
+    on_hand: dict[int, Decimal] = defaultdict(Decimal)
+    for item_id, warehouse_id, qty in stock_rows:
+        quantity = _d(qty)
+        on_hand[item_id] += quantity
+        if quantity > 0:
+            shelves[item_id].append({
+                "warehouse_id": warehouse_id,
+                "warehouse_name": names.get(warehouse_id) or f"Warehouse {warehouse_id}",
+                "available_qty": float(quantity),
+            })
+
+    rows = []
+    for item_id, lines in by_item.items():
+        item = items.get(item_id)
+        demand = sum((_d(line["pending_qty"]) for line in lines), Decimal("0"))
+        available = on_hand.get(item_id, Decimal("0"))
+        rows.append({
+            "item_id": item_id,
+            "item_code": item.code if item else None,
+            "item_name": item.name if item else None,
+            "uom_code": item.uom_code if item else None,
+            "indent_count": len({line["indent_id"] for line in lines}),
+            "urgent_count": sum(1 for line in lines
+                                if line["priority"] == Priority.URGENT.value),
+            "total_demand": float(demand),
+            "available_total": float(available),
+            "shortfall": float(max(Decimal("0"), demand - available)),
+            # Fullest shelf first: the default answer to "where from" is usually the
+            # one holding the most, and offering it first saves a click per item.
+            "warehouses": sorted(shelves.get(item_id, []),
+                                 key=lambda w: -w["available_qty"]),
+            "demand": sorted(lines, key=lambda line: (
+                line["priority"] != Priority.URGENT.value, line["raised_at"] or "")),
+        })
+    # Worst shortfall first: the rows that need a human decision, not the easy ones.
+    rows.sort(key=lambda row: (-row["shortfall"], -row["total_demand"]))
+    return {"items": rows, "total": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# Raising a monthly cycle in bulk
+#
+# ~770 lab technicians raise a monthly indent each, and every one of them was typing
+# the same twenty lines they typed last month into the same form. The approval and
+# allocation sides already batch a cycle; only the raising end was still one-at-a-time,
+# which made the whole flow unusable at real headcount.
+#
+# Three pieces, and none of them invent a document:
+#   * `last_monthly_cycle`  — what this person raised last time, ready to reuse.
+#   * `copy_monthly_cycle`  — that, as a new DRAFT, quantities editable before saving.
+#   * `submit_monthly_cycle`— submit several drafts in one call, each on its own ladder.
+#
+# Every indent stays a separate `ind_indents` row with its own workflow instance, for
+# the same reason consolidation stores nothing: the ladder resolves each one
+# independently and merging them would break who-approves-what.
+# ---------------------------------------------------------------------------
+
+async def last_monthly_cycle(db: AsyncSession, user) -> dict:
+    """The most recent monthly indent this person raised, as a reusable line list.
+
+    Reads their own indents only — this is "what did I ask for last month", not a
+    scope-wide query, so it needs no rung: `requested_by_id` IS the narrowest scope
+    there is.
+    """
+    previous = (await db.execute(
+        select(Indent)
+        .options(selectinload(Indent.items))
+        .where(
+            Indent.requested_by_id == user.id,
+            Indent.indent_type == IndentType.MONTHLY.value,
+            Indent.status != IndentStatus.DRAFT.value,
+        )
+        .order_by(Indent.indent_date.desc(), Indent.id.desc())
+        .limit(1)
+    )).scalars().first()
+
+    if previous is None:
+        return {"cycle": None, "cycle_label": None, "indent_no": None,
+                "required_date": None, "items": []}
+
+    return {
+        "cycle": cycle_key(previous),
+        "cycle_label": _month_label(cycle_key(previous)),
+        "indent_no": previous.indent_no,
+        "indent_id": previous.id,
+        "required_date": previous.required_date,
+        "items": [
+            {
+                "item_id": line.item_id,
+                "item_code": line.item_code,
+                "item_name": line.item_name,
+                "uom_code": line.uom_code,
+                # What was ASKED for, not what was approved: this is a starting point
+                # for next month's request, and seeding it with last month's cut would
+                # ratchet the ask down a little every cycle.
+                "quantity": float(line.quantity or 0),
+                "approved_qty": float(line.approved_quantity or 0),
+                "remarks": line.remarks,
+            }
+            for line in sorted(previous.items, key=lambda x: x.line_no or 0)
+        ],
+    }
+
+
+def _next_cycle_required_date(previous_required):
+    """When next month's copy is needed by, when the requester did not say.
+
+    A required date is mandatory on every indent, so a copy has to produce one or the
+    whole point (one click, no typing) is lost. Rolls last cycle's date forward a
+    month, keeping the day — a store that always wants stock by the 5th keeps wanting
+    it by the 5th. Anything that still lands in the past falls back to a month out,
+    because a copy raised late must not be born already overdue.
+    """
+    today = ist_today()
+    candidate = None
+    if previous_required is not None:
+        year, month = previous_required.year, previous_required.month + 1
+        if month > 12:
+            year, month = year + 1, 1
+        # The 31st does not exist in every month; clamp to the last valid day.
+        day = min(previous_required.day, calendar.monthrange(year, month)[1])
+        candidate = date(year, month, day)
+    if candidate is None or candidate < today:
+        year, month = today.year, today.month + 1
+        if month > 12:
+            year, month = year + 1, 1
+        day = min(today.day, calendar.monthrange(year, month)[1])
+        candidate = date(year, month, day)
+    return candidate
+
+
+async def copy_monthly_cycle(db: AsyncSession, user, *, required_date=None,
+                             remarks: str | None = None,
+                             overrides: dict[int, float] | None = None) -> Indent:
+    """Raise this month's indent from last month's, as a DRAFT.
+
+    A draft, never submitted: the point is to save the typing, not to send an
+    unreviewed request up the ladder. `overrides` is {item_id: quantity} for the lines
+    the requester changed, and a quantity of 0 drops the line entirely — last month's
+    list is a suggestion, not a commitment.
+    """
+    previous = await last_monthly_cycle(db, user)
+    if not previous["items"]:
+        raise ValidationError(
+            "You have no earlier monthly indent to copy. Raise the first one from the "
+            "normal form; next month this will fill itself in."
+        )
+
+    overrides = overrides or {}
+    lines = []
+    for line in previous["items"]:
+        qty = overrides.get(line["item_id"], line["quantity"])
+        if _d(qty) <= Decimal("0"):
+            continue   # deliberately dropped for this cycle
+        lines.append(IndentItemIn(item_id=line["item_id"], quantity=qty,
+                                  remarks=line["remarks"]))
+    if not lines:
+        raise ValidationError("Every line was set to zero — there is nothing to raise.")
+
+    # Straight through create_indent, so numbering, the requester snapshot, validation
+    # and the audit row are all identical to a hand-typed indent. A second create path
+    # is a second set of rules to keep in step.
+    return await create_indent(db, IndentCreate(
+        required_date=required_date or _next_cycle_required_date(
+            previous.get("required_date")),
+        indent_type=IndentType.MONTHLY,
+        remarks=remarks or f"Copied from {previous['indent_no']}",
+        items=lines,
+    ), user)
+
+
+async def submit_monthly_cycle(db: AsyncSession, user, indent_ids: list[int]) -> dict:
+    """Submit several drafts in one call. One workflow instance each, as always.
+
+    Partial success is the normal outcome, not an error: one draft failing its ladder
+    resolution must not silently discard the other nineteen. Each is reported.
+    """
+    if not indent_ids:
+        raise ValidationError("Pick at least one indent to submit")
+
+    submitted, failed = [], []
+    for indent_id in indent_ids:
+        try:
+            indent = await submit_indent(db, indent_id, user)
+            submitted.append({"indent_id": indent.id, "indent_no": indent.indent_no,
+                              "status": indent.status})
+        except AppException as exc:
+            # Rolled back so the next one starts clean — submit_indent commits its own
+            # work, so a failure here has left nothing half-written.
+            await db.rollback()
+            failed.append({"indent_id": indent_id, "error": str(exc)})
+
+    return {
+        "submitted": submitted,
+        "failed": failed,
+        "submitted_count": len(submitted),
+        "failed_count": len(failed),
     }

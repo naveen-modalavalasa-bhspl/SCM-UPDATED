@@ -163,6 +163,34 @@ class AllocationIn(BaseModel):
     remarks: str | None = None
 
 
+class AllocBatchActionIn(BaseModel):
+    """Approve or reject a whole cycle's allocations in one act."""
+    allocation_ids: list[int]
+    comments: str = ""
+
+
+class AllocationBatchIn(BaseModel):
+    """Every indent in a monthly cycle decided in one go.
+
+    One `AllocationIn` per indent, exactly what the single-indent screen posts — the
+    batch screen is a faster way to fill them in, not a different decision. Each still
+    becomes its own allocation with its own ladder, so nothing about how a reservation
+    is written or approved changes."""
+    allocations: list[AllocationIn]
+
+
+class AllocationBatchFailureOut(BaseModel):
+    indent_id: int
+    indent_no: str | None = None
+    reason: str
+
+
+class AllocationBatchOut(BaseModel):
+    created_count: int
+    created_indent_ids: list[int] = Field(default_factory=list)
+    failed: list[AllocationBatchFailureOut] = Field(default_factory=list)
+
+
 class AllocationItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

@@ -320,3 +320,17 @@ export interface IssueFromStockResult {
   /** Nothing owed anywhere — the indent has no reason to climb further. */
   fully_served: boolean;
 }
+
+
+/** One monthly allocation cycle in the approval inbox. */
+export interface AllocationCycleRow {
+  cycle: string;
+  month_label: string;
+  allocation_count: number;
+  actionable_count: number;
+  indent_count: number;
+  item_count: number;
+  total_qty: number;
+  href: string;
+  doc_type: string;
+}

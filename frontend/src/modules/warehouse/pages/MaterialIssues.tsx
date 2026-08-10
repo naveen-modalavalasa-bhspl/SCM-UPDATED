@@ -1,8 +1,16 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { StatusPill, type Column } from "@/shared/components";
+import { Forward } from "lucide-react";
+import {
+  Button, Can, ConfirmModal, StatusPill, type Column,
+} from "@/shared/components";
+import { alerts } from "@/modules/alerts";
 import { DocumentList } from "../components/DocumentList";
-import { listIssues, deleteIssue, DRAFT_DELETE_PERMISSION } from "../api";
+import {
+  DRAFT_DELETE_PERMISSION, deleteIssue, forwardArrival, listIssues, listReceipts,
+} from "../api";
 import { fmtDate, fmtMoneyShort, fmtQty } from "../format";
 import type { Issue } from "../types";
 
@@ -103,6 +111,13 @@ export default function MaterialIssues({
   ];
 
   return (
+    <>
+    {/* Forwarding is reachable from here too, not only from the GRN screen. A
+        storekeeper working out of Material Issues thinks "pass this consignment on",
+        not "go back and reopen the receipt it arrived on". Same endpoint, same
+        permission — the service still refuses anything not arrived and stock-posted,
+        and skips indents that already have an issue at this point. */}
+    {direction === "OUT" && <ForwardFromGrn />}
     <DocumentList<Issue>
       title={title}
       queryKey={`wh-issues-${direction}`}
@@ -145,5 +160,95 @@ export default function MaterialIssues({
         </div>
       )}
     />
+    </>
+  );
+}
+
+/**
+ * "Forward an arrived consignment" — the Material Issues doorway to the same action
+ * the GRN screen offers.
+ *
+ * Lists consignment receipts that have landed at this point and been posted to stock,
+ * and have not been forwarded yet. Picking one builds the onward issue drafts, one per
+ * indent, exactly as the button on the GRN does: same endpoint, same `issue.forward`
+ * permission, and the same scope — `listReceipts` only ever returns receipts at
+ * warehouses this login can see.
+ */
+function ForwardFromGrn() {
+  const nav = useNavigate();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+
+  const arrived = useQuery({
+    queryKey: ["wh-receipts", "arrived-consignments"],
+    queryFn: () => listReceipts({ receipt_type: "DISPATCH", page: 1, size: 50 }),
+    enabled: open,
+  });
+
+  const forward = useMutation({
+    mutationFn: (receiptId: number) => forwardArrival(receiptId),
+    onSuccess: (drafts) => {
+      const made = (drafts ?? []) as Array<{ issue_no?: string }>;
+      if (made.length === 0) {
+        void alerts.info("issue.forwarded_none");
+        return;
+      }
+      void alerts.success("issue.forwarded", {
+        number: made.map((d) => d.issue_no).filter(Boolean).join(", "),
+      });
+      qc.invalidateQueries({ queryKey: ["wh-issues-OUT"] });
+      setOpen(false);
+      nav("/warehouse/transactions/material-issues");
+    },
+  });
+
+  const rows = (arrived.data?.items ?? []).filter((r) => r.is_stock_posted);
+
+  return (
+    <Can do="issue.forward">
+      <div className="mb-3 flex justify-end">
+        <Button variant="soft" onClick={() => setOpen(true)}>
+          <Forward className="h-4 w-4" /> Forward an arrived consignment
+        </Button>
+      </div>
+      <ConfirmModal
+        isOpen={open}
+        title="Forward to the points below"
+        message="Pick the consignment that arrived here. One issue draft is built per
+                 indent on it — you still review and submit each one."
+        confirmLabel="Close"
+        busy={forward.isPending}
+        error={forward.error ?? arrived.error}
+        onConfirm={() => setOpen(false)}
+        onClose={() => setOpen(false)}
+      >
+        <div className="mt-2 divide-y divide-line rounded-xl border border-line">
+          {arrived.isLoading && <p className="p-3 text-sm text-muted">Loading…</p>}
+          {!arrived.isLoading && rows.length === 0 && (
+            <p className="p-3 text-sm text-muted">
+              Nothing has arrived here and been posted to stock yet.
+            </p>
+          )}
+          {rows.map((r) => (
+            <button
+              key={r.id}
+              type="button"
+              disabled={forward.isPending}
+              onClick={() => forward.mutate(r.id)}
+              className="flex w-full items-center justify-between gap-2 p-3 text-left
+                         hover:bg-content2 disabled:opacity-60"
+            >
+              <div>
+                <span className="mono text-sm font-semibold text-ink">{r.grn_no}</span>
+                <p className="text-xs text-muted">
+                  {r.warehouse_name} · {fmtDate(r.grn_date)}
+                </p>
+              </div>
+              <StatusPill status={r.status} />
+            </button>
+          ))}
+        </div>
+      </ConfirmModal>
+    </Can>
   );
 }

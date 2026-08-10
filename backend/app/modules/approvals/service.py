@@ -624,8 +624,10 @@ async def _monthly_pending_indents(
     return out
 
 
-def _cycle_key(indent: Indent) -> str:
-    return indent.indent_date.strftime("%Y-%m") if indent.indent_date else "UNDATED"
+# The cycle key lives in indents, which owns the concept. It was duplicated here and
+# the two copies had to agree forever or "approve the March lot" and "issue the March
+# lot" would quietly mean different sets of indents.
+from app.modules.indents.service import cycle_key as _cycle_key   # noqa: E402
 
 
 _MONTH_NAMES = (
@@ -1075,6 +1077,9 @@ async def approve_consolidation(
         except AppException as exc:
             # One document's problem is not the batch's: record it and carry on.
             await db.rollback()
+            # The rollback expires `user` too; without this the NEXT indent dies on a
+            # lazy reload outside async context and 500s the whole consolidation.
+            await db.refresh(user)
             failed.append(ConsolidationApprovalFailureOut(
                 indent_id=indent_id, reason=str(getattr(exc, "message", None) or exc),
             ))
@@ -1109,3 +1114,35 @@ async def return_indent(
     indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
     updated = await indent_service.return_indent_for_correction(db, indent_id, comments, user)
     return _approval_out(updated, instance, has_previous)
+
+
+# ---------------- Monthly allocation cycles in the approval inbox ----------------
+#
+# A monthly cycle's allocations were only reachable from Inventory > Allocation
+# Approvals. Somebody living in the Approvals module — which is where every other
+# approval lands — had no way to see or sign them, so a cycle sat waiting while the
+# approver's inbox said there was nothing to do.
+#
+# Delegated rather than reimplemented: `indents.service.allocation_approval_batches`
+# already builds these, already applies `_indent_visibility` (the rung), and already
+# marks which ones the caller's ACTIVE position may sign. Writing a second query here
+# would be a second scope rule to keep in step with the first.
+
+async def allocation_cycles_for_user(db: AsyncSession, user) -> list[dict]:
+    """Monthly allocation cycles awaiting this approver, for the approval inbox."""
+    from app.modules.indents.service import allocation_approval_batches
+
+    batches = await allocation_approval_batches(db, user)
+    return [{
+        "cycle": batch["cycle"],
+        "month_label": batch["month_label"],
+        "allocation_count": batch["allocation_count"],
+        "actionable_count": batch["actionable_count"],
+        "indent_count": batch["indent_count"],
+        "item_count": batch["item_count"],
+        "total_qty": batch["total_qty"],
+        # Where the inbox sends them. The same screen Inventory links to, so a cycle
+        # is signed in one place however it was reached.
+        "href": f"/inventory/allocation-approvals/cycle/{batch['cycle']}",
+        "doc_type": DocType.ALLOCATION.value,
+    } for batch in batches]

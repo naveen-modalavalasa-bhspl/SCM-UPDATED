@@ -23,6 +23,7 @@ from app.platform.rbac.service import (
 from app.platform.settings.models import AuditLog
 from app.platform.workflow import engine
 from app.shared.enums import IndentStatus, POStatus, ScopeRung
+from app.modules.indents.enums import IndentType
 from app.shared.time import now as ist_now, today as ist_today
 
 
@@ -289,6 +290,37 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
                 "my_indents", "Your indents pending approval", pending_indents,
                 "/indents", "file-text",
             ))
+
+        # The monthly cycle, as a number somebody can act on. The rest of this screen
+        # counts documents; a cycle is the unit the business actually plans in, and
+        # with 770 people raising one indent each there was no way to see how the
+        # month was going without opening a report. Same visibility predicate as the
+        # tile above, so it can never claim more than the list would show.
+        cycle = ist_today().strftime("%Y-%m")
+        in_cycle = and_(
+            indent_scope,
+            Indent.indent_type == IndentType.MONTHLY.value,
+            func.date_format(Indent.indent_date, "%Y-%m") == cycle,
+        )
+        cycle_total = await _count(db, Indent, in_cycle)
+        if cycle_total:
+            cycle_done = await _count(
+                db, Indent, in_cycle,
+                Indent.status.in_([IndentStatus.CLOSED.value,
+                                   IndentStatus.PARTIALLY_FULFILLED.value]),
+            )
+            kpis.append(_kpi(
+                "monthly_cycle", "THIS MONTH'S CYCLE", cycle_total,
+                f"{cycle_done} served", "/indents?indent_type=MONTHLY", "calendar-check",
+                tone="purple",
+                detail_tone="green" if cycle_done == cycle_total else "orange",
+            ))
+            if cycle_total - cycle_done:
+                attention.append(_attention(
+                    "monthly_cycle", f"Monthly cycle {cycle} still owed",
+                    cycle_total - cycle_done, "/indents?indent_type=MONTHLY",
+                    "calendar-check", "orange",
+                ))
 
     if pending or APPROVE_PERMISSIONS & permissions:
         overdue = sum(1 for row in pending if _is_overdue(row))

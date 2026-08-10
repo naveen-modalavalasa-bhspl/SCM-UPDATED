@@ -81,6 +81,10 @@ MR_REJECT = "mr.reject"
 ISSUE_VIEW = "issue.view"
 ISSUE_CREATE = "issue.create"
 ISSUE_ISSUE = "issue.issue"
+# Passing an arrived consignment on to a point below (WH -> MDP -> LIP). Separate from
+# ISSUE_CREATE because the people who forward are not the people who decide what leaves
+# a main warehouse.
+ISSUE_FORWARD = "issue.forward"
 
 # --- Warehouse ---
 # The warehouse module runs the physical dock-to-stock cycle: receipt -> inspection
@@ -209,6 +213,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(ISSUE_VIEW, "warehouse", "issue", "view", "View issues"),
     Perm(ISSUE_CREATE, "warehouse", "issue", "create", "Create issues"),
     Perm(ISSUE_ISSUE, "warehouse", "issue", "issue", "Issue stock to a department"),
+    Perm(ISSUE_FORWARD, "warehouse", "issue", "forward",
+         "Forward an arrived consignment on to a point below"),
     Perm(RECEIPT_VIEW, "warehouse", "receipt", "view", "View goods receipts"),
     Perm(RECEIPT_CREATE, "warehouse", "receipt", "create", "Create goods receipts"),
     Perm(RECEIPT_POST, "warehouse", "receipt", "post", "Post a goods receipt"),

@@ -13,6 +13,10 @@ import type {
   ConsolidationIndentSummary, ConsolidationQuery,
 } from "../types";
 
+/** Indents per approve request. Small enough that no single call can outlive a
+ *  gateway timeout on a monthly batch, large enough that a normal batch is one call. */
+const APPROVE_CHUNK = 25;
+
 const formatQty = (value: number) => {
   const rounded = Math.round(value * 1000) / 1000;
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
@@ -368,6 +372,9 @@ export function BatchCard({ batch, onBack }: {
   // nothing is written until the approver acts on the indents themselves.
   const [decisions, setDecisions] = useState<Record<number, ItemDecision>>({});
   const [result, setResult] = useState<ConsolidationApprovalResult | null>(null);
+  // How many indents the running approval has got through, so a batch of hundreds
+  // shows movement instead of a frozen button.
+  const [progress, setProgress] = useState(0);
   const queryClient = useQueryClient();
   const setDecision = (itemId: number, patch: Partial<ItemDecision>) =>
     setDecisions((current) => ({
@@ -383,19 +390,45 @@ export function BatchCard({ batch, onBack }: {
   });
 
   const approve = useMutation({
-    mutationFn: () => approvalsApi.approveConsolidation({
-      indent_ids: batch.indents.map((row) => row.id),
+    mutationFn: async () => {
+      const indentIds = batch.indents.map((row) => row.id);
       // Every item's split, flattened. A line nobody edited still ships its share,
       // because the split of an untouched item is simply its full ceiling.
-      lines: batch.consolidated_items.flatMap((item) => {
+      const lines = batch.consolidated_items.flatMap((item) => {
         const { split } = resolveItem(item, decisions[item.item_id]);
         return (item.allocations ?? []).map((allocation) => ({
           indent_id: allocation.indent_id,
           line_id: allocation.line_id,
           approved_quantity: split.get(allocation.line_id) ?? 0,
         }));
-      }),
-    }),
+      });
+
+      // Sent in chunks, not one request. The backend walks the batch one indent at a
+      // time — engine-owned chains cannot be short-cut — so a monthly cycle of several
+      // hundred indents would sit on a single request long past any gateway timeout,
+      // and a timeout mid-walk leaves the approver unable to tell what went through.
+      // The call is already non-atomic across indents by design, so splitting it
+      // changes nothing about the outcome, only how long any one request is held open.
+      const chunks: number[][] = [];
+      for (let i = 0; i < indentIds.length; i += APPROVE_CHUNK) {
+        chunks.push(indentIds.slice(i, i + APPROVE_CHUNK));
+      }
+      const merged: ConsolidationApprovalResult = {
+        approved_count: 0, approved_indent_ids: [], failed: [],
+      };
+      for (const chunk of chunks) {
+        const ids = new Set(chunk);
+        const part = await approvalsApi.approveConsolidation({
+          indent_ids: chunk,
+          lines: lines.filter((line) => ids.has(line.indent_id)),
+        });
+        merged.approved_count += part.approved_count;
+        merged.approved_indent_ids.push(...part.approved_indent_ids);
+        merged.failed.push(...part.failed);
+        setProgress(merged.approved_count + merged.failed.length);
+      }
+      return merged;
+    },
     onSuccess: (data) => {
       setResult(data);
       // The approved indents leave this approver's queue, so the workspace has to be
@@ -442,10 +475,12 @@ export function BatchCard({ batch, onBack }: {
           <StatusPill status={batch.current_stage_name ?? "PENDING"} />
           <Button
             disabled={blocked || approve.isPending || batch.indents.length === 0}
-            onClick={() => approve.mutate()}
+            onClick={() => { setProgress(0); approve.mutate(); }}
           >
             <Check className="h-4 w-4" />
-            {approve.isPending ? "Approving…" : `Approve all ${batch.indents.length}`}
+            {approve.isPending
+              ? `Approving… ${progress}/${batch.indents.length}`
+              : `Approve all ${batch.indents.length}`}
           </Button>
         </div>
       </div>

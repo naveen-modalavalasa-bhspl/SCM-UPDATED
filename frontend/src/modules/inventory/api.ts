@@ -7,6 +7,11 @@ import type {
   Allocation,
   AllocationListRow,
   AllocationProposal,
+  AllocationApprovalBatch,
+  AllocBatchResult,
+  AllocationBatchResult,
+  BatchDemand,
+  FulfilmentBatch,
   CatalogItemOption,
   MaterialRequest,
   MaterialRequestListRow,
@@ -253,6 +258,44 @@ export const rejectMaterialRequest = (id: number, comments = "") =>
  * AWAITING_ALLOCATION; neither is PARTIALLY_FULFILLED, which is what the filter asked
  * for. The remainder IS the queue, so it is the only filter.
  */
+/** One row per ITEM across every indent still owed — the consolidated view.
+ *
+ *  Nine hundred monthly indents are nine hundred rows in the queue above, and none of
+ *  them shows that between them they want 4,000 gloves against 2,500 on the shelf.
+ *  This is the same rows grouped, computed fresh; no batch is stored anywhere. */
+export const getBatchDemand = (cycle?: string) =>
+  api
+    .get<BatchDemand>("/api/allocations/demand", {
+      params: cycle ? { cycle } : undefined,
+    })
+    .then((r) => r.data);
+
+/** One row per monthly cycle still owed — what the Fulfilment Queue shows in place of
+ *  every indent in that cycle. */
+/** Allocations awaiting me, grouped into the monthly cycle they serve. Without this
+ *  the batch work just moves the queue along: 900 indents approved at once, allocated
+ *  at once, and then 900 allocations to open and sign one by one. */
+export const getAllocationApprovalBatches = (includeDone = false) =>
+  api.get<{ items: AllocationApprovalBatch[] }>(
+    "/api/allocations/approval-batches",
+    { params: includeDone ? { include_done: true } : undefined })
+    .then((r) => r.data);
+
+export const approveAllocationsBatch = (allocationIds: number[], comments = "") =>
+  api.post<AllocBatchResult>("/api/allocations/approve-batch",
+                             { allocation_ids: allocationIds, comments })
+    .then((r) => r.data);
+
+export const rejectAllocationsBatch = (allocationIds: number[], comments = "") =>
+  api.post<AllocBatchResult>("/api/allocations/reject-batch",
+                             { allocation_ids: allocationIds, comments })
+    .then((r) => r.data);
+
+export const getFulfilmentBatches = (includeDone = false) =>
+  api.get<{ items: FulfilmentBatch[] }>(
+    "/api/allocations/batches",
+    { params: includeDone ? { include_done: true } : undefined }).then((r) => r.data);
+
 export const getFulfillmentQueue = (status?: string) =>
   api
     .get<Page<Record<string, unknown>>>("/api/indents", {
@@ -264,6 +307,16 @@ export const getFulfillmentQueue = (status?: string) =>
 
 export const getAllocationProposal = (indentId: number) =>
   api.get<AllocationProposal>(`/api/allocations/proposal/${indentId}`).then((r) => r.data);
+
+/** Every indent in a cycle allocated in one request — one allocation each, exactly
+ *  what `createAllocation` writes for a single indent. Not atomic across indents by
+ *  design: one that somebody else already served must not discard the other 899. */
+export const createAllocationsBatch = (
+  allocations: { indent_id: number; decisions: AllocationDecision[] }[],
+) =>
+  api
+    .post<AllocationBatchResult>("/api/allocations/batch", { allocations })
+    .then((r) => r.data);
 
 export const createAllocation = (indentId: number, decisions: AllocationDecision[], remarks?: string) =>
   api

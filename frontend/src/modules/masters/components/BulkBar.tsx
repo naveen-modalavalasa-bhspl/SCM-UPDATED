@@ -95,7 +95,8 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
       {result && (
         <div className="mt-2 rounded-lg bg-ok-bg px-3 py-2 text-sm text-ok">
           Imported {result.total} row{result.total === 1 ? "" : "s"} —{" "}
-          {result.created} created, {result.updated} updated.
+          {result.created} created, {result.updated} updated
+          {result.unchanged ? `, ${result.unchanged} unchanged` : ""}.
         </div>
       )}
       {error && (

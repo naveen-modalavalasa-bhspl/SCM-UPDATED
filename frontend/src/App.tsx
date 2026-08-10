@@ -52,6 +52,8 @@ import { StockTransferView } from "@/modules/inventory/components/StockTransferV
 import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
 import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
 import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
+import { FulfilmentBatchPage } from "@/modules/inventory/pages/FulfilmentBatchPage";
+import { AllocationCycleApprovalPage } from "@/modules/inventory/pages/AllocationCycleApprovalPage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
 import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
 import { AllocationApprovalsPage } from "@/modules/inventory/pages/AllocationApprovalsPage";
@@ -135,11 +137,17 @@ function AppRoutes() {
         <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
+        {/* Child screen, not a menu entry: the queue lists a monthly cycle as one
+            row and navigates here to split it item by item. */}
+        <Route path="inventory/fulfillment/:cycle" element={<FulfilmentBatchPage />} />
         {/* Where the MDP/LIP chain is declared — everything downstream reads it. */}
         <Route path="inventory/stocking-points" element={<StockingPointsPage />} />
         <Route path="inventory/allocation-approvals" element={<AllocationApprovalsPage />} />
         {/* Child screen, not a menu entry: the list navigates here to review one
             allocation. Without this route that row click is a dead end. */}
+        {/* A whole monthly cycle, opened from the same list a single allocation is.
+            Declared above :id so the literal segment is matched first. */}
+        <Route path="inventory/allocation-approvals/cycle/:cycle" element={<AllocationCycleApprovalPage />} />
         <Route path="inventory/allocation-approvals/:id" element={<AllocationApprovalDetailPage />} />
         <Route path="inventory/demand" element={<ItemDemandPage />} />
         <Route path="inventory/labels" element={<LabelsPage />} />

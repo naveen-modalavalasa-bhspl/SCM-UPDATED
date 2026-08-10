@@ -361,6 +361,17 @@ const DEFINITIONS: AlertDef[] = [
     "{number} is inspected and sent for put-away.",
   ),
   alert("issue.acknowledged", "success", "Receipt acknowledged", "{number} has been confirmed."),
+  // Forwarding an arrived consignment on to the points below. The screen fired
+  // "issue.created", which is not a key in here, so the toast showed a green tick and
+  // no words — the storekeeper had no idea whether anything had been created.
+  alert(
+    "issue.forwarded", "success", "Forwarded to the points below",
+    "{number}. Review and submit each one from Material Issues.",
+  ),
+  alert(
+    "issue.forwarded_none", "info", "Nothing to forward",
+    "Every indent on this GRN already has an issue at this point.",
+  ),
   alert("reminder.sent", "success", "Reminder sent", "{name} has been nudged."),
   alert("delegation.created", "success", "Delegation active", "{name} approves on your behalf."),
   alert("delegation.ended", "success", "Delegation ended", "Approvals come back to you."),

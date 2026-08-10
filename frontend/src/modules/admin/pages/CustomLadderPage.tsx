@@ -37,6 +37,13 @@ const POLICY_CHOICES: { value: SelfApprovalPolicy; label: string; help: string }
     label: "Yes — they can approve it themselves",
     help: "They stay on the ladder and the approval lands in their own queue.",
   },
+  {
+    value: "NO_APPROVAL",
+    label: "Nobody — this step needs no signature",
+    help: "The document is approved the moment it is raised, and the trail records "
+      + "that no signature was required. For steps already sanctioned upstream, such "
+      + "as an MDP forwarding a consignment on to a LIP.",
+  },
 ];
 
 /** Departments and their posts move only when HCM syncs. */
@@ -160,8 +167,10 @@ export function CustomLadderPage() {
             <Button variant="ghost" onClick={() => navigate("/admin/approvals-config")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
+            {/* A ladder nobody signs has nothing to pick, so an empty step list is the
+                correct save here rather than an unfinished one. */}
             <Button
-              disabled={steps.length === 0 || save.isPending}
+              disabled={(steps.length === 0 && policy !== "NO_APPROVAL") || save.isPending}
               onClick={() => setConfirming(true)}
             >
               Save ladder

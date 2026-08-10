@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Chip, Pagination } from "@heroui/react";
 import { PageHeader, Card, ResponsiveList, StatusPill, Button, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
-import { getFulfillmentQueue, listAllocations } from "../api";
+import { getFulfilmentBatches, getFulfillmentQueue, listAllocations } from "../api";
 import { fmtDate } from "@/shared/datetime";
 
 /**
@@ -24,6 +24,7 @@ import { fmtDate } from "@/shared/datetime";
 interface QueueRow {
   id: number;
   indent_no: string;
+  indent_type?: string | null;
   department_name?: string | null;
   requested_by_name?: string | null;
   current_approver_name?: string | null;
@@ -31,6 +32,12 @@ interface QueueRow {
   status: string;
   total_items: number;
   created_at: string;
+  /** Set on the one row that stands for a whole monthly cycle. A cycle of 900 indents
+   *  is one decision, so it is one row here; clicking it opens the item-first split
+   *  rather than 900 separate allocation screens. */
+  cycle?: string;
+  month_label?: string;
+  indent_count?: number;
 }
 
 const STATUS_OPTIONS = [
@@ -42,6 +49,10 @@ const STATUS_OPTIONS = [
 ];
 
 
+/** Stable id for a synthetic cycle row. Only has to be unique within this list. */
+const hashCycle = (cycle: string) =>
+  [...cycle].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 1_000_000, 7) || 1;
+
 const ageInDays = (s?: string | null) =>
   s ? Math.floor((Date.now() - new Date(s).getTime()) / 86_400_000) : 0;
 
@@ -51,6 +62,7 @@ export function FulfillmentQueuePage() {
   const [deptFilter, setDeptFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
+  const [showDoneCycles, setShowDoneCycles] = useState(false);
   const nav = useNavigate();
 
   const queue = useQuery({
@@ -68,7 +80,38 @@ export function FulfillmentQueuePage() {
     [pending.data],
   );
 
-  const all = (queue.data?.items ?? []) as unknown as QueueRow[];
+  // Monthly cycles, counted server-side off exactly the rows below. Fetched separately
+  // rather than grouped here so the count on the row is the same number the batch
+  // screen will open with.
+  const batches = useQuery({
+    queryKey: ["fulfilment-batches", showDoneCycles],
+    // A cycle that has been fully allocated leaves the queue, which is right — but it
+    // also became unfindable, so there was no way to look back at what was just done.
+    queryFn: () => getFulfilmentBatches(showDoneCycles),
+  });
+
+  const all = useMemo(() => {
+    const raw = (queue.data?.items ?? []) as unknown as QueueRow[];
+    // A monthly indent is never its own row: it is part of a cycle, and the cycle is
+    // the thing a storekeeper acts on. Regular indents are one-off requests and stay
+    // exactly as they always were.
+    const singles = raw.filter((r) => r.indent_type !== "MONTHLY");
+    const cycleRows: QueueRow[] = (batches.data?.items ?? []).map((b) => ({
+      // Negative, so a synthetic row can never collide with a real indent id.
+      id: -Math.abs(hashCycle(b.cycle)),
+      indent_no: `${b.month_label} — consolidated`,
+      cycle: b.cycle,
+      month_label: b.month_label,
+      indent_count: b.indent_count,
+      requested_by_name: `${b.requester_count} requester${b.requester_count === 1 ? "" : "s"}`,
+      department_name: `${b.item_count} item${b.item_count === 1 ? "" : "s"}`,
+      priority: b.urgent_count > 0 ? "URGENT" : "NORMAL",
+      status: "AWAITING_ALLOCATION",
+      total_items: b.item_count,
+      created_at: b.oldest_raised_at ?? new Date().toISOString(),
+    }));
+    return [...cycleRows, ...singles];
+  }, [queue.data, batches.data]);
 
   const allDepartments = useMemo(() => {
     const depts = new Set<string>();
@@ -100,8 +143,16 @@ export function FulfillmentQueuePage() {
       header: "Indent",
       render: (r) => (
         <div>
-          <div className="font-mono text-xs font-semibold text-ink">{r.indent_no}</div>
-          <div className="text-[11px] text-muted">{r.total_items} line{r.total_items === 1 ? "" : "s"}</div>
+          <div className={r.cycle
+            ? "text-xs font-semibold text-ink"
+            : "font-mono text-xs font-semibold text-ink"}>
+            {r.indent_no}
+          </div>
+          <div className="text-[11px] text-muted">
+            {r.cycle
+              ? `${r.indent_count} indents · ${r.total_items} item${r.total_items === 1 ? "" : "s"}`
+              : `${r.total_items} line${r.total_items === 1 ? "" : "s"}`}
+          </div>
         </div>
       ),
     },
@@ -147,7 +198,12 @@ export function FulfillmentQueuePage() {
       render: (r) => (
         <Button
           variant="ghost"
-          onClick={(e) => { e.stopPropagation(); nav(`/indents/${r.id}`); }}
+          // A cycle has no single indent behind it to open, so the button does what
+          // the row does rather than pointing at an id that does not exist.
+          onClick={(e) => {
+            e.stopPropagation();
+            nav(r.cycle ? `/inventory/fulfillment/${r.cycle}` : `/indents/${r.id}`);
+          }}
         >
           Open
         </Button>
@@ -193,7 +249,8 @@ export function FulfillmentQueuePage() {
           setStatusFilter("");
           setPage(1);
         }}
-        active={(search ? 1 : 0) + (priorityFilter ? 1 : 0) + (deptFilter ? 1 : 0) + (statusFilter ? 1 : 0)}
+        active={(search ? 1 : 0) + (priorityFilter ? 1 : 0) + (deptFilter ? 1 : 0)
+          + (statusFilter ? 1 : 0) + (showDoneCycles ? 1 : 0)}
       >
         <FilterSelect
           value={statusFilter}
@@ -216,6 +273,12 @@ export function FulfillmentQueuePage() {
           options={allDepartments}
           placeholder="All Departments"
         />
+        <Button
+          variant={showDoneCycles ? "soft" : "subtle"}
+          onClick={() => { setShowDoneCycles((v) => !v); setPage(1); }}
+        >
+          {showDoneCycles ? "Hiding nothing" : "Show finished cycles"}
+        </Button>
       </FilterBar>
 
       {queue.error ? (
@@ -232,7 +295,11 @@ export function FulfillmentQueuePage() {
             // questions worth asking — how much, and out of which point — and does it
             // per line with splits, so the queue's job is to pick the indent, not to
             // reimplement the decision inline.
-            onRowClick={(r) => nav(`/inventory/allocate/${r.id}`)}
+            // A cycle opens the item-first split; a single indent opens the allocation
+            // screen it always opened.
+            onRowClick={(r) => nav(r.cycle
+              ? `/inventory/fulfillment/${r.cycle}`
+              : `/inventory/allocate/${r.id}`)}
             columns={columns}
             empty="Nothing owed. Indents appear here the moment a line is approved for more than has been allocated."
             renderCard={(r) => (

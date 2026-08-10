@@ -38,6 +38,19 @@ class IndentUpdate(BaseModel):
     items: list[IndentItemIn] | None = None
 
 
+class MonthlyCopyIn(BaseModel):
+    """Raise this cycle from last cycle. Everything optional — the whole point is
+    that an empty body already does the right thing."""
+    required_date: date | None = None
+    remarks: str | None = None
+    #: {item_id: quantity} for the lines the requester changed. 0 drops the line.
+    overrides: dict[int, float] = Field(default_factory=dict)
+
+
+class MonthlySubmitIn(BaseModel):
+    indent_ids: list[int]
+
+
 class ActionIn(BaseModel):
     comments: str = ""
 

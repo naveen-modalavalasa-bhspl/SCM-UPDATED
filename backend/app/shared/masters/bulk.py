@@ -22,7 +22,8 @@ from __future__ import annotations
 import io
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, get_args, get_origin
+from types import UnionType
+from typing import Any, Union, get_args, get_origin
 
 from fastapi import Depends, File, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -51,8 +52,13 @@ MAX_IMPORT_ROWS = 5000
 # --------------------------------------------------------------------------- #
 def _unwrap_optional(annotation: Any) -> Any:
     """`str | None` describes the same column as `str`. Optionality is already
-    carried by whether the field is required, so the None arm is noise here."""
-    if get_origin(annotation) is None:
+    carried by whether the field is required, so the None arm is noise here.
+
+    Only a union is unwrapped. Testing `get_origin(...) is None` instead collapsed
+    every single-argument generic, so `list[int]` came back as `int`: the ids column
+    was then read as one number and "1, 2" died on `float()`.
+    """
+    if get_origin(annotation) not in (Union, UnionType):
         return annotation
     args = [a for a in get_args(annotation) if a is not type(None)]
     return args[0] if len(args) == 1 else annotation
@@ -292,6 +298,49 @@ def parse_upload(defn, content: bytes) -> tuple[list[dict], list[str]]:
     return parsed, errors
 
 
+def _exported_record(defn, row, fields) -> dict:
+    """The stored row as /export would write it, read straight back through the same
+    cell parser — so it can be compared with a sheet row field for field."""
+    payload = defn.serialize(row)
+    out: dict[str, Any] = {}
+    for name, field in fields.items():
+        try:
+            value = _cell_in(_cell_out(payload.get(name, getattr(row, name, None))),
+                             field.annotation)
+        except (ValueError, TypeError):
+            return {}            # cannot be compared, so treat the row as changed
+        if value is not None:
+            out[name] = value
+    return out
+
+
+async def untouched_rows(defn, db: AsyncSession, parsed: list[dict]) -> tuple[list[dict], int]:
+    """Split the sheet into rows that ask for a change and rows that do not.
+
+    A row identical to what /export wrote is a no-op, and running it through the
+    create-form schema is what makes one legacy record reject the whole file: 69 of
+    the live items predate the mandatory general name / brand / manufacturer, so an
+    admin who exports the item master, types three new rows at the bottom and uploads
+    it gets 296 errors about rows they never touched and nothing is saved. Rows the
+    admin actually edited are still validated in full.
+    """
+    ids = [r["id"] for r in parsed if r.get("id") is not None]
+    if not ids:
+        return parsed, 0
+    stored = {row.id: row for row in (await db.execute(
+        select(defn.model).where(defn.model.id.in_(ids)))).scalars().all()}
+    fields = defn.schema.model_fields
+    changed, unchanged = [], 0
+    for record in parsed:
+        row = stored.get(record.get("id"))
+        supplied = {k: v for k, v in record.items() if k not in ("id", "__row__")}
+        if row is not None and _exported_record(defn, row, fields) == supplied:
+            unchanged += 1
+            continue
+        changed.append(record)
+    return changed, unchanged
+
+
 def validate_rows(defn, parsed: list[dict]) -> tuple[list[tuple[int, int | None, BaseModel]], list[str]]:
     """Run every row through the master's own schema before anything is written."""
     ready: list[tuple[int, int | None, BaseModel]] = []
@@ -373,6 +422,7 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
         if not content:
             raise ValidationError("That file is empty.")
         parsed, read_errors = parse_upload(defn, content)
+        parsed, unchanged = await untouched_rows(defn, db, parsed)
         ready, schema_errors = validate_rows(defn, parsed)
         problems = read_errors + schema_errors
         if problems:
@@ -436,4 +486,4 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
 
         await write(db, defn, commit=True)
         return {"success": True, "created": created, "updated": updated,
-                "total": created + updated}
+                "unchanged": unchanged, "total": created + updated}

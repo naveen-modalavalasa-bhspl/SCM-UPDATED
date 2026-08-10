@@ -162,8 +162,14 @@ export function AppLayout() {
       size="sm"
       variant="bordered"
       selectedKeys={me.active_position ? [String(me.active_position.id)] : []}
-      onSelectionChange={async (keys) => {
-        const id = Number(Array.from(keys)[0]);
+      // `onChange`, not `onSelectionChange`. HeroUI's selection callback handed back a
+      // Set holding "4" when the choice came through the native select underneath —
+      // a mangled key, not the position id — so switch-position posted 4 and 403'd
+      // with "that position is not assigned to you". Nobody wearing two hats could
+      // change into the other one, which blocks every allocation approval. The native
+      // change event carries the option's real value, so it cannot be truncated.
+      onChange={async (event) => {
+        const id = Number(event.target.value);
         if (id && id !== me.active_position?.id) {
           await switchPosition(id);
           nav("/");

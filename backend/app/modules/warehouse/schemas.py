@@ -191,7 +191,16 @@ class ReceiptItemWrite(BaseModel):
     id: int | None = None
     po_item_id: int | None = None
     indent_id: int | None = None
+    indent_no: str | None = None
     item_id: int
+    # Display only, and ignored on the way in: the service always snapshots code, name
+    # and unit from the masters when it writes a line. They are here so a form that is
+    # PRE-FILLED from another document (a PO, or an incoming consignment) can show what
+    # the item is — without them the source payload carried a bare item_id and every
+    # line rendered as a placeholder with no name.
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
     ordered_qty: Decimal = Decimal("0")
     received_qty: Decimal = Decimal("0")
     accepted_qty: Decimal | None = None
@@ -1342,3 +1351,8 @@ class ReportResult(BaseModel):
 
 
 BinRead.model_rebuild()
+
+
+class IssueBatchIn(BaseModel):
+    """The issues to post in one go — a whole monthly cycle, usually."""
+    issue_ids: list[int]

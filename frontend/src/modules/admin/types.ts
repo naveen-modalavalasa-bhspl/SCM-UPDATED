@@ -270,8 +270,11 @@ export interface LadderRung {
  *  INDEPENDENT — the raiser is dropped from every rung; somebody else has to sign.
  *  CREATOR_ALLOWED — the raiser stays on the ladder and gets the approval task, which
  *  is what Inventory and Warehouse need: the same handful of people hold every post
- *  there, so dropping the raiser emptied the whole ladder and nothing moved. */
-export type SelfApprovalPolicy = "INDEPENDENT" | "CREATOR_ALLOWED";
+ *  there, so dropping the raiser emptied the whole ladder and nothing moved.
+ *  NO_APPROVAL — nobody signs it; the document is born approved with a wf_actions row
+ *  saying so. Unticking every rung is NOT the same thing: an empty ladder reads as a
+ *  misconfiguration and falls through to the reporting line. */
+export type SelfApprovalPolicy = "INDEPENDENT" | "CREATOR_ALLOWED" | "NO_APPROVAL";
 
 /** Both ladder kinds carry the same policy — it belongs to the ladder, not to a role
  *  or a person, so each project decides for itself. */

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { getAllocationApprovalBatches } from "../api";
 import { Pagination } from "@heroui/react";
 import {
-  Card, PageHeader, ResponsiveList, StatusPill, type Column,
+  Button, Card, PageHeader, ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
 import { getAllocation, getPendingInventoryApprovals } from "../api";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
@@ -25,6 +26,9 @@ export function AllocationApprovalsPage() {
   const redirectedFromInbox = useRef(false);
   const [search, setSearch] = useState("");
   const [allocatorFilter, setAllocatorFilter] = useState("");
+  // A signed cycle leaves the queue, which is right — but it also became unfindable,
+  // search included, so there was no way to confirm what had just been approved.
+  const [showDone, setShowDone] = useState(false);
   const [page, setPage] = useState(1);
 
   const queue = useQuery({
@@ -54,8 +58,38 @@ export function AllocationApprovalsPage() {
     return Array.from(allocs).sort().map(a => ({ value: a, label: a }));
   }, [queue.data]);
 
+  // Monthly cycles, counted server-side off the same pending rows. A cycle of 900
+  // allocations is ONE decision for the approver, so it takes one row in this list
+  // and opens its own screen — exactly like a single allocation does.
+  const batches = useQuery({
+    queryKey: ["allocation-approval-batches", showDone],
+    queryFn: () => getAllocationApprovalBatches(showDone),
+  });
+
   const rows = useMemo(() => {
-    let items = queue.data ?? [];
+    const cycleIds = new Set(
+      (batches.data?.items ?? []).flatMap((b) => b.allocation_ids));
+    const cycleRows = (batches.data?.items ?? []).map((b) => ({
+      // Negative, so a synthetic row can never collide with a real allocation id.
+      id: -Math.abs([...b.cycle].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 1e6, 7) || 1),
+      allocation_no: `${b.month_label} — consolidated`,
+      // What this hat can still sign, not the raw pending count: after level 1 the
+      // rows stay pending at level 2, and the row read "6 allocations" while the
+      // buttons inside could sign none of them.
+      indent_no: `${b.actionable_count || b.allocation_count} allocations`
+        + ` · ${b.indent_count} indents`,
+      status: b.pending_count ? "PENDING_APPROVAL" : "APPROVED",
+      allocated_by_name: "Monthly cycle",
+      cycle: b.cycle,
+      items: b.allocations.flatMap((a) => a.lines.map((l) => ({
+        quantity: l.quantity, requested_qty: l.quantity,
+      }))),
+    })) as unknown as Allocation[];
+
+    // The individual allocations inside a cycle are represented by their cycle row;
+    // listing them twice would invite approving the same thing from two places.
+    let items = (queue.data ?? []).filter((r) => !cycleIds.has(r.id));
+    items = [...cycleRows, ...items];
     if (allocatorFilter) items = items.filter((r) => r.allocated_by_name === allocatorFilter);
     const q = search.trim().toLowerCase();
     if (q) {
@@ -65,7 +99,7 @@ export function AllocationApprovalsPage() {
       );
     }
     return items;
-  }, [queue.data, search, allocatorFilter]);
+  }, [queue.data, batches.data, search, allocatorFilter]);
 
   const columns: Column<Allocation>[] = [
     {
@@ -134,7 +168,7 @@ export function AllocationApprovalsPage() {
           setAllocatorFilter("");
           setPage(1);
         }}
-        active={(search ? 1 : 0) + (allocatorFilter ? 1 : 0)}
+        active={(search ? 1 : 0) + (allocatorFilter ? 1 : 0) + (showDone ? 1 : 0)}
       >
         <FilterSelect
           value={allocatorFilter}
@@ -142,6 +176,12 @@ export function AllocationApprovalsPage() {
           options={allAllocators}
           placeholder="All Allocators"
         />
+        <Button
+          variant={showDone ? "soft" : "subtle"}
+          onClick={() => { setShowDone((v) => !v); setPage(1); }}
+        >
+          {showDone ? "Hiding nothing" : "Show signed cycles"}
+        </Button>
       </FilterBar>
 
       {queue.error ? (
@@ -155,7 +195,9 @@ export function AllocationApprovalsPage() {
             loading={queue.isLoading}
             keyOf={(row) => row.id}
             columns={columns}
-            onRowClick={(row) => nav(`/inventory/allocation-approvals/${row.id}`)}
+            onRowClick={(row) => nav((row as { cycle?: string }).cycle
+              ? `/inventory/allocation-approvals/cycle/${(row as { cycle?: string }).cycle}`
+              : `/inventory/allocation-approvals/${row.id}`)}
             empty="No allocation is waiting for you. Only approvals assigned to your active position appear here."
             renderCard={(row) => (
               <div className="space-y-1">

@@ -30,7 +30,8 @@ from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
     DISPATCH_GATE_OUT, DISPATCH_VIEW, INSPECTION_DELETE, ISSUE_DELETE, MOVEMENT_DELETE,
     PICKING_DELETE, PUTAWAY_DELETE, RECEIPT_DELETE, RETURN_DELETE,
-    INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_POST, ISSUE_VIEW,
+    INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_FORWARD, ISSUE_POST,
+    ISSUE_VIEW,
     MASTER_LOCATION_MANAGE, PICKING_PICK, PICKING_VIEW, PUTAWAY_EXECUTE, PUTAWAY_VIEW,
     RECEIPT_CREATE, RECEIPT_POST, RECEIPT_VIEW, RETURN_APPROVE, RETURN_CREATE, RETURN_VIEW,
     STOCK_TRANSFER, STOCK_VIEW, WAREHOUSE_REPORT_VIEW,
@@ -356,6 +357,14 @@ async def get_picking(picking_id: int, db: AsyncSession = Depends(get_db),
     return await service.get_picking(db, picking_id)
 
 
+@router.post("/receipts/{receipt_id}/forward", response_model=list[s.IssueRead],
+             status_code=201)
+async def forward_arrival(receipt_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(ISSUE_FORWARD))):
+    """Pass an arrived consignment on to the points below it. One draft per indent."""
+    return await service.forward_arrival(db, receipt_id, user)
+
+
 @router.post("/pickings", response_model=s.PickingDetail, status_code=201)
 async def create_picking(data: s.PickingWrite, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(ISSUE_CREATE))):
@@ -392,6 +401,24 @@ async def list_issues(params: PageParams = Depends(), direction: str | None = No
                       user=Depends(require_permission(ISSUE_VIEW))):
     return await service.list_issues(db, params, direction=direction, status=status,
                                      warehouse_id=warehouse_id, search=search, user=user)
+
+
+# --- working a whole monthly cycle -----------------------------------------
+# Above /issues/{issue_id}: "cycles" is not an int, and FastAPI matches in
+# declaration order.
+
+@router.get("/issues/cycles")
+async def issue_cycles(db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(ISSUE_VIEW))):
+    """Outstanding issues grouped by the monthly cycle they serve."""
+    return {"items": await service.issue_cycles(db, user)}
+
+
+@router.post("/issues/post-batch")
+async def post_issues_batch(body: s.IssueBatchIn, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(ISSUE_POST))):
+    """Post a whole cycle. One stock movement and one ledger row per issue."""
+    return await service.post_issues_batch(db, body.issue_ids, user)
 
 
 @router.get("/issues/{issue_id}", response_model=s.IssueDetail)

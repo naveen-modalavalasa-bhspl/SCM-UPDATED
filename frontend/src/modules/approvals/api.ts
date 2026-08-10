@@ -1,5 +1,6 @@
 import { api } from "@/shared/api/client";
 import type {
+  AllocationCycleRow,
   ApprovalDecisionRow, ApprovalHistoryRow, ApprovalIndent, ApprovalQuantityInput,
   ApprovalReport, ConsolidationApprovalInput, ConsolidationApprovalResult,
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
@@ -63,6 +64,11 @@ export const approvalsApi = {
   decisions: (page = 1, size = 20, filters: { search?: string; decision?: string } = {}) =>
     api.get<Paginated<ApprovalDecisionRow>>("/api/approvals/my-decisions", { params: { page, size, ...filters } }).then((r) => r.data),
   decisionsAll: () => allPages<ApprovalDecisionRow>("/api/approvals/my-decisions"),
+  /** Monthly allocation cycles waiting on me. Consolidated the same way monthly
+   *  indents are — one row for the cycle, not one per allocation. */
+  allocationCycles: () =>
+    api.get<{ items: AllocationCycleRow[] }>("/api/approvals/allocation-cycles")
+      .then((r) => r.data.items),
   teamQueue: () =>
     api.get<{ items: TeamQueueRow[] }>("/api/approvals/team-queue").then((r) => r.data.items),
   // One request for the whole screen: filtered batches AND the dropdown contents come

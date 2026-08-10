@@ -41,6 +41,8 @@ function saveBlob(data: Blob, filename: string) {
 
 export interface ImportResult {
   success: boolean; created: number; updated: number; total: number;
+  /** Rows identical to what /export wrote, so they asked for no change. */
+  unchanged: number;
 }
 
 export interface MasterUsage {

@@ -74,6 +74,13 @@ export function ApprovalsPage() {
   useEffect(() => setPage(1), [dateFrom, dateTo, docType, pastDueOnly, raisedRange, search, sort]);
   const all = useMemo(() => query.data?.items ?? [], [query.data?.items]);
   const types = useMemo(() => approvalTypeCounts(summary?.by_doc_type ?? {}), [summary]);
+  // Delegated to the same server-side grouping Inventory uses, so both screens agree
+  // on what a cycle is and who may sign it.
+  const cycles = useQuery({
+    queryKey: ["approvals", "allocation-cycles"],
+    queryFn: approvalsApi.allocationCycles,
+  });
+
   const rows = useMemo(() => {
     const term = search.trim().toLowerCase();
     const window = raisedWindow(raisedRange, dateFrom, dateTo);
@@ -127,6 +134,31 @@ export function ApprovalsPage() {
   return <>
     <PageHeader eyebrow="Approvals" title="Waiting for me" actions={<div className="flex gap-2"><Button variant="ghost" onClick={() => setParams({ view: "reports" })}><BarChart3 className="h-4 w-4" /> Reports</Button><Button variant="ghost" disabled={query.isFetching} onClick={() => query.refetch()}><RefreshCw className={`h-4 w-4 ${query.isFetching ? "animate-spin" : ""}`} /> Refresh</Button></div>} />
     <ResponsiveGrid cols={3} className="mb-4"><StatCard label="Waiting on you" value={summaryQuery.isLoading ? "—" : waiting} icon={<Inbox size={16} />} /><StatCard label="Past due" value={summaryQuery.isLoading ? "—" : pastDue} icon={<TriangleAlert size={16} />} tone={pastDue ? "text-danger" : "text-muted"} /><StatCard label="Longest wait" value={summaryQuery.isLoading || !waiting ? "—" : `${oldest}d`} icon={<AlarmClock size={16} />} tone={oldest > 3 ? "text-warning" : "text-muted"} /></ResponsiveGrid>
+    {/* Monthly allocation cycles. They were only reachable from Inventory, so an
+        approver working out of this inbox never saw them and a cycle sat unsigned. */}
+    {(cycles.data ?? []).length > 0 && <Card className="mb-4 p-4">
+      <h2 className="mb-2 text-sm font-semibold text-ink">Monthly allocation cycles</h2>
+      <div className="space-y-2">
+        {(cycles.data ?? []).map((row) => (
+          <button
+            key={row.cycle}
+            type="button"
+            onClick={() => nav(row.href)}
+            className="flex w-full flex-wrap items-center justify-between gap-2 rounded-lg
+                       border border-line bg-content1 p-3 text-left hover:bg-content2"
+          >
+            <div>
+              <strong className="text-ink">{row.month_label} — consolidated</strong>
+              <p className="text-xs text-muted">
+                {row.allocation_count} allocations · {row.indent_count} indents
+                {" · "}{row.item_count} items
+              </p>
+            </div>
+            <StatusPill status={row.actionable_count ? "PENDING_APPROVAL" : "WAITING"} />
+          </button>
+        ))}
+      </div>
+    </Card>}
     <Card className="mb-4 space-y-3 p-4">
       <div className="flex flex-wrap gap-2">
         <div className="relative min-w-60 flex-1"><Search className="absolute left-3 top-3.5 h-4 w-4 text-muted" /><input className="h-11 w-full rounded-lg border border-line bg-content1 pl-9 pr-3 text-sm text-ink" aria-label="Search approvals" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search document, requester or stage" /></div>

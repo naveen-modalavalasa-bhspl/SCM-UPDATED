@@ -267,7 +267,10 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
     order.
     """
     ladder_config_validate(data.doc_type)
-    if not data.steps:
+    # NO_APPROVAL is the one policy with nothing to tick: the document is born
+    # approved, so demanding a rung would make the setting unsaveable. Every other
+    # policy still needs at least one post or it would resolve to nobody.
+    if not data.steps and data.self_approval_policy != ladder.POLICY_NONE:
         raise ValidationError("Pick at least one approver")
 
     allowed = {row[0] for row in (await db.execute(
@@ -319,6 +322,19 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
               if data.self_approval_policy in ladder.POLICIES
               else ladder.POLICY_INDEPENDENT)
 
+    async def _mark_policy(stage: Stage) -> None:
+        """The policy belongs to the ladder, so it is written once on its first step."""
+        await db.flush()
+        db.add(StageCondition(
+            stage_id=stage.id, field_name=ladder.POLICY_FIELD,
+            operator="EQ", field_value=policy, logic="AND"))
+        if data.fallback_position_id:
+            db.add(StageCondition(
+                stage_id=stage.id,
+                field_name=ladder.FALLBACK_POSITION_FIELD,
+                operator="EQ", field_value=str(data.fallback_position_id),
+                logic="AND"))
+
     for index, step in enumerate(data.steps):
         stage = Stage(
             workflow_id=wf.id,
@@ -333,17 +349,21 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
         )
         db.add(stage)
         if index == 0:
-            # The policy belongs to the ladder, so it is written once on its first step.
-            await db.flush()
-            db.add(StageCondition(
-                stage_id=stage.id, field_name=ladder.POLICY_FIELD,
-                operator="EQ", field_value=policy, logic="AND"))
-            if data.fallback_position_id:
-                db.add(StageCondition(
-                    stage_id=stage.id,
-                    field_name=ladder.FALLBACK_POSITION_FIELD,
-                    operator="EQ", field_value=str(data.fallback_position_id),
-                    logic="AND"))
+            await _mark_policy(stage)
+
+    if not data.steps:
+        # NO_APPROVAL has no rungs to pick, but the marker has to live somewhere or
+        # read_policy finds nothing, defaults to INDEPENDENT, and the "no signature
+        # needed" ladder routes to the reporting line — the exact opposite of the
+        # setting. A disabled, post-less stage carries it: resolve_fixed_chain skips
+        # any stage that has no position, so it can never resolve to an approver.
+        marker = Stage(
+            workflow_id=wf.id, sequence=1, name="No approval required",
+            approver_type=ApproverType.POSITION.value, position_id=None,
+            is_enabled=False, approval_mode=ApprovalMode.ANY_ONE.value,
+        )
+        db.add(marker)
+        await _mark_policy(marker)
     await db.flush()
 
     await write_audit(

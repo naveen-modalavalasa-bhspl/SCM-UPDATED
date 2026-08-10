@@ -94,6 +94,12 @@ def _indents_source() -> Select:
         Indent.id.label("id"),
         Indent.indent_no.label("doc_no"),
         Indent.indent_date.label("doc_date"),
+        # The monthly cycle, derived rather than stored — exactly the key
+        # `indents.service.cycle_key` builds in Python, so a ledger row and an
+        # approval batch can never disagree about which month an indent belongs to.
+        func.coalesce(func.date_format(Indent.indent_date, "%Y-%m"),
+                      "UNDATED").label("cycle"),
+        Indent.indent_type.label("indent_type"),
         Indent.required_date.label("required_date"),
         Indent.status.label("status"),
         Indent.priority.label("priority"),
@@ -120,6 +126,8 @@ INDENTS = LedgerSpec(
     columns=[
         Col("doc_no", "Indent No"),
         Col("doc_date", "Date", "date"),
+        Col("indent_type", "Type", "status", narrow=True),
+        Col("cycle", "Cycle", narrow=True),
         Col("status", "Status", "status"),
         Col("priority", "Priority", "status", narrow=True),
         Col("raised_by", "Raised by"),
@@ -133,6 +141,11 @@ INDENTS = LedgerSpec(
         Col("created_at", "Created at", "datetime"),
     ],
     filters=[
+        Filt("indent_type", "Type"),
+        # The month a monthly indent belongs to. Without it there was no way to ask
+        # "how did the August cycle go", which is the question the whole monthly flow
+        # exists to answer.
+        Filt("cycle", "Cycle"),
         Filt("status", "Status"),
         Filt("priority", "Priority"),
         Filt("department", "Department"),

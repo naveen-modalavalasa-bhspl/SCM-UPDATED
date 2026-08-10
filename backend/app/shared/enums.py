@@ -114,6 +114,14 @@ class DocType(str, Enum):
     # the shelf is yours, so the sign-off is yours. Keeps the ordinary warehouse issue
     # ladder untouched.
     OWN_STOCK_ISSUE = "OWN_STOCK_ISSUE"
+    # Stock that never belonged to this point: it arrived here on a consignment for an
+    # indent whose delivery point sits below, and is only being passed along (WH -> MDP
+    # -> LIP). The five people who signed the indent already sanctioned these goods, so
+    # asking the MDP to justify forwarding them re-approves a settled decision. Its own
+    # doc type rather than reusing OWN_STOCK_ISSUE, because that one means "I chose to
+    # give MY stock" — switching its ladder off to quieten forwarding would silently
+    # remove the sign-off from a real decision.
+    FORWARD_ISSUE = "FORWARD_ISSUE"
     MR = "MR"          # material request — the indent -> procurement bridge
     PO = "PO"
     GRN = "GRN"

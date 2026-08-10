@@ -2,14 +2,14 @@ import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Selec
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ScanLine } from "lucide-react";
+import { ArrowLeft, ScanLine, Send } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
-  binOptions, completeReceipt, convertReceiptToGrn, createReceipt,
+  binOptions, completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
   dispatchReceiptSource, gateEntryOptions,
   getReceipt, incomingDispatchOptions, itemOptions, submitReceipt,
   myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
@@ -317,6 +317,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   }, [form.items]);
 
   const locked = !!doc && !["DRAFT", "GATE_ENTRY"].includes(doc.status);
+  /** Lines came off a consignment, so the items are fixed by what was sent. */
+  const fromConsignment = form.receipt_type === "DISPATCH";
 
   /** A full set is a GRN rule. The gate only checks you have not typed more serials
    *  than units — capturing some of a load is the normal case out there. */
@@ -418,6 +420,30 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     },
   });
 
+  /* An arrived consignment whose goods are only passing through: the MDP never owned
+   * them, they came here for indents whose delivery points sit further down. Builds the
+   * onward drafts in one click instead of retyping 40 lines. */
+  const forward = useMutation({
+    mutationFn: () => forwardArrival(Number(id)),
+    onSuccess: (drafts) => {
+      const made = (drafts ?? []) as Array<{ issue_no?: string }>;
+      if (made.length === 0) {
+        // Every indent on the GRN already had a live issue here, so the service made
+        // nothing. Saying "forwarded" would be a lie.
+        void alerts.info("issue.forwarded_none");
+        return;
+      }
+      void alerts.success("issue.forwarded", {
+        number: made.map((d) => d.issue_no).filter(Boolean).join(", ")
+          || `${made.length} draft(s)`,
+      });
+      qc.invalidateQueries({ queryKey: ["wh-issues"] });
+      // The list lives under /transactions; /warehouse/issues is not a route, so the
+      // click landed nowhere and reinforced the "did anything happen?" feeling.
+      nav("/warehouse/transactions/material-issues");
+    },
+  });
+
   const convert = useMutation({
     mutationFn: () => convertReceiptToGrn(Number(id)),
     onSuccess: (saved) => {
@@ -454,10 +480,18 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         const saved = savedLine(i);
         const code = saved?.item_code ?? l.item_code;
         const name = saved?.item_name ?? l.item_name;
-        if (saved || l.po_item_id) {
+        // A consignment receipt records what turned up in the vehicle. The quantities
+        // are the receiver's to correct — that is the whole point of counting at the
+        // gate — but the ITEMS are the sender's, and repointing a line at another item
+        // would inward something the dispatch never contained.
+        if (saved || l.po_item_id || fromConsignment) {
           return (
             <div className="min-w-0">
-              <div className="truncate text-sm font-medium text-ink">{name ?? "PO line"}</div>
+              {/* "PO line" was the only fallback, so a consignment line with no
+                  snapshot read as if it came off a purchase order. */}
+              <div className="truncate text-sm font-medium text-ink">
+                {name ?? (fromConsignment ? "Consignment line" : "PO line")}
+              </div>
               <div className="truncate font-mono text-[11px] text-muted">{code ?? "—"}</div>
             </div>
           );
@@ -729,11 +763,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 <Button onClick={() => setConfirming("complete")}>Post to stock</Button>
               </Can>
             )}
+            {/* Only on a consignment that has actually banked its stock here. The MDP
+              * is a staging point for these goods, not their destination, so the next
+              * hop is offered right where the arrival is confirmed rather than making
+              * the storekeeper start a fresh issue and retype every line. */}
+            {editing && doc?.receipt_type === "DISPATCH" && doc?.is_stock_posted && (
+              <Can do="issue.forward">
+                <Button onClick={() => forward.mutate()} disabled={forward.isPending}>
+                  <Send className="h-4 w-4" />
+                  {forward.isPending ? "Forwarding…" : "Forward to points below"}
+                </Button>
+              </Can>
+            )}
           </>
         }
       />
 
-      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error ?? consignment.error} />
+      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error} />
 
       {doc && (
         <MetaCard title="Document">
@@ -917,10 +963,18 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             columns={columns}
             keyOf={(_, i) => i}
             minTableWidth={isGrn ? "min-w-[1500px]" : "min-w-[900px]"}
-            onAdd={locked ? undefined : () => set("items", [...form.items, emptyLine()])}
+            // No hand-added lines on a consignment receipt: an empty line has no item
+            // to pick, and anything not on the challan did not arrive.
+            onAdd={locked || fromConsignment
+              ? undefined
+              : () => set("items", [...form.items, emptyLine()])}
             onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
             rowTone={(l) => (num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
-            empty={isGrn ? "Pick a purchase order above, or add lines by hand." : "Add the items received at the gate."}
+            empty={fromConsignment
+              ? "Pick the incoming consignment above — its lines fill in here."
+              : isGrn
+                ? "Pick a purchase order above, or add lines by hand."
+                : "Add the items received at the gate."}
             footer={
               /* Only what the columns above show: totalling accepted, rejected and
                * value at the gate would report figures nobody entered there. */

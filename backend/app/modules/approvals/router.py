@@ -70,6 +70,14 @@ async def approve_consolidation(body: ConsolidationApprovalIn,
     return await service.approve_consolidation(db, body, user)
 
 
+@router.get("/allocation-cycles")
+async def allocation_cycles(db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+    """Monthly allocation cycles waiting on me — the consolidated counterpart to the
+    single allocation rows already in this inbox."""
+    return {"items": await service.allocation_cycles_for_user(db, user)}
+
+
 @router.get("/reports/summary", response_model=ApprovalReportOut)
 async def reports(db: AsyncSession = Depends(get_db),
                   user=Depends(get_current_user)):
