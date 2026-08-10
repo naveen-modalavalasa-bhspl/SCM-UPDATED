@@ -6,6 +6,7 @@ and follows pagination.
 """
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from tenacity import (
@@ -82,14 +83,25 @@ class HcmClient:
             _breaker.on_failure()
             raise HcmUnavailable(f"HCM request failed: {exc}") from exc
 
-    async def fetch_all(self, entity: str, page_size: int = 100) -> list[dict]:
-        """Fetch every row of an entity, following pagination."""
+    # 200 is the largest page HCM will serve; asking for more is silently capped, so
+    # this is the fewest round trips the feed allows (4002 positions: 21 calls, not 41).
+    async def fetch_all(self, entity: str, page_size: int = 200) -> list[dict]:
+        """Fetch every row of an entity, following pagination.
+
+        Only the QUERY of HCM's `next` link is trusted, never its host: HCM builds
+        that link from the request host it sees behind its proxy and drops the port,
+        so `next` comes back as http://<host>/api/employees/?page=2 — a 404 that would
+        end every sync one page in. The page numbers are still HCM's; we just ask for
+        them on the address we were configured with.
+        """
         url = f"{self.base_url}/{entity}/"
         params: dict | None = {"limit": page_size}
         rows: list[dict] = []
-        while url:
+        while True:
             data = await self._get(url, params=params)
             rows.extend(_extract(data))
-            url = data.get("next") if isinstance(data, dict) else None
-            params = None  # `next` already carries query params
-        return rows
+            nxt = data.get("next") if isinstance(data, dict) else None
+            if not nxt:
+                return rows
+            params = {k: v[0] for k, v in parse_qs(urlparse(nxt).query).items()}
+            params.setdefault("limit", page_size)

@@ -158,6 +158,47 @@ outside the structure above.
 
 ---
 
+## The HCM cutover (2026-08-10)
+
+HCM was rebuilt and now serves `:8009` with a new key. Two things came with it: the
+**sections** that say which distribution rung a post serves (`L I P`, `M.D.P` — the
+only place the org states that a position is a stocking point), and a **populated
+reporting tree**. The old `:8001` feed is still up and both payload shapes are still
+read, so the base URL is the only switch.
+
+What does NOT survive the switch is identity. HCM re-keyed everything except
+employees: **0 of 3733 position ids and only 461 of 1504 office ids** carry over, and
+8 employee ids came back holding a different person. So:
+
+- Approval **ladders and any `POSITION`-pinned `wf_stages` row must be reconfigured**
+  after a cutover; the rungs are role ids and those are new too (7 roles: SPH,
+  Regional Manager, District Manager, OE, Driver, DEO, Store Keeper).
+- `sys_local_credentials` is keyed on the employee id, and a sync never re-issues it.
+  Where an id changed hands, that person's old password now opens a session as the
+  new holder — `scripts/hcm_cutover.py` prints every one; re-issue them by hand.
+- `hcm_position_assignments` is derived from the `assigned_employee` on each position,
+  never from HCM's own `position-assignments` feed: the two id ranges overlap and
+  would silently reseat people. That feed is out of `sync.NEEDED_ENTITIES` on purpose.
+
+**Deploying it** is a `.env` change plus two commands, in this order, on whichever
+database `DATABASE_URL` points at:
+
+```
+.venv/Scripts/python -m alembic upgrade head      # adds hcm_positions.section_id/
+                                                  # section_name, hcm_offices.office_mode
+.venv/Scripts/python -m scripts.hcm_cutover       # sync + retire the old generation
+```
+
+Both are idempotent — re-running the cutover retires 0 and reports 0 moves. Note that
+pointing `DATABASE_URL` somewhere else does **not** carry data with it: each database
+is brought up to date by running these two commands against it.
+
+Still sample-sized: `whs_warehouses` holds ~20 rows while the feed describes 948 LIP
+and 33 MDP stocking points. Creating them (and their `inv_position_locations`) is a
+separate backfill and has not been run.
+
+---
+
 ## Deviations from the docs (and why)
 
 The docs are Postgres + "HCM has no data yet"; reality differed. Precedence 03>02>01

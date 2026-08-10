@@ -47,7 +47,11 @@ class HcmOffice(Base):
     id = _pk()
     code = Column(String(50), nullable=True)
     name = Column(String(200), nullable=False, index=True)
-    office_type = Column(String(50), nullable=True)
+    office_type = Column(String(50), nullable=True)      # HCM `level_name`
+    # HCM's own `office_type`: what the place physically is — Mobile for an MMU
+    # vehicle, Warehouse for a store. The column above holds the level and cannot be
+    # reused: /api/auth/me has returned the level under that name since day one.
+    office_mode = Column(String(50), nullable=True, index=True)
     address = Column(String(500), nullable=True)
     city = Column(String(100), nullable=True)
     state = Column(String(100), nullable=True)
@@ -124,6 +128,11 @@ class HcmPosition(Base):
     level_id = Column(BigInteger, index=True, nullable=True)
     parent_position_id = Column(BigInteger, index=True, nullable=True)
     department_id = Column(BigInteger, index=True, nullable=True)
+    # HCM runs one section per distribution rung ("L I P", "M.D.P"), so the section a
+    # position sits in is what marks it as a stocking point. Indexed because the whole
+    # LIP/MDP backfill is "every position in this section".
+    section_id = Column(BigInteger, index=True, nullable=True)
+    section_name = Column(String(200), nullable=True)
     office_id = Column(BigInteger, nullable=True)
     # HCM's own org role ("Network Technicians"), which is NOT an SCM permission role.
     # rbac_roles decides what someone may do; this describes what they are. Kept so

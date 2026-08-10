@@ -170,8 +170,22 @@ async def list_projects(db: AsyncSession) -> list[dict]:
         .group_by(HcmEmployee.project_id, HcmEmployee.project_name)
         .order_by(func.count(HcmEmployee.id).desc())
     )).all()
-    return [{"id": r.project_id, "name": r.project_name or f"Project {r.project_id}",
-             "headcount": r.headcount} for r in rows]
+    projects = [{"id": r.project_id, "name": r.project_name or f"Project {r.project_id}",
+                 "headcount": r.headcount} for r in rows]
+
+    # SCM's own staff — the inventory manager, the warehouse manager — serve every
+    # project and HCM therefore tags them with none, so they produce no row above and
+    # had nowhere to be laddered from. The company-wide ladder already exists as the
+    # fallback every project falls back TO (`ladder_code(None, doc_type)`); this only
+    # makes it selectable. `id: None` is what resolve/save already treat as company-wide,
+    # so nothing downstream changes.
+    unassigned = (await db.execute(
+        select(func.count(HcmEmployee.id))
+        .where(HcmEmployee.project_id.is_(None), HcmEmployee.is_active.is_(True))
+    )).scalar() or 0
+    projects.append({"id": None, "name": "Company-wide (no project)",
+                     "headcount": unassigned})
+    return projects
 
 
 async def list_doc_types() -> list[dict]:

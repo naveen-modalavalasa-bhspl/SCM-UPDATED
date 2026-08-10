@@ -60,13 +60,23 @@ OFFICE_LEVEL_SCOPE = {
 }
 
 
-def derive_key(code: str | None, job_name: str | None, name: str | None) -> str:
-    """The profile key for one position. Pure function — no DB, no config."""
+def derive_key(code: str | None, job_name: str | None, name: str | None,
+               role_name: str | None = None) -> str:
+    """The profile key for one position. Pure function — no DB, no config.
+
+    `role_name` sits between job_name and code because a position code is only a job
+    when the HCM writes one in ("IVM@..."). The rebuilt HCM writes none — its codes
+    are per-post ("POS-SK-LIP-DRV-104-0299-AP-104-MMU") and its job_name is empty on
+    all 4002 positions — so falling straight through to the code turned every single
+    post into its own profile and the screen listed 4002 of them. The org role is the
+    coarsest thing that is still a job, and it is the same field the approval ladder
+    treats as a rank.
+    """
     raw = ""
     if code and "@" in code:
         raw = code.split("@")[0]
     if not raw.strip():
-        raw = job_name or code or name or ""
+        raw = job_name or role_name or code or name or ""
     key = re.sub(r"[^A-Z0-9 ]+", " ", raw.upper())
     key = re.sub(r"\s+", " ", key).strip()
     # "SE1"/"SE2"/"SE3" are three people doing one job, not three jobs. A trailing
@@ -242,7 +252,7 @@ async def _derive(db: AsyncSession) -> dict[str, dict]:
 
     profiles: dict[str, dict] = {}
     for row in rows:
-        job = derive_key(row.code, row.job_name, row.name)
+        job = derive_key(row.code, row.job_name, row.name, row.role_name)
         project_id, project_name = by_position.get(row.id, (None, None))
         if project_id is None:
             # Nobody in the post: fall back to the project name HCM stamps on it.
@@ -312,12 +322,13 @@ async def _profile_roles(db: AsyncSession) -> dict[str, Role]:
 async def profile_role_for_position(db: AsyncSession, position_id: int) -> Role | None:
     """The saved profile role for one position, or None if nobody has granted it yet."""
     row = (await db.execute(
-        select(HcmPosition.name, HcmPosition.code, HcmPosition.job_name, HcmPosition.raw)
+        select(HcmPosition.name, HcmPosition.code, HcmPosition.job_name,
+               HcmPosition.role_name, HcmPosition.raw)
         .where(HcmPosition.id == position_id)
     )).first()
     if row is None:
         return None
-    job = derive_key(row.code, row.job_name, row.name)
+    job = derive_key(row.code, row.job_name, row.name, row.role_name)
     # Targeted, NOT the whole-mirror position_projects() map. This runs on every
     # scoped query — the indent list, the dashboard KPIs, the Home tile, every
     # detail read — and building a 3,400-row dictionary each time to look up one

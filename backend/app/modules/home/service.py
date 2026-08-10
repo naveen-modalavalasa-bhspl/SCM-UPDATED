@@ -322,7 +322,12 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
                     "calendar-check", "orange",
                 ))
 
-    if pending or APPROVE_PERMISSIONS & permissions:
+    # Permission alone, like every other tile here. It used to render whenever the
+    # engine had anything waiting — `pending or ...` — and a pending row belongs to the
+    # PERSON, not the hat they are wearing, so someone holding both an OE post and a
+    # store keeper post carried the OE queue onto the store keeper hat that RBAC had
+    # just taken approvals away from.
+    if APPROVE_PERMISSIONS & permissions:
         overdue = sum(1 for row in pending if _is_overdue(row))
         kpis.append(_kpi(
             "approvals", "APPROVALS", len(pending), f"{overdue} Overdue",

@@ -10,9 +10,11 @@ overwrites SCM-owned columns (hcm_facilities.is_stock_location, hcm_employees
 .password_hash) because those keys are not produced by the mappers.
 """
 import asyncio
+import logging
 from datetime import datetime
 from typing import Callable
 
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.platform.hcm import mappers
@@ -23,6 +25,8 @@ from app.platform.hcm.models import (
 )
 from app.platform.settings.models import HcmSyncLog
 from app.shared.models.base import utcnow
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_dt(value):
@@ -55,7 +59,19 @@ _DT_FIELDS = {"valid_from", "valid_to"}
 _PROJECT_ENTITY = "projects"
 
 
-async def _upsert(db: AsyncSession, model: type, cols: dict, raw: dict) -> bool:
+async def _load_existing(db: AsyncSession, model: type) -> dict:
+    """Every row of a mirror table, by id, in one query.
+
+    `_upsert` used to ask the database for each incoming row, which on the positions
+    feed meant 4002 round trips to decide 4002 inserts-or-updates. The mirror tables
+    are small enough to hold whole (thousands of rows, not millions), and one SELECT
+    beats one per record by an order of magnitude on a remote MySQL.
+    """
+    return {row.id: row for row in (await db.execute(select(model))).scalars().all()}
+
+
+async def _upsert(db: AsyncSession, model: type, cols: dict, raw: dict,
+                  existing_by_id: dict | None = None) -> bool:
     row_id = cols.get("id")
     if row_id is None:
         return False
@@ -66,10 +82,17 @@ async def _upsert(db: AsyncSession, model: type, cols: dict, raw: dict) -> bool:
     # Scrubbing here rather than in each mapper means a newly added sensitive field is
     # dropped even from entities whose mapper has not been touched.
     raw = mappers.scrub_raw(raw)
-    existing = await db.get(model, row_id)
+    if existing_by_id is None:
+        existing = await db.get(model, row_id)
+    else:
+        existing = existing_by_id.get(row_id)
     now = utcnow()
     if existing is None:
-        db.add(model(**cols, raw=raw, synced_at=now))
+        fresh = model(**cols, raw=raw, synced_at=now)
+        db.add(fresh)
+        if existing_by_id is not None:
+            # A feed that lists the same id twice must update, not insert again.
+            existing_by_id[row_id] = fresh
     else:
         for k, v in cols.items():
             if k == "id":
@@ -78,6 +101,30 @@ async def _upsert(db: AsyncSession, model: type, cols: dict, raw: dict) -> bool:
         existing.raw = raw
         existing.synced_at = now
     return True
+
+
+async def _release_emp_code(db: AsyncSession, cols: dict) -> None:
+    """Let an employee HCM has re-keyed keep their code.
+
+    `hcm_employees.emp_code` is unique, and HCM occasionally re-issues a person under
+    a new id — the same HR-EMP code then arrives owned by an id the mirror has never
+    seen, and the insert dies on the unique key, taking the whole employee sync with
+    it. The stale row is stripped of the code and marked inactive instead of deleted:
+    documents, approvals and credentials still point at that id and must keep
+    resolving to a name.
+
+    Only ever touches a row whose id HCM did not just send, so it cannot disturb a
+    normal update-in-place.
+    """
+    code, row_id = cols.get("emp_code"), cols.get("id")
+    if not code or row_id is None:
+        return
+    await db.execute(
+        update(HcmEmployee)
+        .where(HcmEmployee.emp_code == code, HcmEmployee.id != row_id)
+        .values(emp_code=None, is_active=False)
+        .execution_options(synchronize_session=False)
+    )
 
 
 async def _upsert_project(db: AsyncSession, cols: dict) -> bool:
@@ -89,6 +136,16 @@ async def _upsert_project(db: AsyncSession, cols: dict) -> bool:
     if row_id is None or not cols.get("name"):
         return False
     cols = {k: v for k, v in cols.items() if v is not None}
+    # Same story as _release_emp_code: HCM re-keys, `mst_projects.code` is unique, and
+    # the project arriving under a new id carries the code an older row still holds.
+    # The old row keeps its id (documents point at it) and loses the code.
+    if cols.get("code"):
+        await db.execute(
+            update(Project)
+            .where(Project.code == cols["code"], Project.id != row_id)
+            .values(code=f"{cols['code'][:40]}-OLD", is_active=False)
+            .execution_options(synchronize_session=False)
+        )
     existing = await db.get(Project, row_id)
     if existing is None:
         cols.setdefault("code", f"PRJ-{row_id}")
@@ -130,14 +187,39 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
         if rows is None:
             raise last_exc or RuntimeError("HCM fetch failed")
         upserted = 0
+        existing_by_id = await _load_existing(db, model)
+        seats = (await _load_existing(db, HcmPositionAssignment)
+                 if entity_key in ("positions", "employees") else None)
+        # Posts the positions feed does not list, rescued from the employee record.
+        # Loaded for employees only, and only ever ADDED to: the positions feed is
+        # authoritative wherever it does list a post, and must not be overwritten by
+        # the thinner copy an employee record carries.
+        known_positions = (await _load_existing(db, HcmPosition)
+                           if entity_key == "employees" else None)
+        rescued = 0
         for row in rows:
-            if await _upsert(db, model, mapper(row), row):
+            cols = mapper(row)
+            if entity_key == "employees":
+                await _release_emp_code(db, cols)
+            if await _upsert(db, model, cols, row, existing_by_id):
                 upserted += 1
             # positions carry the employee assignment inline (HCM's own feed is empty)
             if entity_key == "positions":
                 derived = mappers.position_assignment_from_position(row)
                 if derived:
-                    await _upsert(db, HcmPositionAssignment, derived, row)
+                    await _upsert(db, HcmPositionAssignment, derived, row, seats)
+            elif entity_key == "employees":
+                orphan = mappers.position_from_employee(row)
+                if orphan and orphan[0]["id"] not in known_positions:
+                    position_cols, seat = orphan
+                    await _upsert(db, HcmPosition, position_cols, row, known_positions)
+                    await _upsert(db, HcmPositionAssignment, seat, row, seats)
+                    rescued += 1
+        if rescued:
+            logger.warning(
+                "hcm sync: %s positions were missing from the positions feed and were "
+                "taken from the employee records instead", rescued,
+            )
         log.records_fetched = len(rows)
         log.records_upserted = upserted
         log.status = "SUCCESS"
@@ -190,12 +272,21 @@ async def sync_all(db: AsyncSession, client: HcmClient | None = None) -> list[Hc
     return logs
 
 
-# The entities SCM actually needs (skips the huge `sections` feed and the empty
-# facilities/facility_types/organization_levels feeds). Used by "Sync now" and the
-# scheduled job. Order = parents first.
+# The entities SCM actually needs (skips the empty facilities/facility_types/
+# organization_levels feeds). Used by "Sync now" and the scheduled job.
+# Order = parents first.
+#
+# `sections` is in: it used to be a huge unusable feed, and is now three rows that say
+# which rung a post serves ("L I P", "M.D.P") — the only place the org states that.
+#
+# `position_assignments` is deliberately OUT. Who holds a position is derived from the
+# `assigned_employee` that every position already carries (see
+# position_assignment_from_position), and the derived row is keyed BY POSITION ID.
+# HCM's own assignment ids share a range with its position ids, so pulling that feed
+# as well would have the two overwrite each other by id and silently reseat people.
 NEEDED_ENTITIES = [
-    "offices", "departments", "position_levels", "projects", "positions",
-    "employees", "position_assignments",
+    "offices", "departments", "sections", "position_levels", "projects",
+    "positions", "employees",
 ]
 
 
