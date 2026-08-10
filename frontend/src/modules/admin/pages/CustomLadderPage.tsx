@@ -57,14 +57,25 @@ const stepFromPost = (post: LadderPost, sequence: number): CustomLadderStep => (
 const resequence = (steps: CustomLadderStep[]) =>
   steps.map((step, index) => ({ ...step, sequence: index + 1 }));
 
+// The select needs a non-empty value for the company-wide ladder: its id is null, and
+// an empty value is how the control says "nothing picked".
+const COMPANY_WIDE = "company";
+
 const holderLabel = (step: CustomLadderStep) =>
   step.holders.map((holder) => holder.name).join(", ");
 
 export function CustomLadderPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const [projectId, setProjectId] = useState<number | null>(
-    params.get("project_id") ? Number(params.get("project_id")) : null);
+  // Three states, not two. `undefined` is "nothing picked yet"; `null` is a real
+  // choice — the company-wide ladder, which is where SCM's own staff live because HCM
+  // tags them to no project. Both used to be `null`, so picking Company-wide read as
+  // picking nothing: the select snapped back to its placeholder and every query below
+  // stayed disabled.
+  const [projectId, setProjectId] = useState<number | null | undefined>(
+    params.has("project_id")
+      ? (params.get("project_id") ? Number(params.get("project_id")) : null)
+      : undefined);
   const [docType, setDocType] = useState(params.get("doc_type") || "GRN");
   const [department, setDepartment] = useState<string>("");
   const [steps, setSteps] = useState<CustomLadderStep[]>([]);
@@ -83,27 +94,27 @@ export function CustomLadderPage() {
 
   useEffect(() => {
     const first = options.data?.projects[0];
-    if (projectId === null && first) setProjectId(first.id);
+    if (projectId === undefined && first) setProjectId(first.id);
   }, [options.data, projectId]);
 
   const departments = useQuery({
     queryKey: ["admin", "ladder-departments", projectId],
-    queryFn: () => adminApi.customLadders.departments(projectId),
-    enabled: projectId !== null,
+    queryFn: () => adminApi.customLadders.departments(projectId ?? null),
+    enabled: projectId !== undefined,
     staleTime: HCM_STALE_MS,
   });
 
   const posts = useQuery({
     queryKey: ["admin", "ladder-department-posts", projectId, department],
-    queryFn: () => adminApi.customLadders.posts(projectId, department),
-    enabled: projectId !== null && department !== "",
+    queryFn: () => adminApi.customLadders.posts(projectId ?? null, department),
+    enabled: projectId !== undefined && department !== "",
     staleTime: HCM_STALE_MS,
   });
 
   const saved_ladder = useQuery({
     queryKey: ["admin", "custom-ladder", projectId, docType],
-    queryFn: () => adminApi.customLadders.get(projectId, docType),
-    enabled: projectId !== null,
+    queryFn: () => adminApi.customLadders.get(projectId ?? null, docType),
+    enabled: projectId !== undefined,
   });
 
   // The server's steps are the starting point; from then on the list is local until
@@ -117,7 +128,7 @@ export function CustomLadderPage() {
   }, [saved_ladder.data]);
 
   const save = useMutation({
-    mutationFn: () => adminApi.customLadders.save(projectId, docType, steps,
+    mutationFn: () => adminApi.customLadders.save(projectId ?? null, docType, steps,
                                                   { self_approval_policy: policy }),
     onSuccess: (data) => {
       setConfirming(false);
@@ -190,12 +201,13 @@ export function CustomLadderPage() {
         <div className="grid gap-3 sm:grid-cols-3">
           <Field label="Project">
             <Select
-              value={projectId ?? ""}
+              value={projectId === undefined ? "" : projectId ?? COMPANY_WIDE}
               placeholder="Pick a project"
               options={(options.data?.projects ?? []).map((p) => ({
-                value: p.id, label: p.name,
+                value: p.id ?? COMPANY_WIDE, label: p.name,
               }))}
-              onChange={(value) => setProjectId(value === "" ? null : Number(value))}
+              onChange={(value) => setProjectId(
+                value === "" ? undefined : value === COMPANY_WIDE ? null : Number(value))}
             />
           </Field>
           <Field label="Document">

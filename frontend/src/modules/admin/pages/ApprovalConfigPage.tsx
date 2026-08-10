@@ -69,8 +69,14 @@ const positionDepartments = (positions: LadderPosition[]) => {
  *  A live project holds ~3,400 posts across seventeen ranks. Shipping all of them with
  *  every ladder read cost 1.3 MB and seconds, to fill in a panel that is closed until
  *  somebody clicks it. */
+// The select needs a non-empty value for the company-wide ladder: its id is null, and
+// an empty value is how the control says "nothing picked". `undefined` is therefore
+// "nothing picked yet" and `null` is the real, selectable company-wide choice — the
+// only home for SCM staff, whom HCM tags to no project at all.
+const COMPANY_WIDE = "company";
+
 function RungPositions({ projectId, roleId, selected, onToggle }: {
-  projectId: number | null;
+  projectId: number | null | undefined;
   roleId: number;
   /** null — nothing ticked — means the rung is the whole rank. */
   selected: number[] | null;
@@ -78,8 +84,8 @@ function RungPositions({ projectId, roleId, selected, onToggle }: {
 }) {
   const positions = useQuery({
     queryKey: ["admin", "ladder-rank-positions", projectId, roleId],
-    queryFn: () => adminApi.ladders.rankPositions(projectId, roleId),
-    enabled: projectId !== null,
+    queryFn: () => adminApi.ladders.rankPositions(projectId ?? null, roleId),
+    enabled: projectId !== undefined,
     staleTime: HCM_STALE_MS,
   });
   const selectedIds = new Set(selected ?? []);
@@ -150,7 +156,7 @@ function RungPositions({ projectId, roleId, selected, onToggle }: {
 export function ApprovalConfigPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const [projectId, setProjectId] = useState<number | null | undefined>(undefined);
   const [docType, setDocType] = useState("INDENT");
   const [rungs, setRungs] = useState<LadderRung[]>([]);
   const [fromRoleId, setFromRoleId] = useState<number | null>(null);
@@ -168,7 +174,7 @@ export function ApprovalConfigPage() {
   // Land on the first real project rather than an empty screen.
   useEffect(() => {
     const first = options.data?.projects[0];
-    if (projectId === null && first) setProjectId(first.id);
+    if (projectId === undefined && first) setProjectId(first.id);
   }, [options.data, projectId]);
 
   // Two reads, deliberately. The ladder is per project AND document; the ranks behind
@@ -176,15 +182,15 @@ export function ApprovalConfigPage() {
   // an identical answer from 3,400 HCM positions.
   const ladder = useQuery({
     queryKey: ["admin", "ladders", projectId, docType],
-    queryFn: () => adminApi.ladders.get(projectId, docType),
-    enabled: projectId !== null,
+    queryFn: () => adminApi.ladders.get(projectId ?? null, docType),
+    enabled: projectId !== undefined,
     staleTime: HCM_STALE_MS,
   });
 
   const ranks = useQuery({
     queryKey: ["admin", "ladder-ranks", projectId],
-    queryFn: () => adminApi.ladders.ranks(projectId),
-    enabled: projectId !== null,
+    queryFn: () => adminApi.ladders.ranks(projectId ?? null),
+    enabled: projectId !== undefined,
     staleTime: HCM_STALE_MS,
   });
 
@@ -207,12 +213,12 @@ export function ApprovalConfigPage() {
   const preview = useQuery({
     queryKey: ["admin", "ladders", "preview", projectId, docType, fromRoleId,
       rungs.map((r) => `${r.position_role_id}:${r.is_enabled}`).join(",")],
-    queryFn: () => adminApi.ladders.preview(projectId, docType, rungs, fromRoleId),
-    enabled: projectId !== null && fromRoleId !== null && rungs.length > 0,
+    queryFn: () => adminApi.ladders.preview(projectId ?? null, docType, rungs, fromRoleId),
+    enabled: projectId !== undefined && fromRoleId !== null && rungs.length > 0,
   });
 
   const save = useMutation({
-    mutationFn: () => adminApi.ladders.save(projectId, docType, rungs),
+    mutationFn: () => adminApi.ladders.save(projectId ?? null, docType, rungs),
     onSuccess: () => {
       setConfirming(false);
       // Only the ladder moved. The ranks and their posts come from HCM and are
@@ -223,7 +229,7 @@ export function ApprovalConfigPage() {
   });
 
   const copy = useMutation({
-    mutationFn: () => adminApi.ladders.copy(projectId, docType, copyTargets),
+    mutationFn: () => adminApi.ladders.copy(projectId ?? null, docType, copyTargets),
     onSuccess: () => { setCopying(false); setCopyTargets([]); },
     onError: (err: Error) => { setCopying(false); setError(err.message); },
   });
@@ -321,12 +327,13 @@ export function ApprovalConfigPage() {
             hint="Each project has its own ladder, built from the ranks its people hold."
           >
             <Select
-              value={projectId ?? ""}
+              value={projectId === undefined ? "" : projectId ?? COMPANY_WIDE}
               placeholder="Pick a project"
               options={(options.data?.projects ?? []).map((p) => ({
-                value: p.id, label: p.name,
+                value: p.id ?? COMPANY_WIDE, label: p.name,
               }))}
-              onChange={(value) => setProjectId(value === "" ? null : Number(value))}
+              onChange={(value) => setProjectId(
+                value === "" ? undefined : value === COMPANY_WIDE ? null : Number(value))}
             />
           </Field>
           <Field label="Document" hint="Grouped by the module that owns the document.">

@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     # Demo seeds create mock HCM identities and local credentials. Production must
     # opt in explicitly rather than accepting demo access by accident.
     ALLOW_DEMO_DATA: bool = False
+    # The password an employee arriving from an HCM sync gets, so a new joiner can log
+    # in without an admin issuing one by hand. Unset means no login is created — every
+    # account it makes shares one password, which is fine for a test org and is not
+    # something to fall back into silently anywhere else. Never a literal in code
+    # (rule 13); it comes from .env or it does not happen.
+    NEW_USER_DEFAULT_PASSWORD: str | None = None
 
     # --- CORS (comma-separated) ---
     CORS_ORIGINS: str = "http://localhost:5173"

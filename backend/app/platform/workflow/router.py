@@ -1,8 +1,9 @@
 """Workflow read endpoints: the 'My Approvals' inbox and a document's audit trail."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.exceptions import ValidationError
 from app.core.dependencies import get_current_user, require_permission
 from app.core.pagination import PageParams
 from app.platform.rbac import permissions as perms
@@ -18,6 +19,23 @@ from app.platform.workflow.schemas import (
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
 
 
+def _project_id(project_id: str | None = Query(None)) -> int | None:
+    """The project a ladder is being configured for, or None for company-wide.
+
+    Parsed by hand because company-wide IS a real choice on this screen and a select
+    with no value posts `?project_id=`, which an `int | None` rejects with a 422 — the
+    "Could not load this department's posts" the SCM staff's own ladder died on. An
+    empty string and an absent parameter mean the same thing here: not scoped to a
+    project.
+    """
+    if project_id is None or not project_id.strip():
+        return None
+    try:
+        return int(project_id)
+    except ValueError as exc:
+        raise ValidationError(f"project_id must be a number: {project_id!r}") from exc
+
+
 # ---------------- Settings > Approvals Config ----------------
 
 @router.get("/ladders/options")
@@ -30,7 +48,7 @@ async def ladder_options(
 
 @router.get("/ladders/ranks")
 async def ladder_ranks(
-    project_id: int | None = None,
+    project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
@@ -40,7 +58,7 @@ async def ladder_ranks(
 @router.get("/ladders/rank-positions")
 async def ladder_rank_positions(
     role_id: int,
-    project_id: int | None = None,
+    project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
@@ -50,7 +68,7 @@ async def ladder_rank_positions(
 @router.get("/ladders")
 async def get_ladder(
     doc_type: str,
-    project_id: int | None = None,
+    project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
@@ -145,7 +163,7 @@ async def copy_ladder(
 
 @router.get("/ladders/departments")
 async def ladder_departments(
-    project_id: int | None = None,
+    project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
@@ -155,7 +173,7 @@ async def ladder_departments(
 @router.get("/ladders/department-posts")
 async def ladder_department_posts(
     department: str,
-    project_id: int | None = None,
+    project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
@@ -165,7 +183,7 @@ async def ladder_department_posts(
 @router.get("/ladders/custom")
 async def get_custom_ladder(
     doc_type: str,
-    project_id: int | None = None,
+    project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):

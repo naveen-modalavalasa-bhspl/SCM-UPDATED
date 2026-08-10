@@ -103,6 +103,44 @@ async def _upsert(db: AsyncSession, model: type, cols: dict, raw: dict,
     return True
 
 
+async def _issue_missing_logins(db: AsyncSession) -> int:
+    """Give every active employee without one a login, on the configured password.
+
+    HCM is the joiner feed: someone hired today appears in the mirror on the next sync
+    and, until now, could not sign in until an admin cut them a credential by hand.
+    Only ever ADDS — an existing password is never touched, so this cannot reset
+    anybody back to the shared default.
+
+    Off unless NEW_USER_DEFAULT_PASSWORD is set (rule 13: no secret in code).
+    """
+    from app.core.config import settings
+    from app.core.security import hash_password
+    from app.platform.settings.models import UserCredential
+
+    password = settings.NEW_USER_DEFAULT_PASSWORD
+    if not password:
+        return 0
+
+    missing = (await db.execute(
+        select(HcmEmployee.id)
+        .outerjoin(UserCredential, UserCredential.employee_id == HcmEmployee.id)
+        .where(HcmEmployee.is_active.is_(True), UserCredential.employee_id.is_(None))
+    )).scalars().all()
+    if not missing:
+        return 0
+
+    # Hashed once, not per row: bcrypt is deliberately slow, and 1900 of them would
+    # turn a sync into a coffee break.
+    digest = hash_password(password)
+    db.add_all(UserCredential(employee_id=employee_id, password_hash=digest,
+                              must_change=False)
+               for employee_id in missing)
+    await db.commit()
+    logger.warning("hcm sync: issued %s new logins on the default password",
+                   len(missing))
+    return len(missing)
+
+
 async def _release_emp_code(db: AsyncSession, cols: dict) -> None:
     """Let an employee HCM has re-keyed keep their code.
 
@@ -269,6 +307,8 @@ async def sync_all(db: AsyncSession, client: HcmClient | None = None) -> list[Hc
     from app.platform.rbac.service import sync_hcm_roles
     await sync_hcm_roles(db)
     await db.commit()
+    # A joiner HCM sent us can sign in without waiting for an admin.
+    await _issue_missing_logins(db)
     return logs
 
 
@@ -298,6 +338,8 @@ async def sync_needed(db: AsyncSession, client: HcmClient | None = None) -> list
     from app.platform.rbac.service import sync_hcm_roles
     await sync_hcm_roles(db)
     await db.commit()
+    # A joiner HCM sent us can sign in without waiting for an admin.
+    await _issue_missing_logins(db)
     return logs
 
 
