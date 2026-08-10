@@ -36,10 +36,10 @@ export function ConsolidationDetailPage() {
       </div>}
     />
     <p className="mb-4 text-sm text-body">
-      Set an approved total against any item and it is shared out across the indents
-      that asked for it, in proportion to what each requested; name indents in that
-      item's exclude box and their share goes to the rest. Approve all sends every
-      indent in this consolidation on at those quantities.
+      Everything this cycle asked for, one row per item, with the total everyone
+      requested. Open an item to see which indents asked for it, set the quantity going
+      out and leave indents out of it. Approve all sends every indent in this
+      consolidation on at those quantities.
     </p>
 
     {query.error

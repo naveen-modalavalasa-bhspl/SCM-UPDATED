@@ -20,8 +20,8 @@ import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPa
 // Approvals is its own module now — the inbox, decisions, team queue, reports and the
 // indent review screen all live there, not inside indents.
 import {
-  ApprovalCorrectionPage, ApprovalsPage, ConsolidationDetailPage, ConsolidationPage,
-  MyDecisionsPage, TeamQueuePage,
+  ApprovalCorrectionPage, ApprovalsPage, ConsolidationDetailPage, ConsolidationIssuePage,
+  ConsolidationItemPage, ConsolidationPage, MyDecisionsPage, TeamQueuePage,
 } from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
@@ -52,8 +52,6 @@ import { StockTransferView } from "@/modules/inventory/components/StockTransferV
 import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
 import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
 import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
-import { FulfilmentBatchPage } from "@/modules/inventory/pages/FulfilmentBatchPage";
-import { AllocationCycleApprovalPage } from "@/modules/inventory/pages/AllocationCycleApprovalPage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
 import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
 import { AllocationApprovalsPage } from "@/modules/inventory/pages/AllocationApprovalsPage";
@@ -118,6 +116,11 @@ function AppRoutes() {
         {/* Child screen, not a menu entry: it is reached by opening a row, and its
             :cycle is the group key the list navigated with. */}
         <Route path="approvals/consolidation/:cycle" element={<ConsolidationDetailPage />} />
+        {/* One item of a consolidation, and everyone who asked for it — opened from an
+            item row. Same rule as :cycle above: reached by navigation, never a menu. */}
+        <Route path="approvals/consolidation/:cycle/items/:itemId" element={<ConsolidationItemPage />} />
+        {/* Serve-from-stock for the whole cycle, one panel per indent. */}
+        <Route path="approvals/consolidation/:cycle/serve" element={<ConsolidationIssuePage />} />
         {/* Delegation is retired. The route stays so old links and bookmarks land
             somewhere real instead of on a blank page. */}
         <Route path="approvals/delegations" element={<Navigate to="/approvals" replace />} />
@@ -137,17 +140,11 @@ function AppRoutes() {
         <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
-        {/* Child screen, not a menu entry: the queue lists a monthly cycle as one
-            row and navigates here to split it item by item. */}
-        <Route path="inventory/fulfillment/:cycle" element={<FulfilmentBatchPage />} />
         {/* Where the MDP/LIP chain is declared — everything downstream reads it. */}
         <Route path="inventory/stocking-points" element={<StockingPointsPage />} />
         <Route path="inventory/allocation-approvals" element={<AllocationApprovalsPage />} />
         {/* Child screen, not a menu entry: the list navigates here to review one
             allocation. Without this route that row click is a dead end. */}
-        {/* A whole monthly cycle, opened from the same list a single allocation is.
-            Declared above :id so the literal segment is matched first. */}
-        <Route path="inventory/allocation-approvals/cycle/:cycle" element={<AllocationCycleApprovalPage />} />
         <Route path="inventory/allocation-approvals/:id" element={<AllocationApprovalDetailPage />} />
         <Route path="inventory/demand" element={<ItemDemandPage />} />
         <Route path="inventory/labels" element={<LabelsPage />} />

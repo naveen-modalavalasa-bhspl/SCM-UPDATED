@@ -1,11 +1,10 @@
 import { api } from "@/shared/api/client";
 import type {
-  AllocationCycleRow,
   ApprovalDecisionRow, ApprovalHistoryRow, ApprovalIndent, ApprovalQuantityInput,
   ApprovalReport, ConsolidationApprovalInput, ConsolidationApprovalResult,
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
-  CorrectionIndent, PendingApproval, PendingSummary, TeamQueueRow,
+  CorrectionIndent, PendingApproval, TeamQueueRow,
 } from "./types";
 import type { Paginated } from "@/shared/types";
 
@@ -57,18 +56,9 @@ export const approvalsApi = {
   pending: (page = 1, size = 20, filters: PendingApprovalQuery = {}) =>
     api.get<Paginated<PendingApproval>>("/api/approvals/pending", { params: { page, size, ...filters } }).then((r) => r.data),
   pendingAll: () => allPages<PendingApproval>("/api/approvals/pending"),
-  // The inbox's tiles and doc-type chips. One counted read instead of pulling the
-  // whole queue a second time alongside the page already on screen.
-  pendingSummary: () =>
-    api.get<PendingSummary>("/api/approvals/pending/summary").then((r) => r.data),
   decisions: (page = 1, size = 20, filters: { search?: string; decision?: string } = {}) =>
     api.get<Paginated<ApprovalDecisionRow>>("/api/approvals/my-decisions", { params: { page, size, ...filters } }).then((r) => r.data),
   decisionsAll: () => allPages<ApprovalDecisionRow>("/api/approvals/my-decisions"),
-  /** Monthly allocation cycles waiting on me. Consolidated the same way monthly
-   *  indents are — one row for the cycle, not one per allocation. */
-  allocationCycles: () =>
-    api.get<{ items: AllocationCycleRow[] }>("/api/approvals/allocation-cycles")
-      .then((r) => r.data.items),
   teamQueue: () =>
     api.get<{ items: TeamQueueRow[] }>("/api/approvals/team-queue").then((r) => r.data.items),
   // One request for the whole screen: filtered batches AND the dropdown contents come

@@ -22,7 +22,8 @@ import {
   useActivityLedgerUrlState,
 } from "../context/ActivityLedgerUrlState";
 import { formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
-import { INDENT_ACTIVITY_EVENT_FILTER_OPTIONS } from "../constants";
+import { INDENT_ACTIVITY_EVENT_FILTER_OPTIONS, INDENT_STATUS } from "../constants";
+import { statusChipStyle } from "../statusPalette";
 
 const EVENT_LABELS: Record<string, string> = {
   REQUEST_CREATED: "Request created",
@@ -82,20 +83,30 @@ const LEGACY_EVENT_RESULTS: Record<string, string> = {
   BOOKMARK_REMOVED: "Bookmark Removed",
 };
 
+/**
+ * The indent status a result reads as, so the ledger paints it the colour the
+ * Overview donut paints that status. Partially allocated joins partially
+ * fulfilled: both are the same "some of it, not all of it" state.
+ */
+const RESULT_STATUS: Record<string, string> = {
+  DRAFT: INDENT_STATUS.DRAFT,
+  APPROVED: INDENT_STATUS.APPROVED,
+  REJECTED: INDENT_STATUS.REJECTED,
+  RETURNED: INDENT_STATUS.RETURNED_FOR_CORRECTION,
+  RETURNED_FOR_CORRECTION: INDENT_STATUS.RETURNED_FOR_CORRECTION,
+  PENDING_APPROVAL: INDENT_STATUS.PENDING_APPROVAL,
+  AWAITING_ALLOCATION: INDENT_STATUS.AWAITING_ALLOCATION,
+  ALLOCATED: INDENT_STATUS.ALLOCATED,
+  PARTIALLY_ALLOCATED: INDENT_STATUS.PARTIALLY_FULFILLED,
+  PARTIALLY_FULFILLED: INDENT_STATUS.PARTIALLY_FULFILLED,
+  FULFILLED: INDENT_STATUS.CLOSED,
+  CLOSED: INDENT_STATUS.CLOSED,
+};
+
+/** Results the donut has no slice for — a ledger event, not a document status. */
 const RESULT_TONE: Record<string, string> = {
-  DRAFT: "bg-neutral-bg text-neutral",
   SUBMITTED: "bg-info-bg text-info",
-  APPROVED: "bg-ok-bg text-ok",
-  REJECTED: "bg-bad-bg text-bad",
-  RETURNED: "bg-warn-bg text-warn",
-  RETURNED_FOR_CORRECTION: "bg-warn-bg text-warn",
   ROUTED_AUTOMATICALLY: "bg-info-bg text-info",
-  AWAITING_ALLOCATION: "bg-info-bg text-info",
-  ALLOCATED: "bg-purple-50 text-purple-600",
-  PARTIALLY_ALLOCATED: "bg-warn-bg text-warn",
-  PARTIALLY_FULFILLED: "bg-warn-bg text-warn",
-  FULFILLED: "bg-ok-bg text-ok",
-  PENDING_APPROVAL: "bg-warn-bg text-warn",
   BOOKMARKED: "bg-brand-050 text-brand",
   BOOKMARK_REMOVED: "bg-neutral-bg text-neutral",
   STATUS_UNAVAILABLE: "bg-neutral-bg text-neutral",
@@ -245,9 +256,15 @@ function occurredAtLabel(row: ActivityRow) {
 
 function ActivityResultBadge({ label }: { label: string }) {
   const code = normalizedCode(label) ?? "STATUS_UNAVAILABLE";
-  const tone = RESULT_TONE[code] ?? "bg-neutral-bg text-neutral";
+  const status = RESULT_STATUS[code];
+  const style = status ? statusChipStyle(status) : null;
+  const tone = style ? "" : RESULT_TONE[code] ?? "bg-neutral-bg text-neutral";
   return (
-    <span className={`inline-flex h-6 items-center whitespace-nowrap rounded-full px-2 text-[11px] font-semibold uppercase tracking-wide ${tone}`}>
+    <span
+      data-result={code}
+      style={style ?? undefined}
+      className={`inline-flex h-6 items-center whitespace-nowrap rounded-full px-2 text-[11px] font-semibold uppercase tracking-wide ${tone}`}
+    >
       {label}
     </span>
   );

@@ -136,29 +136,6 @@ function IndentDashboardContent() {
               selectedStatuses={selectedStatuses}
             />
           )}
-
-          {/* Region/Location breakdown. `by_region` is optional on IndentStats, so a
-              backend that predates the field simply renders nothing here. */}
-          {stats?.by_region && stats.by_region.length > 0 && (
-            <div className="mt-6 border-t border-line/60 pt-4">
-              <h3 className="text-sm font-semibold uppercase tracking-wider text-muted">
-                By region / location
-              </h3>
-              <ul className="mt-3 space-y-1.5" aria-label="Indents by region">
-                {stats.by_region.map((bucket) => (
-                  <li
-                    key={bucket.region_id ?? "unassigned"}
-                    className="flex items-center justify-between gap-4 text-sm"
-                  >
-                    <span className="min-w-0 truncate text-body">
-                      {bucket.region_name ?? "No location"}
-                    </span>
-                    <span className="tabular-nums font-semibold text-ink">{bucket.count}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
         </Card>
 
         <Card className="p-5">

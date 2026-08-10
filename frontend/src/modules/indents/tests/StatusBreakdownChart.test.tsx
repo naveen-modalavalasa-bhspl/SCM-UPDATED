@@ -243,7 +243,7 @@ describe("StatusBreakdownChart presentation", () => {
 
     expect(screen.getByTestId("status-donut-slice-DRAFT")).toHaveAttribute("fill", "var(--color-neutral)");
     expect(screen.getByTestId("status-donut-slice-ALLOCATED")).toHaveAttribute("fill", "#8b5cf6");
-    expect(screen.getByTestId("status-donut-slice-PARTIALLY_FULFILLED")).toHaveAttribute("fill", "var(--color-warn)");
+    expect(screen.getByTestId("status-donut-slice-PARTIALLY_FULFILLED")).toHaveAttribute("fill", "#0891b2");
     expect(screen.getByTestId("status-donut-slice-CLOSED")).toHaveAttribute("fill", "var(--color-ok)");
     expect(screen.getByTestId("status-donut-container")).toHaveClass(
       "h-[250px]",

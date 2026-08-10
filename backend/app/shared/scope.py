@@ -29,6 +29,24 @@ from app.platform.hcm.models import HcmPosition
 from app.shared.enums import ScopeRung
 
 
+def _memo(db: AsyncSession, bucket: str) -> dict:
+    """Per-REQUEST scratch space, keyed by name.
+
+    `get_db` yields a fresh session per request, so anything parked on `session.info`
+    lives exactly as long as one HTTP call and is gone by the next. That is the right
+    lifetime for both answers below: they read `hcm_positions` and the profile roles,
+    neither of which a request can change, so re-deriving them is re-reading the same
+    rows for the same answer.
+
+    It matters because scope is resolved on EVERY scoped read, and a batch approval
+    makes that read forty-one times in one request — 20 queries × 41 against a remote
+    database was 38 seconds of pure round-trip for one unchanging answer. Cached, the
+    rung and the subtree are still computed from the database, still per login, still
+    per active position. Nothing about who may see what moves.
+    """
+    return db.info.setdefault(f"scope_memo_{bucket}", {})
+
+
 async def descendant_position_ids(
     db: AsyncSession, position_id: int | None,
 ) -> list[int]:
@@ -39,6 +57,11 @@ async def descendant_position_ids(
     """
     if position_id is None:
         return []
+    cache = _memo(db, "descendants")
+    if position_id in cache:
+        # A copy: callers own their list, and one mutating it must not rewrite the
+        # answer every later caller in this request gets.
+        return list(cache[position_id])
     descendants: list[int] = []
     frontier = [position_id]
     seen = {position_id}
@@ -56,6 +79,7 @@ async def descendant_position_ids(
             seen.add(row_id)
             descendants.append(row_id)
             frontier.append(row_id)
+    cache[position_id] = list(descendants)
     return descendants
 
 
@@ -76,16 +100,25 @@ async def rung_for(db: AsyncSession, user) -> ScopeRung:
     position_id = getattr(user, "active_position_id", None)
     if position_id is None:
         return ScopeRung.ALL
+    # Keyed by the active position, exactly as the rung itself is — switching position
+    # switches the key, so the memo can never hand one hat the other hat's rung.
+    cache = _memo(db, "rung")
+    if position_id in cache:
+        return cache[position_id]
+
     role = await profile_role_for_position(db, position_id)
     if role is None:
-        return ScopeRung.ALL
-    _, scope = parse_description(role.description)
-    try:
-        return ScopeRung(scope) if scope else ScopeRung.SELF
-    except ValueError:
-        # An unreadable rung is a configuration error, and the safe reading of a
-        # configuration error is the narrowest one.
-        return ScopeRung.SELF
+        rung = ScopeRung.ALL
+    else:
+        _, scope = parse_description(role.description)
+        try:
+            rung = ScopeRung(scope) if scope else ScopeRung.SELF
+        except ValueError:
+            # An unreadable rung is a configuration error, and the safe reading of a
+            # configuration error is the narrowest one.
+            rung = ScopeRung.SELF
+    cache[position_id] = rung
+    return rung
 
 
 async def scope_condition(

@@ -1,6 +1,8 @@
 export { ApprovalsPage } from "./pages/ApprovalsPage";
 export { ConsolidationPage } from "./pages/ConsolidationPage";
 export { ConsolidationDetailPage } from "./pages/ConsolidationDetailPage";
+export { ConsolidationItemPage } from "./pages/ConsolidationItemPage";
+export { ConsolidationIssuePage } from "./pages/ConsolidationIssuePage";
 export { MyDecisionsPage } from "./pages/MyDecisionsPage";
 export { TeamQueuePage } from "./pages/TeamQueuePage";
 export { ApprovalReportsPage } from "./pages/ReportsPage";

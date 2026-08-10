@@ -8,6 +8,7 @@ import {
   Sector,
 } from "recharts";
 import type { SectorProps } from "recharts";
+import { DEFAULT_STATUS_COLOR, STATUS_COLOR, STATUS_INDICATOR } from "../statusPalette";
 
 const PRIMARY_STATUSES = [
   { status: "PENDING_APPROVAL", label: "Pending approval" },
@@ -24,39 +25,10 @@ const TOOLTIP_EDGE_PADDING = 8;
 const TOOLTIP_FALLBACK_WIDTH = 160;
 const TOOLTIP_FALLBACK_HEIGHT = 72;
 
-export const STATUS_INDICATOR: Record<string, string> = {
-  DRAFT: "bg-neutral",
-  PENDING_APPROVAL: "bg-warn",
-  RETURNED_FOR_CORRECTION: "bg-warn",
-  SUBMITTED: "bg-warn",
-  APPROVED: "bg-ok",
-  AWAITING_ALLOCATION: "bg-info",
-  ALLOCATED: "bg-purple-500",
-  PARTIALLY_FULFILLED: "bg-warn",
-  PENDING_PROCUREMENT: "bg-purple-500",
-  PARTIALLY_ORDERED: "bg-blue-600",
-  ORDERED: "bg-blue-600",
-  REJECTED: "bg-bad",
-  CLOSED: "bg-ok",
-};
-
-export const STATUS_COLOR: Record<string, string> = {
-  DRAFT: "var(--color-neutral)",
-  PENDING_APPROVAL: "var(--color-warn)",
-  RETURNED_FOR_CORRECTION: "var(--color-warn)",
-  SUBMITTED: "var(--color-warn)",
-  APPROVED: "var(--color-ok)",
-  AWAITING_ALLOCATION: "var(--color-info)",
-  ALLOCATED: "#8b5cf6",
-  PARTIALLY_FULFILLED: "var(--color-warn)",
-  PENDING_PROCUREMENT: "#8b5cf6",
-  PARTIALLY_ORDERED: "#2563eb",
-  ORDERED: "#2563eb",
-  REJECTED: "var(--color-bad)",
-  CLOSED: "var(--color-ok)",
-};
-
-const DEFAULT_STATUS_COLOR = "var(--color-neutral)";
+// The palette moved to ../statusPalette so the labels on the lists, the ledger and
+// the notification cards paint from the same table as the slices. Re-exported here
+// because the chart is where every existing import of it points.
+export { STATUS_COLOR, STATUS_INDICATOR };
 
 export interface StatusSlice {
   status: string;

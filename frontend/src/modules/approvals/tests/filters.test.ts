@@ -24,9 +24,12 @@ describe("approval Raised filter", () => {
   });
 
   it("always offers the main document filters and counts the queue", () => {
-    // Counts now arrive from /api/approvals/pending/summary rather than being
-    // tallied from a second full fetch of the queue.
-    expect(approvalTypeCounts({ INDENT: 2, MR: 1, PO: 1 })).toEqual([
+    expect(approvalTypeCounts([
+      { doc_type: "INDENT" },
+      { doc_type: "INDENT" },
+      { doc_type: "MR" },
+      { doc_type: "PO" },
+    ])).toEqual([
       ["INDENT", 2],
       ["MR", 1],
       ["ALLOCATION", 0],

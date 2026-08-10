@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { AlertCircle, ArrowLeft, Check, RotateCcw, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, Check, PackageCheck, RotateCcw, X } from "lucide-react";
 import { Button, Card, ConfirmModal, PageHeader, StatusPill } from "@/shared/components";
 import { approvalsApi } from "../api";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
@@ -30,6 +30,9 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const [reason, setReason] = useState("");
   const [checks, setChecks] = useState([false, false, false]);
   const [confirming, setConfirming] = useState<Decision>(null);
+  // Closed to start: opening it is what fetches the approver's own stock, so the
+  // review screen costs one request until they ask to serve.
+  const [serving, setServing] = useState(false);
 
   const indent = useQuery({
     queryKey: ["approvals", "indent", indentId],
@@ -123,14 +126,31 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
 
   return <>
     <Button variant="ghost" onClick={() => nav("/approvals")}><ArrowLeft className="h-4 w-4" /> Back to approvals</Button>
-    <PageHeader eyebrow="Approval review" title={indent.data.indent_no} actions={<StatusPill status={indent.data.current_stage_name ?? indent.data.status} />} />
+    <PageHeader
+      eyebrow="Approval review"
+      title={indent.data.indent_no}
+      actions={<>
+        <StatusPill status={indent.data.current_stage_name ?? indent.data.status} />
+        {/* Top right, next to the status: serving from your own stock is an action on
+            the whole document, like approving, not a field inside the comparison. */}
+        <Button variant="primary" onClick={() => setServing((open) => !open)}>
+          <PackageCheck className="h-4 w-4" /> {serving ? "Hide own stock" : "Serve from own stock"}
+        </Button>
+      </>}
+    />
 
     <div className="space-y-5">
       <Card className="p-4"><dl className="grid gap-3 text-sm sm:grid-cols-3"><div><dt className="text-muted">Requested by</dt><dd className="font-semibold text-ink">{indent.data.requested_by_name ?? "—"}</dd></div><div><dt className="text-muted">Department</dt><dd>{indent.data.department_name ?? "—"}</dd></div><div><dt className="text-muted">Priority</dt><dd><StatusPill status={indent.data.priority} /></dd></div></dl></Card>
 
       {/* Serve-from-own-stock sits above the decision, not after it: an approver who
-          holds the goods should give them and let only the remainder climb. */}
-      <IssueFromStockPanel indentId={indentId} />
+          holds the goods should give them and let only the remainder climb. Behind a
+          button because most approvals are a straight pass-up — the panel opens for
+          the approver who means to give stock, and the quantities stay in view for
+          everyone else. */}
+      {serving && <section className="space-y-2">
+        <h2 className="font-semibold text-ink">Serve from your own stock</h2>
+        <IssueFromStockPanel indentId={indentId} />
+      </section>}
 
       <section>
         <h2 className="font-semibold text-ink">Quantity comparison</h2>

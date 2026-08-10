@@ -659,14 +659,24 @@ async def _enabled_role_scopes(db: AsyncSession, stages: list[Stage],
     governed by its toggle. One rule covers both jobs — gating an enabled rung, and
     force-including a disabled one ("over five lakh, always include the COO").
     """
+    # Every stage's conditions in ONE query rather than one per stage. The live INDENT
+    # ladder has 24 stages, and against a remote database 24 round trips cost ~700ms
+    # on a table holding a handful of rows. Same rows, same grouping, same decisions —
+    # only the number of trips changes.
+    stored_by_stage: dict[int, list[StageCondition]] = {}
+    stage_ids = [s.id for s in stages if s.id is not None and s.position_role_id is not None]
+    if stage_ids:
+        for condition in (await db.execute(
+            select(StageCondition).where(StageCondition.stage_id.in_(stage_ids))
+        )).scalars().all():
+            stored_by_stage.setdefault(condition.stage_id, []).append(condition)
+
     enabled: dict[int, set[int] | None] = {}
     for stage in stages:
         if stage.position_role_id is None:
             continue
         if stage.id is not None:
-            stored = list((await db.execute(
-                select(StageCondition).where(StageCondition.stage_id == stage.id)
-            )).scalars().all())
+            stored = stored_by_stage.get(stage.id, [])
             configured = any(
                 condition.field_name == APPROVER_SCOPE_FIELD
                 for condition in stored

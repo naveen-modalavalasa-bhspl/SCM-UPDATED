@@ -23,6 +23,21 @@ const matches = (path: string, loc: string) =>
   loc === path || (path !== "/" && loc.startsWith(path));
 
 /**
+ * Detail screens whose URL does not sit under the menu page they were opened from,
+ * and the page that owns them. Longest-prefix matching alone puts
+ * /inventory/allocate/491 under the module root, so the tab strip lit up Overview
+ * while the user was looking at the screen the Fulfilment Queue had navigated to.
+ * A row click must leave the tab it came from selected.
+ */
+const DETAIL_OWNER: [prefix: string, page: string][] = [
+  ["/inventory/allocate", "/inventory/fulfillment"],
+];
+
+/** The menu path the tab strip should treat this URL as, detail screens included. */
+const navPath = (loc: string) =>
+  DETAIL_OWNER.find(([prefix]) => matches(prefix, loc))?.[1] ?? loc;
+
+/**
  * Screens still being trialled: in the menu when the code is being run (`npm run
  * dev`), absent from a production build — which is what the deployed image is.
  * So a developer who pulls sees them, the live site does not, and nobody has to
@@ -137,8 +152,9 @@ export function AppLayout() {
   const pairs = menu.flatMap((r) =>
     r.children?.length ? r.children.map((c) => ({ root: r, child: c })) : [{ root: r, child: r }],
   );
+  const activeLoc = navPath(loc);
   const best = pairs
-    .filter(({ child }) => matches(child.path, loc))
+    .filter(({ child }) => matches(child.path, activeLoc))
     .sort((a, b) => b.child.path.length - a.child.path.length)[0];
   const activeRoot = best?.root ?? menu[0];
   const tabs = activeRoot?.children ?? [];
@@ -162,14 +178,8 @@ export function AppLayout() {
       size="sm"
       variant="bordered"
       selectedKeys={me.active_position ? [String(me.active_position.id)] : []}
-      // `onChange`, not `onSelectionChange`. HeroUI's selection callback handed back a
-      // Set holding "4" when the choice came through the native select underneath —
-      // a mangled key, not the position id — so switch-position posted 4 and 403'd
-      // with "that position is not assigned to you". Nobody wearing two hats could
-      // change into the other one, which blocks every allocation approval. The native
-      // change event carries the option's real value, so it cannot be truncated.
-      onChange={async (event) => {
-        const id = Number(event.target.value);
+      onSelectionChange={async (keys) => {
+        const id = Number(Array.from(keys)[0]);
         if (id && id !== me.active_position?.id) {
           await switchPosition(id);
           nav("/");

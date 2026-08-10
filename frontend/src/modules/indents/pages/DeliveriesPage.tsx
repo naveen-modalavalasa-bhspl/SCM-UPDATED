@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Camera, CheckCircle2, FileText, Trash2 } from "lucide-react";
 import {
@@ -24,9 +24,6 @@ import type { Delivery, DeliveryLine, ReceiptAttachment } from "../types";
 const PHOTO = "RECEIPT_PHOTO";
 const BILL = "RECEIPT_BILL";
 
-// PARTIALLY_ORDERED and ORDERED are offered even though no live indent holds either
-// yet: they are reachable the moment procurement starts raising POs off indents, and
-// a status you cannot filter is a status you cannot find.
 const STATUS_OPTIONS = [
   { value: "", label: "Any status" },
   { value: "ALLOCATED", label: "Allocated" },
@@ -34,9 +31,6 @@ const STATUS_OPTIONS = [
   { value: "PARTIALLY_ORDERED", label: "Partly ordered" },
   { value: "ORDERED", label: "Ordered" },
   { value: "PENDING_PROCUREMENT", label: "With procurement" },
-  // Fully received. The list used to end at the statuses still owing goods, so an
-  // indent disappeared the moment its last line was confirmed.
-  { value: "CLOSED", label: "Completed" },
 ];
 
 const qty = (value: number) => Number(value ?? 0).toLocaleString();
@@ -109,12 +103,6 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
         .map((line) => [line.indent_item_id, String(receivable(line))]),
     ));
 
-  // The file inputs are driven by ref rather than by a wrapping <label>; `pending`
-  // is only so the right button reads "Uploading…" while its file is in flight.
-  const photoInput = useRef<HTMLInputElement>(null);
-  const billInput = useRef<HTMLInputElement>(null);
-  const [pending, setPending] = useState<string | null>(null);
-
   const attachments = useQuery({
     queryKey: ["indent-receipt-attachments", delivery.indent_id],
     queryFn: () => indentApi.receiptAttachments(delivery.indent_id),
@@ -124,7 +112,6 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
     mutationFn: ({ file, category }: { file: File; category: string }) =>
       indentApi.uploadReceiptAttachment(delivery.indent_id, file, category),
     onSuccess: () => attachments.refetch(),
-    onSettled: () => setPending(null),
   });
 
   const remove = useMutation({
@@ -239,63 +226,32 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
             <p className="mb-2 text-xs text-muted">
               Required. Add the bill too if you were given one.
             </p>
-            {/* Real buttons that click a ref'd input, NOT a <label> wrapping a
-                `display:none` input. The label form silently stopped opening the
-                picker inside this modal: a `display:none` input is not focusable, and
-                the modal's focus scope swallows the forwarded click, so the only
-                visible effect of pressing "Add photo" was the label text getting
-                selected. `sr-only` keeps the input rendered and reachable. */}
             <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => photoInput.current?.click()}
-                disabled={upload.isPending}
-                className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-line px-4 text-sm transition-colors hover:bg-default disabled:opacity-60"
-              >
-                <Camera className="h-4 w-4" />
-                {upload.isPending && pending === PHOTO ? "Uploading…" : "Add photo"}
-              </button>
-              <input
-                ref={photoInput}
-                type="file"
-                accept="image/*"
-                className="sr-only"
-                tabIndex={-1}
-                aria-hidden="true"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) {
-                    setPending(PHOTO);
-                    upload.mutate({ file, category: PHOTO });
-                  }
-                  event.target.value = "";
-                }}
-              />
-
-              <button
-                type="button"
-                onClick={() => billInput.current?.click()}
-                disabled={upload.isPending}
-                className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-line px-4 text-sm transition-colors hover:bg-default disabled:opacity-60"
-              >
-                <FileText className="h-4 w-4" />
-                {upload.isPending && pending === BILL ? "Uploading…" : "Add bill"}
-              </button>
-              <input
-                ref={billInput}
-                type="file"
-                className="sr-only"
-                tabIndex={-1}
-                aria-hidden="true"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) {
-                    setPending(BILL);
-                    upload.mutate({ file, category: BILL });
-                  }
-                  event.target.value = "";
-                }}
-              />
+              <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-line px-4 text-sm">
+                <Camera className="h-4 w-4" /> Add photo
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) upload.mutate({ file, category: PHOTO });
+                    event.target.value = "";
+                  }}
+                />
+              </label>
+              <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-line px-4 text-sm">
+                <FileText className="h-4 w-4" /> Add bill
+                <input
+                  type="file"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) upload.mutate({ file, category: BILL });
+                    event.target.value = "";
+                  }}
+                />
+              </label>
             </div>
 
             {(attachments.data ?? []).length > 0 && (

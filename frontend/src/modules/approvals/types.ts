@@ -1,11 +1,3 @@
-/** GET /api/approvals/pending/summary — the inbox tiles and chips, counted in SQL. */
-export interface PendingSummary {
-  total: number;
-  past_due: number;
-  oldest_waiting_since?: string | null;
-  by_doc_type: Record<string, number>;
-}
-
 export interface PendingApproval {
   instance_id: number;
   doc_type: string;
@@ -17,11 +9,6 @@ export interface PendingApproval {
   amount?: number | null;
   waiting_since?: string | null;
   due_at?: string | null;
-  /** Decided by the server against its own clock. `due_at` goes out as a naive UTC
-   *  timestamp, so a browser comparing it to `Date.now()` in IST answered a
-   *  different question to the `overdue_only` filter — five and a half hours of
-   *  documents were past due to one and not the other. */
-  overdue?: boolean;
   current_stage_name?: string | null;
   approver_name?: string | null;
 }
@@ -154,6 +141,8 @@ export interface ConsolidationIndentSummary {
   id: number;
   indent_no: string;
   status: string;
+  /** NORMAL / URGENT. Optional: an older API build does not send it. */
+  priority?: string | null;
   requested_by_id?: number | null;
   requested_by_name?: string | null;
   requested_by_code?: string | null;
@@ -319,18 +308,4 @@ export interface IssueFromStockResult {
   outstanding_quantity: number;
   /** Nothing owed anywhere — the indent has no reason to climb further. */
   fully_served: boolean;
-}
-
-
-/** One monthly allocation cycle in the approval inbox. */
-export interface AllocationCycleRow {
-  cycle: string;
-  month_label: string;
-  allocation_count: number;
-  actionable_count: number;
-  indent_count: number;
-  item_count: number;
-  total_qty: number;
-  href: string;
-  doc_type: string;
 }

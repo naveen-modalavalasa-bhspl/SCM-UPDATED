@@ -1,23 +1,29 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Check, Layers, RefreshCw, Search, Users } from "lucide-react";
 import {
-  Button, Card, PageHeader, ResponsiveList, Select, StatCard, StatusPill, type Column,
+  CalendarRange, Check, ChevronDown, ChevronRight, Filter, Layers, PackageCheck,
+  RefreshCw, Search, SlidersHorizontal, Users, X,
+} from "lucide-react";
+import {
+  Button, Card, EmptyState, ErrorBanner, PageHeader, ResponsiveList, Select, StatCard,
+  StatusPill, type Column,
 } from "@/shared/components";
 import { approvalsApi } from "../api";
-import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
+import { useConsolidationDecisions, type ItemDecision } from "../consolidationDecisions";
 import type {
   ConsolidatedItem, ConsolidatedItemAllocation, ConsolidationApprovalResult,
   ConsolidationBatch, ConsolidationDimension, ConsolidationFilterOptions,
-  ConsolidationIndentSummary, ConsolidationQuery,
+  ConsolidationQuery,
 } from "../types";
 
-/** Indents per approve request. Small enough that no single call can outlive a
- *  gateway timeout on a monthly batch, large enough that a normal batch is one call. */
-const APPROVE_CHUNK = 25;
+/** Indents per approve request. Small on purpose: the bar only moves when a chunk
+ *  comes back, so 25 meant an approver watched "0 of 41" for minutes and assumed the
+ *  screen had hung. Small chunks also bound what one dropped connection costs — the
+ *  chunks already through are committed and stay approved. */
+const APPROVE_CHUNK = 5;
 
-const formatQty = (value: number) => {
+export const formatQty = (value: number) => {
   const rounded = Math.round(value * 1000) / 1000;
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 };
@@ -56,21 +62,17 @@ export function splitQuantity(total: number, weights: number[]): number[] {
   return base.map((value) => value / scale);
 }
 
-/** Indent numbers typed into an item's exclude box, split on commas/spaces/newlines. */
-const parseExcluded = (text: string): string[] =>
-  text.split(/[\s,;]+/).map((token) => token.trim().toUpperCase()).filter(Boolean);
-
-const isExcluded = (allocation: ConsolidatedItemAllocation, excluded: string[]) =>
-  excluded.some((token) => allocation.indent_no.toUpperCase().includes(token));
-
-interface ItemDecision { approved: string; exclude: string }
+/** Exclusion is by exact indent number — the list comes from picking real indents off
+ *  the item's own page, never from free text that could half-match two of them. */
+export const isExcluded = (allocation: ConsolidatedItemAllocation, excluded: string[]) =>
+  excluded.includes(allocation.indent_no.toUpperCase());
 
 /** What one item row currently resolves to: the approver's total, who is out, and
  *  the per-indent split of what is left. Pure — the screen recomputes it on every
  *  keystroke rather than storing a split that could go stale against its inputs. */
-function resolveItem(item: ConsolidatedItem, decision: ItemDecision | undefined) {
+export function resolveItem(item: ConsolidatedItem, decision: ItemDecision | undefined) {
   const allocations = item.allocations ?? [];
-  const excluded = parseExcluded(decision?.exclude ?? "");
+  const excluded = (decision?.excluded ?? []).map((no) => no.toUpperCase());
   const included = allocations.filter((a) => !isExcluded(a, excluded));
   const droppedCount = allocations.length - included.length;
 
@@ -105,6 +107,12 @@ const FILTERS: { dimension: ConsolidationDimension; param: keyof ConsolidationQu
   { dimension: "item", param: "item_id", label: "Item" },
 ];
 
+/** How many dimension dropdowns stay on the bar itself. Search, the raised-on window
+ *  and two dropdowns is one line on a laptop; the other five turned the bar into a
+ *  form of its own, so they live behind "More filters" and announce themselves with a
+ *  count when something inside is set. */
+const PRIMARY_FILTERS = 2;
+
 function FilterBar({ options, value, onChange, onClear, search, onSearch }: {
   options: ConsolidationFilterOptions;
   value: ConsolidationQuery;
@@ -114,179 +122,262 @@ function FilterBar({ options, value, onChange, onClear, search, onSearch }: {
   onSearch: (next: string) => void;
 }) {
   const active = FILTERS.filter((f) => (options[f.dimension] ?? []).length > 0);
-  const applied = Object.values(value).filter(Boolean).length;
-  const field = "min-h-11 w-full rounded-xl border border-line bg-content1 px-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand-500";
+  const primary = active.slice(0, PRIMARY_FILTERS);
+  const extra = active.slice(PRIMARY_FILTERS);
+  const applied = {
+    /** Everything narrowing the workspace, dropdowns and dates and search alike. */
+    count: Object.values(value).filter(Boolean).length,
+    /** The ones folded away behind "More filters" — what the chip row announces. */
+    hidden: extra.filter((f) => value[f.param]),
+  };
+  const [open, setOpen] = useState(false);
+
+  const control = "h-11 rounded-xl border border-line bg-content1 text-sm text-ink outline-none focus:border-brand";
+  const optionsFor = (filter: typeof FILTERS[number]) =>
+    (options[filter.dimension] ?? []).map((option) => ({
+      value: option.value,
+      label: `${option.label} (${option.indent_count})`,
+    }));
+  /** The chosen option's own name, so a chip reads "Region · North" and not an id.
+   *  Falls back to the raw value if the option list has moved on under it. */
+  const optionLabel = (filter: typeof FILTERS[number], picked: string | undefined) =>
+    (options[filter.dimension] ?? []).find((option) => option.value === picked)?.label ?? picked;
 
   return (
-    <Card className="mb-4 p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted">Filters</p>
-        <Button variant="ghost" disabled={applied === 0} onClick={onClear}>
-          Clear filters{applied > 0 ? ` (${applied})` : ""}
-        </Button>
-      </div>
-
-      {/* Search and the raised-on window sit above the dropdowns and are always
-          offered: unlike a dimension, they need no values in the queue to be useful. */}
-      <div className="mb-3 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Search</span>
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-            <input
-              className={`${field} pl-9`}
-              type="search"
-              aria-label="Search consolidations"
-              placeholder="Indent no., requester, item, region…"
-              value={search}
-              onChange={(e) => onSearch(e.target.value)}
-            />
-          </div>
-        </label>
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Raised from</span>
+    <Card className="mb-4 p-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-55 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
-            className={field}
+            className={`${control} w-full pl-9 pr-3 placeholder:text-muted`}
+            type="search"
+            aria-label="Search consolidations"
+            placeholder="Search indent no., requester, item…"
+            value={search}
+            onChange={(e) => onSearch(e.target.value)}
+          />
+        </div>
+
+        {/* One raised-on control, not two labelled fields: the pair only ever reads as
+            a window, and reading it as one keeps the bar to a single line. */}
+        <div className={`${control} flex items-center gap-1.5 px-2.5`}>
+          <CalendarRange className="h-4 w-4 shrink-0 text-muted" />
+          <input
+            className="w-30 bg-transparent text-sm text-ink outline-none"
             type="date"
             aria-label="Raised from"
             value={value.raised_from ?? ""}
             onChange={(e) => onChange({ ...value, raised_from: e.target.value || undefined })}
           />
-        </label>
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Raised to</span>
+          <span className="text-xs text-muted">to</span>
           <input
-            className={field}
+            className="w-30 bg-transparent text-sm text-ink outline-none"
             type="date"
             aria-label="Raised to"
             value={value.raised_to ?? ""}
             onChange={(e) => onChange({ ...value, raised_to: e.target.value || undefined })}
           />
-        </label>
+        </div>
+
+        {primary.map((filter) => (
+          <div key={filter.param} className="min-w-42">
+            <Select
+              ariaLabel={filter.label}
+              placeholder={`All ${filter.label.toLowerCase()}s`}
+              value={value[filter.param] ?? ""}
+              onChange={(next) => onChange({ ...value, [filter.param]: next || undefined })}
+              options={optionsFor(filter)}
+            />
+          </div>
+        ))}
+
+        {extra.length > 0 && (
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen((current) => !current)}
+            className={`${control} flex items-center gap-1.5 px-3 font-medium text-body hover:bg-content2`}
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+            More filters
+            {applied.hidden.length > 0 && (
+              <span className="rounded-full bg-brand px-1.5 py-0.5 text-[11px] font-bold leading-none text-white">
+                {applied.hidden.length}
+              </span>
+            )}
+            <ChevronDown className={`h-4 w-4 text-muted transition-transform ${open ? "rotate-180" : ""}`} />
+          </button>
+        )}
+
+        {applied.count > 0 && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="flex h-11 items-center gap-1 rounded-xl px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
+          >
+            <X className="h-4 w-4" /> Clear ({applied.count})
+          </button>
+        )}
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {active.map((filter) => (
-          <Select
-            key={filter.param}
-            label={filter.label}
-            placeholder={`All ${filter.label.toLowerCase()}s`}
-            value={value[filter.param] ?? ""}
-            onChange={(next) => onChange({ ...value, [filter.param]: next || undefined })}
-            options={(options[filter.dimension] ?? []).map((option) => ({
-              value: option.value,
-              label: `${option.label} (${option.indent_count})`,
-            }))}
-          />
-        ))}
-      </div>
+      {open && extra.length > 0 && (
+        <div className="mt-2.5 grid grid-cols-1 gap-2.5 border-t border-line/70 pt-3 sm:grid-cols-2 lg:grid-cols-3">
+          {extra.map((filter) => (
+            <Select
+              key={filter.param}
+              label={filter.label}
+              placeholder={`All ${filter.label.toLowerCase()}s`}
+              value={value[filter.param] ?? ""}
+              onChange={(next) => onChange({ ...value, [filter.param]: next || undefined })}
+              options={optionsFor(filter)}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* A filter that is set but folded away behind "More filters" is a filter nobody
+          can see. The count badge says how many; these say WHICH, and each one drops
+          itself. Only rendered while the panel is closed — with it open the dropdowns
+          are already showing the same thing. */}
+      {!open && applied.hidden.length > 0 && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-line/70 pt-2.5">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+            Also filtered
+          </span>
+          {applied.hidden.map((filter) => (
+            <button
+              key={filter.param}
+              type="button"
+              onClick={() => onChange({ ...value, [filter.param]: undefined })}
+              aria-label={`Remove ${filter.label} filter`}
+              className="group inline-flex min-h-9 items-center gap-1.5 rounded-full border border-brand/20 bg-brand-050 py-1 pl-3 pr-2 text-xs text-brand transition-colors hover:border-brand/45"
+            >
+              <span className="text-brand/70">{filter.label}</span>
+              <span className="max-w-[18ch] truncate font-semibold">
+                {optionLabel(filter, value[filter.param])}
+              </span>
+              <X className="h-3.5 w-3.5 opacity-55 transition-opacity group-hover:opacity-100" />
+            </button>
+          ))}
+        </div>
+      )}
     </Card>
   );
 }
 
-/** The per-indent result of an item's approved total, shown under the row it came
- *  from so the approver sees who loses what before deciding. */
-function SplitBreakdown({ item, decision }: { item: ConsolidatedItem; decision: ItemDecision | undefined }) {
-  const { allocations, included, droppedCount, split, total } = resolveItem(item, decision);
-  if (allocations.length === 0) return <span className="text-xs text-muted">—</span>;
-
-  return (
-    <div className="space-y-1">
-      {allocations.map((allocation) => {
-        const share = split.get(allocation.line_id) ?? 0;
-        const out = !included.includes(allocation);
-        return (
-          <p key={allocation.line_id} className={`text-xs ${out ? "text-muted line-through" : "text-body"}`}>
-            <span className="font-mono">{allocation.indent_no}</span>
-            {" · "}{formatQty(allocation.requested_quantity)} → <strong>{formatQty(share)}</strong>
-          </p>
-        );
-      })}
-      <p className="text-xs text-muted">
-        Allocated {formatQty(total)} across {included.length} indent{included.length === 1 ? "" : "s"}
-        {droppedCount > 0 ? ` · ${droppedCount} excluded` : ""}
-      </p>
-    </div>
-  );
-}
-
-/** One consolidated item: what was asked for, what this approver is passing on, who
- *  is being left out, and the resulting per-indent split — all on one row.
+/** The consolidated item list: one row per item, showing only what everyone asked for
+ *  in total and what is going out. Who asked for it lives on the item's own page —
+ *  this list is the totals, and the way in.
  *
- *  Plain `<input>`s rather than the HeroUI field kit: this row lives outside a table
- *  on purpose (see the note at its call site) and a native input is also what makes
- *  the browser's own `<datalist>` suggestion list work for the exclude box.
+ *  A list, not the old inline editor: with the quantity box gone from the row there is
+ *  nothing here for a react-aria grid cell to swallow, so this is a plain
+ *  <ResponsiveList> like every other list screen.
  */
-function ItemEditor({ item, batchKey, decision, onChange }: {
-  item: ConsolidatedItem;
-  batchKey: string;
-  decision: ItemDecision | undefined;
-  onChange: (patch: Partial<ItemDecision>) => void;
+function ItemList({ items, decisions, onOpen }: {
+  items: ConsolidatedItem[];
+  decisions: Record<string, ItemDecision>;
+  onOpen: (item: ConsolidatedItem) => void;
 }) {
-  const { invalid, over, ceiling, droppedCount } = resolveItem(item, decision);
-  const listId = `exclude-${batchKey}-${item.item_id}`;
-  const field = "min-h-11 w-full rounded-xl border border-line bg-content1 px-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand-500";
+  const name = (item: ConsolidatedItem) => item.item_name ?? item.item_code ?? `Item ${item.item_id}`;
+
+  /** What this item is currently set to send out, and whether that is still the
+   *  untouched default — an approver scanning the list needs to see at a glance
+   *  which items they have already been into. */
+  const state = (item: ConsolidatedItem) => {
+    const { total, ceiling, droppedCount, invalid, over } = resolveItem(item, decisions[String(item.item_id)]);
+    return { total, ceiling, droppedCount, invalid, over, edited: total !== ceiling || droppedCount > 0 };
+  };
+
+  const columns: Column<ConsolidatedItem>[] = [
+    {
+      key: "item",
+      header: "Item",
+      render: (row) => <div className="min-w-0">
+        <strong className="block truncate text-ink">{name(row)}</strong>
+        <span className="block truncate text-xs text-muted">
+          {row.item_code}{row.uom_code ? ` · ${row.uom_code}` : ""}
+        </span>
+      </div>,
+    },
+    {
+      key: "indents",
+      header: "Requested by",
+      render: (row) => <span className="text-body">
+        {row.indent_count} indent{row.indent_count === 1 ? "" : "s"}
+      </span>,
+    },
+    {
+      key: "requested",
+      header: "Total requested",
+      render: (row) => <span className="tabular font-semibold text-ink">
+        {formatQty(row.total_requested_quantity)}
+      </span>,
+    },
+    {
+      key: "approvable",
+      header: "Approvable",
+      hideOnNarrow: true,
+      render: (row) => <span className="tabular text-muted">{formatQty(row.total_ceiling_quantity)}</span>,
+    },
+    {
+      key: "approving",
+      header: "Approving",
+      render: (row) => {
+        const { total, invalid, over, edited } = state(row);
+        if (invalid || over) return <span className="text-sm font-semibold text-danger">Fix quantity</span>;
+        return <span className={`tabular font-semibold ${edited ? "text-brand" : "text-body"}`}>
+          {formatQty(total)}
+        </span>;
+      },
+    },
+    {
+      key: "excluded",
+      header: "Excluded",
+      render: (row) => {
+        const { droppedCount } = state(row);
+        return droppedCount === 0
+          ? <span className="text-muted">—</span>
+          : <span className="rounded-full bg-warn/15 px-2 py-0.5 text-xs font-semibold text-warn">
+              {droppedCount} out
+            </span>;
+      },
+    },
+    { key: "open", header: "", render: () => <ChevronRight className="h-4 w-4 text-muted" /> },
+  ];
 
   return (
-    <div className="rounded-2xl border border-line/70 bg-content1 p-4">
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1.6fr)]">
-        <div>
-          <strong className="text-ink">{item.item_name ?? item.item_code}</strong>
-          <p className="text-xs text-muted">{item.item_code}{item.uom_code ? ` · ${item.uom_code}` : ""}</p>
-          <p className="mt-1 text-xs text-muted">
-            {item.indent_count} indent{item.indent_count === 1 ? "" : "s"}
-            {" · requested "}{formatQty(item.total_requested_quantity)}
-            {" · approvable "}{formatQty(ceiling)}
+    <ResponsiveList
+      data={items}
+      columns={columns}
+      keyOf={(row) => row.item_id}
+      onRowClick={onOpen}
+      empty="No items on this batch."
+      renderCard={(row) => {
+        const { total, droppedCount, invalid, over, edited } = state(row);
+        return <div className="space-y-1.5">
+          <div className="flex items-start justify-between gap-3">
+            <span className="min-w-0">
+              <strong className="block truncate text-ink">{name(row)}</strong>
+              <span className="block truncate text-xs text-muted">{row.item_code}</span>
+            </span>
+            <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted" />
+          </div>
+          <p className="text-xs text-muted">
+            {row.indent_count} indent{row.indent_count === 1 ? "" : "s"}
+            {" · requested "}<strong className="text-body">{formatQty(row.total_requested_quantity)}</strong>
+            {row.uom_code ? ` ${row.uom_code}` : ""}
           </p>
-        </div>
-
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Approve (total)</span>
-          <input
-            className={field}
-            type="number"
-            min={0}
-            max={ceiling}
-            step="any"
-            inputMode="decimal"
-            aria-label={`Approved quantity for ${item.item_name ?? item.item_code}`}
-            placeholder={formatQty(ceiling)}
-            value={decision?.approved ?? ""}
-            onChange={(e) => onChange({ approved: e.target.value })}
-          />
-          {(invalid || over) && <span className="mt-1 block text-xs text-danger">
-            {invalid ? "Enter a quantity of 0 or more." : `Capped at ${formatQty(ceiling)}.`}
-          </span>}
-        </label>
-
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Exclude indents</span>
-          <input
-            className={field}
-            list={listId}
-            aria-label={`Indents to exclude for ${item.item_name ?? item.item_code}`}
-            placeholder="Type or pick an indent no."
-            value={decision?.exclude ?? ""}
-            onChange={(e) => onChange({ exclude: e.target.value })}
-          />
-          <datalist id={listId}>
-            {(item.allocations ?? []).map((a) => (
-              <option key={a.line_id} value={a.indent_no}>{a.requested_by_name ?? ""}</option>
-            ))}
-          </datalist>
-          <span className="mt-1 block text-xs text-muted">
-            {droppedCount > 0
-              ? `${droppedCount} getting nothing — their share goes to the rest`
-              : "Separate several with commas"}
-          </span>
-        </label>
-
-        <div>
-          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Per-indent split</span>
-          <SplitBreakdown item={item} decision={decision} />
-        </div>
-      </div>
-    </div>
+          <p className="text-xs">
+            {invalid || over
+              ? <span className="font-semibold text-danger">Fix quantity</span>
+              : <span className={edited ? "font-semibold text-brand" : "text-muted"}>
+                  Approving {formatQty(total)}
+                </span>}
+            {droppedCount > 0 && <span className="text-warn"> · {droppedCount} excluded</span>}
+          </p>
+        </div>;
+      }}
+    />
   );
 }
 
@@ -299,40 +390,132 @@ export const batchRef = (batch: ConsolidationBatch) => `CONS-${batch.cycle}`;
 const batchTotalRequested = (batch: ConsolidationBatch) =>
   batch.consolidated_items.reduce((sum, item) => sum + item.total_requested_quantity, 0);
 
+const MONTH_ABBR = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
+
+/** The cycle, read off its own key. Every row on this screen IS a month, so the
+ *  leading tile says which one instead of repeating the same generic glyph twenty
+ *  times — the month is the one thing that tells two rows apart at a glance.
+ *  `UNDATED` is a real cycle key (an indent with no date), and it has no month. */
+export function cycleTile(cycle: string) {
+  const [year, month] = cycle.split("-");
+  const index = Number(month) - 1;
+  return year?.length === 4 && index >= 0 && index < 12
+    ? { top: MONTH_ABBR[index], bottom: year }
+    : { top: "—", bottom: "" };
+}
+
+function CycleTile({ cycle }: { cycle: string }) {
+  const { top, bottom } = cycleTile(cycle);
+  return (
+    <span
+      aria-hidden
+      className="grid h-11 w-11 shrink-0 place-content-center rounded-xl border border-brand/15 bg-brand-050 text-center leading-none"
+    >
+      <span className="font-display text-[13px] font-bold tracking-wide text-brand">{top}</span>
+      {bottom && <span className="mt-1 block text-[10px] font-semibold text-brand/60">{bottom}</span>}
+    </span>
+  );
+}
+
+/** How this cycle's volume compares with the busiest one on screen. A bare number
+ *  says nothing until you have read every other row; a rule under it says "this is
+ *  the big one" before you have read anything. */
+function VolumeBar({ value, peak }: { value: number; peak: number }) {
+  const pct = peak > 0 ? Math.max(4, Math.round((value / peak) * 100)) : 0;
+  return (
+    <span className="mt-1.5 block h-1 w-full max-w-24 overflow-hidden rounded-full bg-content2">
+      <span className="block h-full rounded-full bg-brand/55" style={{ width: `${pct}%` }} />
+    </span>
+  );
+}
+
+/** Requesters, short. A consolidation gathers everyone reporting to the approver, so
+ *  the full list ran a row into a paragraph and no name in it was readable. Two names
+ *  carry the recognition and the rest becomes a count; the whole list is still one
+ *  hover away, and in full inside the consolidation. */
+export function requesterSummary(names: string[], keep = 2) {
+  const shown = names.slice(0, keep);
+  const rest = names.length - shown.length;
+  return { shown, rest };
+}
+
+/** A scope cell: the one name when the cycle has one, the count when it spans more. */
+const spanLabel = (name: string | null | undefined, count: number, noun: string) =>
+  name || (count > 0 ? `${count} ${noun}${count === 1 ? "" : "s"}` : "—");
+
+function Requesters({ names, keep = 2 }: { names: string[]; keep?: number }) {
+  const { shown, rest } = requesterSummary(names, keep);
+  if (names.length === 0) return <span className="text-muted">—</span>;
+
+  return (
+    <span className="flex flex-wrap items-center gap-1" title={names.join(", ")}>
+      {shown.map((name) => (
+        <span key={name} className="max-w-[16ch] truncate rounded-full bg-content2 px-2 py-0.5 text-xs text-body">
+          {name}
+        </span>
+      ))}
+      {rest > 0 && (
+        <span className="text-xs font-semibold text-muted">+{rest} other{rest === 1 ? "" : "s"}</span>
+      )}
+    </span>
+  );
+}
+
 /** The workspace's front door: one row per consolidation, in the shape of the All
  *  requests list. Opening a row is what reveals the quantity editor — the same
  *  drill-down an indent gets, so the two screens read the same way. */
-function BatchList({ batches, onOpen }: {
+function BatchList({ batches, loading, onOpen }: {
   batches: ConsolidationBatch[];
+  loading?: boolean;
   onOpen: (batch: ConsolidationBatch) => void;
 }) {
+  // The busiest cycle on screen sets the scale every other row is drawn against.
+  const peak = batches.reduce((max, row) => Math.max(max, batchTotalRequested(row)), 0);
+
   const columns: Column<ConsolidationBatch>[] = [
     {
       key: "ref",
       header: "Consolidation",
-      render: (row) => <div>
-        <strong className="font-mono text-ink">{batchRef(row)}</strong>
-        <p className="text-xs text-muted">{row.month_label}</p>
+      render: (row) => <div className="flex items-center gap-3">
+        <CycleTile cycle={row.cycle} />
+        <span className="min-w-0">
+          <strong className="block font-display text-[15px] font-bold text-ink">{row.month_label}</strong>
+          <span className="block truncate font-mono text-[11px] tracking-tight text-muted">{batchRef(row)}</span>
+        </span>
       </div>,
     },
-    { key: "indents", header: "Indents", render: (row) => row.indent_count },
-    { key: "items", header: "Items", render: (row) => row.consolidated_items.length },
+    { key: "indents", header: "Indents", render: (row) => <span className="tabular text-ink">{row.indent_count}</span> },
+    { key: "items", header: "Items", render: (row) => <span className="tabular text-ink">{row.consolidated_items.length}</span> },
     {
       key: "requesters",
       header: "Requesters",
       hideOnNarrow: true,
-      render: (row) => <span className="block max-w-[22ch] truncate">{row.requesters.join(", ") || "—"}</span>,
+      render: (row) => <Requesters names={row.requesters} />,
+    },
+    // Region and project each get their own column. A cycle that spans several of
+    // either has no single name to show, so the cell says how many it spans rather
+    // than picking one of them.
+    {
+      key: "region",
+      header: "Region",
+      hideOnNarrow: true,
+      render: (row) => <span className="text-muted">{spanLabel(row.region_name, row.region_count, "region")}</span>,
     },
     {
-      key: "scope",
-      header: "Scope",
+      key: "project",
+      header: "Project",
       hideOnNarrow: true,
-      render: (row) => <span className="text-muted">
-        {[row.region_name, row.project_name].filter(Boolean).join(" · ")
-          || `${row.region_count} region${row.region_count === 1 ? "" : "s"} · ${row.project_count} project${row.project_count === 1 ? "" : "s"}`}
-      </span>,
+      render: (row) => <span className="text-muted">{spanLabel(row.project_name, row.project_count, "project")}</span>,
     },
-    { key: "requested", header: "Requested (total)", render: (row) => formatQty(batchTotalRequested(row)) },
+    {
+      key: "requested",
+      header: "Requested",
+      render: (row) => <div className="min-w-20">
+        <span className="tabular font-semibold text-ink">{formatQty(batchTotalRequested(row))}</span>
+        <VolumeBar value={batchTotalRequested(row)} peak={peak} />
+      </div>,
+    },
     { key: "stage", header: "Stage", render: (row) => <StatusPill status={row.current_stage_name ?? "PENDING"} /> },
   ];
 
@@ -340,23 +523,40 @@ function BatchList({ batches, onOpen }: {
     <ResponsiveList
       data={batches}
       columns={columns}
+      loading={loading}
       keyOf={(row) => row.batch_key}
       onRowClick={onOpen}
       empty="No Monthly indents are waiting for your consolidated approval."
-      renderCard={(row) => <div className="space-y-2">
+      renderCard={(row) => <div className="space-y-2.5">
         <div className="flex items-center justify-between gap-3">
-          <span className="min-w-0">
-            <strong className="block truncate font-mono text-ink">{batchRef(row)}</strong>
-            <span className="mt-1 block truncate text-xs text-muted">{row.month_label}</span>
+          <span className="flex min-w-0 items-center gap-3">
+            <CycleTile cycle={row.cycle} />
+            <span className="min-w-0">
+              <strong className="block truncate font-display text-[15px] font-bold text-ink">
+                {row.month_label}
+              </strong>
+              <span className="block truncate font-mono text-[11px] text-muted">{batchRef(row)}</span>
+            </span>
           </span>
           <StatusPill status={row.current_stage_name ?? "PENDING"} />
         </div>
-        <p className="text-xs text-muted">
-          {row.indent_count} indent{row.indent_count === 1 ? "" : "s"}
-          {" · "}{row.consolidated_items.length} item{row.consolidated_items.length === 1 ? "" : "s"}
-          {" · requested "}{formatQty(batchTotalRequested(row))}
-        </p>
-        <p className="truncate text-xs text-muted">{row.requesters.join(", ") || "—"}</p>
+        {/* Three figures, three columns — the same numbers the table shows, but
+            lined up instead of run together in a sentence. */}
+        <div className="grid grid-cols-3 gap-2 rounded-xl bg-content2/60 px-3 py-2 text-center">
+          {[
+            ["Indents", String(row.indent_count)],
+            ["Items", String(row.consolidated_items.length)],
+            ["Requested", formatQty(batchTotalRequested(row))],
+          ].map(([label, figure]) => (
+            <span key={label} className="min-w-0">
+              <span className="block truncate tabular text-sm font-semibold text-ink">{figure}</span>
+              <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted">
+                {label}
+              </span>
+            </span>
+          ))}
+        </div>
+        <Requesters names={row.requesters} />
       </div>}
     />
   );
@@ -368,24 +568,23 @@ export function BatchCard({ batch, onBack }: {
    *  visible Back control; this fires when the batch itself is finished with. */
   onBack: () => void;
 }) {
-  // Keyed by item id, one per row of the consolidated item table. Local to the screen:
-  // nothing is written until the approver acts on the indents themselves.
-  const [decisions, setDecisions] = useState<Record<number, ItemDecision>>({});
+  // Keyed by item id, one per item the approver has been into. Held outside this
+  // component (see consolidationDecisions.ts) because the quantities are now set on
+  // each item's own page and spent here — a `useState` would be thrown away in
+  // between. Still nothing written server-side until Approve all.
+  const { decisions, clearCycle } = useConsolidationDecisions(batch.cycle);
   const [result, setResult] = useState<ConsolidationApprovalResult | null>(null);
-  // How many indents the running approval has got through, so a batch of hundreds
-  // shows movement instead of a frozen button.
+  // How many indents the server has answered for so far. Decided from the responses,
+  // never from a timer: it has to say what is actually committed, because that is
+  // exactly what survives if the tab is closed halfway through.
   const [progress, setProgress] = useState(0);
   const queryClient = useQueryClient();
-  const setDecision = (itemId: number, patch: Partial<ItemDecision>) =>
-    setDecisions((current) => ({
-      ...current,
-      [itemId]: { ...(current[itemId] ?? { approved: "", exclude: "" }), ...patch },
-    }));
+  const nav = useNavigate();
 
   // A bad number anywhere in the batch blocks the whole approval: the split it feeds
   // would be wrong for every indent holding that item, not just one.
   const blocked = batch.consolidated_items.some((item) => {
-    const { invalid, over } = resolveItem(item, decisions[item.item_id]);
+    const { invalid, over } = resolveItem(item, decisions[String(item.item_id)]);
     return invalid || over;
   });
 
@@ -395,7 +594,7 @@ export function BatchCard({ batch, onBack }: {
       // Every item's split, flattened. A line nobody edited still ships its share,
       // because the split of an untouched item is simply its full ceiling.
       const lines = batch.consolidated_items.flatMap((item) => {
-        const { split } = resolveItem(item, decisions[item.item_id]);
+        const { split } = resolveItem(item, decisions[String(item.item_id)]);
         return (item.allocations ?? []).map((allocation) => ({
           indent_id: allocation.indent_id,
           line_id: allocation.line_id,
@@ -403,20 +602,18 @@ export function BatchCard({ batch, onBack }: {
         }));
       });
 
-      // Sent in chunks, not one request. The backend walks the batch one indent at a
-      // time — engine-owned chains cannot be short-cut — so a monthly cycle of several
-      // hundred indents would sit on a single request long past any gateway timeout,
-      // and a timeout mid-walk leaves the approver unable to tell what went through.
-      // The call is already non-atomic across indents by design, so splitting it
-      // changes nothing about the outcome, only how long any one request is held open.
-      const chunks: number[][] = [];
-      for (let i = 0; i < indentIds.length; i += APPROVE_CHUNK) {
-        chunks.push(indentIds.slice(i, i + APPROVE_CHUNK));
-      }
+      // Sent in small chunks, not one request. The backend walks the batch one indent
+      // at a time — engine-owned chains cannot be short-cut — so a monthly cycle would
+      // sit on a single request long past any gateway timeout. The call is already
+      // non-atomic across indents by design and each indent commits on its own, so
+      // splitting it changes nothing about the outcome: it only bounds how long any
+      // one request is held open, and gives the bar below something to move on.
       const merged: ConsolidationApprovalResult = {
         approved_count: 0, approved_indent_ids: [], failed: [],
       };
-      for (const chunk of chunks) {
+      setProgress(0);
+      for (let i = 0; i < indentIds.length; i += APPROVE_CHUNK) {
+        const chunk = indentIds.slice(i, i + APPROVE_CHUNK);
         const ids = new Set(chunk);
         const part = await approvalsApi.approveConsolidation({
           indent_ids: chunk,
@@ -431,6 +628,9 @@ export function BatchCard({ batch, onBack }: {
     },
     onSuccess: (data) => {
       setResult(data);
+      // The draft has been spent. Leaving it behind would re-apply last week's
+      // numbers to whatever is still in the cycle after this round.
+      if (data.approved_count > 0) clearCycle();
       // The approved indents leave this approver's queue, so the workspace has to be
       // re-read rather than patched.
       queryClient.invalidateQueries({ queryKey: ["approvals"] });
@@ -441,19 +641,6 @@ export function BatchCard({ batch, onBack }: {
       if (data.failed.every((f) => f.skipped)) onBack();
     },
   });
-
-  const indentColumns: Column<ConsolidationIndentSummary>[] = [
-    { key: "indent", header: "Indent", render: (row) => <div><strong className="font-mono text-ink">{row.indent_no}</strong><p className="text-xs text-muted">{row.line_count} line{row.line_count === 1 ? "" : "s"}</p></div> },
-    { key: "requester", header: "Requester", render: (row) => row.requested_by_name ?? "—" },
-    { key: "region", header: "Region", hideOnNarrow: true, render: (row) => row.region_name ?? "—" },
-    { key: "project", header: "Project", hideOnNarrow: true, render: (row) => row.project_name ?? "—" },
-    { key: "office", header: "Office", hideOnNarrow: true, render: (row) => row.office_name ?? "—" },
-    { key: "vehicle", header: "Vehicle", hideOnNarrow: true, render: (row) => row.vehicle_number ?? "—" },
-    { key: "requested", header: "Requested", render: (row) => formatQty(row.total_requested_quantity) },
-    { key: "previous", header: "Previously approved", hideOnNarrow: true, render: (row) => row.previous_approved_quantity === null || row.previous_approved_quantity === undefined ? "—" : formatQty(row.previous_approved_quantity) },
-    { key: "ceiling", header: "Approvable now", render: (row) => formatQty(row.current_ceiling_quantity) },
-    { key: "stage", header: "Stage", hideOnNarrow: true, render: (row) => <StatusPill status={row.current_stage_name ?? "PENDING"} /> },
-  ];
 
   return (
     <Card className="mb-4 space-y-4 p-4">
@@ -467,15 +654,26 @@ export function BatchCard({ batch, onBack }: {
             {batch.project_count > 0 ? ` · ${batch.project_count} project${batch.project_count === 1 ? "" : "s"}` : ""}
             {batch.region_count > 0 ? ` · ${batch.region_count} region${batch.region_count === 1 ? "" : "s"}` : ""}
           </p>
-          <p className="mt-1 flex items-center gap-1 text-xs text-muted">
-            <Users className="h-3.5 w-3.5" /> {batch.requesters.join(", ")}
+          <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+            <Users className="h-3.5 w-3.5 shrink-0" /> <Requesters names={batch.requesters} />
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <StatusPill status={batch.current_stage_name ?? "PENDING"} />
+          {/* Serving from your own stock is a different job from setting quantities —
+              it moves goods — so it is a visible action up here, not a disclosure
+              buried under the item editor where nobody found it. */}
+          {/* Same solid primary as Approve all: both are real decisions the approver
+              takes from this header, so neither is demoted to a secondary weight. */}
+          <Button
+            disabled={batch.indents.length === 0}
+            onClick={() => nav(`/approvals/consolidation/${encodeURIComponent(batch.cycle)}/serve`)}
+          >
+            <PackageCheck className="h-4 w-4" /> Serve from own stock
+          </Button>
           <Button
             disabled={blocked || approve.isPending || batch.indents.length === 0}
-            onClick={() => { setProgress(0); approve.mutate(); }}
+            onClick={() => approve.mutate()}
           >
             <Check className="h-4 w-4" />
             {approve.isPending
@@ -486,8 +684,39 @@ export function BatchCard({ batch, onBack }: {
       </div>
 
       {blocked && <p className="rounded-xl bg-danger/10 p-3 text-sm text-danger">
-        Fix the quantities above before approving.
+        One item's quantity is out of range — open it and fix it before approving.
       </p>}
+      {approve.isPending && (
+        <div className="rounded-xl bg-brand/5 p-3">
+          <div className="mb-2 flex items-center justify-between text-sm">
+            <span className="text-body">
+              Approving {progress} of {batch.indents.length}…
+            </span>
+            <span className="font-mono text-xs text-muted">
+              {Math.round((progress / Math.max(batch.indents.length, 1)) * 100)}%
+            </span>
+          </div>
+          <div
+            className="h-2 w-full overflow-hidden rounded-full bg-brand/15"
+            role="progressbar"
+            aria-valuenow={progress}
+            aria-valuemin={0}
+            aria-valuemax={batch.indents.length}
+            aria-label="Indents approved"
+          >
+            <div
+              className="h-full rounded-full bg-brand transition-[width] duration-300"
+              style={{ width: `${(progress / Math.max(batch.indents.length, 1)) * 100}%` }}
+            />
+          </div>
+          {/* Said out loud because it is the thing an approver worries about while a
+              long run is going. Each indent commits on its own, so this is true. */}
+          <p className="mt-2 text-xs text-muted">
+            Safe to wait — every indent already counted is approved and stays approved,
+            even if this page is closed.
+          </p>
+        </div>
+      )}
       {approve.error && <p className="rounded-xl bg-danger/10 p-3 text-sm text-danger">
         {(approve.error as Error).message}
       </p>}
@@ -506,60 +735,58 @@ export function BatchCard({ batch, onBack }: {
         );
       })()}
 
-      {/* An editor, not a list — deliberately not <ResponsiveList>. Its table is a
-          react-aria grid, and a grid cell swallows the keystrokes an <input> needs,
-          so an editable quantity inside one silently refuses to type. */}
+      {/* The whole batch, item by item — and nothing else. The matching indents used
+          to sit under this as a second table, which meant an approver read the same
+          twenty indents once here and again inside every item they opened. They now
+          live on the item they asked for, where the exclusion that drops one of them
+          actually happens. */}
       <div>
-        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Consolidated item quantities</p>
-        {batch.consolidated_items.length === 0
-          ? <div className="rounded-2xl border border-line/70 bg-content1 py-10 text-center text-muted">No items on this batch.</div>
-          : <div className="space-y-3">
-              {batch.consolidated_items.map((item) => (
-                <ItemEditor
-                  key={item.item_id}
-                  item={item}
-                  batchKey={batch.batch_key}
-                  decision={decisions[item.item_id]}
-                  onChange={(patch) => setDecision(item.item_id, patch)}
-                />
-              ))}
-            </div>}
-      </div>
-
-      <div>
-        {/* Serve-from-stock, per indent. A consolidation is a view over several
-            documents, and stock is issued INTO the raiser's own point — so there is
-            no single "issue the batch": each indent's goods go somewhere different. */}
-        <details className="mb-3 rounded-2xl border border-line/70 bg-content1 p-3">
-          <summary className="cursor-pointer text-sm font-semibold text-ink">
-            Serve these indents from your own stock
-          </summary>
-          <div className="mt-3 space-y-3">
-            {batch.indents.map((row) => (
-              <div key={row.id}>
-                <p className="mb-1 font-mono text-xs text-muted">{row.indent_no}</p>
-                <IssueFromStockPanel indentId={row.id} />
-              </div>
-            ))}
-          </div>
-        </details>
-
-        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Matching indents</p>
-        <ResponsiveList
-          data={batch.indents}
-          columns={indentColumns}
-          keyOf={(row) => row.id}
-          empty="No indents in this batch."
-          renderCard={(row) => <div className="space-y-2">
-            <div className="flex justify-between gap-2"><strong className="font-mono text-ink">{row.indent_no}</strong><StatusPill status={row.current_stage_name ?? "PENDING"} /></div>
-            <p className="text-sm text-body">{row.requested_by_name ?? "—"}</p>
-            <p className="text-xs text-muted">
-              {[row.region_name, row.project_name, row.office_name, row.vehicle_number].filter(Boolean).join(" · ") || "—"}
-            </p>
-            <p className="text-xs text-muted">Requested {formatQty(row.total_requested_quantity)} · Approvable now {formatQty(row.current_ceiling_quantity)}</p>
-          </div>}
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+          Consolidated item quantities
+        </p>
+        <ItemList
+          items={batch.consolidated_items}
+          decisions={decisions}
+          onOpen={(item) => nav(
+            `/approvals/consolidation/${encodeURIComponent(batch.cycle)}/items/${item.item_id}`,
+          )}
         />
+        <p className="mt-2 text-xs text-muted">
+          Open an item to see who asked for it, set the quantity going out and leave
+          indents out of it.
+        </p>
       </div>
+    </Card>
+  );
+}
+
+/** The fourth tile. Three counts and a fourth count read as four of the same thing,
+ *  and the number that actually matters here is a proportion: how much of the queue
+ *  the filters are letting through. Same shell and rhythm as `StatCard` — it belongs
+ *  to that row — with the share drawn instead of spelled out. */
+function CoverageCard({ shown, total }: { shown: number; total: number }) {
+  const pct = total > 0 ? Math.round((shown / total) * 100) : 0;
+  const narrowed = shown < total;
+  return (
+    <Card className="p-4 sm:p-5">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+          {narrowed ? "In view" : "Whole queue"}
+        </span>
+        <span className={narrowed ? "text-brand" : "text-muted"}>
+          <Filter className="h-4 w-4" />
+        </span>
+      </div>
+      <div className="flex items-end justify-between gap-2">
+        <span className="font-display text-3xl font-bold tabular text-ink">{pct}%</span>
+        <span className="pb-1 text-xs text-muted tabular">{shown} of {total}</span>
+      </div>
+      <span className="mt-3 block h-1.5 overflow-hidden rounded-full bg-content2">
+        <span
+          className="block h-full rounded-full bg-brand transition-[width] duration-300"
+          style={{ width: `${pct}%` }}
+        />
+      </span>
     </Card>
   );
 }
@@ -600,24 +827,30 @@ export function ConsolidationPage() {
         <RefreshCw className={`h-4 w-4 ${query.isFetching ? "animate-spin" : ""}`} /> Refresh
       </Button>}
     />
-    <p className="mb-4 text-sm text-body">
-      One row per consolidation — every Monthly indent waiting on you, grouped by
-      monthly cycle. Region, project, office, vehicle, requester and item narrow what
-      is inside a cycle; they never split it into separate approvals. Open a
-      consolidation to set quantities and approve it.
+    <p className="mb-4 max-w-3xl text-sm text-body">
+      Every Monthly indent waiting on you, gathered into one row per monthly cycle.
+      Filters narrow what is <em className="not-italic font-semibold">inside</em> a
+      cycle — they never split it into separate approvals. Open a consolidation to set
+      quantities and approve it.
     </p>
 
     {data && <>
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Indents shown" value={data.total_indent_count} icon={<Layers className="h-4 w-4" />} />
-        <StatCard label="Requesters" value={data.total_requester_count} icon={<Users className="h-4 w-4" />} />
-        <StatCard label="Consolidations" value={batches.length} />
+        {/* One accent, on the number the screen is about; the other two stay ink so
+            the strip reads as a hierarchy rather than a set of coloured lights. */}
         <StatCard
-          label={appliedCount > 0 ? "Filtered out" : "All pending"}
-          value={appliedCount > 0
-            ? `${data.unfiltered_indent_count - data.total_indent_count} of ${data.unfiltered_indent_count}`
-            : data.unfiltered_indent_count}
+          label="Indents shown"
+          value={data.total_indent_count}
+          tone="text-brand"
+          icon={<Layers className="h-4 w-4" />}
         />
+        <StatCard label="Requesters" value={data.total_requester_count} icon={<Users className="h-4 w-4" />} />
+        <StatCard
+          label="Consolidations"
+          value={batches.length}
+          icon={<CalendarRange className="h-4 w-4" />}
+        />
+        <CoverageCard shown={data.total_indent_count} total={data.unfiltered_indent_count} />
       </div>
       <FilterBar
         options={data.filter_options}
@@ -629,21 +862,28 @@ export function ConsolidationPage() {
       />
     </>}
 
-    {query.error
-      ? <p className="rounded-xl bg-danger/10 p-4 text-sm text-danger">{(query.error as Error).message}</p>
-      : query.isLoading
-        ? <Card className="p-8 text-center text-muted">Loading…</Card>
-        : batches.length === 0
-          ? <Card className="flex flex-col items-center gap-2 p-10 text-center text-muted">
-              <Layers className="h-6 w-6" />
-              {appliedCount > 0
-                ? "No Monthly indents match these filters."
-                : "No Monthly indents are waiting for your consolidated approval."}
-              {appliedCount > 0 && <Button variant="ghost" onClick={() => setFilters({})}>Clear filters</Button>}
-            </Card>
-          : <BatchList
-              batches={batches}
-              onOpen={(batch) => nav(`/approvals/consolidation/${encodeURIComponent(batch.batch_key)}`)}
-            />}
+    <ErrorBanner error={query.error} />
+
+    {!query.error && (query.isLoading || batches.length > 0
+      // Skeleton rows, not a "Loading…" card: the list keeps its shape while it
+      // arrives, so nothing on the page jumps when it does.
+      ? <BatchList
+          batches={batches}
+          loading={query.isLoading}
+          onOpen={(batch) => nav(`/approvals/consolidation/${encodeURIComponent(batch.batch_key)}`)}
+        />
+      : <EmptyState
+          title={appliedCount > 0
+            ? "No consolidation matches these filters"
+            : "Nothing waiting on your consolidated approval"}
+          hint={appliedCount > 0
+            ? "Monthly indents are pending, but none of them survive the current filters. Widen or clear them to see the rest of the queue."
+            : "Monthly indents raised below you land here, gathered by the month they were raised in. Nothing is pending right now."}
+          action={appliedCount > 0
+            ? <Button variant="subtle" onClick={() => { setSearchText(""); setFilters({}); }}>
+                Clear filters
+              </Button>
+            : undefined}
+        />)}
   </>;
 }

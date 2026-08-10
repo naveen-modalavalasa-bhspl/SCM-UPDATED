@@ -722,7 +722,20 @@ async def indent_access_condition(db: AsyncSession, user):
 
     Role permissions open endpoints and UI actions. This SQL predicate limits which
     records the authenticated employee may actually see.
+
+    Built once per request and reused (see shared/scope.py `_memo`). The clause is
+    keyed by the login AND the position they are wearing, which is exactly what it is
+    derived from, so a session that switches hats builds a new one. Its subqueries stay
+    live — `wf_pending` and `wf_actions` are read when the SQL runs, not when the
+    clause is assembled — so reusing it is reusing a predicate, never a result set.
+    A batch approval asked for the identical clause once per indent and paid nine
+    round trips each time to rebuild it.
     """
+    cache = db.info.setdefault("indent_access_memo", {})
+    key = (user.id, getattr(user, "active_position_id", None))
+    if key in cache:
+        return cache[key]
+
     assignment, position = await _current_assignment(db, user)
     position_id = getattr(user, "active_position_id", None)
     role_codes = await _authenticated_role_codes(db, user)
@@ -778,7 +791,9 @@ async def indent_access_condition(db: AsyncSession, user):
     if scm_statuses:
         visible.append(Indent.status.in_(scm_statuses))
 
-    return or_(*visible)
+    clause = or_(*visible)
+    cache[key] = clause
+    return clause
 
 
 async def _indent_visibility(db: AsyncSession, user):

@@ -1,8 +1,9 @@
 """Position-aware RBAC read logic: effective roles, permissions, and menu."""
 import re
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import event, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
@@ -21,6 +22,24 @@ from app.shared.enums import AuditAction, GroupType
 MAX_GROUP_DEPTH = 10
 
 HCM_ROLE_DESCRIPTION_PREFIX = "HCM role ID: "
+
+# The models that decide what a login may do, and at what rung. `get_user_permissions`
+# and `scope.rung_for` both memoise their answer for the life of one request; if a
+# request CHANGES a grant or a job profile, those memos have to go, or an admin screen
+# could read back the answer it just replaced. (A profile's rung is parsed off the
+# Role's description, which is why Role is in this list twice over.) Hooked on flush
+# rather than added to each write helper, so a new writer cannot forget to do it.
+_GRANT_MODELS = (Role, RolePermission, UserRole, UserGroup, UserGroupMember)
+
+_MEMO_KEYS = ("user_permissions_memo", "scope_memo_rung")
+
+
+@event.listens_for(Session, "after_flush")
+def _drop_permission_memo(session, _flush_context) -> None:
+    touched = session.new | session.dirty | session.deleted
+    if any(isinstance(obj, _GRANT_MODELS) for obj in touched):
+        for key in _MEMO_KEYS:
+            session.info.pop(key, None)
 
 
 def hcm_role_description(role_id: int) -> str:
@@ -353,16 +372,29 @@ async def get_user_roles(
 async def get_user_permissions(
     db: AsyncSession, user, position_id: int | None = None,
 ) -> set[str]:
+    # Memoised for the life of one request. What a login may DO cannot change while
+    # that request is running, and the answer is asked for once per document — a batch
+    # approval of forty-one indents paid for the same five queries forty-one times.
+    # Keyed by (employee, position) exactly as the answer is derived, so the grant set
+    # is still per login and per hat; nothing about who may do what moves.
+    cache = db.info.setdefault("user_permissions_memo", {})
+    key = (user.id, position_id)
+    if key in cache:
+        return set(cache[key])
+
     roles = await get_user_roles(db, user.id, position_id)
     role_ids = [role.id for role in roles]
     if not role_ids:
+        cache[key] = set()
         return set()
     stmt = (
         select(Permission.code)
         .join(RolePermission, RolePermission.permission_id == Permission.id)
         .where(RolePermission.role_id.in_(role_ids))
     )
-    return set((await db.execute(stmt)).scalars().all())
+    codes = set((await db.execute(stmt)).scalars().all())
+    cache[key] = set(codes)
+    return codes
 
 
 async def get_user_positions(db: AsyncSession, employee_id: int) -> list[dict]:

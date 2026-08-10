@@ -8,7 +8,7 @@ import {
   CardBody, Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Skeleton,
   Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { PageHeader, Button, Can, Card, FormActions } from "@/shared/components";
+import { PageHeader, Button, Can, Card } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
@@ -395,9 +395,6 @@ export function IndentDetailPage() {
               <Detail label="Requested by" value={indent.requested_by_name} />
               <Detail label="Position" value={indent.position_name} />
               <Detail label="Department" value={indent.department_name} />
-              {/* The requester's HCM location, snapshotted at create — what monthly
-                  indents are grouped by. Not editable here or on the form. */}
-              <Detail label="Region / Location" value={indent.region_name} />
               <Detail label="Deliver to" value={indent.office_name} />
               <Detail label="Vehicle" value={indent.vehicle_number} />
               <Detail label="Priority" value={indent.priority} />
@@ -413,11 +410,8 @@ export function IndentDetailPage() {
         <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>
       )}
 
-      {/* FormActions, not a hand-rolled bar: at bottom-0/z-10 these sat UNDER the
-          mobile module nav (bottom-0, z-30), so Submit/Approve/Reject were invisible
-          on a phone. */}
       {showActions && (
-        <FormActions className="mt-6">
+        <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
           {indent.can_submit && (
             <Button className="flex-1 md:flex-none" disabled={actionPending} onClick={() => !actionPending && submit.mutate()}>
               {submit.isPending ? <InlineSpinner /> : <Send className="h-4 w-4" />} {submit.isPending ? "Submitting..." : "Submit for approval"}
@@ -444,11 +438,11 @@ export function IndentDetailPage() {
               {approve.isPending ? "Approving..." : "Approve"}
             </Button>
           )}
-        </FormActions>
+        </div>
       )}
 
       {showCorrectionActions && (
-        <FormActions className="mt-6">
+        <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
           {indent.can_resubmit_correction && (
             <Button
               className="flex-1 md:flex-none"
@@ -463,7 +457,7 @@ export function IndentDetailPage() {
               {resubmitCorrection.isPending ? "Resubmitting..." : "Resubmit correction"}
             </Button>
           )}
-        </FormActions>
+        </div>
       )}
 
       <Modal

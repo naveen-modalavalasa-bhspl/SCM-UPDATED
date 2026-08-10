@@ -724,7 +724,7 @@ describe("indent UI shell", () => {
       PENDING_APPROVAL: "var(--color-warn)",
       AWAITING_ALLOCATION: "var(--color-info)",
       ALLOCATED: "#8b5cf6",
-      PARTIALLY_FULFILLED: "var(--color-warn)",
+      PARTIALLY_FULFILLED: "#0891b2",
       CLOSED: "var(--color-ok)",
       REJECTED: "var(--color-bad)",
     };
@@ -3835,7 +3835,20 @@ describe("indent UI shell", () => {
     });
   });
 
-  it("breaks the statistics down by region, keeping unassigned indents visible", async () => {
+  it("does not show Region / Location on the detail screen", async () => {
+    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({
+      region_id: 654,
+      region_name: "104-MMU-AP-Hanumanthunipadu",
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("Deliver to")).toBeInTheDocument();
+    expect(screen.queryByText("Region / Location")).not.toBeInTheDocument();
+    expect(screen.queryByText("104-MMU-AP-Hanumanthunipadu")).not.toBeInTheDocument();
+  });
+
+  it("does not render a region breakdown on the dashboard", async () => {
     vi.mocked(indentApi.stats).mockResolvedValueOnce({
       total: 10,
       draft: 0,
@@ -3856,30 +3869,9 @@ describe("indent UI shell", () => {
 
     renderWithProviders(<IndentDashboardPage />, "/indents/overview");
 
-    const breakdown = await screen.findByRole("list", { name: "Indents by region" });
-    expect(within(breakdown).getByText("104-MMU-AP-Hanumanthunipadu")).toBeInTheDocument();
-    expect(within(breakdown).getByText("No location")).toBeInTheDocument();
-    expect(within(breakdown).getByText("3")).toBeInTheDocument();
-  });
-
-  it("shows Region on the detail screen without offering a way to change it", async () => {
-    vi.mocked(indentApi.get).mockResolvedValue(detailIndent({
-      region_id: 654,
-      region_name: "104-MMU-AP-Hanumanthunipadu",
-    }));
-
-    renderWithProviders(<IndentDetailPage />, "/indents/42");
-
-    expect(await screen.findByText("Region / Location")).toBeInTheDocument();
-    expect(screen.getByText("104-MMU-AP-Hanumanthunipadu")).toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: /region/i })).not.toBeInTheDocument();
-  });
-
-  it("does not render a region breakdown when the backend omits by_region", async () => {
-    renderWithProviders(<IndentDashboardPage />, "/indents/overview");
-
     await waitFor(() => expect(indentApi.stats).toHaveBeenCalled());
     expect(screen.queryByRole("list", { name: "Indents by region" })).not.toBeInTheDocument();
+    expect(screen.queryByText("By region / location")).not.toBeInTheDocument();
   });
 
   it("does not render pin controls for any indent in All Requests", async () => {

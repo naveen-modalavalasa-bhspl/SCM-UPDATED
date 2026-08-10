@@ -133,6 +133,15 @@ async def location_ids_for_subtree(db: AsyncSession, position_id: int | None) ->
     if position_id is None:
         return set()
 
+    # Memoised for the life of ONE request (see shared/scope.py `_memo` for why the
+    # session is the right lifetime). The descent costs a query per level of the org
+    # chart and is re-run on every scoped read; a batch approval asks for the same
+    # position's subtree once per indent and gets the same answer every time, because
+    # nothing a request does moves a position or a tag.
+    cache = db.info.setdefault("subtree_points_memo", {})
+    if position_id in cache:
+        return set(cache[position_id])
+
     seen: set[int] = {position_id}
     frontier = [position_id]
     while frontier:
@@ -142,12 +151,14 @@ async def location_ids_for_subtree(db: AsyncSession, position_id: int | None) ->
         frontier = list(children - seen)
         seen |= children
 
-    return set((await db.execute(
+    points = set((await db.execute(
         select(PositionLocation.warehouse_id).where(
             PositionLocation.position_id.in_(seen),
             PositionLocation.is_active == 1,
         )
     )).scalars().all())
+    cache[position_id] = set(points)
+    return points
 
 
 async def primary_location_for(db: AsyncSession, position_id: int | None) -> int | None:
@@ -227,6 +238,7 @@ async def ensure_point_for_position(db: AsyncSession, position_id: int | None) -
         project_id=NO_PROJECT, is_primary=1, is_active=1,
     ))
     await db.flush()
+    db.info.pop("subtree_points_memo", None)
     return warehouse_id
 
 
@@ -380,6 +392,10 @@ async def tag_position(db: AsyncSession, data, user=None) -> dict:
         ).values(is_primary=0))
 
     await db.commit()
+    # The tagging just moved, so anything this request already worked out about which
+    # points a position reaches is now wrong. Cheap insurance: the memo only exists to
+    # save round trips, never to outlive the fact it was derived from.
+    db.info.pop("subtree_points_memo", None)
     tags = await list_tags(db, data.position_id)
     return next(t for t in tags if t["warehouse_id"] == data.warehouse_id)
 
@@ -391,6 +407,7 @@ async def untag(db: AsyncSession, tag_id: int) -> None:
         PositionLocation.id == tag_id,
     ).values(is_active=0))
     await db.commit()
+    db.info.pop("subtree_points_memo", None)
 
 
 async def search_positions(db: AsyncSession, query: str, limit: int = 20) -> list[dict]:

@@ -42,6 +42,28 @@ export function notificationsReturnUrlFromState(state: unknown) {
   return safeNotificationsReturnUrl(value);
 }
 
+const TAB_STORAGE_KEY = "scm-erp:indents:notifications:tab";
+
+export type NotificationsTab = "unread" | "all";
+
+/** The tab lives in sessionStorage, not the URL, so opening an indent and coming
+ *  back lands on the tab you left — the same reason the scroll offset is kept. */
+export function readNotificationsTab(): NotificationsTab {
+  try {
+    return window.sessionStorage.getItem(TAB_STORAGE_KEY) === "all" ? "all" : "unread";
+  } catch {
+    return "unread";
+  }
+}
+
+export function saveNotificationsTab(tab: NotificationsTab) {
+  try {
+    window.sessionStorage.setItem(TAB_STORAGE_KEY, tab);
+  } catch {
+    // Storage can be unavailable in hardened/private browser contexts.
+  }
+}
+
 function scrollStorageKey(listUrl: string) {
   return `${SCROLL_STORAGE_PREFIX}${encodeURIComponent(listUrl)}`;
 }
