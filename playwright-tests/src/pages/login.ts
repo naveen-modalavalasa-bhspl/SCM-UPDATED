@@ -21,7 +21,10 @@ export async function loginAs(page: Page, account: Account, log: RunLogger) {
     await page.goto("/login");
 
     await page.getByLabel("Employee ID").fill(account.employeeId);
-    await page.getByLabel("Password").fill(account.password);
+    // The field, not the eye. "Password" also matches the show/hide toggle's
+    // aria-label, and a two-element match is a strict-mode failure, not a guess.
+    await page.locator("input[name='password'], input[type='password']")
+      .first().fill(account.password);
     await page.getByRole("button", { name: /sign in/i }).click();
 
     // A bad password renders an inline error instead of navigating; surface it as

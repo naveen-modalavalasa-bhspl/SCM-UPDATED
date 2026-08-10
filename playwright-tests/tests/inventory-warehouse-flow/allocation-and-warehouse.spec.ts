@@ -44,11 +44,23 @@ test.describe("Inventory and warehouse approvals", () => {
     // ---- inventory: decide, then sign it once per hat ----
 
     await loginAs(page, inventoryUser, log);
-    await allocateStock(page, log, indent, goto);
-    await capture("allocation-submitted");
+    // Allocating twice is refused by the backend ("already awaiting approval"), which
+    // is correct — so a run that stopped after submitting resumes at the signature
+    // instead of dying on its own leftovers.
+    const pending = (await api.allocationsFor(indent.id, inventoryUser))
+      .some((row) => row.status === "PENDING_APPROVAL");
+    if (pending) {
+      log.info("An allocation is already awaiting approval — resuming at the signature.");
+    } else {
+      await allocateStock(page, log, indent, goto);
+      await capture("allocation-submitted");
+    }
 
+    // Highest id, not last in the list: the API does not promise an order, and a
+    // rejected allocation stays attached to the indent forever — so "the last one"
+    // can be a dead one and the run then watches the wrong document.
     const created = await api.allocationsFor(indent.id, inventoryUser);
-    const allocation = created[created.length - 1];
+    const allocation = [...created].sort((a, b) => a.id - b.id).at(-1)!;
     log.info(`Allocation ${allocation.allocation_no} is ${allocation.status}.`);
 
     const hats = inventoryUser.hats ?? [];

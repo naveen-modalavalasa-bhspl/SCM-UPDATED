@@ -55,6 +55,30 @@ const pageTree = (pages: JobProfileMatrix["pages"]) => {
   return [...groups.values()];
 };
 
+/** Module names are spelled differently on the two halves of this screen — the page
+ *  tree says "Warehouse", the permission catalogue says "warehouse" — so they are
+ *  compared on letters alone. */
+const sameModule = (a: string, b: string) =>
+  a.replace(/[^a-z]/gi, "").toLowerCase() === b.replace(/[^a-z]/gi, "").toLowerCase();
+
+/** What ticking a page actually does, said plainly. Shown on hover, because "Put-away"
+ *  tells an admin nothing about what the holder will be able to reach. */
+const pageHint = (page: { name: string; always_on: boolean;
+                          required_permission: string | null }) =>
+  page.always_on
+    ? `${page.name} is always visible — every login can open it, and it cannot be `
+      + "taken away here."
+    : `Lets the holder open ${page.name} and see what is on it.`
+      + (page.required_permission
+         ? ` Grants "${page.required_permission}".`
+         : " This screen has no permission of its own, so it is visible to anyone "
+           + "who can reach the module.");
+
+/** An action is a verb, not a screen: it decides whether the button works. */
+const featureHint = (feature: { code: string; description: string }) =>
+  `${feature.description}. Grants "${feature.code}" — the backend checks this on every `
+  + "request, so it is the real permission, not just a visible button.";
+
 export function JobProfilesPage() {
   const toast = useToast();
   const queryClient = useQueryClient();
@@ -153,6 +177,38 @@ export function JobProfilesPage() {
     }
     return [...byModule.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [data?.features]);
+
+  /** One tick for a whole module: every page under it AND every action in it. Two
+   *  half-granted modules is the shape of an access bug, so they move together. */
+  const setModule = (moduleName: string, on: boolean) => {
+    const pages = (data?.pages ?? [])
+      .filter((page) => !page.always_on
+        && (groups.find((g) => g.name === moduleName)?.pages ?? [])
+             .some((p) => p.code === page.code))
+      .map((page) => page.code);
+    const features = (data?.features ?? [])
+      .filter((feature) => sameModule(feature.module, moduleName))
+      .map((feature) => feature.code);
+    const apply = (current: Set<string>, codes: string[]) => {
+      const next = new Set(current);
+      for (const code of codes) on ? next.add(code) : next.delete(code);
+      return next;
+    };
+    setPageCodes(apply(pageCodes, pages));
+    setFeatureCodes(apply(featureCodes, features));
+  };
+
+  const moduleState = (moduleName: string) => {
+    const pages = (groups.find((g) => g.name === moduleName)?.pages ?? [])
+      .filter((page) => !page.always_on).map((page) => page.code);
+    const features = (data?.features ?? [])
+      .filter((feature) => sameModule(feature.module, moduleName))
+      .map((feature) => feature.code);
+    const all = [...pages, ...features];
+    const on = pages.filter((c) => pageCodes.has(c)).length
+      + features.filter((c) => featureCodes.has(c)).length;
+    return { checked: all.length > 0 && on === all.length, some: on > 0 && on < all.length };
+  };
 
   const toggle = (set: Set<string>, code: string, apply: (s: Set<string>) => void) => {
     const next = new Set(set);
@@ -411,16 +467,30 @@ export function JobProfilesPage() {
                   </div>
                 </div>
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                  {groups.map((group) => (
+                  {groups.map((group) => {
+                    const state = moduleState(group.name);
+                    return (
                     <div key={group.name}>
-                      <div className="text-xs font-semibold uppercase text-default-500 mb-1">
-                        {group.name}
-                      </div>
+                      <label className="flex items-center gap-2 mb-1 cursor-pointer"
+                             title={`Turn the whole ${group.name} module on or off — `
+                               + "every screen under it and every action in it."}>
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4"
+                          checked={state.checked}
+                          ref={(el) => { if (el) el.indeterminate = state.some; }}
+                          onChange={() => setModule(group.name, !state.checked)}
+                        />
+                        <span className="text-xs font-semibold uppercase text-default-500">
+                          {group.name}
+                        </span>
+                      </label>
                       <ul className="space-y-1">
                         {group.pages.map((page) => (
                           <li key={page.code}>
                             <label className="flex items-center gap-2 min-h-[32px] text-sm
-                                              cursor-pointer">
+                                              cursor-pointer"
+                                   title={pageHint(page)}>
                               <input
                                 type="checkbox"
                                 className="w-4 h-4"
@@ -438,28 +508,51 @@ export function JobProfilesPage() {
                         ))}
                       </ul>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </Card>
 
               <Card className="p-4">
                 <div className="mb-3 flex items-center justify-between gap-2">
                   <h3 className="font-semibold">Actions</h3>
-                  <Button variant="subtle" onClick={() => setFeatureCodes(new Set())}>
-                    Clear all
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button variant="subtle" onClick={() => setFeatureCodes(new Set(
+                      (data?.features ?? []).map((f) => f.code),
+                    ))}>Select all</Button>
+                    <Button variant="subtle" onClick={() => setFeatureCodes(new Set())}>
+                      Clear all
+                    </Button>
+                  </div>
                 </div>
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                  {featureModules.map(([module, features]) => (
+                  {featureModules.map(([module, features]) => {
+                    const state = moduleState(
+                      groups.find((g) => sameModule(g.name, module))?.name ?? module);
+                    return (
                     <div key={module}>
-                      <div className="text-xs font-semibold uppercase text-default-500 mb-1">
-                        {module}
-                      </div>
+                      <label className="flex items-center gap-2 mb-1 cursor-pointer"
+                             title={`Turn the whole ${module} module on or off — every `
+                               + "screen under it and every action in it."}>
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4"
+                          checked={state.checked}
+                          ref={(el) => { if (el) el.indeterminate = state.some; }}
+                          onChange={() => setModule(
+                            groups.find((g) => sameModule(g.name, module))?.name ?? module,
+                            !state.checked)}
+                        />
+                        <span className="text-xs font-semibold uppercase text-default-500">
+                          {module}
+                        </span>
+                      </label>
                       <ul className="space-y-1">
                         {features.map((feature) => (
                           <li key={feature.code}>
                             <label className="flex items-start gap-2 min-h-[32px] text-sm
-                                              cursor-pointer">
+                                              cursor-pointer"
+                                   title={featureHint(feature)}>
                               <input
                                 type="checkbox"
                                 className="w-4 h-4 mt-0.5"
@@ -473,7 +566,8 @@ export function JobProfilesPage() {
                         ))}
                       </ul>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </Card>
             </>

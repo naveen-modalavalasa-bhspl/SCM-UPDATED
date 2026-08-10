@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import type { RunLogger } from "../logger.js";
+import { config } from "../config.js";
 
 export interface CreatedIndent {
   id: number;
@@ -17,12 +18,25 @@ export interface CreatedIndent {
 export async function createIndent(
   page: Page,
   log: RunLogger,
-  options: { quantity: number; itemQuery?: string; remarks?: string; daysAhead?: number },
+  options: { quantity: number; itemQuery?: string; remarks?: string; daysAhead?: number;
+             /** "Monthly" makes the request part of the consolidation cycle. */
+             indentType?: string },
 ): Promise<CreatedIndent> {
   return log.runStep("Create indent", async () => {
+    if (options.indentType) {
+      // Set before the item: the type decides which cycle the request joins, and the
+      // consolidation screen groups by it.
+      const type = page.getByRole("combobox", { name: "Indent type" }).first();
+      await type.click();
+      await page.getByRole("option", { name: options.indentType, exact: false })
+        .first().click();
+    }
+
     const combobox = page.getByRole("combobox", { name: "Item" }).first();
     await combobox.click();
-    if (options.itemQuery) await combobox.fill(options.itemQuery);
+    // Defaults to an item the warehouse actually holds — see config.stockedItem.
+    const query = options.itemQuery ?? config.stockedItem;
+    if (query) await combobox.fill(query);
 
     const listbox = page.getByRole("listbox");
     await expect(listbox.getByRole("option").first()).toBeVisible({ timeout: 15_000 });

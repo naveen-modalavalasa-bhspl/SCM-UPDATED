@@ -52,10 +52,12 @@ import { StockTransferView } from "@/modules/inventory/components/StockTransferV
 import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
 import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
 import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
+import { FulfilmentBatchPage } from "@/modules/inventory/pages/FulfilmentBatchPage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
 import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
 import { AllocationApprovalsPage } from "@/modules/inventory/pages/AllocationApprovalsPage";
 import { AllocationApprovalDetailPage } from "@/modules/inventory/pages/AllocationApprovalDetailPage";
+import { AllocationCycleApprovalPage } from "@/modules/inventory/pages/AllocationCycleApprovalPage";
 import { StockingPointsPage } from "@/modules/inventory/pages/StockingPointsPage";
 import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialRequestDetailPage";
 import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
@@ -138,6 +140,13 @@ function AppRoutes() {
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
         <Route path="inventory/valuation" element={<StockValuationView />} />
         <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
+        {/* One monthly cycle, opened from the row above. A detail screen, not a page
+            of its own: it carries no rbac_pages row, exactly like
+            inventory/allocate/:indentId, so it inherits the Fulfilment Queue's
+            permission and every action inside it is still checked server-side.
+            The queue has always linked here; the route was simply never registered,
+            so every monthly cycle landed on "No screen at this address". */}
+        <Route path="inventory/fulfillment/:cycle" element={<FulfilmentBatchPage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
         {/* Where the MDP/LIP chain is declared — everything downstream reads it. */}
@@ -145,6 +154,11 @@ function AppRoutes() {
         <Route path="inventory/allocation-approvals" element={<AllocationApprovalsPage />} />
         {/* Child screen, not a menu entry: the list navigates here to review one
             allocation. Without this route that row click is a dead end. */}
+        {/* Before the :id route, which matches a single segment and would never catch
+            this two-segment path anyway — kept adjacent so the pair reads as one
+            decision. Same story as the fulfilment cycle: the page and the link were
+            written, only the route was missing, so every monthly cycle dead-ended. */}
+        <Route path="inventory/allocation-approvals/cycle/:cycle" element={<AllocationCycleApprovalPage />} />
         <Route path="inventory/allocation-approvals/:id" element={<AllocationApprovalDetailPage />} />
         <Route path="inventory/demand" element={<ItemDemandPage />} />
         <Route path="inventory/labels" element={<LabelsPage />} />

@@ -25,6 +25,15 @@ export const config = {
   a11y: bool("A11Y", true),
   // Pauses between actions so a headed run is watchable at human speed.
   slowMo: num("SLOW_MO", 0),
+  /**
+   * The item every raised indent asks for, unless a test names its own.
+   *
+   * An indent for something the warehouse does not stock cannot be allocated or
+   * issued, so the journey dies two logins later at the fulfilment queue with an
+   * empty list — which reads as a broken screen rather than as an empty shelf.
+   * Kept as a search string, so it survives a masters reseed the way the picker does.
+   */
+  stockedItem: process.env.STOCK_ITEM || "Dolo 650",
   screenshotEveryStep: bool("SCREENSHOT_EVERY_STEP", true),
   reportsDir: resolve(ROOT, "reports"),
 
@@ -76,6 +85,11 @@ interface Users {
   raiser: Account;
   approvers: Account[];
   inventory?: Account;
+  /** The warehouse manager — issues, consigns and dispatches what inventory reserved. */
+  warehouse?: Account;
+  /** Store keepers who each raise a monthly indent, so the cycle has something to
+   *  consolidate. One raiser cannot demonstrate consolidation. */
+  monthlyRaisers?: Account[];
   /** Unscoped reader/writer for specs that configure rather than transact. */
   admin?: Account;
   /** One real reporting line, bottom-up: storekeeper first, then each rung above

@@ -9,17 +9,18 @@ endpoints, so it is computed on the way in and can never disagree with them.
 """
 import logging
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.platform.hcm.models import (
     HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
+from app.platform.hcm import sync as hcm_sync
 from app.shared.enums import DocType, WarehouseType
 from app.shared.models.warehouse import Warehouse
 
 from .enums import LocationTier, MovementKind
-from .models import NO_PROJECT, PositionLocation
+from .models import NO_PROJECT, PositionLocation, Stock
 
 logger = logging.getLogger(__name__)
 
@@ -466,3 +467,119 @@ async def search_positions(db: AsyncSession, query: str, limit: int = 20) -> lis
         "employee_name": r[4],
         "tagged_to": tagged.get(r[0]),
     } for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+#  Stocking points, derived from the HCM mirror
+# --------------------------------------------------------------------------- #
+#
+# HCM says where stock can sit; it just says it in three different ways. A post in the
+# LIP or MDP section serves that rung of the distribution chain. An office HCM types as
+# a warehouse IS a stocking point, whatever section the people standing in it belong to
+# — the warehouse manager sits in "LOGISTICS-01" and would otherwise be tagged to
+# nothing at all. Both are read here, on every sync, so a vehicle HCM adds tomorrow has
+# somewhere to hold stock without anyone running a script.
+
+# Matched on letters only: HCM types these by hand and has already shipped both "M.D.P"
+# and "M.D.P.", and "ware house" for the office type.
+SECTION_TIER = {"LIP": WarehouseType.LIP.value, "MDP": WarehouseType.MDP.value}
+WAREHOUSE_OFFICE_TYPE = "WAREHOUSE"
+# Warehouses this function owns, and the only ones it will ever delete. Anything an
+# admin created by hand has a different code and is left alone.
+DERIVED_CODE = "^(LIP|MDP|WH)-[0-9]+$"
+
+
+def _letters(value: str | None) -> str:
+    return "".join(ch for ch in (value or "").upper() if ch.isalpha())
+
+
+async def rebuild_stocking_points(db: AsyncSession) -> dict:
+    """One warehouse per stocking-point office, and the position links that reach it.
+
+    Rebuilt rather than patched: HCM re-keys its offices and positions on every rebuild
+    of its own database, so yesterday's rows name ids that no longer exist. Warehouses
+    holding stock are kept whatever else changes — deleting one would orphan its
+    balances, and `stk_ledger` is append-only, so it could not be corrected afterwards.
+    """
+    positions = (await db.execute(
+        select(HcmPosition.id, HcmPosition.section_name, HcmPosition.office_id,
+               HcmPosition.project_id, HcmPosition.project_name)
+        .where(HcmPosition.is_active.is_(True), HcmPosition.office_id.isnot(None))
+    )).all()
+    offices = {o.id: (o.name, o.office_mode) for o in (await db.execute(
+        select(HcmOffice.id, HcmOffice.name, HcmOffice.office_mode)
+    )).all()}
+
+    # office -> what kind of stocking point it is. Section first, warehouse second: a
+    # warehouse office with LIP posts in it is still an LIP.
+    kinds: dict[int, tuple[str, str]] = {}
+    for row in positions:
+        tier = SECTION_TIER.get(_letters(row.section_name))
+        if tier:
+            kinds.setdefault(row.office_id, (tier, tier))
+    for office_id, (_name, mode) in offices.items():
+        if _letters(mode) == WAREHOUSE_OFFICE_TYPE:
+            # MAIN, not a rung: a store is where stock arrives from outside, which is
+            # what tier_of() already reads the top of the chain as.
+            kinds.setdefault(office_id, (WarehouseType.MAIN.value, "WH"))
+
+    stocked = set((await db.execute(
+        select(Stock.warehouse_id).distinct()
+    )).scalars().all())
+    existing = {w.code: w for w in (await db.execute(
+        select(Warehouse).where(Warehouse.code.regexp_match(DERIVED_CODE))
+    )).scalars().all()}
+    wanted = {f"{prefix}-{office_id}": (office_id, kind)
+              for office_id, (kind, prefix) in kinds.items()}
+
+    removed = [w for code, w in existing.items()
+               if code not in wanted and w.id not in stocked]
+    if removed:
+        ids = [w.id for w in removed]
+        await db.execute(delete(PositionLocation)
+                         .where(PositionLocation.warehouse_id.in_(ids)))
+        await db.execute(delete(Warehouse).where(Warehouse.id.in_(ids)))
+
+    warehouses: dict[int, Warehouse] = {}
+    for code, (office_id, kind) in wanted.items():
+        name = offices.get(office_id, (str(office_id), None))[0]
+        warehouse = existing.get(code)
+        if warehouse is None:
+            warehouse = Warehouse(
+                code=code, name=f"{name} - {kind}", office_id=office_id,
+                office_name=name, warehouse_type=kind,
+                is_bin_managed=False, is_active=True,
+            )
+            db.add(warehouse)
+        else:
+            warehouse.name, warehouse.office_name = f"{name} - {kind}", name
+            warehouse.warehouse_type, warehouse.is_active = kind, True
+        warehouses[office_id] = warehouse
+    await db.flush()
+
+    # Links are rebuilt whole: a position id HCM re-issued would otherwise leave a row
+    # pointing at a post nobody holds.
+    await db.execute(delete(PositionLocation).where(
+        PositionLocation.warehouse_id.in_([w.id for w in warehouses.values()])))
+    links = 0
+    for row in positions:
+        warehouse = warehouses.get(row.office_id)
+        if warehouse is None:
+            continue
+        db.add(PositionLocation(
+            position_id=row.id, warehouse_id=warehouse.id,
+            project_id=row.project_id or NO_PROJECT, project_name=row.project_name,
+            is_primary=1, is_active=1,
+        ))
+        links += 1
+    await db.commit()
+
+    result = {"warehouses": len(warehouses), "links": links, "removed": len(removed)}
+    logger.info("stocking points rebuilt: %s", result)
+    return result
+
+
+# Registered, not called: platform must never import a module (rule 5), so the sync
+# offers a hook and inventory — which owns stocking points — puts itself in it. Every
+# "Sync now" and every scheduled run therefore ends with the points up to date.
+hcm_sync.POST_SYNC_HOOKS.append(rebuild_stocking_points)

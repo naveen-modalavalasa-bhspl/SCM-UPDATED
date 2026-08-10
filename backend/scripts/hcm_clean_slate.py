@@ -34,7 +34,7 @@ from sqlalchemy import delete, func, select, text
 
 from app.core.database import SessionLocal
 from app.core.security import hash_password
-from app.modules.inventory.models import PositionLocation
+from app.modules.inventory.locations import rebuild_stocking_points
 from app.platform.hcm.client import HcmClient
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
@@ -136,84 +136,9 @@ async def prune_mirror(db, live: dict[str, set[int]]) -> None:
 
 
 async def build_stocking_points(db) -> None:
-    """One warehouse per office that holds an LIP or MDP position, plus the
-    position -> warehouse rows the allocator reads.
-
-    Keyed on the office, not the position: two store keepers (the DEO and the driver)
-    share one vehicle, and that vehicle is one place stock sits, not two.
-    """
-    all_positions = (await db.execute(
-        select(HcmPosition.section_name, HcmPosition.office_id, HcmPosition.id,
-               HcmPosition.project_id, HcmPosition.project_name)
-        .where(HcmPosition.is_active.is_(True))
-    )).all()
-    rows = [(SECTION_TIER[_letters(r.section_name)], *r[1:]) for r in all_positions
-            if _letters(r.section_name) in SECTION_TIER]
-
-    offices = {o.id: (o.name, o.office_mode) for o in (await db.execute(
-        select(HcmOffice.id, HcmOffice.name, HcmOffice.office_mode)
-    )).all()}
-
-    # Rebuilt from scratch every run: HCM re-keys its offices and positions on every
-    # rebuild, so yesterday's rows point at ids that no longer exist. Only the ones
-    # this script derives are dropped — a warehouse someone created by hand stays.
-    derived = (await db.execute(
-        select(Warehouse.id).where(Warehouse.code.regexp_match("^(LIP|MDP|WH)-[0-9]+$"))
-    )).scalars().all()
-    if derived:
-        await db.execute(delete(PositionLocation)
-                         .where(PositionLocation.warehouse_id.in_(derived)))
-        await db.execute(delete(Warehouse).where(Warehouse.id.in_(derived)))
-        await db.flush()
-
-    warehouses: dict[int, Warehouse] = {}
-
-    def add(office_id: int, kind: str, prefix: str | None = None) -> None:
-        if office_id is None or office_id in warehouses:
-            return
-        name, _mode = offices.get(office_id, (str(office_id), None))
-        warehouses[office_id] = Warehouse(
-            code=f"{prefix or kind}-{office_id}",
-            name=f"{name} - {prefix or kind}",
-            office_id=office_id,
-            office_name=offices.get(office_id, (None, None))[0],
-            warehouse_type=kind,
-            is_bin_managed=False,
-            is_active=True,
-        )
-
-    for kind, office_id, _, _, _ in rows:
-        add(office_id, kind)
-    # An office HCM marks as a store is a stocking point in its own right, whether or
-    # not anybody is posted to it yet.
-    for office_id, (_name, mode) in offices.items():
-        if _letters(mode) == WAREHOUSE_OFFICE_TYPE:
-            # MAIN, not a rung: a store is where stock enters from outside, which is
-            # exactly what locations.tier_of() reads the top of the chain as.
-            add(office_id, WarehouseType.MAIN.value, prefix="WH")
-    db.add_all(warehouses.values())
-    await db.flush()
-
-    for _, office_id, position_id, project_id, project_name in rows:
-        warehouse = warehouses.get(office_id)
-        if warehouse is None:
-            continue
-        db.add(PositionLocation(
-            position_id=position_id,
-            warehouse_id=warehouse.id,
-            project_id=project_id or 0,
-            project_name=project_name,
-            is_primary=1,
-            is_active=1,
-        ))
-    await db.commit()
-
-    by_type = (await db.execute(
-        select(Warehouse.warehouse_type, func.count(Warehouse.id))
-        .group_by(Warehouse.warehouse_type)
-    )).all()
-    print(f"  built {len(warehouses)} warehouses {dict(by_type)}, "
-          f"{len(rows)} position locations")
+    """Delegates to the inventory module, which owns stocking points and now rebuilds
+    them on every HCM sync. Kept as a name so the cutover script reads the same."""
+    print(f"  stocking points: {await rebuild_stocking_points(db)}")
 
 
 async def reset_credentials(db) -> None:

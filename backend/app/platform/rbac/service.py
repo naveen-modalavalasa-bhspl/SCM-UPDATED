@@ -1,7 +1,7 @@
 """Position-aware RBAC read logic: effective roles, permissions, and menu."""
 import re
 
-from sqlalchemy import event, func, or_, select
+from sqlalchemy import event, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -515,8 +515,45 @@ def _normalise_role_name(name: str | None) -> str:
     return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
 
 
+# warehouse_type -> what that stocking point is called in the menu. A type this does
+# not name (MAIN, TRANSIT, QUARANTINE, SCRAP) is a warehouse in the ordinary sense.
+STOCKING_POINT_LABEL = {"LIP": WAREHOUSE_FIELD_LABEL, "MDP": WAREHOUSE_MDP_LABEL}
+
+# The post's own stocking point, read straight from the tagging the HCM sync now
+# maintains. Raw SQL because `inv_position_locations` belongs to the inventory module
+# and platform may not import a module (rule 5); the shape of these two tables is
+# fixed, so a literal join is honest here in a way a reflected model would not be.
+_STOCKING_POINT_SQL = text(
+    "SELECT w.warehouse_type FROM inv_position_locations pl"
+    " JOIN whs_warehouses w ON w.id = pl.warehouse_id"
+    " WHERE pl.position_id = :position_id AND pl.is_active = 1"
+    " ORDER BY pl.is_primary DESC, pl.id LIMIT 1"
+)
+
+
 async def warehouse_menu_label(db: AsyncSession, user, position_id: int | None) -> str:
-    """MDP for the management line, LIP for field staff, Warehouse for the rest."""
+    """What to call the Warehouse module for the hat this login is currently wearing.
+
+    Read from the position's OWN stocking point: a store keeper on an MMU vehicle sees
+    LIP, the same person switched to their MDP post sees MDP, and a warehouse post sees
+    Warehouse. HCM now states this per position — the section a post sits in — so it no
+    longer has to be inferred from role names and a department prefix, which guessed
+    "MDP" for every OE in the company whether or not they held an MDP.
+
+    Naming only. Whether the module appears at all, and what can be done inside it,
+    comes from permissions alone — so removing Warehouse from a job profile hides it
+    regardless of what this returns.
+
+    The old inference stays as the fallback, for a post HCM has not tagged.
+    """
+    if position_id is not None:
+        warehouse_type = await db.scalar(
+            _STOCKING_POINT_SQL, {"position_id": position_id}
+        )
+        if warehouse_type:
+            return STOCKING_POINT_LABEL.get(
+                warehouse_type.upper(), WAREHOUSE_DEFAULT_LABEL)
+
     stmt = (
         select(HcmPosition.role_name)
         .join(HcmPositionAssignment,

@@ -53,6 +53,21 @@ PLAN: list[tuple[str, str, type, Callable[[dict], dict]]] = [
 
 _DT_FIELDS = {"valid_from", "valid_to"}
 
+# Work that must follow a sync but belongs to a MODULE, which platform may not import
+# (rule 5). A module registers itself here at import time — inventory does, to rebuild
+# the stocking points HCM's offices and sections describe. Each hook takes the session
+# and owns its own commit; one failing hook must not lose the sync that preceded it.
+POST_SYNC_HOOKS: list[Callable] = []
+
+
+async def _run_post_sync_hooks(db: AsyncSession) -> None:
+    for hook in POST_SYNC_HOOKS:
+        try:
+            await hook(db)
+        except Exception:  # noqa: BLE001 — a hook is follow-up work, not the sync
+            await db.rollback()
+            logger.exception("post-sync hook %s failed", getattr(hook, "__name__", hook))
+
 # mst_projects is SCM-owned, not an hcm_ mirror: it has no raw/synced_at columns and
 # admins may edit it. HCM is treated as the source for identity (id, code, name,
 # office) while SCM keeps the rest, so it upserts through its own path below.
@@ -309,6 +324,7 @@ async def sync_all(db: AsyncSession, client: HcmClient | None = None) -> list[Hc
     await db.commit()
     # A joiner HCM sent us can sign in without waiting for an admin.
     await _issue_missing_logins(db)
+    await _run_post_sync_hooks(db)
     return logs
 
 
@@ -340,6 +356,7 @@ async def sync_needed(db: AsyncSession, client: HcmClient | None = None) -> list
     await db.commit()
     # A joiner HCM sent us can sign in without waiting for an admin.
     await _issue_missing_logins(db)
+    await _run_post_sync_hooks(db)
     return logs
 
 

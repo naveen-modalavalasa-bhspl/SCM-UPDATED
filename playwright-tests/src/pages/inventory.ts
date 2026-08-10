@@ -77,8 +77,16 @@ export async function approveAllocation(
     ).toBeVisible({ timeout: 20_000 });
     await row.click();
 
-    const dialog = page.getByRole("dialog");
-    await expect(dialog).toBeVisible({ timeout: 15_000 });
+    // Allocation review is a full page ("Review ALC/..."), not a modal — it used to
+    // be a dialog, so the scope is resolved rather than assumed: whichever of the two
+    // this build renders, everything below addresses the same container.
+    const dialog = (await page.getByRole("dialog").count())
+      ? page.getByRole("dialog")
+      : page.locator("body");
+    await expect(
+      page.getByRole("heading", { name: /Review ALC\// })
+        .or(page.getByRole("dialog")).first(),
+    ).toBeVisible({ timeout: 15_000 });
 
     // Read the signatures already on the document while the dialog is still open —
     // this is what proves a second rung exists rather than one clicked twice.
@@ -89,8 +97,10 @@ export async function approveAllocation(
       log.info(`  · ${entry.replace(/\s+/g, " ").trim().slice(0, 110)}`);
     }
 
-    await dialog.getByPlaceholder("Optional reason or instruction")
-      .fill("Approved by the automated functional run.");
+    const note = dialog.getByPlaceholder("Optional reason or instruction");
+    if (await note.count()) {
+      await note.first().fill("Approved by the automated functional run.");
+    }
 
     const approve = dialog.getByRole("button", { name: /approve and reserve/i });
     const [response] = await Promise.all([
@@ -103,7 +113,10 @@ export async function approveAllocation(
     if (!response.ok()) {
       throw new Error(`Allocation approval rejected: ${response.status()} ${await response.text()}`);
     }
-    await expect(dialog).toBeHidden({ timeout: 30_000 });
+    // Back to the queue: on the page build the heading goes away, on the modal build
+    // the dialog does.
+    await expect(page.getByRole("heading", { name: /Review ALC\// }))
+      .toBeHidden({ timeout: 30_000 });
   });
 }
 
