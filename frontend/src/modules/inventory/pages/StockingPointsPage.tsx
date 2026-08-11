@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Building2, MapPin, Star, Trash2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Boxes, Building2, MapPin, Star, Trash2 } from "lucide-react";
 import {
   Button, Card, PageHeader, ResponsiveList, Select, StatCard, StatusPill, type Column,
 } from "@/shared/components";
@@ -33,8 +34,15 @@ function TierBadge({ tier, label }: { tier: number; label: string }) {
  *  felt everywhere. The tier itself is NOT set here: it comes from the warehouse's
  *  own type, so a point cannot be an MDP on one tag and a LIP on another.
  */
+/** Whole numbers where the stock is whole, otherwise three places — the same way the
+ *  stock screens render a quantity, so the two never look like different figures. */
+const qty = (value: number) => value.toLocaleString(undefined, {
+  maximumFractionDigits: 3,
+});
+
 export function StockingPointsPage() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [positionId, setPositionId] = useState("");
   const [personQuery, setPersonQuery] = useState("");
   const [picked, setPicked] = useState<PositionSearchHit | null>(null);
@@ -132,6 +140,17 @@ export function StockingPointsPage() {
       header: "Position",
       render: (row) => <div>
         <strong className="text-ink">{row.position_name ?? `Position ${row.position_id}`}</strong>
+        {/* Who actually stands in the post. Without it the list answers with a post
+            name and leaves the reader to work out whose stock they are looking at —
+            which is the whole question this screen is opened to settle. */}
+        {(row.holders ?? []).length > 0 && (
+          <p className="truncate text-xs text-body">
+            {(row.holders ?? []).map((h) => h.employee_name ?? h.employee_code).join(", ")}
+            <span className="font-mono text-muted">
+              {" "}· {(row.holders ?? []).map((h) => h.employee_code).filter(Boolean).join(", ")}
+            </span>
+          </p>
+        )}
         {row.is_primary && <p className="flex items-center gap-1 text-xs text-muted">
           <Star className="h-3 w-3" /> issues from here by default
         </p>}
@@ -144,6 +163,28 @@ export function StockingPointsPage() {
         <strong className="text-ink">{row.warehouse_name ?? `#${row.warehouse_id}`}</strong>
         <p className="font-mono text-xs text-muted">{row.warehouse_code ?? "—"}</p>
       </div>,
+    },
+    {
+      key: "stock",
+      header: "Stock",
+      // Clickable, because the number always raises the next question. Straight to
+      // Stock Balance filtered to this point, rather than making the reader find the
+      // screen and re-pick the warehouse out of a thousand-row dropdown.
+      render: (row) => (row.stock_qty ?? 0) > 0
+        ? <button
+            type="button"
+            className="text-left"
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate(`/inventory/stock-balance?warehouse_id=${row.warehouse_id}`);
+            }}
+          >
+            <strong className="tabular text-ink underline decoration-line underline-offset-4">
+              {qty(row.stock_qty ?? 0)}
+            </strong>
+            <span className="block text-xs text-muted">{row.stock_items ?? 0} items</span>
+          </button>
+        : <span className="text-sm text-muted">—</span>,
     },
     { key: "tier", header: "Tier", render: (row) => <TierBadge tier={row.tier} label={row.tier_label} /> },
     {
@@ -177,10 +218,26 @@ export function StockingPointsPage() {
       a bin change.
     </p>
 
-    <div className="mb-2 grid grid-cols-3 gap-3">
+    {/* Counted by the server over the WHOLE filtered set. Search an employee code and
+        these four become that person's answer: how many MDPs, how many LIPs, and what
+        is sitting on them altogether. */}
+    <div className="mb-2 grid grid-cols-2 gap-3 lg:grid-cols-4">
       <StatCard label="Warehouses" value={byTier.warehouses} icon={<Building2 className="h-4 w-4" />} />
       <StatCard label="MDPs" value={byTier.mdps} icon={<MapPin className="h-4 w-4" />} />
       <StatCard label="LIPs" value={byTier.lips} icon={<MapPin className="h-4 w-4" />} />
+      <StatCard
+        label="Stock on hand"
+        // The breakdown rides inside the value: a bare quantity reads as "one number
+        // about something", and the two figures that qualify it — how many items, and
+        // how many points are actually holding any — are the ones asked for next.
+        value={<>
+          {qty(tags.data?.stock_qty ?? 0)}
+          <span className="block text-xs font-normal tracking-normal text-muted">
+            {tags.data?.stock_items ?? 0} items · {tags.data?.stock_points ?? 0} points stocked
+          </span>
+        </>}
+        icon={<Boxes className="h-4 w-4" />}
+      />
     </div>
     {/* A zero here is a real state, not a loading one, and it is worth naming: the
         screen lists TAGGINGS, so a warehouse nobody is tagged to is not on it. Said
@@ -312,7 +369,7 @@ export function StockingPointsPage() {
           <input
             className={field}
             aria-label="Search stocking point tags"
-            placeholder="Position, point name, code or project…"
+            placeholder="HR-EMP-…, person, post, point or project"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -366,7 +423,15 @@ export function StockingPointsPage() {
           <strong className="text-ink">{row.position_name ?? `Position ${row.position_id}`}</strong>
           <TierBadge tier={row.tier} label={row.tier_label} />
         </div>
+        {(row.holders ?? []).length > 0 && <p className="text-xs text-body">
+          {(row.holders ?? []).map((h) => h.employee_name ?? h.employee_code).join(", ")}
+        </p>}
         <p className="text-sm text-body">{row.warehouse_name ?? `#${row.warehouse_id}`}</p>
+        <p className="text-sm text-ink">
+          {(row.stock_qty ?? 0) > 0
+            ? <>{qty(row.stock_qty ?? 0)} <span className="text-muted">on hand · {row.stock_items ?? 0} items</span></>
+            : <span className="text-muted">Nothing on hand</span>}
+        </p>
         <p className="text-xs text-muted">{row.project_name ?? "No project"}</p>
         <Button variant="ghost" onClick={() => remove.mutate(row.id)}>
           <Trash2 className="h-4 w-4" /> Remove

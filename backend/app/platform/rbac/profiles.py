@@ -319,6 +319,58 @@ async def _profile_roles(db: AsyncSession) -> dict[str, Role]:
     return out
 
 
+async def profile_keys_for_position(db: AsyncSession, position_id: int) -> list[str]:
+    """The profile keys one position answers to, most specific first.
+
+    The same three-rung chain `profile_role_for_position` resolves a ROLE through —
+    the job's own profile, the project's default, the company-wide one — returned as
+    keys so a caller that pairs something WITH a profile (BOM groups) narrows on
+    exactly the profile the position would have been granted through.
+    """
+    row = (await db.execute(
+        select(HcmPosition.name, HcmPosition.code, HcmPosition.job_name,
+               HcmPosition.role_name, HcmPosition.raw)
+        .where(HcmPosition.id == position_id)
+    )).first()
+    if row is None:
+        return []
+    job = derive_key(row.code, row.job_name, row.name, row.role_name)
+    project_id = await db.scalar(
+        select(HcmEmployee.project_id)
+        .join(HcmPositionAssignment,
+              HcmPositionAssignment.employee_id == HcmEmployee.id)
+        .where(HcmPositionAssignment.position_id == position_id,
+               HcmPositionAssignment.is_active.is_(True),
+               HcmEmployee.project_id.isnot(None))
+        .limit(1)
+    )
+    if project_id is None:
+        raw_name = _raw_project_name(row.raw)
+        if raw_name:
+            project_id = await db.scalar(
+                select(HcmEmployee.project_id)
+                .where(HcmEmployee.project_name == raw_name,
+                       HcmEmployee.project_id.isnot(None))
+                .limit(1)
+            )
+    return [profile_key(project_id, job),
+            profile_key(project_id, DEFAULT_JOB),
+            COMPANY_DEFAULT_KEY]
+
+
+async def profile_keys_for_user(db: AsyncSession, user) -> list[str]:
+    """The profile keys the signed-in employee's ACTIVE position answers to.
+
+    The active hat, not every position they hold: the rest of the system already
+    reasons in the hat the session is wearing (permissions, data scope, whose turn it
+    is to sign), and a kit handed to one job must not follow the person into another.
+    """
+    position_id = getattr(user, "active_position_id", None)
+    if not position_id:
+        return []
+    return await profile_keys_for_position(db, position_id)
+
+
 async def profile_role_for_position(db: AsyncSession, position_id: int) -> Role | None:
     """The saved profile role for one position, or None if nobody has granted it yet."""
     row = (await db.execute(

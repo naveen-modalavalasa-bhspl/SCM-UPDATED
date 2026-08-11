@@ -121,7 +121,20 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   };
 
   if (indent.isLoading) return <p className="p-6 text-sm text-muted">Loading approval details…</p>;
-  if (indent.error) return <p className="rounded-lg bg-danger/10 p-4 text-danger">{(indent.error as Error).message}</p>;
+  // A document that has left approval is not an error, it is an outcome — somebody
+  // signed it, or this approver served it and came back on the browser's back button.
+  // Painting it red reads as "your action failed" over an act that succeeded.
+  if (indent.error) {
+    const message = (indent.error as Error).message;
+    const movedOn = /not awaiting approval/i.test(message);
+    return <Card className={`p-4 text-sm ${movedOn ? "text-body" : "bg-danger/10 text-danger"}`}>
+      <p>{movedOn ? "This indent has already moved on — it is no longer waiting on you." : message}</p>
+      {movedOn && <p className="mt-1 text-xs text-muted">{message}</p>}
+      <Button className="mt-3" variant="ghost" onClick={() => nav("/approvals")}>
+        <ArrowLeft className="h-4 w-4" /> Back to approvals
+      </Button>
+    </Card>;
+  }
   if (!indent.data) return <p className="p-6 text-muted">Approval not found.</p>;
 
   return <>

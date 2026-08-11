@@ -4828,25 +4828,42 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if indent is None:
         raise NotFoundError(f"Indent {indent_id} not found")
-    _ensure_allocation_eligible(indent)
 
     committed = await _committed_by_line(db, indent_id)
 
-    # Every line already covered by a live allocation — an approver served it out of
-    # their own stock before it ever reached the queue. The form would open with
-    # "asked 0" on every row and a Submit that can only raise an empty allocation, so
-    # say what happened instead. The queue itself already filters these out; this is
-    # the stale link, the bookmark and the back button.
-    if indent.items and not any(
+    # Read-only, so it never refuses. Every row in the fulfilment queue opens THIS
+    # screen — one row, one destination — and the screen says what state the indent is
+    # in rather than the router guessing between four pages and a red error. An indent
+    # already served out of an approver's own stock, or finished, opens here showing
+    # its allocations; only the Submit is withheld, by `allocatable`.
+    #
+    # The write path (`decide_allocation`) still calls `_ensure_allocation_eligible` —
+    # that is the guard that matters, and no screen state can talk past it.
+    blocked_reason = None
+    if indent.status not in _ALLOCATION_ELIGIBLE_STATUSES:
+        blocked_reason = (
+            f"This indent is {indent.status.replace('_', ' ').lower()} — "
+            f"there is nothing to allocate."
+        )
+    elif indent.items and not any(
         Decimal(str(line.approved_quantity or line.quantity or 0))
         - Decimal(str(line.allocated_quantity or 0))
         - committed.get(line.id, Decimal("0")) > 0
         for line in indent.items
     ):
-        raise ValidationError(
-            f"Indent {indent.indent_no} has nothing left to allocate — every line is "
-            f"already covered by an allocation. Check Allocation Approvals.",
+        blocked_reason = (
+            "Every line is already covered by an allocation — an approver served this "
+            "out of their own stock."
         )
+
+    # What is already promising this indent something, so the screen can point at it
+    # instead of leaving the reader to go looking in Allocation Approvals.
+    live = (await db.execute(
+        select(Allocation.id, Allocation.allocation_no, Allocation.status)
+        .where(Allocation.indent_id == indent_id,
+               Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES))
+        .order_by(Allocation.id.desc())
+    )).all()
 
     lines = [{
         "indent_item_id": line.id,
@@ -4873,8 +4890,8 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
     # anyone with a company-wide scope has no subtree, and sees every warehouse as
     # before — the narrowing exists so an OE is offered their own MDP and LIP rather
     # than every store in the company.
-    my_points = await locations.location_ids_for_subtree(
-        db, getattr(user, "active_position_id", None)) if user is not None else set()
+    my_points = (await locations.location_ids_for_user(db, user)
+                 if user is not None else set())
 
     proposal = await allocations.propose(
         db, indent_id, lines, warehouse_ids=sorted(my_points) or None)
@@ -4884,6 +4901,12 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "department_name": indent.department_name,
         "requested_by_name": indent.requested_by_name,
         "status": indent.status,
+        # False means "look, don't decide": the lines are still worth reading, the
+        # Submit is not offered, and `blocked_reason` says why in words.
+        "allocatable": blocked_reason is None,
+        "blocked_reason": blocked_reason,
+        "allocations": [{"id": row.id, "allocation_no": row.allocation_no,
+                         "status": row.status} for row in live],
         "lines": [{**p, "available_total": float(p["available_total"]),
                    "competing_demand": float(p["competing_demand"]),
                    "warehouses": [{**w, "available_qty": float(w["available_qty"])}
@@ -5021,8 +5044,7 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # he does not hold makes it an ordinary inventory allocation.
     sources = {d.get("warehouse_id") for d in decisions
                if d.get("warehouse_id") and Decimal(str(d.get("quantity") or 0)) > 0}
-    my_points = await locations.location_ids_for_subtree(
-        db, getattr(user, "active_position_id", None))
+    my_points = await locations.location_ids_for_user(db, user)
     doc_type = (DocType.OWN_STOCK_ALLOCATION.value
                 if sources and sources <= my_points
                 else DocType.ALLOCATION.value)

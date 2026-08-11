@@ -229,6 +229,8 @@ export default function ConsignmentForm() {
             uom_code: line.uom_code,
             batch_id: line.batch_id,
             batch_no: line.batch_no,
+            mfg_date: line.mfg_date,
+            expiry_date: line.expiry_date,
             is_serial_tracked: !!line.serial_no || !!existing?.is_serial_tracked,
             serial_numbers: [
               ...(existing?.serial_numbers ?? []),
@@ -267,6 +269,12 @@ export default function ConsignmentForm() {
         uom_code: line.uom_code,
         batch_id: line.batch_id,
         batch_no: line.batch_no,
+        mfg_date: line.mfg_date ?? existing?.mfg_date ?? null,
+        expiry_date: line.expiry_date ?? existing?.expiry_date ?? null,
+        imei_by_serial: {
+          ...(existing?.imei_by_serial ?? {}),
+          ...(line.serial_no && line.imei_no ? { [line.serial_no]: line.imei_no } : {}),
+        },
         is_serial_tracked: !!line.serial_no || !!existing?.is_serial_tracked,
         serial_numbers: [
           ...(existing?.serial_numbers ?? []),
@@ -474,6 +482,10 @@ export default function ConsignmentForm() {
           uom_code: sourceLine.uom_code,
           batch_id: sourceLine.batch_id,
           batch_no: sourceLine.batch_no,
+          // Carried, not retyped: the consignment states which goods are in the
+          // carton so the receiving GRN does not have to rebuild it from stk_batches.
+          mfg_date: sourceLine.mfg_date,
+          expiry_date: sourceLine.expiry_date,
           is_serial_tracked: sourceLine.is_serial_tracked,
           serial_numbers: [],
           quantity: 0,
@@ -841,6 +853,8 @@ export default function ConsignmentForm() {
                       <tr>
                         <th className="px-3 py-2">Item</th>
                         <th className="px-3 py-2">Batch</th>
+                        <th className="px-3 py-2">Mfg</th>
+                        <th className="px-3 py-2">Expiry</th>
                         <th className="px-3 py-2 text-right">Issued</th>
                         <th className="px-3 py-2 text-right">Packed</th>
                         <th className="px-3 py-2 text-right">This package</th>
@@ -861,6 +875,8 @@ export default function ConsignmentForm() {
                               <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
                             </td>
                             <td className="px-3 py-2 text-xs text-muted">{line.batch_no ?? "—"}</td>
+                            <td className="px-3 py-2 text-xs text-muted">{line.mfg_date ?? "—"}</td>
+                            <td className="px-3 py-2 text-xs text-muted">{line.expiry_date ?? "—"}</td>
                             <td className="px-3 py-2 text-right tabular">{fmtQty(line.quantity)} {line.uom_code ?? ""}</td>
                             <td className={`px-3 py-2 text-right tabular ${complete ? "text-ok" : "text-body"}`}>
                               {fmtQty(packed)}
@@ -970,6 +986,7 @@ export default function ConsignmentForm() {
             : 0
         }
         available={availableSerials(serialTarget)}
+        imeiBySerial={serialTarget?.line.imei_by_serial}
         pickMode="select"
         initial={
           serialTarget

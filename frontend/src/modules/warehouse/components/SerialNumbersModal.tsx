@@ -34,6 +34,7 @@ export function SerialNumbersModal({
   readOnly = false,
   partial = false,
   available = null,
+  imeiBySerial,
   pickMode = "reject",
   noun = "serial",
 }: {
@@ -54,6 +55,9 @@ export function SerialNumbersModal({
   partial?: boolean;
   /** The GRN's serials for this line. Present = pick mode, absent = type them. */
   available?: string[] | null;
+  /** serial -> IMEI. Shown beside each unit so a handset is identified by both of
+   *  its numbers at the moment it is picked, not retyped at the far end. */
+  imeiBySerial?: Record<string, string>;
   /** `reject` is QC semantics; `select` is used when issuing stock from a bin. */
   pickMode?: "reject" | "select";
 }) {
@@ -183,7 +187,14 @@ export function SerialNumbersModal({
                           className={`h-4 w-4 shrink-0 accent-current ${selectMode ? "text-brand" : "text-bad"}`}
                         />
                         <span className="w-6 shrink-0 text-[11px] text-muted tabular">{i + 1}</span>
-                        <span className="truncate font-mono text-sm text-ink">{s}</span>
+                        <span className="min-w-0">
+                          <span className="block truncate font-mono text-sm text-ink">{s}</span>
+                          {imeiBySerial?.[s] && (
+                            <span className="block truncate font-mono text-[11px] text-muted">
+                              IMEI {imeiBySerial[s]}
+                            </span>
+                          )}
+                        </span>
                         <span className={`ml-auto text-[11px] font-semibold uppercase ${selectMode ? (
                           isSelected ? "text-brand" : "text-muted"
                         ) : (

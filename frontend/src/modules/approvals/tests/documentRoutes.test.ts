@@ -14,7 +14,16 @@ describe("approval document routes", () => {
 
   it("marks completed allocations as read-only decision views", () => {
     expect(approvalDecisionDocumentPath({ doc_type: "ALLOCATION", doc_id: 7 }))
-      .toBe("/inventory/allocation-approvals?review=7&decision=1");
+      .toBe("/inventory/allocation-approvals/7?decision=1");
+  });
+
+  // Same document, different approval event. Left out of the switch it fell through to
+  // `default`, which is the page the approver is already on — the click did nothing.
+  it("routes own-stock allocations exactly like ordinary ones", () => {
+    expect(approvalDocumentPath({ doc_type: "OWN_STOCK_ALLOCATION", doc_id: 7 }))
+      .toBe("/inventory/allocation-approvals/7");
+    expect(approvalDecisionDocumentPath({ doc_type: "OWN_STOCK_ALLOCATION", doc_id: 7 }))
+      .toBe("/inventory/allocation-approvals/7?decision=1");
   });
 
   it("opens the exact purchase order instead of the generic PO page", () => {

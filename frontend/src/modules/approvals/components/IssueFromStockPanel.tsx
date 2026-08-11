@@ -181,6 +181,14 @@ function LineRow({ line, field, quantity, source, onQuantity, onSource }: {
   onSource: (value: string) => void;
 }) {
   const spent = line.remainder === 0;
+  // What THIS source can actually cover. "You hold" is the total across every point,
+  // but an allocation comes out of one shelf, so the ceiling on the box is the chosen
+  // point's own stock — capping by the total let an approver type the 10 that was
+  // owed against a point holding 5 and get the error only after submitting.
+  const chosen = line.sources.find((s) => String(s.warehouse_id) === source)
+    ?? line.sources[0];
+  const ceiling = Math.min(line.issuable_now, chosen?.available_quantity ?? 0);
+  const capped = ceiling < line.issuable_now;
   return (
     // The item is the thing being decided, so its box is the only card-like surface on
     // the screen: a brand rail down the left edge, its own shadow, and the two numbers
@@ -213,14 +221,21 @@ function LineRow({ line, field, quantity, source, onQuantity, onSource }: {
             className={field}
             type="number"
             min={0}
-            max={line.issuable_now}
+            max={ceiling}
             step="any"
             aria-label={`Issue quantity for ${line.item_name ?? line.item_code}`}
-            placeholder={fmt(line.issuable_now)}
-            disabled={line.issuable_now <= 0}
+            placeholder={fmt(ceiling)}
+            disabled={ceiling <= 0}
             value={quantity}
             onChange={(e) => onQuantity(e.target.value)}
           />
+          {/* Said before submitting, not after. The gap between "you hold 505" and
+              "this shelf has 5" is the whole confusion, so it is named where the
+              number is typed rather than left to a server error. */}
+          {capped && <span className="mt-1 block text-xs text-warn">
+            This point holds {fmt(chosen?.available_quantity ?? 0)} of the {fmt(line.remainder)} owed
+            {line.sources.length > 1 ? " — pick another point for the rest" : ""}
+          </span>}
         </label>
         {/* Always shown, even with one option: the source is part of what is being
             committed, so the approver should see which point it comes out of rather

@@ -49,6 +49,19 @@ const STATUS_OPTIONS = [
 ];
 
 
+/**
+ * Where a row leads. ONE destination for every indent, whatever state it is in.
+ *
+ * Routing by state — allocate here, the allocation there, the indent somewhere else —
+ * meant two rows in the same list opened two different screens, and the ones the
+ * allocate form refuses opened on a red error. The allocate screen now reads every
+ * indent and says for itself when there is no decision left in it, so the click is
+ * predictable and nothing is a dead end. A cycle is still its own thing: it is one
+ * decision over many indents, not an indent.
+ */
+const destinationFor = (row: QueueRow) =>
+  row.cycle ? `/inventory/fulfillment/${row.cycle}` : `/inventory/allocate/${row.id}`;
+
 /** Stable id for a synthetic cycle row. Only has to be unique within this list. */
 const hashCycle = (cycle: string) =>
   [...cycle].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 1_000_000, 7) || 1;
@@ -85,10 +98,17 @@ export function FulfillmentQueuePage() {
     queryKey: ["allocations", "PENDING_APPROVAL"],
     queryFn: () => listAllocations({ status: "PENDING_APPROVAL" }),
   });
-  const pendingIndentIds = useMemo(
-    () => new Set((pending.data?.items ?? []).map((allocation) => allocation.indent_id)),
+  // Indent -> the allocation already waiting on it. Not just a membership test: an
+  // indent an approver served out of their own stock has every line covered, so the
+  // allocate screen has nothing to offer it and refuses ("already covered by an
+  // allocation"). The row still has somewhere useful to go — the allocation itself.
+  const pendingAllocationByIndent = useMemo(
+    () => new Map((pending.data?.items ?? []).map(
+      (allocation) => [allocation.indent_id, allocation.id])),
     [pending.data],
   );
+  const pendingIndentIds = useMemo(
+    () => new Set(pendingAllocationByIndent.keys()), [pendingAllocationByIndent]);
 
   // Monthly cycles, counted server-side off exactly the rows below. Fetched separately
   // rather than grouped here so the count on the row is the same number the batch
@@ -318,9 +338,7 @@ export function FulfillmentQueuePage() {
             // reimplement the decision inline.
             // A cycle opens the item-first split; a single indent opens the allocation
             // screen it always opened.
-            onRowClick={(r) => nav(r.cycle
-              ? `/inventory/fulfillment/${r.cycle}`
-              : `/inventory/allocate/${r.id}`)}
+            onRowClick={(r) => nav(destinationFor(r))}
             columns={columns}
             empty={view === "OWED"
               ? "Nothing owed. Indents appear here the moment a line is approved for more than has been allocated. Switch to Everything to see the ones already fulfilled."

@@ -63,15 +63,15 @@ export function installApiAlerts(): void {
           alerts.error("session.expired");
         }
       } else if (status === 403) {
-        // The backend's message names the missing permission code
-        // ("Missing permission: indent.view"); fall back to a readable phrase
-        // rather than printing an empty {permission} slot.
-        const detail = error.response?.data?.error ?? error.response?.data?.detail;
-        alerts.error("permission.denied", {
-          permission: typeof detail === "string" && detail.includes(":")
-            ? detail.split(":").pop()?.trim()
-            : "this action",
-        });
+        // Disabled by request: the "Not allowed" popup is not raised any more.
+        // Screens keep their own inline error handling, and the 403 still reaches
+        // every onError below via the re-reject.
+        // const detail = error.response?.data?.error ?? error.response?.data?.detail;
+        // alerts.error("permission.denied", {
+        //   permission: typeof detail === "string" && detail.includes(":")
+        //     ? detail.split(":").pop()?.trim()
+        //     : "this action",
+        // });
       } else if (status >= 500) {
         // Disabled by request: the generic "Something went wrong" popup is not
         // raised any more. Screens keep their own inline error handling, and the

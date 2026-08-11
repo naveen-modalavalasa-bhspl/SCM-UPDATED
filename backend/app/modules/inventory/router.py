@@ -346,7 +346,8 @@ async def list_position_locations(position_id: int | None = None,
     if position_id is not None:
         rows = await locations.list_tags(db, position_id)
         return {"items": rows, "total": len(rows), "page": 1, "size": len(rows),
-                "tier_counts": {}}
+                "tier_counts": {}, "stock_points": 0, "stock_items": 0,
+                "stock_qty": 0.0}
     return await locations.search_tags(db, user, search=search, tier=tier,
                                        project_id=project_id, page=page, size=size)
 
@@ -383,7 +384,7 @@ async def my_stocking_points(db: AsyncSession = Depends(get_db),
     primary = await locations.primary_location_for(db, position_id)
     return {
         "primary_warehouse_id": primary,
-        "warehouse_ids": sorted(await locations.location_ids_for_subtree(db, position_id)),
+        "warehouse_ids": sorted(await locations.location_ids_for_user(db, user)),
         "tags": await locations.list_tags(db, position_id),
         # What this person's own point IS. The warehouse screens call themselves by it,
         # because somebody who holds an MDP does not call the place a warehouse.

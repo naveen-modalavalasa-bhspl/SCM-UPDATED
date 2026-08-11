@@ -344,6 +344,12 @@ export interface AllocationProposal {
   department_name: string | null;
   requested_by_name: string | null;
   status: string;
+  /** False = look, don't decide. The lines still read; the Submit is withheld. */
+  allocatable: boolean;
+  /** Why, in words, when `allocatable` is false. */
+  blocked_reason: string | null;
+  /** Everything already promising this indent something. */
+  allocations: { id: number; allocation_no: string; status: string }[];
   lines: AllocationProposalLine[];
 }
 
@@ -770,6 +776,12 @@ export interface PositionLocationTag {
   project_id: number;
   project_name?: string | null;
   is_primary: boolean;
+  /** Who stands in the post. A position carries several assignment rows, so this is a
+   *  list — and it is what lets the screen be searched by employee code. */
+  holders?: { employee_code?: string | null; employee_name?: string | null }[];
+  /** On-hand at this point: distinct items, and the total available quantity. */
+  stock_items?: number;
+  stock_qty?: number;
 }
 
 export interface PositionLocationWrite {
@@ -801,6 +813,11 @@ export interface StockingPointTagPage {
   /** Tier -> how many tags in the WHOLE filtered set, so the cards above the list
    *  keep counting the network rather than the page. */
   tier_counts: Record<string, number>;
+  /** On-hand across the whole filtered set, not the page — so searching one employee
+   *  code answers "what has this person got in total". */
+  stock_points: number;
+  stock_items: number;
+  stock_qty: number;
 }
 
 /** What a move between two points would be. Read-only: the user picks from/to and a

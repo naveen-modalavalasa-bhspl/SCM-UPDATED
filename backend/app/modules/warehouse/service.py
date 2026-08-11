@@ -1482,7 +1482,20 @@ async def _register_serials(
     A duplicate serial is refused rather than silently reused — two physical units
     sharing one serial makes every later movement ambiguous. The asset/consumable
     code is not generated here: that happens at putaway, once the unit has a bin.
+
+    The line's IMEIs are written onto the units in the same pass. `create_receipt`
+    captures both lists in unit order, so position i of one names position i of the
+    other; the IMEI stayed a JSON blob on the receipt line before this, which is why
+    nothing downstream could show it.
     """
+    all_serials = list(line.serial_numbers or [])
+    all_imeis = list(getattr(line, "imei_numbers", None) or [])
+    imei_by_serial = {
+        str(serial).strip().lower(): str(imei).strip()
+        for serial, imei in zip(all_serials, all_imeis)
+        if serial and imei
+    }
+
     rows: list[m.SerialNumber] = []
     for serial in serial_numbers if serial_numbers is not None else (line.serial_numbers or []):
         clash = await db.scalar(select(m.SerialNumber).where(
@@ -1505,10 +1518,14 @@ async def _register_serials(
                 clash.batch_id = line.batch_id or clash.batch_id
             clash.bin_id = bin_id if bin_id is not None else clash.bin_id
             clash.status = status
+            # A unit re-homed by an onward GRN keeps the IMEI it was first recorded
+            # with unless this receipt states one — the handset does not change hands.
+            clash.imei = imei_by_serial.get(serial.strip().lower()) or clash.imei
             rows.append(clash)
             continue
         row = m.SerialNumber(
             item_id=line.item_id, serial_number=serial,
+            imei=imei_by_serial.get(serial.strip().lower()),
             batch_id=line.batch_id or None, warehouse_id=receipt.warehouse_id,
             bin_id=bin_id, status=status, remarks=remarks, is_active=True,
         )
@@ -3292,23 +3309,90 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
         project_id = next(
             (v["project_id"] for v in lines.values() if v["project_id"]), None
         )
+        items: list[s.IssueItemWrite] = []
+        for item_id, v in lines.items():
+            items.extend(await _allocation_lines_by_batch(
+                db, alloc.indent_id, warehouse_id, item_id, v,
+            ))
         data = s.IssueWrite(
             issue_date=ist_today(),
             warehouse_id=warehouse_id,
             indent_id=alloc.indent_id,
             project_id=project_id,
-            items=[
-                s.IssueItemWrite(
-                    item_id=item_id,
-                    indent_item_id=v["indent_item_id"],
-                    requested_qty=v["requested"] or v["qty"],
-                    issued_qty=v["qty"],
-                )
-                for item_id, v in lines.items()
-            ],
+            items=items,
         )
         drafts.append(await _build_issue(db, data, user))
     return drafts
+
+
+async def _allocation_lines_by_batch(
+    db: AsyncSession,
+    indent_id: int,
+    warehouse_id: int,
+    item_id: int,
+    allocated: dict,
+) -> list[s.IssueItemWrite]:
+    """Split one allocated quantity into the batches and bins it was reserved from.
+
+    `inv_allocation_items` records a quantity and a warehouse, nothing finer, so this
+    used to draft one issue line on NO_BATCH/NO_BIN. Every document after it inherited
+    that blank: no batch number, no expiry, no manufacturing date on the issue, the
+    consignment, or the GRN at the receiving point — and the serial picker fell back to
+    every unit the warehouse holds instead of the ones actually set aside.
+
+    The detail was never missing, only unread. `allocate_for_indent` writes one
+    `inv_reservations` row per stock row it draws from, and a stock row IS a
+    (warehouse, bin, batch) — so the reservations spell out exactly which goods were
+    promised. Read them back and draft one line per rung.
+
+    Falls back to a single unsplit line when the reservations do not add up to what was
+    allocated: a hand-edited allocation must still produce an issue, just a vaguer one.
+    """
+    from app.modules.inventory.models import Reservation
+
+    qty = _d(allocated["qty"])
+    base = {
+        "item_id": item_id,
+        "indent_item_id": allocated["indent_item_id"],
+        "requested_qty": _d(allocated["requested"]) or qty,
+    }
+    rows = (await db.execute(
+        select(Reservation)
+        .where(
+            Reservation.ref_type == InventoryRefType.RESERVATION.value,
+            Reservation.ref_id == indent_id,
+            Reservation.item_id == item_id,
+            Reservation.warehouse_id == warehouse_id,
+        )
+        .order_by(Reservation.id)
+    )).scalars().all()
+
+    reserved = sum((_d(row.quantity) for row in rows), ZERO)
+    if not rows or reserved != qty:
+        if rows:
+            logger.warning(
+                "indent %s item %s at warehouse %s: reservations total %s but %s was "
+                "allocated; issue line left unsplit",
+                indent_id, item_id, warehouse_id, reserved, qty,
+            )
+        return [s.IssueItemWrite(**base, issued_qty=qty)]
+
+    # One line per (bin, batch), so a quantity drawn from two batches stays two lines
+    # with two expiry dates rather than one line claiming a batch it half came from.
+    merged: dict[tuple[int, int], Decimal] = {}
+    for row in rows:
+        key = (row.bin_id or m.NO_BIN, row.batch_id or m.NO_BATCH)
+        merged[key] = merged.get(key, ZERO) + _d(row.quantity)
+
+    lines: list[s.IssueItemWrite] = []
+    for (bin_id, batch_id), line_qty in merged.items():
+        lines.append(s.IssueItemWrite(
+            **{**base, "requested_qty": line_qty},
+            issued_qty=line_qty,
+            bin_id=bin_id or None,
+            batch_id=batch_id or None,
+        ))
+    return lines
 
 
 async def _warehouse_reference_no(
@@ -3655,21 +3739,34 @@ async def _decorate_issue_serials(
         )
     )).scalars().all()
     by_item: dict[int, list[str]] = {}
+    # IMEI travels with the serial, so the issue screen and everything downstream can
+    # show both without going back to whs_serial_numbers per line.
+    imeis_by_item: dict[int, list[str]] = {}
     for row in rows:
         by_item.setdefault(row.item_id, []).append(row.serial_number)
+        if row.imei:
+            imeis_by_item.setdefault(row.item_id, []).append(row.imei)
     item_ids = {line.item_id for line in issue.items}
     serial_by_item: dict[int, bool] = {}
+    imei_tracked_by_item: dict[int, bool] = {}
     if item_ids:
         item_rows = (await db.execute(
-            select(Item.id, Item.is_serial_tracked).where(Item.id.in_(item_ids))
+            select(Item.id, Item.is_serial_tracked, Item.is_imei_tracked)
+            .where(Item.id.in_(item_ids))
         )).all()
         serial_by_item = {
             item_id: bool(is_serial_tracked)
-            for item_id, is_serial_tracked in item_rows
+            for item_id, is_serial_tracked, _ in item_rows
+        }
+        imei_tracked_by_item = {
+            item_id: bool(is_imei_tracked)
+            for item_id, _, is_imei_tracked in item_rows
         }
     for line in issue.items:
         setattr(line, "serial_numbers", by_item.get(line.item_id, []))
+        setattr(line, "imei_numbers", imeis_by_item.get(line.item_id, []))
         setattr(line, "is_serial_tracked", serial_by_item.get(line.item_id, False))
+        setattr(line, "is_imei_tracked", imei_tracked_by_item.get(line.item_id, False))
     return issue
 
 
@@ -3706,6 +3803,7 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             bin_id=line.bin_id or m.NO_BIN, bin_code=await _bin_code(db, line.bin_id),
             batch_id=line.batch_id or m.NO_BATCH,
             batch_no=batch.batch_no if batch else None,
+            mfg_date=batch.mfg_date if batch else None,
             expiry_date=batch.expiry_date if batch else None,
             requested_qty=requested, issued_qty=issued, returned_qty=ZERO,
             rate=rate or None, amount=(issued * rate) if rate else None,
@@ -4353,8 +4451,7 @@ async def _issue_doc_type(db: AsyncSession, issue: m.MaterialIssue, user) -> str
     two cannot share a row in Approvals Config or switching one off silently switches
     off the other.
     """
-    my_points = await stock_locations.location_ids_for_subtree(
-        db, getattr(user, "active_position_id", None))
+    my_points = await stock_locations.location_ids_for_user(db, user)
     if not (issue.warehouse_id and issue.warehouse_id in my_points):
         return DocType.WH_ISSUE.value
     if await _is_forwarding(db, issue):
@@ -5272,7 +5369,13 @@ async def _apply_consignment_packages(
                         uom_code=item.uom_code,
                         batch_id=batch_id,
                         batch_no=batch.batch_no if batch else None,
+                        mfg_date=batch.mfg_date if batch else None,
+                        expiry_date=batch.expiry_date if batch else None,
                         serial_no=serial,
+                        # Off the unit, not off the form. The IMEI is a property of
+                        # the handset in the carton; asking the packer to type it
+                        # again is how it drifts from what was actually sent.
+                        imei_no=serial_row.imei,
                         quantity=Decimal("1"),
                         delivered_qty=ZERO,
                         rate=rate or None,
@@ -5292,7 +5395,10 @@ async def _apply_consignment_packages(
                     uom_code=item.uom_code,
                     batch_id=batch_id,
                     batch_no=batch.batch_no if batch else None,
+                    mfg_date=batch.mfg_date if batch else None,
+                    expiry_date=batch.expiry_date if batch else None,
                     serial_no=None,
+                    imei_no=None,
                     quantity=qty,
                     delivered_qty=ZERO,
                     rate=rate or None,
@@ -6441,6 +6547,7 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
         like = f"%{search}%"
         stmt = stmt.where(or_(
             m.SerialNumber.serial_number.ilike(like),
+            m.SerialNumber.imei.ilike(like),
             m.SerialNumber.asset_code.ilike(like),
             m.SerialNumber.consumable_code.ilike(like)))
 
@@ -6459,7 +6566,10 @@ async def _decorate_serial(db: AsyncSession, row: m.SerialNumber) -> dict:
         "item_name": item.name if item else None,
         "is_asset": bool(getattr(item, "is_asset", False)) if item else False,
         "serial_number": row.serial_number,
+        "imei": row.imei,
         "batch_id": row.batch_id, "batch_no": batch.batch_no if batch else None,
+        "mfg_date": batch.mfg_date if batch else None,
+        "expiry_date": batch.expiry_date if batch else None,
         "warehouse_id": row.warehouse_id, "warehouse_name": wh.name if wh else None,
         "bin_id": row.bin_id, "bin_code": await _bin_code(db, row.bin_id),
         "asset_code": row.asset_code, "consumable_code": row.consumable_code,
@@ -7519,6 +7629,16 @@ async def dispatch_receipt_source(
         select(m.Batch).where(m.Batch.id.in_(batch_ids))
     )).scalars().all()} if batch_ids else {}
 
+    # The inward form only renders its serial and IMEI cells for a line that says it
+    # is tracked, and a prefilled line said nothing — so the numbers the consignment
+    # carries had nowhere to show and the storekeeper was asked for them again.
+    tracked_item_ids = {line.item_id for line in dispatch.items}
+    tracking = {
+        row.id: row for row in (await db.execute(
+            select(Item).where(Item.id.in_(tracked_item_ids))
+        )).scalars().all()
+    } if tracked_item_ids else {}
+
     items = []
     for line in dispatch.items:
         batch_id = line.batch_id if (
@@ -7542,11 +7662,21 @@ async def dispatch_receipt_source(
             "accepted_qty": _d(line.quantity),
             "rate": line.rate,
             # The line's own snapshot wins: a hand-corrected consignment keeps
-            # showing what was actually sent.
+            # showing what was actually sent. The batch lookup is now only a
+            # fallback, for consignments dispatched before the dates were carried.
             "batch_no": line.batch_no or (batch.batch_no if batch else None),
-            "mfg_date": batch.mfg_date if batch else None,
-            "expiry_date": batch.expiry_date if batch else None,
+            "mfg_date": line.mfg_date or (batch.mfg_date if batch else None),
+            "expiry_date": line.expiry_date or (batch.expiry_date if batch else None),
             "serial_numbers": [line.serial_no] if line.serial_no else None,
+            # Prefilled from the unit that was dispatched. The receiving storekeeper
+            # was being asked to retype every IMEI off the handset — "enter exactly 1
+            # IMEI numbers for ..." — against a GRN that already knew which unit
+            # was in the box.
+            "imei_numbers": [line.imei_no] if line.imei_no else None,
+            "is_serial_tracked": bool(
+                getattr(tracking.get(line.item_id), "is_serial_tracked", False)),
+            "is_imei_tracked": bool(
+                getattr(tracking.get(line.item_id), "is_imei_tracked", False)),
         })
 
     return {
@@ -7843,6 +7973,11 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
             m.SerialNumber.is_active.is_(True),
         ).order_by(m.SerialNumber.serial_number)
     )).scalars().all()
+    # Keyed on the serial, so the consignment can print the IMEI beside the unit it
+    # belongs to instead of the receiving point retyping it off the handset.
+    imei_by_serial = {
+        serial.serial_number: serial.imei for serial in serial_rows if serial.imei
+    }
     for serial in serial_rows:
         serials_by_item_batch.setdefault(
             (serial.item_id, serial.batch_id or m.NO_BATCH),
@@ -7889,11 +8024,25 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "uom_code": line.uom_code,
                 "batch_id": line.batch_id,
                 "batch_no": line.batch_no,
+                # Snapshotted on the issue line at creation, so the packer sees what
+                # is actually in the carton rather than a blank the receiving point
+                # has to guess at.
+                "mfg_date": line.mfg_date,
+                "expiry_date": line.expiry_date,
                 "is_serial_tracked": (
                     bool(item_by_id[line.item_id].is_serial_tracked)
                     if line.item_id in item_by_id else False
                 ),
+                "is_imei_tracked": (
+                    bool(item_by_id[line.item_id].is_imei_tracked)
+                    if line.item_id in item_by_id else False
+                ),
                 "serial_numbers": _get_line_serials(line),
+                "imei_by_serial": {
+                    serial: imei_by_serial[serial]
+                    for serial in _get_line_serials(line)
+                    if serial in imei_by_serial
+                },
                 "quantity": _d(line.issued_qty),
                 "rate": line.rate,
                 "remarks": line.remarks,

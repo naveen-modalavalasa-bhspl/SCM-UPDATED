@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.modules.indents.enums import IndentStatus
 from app.modules.indents.models import Indent, IndentItem
-from app.modules.inventory import locations
+from app.modules.inventory import allocations, locations
 from app.modules.inventory.allocations import ACTIVE_ALLOCATION_STATUSES as LIVE_ALLOCATION_STATUSES
 from app.modules.inventory.models import NO_PROJECT, Allocation, AllocationItem, Stock
 from app.platform.hcm.models import HcmPositionAssignment
@@ -50,8 +50,18 @@ def remainder_of(line: IndentItem) -> Decimal:
 
 async def _stock_at(
     db: AsyncSession, item_id: int, warehouse_ids: set[int],
+    indent_id: int | None = None,
 ) -> dict[int, Decimal]:
-    """Available (not reserved) quantity per point, for one item."""
+    """Free quantity per point, for one item: what is on the shelf, less what an
+    un-approved allocation has already promised out of it.
+
+    The subtraction is the point. Nothing is reserved until an allocation is approved,
+    so an OE who has just given 100 of his 505 to one storekeeper still reads 505 on
+    `available_qty` — and the next storekeeper's screen offered him the same units
+    again. This indent's own pledges are excluded because the caller already takes
+    them off line by line via `committed_by_line`; counting them here as well would
+    deduct them twice.
+    """
     if not warehouse_ids:
         return {}
     rows = (await db.execute(
@@ -63,6 +73,12 @@ async def _stock_at(
     totals: dict[int, Decimal] = {}
     for warehouse_id, available in rows:
         totals[warehouse_id] = totals.get(warehouse_id, Decimal("0")) + _d(available)
+
+    pledged = await allocations.pledged_by_point(
+        db, {item_id}, warehouse_ids, exclude_indent_id=indent_id)
+    for (_item, warehouse_id), qty in pledged.items():
+        if warehouse_id in totals:
+            totals[warehouse_id] -= qty
     return {wid: qty for wid, qty in totals.items() if qty > 0}
 
 
@@ -117,8 +133,10 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
     if indent is None:
         raise NotFoundError("Indent not found")
 
-    position_id = getattr(user, "active_position_id", None)
-    my_points = await locations.location_ids_for_subtree(db, position_id)
+    # Every live post this person holds, not the hat they happen to be wearing: the
+    # storekeepers carrying the stock hang off one of a DM's four posts, and scoping to
+    # the selected one showed him nothing and read as missing stock.
+    my_points = await locations.location_ids_for_user(db, user)
     target = await _requester_point(db, indent)
     # Names, once, for every point in play. A picker that offers "#12" asks the
     # approver to know warehouse ids by heart.
@@ -132,7 +150,7 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
 
     out = []
     for line in lines:
-        by_point = await _stock_at(db, line.item_id, my_points)
+        by_point = await _stock_at(db, line.item_id, my_points, indent_id=indent_id)
         owed = max(remainder_of(line) - committed.get(line.id, Decimal("0")),
                    Decimal("0"))
         on_hand = sum(by_point.values(), Decimal("0"))
@@ -152,10 +170,15 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
             # What an Issue now would actually move: you cannot give more than is
             # owed, nor more than you hold.
             "issuable_now": float(min(owed, on_hand)),
+            # Fullest shelf first, the way the fulfilment queue already orders them.
+            # Sorted by warehouse id, the default source was whichever point happened
+            # to have the lowest id: an approver holding 505 across five points was
+            # offered one holding 5, typed the 10 that was owed, and got "only 5.000 is
+            # available" while the panel above said he held 505.
             "sources": [
                 {"warehouse_id": wid, "warehouse_name": names.get(wid) or f"Point {wid}",
                  "available_quantity": float(qty)}
-                for wid, qty in sorted(by_point.items())
+                for wid, qty in sorted(by_point.items(), key=lambda kv: (-kv[1], kv[0]))
             ],
         })
 
@@ -221,8 +244,7 @@ async def issue_from_my_stock(
             "nowhere to issue into. Tag it under Inventory > Stocking Points.",
         )
 
-    position_id = getattr(user, "active_position_id", None)
-    my_points = await locations.location_ids_for_subtree(db, position_id)
+    my_points = await locations.location_ids_for_user(db, user)
 
     decisions, issued = [], []
     committed = await committed_by_line(db, indent_id)
@@ -355,7 +377,13 @@ async def issue_from_my_stock(
             user,
         )
         forwarded = outstanding > 0
-        closed = outstanding == 0
+        # The ladder ended here either way. Both arms of `settle` call approve_indent,
+        # so "send the rest on" takes the document out of this approver's queue just as
+        # surely as serving it in full does — reporting closed only for the full-serve
+        # case left the screen refetching an indent that had already moved to
+        # AWAITING_ALLOCATION, which answers 422 and paints a red error over an act
+        # that succeeded. Whether anything is still owed is `fully_served`, separately.
+        closed = True
 
     return {
         "indent_id": indent_id,

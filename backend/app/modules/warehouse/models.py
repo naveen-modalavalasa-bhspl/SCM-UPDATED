@@ -430,6 +430,7 @@ class MaterialIssueLine(Base):
     bin_code = Column(String(50), nullable=True)
     batch_id = Column(BigInteger, nullable=True)
     batch_no = Column(String(50), nullable=True)
+    mfg_date = Column(Date, nullable=True)
     expiry_date = Column(Date, nullable=True)
 
     requested_qty = Column(QTY, nullable=False, default=0)
@@ -542,7 +543,13 @@ class DispatchItem(Base):
     uom_code = Column(String(20), nullable=True)
     batch_id = Column(BigInteger, nullable=True)
     batch_no = Column(String(50), nullable=True)
+    # Snapshotted beside the batch id, not re-derived. The receiving point rebuilt
+    # both from stk_batches, which only works while batch_id survives — and it does
+    # not on an allocation-drafted issue. A consignment states what it carries.
+    mfg_date = Column(Date, nullable=True)
+    expiry_date = Column(Date, nullable=True)
     serial_no = Column(String(100), nullable=True)
+    imei_no = Column(String(50), nullable=True)
 
     quantity = Column(QTY, nullable=False, default=0)
     delivered_qty = Column(QTY, nullable=False, default=0)
@@ -712,6 +719,11 @@ class SerialNumber(Base):
     id = pk()
     item_id = Column(BigInteger, index=True, nullable=False)
     serial_number = Column(String(100), index=True, nullable=False)
+    # The unit's second identifier. It arrives on the inbound GRN and used to stop
+    # there, as a JSON blob on inb_receipt_items — so the outward flow had no IMEI to
+    # carry and every receiving storekeeper retyped it off the handset. On the unit,
+    # it travels with the serial and can be PICKED by batch and bin.
+    imei = Column(String(50), index=True, nullable=True)
     batch_id = Column(BigInteger, nullable=True)
     warehouse_id = Column(BigInteger, index=True, nullable=True)
     bin_id = Column(BigInteger, nullable=True)

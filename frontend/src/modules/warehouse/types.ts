@@ -805,7 +805,12 @@ export interface DispatchItem {
   uom_code?: string | null;
   batch_id?: number | null;
   batch_no?: string | null;
+  /** Snapshotted on the line, so the receiving GRN reads what was sent instead of
+   *  rebuilding it from `stk_batches` — which only works while `batch_id` survives. */
+  mfg_date?: string | null;
+  expiry_date?: string | null;
   serial_no?: string | null;
+  imei_no?: string | null;
   quantity: number;
   delivered_qty: number;
   rate?: number | null;
@@ -907,8 +912,12 @@ export interface ConsignmentPackageItemWrite {
   uom_code?: string | null;
   batch_id?: number | null;
   batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
   serial_no?: string | null;
+  imei_no?: string | null;
   serial_numbers?: string[];
+  imei_numbers?: string[];
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
   quantity: number;
@@ -958,9 +967,15 @@ export interface IssueDispatchSourceItem extends DispatchItemWrite {
   item_name?: string | null;
   uom_code?: string | null;
   batch_no?: string | null;
+  /** Snapshotted on the issue line, so the packer sees what is in the carton
+   *  rather than a blank the receiving point has to guess at. */
+  mfg_date?: string | null;
+  expiry_date?: string | null;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
   serial_numbers?: string[];
+  /** serial -> IMEI, so a handset's number shows beside the unit it belongs to. */
+  imei_by_serial?: Record<string, string>;
 }
 
 export interface IssueDispatchSource {
@@ -1074,8 +1089,11 @@ export interface SerialNumber {
   item_name?: string | null;
   is_asset?: boolean;
   serial_number: string;
+  imei?: string | null;
   batch_id?: number | null;
   batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
   warehouse_id?: number | null;
   warehouse_name?: string | null;
   bin_id?: number | null;

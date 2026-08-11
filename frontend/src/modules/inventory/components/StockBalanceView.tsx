@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpreadsheet } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
@@ -96,10 +96,15 @@ function LotCard({ lot, uom }: { lot: StockLot; uom?: string }) {
 
 export function StockBalanceView() {
   const navigate = useNavigate();
+  // Seeded from the URL so Stocking Points can hand off "show me what is at THIS
+  // point" without the reader re-picking a warehouse out of a thousand-row dropdown.
+  // Read once, as the initial value — after that the filter is the user's, and
+  // re-syncing it would fight every change they make.
+  const [params] = useSearchParams();
   const [page, setPage] = useState(1);
   const [size, setSize] = useState(20);
   const [search, setSearch] = useState("");
-  const [warehouseId, setWarehouseId] = useState("");
+  const [warehouseId, setWarehouseId] = useState(params.get("warehouse_id") ?? "");
   const [expiringIn, setExpiringIn] = useState("");
   const [expiryFrom, setExpiryFrom] = useState("");
   const [expiryTo, setExpiryTo] = useState("");

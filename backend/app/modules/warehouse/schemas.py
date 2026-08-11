@@ -224,6 +224,11 @@ class ReceiptItemWrite(BaseModel):
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
+    # Display only, like item_code above, and ignored on the way in — the service
+    # reads tracking off the item master. Here so a PRE-FILLED line can render its
+    # serial and IMEI cells instead of hiding the numbers it was handed.
+    is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
 
     @field_validator("received_qty", "ordered_qty")
     @classmethod
@@ -770,6 +775,7 @@ class IssueItemRead(_Read):
     bin_code: str | None = None
     batch_id: int | None = None
     batch_no: str | None = None
+    mfg_date: date | None = None
     expiry_date: date | None = None
     requested_qty: Decimal
     issued_qty: Decimal
@@ -777,6 +783,7 @@ class IssueItemRead(_Read):
     rate: Decimal | None = None
     amount: Decimal | None = None
     remarks: str | None = None
+    is_imei_tracked: bool = False
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
 
@@ -980,7 +987,10 @@ class DispatchItemRead(_Read):
     uom_code: str | None = None
     batch_id: int | None = None
     batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
     serial_no: str | None = None
+    imei_no: str | None = None
     quantity: Decimal
     delivered_qty: Decimal
     rate: Decimal | None = None
@@ -1189,8 +1199,11 @@ class SerialRead(_Read):
     item_name: str | None = None
     is_asset: bool = False
     serial_number: str
+    imei: str | None = None
     batch_id: int | None = None
     batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
     warehouse_id: int | None = None
     warehouse_name: str | None = None
     bin_id: int | None = None
@@ -1283,8 +1296,16 @@ class IssueDispatchSourceItem(DispatchItemWrite):
     item_name: str | None = None
     uom_code: str | None = None
     batch_no: str | None = None
+    # Snapshotted on the issue line, not re-derived downstream — see
+    # `out_dispatch_items.mfg_date` for why the consignment carries them itself.
+    mfg_date: date | None = None
+    expiry_date: date | None = None
     is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
     serial_numbers: list[str] = []
+    # serial -> IMEI, so the packing screen shows the handset's number beside the
+    # unit it belongs to rather than making the receiving point retype it.
+    imei_by_serial: dict[str, str] = {}
 
 
 class IssueDispatchSource(BaseModel):

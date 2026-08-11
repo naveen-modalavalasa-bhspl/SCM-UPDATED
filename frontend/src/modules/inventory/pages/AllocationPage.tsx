@@ -171,6 +171,31 @@ export function AllocationPage() {
         much to give and from where. Nothing is reserved until this is approved.
       </p>
 
+      {/* Every fulfilment-queue row opens this screen, including the ones with no
+          decision left in them. Saying so here — with a link to whatever is already
+          promising the goods — beats four different destinations and a red error. */}
+      {!data.allocatable && (
+        <Card className="mb-4 p-4">
+          <p className="text-sm font-semibold text-ink">{data.blocked_reason}</p>
+          {data.allocations.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {data.allocations.map((allocation) => (
+                <Button
+                  key={allocation.id}
+                  variant="subtle"
+                  onClick={() => nav(`/inventory/allocation-approvals/${allocation.id}`)}
+                >
+                  {allocation.allocation_no} · {allocation.status.replace(/_/g, " ").toLowerCase()}
+                </Button>
+              ))}
+            </div>
+          )}
+          <p className="mt-2 text-xs text-muted">
+            The lines below are shown as they stand. Nothing here can be submitted.
+          </p>
+        </Card>
+      )}
+
       <div className="space-y-4">
         {data.lines.map((line: AllocationProposalLine) => {
           const splits = splitsOf(line.indent_item_id);
@@ -192,7 +217,11 @@ export function AllocationPage() {
                   <h3 className="font-semibold text-ink">{line.item_name}</h3>
                 </div>
                 <div className="text-sm text-muted">
-                  asked <span className="tabular font-semibold text-ink">{line.requested_qty}</span>{" "}
+                  {/* Not "asked": the backend already subtracts what an approved or
+                      pending allocation has promised, so this is what is STILL owed on
+                      the line. A line fully covered by a pending allocation reads 0,
+                      which is correct and only looked wrong under the old label. */}
+                  still owed <span className="tabular font-semibold text-ink">{line.requested_qty}</span>{" "}
                   {/* `available_total` is free stock, not everything in the building.
                       Calling it "on hand" is what let an allocator promise units that
                       another indent had already reserved. */}
@@ -328,12 +357,14 @@ export function AllocationPage() {
         <div className="flex gap-2">
           {/* Disabled, not just warned: the backend refuses an over-allocation, so
               leaving the button live only produced a 422 the allocator could do
-              nothing with. */}
-          <Button onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
-            {save.isPending ? "Submitting…" : "Submit for approval"}
-          </Button>
+              nothing with. Withheld entirely when there is no decision left to make. */}
+          {data.allocatable && (
+            <Button onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
+              {save.isPending ? "Submitting…" : "Submit for approval"}
+            </Button>
+          )}
           <Button variant="subtle" onClick={() => nav("/inventory/fulfillment")}>
-            Cancel
+            {data.allocatable ? "Cancel" : "Back to the queue"}
           </Button>
         </div>
       </div>

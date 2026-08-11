@@ -76,12 +76,12 @@ describe("the alert interceptor", () => {
     expect(raised()).toEqual(["Something went wrong"]);
   });
 
-  it("names the missing permission on a 403", async () => {
+  // Disabled by request: a 403 raises no popup, it only re-rejects.
+  it("stays quiet on a 403", async () => {
     serverError(403, { error: "Missing permission: indent.view" });
     await failingRequest();
 
-    expect(raised()).toEqual(["Not allowed"]);
-    expect(getSnapshot()[0].message).toContain("indent.view");
+    expect(raised()).toEqual([]);
   });
 
   it("stays quiet on a 422 — the screen shows those inline", async () => {

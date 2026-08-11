@@ -119,6 +119,18 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
             })
             entry["available_qty"] += stock.available_qty or ZERO
 
+        # Less what un-approved allocations against OTHER indents have already
+        # promised out of each point — nothing is reserved until approval, so the
+        # shelf otherwise reads full to everyone until the first signature lands.
+        # This indent's own pledges stay in: the screen shows them separately as
+        # already-allocated and would double-count them here.
+        pledged = await pledged_by_point(
+            db, {line["item_id"]}, set(by_warehouse), exclude_indent_id=indent_id)
+        for (_item, warehouse_id), qty in pledged.items():
+            entry = by_warehouse.get(warehouse_id)
+            if entry is not None:
+                entry["available_qty"] = max(entry["available_qty"] - qty, ZERO)
+
         out.append({
             **line,
             "available_total": sum(
@@ -127,6 +139,51 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
             "competing_demand": await competing_demand(db, line["item_id"], indent_id),
         })
     return out
+
+
+# DRAFT and PENDING_APPROVAL only. An APPROVED allocation has ALREADY moved its
+# quantity out of available_qty into reserved_qty (see `allocation.reserve`), so
+# counting it here would subtract the same units twice.
+UNRESERVED_ALLOCATION_STATUSES = (
+    AllocationStatus.DRAFT.value,
+    AllocationStatus.PENDING_APPROVAL.value,
+)
+
+
+async def pledged_by_point(
+    db: AsyncSession, item_ids: set[int], warehouse_ids: set[int],
+    exclude_indent_id: int | None = None,
+) -> dict[tuple[int, int], Decimal]:
+    """Per (item, point), how much an un-approved allocation has already promised.
+
+    Nothing is reserved until an allocation is APPROVED, so between the decision and
+    the signature `stk_balance.available_qty` still counts those units as free. An OE
+    who gave 100 of his 505 to one storekeeper was shown 505 again by the next one,
+    promised the same units twice, and only found out when the second allocation
+    failed to reserve. This is the gap, stated once and subtracted everywhere free
+    stock is quoted — the balance itself is never written to (rule 7).
+
+    `exclude_indent_id` leaves out this indent's own pledges, for callers that already
+    account for them line by line and would otherwise deduct them a second time.
+    """
+    if not item_ids or not warehouse_ids:
+        return {}
+    conditions = [
+        AllocationItem.item_id.in_(item_ids),
+        AllocationItem.warehouse_id.in_(warehouse_ids),
+        Allocation.status.in_(UNRESERVED_ALLOCATION_STATUSES),
+    ]
+    if exclude_indent_id is not None:
+        conditions.append(Allocation.indent_id != exclude_indent_id)
+    rows = (await db.execute(
+        select(AllocationItem.item_id, AllocationItem.warehouse_id,
+               func.coalesce(func.sum(AllocationItem.quantity), 0))
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .where(*conditions)
+        .group_by(AllocationItem.item_id, AllocationItem.warehouse_id)
+    )).all()
+    return {(item_id, warehouse_id): _d(qty)
+            for item_id, warehouse_id, qty in rows}
 
 
 async def competing_demand(db: AsyncSession, item_id: int,
@@ -292,11 +349,20 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
                     Stock.warehouse_id == d["warehouse_id"],
                 )
             ))
-            if quantity > on_shelf:
+            # Less whatever an un-approved allocation has already promised out of this
+            # point. Reservation only happens at approval, so without this the shelf
+            # reads full to every approver until the first signature lands, and the
+            # same 100 units get committed to three indents.
+            pledged = await pledged_by_point(
+                db, {d["item_id"]}, {d["warehouse_id"]})
+            free = on_shelf - pledged.get((d["item_id"], d["warehouse_id"]), ZERO)
+            if quantity > free:
                 raise ValidationError(
                     f"{d.get('item_name') or d['item_id']}: cannot allocate "
-                    f"{quantity} from {warehouse.name} — only {on_shelf} is available. "
-                    "Allocate what is there; the rest goes to a material request."
+                    f"{quantity} from {warehouse.name} — only {free} is free "
+                    f"({on_shelf} on the shelf, {on_shelf - free} already promised to "
+                    "allocations awaiting approval). Allocate what is there; the rest "
+                    "goes to a material request."
                 )
         db.add(AllocationItem(
             allocation_id=alloc.id,

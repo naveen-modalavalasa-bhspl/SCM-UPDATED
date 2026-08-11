@@ -8,9 +8,13 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
   switch (document.doc_type) {
     case "INDENT": return `/approvals?reviewIndent=${document.doc_id}`;
     case "MR": return `/inventory/material-requests/${document.doc_id}`;
-    // ?review= opens that allocation's review panel directly; without it the approver
-    // lands on the queue and has to find the row again.
-    case "ALLOCATION": return `/inventory/allocation-approvals?review=${document.doc_id}`;
+    // OWN_STOCK_ALLOCATION is the SAME document under a different approval event —
+    // an approver serving an indent out of a point they hold. Listing it here while
+    // leaving it out of this switch is why clicking it went to `default`, i.e. back to
+    // the page the approver was already on: the click looked like it did nothing.
+    case "ALLOCATION":
+    case "OWN_STOCK_ALLOCATION":
+      return `/inventory/allocation-approvals/${document.doc_id}`;
     case "PO": return `/pos/${document.doc_id}?approval=1`;
     case "GRN": return `/warehouse/grn/${document.doc_id}`;
     case "ISSUE":
@@ -31,7 +35,9 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
 export function approvalDecisionDocumentPath(document: ApprovalDocument): string {
   switch (document.doc_type) {
     case "INDENT": return `/indents/${document.doc_id}?decision=1`;
-    case "ALLOCATION": return `/inventory/allocation-approvals?review=${document.doc_id}&decision=1`;
+    case "ALLOCATION":
+    case "OWN_STOCK_ALLOCATION":
+      return `/inventory/allocation-approvals/${document.doc_id}?decision=1`;
     case "PO": return `/pos/${document.doc_id}?decision=1`;
     case "MR": return `/inventory/material-requests/${document.doc_id}`;
     case "GRN": return `/warehouse/grn/${document.doc_id}`;

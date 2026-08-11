@@ -162,6 +162,48 @@ async def location_ids_for_subtree(db: AsyncSession, position_id: int | None) ->
     return points
 
 
+async def active_positions_of(db: AsyncSession, user) -> set[int]:
+    """Every LIVE post this login holds — not just the hat they happen to be wearing.
+
+    Both sides have to be alive. The assignment rows survive a cutover but the posts
+    do not: 4,002 of the 8,007 assignments still name a position HCM retired, and
+    those retired posts sit at the top of the name sort, so the hat a login lands on
+    is routinely a dead one whose reporting tree nobody was ever moved into.
+    """
+    if user is None:
+        return set()
+    positions = set((await db.execute(
+        select(HcmPositionAssignment.position_id)
+        .join(HcmPosition, HcmPosition.id == HcmPositionAssignment.position_id)
+        .where(HcmPositionAssignment.employee_id == user.id,
+               HcmPositionAssignment.is_active.is_(True),
+               HcmPosition.is_active.is_(True))
+    )).scalars().all())
+    # The hat in hand counts even if the two tables disagree about it — narrowing a
+    # login below what it is actively acting as would take away access it has today.
+    active = getattr(user, "active_position_id", None)
+    if active is not None:
+        positions.add(active)
+    return positions
+
+
+async def location_ids_for_user(db: AsyncSession, user) -> set[int]:
+    """Every stocking point this PERSON can draw from: their own points and their
+    reportees', across every live post they hold.
+
+    Per person, not per hat. A DM holds four posts — "DM MDP PADERU", two generations
+    of "DM-104-PADERU", a storekeeper post — and the storekeepers carrying the stock
+    hang off only one of them. Scoping to the selected hat meant the same human saw
+    12,160 units under one and nothing under another, which reads as missing stock
+    rather than as a hat they forgot to switch. Every post is still them, so every
+    post's reportees are still their reportees.
+    """
+    points: set[int] = set()
+    for position_id in await active_positions_of(db, user):
+        points |= await location_ids_for_subtree(db, position_id)
+    return points
+
+
 async def primary_location_for(db: AsyncSession, position_id: int | None) -> int | None:
     """The point a position issues from by default — its primary, else its only one."""
     if position_id is None:
@@ -249,10 +291,9 @@ async def warehouses_visible_to(db: AsyncSession, user) -> set[int] | None:
     None means "no tagging reaches this user" — the caller keeps whatever scope it
     already had, so adding this layer can never take away access someone has today.
     """
-    position_id = getattr(user, "active_position_id", None) if user is not None else None
-    if position_id is None:
+    if user is None:
         return None
-    visible = await location_ids_for_subtree(db, position_id)
+    visible = await location_ids_for_user(db, user)
     return visible or None
 
 
@@ -375,6 +416,46 @@ def _tag_row(tag, code, name, wh_type, position_name) -> dict:
     }
 
 
+async def _holders_of(db: AsyncSession, position_ids: set[int]) -> dict[int, list[dict]]:
+    """Who stands in each post. Looked up separately rather than joined into the page,
+    because a position carries more than one assignment row and joining it would
+    multiply the tagging: one tag would be listed once per holder, and the total above
+    the list would count taggings that do not exist."""
+    if not position_ids:
+        return {}
+    rows = (await db.execute(
+        select(HcmPositionAssignment.position_id,
+               HcmEmployee.emp_code, HcmEmployee.full_name)
+        .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
+        .where(HcmPositionAssignment.position_id.in_(position_ids))
+    )).all()
+    holders: dict[int, list[dict]] = {}
+    for position_id, code, full_name in rows:
+        holders.setdefault(position_id, []).append(
+            {"employee_code": code, "employee_name": full_name})
+    return holders
+
+
+async def stock_at_points(db: AsyncSession, warehouse_ids: set[int]) -> dict[int, dict]:
+    """On-hand at each stocking point: how many distinct items, and how much in total.
+
+    Unscoped on purpose — the caller has already decided which points may be read, and
+    the number has to be the point's real holding or "what has this OE got" answers
+    with a figure nobody can reconcile against the stock screens.
+    """
+    if not warehouse_ids:
+        return {}
+    rows = (await db.execute(
+        select(Stock.warehouse_id,
+               func.count(func.distinct(Stock.item_id)),
+               func.sum(Stock.available_qty))
+        .where(Stock.warehouse_id.in_(warehouse_ids), Stock.available_qty > 0)
+        .group_by(Stock.warehouse_id)
+    )).all()
+    return {wid: {"stock_items": int(items or 0), "stock_qty": float(qty or 0)}
+            for wid, items, qty in rows}
+
+
 async def search_tags(db: AsyncSession, user, *, search: str | None = None,
                       tier: int | None = None, project_id: int | None = None,
                       page: int = 1, size: int = 25) -> dict:
@@ -411,6 +492,17 @@ async def search_tags(db: AsyncSession, user, *, search: str | None = None,
             Warehouse.name.ilike(like),
             Warehouse.code.ilike(like),
             PositionLocation.project_name.ilike(like),
+            # The person, not just the post. Nobody browsing this screen knows which of
+            # an OE's four posts holds the stocking point, so typing "HR-EMP-07278" or
+            # their name has to answer with every point that employee reaches. A
+            # subquery rather than a join: a position carries several assignment rows
+            # and joining would list each tagging once per holder.
+            PositionLocation.position_id.in_(
+                select(HcmPositionAssignment.position_id)
+                .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
+                .where(or_(HcmEmployee.emp_code.ilike(like),
+                           HcmEmployee.full_name.ilike(like)))
+            ),
         ))
     if project_id is not None:
         conditions.append(PositionLocation.project_id == project_id)
@@ -446,16 +538,39 @@ async def search_tags(db: AsyncSession, user, *, search: str | None = None,
     )).all():
         counts[tier_of(wh_type).value] += n
 
+    # On-hand across the WHOLE filtered set, not the page. Searching an employee code
+    # is asking "what has this person got", and an answer that only totalled the 25
+    # rows on screen would understate anyone holding more points than that.
+    point_ids = set((await db.execute(
+        joined(PositionLocation.warehouse_id).distinct()
+    )).scalars().all())
+    stock = await stock_at_points(db, point_ids)
+
     rows = (await db.execute(
         joined(PositionLocation, Warehouse.code, Warehouse.name,
                Warehouse.warehouse_type, HcmPosition.name)
         .order_by(PositionLocation.position_id, PositionLocation.is_primary.desc())
         .offset(max(page - 1, 0) * size).limit(size)
     )).all()
+    holders = await _holders_of(db, {row[0].position_id for row in rows})
+
+    items = []
+    for row in rows:
+        tag = _tag_row(*row)
+        tag["holders"] = holders.get(tag["position_id"], [])
+        tag.update(stock.get(tag["warehouse_id"],
+                             {"stock_items": 0, "stock_qty": 0.0}))
+        items.append(tag)
+
     return {
-        "items": [_tag_row(*row) for row in rows],
+        "items": items,
         "total": total, "page": page, "size": size,
         "tier_counts": {str(k): v for k, v in counts.items()},
+        # Distinct points, so a point tagged to four posts is counted once — the cards
+        # above the list already count points that way and the two must agree.
+        "stock_points": sum(1 for wid in point_ids if wid in stock),
+        "stock_items": sum(s["stock_items"] for s in stock.values()),
+        "stock_qty": sum(s["stock_qty"] for s in stock.values()),
     }
 
 
