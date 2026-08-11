@@ -17,8 +17,12 @@ export const CODE_RULE = {
 
 export const RATE_RULE = { type: "number", min: 0, max: 100 } as const;
 
-export const WAREHOUSE_TYPES: Option[] = ["MAIN", "LIP", "MDP", "TRANSIT", "QUARANTINE", "SCRAP"]
-  .map((v) => ({ value: v, label: v }));
+// Mirrors WarehouseType in backend/app/shared/enums.py — the backend rejects
+// anything not in that enum, so a value offered here and missing there is a save
+// that fails after the user has filled the form.
+export const WAREHOUSE_TYPES: Option[] = [
+  "MAIN", "CENTRAL", "REGIONAL", "LIP", "MDP", "TRANSIT", "QUARANTINE", "SCRAP",
+].map((v) => ({ value: v, label: v }));
 
 export const BIN_TYPES: Option[] = ["ZONE", "RACK", "SHELF", "STORAGE", "STAGING"]
   .map((v) => ({ value: v, label: v }));

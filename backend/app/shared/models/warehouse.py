@@ -9,7 +9,7 @@ Only the columns the app reads or writes are mapped. Both tables carry NOT NULL
 columns with database defaults (warehouse_type='MAIN', bin_type='STORAGE'); mapping
 one and passing None sends an explicit NULL that overrides the default and raises 1048.
 """
-from sqlalchemy import Boolean, Column, ForeignKey, Index, Numeric, String
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Numeric, String
 from sqlalchemy.orm import synonym
 
 from app.core.database import Base
@@ -44,6 +44,15 @@ Index("ix_whs_warehouses_active", Warehouse.is_active)
 # past on the way to a bin, not somewhere stock is counted.
 BIN_TYPES = ("BIN", "COLD_STORAGE_BIN")
 
+# What `whs_warehouse_locations.storage_type` — a MySQL ENUM — actually accepts. It is a
+# subset of `enums.BinType`, which carries values other deployments' data uses. Sending
+# anything else is rejected by the database with a truncation error, i.e. a 500 on a
+# form the user filled in correctly, so the write schema checks it here and 422s instead.
+STORAGE_TYPES = (
+    "BLOCK", "FLOOR", "LANE", "RACK", "SHELF", "BIN", "LOT",
+    "COLD_ROOM", "REFRIGERATOR", "COLD_STORAGE_BIN", "PALLET",
+)
+
 
 class WarehouseLocation(Base):
     """`whs_warehouse_locations` — every storage point inside a warehouse.
@@ -73,8 +82,11 @@ class WarehouseLocation(Base):
     bin_type = Column("storage_type", String(50), nullable=True)
     storage_type_id = Column(Numeric(20, 0), nullable=True)
     barcode = Column(String(100), nullable=True)
-    floor_level = Column(String(50), nullable=True)
-    shelf_level = Column(String(50), nullable=True)
+    # Both are whole numbers in the database (`int`), not labels: floor 0, shelf 3.
+    # Declaring them as strings made SQLAlchemy hand the router an `int` anyway — the
+    # driver decides — and every read of a location with a floor set failed validation.
+    floor_level = Column(Integer, nullable=True)
+    shelf_level = Column(Integer, nullable=True)
 
     capacity_weight = Column(Numeric(16, 3), nullable=True)
     capacity_volume = Column(Numeric(16, 3), nullable=True)

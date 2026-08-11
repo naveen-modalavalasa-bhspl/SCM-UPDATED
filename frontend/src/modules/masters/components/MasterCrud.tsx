@@ -11,7 +11,8 @@ import { BulkBar } from "./BulkBar";
 import { alerts } from "@/modules/alerts";
 import type { BulkApi, MasterUsage } from "../api";
 
-export type FieldType = "text" | "number" | "select" | "switch" | "multiselect";
+export type FieldType =
+  "text" | "number" | "date" | "select" | "switch" | "multiselect";
 export interface Option { value: string | number; label: string }
 
 export interface FormField {
@@ -31,6 +32,12 @@ export interface FormField {
   patternMessage?: string;
   min?: number;
   max?: number;
+  /** Renders at half width, sharing a row with the next field also marked `half` —
+   *  a from/to pair reads as one line rather than two. Stacks below `sm`. */
+  half?: boolean;
+  /** Date fields only: the bounds the picker itself should offer, read from the rest
+   *  of the form. Keeps the calendar from proposing a day `validate` would reject. */
+  range?: (all: Values) => { min?: string; max?: string };
   /** Anything the rules above cannot express. Return a message, or null to pass. */
   validate?: (value: Values[string], all: Values) => string | null;
   /** Lets one field update local state owned by the tab, e.g. dependent dropdowns. */
@@ -165,6 +172,9 @@ function buildPayload(fields: FormField[], values: Values): Values {
       continue;
     }
     if (f.type === "number") v = v === "" || v === null ? null : Number(v);
+    // A cleared date is null, not "": the backend reads the pair as an optional
+    // window, and an empty string is not a date it can parse.
+    if (f.type === "date" && v === "") v = null;
     if (f.type === "select") {
       v = v === "" || v === undefined
         ? null
@@ -270,9 +280,99 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
       const next = { ...e };
       delete next[k];
       for (const dependent of f.clearOnChange ?? []) delete next[dependent];
+      // A message under another field may have been about this one — the two ends of
+      // a validity window judge each other. Re-run the ones still showing and drop
+      // whichever this edit has just satisfied, so fixing one end clears both.
+      for (const other of p.fields) {
+        if (next[other.key] && !validateForm([other], nextValues)[other.key]) {
+          delete next[other.key];
+        }
+      }
       return next;
     });
   };
+
+  /** One field of the form. `bare` drops the hint: on a paired row the wrapper below
+   *  prints the hints once, full width, instead of wrapping them under half a field. */
+  const renderField = (f: FormField, bare = false) => {
+    const val = values[f.key];
+    const fieldError = fieldErrors[f.key] || undefined;
+    const hint = bare ? undefined : f.hint;
+    if (f.type === "switch") {
+      return (
+        <div key={f.key} className="py-1">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium text-body">{f.label}</span>
+            <Switch isSelected={Boolean(val)} onValueChange={(b) => set(f, b)}
+                    color="primary" size="sm" />
+          </div>
+          {hint && <p className="mt-1 text-xs text-muted">{hint}</p>}
+        </div>
+      );
+    }
+    if (f.type === "multiselect") {
+      return (
+        <Field key={f.key} label={f.label}>
+          <MultiSelect
+            options={f.options ?? []}
+            value={Array.isArray(val) ? val : []}
+            isInvalid={Boolean(fieldError)}
+            onChange={(next) => set(f, next)} />
+          {fieldError
+            ? <span className="mt-1 block text-xs text-bad">{fieldError}</span>
+            : hint && <span className="mt-1 block text-xs text-muted">{hint}</span>}
+        </Field>
+      );
+    }
+    if (f.type === "select") {
+      return (
+        <Field key={f.key} label={f.label}>
+          <Select value={(val as string | number | "") ?? ""}
+                  placeholder={f.placeholder ?? "Type to search…"}
+                  options={f.options ?? []}
+                  isInvalid={Boolean(fieldError)}
+                  errorMessage={fieldError}
+                  onChange={(next) => set(
+                    f,
+                    next === ""
+                      ? null
+                      : (f.options?.find(
+                          (option) => String(option.value) === String(next),
+                        )?.value ?? next),
+                  )} />
+        </Field>
+      );
+    }
+    // A date's own bounds come from the rest of the form, so the picker greys out
+    // the days the pair forbids instead of letting one be chosen and then refused.
+    const bounds = f.type === "date" ? f.range?.(values) ?? {} : {};
+    return (
+      // The hint steps aside for an error: two lines of small grey and
+      // red text under one field is where the message gets missed.
+      <Field key={f.key} label={f.label} hint={fieldError ? undefined : hint}>
+        <Input
+          type={f.type === "number" || f.type === "date" ? f.type : "text"}
+          value={val === null || val === undefined ? "" : String(val)}
+          placeholder={f.placeholder}
+          maxLength={f.maxLength}
+          min={bounds.min}
+          max={bounds.max}
+          isInvalid={Boolean(fieldError)}
+          errorMessage={fieldError}
+          onChange={(e) => set(f, e.target.value)}
+        />
+      </Field>
+    );
+  };
+
+  // Consecutive fields marked `half` pair up into one row; everything else keeps a
+  // row to itself.
+  const rows: FormField[][] = [];
+  for (const f of p.fields) {
+    const last = rows[rows.length - 1];
+    if (f.half && last?.length === 1 && last[0].half) last.push(f);
+    else rows.push([f]);
+  }
 
   const submit = () => {
     const found = validateForm(p.fields, values);
@@ -352,66 +452,20 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
                 {error && (
                   <div className="rounded-lg bg-bad-bg px-3 py-2 text-sm font-medium text-bad">{error}</div>
                 )}
-                {p.fields.map((f) => {
-                  const val = values[f.key];
-                  const fieldError = fieldErrors[f.key] || undefined;
-                  if (f.type === "switch") {
-                    return (
-                      <div key={f.key} className="py-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium text-body">{f.label}</span>
-                          <Switch isSelected={Boolean(val)} onValueChange={(b) => set(f, b)}
-                                  color="primary" size="sm" />
-                        </div>
-                        {f.hint && <p className="mt-1 text-xs text-muted">{f.hint}</p>}
-                      </div>
-                    );
-                  }
-                  if (f.type === "multiselect") {
-                    return (
-                      <Field key={f.key} label={f.label}>
-                        <MultiSelect
-                          options={f.options ?? []}
-                          value={Array.isArray(val) ? val : []}
-                          isInvalid={Boolean(fieldError)}
-                          onChange={(next) => set(f, next)} />
-                        {fieldError
-                          ? <span className="mt-1 block text-xs text-bad">{fieldError}</span>
-                          : f.hint && <span className="mt-1 block text-xs text-muted">{f.hint}</span>}
-                      </Field>
-                    );
-                  }
-                  if (f.type === "select") {
-                    return (
-                      <Field key={f.key} label={f.label}>
-                        <Select value={(val as string | number | "") ?? ""}
-                                placeholder={f.placeholder ?? "Type to search…"}
-                                options={f.options ?? []}
-                                isInvalid={Boolean(fieldError)}
-                                errorMessage={fieldError}
-                                onChange={(next) => set(
-                                  f,
-                                  next === ""
-                                    ? null
-                                    : (f.options?.find(
-                                        (option) => String(option.value) === String(next),
-                                      )?.value ?? next),
-                                )} />
-                      </Field>
-                    );
-                  }
+                {rows.map((row) => {
+                  if (row.length === 1) return renderField(row[0]);
+                  const hints = row
+                    .filter((f) => f.hint && !fieldErrors[f.key])
+                    .map((f) => f.hint);
                   return (
-                    <Field key={f.key} label={f.label}>
-                      <Input
-                        type={f.type === "number" ? "number" : "text"}
-                        value={val === null || val === undefined ? "" : String(val)}
-                        placeholder={f.placeholder}
-                        maxLength={f.maxLength}
-                        isInvalid={Boolean(fieldError)}
-                        errorMessage={fieldError}
-                        onChange={(e) => set(f, e.target.value)}
-                      />
-                    </Field>
+                    <div key={row[0].key}>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {row.map((f) => renderField(f, true))}
+                      </div>
+                      {hints.length > 0 && (
+                        <p className="mt-1 text-xs text-muted">{hints.join(" ")}</p>
+                      )}
+                    </div>
                   );
                 })}
               </ModalBody>

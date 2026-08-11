@@ -83,6 +83,26 @@ export function AllocationPage() {
     return String(Math.max(0, Math.min(n, ceilingFor(line, splits, index))));
   };
 
+  /**
+   * The points this row may still choose: every point holding the item, minus the
+   * ones the OTHER rows on this line have already taken.
+   *
+   * A split exists to draw one line from SEVERAL points, so the same point twice is
+   * never a real answer — and it read as one, because the new row offered the whole
+   * list and the picked point sat right at the top of it. Two rows on one point also
+   * quietly double-count against `ceilingFor`, which caps each row at that point's
+   * free stock without knowing a sibling is drawing on the same shelf.
+   *
+   * The scoping is the backend's: `warehouses` is already narrowed to this login's
+   * own stocking points and their subtree (`allocation_proposal`). This only removes
+   * from that list — it can never add a point the caller was not offered.
+   */
+  const pointsFor = (line: AllocationProposalLine, splits: Split[], index: number) => {
+    const taken = new Set(
+      splits.filter((_, i) => i !== index).map((s) => s.wh).filter(Boolean));
+    return line.warehouses.filter((w) => !taken.has(String(w.warehouse_id)));
+  };
+
   /** Anything still promising stock that is not there. The backend refuses these, so
    *  the submit button has no business being live while one is on screen. */
   const overSplits = (data?.lines ?? []).filter((line: AllocationProposalLine) =>
@@ -214,7 +234,7 @@ export function AllocationPage() {
                                   { wh: v, qty: clampQty(line, next, i, next[i].qty) });
                             }}
                             placeholder="— none —"
-                            options={line.warehouses.map((w) => ({
+                            options={pointsFor(line, splits, i).map((w) => ({
                               value: String(w.warehouse_id),
                               label: `${w.warehouse_name} (${w.available_qty} free)`,
                             }))}
@@ -242,7 +262,13 @@ export function AllocationPage() {
                       )}
                     </div>
                   ))}
-                  <Button variant="subtle" onClick={() => addSplit(line.indent_item_id)}>
+                  {/* Off once every point holding this item is already on a row —
+                      the row it would add could only ever be blank. */}
+                  <Button
+                    variant="subtle"
+                    disabled={splits.filter((s) => s.wh).length >= line.warehouses.length}
+                    onClick={() => addSplit(line.indent_item_id)}
+                  >
                     <Plus size={14} /> Take some from another warehouse
                   </Button>
                 </div>

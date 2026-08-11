@@ -624,10 +624,16 @@ export default function ConsignmentForm() {
           </Field>
           <Field label="To warehouse">
             {/* Destination: the whole network, because a transfer goes to a point
-                this login does not hold — minus the origin, which cannot be both. */}
+                this login does not hold — minus the origin, which cannot be both.
+
+                Left blank, the server derives it from the issue's destination office.
+                It has to: this is the only field the receiving point's inward screen
+                matches on, and the old "For transfer only" placeholder told everyone
+                to skip it — so half the consignments arrived with nothing to receive
+                them against. */}
             <Lookup name="warehouses" load={destinationOptions} value={form.to_warehouse_id ?? ""} isDisabled={locked}
                     onChange={(value) => setForm((f) => ({ ...f, to_warehouse_id: value === "" ? null : value }))}
-                    placeholder="For transfer only" />
+                    placeholder="Auto from the indent" />
           </Field>
           <Field label="Destination">
             <Input value={destination || "—"} disabled />

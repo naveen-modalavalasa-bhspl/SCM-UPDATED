@@ -188,6 +188,10 @@ class ConsolidatedItemOut(BaseModel):
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
+    # Decimal places this unit may carry (app.shared.uom): 0 for anything counted in
+    # whole numbers, 3 for anything measured. The screen splits an approved total in
+    # steps of this, so a countable item can never be shared out as 5.7.
+    uom_decimals: int = 3
     total_requested_quantity: float
     # Sum of each line's approval ceiling — the most this approver could pass on
     # for this item across the whole batch, before touching anything.

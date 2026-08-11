@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
@@ -36,25 +36,29 @@ export default function Warehouses() {
   const [type, setType] = useState("");
   const [active, setActive] = useState("");
 
+  // Searched on the SERVER. The page asked for 200 warehouses and then filtered them
+  // in the browser, but the network holds ~1,000 — so anything past the 200th by code
+  // simply did not exist as far as this screen was concerned, and searching for it
+  // returned "no warehouses match" rather than the row sitting in the table.
+  const [applied, setApplied] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setApplied(search.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ["wh-warehouses"],
-    queryFn: () => listWarehouses({ size: 200 }),
+    queryKey: ["wh-warehouses", applied],
+    queryFn: () => listWarehouses({ size: 200, ...(applied ? { search: applied } : {}) }),
+    placeholderData: (previous) => previous,
   });
 
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return (data?.items ?? []).filter((w) => {
-      if (type && w.warehouse_type !== type) return false;
-      if (active && String(w.is_active) !== active) return false;
-      if (!q) return true;
-      return (
-        w.code.toLowerCase().includes(q) ||
-        w.name.toLowerCase().includes(q) ||
-        (w.facility_name ?? "").toLowerCase().includes(q) ||
-        (w.incharge_name ?? "").toLowerCase().includes(q)
-      );
-    });
-  }, [data, search, type, active]);
+  // Type and status still narrow in the browser: they are a handful of values over a
+  // set the server has already cut down, so a round trip would buy nothing.
+  const rows = useMemo(() => (data?.items ?? []).filter((w) => {
+    if (type && w.warehouse_type !== type) return false;
+    if (active && String(w.is_active) !== active) return false;
+    return true;
+  }), [data, type, active]);
 
   const columns: Column<Warehouse>[] = [
     {

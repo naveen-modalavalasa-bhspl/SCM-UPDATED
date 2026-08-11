@@ -259,6 +259,8 @@ export interface BomChoice {
   description?: string | null;
   total_items: number;
   is_active: boolean;
+  /** Switched on and inside its optional validity window (masters decides both). */
+  is_effective?: boolean;
 }
 
 export interface BomChoiceItem {

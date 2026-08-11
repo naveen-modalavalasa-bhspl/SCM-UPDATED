@@ -662,6 +662,44 @@ Bom.line_count = column_property(
 )
 
 
+class BomGroup(Base):
+    """A BOM handed to a job profile — "who gets this kit".
+
+    The rung is the RBAC job profile (`platform/rbac/profiles.py`), which is the grant
+    unit the rest of the system already reasons in: an HCM role is too coarse (role 29
+    "MANAGER" covers fifteen unrelated jobs) and a position is one post in one village.
+    A profile has no table of its own — it is derived from the HCM mirror and keyed
+    "<project id>:<job>" ("4:DEO") — so `profile_key` is a string, not an FK, and the
+    name is snapshotted beside it the way every other master snapshots its parent.
+
+    One row is one pairing. A profile may hold several BOMs and a BOM may be given to
+    several profiles; the unique constraint only stops the same pairing twice.
+    """
+    __tablename__ = "mst_bom_groups"
+    id = pk()
+    bom_id = Column(ForeignKey("mst_boms.id", ondelete="CASCADE"), index=True,
+                    nullable=False)
+    bom_code = Column(String(50), nullable=True)          # snapshot
+    bom_name = Column(String(200), nullable=True)         # snapshot
+    profile_key = Column(String(150), index=True, nullable=False)
+    profile_job = Column(String(150), nullable=True)      # snapshot
+    profile_name = Column(String(200), nullable=True)     # snapshot
+    # The profile's own project, copied off the key so the list can be read, FILTERED
+    # AND SCOPED without re-deriving 4,000 positions. This column is what
+    # `scope_by_project` narrows on, so it is the row's security boundary too.
+    project_id = Column(BigIntPortable, index=True, nullable=True)
+    project_name = Column(String(200), nullable=True)     # snapshot
+    remarks = Column(String(500), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    # Optional validity window, the same pair mst_boms carries. Both ends are
+    # nullable: a pairing with neither date stands until someone switches it off.
+    effective_from = Column(Date, nullable=True)
+    effective_to = Column(Date, nullable=True)
+    __table_args__ = (
+        UniqueConstraint("bom_id", "profile_key", name="uq_bom_group"),
+    )
+
+
 class ItemSpec(Base):
     """Technical detail for one item. The primary key is item_id, not a surrogate —
     an item has at most one spec row, so the API upserts by item rather than creating.

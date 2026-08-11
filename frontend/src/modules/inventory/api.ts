@@ -1,7 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
   PositionLocationTag, PositionLocationWrite, MovementClassification,
-  MyStockingPoints, PositionSearchHit,
+  MyStockingPoints, PositionSearchHit, StockingPointQuery, StockingPointTagPage,
   AllocationDecision,
   AllocationHistoryRow,
   Allocation,
@@ -296,10 +296,17 @@ export const getFulfilmentBatches = (includeDone = false) =>
     "/api/allocations/batches",
     { params: includeDone ? { include_done: true } : undefined }).then((r) => r.data);
 
-export const getFulfillmentQueue = (status?: string) =>
+/** The fulfilment queue's indents. `owedOnly` keeps the default reading — a line
+ *  still owed — while false returns fulfilled and rejected indents too, so what was
+ *  allocated can be looked up rather than only what is outstanding. */
+export const getFulfillmentQueue = (status?: string, owedOnly = true) =>
   api
     .get<Page<Record<string, unknown>>>("/api/indents", {
-      params: { size: 100, has_remainder: true, ...(status ? { status } : {}) },
+      params: {
+        size: 100,
+        ...(owedOnly ? { has_remainder: true } : {}),
+        ...(status ? { status } : {}),
+      },
     })
     .then((r) => r.data);
 
@@ -426,11 +433,14 @@ export const rejectAllocation = (id: number, comments = "") =>
 
 /* ---------------- Stocking points: tiers, tagging, classification ---------------- */
 
-/** Every position→point tag, optionally for one position. */
-export const listStockingPointTags = (positionId?: number) =>
-  api.get<PositionLocationTag[]>("/api/stocking-points/tags", {
-    params: positionId ? { position_id: positionId } : {},
-  }).then((r) => r.data);
+/** One page of position→point tags, narrowed by the caller's own scope.
+ *
+ *  Paged and filtered on the server: the live tagging is ~2,000 rows, so searching it
+ *  in the browser meant downloading the whole org before the first keystroke could
+ *  match anything. `tier_counts` describes the whole filtered set, not the page. */
+export const listStockingPointTags = (params: StockingPointQuery = {}) =>
+  api.get<StockingPointTagPage>("/api/stocking-points/tags", { params })
+    .then((r) => r.data);
 
 export const tagStockingPoint = (body: PositionLocationWrite) =>
   api.post<PositionLocationTag>("/api/stocking-points/tags", body).then((r) => r.data);

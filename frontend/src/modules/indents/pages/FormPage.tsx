@@ -12,6 +12,9 @@ import {
 import { ItemCombobox } from "../components/ItemCombobox";
 import { ChooseBomModal } from "../components/ChooseBomModal";
 import { INDENT_STATUS, INDENT_TYPE, INDENT_TYPE_OPTIONS } from "../constants";
+import {
+  comparableVehicleNumber, displayUom, splitDeliveryOffice,
+} from "../displayFormat";
 import type { IndentCreate, IndentType, IndentUpdate, TemplateLineItem } from "../types";
 
 interface Line {
@@ -125,6 +128,11 @@ export function IndentFormPage() {
     enabled: !isEditing,
   });
 
+  const { data: vehicles = [], isLoading: isVehiclesLoading } = useQuery({
+    queryKey: indentKeys.vehicles(accountScope),
+    queryFn: () => indentApi.vehicles(),
+  });
+
   const {
     data: draft,
     isLoading: isDraftLoading,
@@ -169,7 +177,7 @@ export function IndentFormPage() {
   const payload = (): IndentCreate => ({
     priority,
     indent_type: indentType,
-    vehicle_id: vehicleId === "" ? null : Number(vehicleId),
+    vehicle_id: resolvedVehicleId === "" ? null : Number(resolvedVehicleId),
     required_date: requiredDate || null,
     remarks: remarks || null,
     items: lines
@@ -274,12 +282,23 @@ export function IndentFormPage() {
    *  An existing indent shows what it was raised against; a new one shows the office
    *  the raiser's position carries. The master list is the last resort — the position
    *  snapshot can name an office the offices endpoint does not return. */
-  const deliveryOfficeName = hasExistingIndent
+  const rawDeliveryOfficeName = hasExistingIndent
     ? (draft?.office_name ?? "—")
     : (me?.active_position?.office_name
       ?? me?.employee.office_name
       ?? offices.find((office) => office.id === deliveryOfficeId)?.name
       ?? "No office assigned to your position");
+  const delivery = splitDeliveryOffice(rawDeliveryOfficeName, draft?.vehicle_number);
+  const inferredVehicle = delivery.vehicleNumber
+    ? vehicles.find((vehicle) =>
+        comparableVehicleNumber(vehicle.name || vehicle.code)
+          === comparableVehicleNumber(delivery.vehicleNumber))
+    : undefined;
+  const resolvedVehicleId = vehicleId === "" ? (inferredVehicle?.id ?? "") : vehicleId;
+  const vehicleNumber = draft?.vehicle_number
+    ?? vehicles.find((vehicle) => vehicle.id === resolvedVehicleId)?.name
+    ?? delivery.vehicleNumber
+    ?? "No vehicle assigned to your delivery location";
 
   if (isEditing && isDraftLoading) return <Skeleton className="h-40 rounded-2xl" />;
 
@@ -342,7 +361,8 @@ export function IndentFormPage() {
                 const duplicateErrorId = `indent-item-${i}-duplicate-error`;
                 const missingQtyErrorId = `indent-item-${i}-qty-error`;
                 const showMissingQtyError = hasAttemptedSubmit && missingQtyRows.has(i);
-                const uom = selectedItem?.uom_code?.trim() || (selectedItem ? UOM_UNAVAILABLE : "");
+                const uom = displayUom(selectedItem?.uom_code)
+                  || (selectedItem ? UOM_UNAVAILABLE : "");
                 const quantityLabel = selectedItem
                   ? `Quantity (${uom})`
                   : "Quantity";
@@ -480,7 +500,10 @@ export function IndentFormPage() {
                 meant an indent could be delivered to an office they do not work at.
                 The id is still submitted; only the choosing is gone. */}
             <Field label="Delivery location">
-              <Input value={deliveryOfficeName} disabled />
+              <Input value={delivery.officeName} disabled />
+            </Field>
+            <Field label="Vehicle">
+              <Input value={vehicleNumber} disabled />
             </Field>
             <Field label="Remarks">
               <Input value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Optional" />
@@ -507,6 +530,7 @@ export function IndentFormPage() {
             !hasSelectedItems
             || hasDuplicateError
             || save.isPending
+            || (Boolean(delivery.vehicleNumber) && isVehiclesLoading)
           }
           onClick={() => {
             setError(null);

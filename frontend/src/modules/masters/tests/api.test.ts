@@ -8,13 +8,13 @@ const CRUD_MASTERS = [
   "brandManufacturers", "itemClasses", "itemSubClasses",
   "packaging", "features", "attributes",
   "specs", "categoryTags", "itemGroups", "itemComponents", "itemPackaging",
-  "boms", "bomItems", "vendorItems",
+  "boms", "bomItems", "bomGroups", "vendorItems",
 ] as const;
 
 describe("masters api", () => {
   it("covers every master the Masters screen shows a tab for", () => {
     expect(Object.keys(mastersApi).sort()).toEqual([
-      "attributes", "bins", "bomItems", "boms",
+      "attributes", "bins", "bomGroups", "bomItems", "boms",
       "brandManufacturers", "brands", "categories", "categoryTags", "departments",
       "dosageForms", "facilities", "features", "generalNames", "hsnCodes",
       "itemClasses", "itemComponents", "itemGroups", "itemPackaging",
@@ -93,5 +93,11 @@ describe("masters api", () => {
 
   it("resolves an entered HSN code through the item-entry endpoint", () => {
     expect(typeof mastersApi.hsnCodes.resolve).toBe("function");
+  });
+
+  it("BOM groups read their job profiles from RBAC, not from a master", () => {
+    // A job profile is derived from the HCM mirror and has no table, so the picker
+    // is a live lookup — there is nothing here to create or edit.
+    expect(typeof mastersApi.bomGroups.profiles).toBe("function");
   });
 });

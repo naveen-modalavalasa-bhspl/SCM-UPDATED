@@ -329,11 +329,26 @@ router.include_router(mr_router)
 points_router = APIRouter(prefix="/api/stocking-points", tags=["inventory"])
 
 
-@points_router.get("/tags", response_model=list[PositionLocationOut])
+@points_router.get("/tags")
 async def list_position_locations(position_id: int | None = None,
+                                  search: str | None = None,
+                                  tier: int | None = None,
+                                  project_id: int | None = None,
+                                  page: int = 1, size: int = 25,
                                   db: AsyncSession = Depends(get_db),
                                   user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await locations.list_tags(db, position_id)
+    """The tagging, searchable and paged, narrowed to what this login may see.
+
+    Asking for one position still answers that question exactly — the engine and the
+    tag form both do — but the screen's own read goes through the scoped path, so a
+    district login browsing the list never sees another project's tagging.
+    """
+    if position_id is not None:
+        rows = await locations.list_tags(db, position_id)
+        return {"items": rows, "total": len(rows), "page": 1, "size": len(rows),
+                "tier_counts": {}}
+    return await locations.search_tags(db, user, search=search, tier=tier,
+                                       project_id=project_id, page=page, size=size)
 
 
 @points_router.post("/tags", response_model=PositionLocationOut)

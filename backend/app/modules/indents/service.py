@@ -53,6 +53,7 @@ from app.modules.indents.models import Indent, IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.time import to_ist
+from app.shared import uom
 
 
 logger = logging.getLogger(__name__)
@@ -5295,11 +5296,16 @@ async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
         {"indent_item_id": 0, "item_id": item_id, "project_id": None}])
     stock = proposal[0] if proposal else {"available_total": 0, "warehouses": []}
 
+    uom_decimals = await uom.decimals_by_code(db, [item.uom_code if item else None])
+
     return {
         "item_id": item_id,
         "item_code": item.code if item else None,
         "item_name": item.name if item else None,
         "uom_code": item.uom_code if item else None,
+        # The unit's step, so the screen's split proposes 6 gloves rather than 5.7.
+        "uom_decimals": uom_decimals.get(
+            item.uom_code if item else None, uom.MAX_DECIMALS),
         "available_total": float(stock["available_total"]),
         "warehouses": [{**w, "available_qty": float(w["available_qty"])}
                        for w in stock["warehouses"]],
@@ -5331,18 +5337,25 @@ async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
 # reservation still lands on its own indent line through inventory.allocation — so
 # rule 7 is untouched and the single-indent screens keep working unchanged.
 
-def split_demand(lines: list[dict], giving: Decimal) -> dict[int, Decimal]:
+def split_demand(
+    lines: list[dict], giving: Decimal, decimals: int = uom.MAX_DECIMALS,
+) -> dict[int, Decimal]:
     """Divide one item's stock across the indent lines competing for it.
 
     Urgent lines are filled to the brim first — an URGENT indent asking for 4 beats a
     NORMAL one asking for 5. Whatever survives that is shared pro-rata by what each
-    line still needs, oldest indent first when rounding leaves a scrap.
+    line still needs, in whole steps of the unit.
+
+    `decimals` is the unit's step (`app.shared.uom`): 0 for anything counted in whole
+    numbers, 3 for anything measured. Pro-rata used to round every share to 3 dp
+    whatever the unit was, so 20 gloves across two lines asking 10 and 7 proposed 5.7
+    gloves — a quantity no storekeeper can hand over and no bin can hold.
 
     Pure and total: plain dicts in, {indent_item_id: quantity} out. Never hands out
     more than `giving`, never gives a line more than it asked for.
     """
     out: dict[int, Decimal] = {line["indent_item_id"]: Decimal("0") for line in lines}
-    left = max(Decimal("0"), _d(giving))
+    left = max(Decimal("0"), uom.quantize(giving, decimals))
 
     urgent = [ln for ln in lines if ln.get("priority") == Priority.URGENT.value]
     rest = [ln for ln in lines if ln.get("priority") != Priority.URGENT.value]
@@ -5350,27 +5363,24 @@ def split_demand(lines: list[dict], giving: Decimal) -> dict[int, Decimal]:
     for line in urgent:
         if left <= 0:
             break
-        take = min(_d(line["pending_qty"]), left)
+        # Down to the unit's step: an urgent line pending 5.7 of a countable item (data
+        # from before this rule) is filled to 5, not handed a fraction back.
+        take = min(uom.quantize(line["pending_qty"], decimals), left)
         out[line["indent_item_id"]] = take
         left -= take
 
-    wanted = sum((_d(ln["pending_qty"]) for ln in rest), Decimal("0"))
-    if left > 0 and wanted > 0:
-        # Quantised to 3 dp, the scale stk_balance and the indent lines both use, so a
-        # split can always be stored exactly as it was shown.
-        for line in rest:
-            share = (left * _d(line["pending_qty"]) / wanted).quantize(Decimal("0.001"))
-            out[line["indent_item_id"]] = min(share, _d(line["pending_qty"]))
-        handed = sum((out[ln["indent_item_id"]] for ln in rest), Decimal("0"))
-        # Rounding never invents stock, but it can leave a crumb unallocated. It goes to
-        # whoever has waited longest rather than evaporating.
-        crumb = left - handed
-        for line in sorted(rest, key=lambda ln: ln.get("raised_at") or ""):
-            if crumb <= 0:
-                break
-            take = min(_d(line["pending_qty"]) - out[line["indent_item_id"]], crumb)
-            out[line["indent_item_id"]] += take
-            crumb -= take
+    if left > 0 and rest:
+        # Largest remainder in whole steps, capped at what each line still needs —
+        # the same rule the approver's consolidation split uses, so the two screens
+        # never propose different numbers for the same shelf.
+        shares = uom.share_out(
+            left,
+            [_d(ln["pending_qty"]) for ln in rest],
+            [_d(ln["pending_qty"]) for ln in rest],
+            decimals,
+        )
+        for line, share in zip(rest, shares):
+            out[line["indent_item_id"]] = share
     return out
 
 
@@ -5380,7 +5390,8 @@ def preview_split(item_row: dict, giving: float) -> list[dict]:
     Kept beside `split_demand` so the number the allocator is shown and the number the
     allocation is written with come from one function, never two.
     """
-    shares = split_demand(item_row["demand"], _d(giving))
+    shares = split_demand(item_row["demand"], _d(giving),
+                          item_row.get("uom_decimals", uom.MAX_DECIMALS))
     return [{**line, "give_qty": float(shares.get(line["indent_item_id"], 0))}
             for line in item_row["demand"]]
 
@@ -5570,6 +5581,10 @@ async def fulfilment_batch(db: AsyncSession, user,
                 "available_qty": float(quantity),
             })
 
+    # One query for the whole queue: which of these units may be split, and how finely.
+    uom_decimals = await uom.decimals_by_code(
+        db, {row.uom_code for row in items.values()})
+
     rows = []
     for item_id, lines in by_item.items():
         item = items.get(item_id)
@@ -5580,6 +5595,8 @@ async def fulfilment_batch(db: AsyncSession, user,
             "item_code": item.code if item else None,
             "item_name": item.name if item else None,
             "uom_code": item.uom_code if item else None,
+            "uom_decimals": uom_decimals.get(
+                item.uom_code if item else None, uom.MAX_DECIMALS),
             "indent_count": len({line["indent_id"] for line in lines}),
             "urgent_count": sum(1 for line in lines
                                 if line["priority"] == Priority.URGENT.value),

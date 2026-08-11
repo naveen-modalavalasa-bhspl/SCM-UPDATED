@@ -22,6 +22,7 @@ import {
 } from "../api";
 import { cancelIndentDecisionReads, commitConfirmedIndentDecision } from "../approvalRefresh";
 import { INDENT_STATUS, indentTypeLabel } from "../constants";
+import { displayUom, splitDeliveryOffice } from "../displayFormat";
 import type { Indent } from "../types";
 
 const REJECTION_REASON_MAX_LENGTH = 250;
@@ -234,6 +235,7 @@ export function IndentDetailPage() {
   const actionPending = submit.isPending || approve.isPending || reject.isPending
     || deleteDraft.isPending || resubmitCorrection.isPending;
   const trimmedRejectionReason = rejectionReason.trim();
+  const delivery = splitDeliveryOffice(indent.office_name, indent.vehicle_number);
   const returnedBy = returnedByFromJourney(journey);
   const correctionOwner = nonEmptyText(indent.correction_owner?.employee_name)
     ?? (indent.correction_owner?.employee_id ? `Employee #${indent.correction_owner.employee_id}` : null);
@@ -380,7 +382,7 @@ export function IndentDetailPage() {
                       <div className="mono text-xs text-muted">{it.item_code}</div>
                     </TableCell>
                     <TableCell className="text-right tabular font-semibold">{it.quantity}</TableCell>
-                    <TableCell className="text-right text-muted">{it.uom_code}</TableCell>
+                    <TableCell className="text-right text-muted">{displayUom(it.uom_code) || "—"}</TableCell>
                   </TableRow>
                 )}
               </TableBody>
@@ -395,8 +397,8 @@ export function IndentDetailPage() {
               <Detail label="Requested by" value={indent.requested_by_name} />
               <Detail label="Position" value={indent.position_name} />
               <Detail label="Department" value={indent.department_name} />
-              <Detail label="Deliver to" value={indent.office_name} />
-              <Detail label="Vehicle" value={indent.vehicle_number} />
+              <Detail label="Deliver to" value={delivery.officeName} />
+              <Detail label="Vehicle" value={delivery.vehicleNumber} />
               <Detail label="Priority" value={indent.priority} />
               {indent.current_approver_name && (
                 <Detail label="With" value={indent.current_approver_name} />

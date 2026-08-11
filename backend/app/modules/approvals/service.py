@@ -1,5 +1,6 @@
 """Business logic for the approver's operational workspace."""
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal
 
@@ -13,12 +14,14 @@ from app.core.exceptions import (
 from app.modules.indents import service as indent_service
 from app.modules.indents.models import Indent
 from app.modules.indents.enums import ApprovalAction, IndentStatus, IndentType
+from app.platform.settings.models import AuditLog
 from app.platform.settings.service import write_audit
 from app.platform.notifications import service as notification_service
 from app.platform.workflow import engine, service as workflow_service
 from app.platform.workflow.models import Action, Instance, Pending
 from app.shared.enums import AuditAction, DocType, InstanceStatus
 from app.shared.time import now as ist_now, today as ist_today
+from app.shared.uom import MAX_DECIMALS, decimals_by_code
 
 from .schemas import (
     ApprovalIndentLineOut, ApprovalIndentOut, ApprovalQuantityIn,
@@ -408,30 +411,69 @@ async def remind_team_approver(db: AsyncSession, approver_id: int, user) -> dict
     }
 
 
+#: The audit entity `approve_indent` writes its per-line quantities under. Its presence
+#: is the proof that an approval RECORDED numbers, which a row of zeros cannot give on
+#: its own — see `_recorded_quantities`.
+QUANTITY_AUDIT_ENTITY = "ind_indent_items"
+
+
+async def _indents_with_recorded_quantities(
+    db: AsyncSession, indent_ids: Iterable[int],
+) -> set[int]:
+    """Which of these indents have had quantities written by an approver.
+
+    `approve_indent` logs every line's before/after under `ind_indent_items` (nothing
+    else writes that entity), so one row of that audit is the durable record that a
+    rung below actually entered numbers — including a deliberate zero, which the
+    quantities themselves cannot distinguish from "never touched".
+    """
+    ids = {int(i) for i in indent_ids}
+    if not ids:
+        return set()
+    rows = (await db.execute(
+        select(AuditLog.entity_id)
+        .where(AuditLog.entity_type == QUANTITY_AUDIT_ENTITY, AuditLog.entity_id.in_(ids))
+        .distinct()
+    )).scalars().all()
+    return {int(row) for row in rows}
+
+
+def _recorded_quantities(indent: Indent, audited: bool) -> bool:
+    """Did the rung below actually record quantities on this indent.
+
+    An approval only lowers the ceiling if it recorded something. An indent submitted
+    before submit-time seeding existed, and approved through the plain
+    `POST /indents/{id}/approve` (the indent screen's Approve button, or an API
+    client), carries approved_qty 0 on every line — it recorded nothing. Reading that
+    as "the level below approved none of it" collapsed the next approver's ceiling to
+    zero: a number nobody entered, which silently wipes out the whole request.
+
+    A quantity above zero says so by itself. Zeros need the audit trail, because an
+    approver who deliberately cut a line to nothing writes exactly the same row as the
+    legacy path that wrote nothing at all — and getting that backwards is how an indent
+    cut to zero at one rung reappeared at the next asking for its full original
+    quantity again.
+    """
+    if any(Decimal(str(line.approved_quantity or 0)) > 0 for line in indent.items):
+        return True
+    return audited
+
+
 async def _has_previous_approval(db: AsyncSession, instance: Instance, indent: Indent) -> bool:
     """Has a level below this one actually recorded quantities on this indent.
 
     Shared by _load_indent_task (single-indent review) and the Consolidation batch
     builder, so the two screens can never disagree about whether a ceiling reads as
     the request or as what the previous level approved.
-
-    An approval only lowers the ceiling if it actually recorded quantities. An indent
-    submitted before submit-time seeding existed, and approved through the plain
-    `POST /indents/{id}/approve` (the indent screen's Approve button, or an API
-    client), carries approved_qty 0 on every line — it recorded nothing. Reading that
-    as "the level below approved none of it" collapsed the next approver's ceiling to
-    zero: a number nobody entered, which silently wipes out the whole request. All
-    lines at zero means nothing was recorded; one line at zero among others is a real
-    decision and is left alone.
     """
     previous_approval = await db.scalar(select(func.count(Action.id)).where(
         Action.instance_id == instance.id,
         Action.action == ApprovalAction.APPROVED.value,
     ))
-    recorded_quantities = any(
-        Decimal(str(line.approved_quantity or 0)) > 0 for line in indent.items
-    )
-    return bool(previous_approval) and recorded_quantities
+    if not previous_approval:
+        return False
+    audited = await _indents_with_recorded_quantities(db, [indent.id])
+    return _recorded_quantities(indent, indent.id in audited)
 
 
 async def _load_indent_task(
@@ -602,9 +644,9 @@ async def _monthly_pending_indents(
     )).scalars().all()
 
     # One grouped COUNT for the whole queue instead of `_has_previous_approval` per
-    # indent: the same answer, but a consolidation with 200 Monthly indents costs two
-    # queries rather than 201. The Python half of the rule (did any line actually
-    # record a quantity) stays identical to the single-indent screen's.
+    # indent: the same answer, but a consolidation with 200 Monthly indents costs three
+    # queries rather than 401. The Python half of the rule stays identical to the
+    # single-indent screen's — both go through `_recorded_quantities`.
     approved_counts = dict((await db.execute(
         select(Action.instance_id, func.count(Action.id))
         .where(
@@ -613,12 +655,13 @@ async def _monthly_pending_indents(
         )
         .group_by(Action.instance_id)
     )).all())
+    audited = await _indents_with_recorded_quantities(db, [i.id for i in indents])
 
     out = []
     for indent in indents:
         instance = instance_by_doc_id[indent.id]
-        has_previous = bool(approved_counts.get(instance.id)) and any(
-            Decimal(str(line.approved_quantity or 0)) > 0 for line in indent.items
+        has_previous = bool(approved_counts.get(instance.id)) and _recorded_quantities(
+            indent, indent.id in audited,
         )
         out.append((indent, instance, has_previous))
     return out
@@ -771,7 +814,10 @@ def _only(values: set):
     return next(iter(real)) if len(real) == 1 else None
 
 
-def _build_batch(cycle: str, group: list, filters: ConsolidationFilters) -> ConsolidationBatchOut:
+def _build_batch(
+    cycle: str, group: list, filters: ConsolidationFilters,
+    decimals_by_uom: dict[str, int] | None = None,
+) -> ConsolidationBatchOut:
     items_totals: dict[int, dict] = {}
     for indent, _instance, has_previous in group:
         for line in _lines(indent, filters):
@@ -849,6 +895,10 @@ def _build_batch(cycle: str, group: list, filters: ConsolidationFilters) -> Cons
             ConsolidatedItemOut(
                 item_id=v["item_id"], item_code=v["item_code"], item_name=v["item_name"],
                 uom_code=v["uom_code"],
+                # How finely this unit may be split, so the screen's proportional share
+                # cannot offer somebody 5.7 of something counted in whole numbers. An
+                # unknown code keeps the old three decimals.
+                uom_decimals=(decimals_by_uom or {}).get(v["uom_code"], MAX_DECIMALS),
                 total_requested_quantity=float(v["total_requested_quantity"]),
                 total_ceiling_quantity=float(v["total_ceiling_quantity"]),
                 indent_count=v["indent_count"],
@@ -871,16 +921,28 @@ async def consolidation_batches_for_user(
     """
     filters = filters or ConsolidationFilters()
     members = await _monthly_pending_indents(db, user)
-    return _batches_from(members, filters)
+    return _batches_from(members, filters, await _member_uom_decimals(db, members))
 
 
-def _batches_from(members: list, filters: ConsolidationFilters) -> list[ConsolidationBatchOut]:
+async def _member_uom_decimals(db: AsyncSession, members: list) -> dict[str, int]:
+    """{uom_code: decimals} for every unit in this queue, in one query."""
+    return await decimals_by_code(db, {
+        line.uom_code for indent, _instance, _has_previous in members
+        for line in indent.items
+    })
+
+
+def _batches_from(
+    members: list, filters: ConsolidationFilters,
+    decimals_by_uom: dict[str, int] | None = None,
+) -> list[ConsolidationBatchOut]:
     groups: dict[str, list] = defaultdict(list)
     for indent, instance, has_previous in members:
         if _matches(indent, filters):
             groups[_cycle_key(indent)].append((indent, instance, has_previous))
 
-    batches = [_build_batch(cycle, group, filters) for cycle, group in groups.items()]
+    batches = [_build_batch(cycle, group, filters, decimals_by_uom)
+               for cycle, group in groups.items()]
     batches.sort(key=lambda b: b.cycle, reverse=True)
     return batches
 
@@ -896,7 +958,7 @@ async def consolidation_workspace(
     """
     filters = filters or ConsolidationFilters()
     members = await _monthly_pending_indents(db, user)
-    batches = _batches_from(members, filters)
+    batches = _batches_from(members, filters, await _member_uom_decimals(db, members))
     return ConsolidationOut(
         items=batches,
         filter_options=_filter_options(members),

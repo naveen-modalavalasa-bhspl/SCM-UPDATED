@@ -1,7 +1,8 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  MasterAttribute, MasterBin, MasterBom, MasterBomItem, MasterBrand,
+  JobProfileOption,
+  MasterAttribute, MasterBin, MasterBom, MasterBomGroup, MasterBomItem, MasterBrand,
   MasterCategory, MasterCategoryTag, MasterFeature, MasterItem,
   MasterHsnCode, MasterItemClass, MasterItemComponent, MasterItemGroup,
   MasterItemPackaging, MasterItemSpec, MasterPackaging, MasterSpec,
@@ -115,6 +116,13 @@ export const mastersApi = {
   },
   boms: crud<MasterBom>("/api/boms"),
   bomItems: crud<MasterBomItem>("/api/bom-items"),
+  bomGroups: {
+    ...crud<MasterBomGroup>("/api/bom-groups"),
+    /** The job profiles a BOM can be given to. Derived from the HCM mirror by RBAC
+     *  (there is no job-profile table), and served under the BOM permission so a
+     *  master-data maintainer can fill the dropdown without holding RBAC's keys. */
+    profiles: () => all<JobProfileOption>("/api/bom-groups/job-profiles"),
+  },
 
   // Specs hang off an item rather than having their own id, so they are read and
   // saved per item and there is nothing to create or deactivate.

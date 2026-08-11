@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Building2, MapPin, Star, Trash2 } from "lucide-react";
 import {
@@ -52,9 +52,32 @@ export function StockingPointsPage() {
   });
   const hits = positionHits.data ?? [];
 
+  // Typed filters. Held apart from what is SENT (`applied` below) so a keystroke
+  // does not fire a request per letter across a 2,000-row tagging.
+  const [search, setSearch] = useState("");
+  const [tierFilter, setTierFilter] = useState("");
+  const [projectFilter, setProjectFilter] = useState("");
+  const [page, setPage] = useState(1);
+  const [applied, setApplied] = useState("");
+  const SIZE = 25;
+
+  useEffect(() => {
+    const timer = setTimeout(() => { setApplied(search.trim()); setPage(1); }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   const tags = useQuery({
-    queryKey: ["inventory", "stocking-points", "tags"],
-    queryFn: () => listStockingPointTags(),
+    queryKey: ["inventory", "stocking-points", "tags",
+               applied, tierFilter, projectFilter, page],
+    queryFn: () => listStockingPointTags({
+      search: applied || undefined,
+      tier: tierFilter ? (Number(tierFilter) as PositionLocationTag["tier"]) : undefined,
+      project_id: projectFilter ? Number(projectFilter) : undefined,
+      page, size: SIZE,
+    }),
+    // Keeps the rows on screen while the next page loads, so filtering does not
+    // flash an empty table between every keystroke.
+    placeholderData: (previous) => previous,
   });
   const warehouses = useQuery({
     queryKey: ["inventory", "warehouses"],
@@ -82,12 +105,26 @@ export function StockingPointsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["inventory", "stocking-points"] }),
   });
 
-  const rows = tags.data ?? [];
-  const byTier = useMemo(() => ({
-    warehouses: rows.filter((r) => r.tier === 1).length,
-    mdps: rows.filter((r) => r.tier === 2).length,
-    lips: rows.filter((r) => r.tier === 3).length,
-  }), [rows]);
+  const rows = tags.data?.items ?? [];
+  const total = tags.data?.total ?? 0;
+  const pages = Math.max(1, Math.ceil(total / SIZE));
+  // Counted by the server over the whole filtered, scoped set. Counting the rows in
+  // hand was the bug behind "Warehouses 0": the cards described one page, and no page
+  // holds a warehouse tag when 2,001 MDP and LIP tags sort ahead of it.
+  const byTier = useMemo(() => {
+    const counts = tags.data?.tier_counts ?? {};
+    return { warehouses: counts["1"] ?? 0, mdps: counts["2"] ?? 0, lips: counts["3"] ?? 0 };
+  }, [tags.data]);
+
+  // Projects come from the rows themselves — the tagging is where a project is
+  // captured, so there is no separate list to keep in step.
+  const projectOptions = useMemo(() => {
+    const seen = new Map<number, string>();
+    for (const row of rows) {
+      if (row.project_id) seen.set(row.project_id, row.project_name ?? String(row.project_id));
+    }
+    return [...seen].map(([value, label]) => ({ value: String(value), label }));
+  }, [rows]);
 
   const columns: Column<PositionLocationTag>[] = [
     {
@@ -140,11 +177,21 @@ export function StockingPointsPage() {
       a bin change.
     </p>
 
-    <div className="mb-4 grid grid-cols-3 gap-3">
+    <div className="mb-2 grid grid-cols-3 gap-3">
       <StatCard label="Warehouses" value={byTier.warehouses} icon={<Building2 className="h-4 w-4" />} />
       <StatCard label="MDPs" value={byTier.mdps} icon={<MapPin className="h-4 w-4" />} />
       <StatCard label="LIPs" value={byTier.lips} icon={<MapPin className="h-4 w-4" />} />
     </div>
+    {/* A zero here is a real state, not a loading one, and it is worth naming: the
+        screen lists TAGGINGS, so a warehouse nobody is tagged to is not on it. Said
+        plainly, because the alternative is reading the card as a missing warehouse. */}
+    {!tags.isLoading && byTier.warehouses === 0 && (
+      <p className="mb-4 rounded-xl bg-content2 px-4 py-3 text-sm text-body">
+        No position is tagged to a top-tier warehouse yet, so none appears below —
+        this screen lists taggings, not warehouses. Tag someone to the central
+        warehouse above and it will show up here and in their stock screens.
+      </p>
+    )}
 
     <Card className="mb-4 p-4">
       <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Tag a position</p>
@@ -255,12 +302,65 @@ export function StockingPointsPage() {
       </p>
     </Card>
 
+    {/* Find a tagging. Everything here narrows on the server, on top of the scope
+        this login already has — a filter can only ever show LESS than the rung does,
+        never more, so clearing one cannot reveal another project's tagging. */}
+    <Card className="mb-4 p-4">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+        <label className="block lg:col-span-2">
+          <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Search</span>
+          <input
+            className={field}
+            aria-label="Search stocking point tags"
+            placeholder="Position, point name, code or project…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </label>
+        <Select
+          label="Tier"
+          placeholder="Any tier"
+          value={tierFilter}
+          onChange={(next) => { setTierFilter(next); setPage(1); }}
+          options={[
+            { value: "1", label: "Warehouse" },
+            { value: "2", label: "MDP" },
+            { value: "3", label: "LIP" },
+          ]}
+        />
+        <Select
+          label="Project"
+          placeholder="Any project"
+          value={projectFilter}
+          onChange={(next) => { setProjectFilter(next); setPage(1); }}
+          options={projectOptions}
+        />
+      </div>
+      {(applied || tierFilter || projectFilter) && (
+        <div className="mt-3 flex items-center gap-3">
+          <span className="text-xs text-muted">
+            {total} {total === 1 ? "tag" : "tags"} match
+          </span>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setSearch(""); setTierFilter(""); setProjectFilter(""); setPage(1);
+            }}
+          >
+            Clear
+          </Button>
+        </div>
+      )}
+    </Card>
+
     <ResponsiveList
       data={rows}
       columns={columns}
       keyOf={(row) => row.id}
       loading={tags.isLoading}
-      empty="No positions are tagged to a stocking point yet."
+      empty={applied || tierFilter || projectFilter
+        ? "No tagging matches those filters."
+        : "No positions are tagged to a stocking point yet."}
       renderCard={(row) => <div className="space-y-2">
         <div className="flex items-center justify-between gap-3">
           <strong className="text-ink">{row.position_name ?? `Position ${row.position_id}`}</strong>
@@ -273,6 +373,30 @@ export function StockingPointsPage() {
         </Button>
       </div>}
     />
+
+    {pages > 1 && (
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <span className="text-sm text-muted">
+          Page {page} of {pages} · {total} tags
+        </span>
+        <div className="flex gap-2">
+          <Button
+            variant="ghost"
+            disabled={page <= 1 || tags.isFetching}
+            onClick={() => setPage((n) => Math.max(1, n - 1))}
+          >
+            Previous
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={page >= pages || tags.isFetching}
+            onClick={() => setPage((n) => Math.min(pages, n + 1))}
+          >
+            Next
+          </Button>
+        </div>
+      </div>
+    )}
   </>;
 }
 

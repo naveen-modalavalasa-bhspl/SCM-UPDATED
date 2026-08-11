@@ -469,6 +469,51 @@ async def list_profiles(db: AsyncSession) -> dict:
     }
 
 
+async def profile_options(db: AsyncSession, user=None) -> list[dict]:
+    """Every job profile this caller may point AT, named — the lookup a screen needs.
+
+    `list_profiles` above answers the RBAC editor's question (which pages, which
+    actions, which scope) and reads the whole permission matrix to do it. A screen
+    that only has to name the job — Masters > BOM Groups — should not pay for that.
+
+    Defaults ("*") are left out on purpose: they are the fallback grant for jobs
+    nobody has configured, not a job anyone holds, so they are not something a kit can
+    be handed to.
+
+    Passing `user` narrows the list to that login's own scope rung, and every caller
+    that serves a request MUST pass it. Naming a profile is a read of the org chart:
+    without the narrowing a district login browses every project's jobs, and — worse —
+    could hand a kit to a profile in a project it has no business touching, since this
+    same list is what `apply_bom_group` validates writes against.
+    """
+    from app.shared.scope import rung_for
+
+    derived = await _derive(db)
+    saved = await _profile_roles(db)
+    options = [
+        {
+            "key": key,
+            "job": bucket["job"],
+            "name": (saved[key].name if key in saved
+                     else default_profile_name(key, bucket)),
+            "project_id": bucket["project_id"],
+            "project_name": bucket["project_name"],
+            "position_count": len(bucket["position_ids"]),
+            "holder_count": bucket["holders"],
+            "configured": key in saved,
+        }
+        for key, bucket in derived.items() if not is_default_key(key)
+    ]
+    if user is not None and await rung_for(db, user) is not ScopeRung.ALL:
+        # Mirrors shared.scope.project_condition, in Python because these rows are
+        # derived from the HCM mirror rather than selected from a table.
+        project_id = getattr(user, "project_id", None)
+        options = [o for o in options
+                   if o["project_id"] is None or o["project_id"] == project_id]
+    options.sort(key=lambda p: (p["project_name"] or "", p["name"] or ""))
+    return options
+
+
 # --------------------------------------------------------------------------- #
 #  Write
 # --------------------------------------------------------------------------- #

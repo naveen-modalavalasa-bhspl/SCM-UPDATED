@@ -1,12 +1,83 @@
 import { mastersApi } from "../api";
 import { MasterCrud } from "../components/MasterCrud";
-import type { Option } from "../components/MasterCrud";
-import type { MasterBom, MasterBomItem, MasterItemGroup } from "../types";
+import type { FormField, Option } from "../components/MasterCrud";
+import type {
+  MasterBom, MasterBomGroup, MasterBomItem, MasterItemGroup,
+} from "../types";
 import { Button, Can, Card, Field, Input, Select } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Active, Code } from "./common";
+
+/** A row with a validity window, as both BOM tabs carry it. */
+interface Dated {
+  effective_from?: string | null;
+  effective_to?: string | null;
+  is_effective?: boolean;
+  is_active: boolean;
+}
+
+const day = (iso?: string | null) =>
+  iso ? new Date(iso + "T00:00:00").toLocaleDateString(undefined, {
+    day: "2-digit", month: "short", year: "numeric",
+  }) : null;
+
+/** The window in words. Blank ends are the common case, so the column says "Always"
+ *  rather than leaving a dash the reader has to interpret. */
+function Validity({ row }: { row: Dated }) {
+  const from = day(row.effective_from);
+  const to = day(row.effective_to);
+  if (!from && !to) return <span className="text-muted">Always</span>;
+  const text = from && to ? `${from} → ${to}` : from ? `From ${from}` : `Until ${to}`;
+  // Off only because of its dates, not because someone switched it off: worth
+  // saying, or a row reading "Active" while nothing can draw it looks like a bug.
+  const dormant = row.is_active && row.is_effective === false;
+  return (
+    <span className={dormant ? "text-bad" : "text-body"}>
+      {text}{dormant ? " · not in effect" : ""}
+    </span>
+  );
+}
+
+/** Both BOM tabs offer the same optional window, so it is written once. The two ends
+ *  share one row: they are one setting, and reading them apart invites a window that
+ *  ends before it starts.
+ *
+ *  Each end also bounds the other's calendar, so the picker cannot offer a day the
+ *  pair forbids. The checks below still run — a date can be typed, not only picked,
+ *  and the same rule is enforced again in `defs.check_validity_window`. */
+const VALIDITY_FIELDS: FormField[] = [
+  { key: "effective_from", label: "Active from", type: "date", half: true,
+    hint: "Optional — leave both blank and it stays active all the time.",
+    range: (all) => ({ max: (all.effective_to as string) || undefined }),
+    validate: (value, all) =>
+      value && all.effective_to && String(value) > String(all.effective_to)
+        ? "Active from cannot be after Active to"
+        : null },
+  { key: "effective_to", label: "Active to", type: "date", half: true,
+    range: (all) => ({ min: (all.effective_from as string) || undefined }),
+    validate: (value, all) =>
+      value && all.effective_from && String(value) < String(all.effective_from)
+        ? "Active to cannot be before Active from"
+        : null },
+];
+
+/** The window's two keys, blank in a new form and read back as blanks so a cleared
+ *  date round-trips as "no bound" rather than as the string "null". */
+const VALIDITY_EMPTY = { effective_from: "", effective_to: "" };
+const validityForm = (r: Dated) => ({
+  effective_from: r.effective_from ?? "", effective_to: r.effective_to ?? "",
+});
+
+/** The window as the API takes it. BOM groups build their body by hand — one form
+ *  submit becomes one row per ticked BOM — so the two keys are picked out here
+ *  instead of riding along with the rest of the form. */
+const windowPayload = (v: Record<string, unknown>) => ({
+  effective_from: (v.effective_from as string) || null,
+  effective_to: (v.effective_to as string) || null,
+});
 
 /** Which items a user group may request. A group is defined by role or position in
  *  the RBAC module; this only decides its catalogue. */
@@ -94,6 +165,8 @@ export function BomsTab({ projects }: { projects: Option[] }) {
           { key: "project", header: "Project", hideOnNarrow: true,
             render: (r) => r.project_name ?? "Any project" },
           { key: "lines", header: "Items", hideOnNarrow: true, render: (r) => r.total_items },
+          { key: "validity", header: "Valid", hideOnNarrow: true,
+            render: (r) => <Validity row={r} /> },
           { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
         ]}
         renderCard={(r) => (
@@ -105,6 +178,7 @@ export function BomsTab({ projects }: { projects: Option[] }) {
             <div className="text-xs text-muted">
               {r.project_name ?? "Any project"}
             </div>
+            <div className="text-xs"><Validity row={r} /></div>
           </div>
         )}
         fetchList={(search) => mastersApi.boms.list({ search, size: 200 }).then((p) => p.items)}
@@ -115,13 +189,15 @@ export function BomsTab({ projects }: { projects: Option[] }) {
           { key: "name", label: "Name", required: true, maxLength: 200 },
           { key: "project_id", label: "Project", type: "select", options: projects },
           { key: "description", label: "Description", maxLength: 500 },
-          { key: "is_active", label: "Active", type: "switch" },
+          ...VALIDITY_FIELDS,
+          { key: "is_active", label: "Active", type: "switch",
+            hint: "Switch this off to retire the BOM. Dates above pause it instead." },
         ]}
         emptyForm={{ code: "", name: "", project_id: null, description: "",
-                     is_active: true }}
+                     ...VALIDITY_EMPTY, is_active: true }}
         toForm={(r) => ({ code: r.code, name: r.name,
           project_id: r.project_id ?? null, description: r.description ?? "",
-          is_active: r.is_active })}
+          ...validityForm(r), is_active: r.is_active })}
         onCreate={async (v) => {
           const saved = await mastersApi.boms.create(v as Partial<MasterBom>);
           qc.invalidateQueries({ queryKey: ["masters", "boms-all"] });
@@ -139,8 +215,128 @@ export function BomsTab({ projects }: { projects: Option[] }) {
   );
 }
 
-/** The lines of one chosen BOM. Kept beside the header list rather than behind a
- *  row click, because building a kit means adding a dozen lines in a row. */
+/** Who gets which kit. The BOM tab above says WHAT is in a kit; this says which job
+ *  may draw it — so the two sit next to each other and share one permission.
+ *
+ *  The rung is the RBAC job profile, not an HCM role and not a position: a role is
+ *  too coarse (one role covers fifteen unrelated jobs) and a position is one post in
+ *  one village. Profiles are derived from the HCM mirror, so the dropdown is a live
+ *  read rather than a list anyone maintains here. */
+export function BomGroupsTab() {
+  const { can } = useAuth();
+  // The profile lookup is gated on the BOM permission, so asking for it without one
+  // would 403 — and someone who is only reading the list has nothing to pick anyway.
+  const mayManage = can("master.bom.manage");
+  const boms = useQuery({
+    queryKey: ["masters", "boms-all"],
+    queryFn: () => mastersApi.boms.list({ size: 300 }).then((p) => p.items),
+    enabled: mayManage,
+  });
+  const profiles = useQuery({
+    queryKey: ["masters", "job-profiles"], queryFn: mastersApi.bomGroups.profiles,
+    enabled: mayManage,
+  });
+
+  // Deactivated BOMs stay in the list, labelled: hiding them would blank the picker
+  // on an existing row whose kit was since retired.
+  const bomOpts: Option[] = (boms.data ?? []).map((b) => ({
+    value: b.id,
+    label: `${b.code} — ${b.name}${b.is_active ? "" : " (inactive)"}`,
+  }));
+  const profileOpts: Option[] = (profiles.data ?? []).map((p) => ({
+    value: p.key,
+    label: `${p.name} · ${p.project_name}`
+      + (p.holder_count ? ` · ${p.holder_count} people` : ""),
+  }));
+
+  return (
+    <>
+      <div className="mb-3 rounded-xl bg-content2 px-4 py-3 text-sm text-muted">
+        A BOM group hands a <strong className="text-body">kit to a job</strong> — the
+        Store Keepers of one project get the store kit, the Drivers get the vehicle
+        kit. The jobs come from{" "}
+        <strong className="text-body">RBAC job profiles</strong>, so they follow the
+        org: nothing is typed here and nothing to keep in step by hand.
+      </div>
+      {profiles.isError && (
+        <div className="mb-3 rounded-xl bg-bad-bg px-4 py-3 text-sm text-bad">
+          Could not load job profiles: {(profiles.error as Error).message}
+        </div>
+      )}
+      <MasterCrud<MasterBomGroup>
+        title="BOM group" queryKey="bom-groups" searchable
+        managePerm="master.bom.manage" bulk={mastersApi.bomGroups}
+        columns={[
+          { key: "profile", header: "Job profile",
+            render: (r) => r.profile_name ?? r.profile_key },
+          { key: "project", header: "Project", hideOnNarrow: true,
+            render: (r) => r.project_name ?? "Unassigned" },
+          { key: "bom", header: "BOM", render: (r) => r.bom_name ?? "—" },
+          { key: "code", header: "Code", hideOnNarrow: true,
+            render: (r) => <Code>{r.bom_code}</Code> },
+          { key: "validity", header: "Valid", hideOnNarrow: true,
+            render: (r) => <Validity row={r} /> },
+          { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
+        ]}
+        renderCard={(r) => (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-semibold text-ink">{r.profile_name}</span>
+              <Active on={r.is_active} />
+            </div>
+            <div className="text-sm text-body">{r.bom_name}</div>
+            <div className="text-xs text-muted">
+              <Code>{r.bom_code}</Code> · {r.project_name ?? "Unassigned"}
+            </div>
+            <div className="text-xs"><Validity row={r} /></div>
+          </div>
+        )}
+        fetchList={(search) =>
+          mastersApi.bomGroups.list({ search, size: 300 }).then((p) => p.items)}
+        fields={[
+          { key: "profile_key", label: "Job profile", type: "select",
+            options: profileOpts, required: true,
+            placeholder: "Type a job or a project…",
+            hint: "Everyone holding this job, in this project." },
+          { key: "bom_ids", label: "BOMs", type: "multiselect", options: bomOpts,
+            required: true,
+            hint: "Tick every kit this job may draw — each becomes its own row." },
+          { key: "remarks", label: "Remarks", maxLength: 500 },
+          ...VALIDITY_FIELDS,
+          { key: "is_active", label: "Active", type: "switch",
+            hint: "Switch this off to retire the pairing. Dates above pause it instead." },
+        ]}
+        emptyForm={{ profile_key: "", bom_ids: [], remarks: "",
+                     ...VALIDITY_EMPTY, is_active: true }}
+        // One row is one pairing, so editing one shows its single BOM ticked. The
+        // multiselect is there for the create, where handing a job six kits in one
+        // pass beats opening the modal six times.
+        toForm={(r) => ({ profile_key: r.profile_key, bom_ids: [r.bom_id],
+          remarks: r.remarks ?? "", ...validityForm(r), is_active: r.is_active })}
+        onCreate={async (v) => {
+          const bomIds = Array.isArray(v.bom_ids) ? v.bom_ids : [];
+          for (const bomId of bomIds) {
+            await mastersApi.bomGroups.create({
+              bom_id: Number(bomId), profile_key: String(v.profile_key),
+              remarks: (v.remarks as string) || null,
+              ...windowPayload(v),
+              is_active: Boolean(v.is_active),
+            });
+          }
+        }}
+        onUpdate={(id, v) =>
+          mastersApi.bomGroups.update(id, {
+            bom_id: Number(Array.isArray(v.bom_ids) ? v.bom_ids[0] : v.bom_ids),
+            profile_key: String(v.profile_key),
+            remarks: (v.remarks as string) || null,
+            ...windowPayload(v),
+            is_active: Boolean(v.is_active),
+          })}
+        onDeactivate={mastersApi.bomGroups.deactivate}
+      />
+    </>
+  );
+}
 
 /** The lines of one chosen BOM. Kept beside the header list rather than behind a
  *  row click, because building a kit means adding a dozen lines in a row. */

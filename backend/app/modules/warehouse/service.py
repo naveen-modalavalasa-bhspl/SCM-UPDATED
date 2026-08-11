@@ -23,7 +23,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import String, and_, false, func, or_, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from app.core.exceptions import AppException, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
@@ -361,7 +361,10 @@ async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
         if parent.warehouse_id != data.warehouse_id:
             raise ValidationError("A bin cannot sit under a parent in another warehouse")
 
-    row = Bin(**data.model_dump())
+    # `name` is NOT NULL in the table but optional on the form — a location that is only
+    # ever referred to by its code needs no second label. Fall back to the code rather
+    # than sending an explicit NULL, which the database rejects with 1048.
+    row = Bin(**{**data.model_dump(), "name": data.name or data.code})
     db.add(row)
     await db.flush()
     await write_audit(db, entity="whs_warehouse_locations", entity_id=row.id,
@@ -381,6 +384,7 @@ async def update_bin(db: AsyncSession, bin_id: int, data: s.BinWrite, user) -> B
 
     for field, value in data.model_dump().items():
         setattr(row, field, value)
+    row.name = data.name or data.code          # NOT NULL — see create_bin.
     if data.parent_id:
         # Validates the parent exists; depth is derived when the tree is built.
         parent = await _get(db, Bin, data.parent_id, "Parent bin")
@@ -579,6 +583,15 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
     seen_serials_by_item: dict[int, set[str]] = {}
     seen_imeis_by_item: dict[int, set[str]] = {}
 
+    # A consignment inward re-receives units that ALREADY EXIST: the very serials a
+    # warehouse or MDP issued are the ones arriving here, so "this serial is already
+    # recorded" is the normal case, not a duplicate. Only a purchase brings units the
+    # network has never seen. Read off the transfer reference as well as the type,
+    # because a gate entry still stores `receipt_type` as GATE_ENTRY while the
+    # storekeeper is filling in the GRN behind it.
+    inbound_transfer = (receipt.transfer_id is not None
+                        or receipt.receipt_type == ReceiptType.DISPATCH.value)
+
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
         received = _d(line.received_qty)
@@ -615,14 +628,23 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
                 raise ValidationError(
                     f"Line {index}: serial {duplicate_in_receipt} is already used for {item.code} in this GRN"
                 )
-            existing_serial = await db.scalar(select(m.SerialNumber.serial_number).where(
+            existing_row = (await db.execute(select(m.SerialNumber).where(
                 m.SerialNumber.item_id == item.id,
                 func.lower(m.SerialNumber.serial_number).in_(normalized_serials),
                 m.SerialNumber.is_active.is_(True),
-            ))
-            if existing_serial:
+                # On a consignment inward the unit already exists — it is the one the
+                # sending point issued. Two states are legitimate: still in flight
+                # (not AVAILABLE), or already re-homed here by an earlier save of
+                # this same GRN. What is NOT legitimate is a unit sitting AVAILABLE
+                # at some OTHER point, because then two units claim one serial.
+                *([m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+                   m.SerialNumber.warehouse_id != receipt.warehouse_id]
+                  if inbound_transfer else []),
+            ))).scalars().first()
+            if existing_row is not None:
                 raise ValidationError(
-                    f"Line {index}: serial {existing_serial} is already recorded for {item.code}"
+                    f"Line {index}: serial {existing_row.serial_number} is already "
+                    f"recorded for {item.code}"
                 )
             seen_for_item.update(normalized_serials)
 
@@ -1469,9 +1491,20 @@ async def _register_serials(
             m.SerialNumber.is_active.is_(True)))
         if clash:
             if clash.warehouse_id != receipt.warehouse_id:
-                raise ValidationError(
-                    f"Serial {serial} is already recorded against this item "
-                    f"(warehouse {clash.warehouse_id}).")
+                # A unit that is still AVAILABLE elsewhere was never sent here, so
+                # two units are claiming one serial and that stays an error. One the
+                # sending point already ISSUED is in transit, and this receipt is
+                # where it lands — so it is re-homed rather than refused. Without
+                # this, every consignment a warehouse dispatched to an MDP or LIP was
+                # rejected on arrival by the serials that prove it is the right load.
+                if clash.status == SerialStatus.AVAILABLE.value:
+                    raise ValidationError(
+                        f"Serial {serial} is already recorded against this item "
+                        f"(warehouse {clash.warehouse_id}).")
+                clash.warehouse_id = receipt.warehouse_id
+                clash.batch_id = line.batch_id or clash.batch_id
+            clash.bin_id = bin_id if bin_id is not None else clash.bin_id
+            clash.status = status
             rows.append(clash)
             continue
         row = m.SerialNumber(
@@ -3731,7 +3764,60 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
     # Approve button from the very person it is waiting on.
     issue = await _decorate_can_approve(
         db, issue, await _issue_doc_type_of(db, issue.id), user)
+    setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     return await _decorate_issue_destination(db, issue)
+
+
+async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
+    """Has the indent raiser said this issue's goods reached them?
+
+    Acknowledging is the shipping side signing that a delivery landed, and it used to
+    open the moment stock was posted — so the store that sent the goods could close the
+    loop on itself, with the requester never asked. Only the raiser can say they
+    arrived (`indents.acknowledge_receipt` writes `received_qty` and nothing else does).
+
+    Measured per ISSUE, not per indent. A 10-unit indent served by a 4-unit issue is
+    settled for THAT issue once those 4 are confirmed; the other 6 stay pending against
+    whatever issue carries them later. So the test is a running total: everything
+    delivered on this line up to and including this issue must be covered by what the
+    raiser has confirmed on it.
+
+    Lines with no `indent_item_id` are stock leaving against no request — nobody is
+    waiting to confirm them, so they never hold the document up.
+    """
+    lines = [line for line in issue.items if line.indent_item_id]
+    if not lines:
+        return True
+
+    from app.modules.indents.models import IndentItem
+
+    confirmed = dict((await db.execute(
+        select(IndentItem.id, IndentItem.received_quantity)
+        .where(IndentItem.id.in_([line.indent_item_id for line in lines]))
+    )).all())
+
+    # Everything the same line already had on the road before this document. Relay legs
+    # are excluded exactly as My Deliveries excludes them (_relayed_onward): the raiser
+    # never sees the WH -> MDP hop, so counting it would demand a confirmation nobody
+    # can give.
+    delivered = dict((await db.execute(
+        select(m.MaterialIssueLine.indent_item_id,
+               func.sum(m.MaterialIssueLine.issued_qty
+                        - func.coalesce(m.MaterialIssueLine.returned_qty, 0)))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .where(m.MaterialIssueLine.indent_item_id.in_(
+                   [line.indent_item_id for line in lines]),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.MaterialIssue.id <= issue.id,
+               ~_relayed_onward())
+        .group_by(m.MaterialIssueLine.indent_item_id)
+    )).all())
+
+    return all(
+        _d(confirmed.get(line.indent_item_id)) >= _d(delivered.get(line.indent_item_id))
+        for line in lines
+    )
 
 
 async def _decorate_issue_destination(
@@ -3759,6 +3845,48 @@ async def _issue_destination(
         employee.office_id if employee else None,
         employee.office_name if employee else None,
     )
+
+
+async def _destination_warehouse(
+    db: AsyncSession,
+    issue: m.MaterialIssue,
+    origin_warehouse_id: int,
+) -> Warehouse | None:
+    """The stocking point a consignment is addressed to, derived from its issue.
+
+    `to_warehouse_id` is the ONLY thing `incoming_dispatch_options` matches on, and
+    nothing ever derived it — it was hand-typed, on a field the form labels "for
+    transfer only". Half the live consignments went out with it blank, and not one of
+    those could be inwarded: the goods arrived, and the receiving point had no
+    consignment to raise a GRN against. It struck WH -> LIP direct exactly as hard as
+    the MDP relay; the four that worked worked because somebody happened to fill it.
+
+    Where the goods are going is already recorded twice over, so it never had to be
+    asked: the issue names the person it is for, and the indent names the office that
+    raised it. Either resolves to the one active stocking point serving that office.
+
+    An explicit choice always wins — this only fills a blank. Origin and destination
+    being the same point is not a delivery, and `create_dispatch` rejects it, so that
+    case stays blank rather than writing a row its own guard would refuse.
+    """
+    from app.modules.indents.models import Indent
+
+    office_id, _ = await _issue_destination(db, issue)
+    if office_id is None and issue.indent_id:
+        indent = await db.get(Indent, issue.indent_id)
+        office_id = getattr(indent, "office_id", None) if indent else None
+    if office_id is None:
+        return None
+
+    warehouse = (await db.execute(
+        select(Warehouse)
+        .where(Warehouse.office_id == office_id, Warehouse.is_active.is_(True))
+        .order_by(Warehouse.id)
+        .limit(1)
+    )).scalar_one_or_none()
+    if warehouse is None or warehouse.id == origin_warehouse_id:
+        return None
+    return warehouse
 
 
 async def _decorate_dispatch_destination(
@@ -3907,6 +4035,34 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     return issue
 
 
+async def _forwardable_serials(
+    db: AsyncSession, line, warehouse_id: int, qty,
+) -> list[str] | None:
+    """The units named on this GRN line that are still on the shelf at this point.
+
+    Filtered rather than passed straight through, for two reasons that would both
+    turn a handover into a 422. `_reserve_issue_serials` refuses a serial that is not
+    AVAILABLE here, so one unit moved by hand would block the whole forward; and a
+    partly rejected line carries more serials than it forwards, which trips the
+    "N serial numbers for M units" guard. Whatever is dropped here is still editable
+    on the draft — the storekeeper reviews it before submitting.
+    """
+    named = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
+    if not named:
+        return None
+    rows = (await db.execute(
+        select(m.SerialNumber.serial_number).where(
+            m.SerialNumber.item_id == line.item_id,
+            m.SerialNumber.serial_number.in_(named),
+            m.SerialNumber.warehouse_id == warehouse_id,
+            m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+            m.SerialNumber.is_active.is_(True),
+        )
+    )).scalars().all()
+    on_shelf = {value.lower() for value in rows}
+    return [value for value in named if value.lower() in on_shelf][:int(qty)] or None
+
+
 async def forward_arrival(db: AsyncSession, receipt_id: int, user) -> list[m.MaterialIssue]:
     """Pass an arrived consignment on to the points below — the MDP leg of WH -> MDP -> LIP.
 
@@ -3967,13 +4123,25 @@ async def forward_arrival(db: AsyncSession, receipt_id: int, user) -> list[m.Mat
                         IndentItem.item_id == line.item_id,
                     ).limit(1)
                 )
+            accepted = _d(line.accepted_qty)
+            # The consignment landed in a batch, in a bin, as named units. That is the
+            # only record of WHICH goods these are, and dropping it left the onward
+            # issue on NO_BATCH/NO_BIN: the serial picker then fell back to every unit
+            # the point holds — opening stock included — and handed the indent raiser
+            # something that never came off this consignment.
             items.append(s.IssueItemWrite(
                 indent_item_id=indent_item_id,
                 item_id=line.item_id,
                 item_code=line.item_code,
                 item_name=line.item_name,
-                requested_qty=_d(line.accepted_qty),
-                issued_qty=_d(line.accepted_qty),
+                batch_id=line.batch_id or None,
+                bin_id=line.bin_id or None,
+                requested_qty=accepted,
+                issued_qty=accepted,
+                serial_numbers=await _forwardable_serials(
+                    db, line, receipt.warehouse_id, accepted),
+                imei_numbers=[value.strip() for value in (line.imei_numbers or [])
+                              if value.strip()] or None,
             ))
 
         draft = await _build_issue(db, s.IssueWrite(
@@ -4421,6 +4589,68 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
     return await get_issue(db, issue.id)
 
 
+async def _issue_slices(
+    db: AsyncSession, issue: m.MaterialIssue, line: m.MaterialIssueLine, qty,
+) -> list[tuple[int, int, int, object]]:
+    """Where an unreserved issue line's goods actually are:
+    (bin, batch, project, quantity).
+
+    All three dimensions come off the balance row, not off the document. `stk_balance`
+    is keyed on (item, warehouse, bin, batch, project) and `move_stock_out` filters on
+    every one of them, so taking any of them from the issue header re-introduces the
+    same miss this function exists to prevent. A forwarded consignment inwards with no
+    project on the balance row while the issue itself carries the indent's project —
+    that alone was enough to read as "0 available" with the goods on the shelf.
+
+    The line's own bin and batch are honoured whenever they hold enough — a
+    storekeeper who named a batch meant it. They are only resolved when the named
+    location cannot cover the line, which is what a FORWARDED consignment always
+    looks like: the reservation was consumed at the point that dispatched it, so the
+    line arrives carrying that point's bin and batch (in practice none), while the
+    goods sit here under the batch the inward GRN created.
+
+    Earliest expiry first, then oldest row: goods with a shelf life must leave in the
+    order they expire, and this is the one place an unreserved outward issue chooses.
+    A line may span batches, so several slices can come back.
+
+    Returns the line's own location unchanged when nothing is found, so a genuine
+    shortage still fails in `move_stock_out` with its own message rather than being
+    silently swallowed here.
+    """
+    from app.modules.inventory.models import Stock
+
+    fallback = [(line.bin_id, line.batch_id, issue.project_id or 0, qty)]
+    rows = (await db.execute(
+        select(Stock)
+        .where(Stock.warehouse_id == issue.warehouse_id,
+               Stock.item_id == line.item_id,
+               Stock.available_qty > 0)
+        .order_by(Stock.expiry_date.is_(None), Stock.expiry_date, Stock.id)
+    )).scalars().all()
+    if not rows:
+        return fallback
+
+    named = [r for r in rows
+             if r.batch_id == line.batch_id and r.bin_id == line.bin_id
+             and r.project_id == (issue.project_id or 0)]
+    if named and _d(named[0].available_qty) >= qty:
+        return fallback
+
+    slices: list[tuple[int, int, int, object]] = []
+    remaining = qty
+    for row in rows:
+        take = min(remaining, _d(row.available_qty))
+        if take <= ZERO:
+            continue
+        slices.append((row.bin_id, row.batch_id, row.project_id, take))
+        remaining -= take
+        if remaining <= ZERO:
+            break
+    # Short overall: leave it to move_stock_out to say so against the line's own
+    # location, rather than issuing a partial quantity nobody asked for.
+    return slices if remaining <= ZERO else fallback
+
+
 async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Takes the stock off the shelf. The only step here that moves anything."""
     issue = await get_issue(db, issue_id)
@@ -4517,14 +4747,23 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                 continue
 
         if outward:
-            await move_stock_out(
-                db, item_id=line.item_id, qty=qty,
-                ref_type=WarehouseDocType.WH_ISSUE.value,
-                ref_id=issue.id, ref_no=issue.issue_no, user=user,
-                warehouse_id=issue.warehouse_id,
-                bin_id=line.bin_id, batch_id=line.batch_id,
-                project_id=issue.project_id or 0,
-            )
+            # Where this line's goods actually sit, not where the line says they do.
+            # A forwarded consignment has no reservation at THIS point (the hold was
+            # consumed at the warehouse that dispatched it), so it lands here with the
+            # bin and batch it was allocated under upstream — usually none at all.
+            # `stk_balance` is keyed on (item, warehouse, bin, batch, project), so a
+            # line still carrying batch 0 looked up a row that does not exist and the
+            # issue failed for "no stock" while the goods sat one key away.
+            for source_bin, source_batch, source_project, slice_qty in (
+                    await _issue_slices(db, issue, line, qty)):
+                await move_stock_out(
+                    db, item_id=line.item_id, qty=slice_qty,
+                    ref_type=WarehouseDocType.WH_ISSUE.value,
+                    ref_id=issue.id, ref_no=issue.issue_no, user=user,
+                    warehouse_id=issue.warehouse_id,
+                    bin_id=source_bin, batch_id=source_batch,
+                    project_id=source_project,
+                )
         else:
             await move_stock(
                 db, item_id=line.item_id, qty=qty, direction=direction,
@@ -4723,6 +4962,11 @@ async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None
     # goods left the gate, the receiver still has to acknowledge them.
     _guard(issue.status, {IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value},
            "acknowledge", "issue")
+    # Hiding the button is not the control (rule 6) — the raiser's confirmation is.
+    if not await _receiver_confirmed(db, issue):
+        raise ValidationError(
+            f"{issue.issue_no} has not been confirmed by the requester yet. They "
+            "record what reached them in My Deliveries; this signs off on that.")
     before_status = issue.status
     issue.status = IssueStatus.ACKNOWLEDGED.value
     issue.acknowledged_by_name = _name(user)
@@ -5153,6 +5397,8 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
 
     wh = await _warehouse(db, issue.warehouse_id)
     to_wh = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
+    if to_wh is None:
+        to_wh = await _destination_warehouse(db, issue, wh.id)
     if data.dispatch_type == DispatchType.TRANSFER and to_wh is None:
         raise ValidationError("A stock transfer consignment needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
@@ -5225,6 +5471,8 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
         raise ValidationError("A consignment cannot be moved to another material issue")
     wh = await _warehouse(db, issue.warehouse_id)
     to_wh = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
+    if to_wh is None:
+        to_wh = await _destination_warehouse(db, issue, wh.id)
     if data.dispatch_type == DispatchType.TRANSFER and to_wh is None:
         raise ValidationError("A stock transfer consignment needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
@@ -5279,6 +5527,8 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         raise ValidationError("A dispatch with no lines has nothing to send")
 
     to_wh = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
+    if to_wh is None:
+        to_wh = await _destination_warehouse(db, issue, wh.id)
     if data.dispatch_type == DispatchType.TRANSFER and to_wh is None:
         raise ValidationError("A stock transfer needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
@@ -6330,6 +6580,45 @@ def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
     return "In the warehouse, not yet issued"
 
 
+def _relayed_onward():
+    """True for an issue line whose goods did NOT stop at the delivery point.
+
+    WH -> MDP -> LIP is one indent served by TWO posted issues, both carrying the same
+    `indent_item_id`. Summing them told the requester an approved quantity of 1 had
+    been issued twice — "2 waiting for you to confirm" against a single unit.
+
+    The leg that must not count is the one whose dispatch handed the goods to another
+    stocking point WHICH THEN ISSUED THEM ON. Both halves matter: a dispatch to a LIP
+    also names a `to_warehouse_id`, and dropping every leg with one would have blanked
+    the direct WH -> LIP flow, where that first leg is the whole delivery.
+
+    Correlated per LINE, not per document: a consignment part-forwarded and part-held
+    at the MDP should count only what actually moved on.
+    """
+    onward = aliased(m.MaterialIssue)
+    onward_line = aliased(m.MaterialIssueLine)
+    return (
+        select(onward_line.id)
+        .select_from(m.Dispatch)
+        .join(onward, and_(
+            onward.warehouse_id == m.Dispatch.to_warehouse_id,
+            onward.id != m.Dispatch.ref_id,
+            onward.direction == IssueDirection.OUT.value,
+            onward.is_stock_posted.is_(True),
+        ))
+        .join(onward_line, and_(
+            onward_line.issue_id == onward.id,
+            onward_line.indent_item_id == m.MaterialIssueLine.indent_item_id,
+        ))
+        .where(
+            m.Dispatch.ref_id == m.MaterialIssueLine.issue_id,
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+            m.Dispatch.to_warehouse_id.isnot(None),
+        )
+        .exists()
+    )
+
+
 async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     """Approved / issued / dispatched / received per line, for a set of indents.
 
@@ -6342,6 +6631,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
         return []
 
     indent_ids = [indent.id for indent in indents]
+    relayed = _relayed_onward()
     # Posted issues only: a draft or in-approval issue has moved nothing, and showing it
     # as "issued" would tell the requester their goods are on the way when they are not.
     issued_rows = (await db.execute(
@@ -6351,7 +6641,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
         .where(m.MaterialIssue.indent_id.in_(indent_ids),
                m.MaterialIssue.direction == IssueDirection.OUT.value,
                m.MaterialIssue.is_stock_posted.is_(True),
-               m.MaterialIssueLine.indent_item_id.isnot(None))
+               m.MaterialIssueLine.indent_item_id.isnot(None),
+               ~relayed)
         .group_by(m.MaterialIssueLine.indent_item_id)
     )).all()
     issued_by_line = {row[0]: _d(row[1]) for row in issued_rows}
@@ -6366,7 +6657,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
         .where(m.MaterialIssue.indent_id.in_(indent_ids),
                m.MaterialIssue.is_stock_posted.is_(True),
                m.Dispatch.status.in_(_ON_THE_ROAD),
-               m.MaterialIssueLine.indent_item_id.isnot(None))
+               m.MaterialIssueLine.indent_item_id.isnot(None),
+               ~relayed)
         .group_by(m.MaterialIssueLine.indent_item_id)
     )).all()
     dispatched_by_line = {row[0]: _d(row[1]) for row in dispatched_rows}

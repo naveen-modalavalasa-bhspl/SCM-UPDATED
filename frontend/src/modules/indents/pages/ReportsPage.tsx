@@ -22,6 +22,7 @@ import {
   useActivityLedgerUrlState,
 } from "../context/ActivityLedgerUrlState";
 import { formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
+import { displayUom } from "../displayFormat";
 import { INDENT_ACTIVITY_EVENT_FILTER_OPTIONS, INDENT_STATUS } from "../constants";
 import { statusChipStyle } from "../statusPalette";
 
@@ -183,7 +184,7 @@ function formatQuantity(row: ActivityRow) {
   const quantity = decimalText(row.quantity);
   if (quantity === null) return "—";
   const requestedQuantity = decimalText(row.requested_quantity);
-  const uomCode = nonEmptyText(row.uom_code);
+  const uomCode = displayUom(row.uom_code) || null;
   const uom = uomCode ? ` ${uomCode}` : "";
   if (
     eventCode(row) === "STOCK_ALLOCATED"

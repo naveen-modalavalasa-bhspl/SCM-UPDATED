@@ -129,6 +129,10 @@ export interface ConsolidatedItem {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
+  /** Decimal places this unit may carry: 0 for anything counted in whole numbers, 3
+   *  for anything measured. Optional — an older API build does not send it, and the
+   *  split then falls back to its own rule. */
+  uom_decimals?: number;
   total_requested_quantity: number;
   /** The most this approver could pass on for this item across the whole batch. */
   total_ceiling_quantity: number;

@@ -65,9 +65,16 @@ export function FulfillmentQueuePage() {
   const [showDoneCycles, setShowDoneCycles] = useState(false);
   const nav = useNavigate();
 
+  // Owed-only was the whole screen: `has_remainder` was hardcoded true, so an indent
+  // left the queue the instant its last line was allocated and there was no way to
+  // look up what had been fulfilled — or what was rejected on the way. Owed stays the
+  // default, because that is the work; "Everything" drops the filter and lets the
+  // Status select beside it narrow to any indent state.
+  const [view, setView] = useState("OWED");
+
   const queue = useQuery({
-    queryKey: ["fulfillment-queue"],
-    queryFn: () => getFulfillmentQueue(),
+    queryKey: ["fulfillment-queue", view],
+    queryFn: () => getFulfillmentQueue(undefined, view === "OWED"),
   });
   // An indent whose allocation is already waiting on an approver has been dealt with;
   // showing it again invites a second allocation the backend will refuse anyway.
@@ -247,11 +254,22 @@ export function FulfillmentQueuePage() {
           setPriorityFilter("");
           setDeptFilter("");
           setStatusFilter("");
+          setView("OWED");
           setPage(1);
         }}
         active={(search ? 1 : 0) + (priorityFilter ? 1 : 0) + (deptFilter ? 1 : 0)
-          + (statusFilter ? 1 : 0) + (showDoneCycles ? 1 : 0)}
+          + (statusFilter ? 1 : 0) + (showDoneCycles ? 1 : 0)
+          + (view === "OWED" ? 0 : 1)}
       >
+        <FilterSelect
+          value={view}
+          onChange={(v) => { setView(v || "OWED"); setPage(1); }}
+          options={[
+            { value: "OWED", label: "Still owed" },
+            { value: "ALL", label: "Everything" },
+          ]}
+          placeholder="Still owed"
+        />
         <FilterSelect
           value={statusFilter}
           onChange={(v) => { setStatusFilter(v); setPage(1); }}
@@ -301,7 +319,9 @@ export function FulfillmentQueuePage() {
               ? `/inventory/fulfillment/${r.cycle}`
               : `/inventory/allocate/${r.id}`)}
             columns={columns}
-            empty="Nothing owed. Indents appear here the moment a line is approved for more than has been allocated."
+            empty={view === "OWED"
+              ? "Nothing owed. Indents appear here the moment a line is approved for more than has been allocated. Switch to Everything to see the ones already fulfilled."
+              : "No indent matches these filters."}
             renderCard={(r) => (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2">

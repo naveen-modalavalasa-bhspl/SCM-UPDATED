@@ -746,6 +746,29 @@ export interface PositionLocationWrite {
   is_primary?: boolean;
 }
 
+/** What the Stocking Points list can be narrowed by. Every field is applied on the
+ *  server, on top of the caller's own scope — never instead of it. */
+export interface StockingPointQuery {
+  /** Free text over position, point name, point code and project. */
+  search?: string;
+  /** 1 warehouse · 2 MDP · 3 LIP. */
+  tier?: LocationTier;
+  project_id?: number;
+  position_id?: number;
+  page?: number;
+  size?: number;
+}
+
+export interface StockingPointTagPage {
+  items: PositionLocationTag[];
+  total: number;
+  page: number;
+  size: number;
+  /** Tier -> how many tags in the WHOLE filtered set, so the cards above the list
+   *  keep counting the network rather than the page. */
+  tier_counts: Record<string, number>;
+}
+
 /** What a move between two points would be. Read-only: the user picks from/to and a
  *  reason, never the kind — see the note on the backend schema. */
 export interface MovementClassification {
@@ -796,6 +819,10 @@ export interface BatchDemandItem {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
+  /** Decimal places this unit may carry: 0 for anything counted in whole numbers, 3
+   *  for anything measured. The proposed split moves in steps of this, so a countable
+   *  item is never offered as 5.7. Optional — an older API build does not send it. */
+  uom_decimals?: number;
   indent_count: number;
   urgent_count: number;
   total_demand: number;

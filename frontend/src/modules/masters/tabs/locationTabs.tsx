@@ -1,10 +1,10 @@
 import { mastersApi } from "../api";
 import { MasterCrud } from "../components/MasterCrud";
 import type { Option } from "../components/MasterCrud";
-import type { MasterBin, MasterWarehouse, Project } from "../types";
+import type { MasterWarehouse, Project } from "../types";
 import type { Column } from "@/shared/components";
 import { Active, Code, ReadOnlyTab } from "./common";
-import { BIN_TYPES, WAREHOUSE_TYPES } from "./constants";
+import { WAREHOUSE_TYPES } from "./constants";
 
 
 
@@ -54,55 +54,6 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
       onCreate={(v) => mastersApi.warehouses.create(v as Partial<MasterWarehouse>)}
       onUpdate={(id, v) => mastersApi.warehouses.update(id, v as Partial<MasterWarehouse>)}
       onDeactivate={mastersApi.warehouses.deactivate}
-    />
-  );
-}
-
-export function BinsTab({ warehouses, bins }: { warehouses: Option[]; bins: Option[] }) {
-  const columns: Column<MasterBin>[] = [
-    // `path` shows the ancestry, which is why the tree needs no expand/collapse.
-    { key: "path", header: "Path", render: (r) => <Code>{r.path ?? r.code}</Code> },
-    { key: "name", header: "Name", render: (r) => r.name ?? "—" },
-    { key: "type", header: "Type", render: (r) => r.bin_type, hideOnNarrow: true },
-    { key: "level", header: "Level", render: (r) => r.level, hideOnNarrow: true },
-    { key: "pick", header: "Pickable", hideOnNarrow: true,
-      render: (r) => (r.is_pickable ? "Yes" : "No") },
-    { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
-  ];
-  return (
-    <MasterCrud<MasterBin>
-      title="Bin" queryKey="bins" searchable managePerm="master.location.manage"
-      columns={columns}
-      renderCard={(r) => (
-        <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <Code>{r.path ?? r.code}</Code><Active on={r.is_active} />
-          </div>
-          <div className="text-sm text-body">{r.name ?? "—"}</div>
-          <div className="text-xs text-muted">{r.bin_type} · level {r.level}</div>
-        </div>
-      )}
-      fetchList={(search) => mastersApi.bins.list({ search, size: 200 }).then((p) => p.items)}
-      fields={[
-        { key: "warehouse_id", label: "Warehouse", type: "select", options: warehouses, required: true },
-        { key: "code", label: "Code", required: true },
-        { key: "name", label: "Name" },
-        { key: "bin_type", label: "Type", type: "select", options: BIN_TYPES },
-        { key: "parent_id", label: "Parent bin", type: "select", options: bins },
-        { key: "capacity_qty", label: "Capacity", type: "number", min: 0 },
-        { key: "is_pickable", label: "Pickable", type: "switch" },
-        { key: "is_active", label: "Active", type: "switch" },
-      ]}
-      emptyForm={{ warehouse_id: null, code: "", name: "", bin_type: "STORAGE",
-                   parent_id: null, capacity_qty: null, is_pickable: true, is_active: true }}
-      toForm={(r) => ({ warehouse_id: r.warehouse_id, code: r.code, name: r.name ?? "",
-        bin_type: r.bin_type, parent_id: r.parent_id ?? null,
-        capacity_qty: r.capacity_qty ?? null, is_pickable: r.is_pickable,
-        is_active: r.is_active })}
-      bulk={mastersApi.bins}
-      onCreate={(v) => mastersApi.bins.create(v as Partial<MasterBin>)}
-      onUpdate={(id, v) => mastersApi.bins.update(id, v as Partial<MasterBin>)}
-      onDeactivate={mastersApi.bins.deactivate}
     />
   );
 }

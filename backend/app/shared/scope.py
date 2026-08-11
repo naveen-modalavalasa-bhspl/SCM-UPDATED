@@ -163,9 +163,18 @@ async def scope_condition(
 
     position_id = getattr(user, "active_position_id", None)
     if owner_col is None:
-        # Nothing identifies a raiser on this table, so the warehouse bound is the
-        # only one available. Never widen to true here.
-        return warehouse_clause if warehouse_clause is not None else literal(False)
+        # Nothing identifies a raiser on this table (serials, put-away tasks,
+        # picklists, cycle counts), so the warehouse bound is the only one available.
+        if warehouse_clause is not None:
+            return warehouse_clause
+        if warehouse_col is not None and warehouse_ids is None:
+            # None is "this login has no warehouse restriction", which is not the
+            # same fact as "this login reaches no warehouse". Reading it as the
+            # latter emptied the serial picker for every non-ALL login: an approved
+            # issue could not be given its units because the list came back blank.
+            # An explicitly empty set still denies.
+            return literal(True)
+        return literal(False)
 
     mine = owner_col == user.id
     if position_col is not None and position_id is not None:
@@ -207,3 +216,37 @@ async def scope_condition(
         return mine
 
     return mine
+
+
+async def project_condition(db: AsyncSession, user, project_col,
+                            *, unassigned=None) -> ColumnElement[bool]:
+    """The WHERE clause for a CONFIGURATION row that belongs to a project.
+
+    `scope_condition` above describes documents: it is built around who raised the
+    row, and with no owner column it correctly refuses everything. Master and config
+    rows have no raiser — a BOM group belongs to a project, full stop — so running
+    them through it would empty every screen below ALL. This is the predicate for
+    that shape, and it is deliberately the only other one: a module writing its own
+    project filter is how the hole reopens (the same rule scope_condition states).
+
+    ALL sees every project. Any narrower rung sees its own project plus the rows that
+    belong to no project, which are company-wide by construction and would otherwise
+    be invisible to everyone but a head-office login. A login with no project at all
+    (System Admin, an unmapped employee) sees only the company-wide rows, never
+    another project's.
+
+    `unassigned` is the value that table writes for "no project". NULL is the usual
+    one, but some tables spell it 0 (`inv_position_locations.project_id` is NOT NULL
+    and defaults to 0), and a 0 read as a real project id would hide every untagged
+    row from everyone. Both spellings count as company-wide when it is given.
+    """
+    def is_unassigned():
+        blank = project_col.is_(None)
+        return blank if unassigned is None else or_(blank, project_col == unassigned)
+
+    if await rung_for(db, user) is ScopeRung.ALL:
+        return literal(True)
+    project_id = getattr(user, "project_id", None)
+    if project_id is None:
+        return is_unassigned()
+    return or_(project_col == project_id, is_unassigned())

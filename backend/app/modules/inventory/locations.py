@@ -9,7 +9,7 @@ endpoints, so it is computed on the way in and can never disagree with them.
 """
 import logging
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.platform.hcm.models import (
@@ -359,6 +359,104 @@ async def list_tags(db: AsyncSession, position_id: int | None = None) -> list[di
             "is_primary": bool(tag.is_primary),
         })
     return out
+
+
+def _tag_row(tag, code, name, wh_type, position_name) -> dict:
+    """One tagging, joined to what a screen needs to render it."""
+    tier = tier_of(wh_type)
+    return {
+        "id": tag.id, "position_id": tag.position_id,
+        "position_name": position_name,
+        "warehouse_id": tag.warehouse_id, "warehouse_code": code,
+        "warehouse_name": name, "warehouse_type": wh_type,
+        "tier": tier.value, "tier_label": tier_label(tier),
+        "project_id": tag.project_id or 0, "project_name": tag.project_name,
+        "is_primary": bool(tag.is_primary),
+    }
+
+
+async def search_tags(db: AsyncSession, user, *, search: str | None = None,
+                      tier: int | None = None, project_id: int | None = None,
+                      page: int = 1, size: int = 25) -> dict:
+    """The tagging as the Stocking Points screen reads it: scoped, filtered, paged.
+
+    Separate from `list_tags` on purpose. That one answers a mechanical question —
+    "which points does THIS position hold?" — for the engine and for /mine, and must
+    stay complete and unscoped or a login would stop being able to see its own point.
+    This one answers a person's question, so it is narrowed to what that person may
+    see (`project_condition`, the same predicate the BOM groups master uses) and cut
+    to a page: the live tagging is 2,001 rows, which is neither searchable nor
+    sendable in one response.
+
+    Tier is filtered on the WAREHOUSE TYPE rather than on a stored column, because the
+    tier is derived from the warehouse and is never written onto the tag (a point must
+    not be an MDP on one tag and a LIP on another).
+    """
+    from app.shared.scope import project_condition
+
+    # Built once and applied to all three queries below — the page, its total and the
+    # per-rung counts must describe the SAME set, and they only do if they cannot
+    # drift apart by being filtered in three places.
+    conditions = [
+        PositionLocation.is_active == 1,
+        # NO_PROJECT (0) is this table's spelling of "no project", so it has to be
+        # named or every unassigned row would read as project 0 and vanish.
+        await project_condition(db, user, PositionLocation.project_id,
+                                unassigned=NO_PROJECT),
+    ]
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        conditions.append(or_(
+            HcmPosition.name.ilike(like),
+            Warehouse.name.ilike(like),
+            Warehouse.code.ilike(like),
+            PositionLocation.project_name.ilike(like),
+        ))
+    if project_id is not None:
+        conditions.append(PositionLocation.project_id == project_id)
+    if tier is not None:
+        types = [t for t, rung in _TIER_BY_TYPE.items() if rung.value == tier]
+        conditions.append(
+            Warehouse.warehouse_type.in_(types) if types
+            # The top rung is "everything that is not a rung", so it is the
+            # complement rather than a list nobody maintains.
+            else or_(Warehouse.warehouse_type.notin_(_TIER_BY_TYPE),
+                     Warehouse.warehouse_type.is_(None)))
+
+    def joined(*columns):
+        return (
+            select(*columns)
+            .select_from(PositionLocation)
+            .outerjoin(Warehouse, Warehouse.id == PositionLocation.warehouse_id)
+            .outerjoin(HcmPosition, HcmPosition.id == PositionLocation.position_id)
+            .where(*conditions)
+        )
+
+    total = await db.scalar(joined(func.count()).select_from(PositionLocation)) or 0
+
+    # Distinct POINTS per rung, over the whole filtered, scoped set — not tags, and
+    # not the page. The cards are read as "how big is the network at each rung", so
+    # counting tag rows overstated it (one point tagged to four positions is still
+    # one point) and counting the page understated it to nothing.
+    counts = {rung.value: 0 for rung in LocationTier}
+    for wh_type, n in (await db.execute(
+        joined(Warehouse.warehouse_type,
+               func.count(func.distinct(PositionLocation.warehouse_id)))
+        .group_by(Warehouse.warehouse_type)
+    )).all():
+        counts[tier_of(wh_type).value] += n
+
+    rows = (await db.execute(
+        joined(PositionLocation, Warehouse.code, Warehouse.name,
+               Warehouse.warehouse_type, HcmPosition.name)
+        .order_by(PositionLocation.position_id, PositionLocation.is_primary.desc())
+        .offset(max(page - 1, 0) * size).limit(size)
+    )).all()
+    return {
+        "items": [_tag_row(*row) for row in rows],
+        "total": total, "page": page, "size": size,
+        "tier_counts": {str(k): v for k, v in counts.items()},
+    }
 
 
 async def tag_position(db: AsyncSession, data, user=None) -> dict:

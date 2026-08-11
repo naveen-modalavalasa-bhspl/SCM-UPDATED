@@ -194,8 +194,20 @@ class WarehouseType(str, Enum):
     LIP (Local Inventory Point) and MDP (Material Distribution Point) from flow doc §1
     are stocking points like any other — they hold real stock and can fulfil an indent.
     They differ only in who they serve, so they are a type here rather than a table.
+
+    Only LIP and MDP are rungs on the distribution chain (`inventory.locations`
+    `_TIER_BY_TYPE`). Every other member sits at the top tier — they are all places
+    stock enters from outside rather than places served from above — so adding one
+    here never has to be mirrored there.
+
+    REGIONAL and CENTRAL came from the live warehouse data, which already held them
+    while this enum did not. A type the enum has not heard of fails validation on
+    save, so the row can be read but never edited from the masters form; naming them
+    is what makes those warehouses maintainable rather than read-only.
     """
     MAIN = "MAIN"
+    CENTRAL = "CENTRAL"
+    REGIONAL = "REGIONAL"
     LIP = "LIP"
     MDP = "MDP"
     TRANSIT = "TRANSIT"

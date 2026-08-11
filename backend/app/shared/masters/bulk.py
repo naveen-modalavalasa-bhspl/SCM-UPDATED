@@ -453,13 +453,22 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
                 if row is None:
                     raise ValidationError(
                         f"Row {line}: no {defn.name.lower()} with id {row_id}.")
+                # The same boundary PUT enforces. Imported here rather than at module
+                # level: crud imports THIS module to register these routes, so the
+                # dependency only runs one way if it is resolved at call time.
+                from app.shared.masters.crud import _require_in_scope
+                await _require_in_scope(db, defn, row_id, user)
             elif has_code:
                 row = by_code.get(getattr(data, "code", None))
 
             if row is None:
                 row = defn.model()
                 if defn.apply is not None:
-                    await defn.apply(db, row, data)
+                    # Same call the CRUD route makes: a master whose apply checks the
+                    # caller must get the caller here too, or a spreadsheet would be
+                    # the way around a check the form enforces.
+                    await (defn.apply(db, row, data, user) if defn.apply_needs_user
+                           else defn.apply(db, row, data))
                 else:
                     for key, value in data.model_dump().items():
                         setattr(row, key, value)
@@ -474,7 +483,8 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
             else:
                 before = defn.serialize(row)
                 if defn.apply is not None:
-                    await defn.apply(db, row, data)
+                    await (defn.apply(db, row, data, user) if defn.apply_needs_user
+                           else defn.apply(db, row, data))
                 else:
                     for key, value in data.model_dump().items():
                         setattr(row, key, value)

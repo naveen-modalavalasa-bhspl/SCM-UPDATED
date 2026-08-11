@@ -285,7 +285,11 @@ export const masterApi = {
   facilities: () => api.get<{ items: Option[] }>("/api/facilities").then((r) => r.data.items),
   boms: () =>
     allMasterRows<BomChoice>("/api/boms")
-      .then((items) => items.filter((bom) => bom.is_active)),
+      // is_effective is the switch AND the BOM's optional validity window, decided
+      // by the server against its own clock. Undefined only where the row predates
+      // the field, which is not a reason to hide a kit.
+      .then((items) => items.filter(
+        (bom) => bom.is_active && bom.is_effective !== false)),
   bomItems: (bomId: number) =>
     allMasterRows<BomChoiceItem>("/api/bom-items", { bom_id: bomId }),
 };

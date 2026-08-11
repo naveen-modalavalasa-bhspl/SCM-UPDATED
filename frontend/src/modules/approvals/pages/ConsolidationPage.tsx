@@ -9,6 +9,7 @@ import {
   Button, Card, EmptyState, ErrorBanner, PageHeader, ResponsiveList, Select, StatCard,
   StatusPill, type Column,
 } from "@/shared/components";
+import { splitQuantity } from "@/shared/quantity";
 import { approvalsApi } from "../api";
 import { useConsolidationDecisions, type ItemDecision } from "../consolidationDecisions";
 import type {
@@ -28,39 +29,11 @@ export const formatQty = (value: number) => {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 };
 
-/** Split `total` across `weights` in proportion, losing nothing to rounding.
- *
- *  Largest remainder (Hamilton): everyone takes their whole units first, then the
- *  units left over go to the biggest fractions. 45 across five equal 10s is 9/9/9/9/9;
- *  43 is 9/9/9/8/8 — never 8.6 five times, because an indent line is a quantity a
- *  storekeeper has to issue. A non-integer total is split on the same rule at three
- *  decimals, so a UOM measured in litres still adds back up exactly.
- */
-export function splitQuantity(total: number, weights: number[]): number[] {
-  const sum = weights.reduce((acc, w) => acc + Math.max(0, w), 0);
-  if (!(total > 0) || sum <= 0) return weights.map(() => 0);
-
-  const scale = Number.isInteger(total) ? 1 : 1000;
-  const units = Math.round(total * scale);
-  const raw = weights.map((w) => (Math.max(0, w) / sum) * units);
-  const base = raw.map((value) => Math.floor(value));
-  let left = units - base.reduce((acc, value) => acc + value, 0);
-
-  // Biggest fraction first; a tie goes to the bigger request, then to the earlier row,
-  // so the same numbers always produce the same split.
-  const order = raw
-    .map((value, index) => ({ index, frac: value - Math.floor(value) }))
-    .sort((a, b) => (b.frac - a.frac)
-      || (weights[b.index] - weights[a.index])
-      || (a.index - b.index));
-
-  for (const { index } of order) {
-    if (left <= 0) break;
-    base[index] += 1;
-    left -= 1;
-  }
-  return base.map((value) => value / scale);
-}
+/** The proportional split, capped per indent and stepped to the unit. It lives in
+ *  `@/shared/quantity` because the fulfilment queue divides stock the same way and the
+ *  two screens must never propose different numbers; re-exported here because this is
+ *  where the module has always imported it from. */
+export { splitQuantity };
 
 /** Exclusion is by exact indent number — the list comes from picking real indents off
  *  the item's own page, never from free text that could half-match two of them. */
@@ -76,14 +49,32 @@ export function resolveItem(item: ConsolidatedItem, decision: ItemDecision | und
   const included = allocations.filter((a) => !isExcluded(a, excluded));
   const droppedCount = allocations.length - included.length;
 
+  /** The most one indent may be passed on this item: what the rung below approved for
+   *  it, falling back to the request at the first rung. Never its share of somebody
+   *  else's ask. */
+  const capOf = (allocation: ConsolidatedItemAllocation) =>
+    Number.isFinite(allocation.ceiling_quantity)
+      ? allocation.ceiling_quantity
+      : allocation.requested_quantity;
+
   const typed = decision?.approved?.trim();
   const parsed = typed === undefined || typed === "" ? null : Number(typed);
   const invalid = parsed !== null && (Number.isNaN(parsed) || parsed < 0);
-  const ceiling = item.total_ceiling_quantity;
+  // The batch total is worth no more than the ceilings still in play. Excluding an
+  // indent takes its ceiling out with it — offering the item's full total afterwards
+  // proposed quantities nobody was entitled to receive.
+  const ceiling = included.length === allocations.length
+    ? item.total_ceiling_quantity
+    : included.reduce((sum, a) => sum + capOf(a), 0);
   const over = parsed !== null && !invalid && parsed > ceiling;
   const total = parsed === null || invalid ? ceiling : Math.min(parsed, ceiling);
 
-  const shares = splitQuantity(total, included.map((a) => a.requested_quantity));
+  const shares = splitQuantity(
+    total,
+    included.map((a) => a.requested_quantity),
+    included.map(capOf),
+    item.uom_decimals,
+  );
   const split = new Map<number, number>(allocations.map((a) => [a.line_id, 0]));
   included.forEach((a, index) => split.set(a.line_id, shares[index]));
 
@@ -588,9 +579,36 @@ export function BatchCard({ batch, onBack }: {
     return invalid || over;
   });
 
+  /** Indents left out of every item they appear on — they get nothing from this round.
+   *
+   *  They are HELD, not approved: sending them on with zeros used to pass them up the
+   *  ladder as decided-and-empty, so the next approver saw an indent nobody meant to
+   *  send. Held here, the indent simply stays in this approver's queue, exactly where
+   *  it was before Approve all, and can be included next round, approved on its own
+   *  screen, or rejected — none of which is possible once it has climbed a rung.
+   *
+   *  Excluded on SOME items only is not a hold: those lines go out at zero and the
+   *  rest at their share, which is an ordinary partial approval. */
+  const held = useMemo(() => {
+    const seen = new Map<number, boolean>();
+    for (const item of batch.consolidated_items) {
+      const excluded = (decisions[String(item.item_id)]?.excluded ?? [])
+        .map((no) => no.toUpperCase());
+      for (const allocation of item.allocations ?? []) {
+        const out = isExcluded(allocation, excluded);
+        seen.set(allocation.indent_id, (seen.get(allocation.indent_id) ?? true) && out);
+      }
+    }
+    return new Set([...seen].filter(([, all]) => all).map(([id]) => id));
+  }, [batch.consolidated_items, decisions]);
+
+  /** How many indents Approve all actually sends — the button, the progress bar and
+   *  the request all count the same set, so a held indent never shows up as one that
+   *  failed to approve. */
+  const sending = batch.indents.length - held.size;
+
   const approve = useMutation({
     mutationFn: async () => {
-      const indentIds = batch.indents.map((row) => row.id);
       // Every item's split, flattened. A line nobody edited still ships its share,
       // because the split of an untouched item is simply its full ceiling.
       const lines = batch.consolidated_items.flatMap((item) => {
@@ -601,6 +619,7 @@ export function BatchCard({ batch, onBack }: {
           approved_quantity: split.get(allocation.line_id) ?? 0,
         }));
       });
+      const indentIds = batch.indents.map((row) => row.id).filter((id) => !held.has(id));
 
       // Sent in small chunks, not one request. The backend walks the batch one indent
       // at a time — engine-owned chains cannot be short-cut — so a monthly cycle would
@@ -672,13 +691,13 @@ export function BatchCard({ batch, onBack }: {
             <PackageCheck className="h-4 w-4" /> Serve from own stock
           </Button>
           <Button
-            disabled={blocked || approve.isPending || batch.indents.length === 0}
+            disabled={blocked || approve.isPending || sending === 0}
             onClick={() => approve.mutate()}
           >
             <Check className="h-4 w-4" />
             {approve.isPending
-              ? `Approving… ${progress}/${batch.indents.length}`
-              : `Approve all ${batch.indents.length}`}
+              ? `Approving… ${progress}/${sending}`
+              : `Approve all ${sending}`}
           </Button>
         </div>
       </div>
@@ -686,14 +705,20 @@ export function BatchCard({ batch, onBack }: {
       {blocked && <p className="rounded-xl bg-danger/10 p-3 text-sm text-danger">
         One item's quantity is out of range — open it and fix it before approving.
       </p>}
+      {held.size > 0 && <p className="rounded-xl bg-warn/10 p-3 text-sm text-warn">
+        {held.size} indent{held.size === 1 ? " is" : "s are"} left out of every item and
+        will not be sent on — {held.size === 1 ? "it stays" : "they stay"} in your queue
+        for you to include next round, or to reject.
+        {sending === 0 && " Nothing is left to approve."}
+      </p>}
       {approve.isPending && (
         <div className="rounded-xl bg-brand/5 p-3">
           <div className="mb-2 flex items-center justify-between text-sm">
             <span className="text-body">
-              Approving {progress} of {batch.indents.length}…
+              Approving {progress} of {sending}…
             </span>
             <span className="font-mono text-xs text-muted">
-              {Math.round((progress / Math.max(batch.indents.length, 1)) * 100)}%
+              {Math.round((progress / Math.max(sending, 1)) * 100)}%
             </span>
           </div>
           <div
@@ -701,12 +726,12 @@ export function BatchCard({ batch, onBack }: {
             role="progressbar"
             aria-valuenow={progress}
             aria-valuemin={0}
-            aria-valuemax={batch.indents.length}
+            aria-valuemax={sending}
             aria-label="Indents approved"
           >
             <div
               className="h-full rounded-full bg-brand transition-[width] duration-300"
-              style={{ width: `${(progress / Math.max(batch.indents.length, 1)) * 100}%` }}
+              style={{ width: `${(progress / Math.max(sending, 1)) * 100}%` }}
             />
           </div>
           {/* Said out loud because it is the thing an approver worries about while a

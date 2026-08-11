@@ -6,7 +6,7 @@ import { Pagination } from "@heroui/react";
 import {
   Button, Card, PageHeader, ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
-import { getAllocation, getPendingInventoryApprovals } from "../api";
+import { getAllocation, getPendingInventoryApprovals, listAllocations } from "../api";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import type { Allocation } from "../types";
 
@@ -31,11 +31,28 @@ export function AllocationApprovalsPage() {
   const [showDone, setShowDone] = useState(false);
   const [page, setPage] = useState(1);
 
+  // Which decisions to list. The screen was an inbox and nothing else: it asked only
+  // for what is WAITING on this hat, so an allocation vanished the moment it was
+  // signed and there was no way to look up what was approved or why something was
+  // rejected. Waiting stays the default — that is the work — but the decided ones
+  // are now reachable from the same place instead of nowhere.
+  const [decision, setDecision] = useState("WAITING");
+
   const queue = useQuery({
-    queryKey: ["inventory", "allocation-approvals"],
+    queryKey: ["inventory", "allocation-approvals", decision],
     queryFn: async () => {
-      const pending = await getPendingInventoryApprovals();
-      return Promise.all(pending.map((item) => getAllocation(item.doc_id)));
+      if (decision === "WAITING") {
+        const pending = await getPendingInventoryApprovals();
+        return Promise.all(pending.map((item) => getAllocation(item.doc_id)));
+      }
+      // A decided allocation is read from the allocation list, not the approval
+      // inbox: the inbox only ever holds what is still owed a signature.
+      const wanted = decision === "ALL"
+        ? ["PENDING_APPROVAL", "APPROVED", "REJECTED"] : [decision];
+      const pages = await Promise.all(
+        wanted.map((status) => listAllocations({ status })));
+      const rows = pages.flatMap((p) => p.items ?? []);
+      return Promise.all(rows.map((row) => getAllocation(row.id)));
     },
   });
 
@@ -166,10 +183,25 @@ export function AllocationApprovalsPage() {
         onClear={() => {
           setSearch("");
           setAllocatorFilter("");
+          setDecision("WAITING");
           setPage(1);
         }}
-        active={(search ? 1 : 0) + (allocatorFilter ? 1 : 0) + (showDone ? 1 : 0)}
+        active={(search ? 1 : 0) + (allocatorFilter ? 1 : 0) + (showDone ? 1 : 0)
+          + (decision === "WAITING" ? 0 : 1)}
       >
+        {/* Waiting first and selected by default: this screen is somewhere work is
+            done, not an archive. The decided ones are one choice away. */}
+        <FilterSelect
+          value={decision}
+          onChange={(v) => { setDecision(v || "WAITING"); setPage(1); }}
+          options={[
+            { value: "WAITING", label: "Waiting for me" },
+            { value: "APPROVED", label: "Approved" },
+            { value: "REJECTED", label: "Rejected" },
+            { value: "ALL", label: "All decisions" },
+          ]}
+          placeholder="Waiting for me"
+        />
         <FilterSelect
           value={allocatorFilter}
           onChange={(v) => { setAllocatorFilter(v); setPage(1); }}
@@ -198,7 +230,9 @@ export function AllocationApprovalsPage() {
             onRowClick={(row) => nav((row as { cycle?: string }).cycle
               ? `/inventory/allocation-approvals/cycle/${(row as { cycle?: string }).cycle}`
               : `/inventory/allocation-approvals/${row.id}`)}
-            empty="No allocation is waiting for you. Only approvals assigned to your active position appear here."
+            empty={decision === "WAITING"
+              ? "No allocation is waiting for you. Only approvals assigned to your active position appear here."
+              : "No allocation matches this filter."}
             renderCard={(row) => (
               <div className="space-y-1">
                 <div className="flex items-center justify-between gap-2">

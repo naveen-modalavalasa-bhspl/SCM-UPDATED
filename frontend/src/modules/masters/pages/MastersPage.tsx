@@ -11,20 +11,20 @@ import {
   BrandsTab, CategoriesTab, GeneralNamesTab, HsnCodesTab, ItemClassesTab,
   ItemSubClassesTab, ItemsTab,
 } from "../tabs/itemTabs";
-import { BinsTab, ProjectsTab, WarehousesTab } from "../tabs/locationTabs";
+import { ProjectsTab, WarehousesTab } from "../tabs/locationTabs";
 import { VendorItemsTab, VendorsTab } from "../tabs/vendorTabs";
 import { ConversionsTab, UomTab } from "../tabs/uomTabs";
 import {
   AttributesTab, CategoryTaggingTab, FeaturesTab, PackagingTab, SpecsTab,
 } from "../tabs/attributeTabs";
-import { BomsTab, ItemGroupsTab } from "../tabs/bomTabs";
+import { BomGroupsTab, BomsTab, ItemGroupsTab } from "../tabs/bomTabs";
 const TABS = [
   "items", "categories", "general-names", "item-classes", "item-sub-classes",
   "brands", "manufacturers", "dosage-forms", "hsn-codes",
   "features", "packaging", "item-groups",
   "attributes", "specs", "category-tags",
-  "uom", "conversions", "warehouses", "bins",
-  "projects", "vendors", "vendor-items", "boms",
+  "uom", "conversions", "warehouses",
+  "projects", "vendors", "vendor-items", "boms", "bom-groups",
   "departments", "facilities",
 ] as const;
 
@@ -35,9 +35,9 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   "dosage-forms": "Dosage Forms", "hsn-codes": "HSN Codes",
   features: "Features", packaging: "Packages", "item-groups": "Item Groups",
   attributes: "Attributes", specs: "Specs", "category-tags": "Category Tagging",
-  uom: "UOM", conversions: "Conversions", warehouses: "Warehouses", bins: "Bins",
+  uom: "UOM", conversions: "Conversions", warehouses: "Warehouses",
   projects: "Projects", vendors: "Vendors", "vendor-items": "Vendor Rates",
-  boms: "BOM",
+  boms: "BOM", "bom-groups": "BOM Groups",
   departments: "Departments", facilities: "Facilities",
 };
 
@@ -46,10 +46,8 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
  *  mount no matter which tab you were on — seven requests to render a list of
  *  manufacturers. Each source is now fetched by the tabs that read it. */
 const NEEDS: Record<string, readonly string[]> = {
-  uom: ["items", "conversions", "attributes", "specs", "packaging", "bins"],
+  uom: ["items", "conversions", "attributes", "specs", "packaging"],
   categories: ["items", "categories", "category-tags"],
-  warehouses: ["warehouses", "bins"],
-  bins: ["bins"],
   facilities: ["warehouses", "facilities"],
   projects: ["boms", "projects"],
   items: ["item-groups", "vendor-items", "boms"],
@@ -88,16 +86,6 @@ export function MastersPage() {
     queryFn: () => mastersApi.categories.list({ size: 200 }).then((p) => p.items),
     enabled: wanted("categories"),
   });
-  const warehouses = useQuery({
-    queryKey: ["masters", "warehouses-all"],
-    queryFn: () => mastersApi.warehouses.list({ size: 200 }).then((p) => p.items),
-    enabled: wanted("warehouses"),
-  });
-  const bins = useQuery({
-    queryKey: ["masters", "bins-all"],
-    queryFn: () => mastersApi.bins.list({ size: 500 }).then((p) => p.items),
-    enabled: wanted("bins"),
-  });
   const facilities = useQuery({
     queryKey: ["masters", "facilities"], queryFn: mastersApi.facilities,
     enabled: wanted("facilities"),
@@ -115,8 +103,6 @@ export function MastersPage() {
 
   const uomOpts: Option[] = (uom.data ?? []).map((u) => ({ value: u.id, label: `${u.code} — ${u.name}` }));
   const catOpts: Option[] = (cats.data ?? []).map((c) => ({ value: c.id, label: `${c.code} — ${c.name}` }));
-  const whOpts: Option[] = (warehouses.data ?? []).map((w) => ({ value: w.id, label: `${w.code} — ${w.name}` }));
-  const binOpts: Option[] = (bins.data ?? []).map((b) => ({ value: b.id, label: b.path ?? b.code }));
   const facOpts: Option[] = (facilities.data ?? []).map((f) => ({ value: f.id, label: f.name }));
   const projectOpts: Option[] = (projects.data ?? []).map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }));
   const itemOpts: Option[] = (items.data ?? []).map((i) => ({ value: i.id, label: `${i.code} — ${i.name}` }));
@@ -150,10 +136,12 @@ export function MastersPage() {
       {tab === "specs" && <SpecsTab uoms={uomOpts} />}
       {tab === "category-tags" && <CategoryTaggingTab categories={catOpts} />}
       {tab === "boms" && <BomsTab projects={projectOpts} />}
+      {/* Its two dropdowns (BOMs, job profiles) are read by this tab alone, so it
+          fetches them itself rather than joining the shared NEEDS sources above. */}
+      {tab === "bom-groups" && <BomGroupsTab />}
       {tab === "uom" && <UomTab />}
       {tab === "conversions" && <ConversionsTab uoms={uomOpts} />}
       {tab === "warehouses" && <WarehousesTab facilities={facOpts} />}
-      {tab === "bins" && <BinsTab warehouses={whOpts} bins={binOpts} />}
       {tab === "projects" && <ProjectsTab />}
       {tab === "vendors" && <VendorsTab />}
       {tab === "vendor-items" && <VendorItemsTab items={itemOpts} />}

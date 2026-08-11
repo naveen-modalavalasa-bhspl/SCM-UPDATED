@@ -83,17 +83,49 @@ describe("resolveItem", () => {
 
     expect(included.map((a) => a.indent_no)).toEqual(["IND-10", "IND-11"]);
     expect(split.get(1)).toBe(0);
-    expect(split.get(2)).toBe(15);
-    expect(split.get(3)).toBe(15);
+    // Each of the two left asked for 10 and may have no more than 10, so the excluded
+    // indent's 10 goes nowhere — it is simply not approved.
+    expect(split.get(2)).toBe(10);
+    expect(split.get(3)).toBe(10);
   });
 
-  it("hands an excluded indent's share to the rest", () => {
+  it("never hands an excluded indent's share past somebody else's own ceiling", () => {
+    // The share does go to the rest — but only as far as each of them may receive.
+    // Dropping one of two indents used to offer the survivor the whole 60 when it had
+    // asked for 30, which the server then refused: an approval nobody could complete.
     const dolo = item([["IND-1", 30], ["IND-2", 30]]);
-    const { total, droppedCount, split } = resolveItem(dolo, { approved: "", excluded: ["IND-2"] });
+    const { total, ceiling, droppedCount, split } =
+      resolveItem(dolo, { approved: "", excluded: ["IND-2"] });
 
     expect(droppedCount).toBe(1);
+    expect(ceiling).toBe(30);
+    expect(total).toBe(30);
+    expect(split.get(1)).toBe(30);
+  });
+
+  it("shares an excluded indent's quantity out where there is room for it", () => {
+    // Three asking 30 each, only 60 approvable: dropping one leaves 60 across two
+    // ceilings of 30, so the whole 60 still goes out — 30 and 30.
+    const dolo = item([["IND-1", 30], ["IND-2", 30], ["IND-3", 30]]);
+    const { total, split } = resolveItem(
+      { ...dolo, total_ceiling_quantity: 60 }, { approved: "60", excluded: ["IND-3"] },
+    );
+
     expect(total).toBe(60);
-    expect(split.get(1)).toBe(60);
+    expect(split.get(1)).toBe(30);
+    expect(split.get(2)).toBe(30);
+    expect(split.get(3)).toBe(0);
+  });
+
+  it("splits a countable unit in whole numbers only", () => {
+    // 20 across lines asking 10 and 7 is 11.8 and 8.2 pro-rata. Gloves do not come in
+    // fifths, so the split moves in whole units: the fulfilment queue's 5.7 bug.
+    const gloves = { ...item([["IND-1", 10], ["IND-2", 7]]), uom_decimals: 0 };
+    const { split } = resolveItem({ ...gloves, total_ceiling_quantity: 15 }, undefined);
+
+    expect(split.get(1)).toBe(9);
+    expect(split.get(2)).toBe(6);
+    expect((split.get(1) ?? 0) + (split.get(2) ?? 0)).toBe(15);
   });
 
   it("caps an over-ceiling total and says so", () => {

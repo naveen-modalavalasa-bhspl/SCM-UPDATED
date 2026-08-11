@@ -9,6 +9,7 @@ import type { Option } from "@/shared/types";
 import {
   indentKeys, masterApi, type IndentAccountScope,
 } from "../api";
+import { displayUom } from "../displayFormat";
 import type { BomChoice, TemplateLineItem } from "../types";
 
 interface PreviewItem extends TemplateLineItem {
@@ -200,7 +201,7 @@ export function ChooseBomModal({
                                   <span className="block text-xs font-medium text-bad">Unavailable</span>
                                 )}
                               </td>
-                              <td className="p-3 text-body">{item.uom_code || "—"}</td>
+                              <td className="p-3 text-body">{displayUom(item.uom_code) || "—"}</td>
                               <td className="p-3 text-body">
                                 {item.quantity != null && Number(item.quantity) > 0
                                   ? item.quantity

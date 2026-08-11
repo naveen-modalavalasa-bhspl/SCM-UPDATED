@@ -91,6 +91,14 @@ export function itemCodePreview(
     .join("-").toUpperCase() + `-${tail}`;
 }
 
+/** Where one tag's answer is stored in `mst_item_specs.specifications`.
+ *  Attributes, specs and features are three separate tables whose codes and ids are
+ *  only unique within themselves — "LENGTH" is both an attribute and a spec — so the
+ *  type has to be part of the key or the two share one value. */
+export function tagKey(tag: MasterCategoryTag) {
+  return `${tag.tag_type}:${tag.tag_code ?? tag.tag_id}`;
+}
+
 /** Fields required by the category, with nothing filled in yet. */
 export function missingRequiredTags(
   tags: MasterCategoryTag[],
@@ -99,7 +107,7 @@ export function missingRequiredTags(
   return tags
     .filter((tag) => tag.is_required && tag.is_active)
     .filter((tag) => {
-      const value = values[tag.tag_code ?? String(tag.tag_id)] ?? "";
+      const value = values[tagKey(tag)] ?? "";
       return tag.tag_type === "FEATURE"
         ? !["true", "yes", "1"].includes(String(value).toLowerCase())
         : !String(value).trim();
@@ -607,8 +615,12 @@ export function TagFields({ tags, values, onChange }: {
   return (
     <div className="grid gap-4 md:grid-cols-2">
       {tags.map((tag) => {
-        const code = tag.tag_code ?? String(tag.tag_id);
-        const definition = attributes.data?.find((a) => a.id === tag.tag_id);
+        const code = tagKey(tag);
+        // Only an ATTRIBUTE's id points into mst_attributes; a spec id would match
+        // an unrelated attribute row.
+        const definition = tag.tag_type === "ATTRIBUTE"
+          ? attributes.data?.find((a) => a.id === tag.tag_id)
+          : undefined;
         const label = `${tag.tag_name}${tag.tag_uom_code ? ` (${tag.tag_uom_code})` : ""}` +
           (tag.is_required ? " *" : "");
         if (tag.tag_type === "ATTRIBUTE" && definition?.data_type === "LIST") {
@@ -653,7 +665,7 @@ export function FeatureFields({ tags, values, onChange }: {
   return (
     <div className="grid gap-3 md:grid-cols-2">
       {tags.map((tag) => {
-        const code = tag.tag_code ?? String(tag.tag_id);
+        const code = tagKey(tag);
         const selected = ["true", "yes", "1"]
           .includes(String(values[code] ?? "").toLowerCase());
         return (

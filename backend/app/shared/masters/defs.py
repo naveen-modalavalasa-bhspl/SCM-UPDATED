@@ -20,10 +20,10 @@ from app.shared.enums import (
 )
 from app.shared.masters.crud import MasterDef
 from app.shared.models.master import (
-    Attribute, Bom, BomItem, Brand, BrandGeneralName, BrandManufacturer, CategoryTag,
-    DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory, ItemClass,
-    ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer, Packaging,
-    Project, Spec, Uom, UomConversion, Vendor, VendorItem,
+    Attribute, Bom, BomGroup, BomItem, Brand, BrandGeneralName, BrandManufacturer,
+    CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
+    ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
+    Packaging, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
 )
 from app.shared.models.warehouse import Bin, Warehouse
 
@@ -1271,6 +1271,33 @@ async def apply_hsn(db: AsyncSession, row: HsnCode, data: HsnIn) -> None:
 # --------------------------------------------------------------------------- #
 #  Bills of material
 # --------------------------------------------------------------------------- #
+def check_validity_window(data) -> None:
+    """A window that ends before it starts is never open, so it is refused rather
+    than saved as a row nobody can use."""
+    if data.effective_from and data.effective_to \
+            and data.effective_to < data.effective_from:
+        raise ValidationError("Active to cannot be before Active from")
+
+
+def in_effect(row) -> bool:
+    """Whether a row is usable today.
+
+    Both ends are optional and mean the obvious thing: no start is "since always",
+    no end is "until further notice", neither is "all the time". Kept separate from
+    is_active rather than folded into it — a row outside its window is scheduled or
+    expired, not retired, and the flag must keep saying what the admin actually set
+    or the next save would switch it off for good.
+    """
+    if not row.is_active:
+        return False
+    today = date.today()
+    if row.effective_from and today < row.effective_from:
+        return False
+    if row.effective_to and today > row.effective_to:
+        return False
+    return True
+
+
 class BomIn(BaseModel):
     """A named, reusable set of items belonging to a project — the standard kit a
     requester picks instead of typing the same twelve lines every time.
@@ -1283,6 +1310,9 @@ class BomIn(BaseModel):
     name: str
     project_id: int | None = None
     description: str | None = None
+    # Optional on both ends: a kit with no window is available all the time.
+    effective_from: date | None = None
+    effective_to: date | None = None
     is_active: bool = True
 
 
@@ -1292,10 +1322,15 @@ def bom_out(b: Bom) -> dict:
             # line_count is counted from mst_bom_items; the stored total_items
             # column was never maintained and always read 0.
             "description": b.description, "total_items": b.line_count,
+            "effective_from": b.effective_from.isoformat() if b.effective_from else None,
+            "effective_to": b.effective_to.isoformat() if b.effective_to else None,
+            # What a consumer asks before offering the kit: the switch AND the window.
+            "is_effective": in_effect(b),
             "is_active": b.is_active}
 
 
 async def apply_bom(db: AsyncSession, row: Bom, data: BomIn) -> None:
+    check_validity_window(data)
     project = await db.get(Project, data.project_id) if data.project_id else None
     if data.project_id is not None and project is None:
         raise ValidationError("Project not found")
@@ -1343,6 +1378,80 @@ async def apply_bom_item(db: AsyncSession, row: BomItem, data: BomItemIn) -> Non
     row.category_name = item.category_name
     row.uom_id = uom.id if uom else item.uom_id
     row.uom_code = uom.code if uom else item.uom_code
+
+
+# --------------------------------------------------------------------------- #
+#  BOM groups — which job profile gets which kit
+# --------------------------------------------------------------------------- #
+class BomGroupIn(BaseModel):
+    """One BOM handed to one job profile.
+
+    `profile_key` is RBAC's derived key ("4:DEO"), not an id: a job profile has no
+    table (platform/rbac/profiles.py). It is validated against the live derivation on
+    every save, narrowed to what the CALLER may see, so a key from a retired HCM
+    generation — or from a project this login has no business in — is refused rather
+    than stored.
+    """
+    bom_id: int
+    profile_key: str = Field(min_length=1, max_length=150)
+    remarks: str | None = None
+    # Optional on both ends: a pairing with no window stands all the time.
+    effective_from: date | None = None
+    effective_to: date | None = None
+    is_active: bool = True
+
+
+def bom_group_out(g: BomGroup) -> dict:
+    return {"id": g.id, "bom_id": g.bom_id, "bom_code": g.bom_code,
+            "bom_name": g.bom_name, "profile_key": g.profile_key,
+            "profile_job": g.profile_job, "profile_name": g.profile_name,
+            "project_id": g.project_id, "project_name": g.project_name,
+            "remarks": g.remarks,
+            "effective_from": g.effective_from.isoformat() if g.effective_from else None,
+            "effective_to": g.effective_to.isoformat() if g.effective_to else None,
+            "is_effective": in_effect(g),
+            "is_active": g.is_active}
+
+
+async def scope_bom_groups(db: AsyncSession, user, stmt):
+    """Narrow the list to the projects this login's rung reaches.
+
+    Always applied (`scope_always` on the MasterDef below), never only on ?mine=true:
+    a district admin maintaining their own kits must not read — or, through
+    crud._require_in_scope, edit — another region's pairings.
+    """
+    from app.shared.scope import project_condition
+
+    return stmt.where(await project_condition(db, user, BomGroup.project_id))
+
+
+async def apply_bom_group(db: AsyncSession, row: BomGroup, data: BomGroupIn,
+                          user=None) -> None:
+    """RBAC lives in platform, which is downstream of shared, so the import is
+    function-local — the module-level graph still runs one way (rule 5), the same way
+    apply_item_group reaches rbac_user_groups.
+
+    The profile is looked up in the CALLER's own option list, not in the whole
+    derivation, so the write side and the read side agree: a profile this login could
+    not have been shown is not a profile they may hand a kit to.
+    """
+    from app.platform.rbac.profiles import profile_options
+
+    bom = await db.get(Bom, data.bom_id)
+    if bom is None:
+        raise ValidationError("BOM not found")
+    check_validity_window(data)
+    profile = next((p for p in await profile_options(db, user)
+                    if p["key"] == data.profile_key), None)
+    if profile is None:
+        raise ValidationError("Job profile not found")
+
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.bom_code, row.bom_name = bom.code, bom.name
+    row.profile_job, row.profile_name = profile["job"], profile["name"]
+    row.project_id = profile["project_id"] or None
+    row.project_name = profile["project_name"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1543,10 +1652,24 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="boms", name="BOM", model=Bom, schema=BomIn,
               manage_perm=perms.MASTER_BOM_MANAGE, serialize=bom_out,
               search_cols=("name", "code"), apply=apply_bom,
-              filters=("project_id",)),
+              filters=("project_id",),
+              usage=(("BOM lines", "mst_bom_items", "bom_id"),
+                     ("Job profiles", "mst_bom_groups", "bom_id"))),
 
     MasterDef(path="bom-items", name="BOM line", model=BomItem, schema=BomItemIn,
               manage_perm=perms.MASTER_BOM_MANAGE, serialize=bom_item_out,
               search_cols=("item_name", "item_code"), order_col="line_no",
               apply=apply_bom_item, filters=("bom_id", "item_id")),
+
+    # Which job profile gets which BOM. Sits under BOM on the same permission: a kit
+    # and who may draw it are one decision, made by one person. Scoped on every read
+    # and every write — this master names an RBAC profile, so it must not let one
+    # project's admin see or touch another project's assignment.
+    MasterDef(path="bom-groups", name="BOM group", model=BomGroup,
+              schema=BomGroupIn, manage_perm=perms.MASTER_BOM_MANAGE,
+              serialize=bom_group_out, order_col="profile_name",
+              search_cols=("profile_name", "bom_name", "bom_code"),
+              apply=apply_bom_group, apply_needs_user=True,
+              scope_to_user=scope_bom_groups, scope_always=True,
+              filters=("bom_id", "profile_key", "project_id")),
 ]

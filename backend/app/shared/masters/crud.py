@@ -66,6 +66,17 @@ class MasterDef:
     # the request asks for it with ?mine=true. Declared data rather than a branch in
     # the handler, because only the item master has anything to narrow by.
     scope_to_user: Callable | None = None
+    # Applies `scope_to_user` on EVERY read, not only when ?mine=true asks for it.
+    # Opt-in narrowing is a UX convenience — a requester picking from a dropdown —
+    # and a caller who omits the flag simply sees more. That is the wrong shape for a
+    # master whose rows belong to a project: dropping the parameter would be the
+    # whole bypass, and hiding a button is not security (rule 6).
+    scope_always: bool = False
+    # Whether `apply` takes the calling user as a fourth argument. Declared rather
+    # than sniffed, and off by default, so the other twenty-odd apply hooks keep
+    # their three-argument signature. Needed by masters that must check the caller
+    # MAY point at what they are pointing at, not merely that it exists.
+    apply_needs_user: bool = False
     # Optional guard for masters whose active rows form an ordered structure. Item
     # packaging, for example, may remove only its highest level.
     before_deactivate: Callable | None = None
@@ -101,12 +112,36 @@ async def _write(db: AsyncSession, defn: MasterDef, commit: bool = False) -> Non
         raise
 
 
-async def _apply_fields(db: AsyncSession, defn: MasterDef, row, data: BaseModel) -> None:
+async def _apply_fields(db: AsyncSession, defn: MasterDef, row, data: BaseModel,
+                        user=None) -> None:
     if defn.apply is not None:
-        await defn.apply(db, row, data)
+        if defn.apply_needs_user:
+            await defn.apply(db, row, data, user)
+        else:
+            await defn.apply(db, row, data)
         return
     for key, value in data.model_dump().items():
         setattr(row, key, value)
+
+
+async def _require_in_scope(db: AsyncSession, defn: MasterDef, row_id: int,
+                            user) -> None:
+    """Refuse a write to a row this caller's list would never have shown them.
+
+    Narrowing the list alone is only half a boundary: the ids are sequential, so a
+    login that cannot SEE another project's row could still PUT or DELETE it by
+    guessing the number. Re-runs the master's own narrowing against this one id, so
+    read and write can never disagree about who owns what.
+
+    Answers "not found" rather than "forbidden" on purpose — a row outside the
+    caller's scope should not be confirmed to exist.
+    """
+    if not (defn.scope_always and defn.scope_to_user is not None):
+        return
+    stmt = await defn.scope_to_user(
+        db, user, select(defn.model.id).where(defn.model.id == row_id))
+    if await db.scalar(stmt) is None:
+        raise NotFoundError(f"{defn.name} not found")
 
 
 def _search_clause(defn: MasterDef, search: str):
@@ -146,8 +181,10 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         if defn.default_active_only and not include_inactive:
             stmt = stmt.where(defn.model.is_active.is_(True))
         # Opt-in, so an admin managing the master still sees everything while a
-        # requester picking from it sees only what their groups allow.
-        if mine and defn.scope_to_user is not None:
+        # requester picking from it sees only what their groups allow — unless the
+        # master declares scope_always, where the narrowing IS the access rule and a
+        # request that leaves ?mine off must not see more.
+        if (mine or defn.scope_always) and defn.scope_to_user is not None:
             stmt = await defn.scope_to_user(db, user, stmt)
         # Declared filters are read off the query string rather than being separate
         # parameters, because each master declares a different set of them.
@@ -203,13 +240,18 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         user=Depends(require_permission(defn.manage_perm)),
     ):
         row = defn.model()
-        await _apply_fields(db, defn, row, data)
+        await _apply_fields(db, defn, row, data, user)
         db.add(row)
         await _write(db, defn)
+        # A new row has only ever been written, never read, so anything the ORM does
+        # not hold in memory — a server default, or a column_property like
+        # Bom.line_count — is still unloaded. Reading one inside serialize() would
+        # fire a lazy SELECT from async code and raise MissingGreenlet, so the load
+        # happens here, before either serialize call, where awaiting IO is allowed.
+        await db.refresh(row)
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.CREATE, actor=user, after=defn.serialize(row))
         await _write(db, defn, commit=True)
-        await db.refresh(row)
         return defn.serialize(row)
 
     @router.put(base + "/{row_id}", name=f"update_{defn.path}")
@@ -222,8 +264,9 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         row = await db.get(defn.model, row_id)
         if not row:
             raise NotFoundError(f"{defn.name} not found")
+        await _require_in_scope(db, defn, row_id, user)
         before = defn.serialize(row)
-        await _apply_fields(db, defn, row, data)
+        await _apply_fields(db, defn, row, data, user)
         await _write(db, defn)
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.UPDATE, actor=user,
@@ -243,6 +286,7 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         row = await db.get(defn.model, row_id)
         if not row:
             raise NotFoundError(f"{defn.name} not found")
+        await _require_in_scope(db, defn, row_id, user)
         if not hasattr(row, "is_active"):
             raise ValidationError(f"{defn.name} cannot be deactivated")
         if defn.before_deactivate is not None:

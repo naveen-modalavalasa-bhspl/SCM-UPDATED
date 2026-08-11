@@ -15,6 +15,7 @@ from app.modules.warehouse.enums import (
     DispatchEventType, DispatchType, InspectionResult, InspectionType, IssueDirection,
     IssueType, PickStrategy, ReceiptType,
 )
+from app.shared.models.warehouse import STORAGE_TYPES
 
 ORM = ConfigDict(from_attributes=True)
 
@@ -79,8 +80,8 @@ class BinRead(_Read):
     bin_type: str | None = None
     storage_type_id: int | None = None
     barcode: str | None = None
-    floor_level: str | None = None
-    shelf_level: str | None = None
+    floor_level: int | None = None
+    shelf_level: int | None = None
     # Derived when the tree is built, not stored — see service.bin_tree.
     path: str | None = None
     level: int | None = None
@@ -120,9 +121,19 @@ class BinWrite(BaseModel):
     max_temperature_celsius: Decimal | None = None
     storage_type_id: int | None = None
     barcode: str | None = None
-    floor_level: str | None = None
-    shelf_level: str | None = None
+    floor_level: int | None = None
+    shelf_level: int | None = None
     is_active: bool = True
+
+    @field_validator("bin_type")
+    @classmethod
+    def known_storage_type(cls, value: str) -> str:
+        value = (value or "").upper()
+        if value not in STORAGE_TYPES:
+            raise ValueError(
+                f"{value or 'blank'} is not a storage type. "
+                f"Use one of: {', '.join(STORAGE_TYPES)}")
+        return value
 
     @field_validator(
         "name", "description", "barcode", "floor_level", "shelf_level",
@@ -146,8 +157,8 @@ class LocationRead(_Read):
     name: str | None = None
     description: str | None = None
     barcode: str | None = None
-    floor_level: str | None = None
-    shelf_level: str | None = None
+    floor_level: int | None = None
+    shelf_level: int | None = None
     capacity_weight: Decimal | None = None
     capacity_volume: Decimal | None = None
     max_weight_capacity: Decimal | None = None
@@ -821,6 +832,9 @@ class IssueDetail(IssueRead):
     # eleven of them hold `issue.issue` and a permission-gated button appeared for
     # all eleven on a document only one of them could act on.
     can_approve: bool = False
+    # False until the indent raiser has confirmed this issue's quantities in My
+    # Deliveries. The sending store must not be able to certify its own delivery.
+    can_acknowledge: bool = False
 
 
 # ---------------------------------------------------------------------------

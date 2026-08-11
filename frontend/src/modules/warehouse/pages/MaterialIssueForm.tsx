@@ -574,9 +574,17 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 <Button onClick={() => setConfirming("post")}>Issue from stock</Button>
               </Can>
             )}
+            {/* Only once the raiser has confirmed what reached them. Until then the
+                store that shipped the goods would be signing for its own delivery. */}
             {editing && ["ISSUED", "DISPATCHED"].includes(doc?.status ?? "") && (
               <Can do="issue.view">
-                <Button onClick={() => setConfirming("ack")}>Acknowledge</Button>
+                {doc?.can_acknowledge ? (
+                  <Button onClick={() => setConfirming("ack")}>Acknowledge</Button>
+                ) : (
+                  <Button disabled title="Waiting for the requester to confirm this delivery in My deliveries">
+                    Acknowledge
+                  </Button>
+                )}
               </Can>
             )}
             {editing && doc && !["CANCELLED", "ACKNOWLEDGED"].includes(doc.status) && (

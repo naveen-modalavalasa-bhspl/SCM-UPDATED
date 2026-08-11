@@ -347,8 +347,10 @@ export function ConsolidationItemPage() {
                         type="number"
                         min={0}
                         max={resolved.ceiling}
-                        step="any"
-                        inputMode="decimal"
+                        // The unit's own step. A countable item cannot be typed as
+                        // 5.7 here any more than it can be split into 5.7 below.
+                        step={item.uom_decimals === 0 ? 1 : "any"}
+                        inputMode={item.uom_decimals === 0 ? "numeric" : "decimal"}
                         aria-label={`Approved quantity for ${name}`}
                         placeholder={formatQty(resolved.ceiling)}
                         value={decision?.approved ?? ""}

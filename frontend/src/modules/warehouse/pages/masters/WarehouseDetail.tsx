@@ -20,21 +20,21 @@ import { usePointLabel } from "../../usePointLabel";
  * where the mismatched `path` values in the data came from.
  */
 
+// Exactly the values `whs_warehouse_locations.storage_type` accepts (backend
+// `shared/models/warehouse.STORAGE_TYPES`). Offering a type the column rejects — ZONE,
+// AISLE, ROOM, STAGING, QUARANTINE, DAMAGE all did — turns a filled-in form into a 500.
 const BIN_TYPES = [
-  { value: "ZONE", label: "Zone" },
   { value: "BLOCK", label: "Block" },
   { value: "FLOOR", label: "Floor" },
-  { value: "AISLE", label: "Lane / aisle" },
-  { value: "ROOM", label: "Room" },
+  { value: "LANE", label: "Lane / aisle" },
   { value: "RACK", label: "Rack" },
   { value: "SHELF", label: "Shelf" },
   { value: "BIN", label: "Storage bin" },
+  { value: "LOT", label: "Lot" },
+  { value: "PALLET", label: "Pallet" },
   { value: "COLD_ROOM", label: "Cold store room" },
   { value: "REFRIGERATOR", label: "Refrigerator" },
   { value: "COLD_STORAGE_BIN", label: "Cold storage bin" },
-  { value: "STAGING", label: "Staging" },
-  { value: "QUARANTINE", label: "Quarantine" },
-  { value: "DAMAGE", label: "Damage" },
 ];
 
 const TABS = [
@@ -45,9 +45,9 @@ const TABS = [
 const defaultChildType = (parent: Bin | null) => {
   const type = (parent?.bin_type ?? "").toUpperCase();
   if (!parent) return "BLOCK";
-  if (["BLOCK", "ZONE"].includes(type)) return "FLOOR";
-  if (type === "FLOOR") return "AISLE";
-  if (["AISLE", "ROOM"].includes(type)) return "RACK";
+  if (type === "BLOCK") return "FLOOR";
+  if (type === "FLOOR") return "LANE";
+  if (["LANE", "COLD_ROOM"].includes(type)) return "RACK";
   if (type === "RACK") return "SHELF";
   return "BIN";
 };
@@ -57,8 +57,8 @@ const cleanDraft = (draft: BinWrite): BinWrite => ({
   name: draft.name?.trim() || null,
   description: draft.description?.trim() || null,
   barcode: draft.barcode?.trim() || null,
-  floor_level: draft.floor_level?.toString().trim() || null,
-  shelf_level: draft.shelf_level?.toString().trim() || null,
+  floor_level: draft.floor_level ?? null,
+  shelf_level: draft.shelf_level ?? null,
 });
 
 const coldDefaultsFrom = (parent: Bin | null) => ({
@@ -152,8 +152,8 @@ export default function WarehouseDetail() {
       bin_type: defaultChildType(parent),
       capacity_qty: null,
       barcode: "",
-      floor_level: "",
-      shelf_level: "",
+      floor_level: null,
+      shelf_level: null,
       capacity_volume: null,
       max_weight_capacity: null,
       height_cm: null,
@@ -177,8 +177,8 @@ export default function WarehouseDetail() {
       capacity_qty: bin.capacity_qty ?? null,
       storage_type_id: bin.storage_type_id ?? null,
       barcode: bin.barcode ?? "",
-      floor_level: bin.floor_level ?? "",
-      shelf_level: bin.shelf_level ?? "",
+      floor_level: bin.floor_level ?? null,
+      shelf_level: bin.shelf_level ?? null,
       capacity_volume: bin.capacity_volume ?? null,
       max_weight_capacity: bin.max_weight_capacity ?? null,
       height_cm: bin.height_cm ?? null,
@@ -351,8 +351,12 @@ export default function WarehouseDetail() {
                   <>
                     <Field label="Floor level number">
                       <Input
+                        type="number"
                         value={draft.floor_level ?? ""}
-                        onChange={(e) => setDraft({ ...draft, floor_level: e.target.value })}
+                        onChange={(e) => setDraft({
+                          ...draft,
+                          floor_level: e.target.value === "" ? null : Number(e.target.value),
+                        })}
                       />
                     </Field>
                     <Field label="Height (cm)">
@@ -367,7 +371,7 @@ export default function WarehouseDetail() {
                     </Field>
                   </>
                 )}
-                {draft.bin_type === "AISLE" && (
+                {draft.bin_type === "LANE" && (
                   <Field label="Aisle width (metres)">
                     <Input
                       type="number"
@@ -406,8 +410,12 @@ export default function WarehouseDetail() {
                 {draft.bin_type === "SHELF" && (
                   <Field label="Shelf level number">
                     <Input
+                      type="number"
                       value={draft.shelf_level ?? ""}
-                      onChange={(e) => setDraft({ ...draft, shelf_level: e.target.value })}
+                      onChange={(e) => setDraft({
+                        ...draft,
+                        shelf_level: e.target.value === "" ? null : Number(e.target.value),
+                      })}
                     />
                   </Field>
                 )}

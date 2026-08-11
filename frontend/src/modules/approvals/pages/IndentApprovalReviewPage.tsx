@@ -167,10 +167,17 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                 the block's left and right edges, so nothing drifts out from under
                 the field. The unit sits inside the field rather than beside it —
                 hung outside, it pushed the box left of the header above it. */}
-            <div className="ml-auto w-32">
-              <div className="relative">
-                <input type="text" inputMode="decimal" autoComplete="off" aria-label={`Approved quantity for ${line.item_name ?? line.id}`} aria-invalid={Boolean(lineError)} aria-describedby={`qty-help-${line.id}`} value={raw} onChange={(event) => setQuantity(line, event.target.value)} className={`h-10 w-full rounded-lg border bg-content1 py-2 pl-3 pr-10 text-right tabular-nums text-ink outline-none transition focus:ring-2 ${lineError ? "border-danger bg-danger/5 focus:ring-danger/30" : "border-line focus:border-brand focus:ring-brand/25"}`} />
-                <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted">{line.uom_code}</span>
+            <div className="ml-auto w-36">
+              {/* The unit is a SIBLING of the input, not an overlay on top of it.
+                  Absolutely positioned, it sat over the field's own text: the number
+                  is right-aligned and grew straight under a unit the padding was not
+                  wide enough to clear, so typing into "UOM-BOX" was unreadable. As a
+                  flex row the input takes the space that is left and the two can
+                  never collide, whatever the unit is called. The border and focus
+                  ring move to the wrapper so it still reads as one control. */}
+              <div className={`flex h-10 items-center rounded-lg border bg-content1 pr-3 transition focus-within:ring-2 ${lineError ? "border-danger bg-danger/5 focus-within:ring-danger/30" : "border-line focus-within:border-brand focus-within:ring-brand/25"}`}>
+                <input type="text" inputMode="decimal" autoComplete="off" aria-label={`Approved quantity for ${line.item_name ?? line.id}`} aria-invalid={Boolean(lineError)} aria-describedby={`qty-help-${line.id}`} value={raw} onChange={(event) => setQuantity(line, event.target.value)} className="h-full min-w-0 flex-1 rounded-lg bg-transparent px-3 text-right tabular-nums text-ink outline-none" />
+                <span className="shrink-0 whitespace-nowrap text-xs text-muted">{line.uom_code}</span>
               </div>
               {/* The range is on screen before anything goes wrong, and repeated inside
                   the error when it does — the approver never has to work out the cap. */}

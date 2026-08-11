@@ -395,6 +395,12 @@ export interface MasterBom {
   project_name?: string | null;
   description?: string | null;
   total_items: number;
+  /** Optional validity window, both ends independent. Blank means no bound that
+   *  side, so a BOM with neither date is available all the time. */
+  effective_from?: string | null;
+  effective_to?: string | null;
+  /** Switched on AND inside its window — what a consumer asks before offering it. */
+  is_effective?: boolean;
   is_active: boolean;
 }
 
@@ -410,6 +416,38 @@ export interface MasterBomItem {
   uom_code?: string | null;
   quantity: number;
   remarks?: string | null;
+}
+
+/** One BOM handed to one job profile — "who gets this kit". */
+export interface MasterBomGroup {
+  id: number;
+  bom_id: number;
+  bom_code?: string | null;
+  bom_name?: string | null;
+  /** RBAC's derived profile key, e.g. "4:DEO". A job profile has no table. */
+  profile_key: string;
+  profile_job?: string | null;
+  profile_name?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
+  remarks?: string | null;
+  /** Optional validity window — blank ends mean the pairing stands all the time. */
+  effective_from?: string | null;
+  effective_to?: string | null;
+  is_effective?: boolean;
+  is_active: boolean;
+}
+
+/** A job profile as the BOM-group screen needs it: named, counted, nothing else. */
+export interface JobProfileOption {
+  key: string;
+  job: string;
+  name: string;
+  project_id: number;
+  project_name: string;
+  position_count: number;
+  holder_count: number;
+  configured: boolean;
 }
 
 /** Keyed by item_id, so it is saved with PUT and never created separately. */

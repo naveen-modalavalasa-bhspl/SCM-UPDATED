@@ -48,6 +48,38 @@ router.include_router(_hcm)
 
 
 # --------------------------------------------------------------------------- #
+#  Job profiles — the rung a BOM group is handed to
+# --------------------------------------------------------------------------- #
+_profiles = APIRouter(tags=["masters"])
+
+
+@_profiles.get("/api/bom-groups/job-profiles")
+async def bom_group_job_profiles(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.MASTER_BOM_MANAGE)),
+):
+    """The job profiles a BOM can be given to, named and grouped by project.
+
+    Gated on the BOM permission rather than on ADMIN_ROLES_MANAGE, which the RBAC
+    screen's own listing uses: naming a profile is not editing one, and a master-data
+    maintainer must be able to fill this dropdown without holding the keys to RBAC.
+
+    `user` is passed on, so the dropdown is narrowed to the caller's scope rung — it
+    offers exactly the profiles `apply_bom_group` will accept a write for, and a
+    district admin is never shown another region's jobs.
+
+    Derived from the HCM mirror on every read (rule 10), so a profile that no longer
+    exists after a cutover simply stops being offered.
+    """
+    from app.platform.rbac.profiles import profile_options
+
+    return {"items": await profile_options(db, user)}
+
+
+router.include_router(_profiles)
+
+
+# --------------------------------------------------------------------------- #
 #  UOM suggestions — the standard units for a measurement class
 # --------------------------------------------------------------------------- #
 _uom = APIRouter(tags=["masters"])

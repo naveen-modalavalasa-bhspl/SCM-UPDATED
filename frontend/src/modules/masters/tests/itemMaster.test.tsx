@@ -78,11 +78,11 @@ describe("what a category insists on", () => {
     const tags = [tag({}), tag({ id: 2, tag_code: "COLOUR", tag_name: "Colour",
                                  tag_type: "ATTRIBUTE", is_required: false })];
     expect(missingRequiredTags(tags, {}).map((t) => t.tag_name)).toEqual(["Voltage"]);
-    expect(missingRequiredTags(tags, { VOLTAGE: "240" })).toEqual([]);
+    expect(missingRequiredTags(tags, { "SPEC:VOLTAGE": "240" })).toEqual([]);
   });
 
   it("treats whitespace as an unanswered field", () => {
-    expect(missingRequiredTags([tag({})], { VOLTAGE: "  " })).toHaveLength(1);
+    expect(missingRequiredTags([tag({})], { "SPEC:VOLTAGE": "  " })).toHaveLength(1);
   });
 
   it("ignores a required field that has been deactivated", () => {
@@ -93,9 +93,9 @@ describe("what a category insists on", () => {
     const feature = tag({
       tag_type: "FEATURE", tag_code: "FRAGILE", tag_name: "Fragile",
     });
-    expect(missingRequiredTags([feature], { FRAGILE: "" })).toEqual([feature]);
-    expect(missingRequiredTags([feature], { FRAGILE: "false" })).toEqual([feature]);
-    expect(missingRequiredTags([feature], { FRAGILE: "true" })).toEqual([]);
+    expect(missingRequiredTags([feature], { "FEATURE:FRAGILE": "" })).toEqual([feature]);
+    expect(missingRequiredTags([feature], { "FEATURE:FRAGILE": "false" })).toEqual([feature]);
+    expect(missingRequiredTags([feature], { "FEATURE:FRAGILE": "true" })).toEqual([]);
   });
 });
 

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { AlertTriangle, ChevronDown, ChevronRight, Plus, Send, Trash2 } from "lucide-react";
 import { Button, Card, Input } from "@/shared/components";
+import { splitQuantity } from "@/shared/quantity";
 import { createAllocationsBatch, getBatchDemand } from "../api";
 import type {
   AllocationDecision, BatchDemandItem, BatchDemandLine,
@@ -48,42 +49,38 @@ function splitPreview(
   lines: BatchDemandLine[],
   giving: number,
   fixed: Map<number, number> = new Map(),
+  decimals = 3,
 ): Map<number, number> {
   const out = new Map<number, number>(lines.map((l) => [l.indent_item_id, 0]));
   const open = lines.filter((l) => !fixed.has(l.indent_item_id));
+  // The unit's step. Pro-rata used to round every share to 3 dp whatever the unit was,
+  // so 20 gloves across lines asking 10 and 7 proposed 5.7 gloves — a quantity nobody
+  // can pick off a shelf. `decimals` is 0 for anything counted in whole numbers.
+  const step = (value: number) => Math.floor(value * 10 ** decimals) / 10 ** decimals;
 
   let left = Math.max(0, giving);
   for (const [lineId, qty] of fixed) {
     out.set(lineId, qty);
     left -= qty;
   }
-  left = Math.max(0, left);
+  left = step(Math.max(0, left));
 
   for (const line of open.filter((l) => l.priority === "URGENT")) {
-    const take = Math.min(line.pending_qty, left);
+    const take = Math.min(step(line.pending_qty), left);
     out.set(line.indent_item_id, take);
-    left -= take;
+    left = round3(left - take);
   }
 
   const rest = open.filter((l) => l.priority !== "URGENT");
   const wanted = rest.reduce((sum, l) => sum + l.pending_qty, 0);
   if (left > 0 && wanted > 0) {
-    for (const line of rest) {
-      const share = round3(left * line.pending_qty / wanted);
-      out.set(line.indent_item_id, Math.min(share, line.pending_qty));
-    }
-    // Rounding each share to 3 dp loses a crumb — asking for 9 handed out 8.997, which
-    // reads as a bug even though nothing was lost. It goes to whoever has waited
-    // longest, exactly as `split_demand` does on the backend.
-    let crumb = round3(left - rest.reduce(
-      (sum, l) => sum + (out.get(l.indent_item_id) ?? 0), 0));
-    for (const line of [...rest].sort(
-      (a, c) => (a.raised_at ?? "").localeCompare(c.raised_at ?? ""))) {
-      if (crumb <= 0) break;
-      const take = Math.min(line.pending_qty - (out.get(line.indent_item_id) ?? 0), crumb);
-      out.set(line.indent_item_id, (out.get(line.indent_item_id) ?? 0) + take);
-      crumb = round3(crumb - take);
-    }
+    // Largest remainder in whole steps of the unit, capped at what each line still
+    // needs — the same rule `share_out` applies on the backend, so the proposal shown
+    // here is exactly what gets reserved.
+    const shares = splitQuantity(
+      left, rest.map((l) => l.pending_qty), rest.map((l) => l.pending_qty), decimals,
+    );
+    rest.forEach((line, index) => out.set(line.indent_item_id, shares[index]));
   }
   return out;
 }
@@ -164,7 +161,7 @@ function ItemRow({ item, plan, onChange }: {
 
   const giving = planTotal(plan);
   const shares = useMemo(
-    () => splitPreview(item.demand, giving, fixedShares(item, plan)),
+    () => splitPreview(item.demand, giving, fixedShares(item, plan), item.uom_decimals),
     [item, plan, giving],
   );
   const handed = item.demand.reduce(
@@ -471,7 +468,8 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
     const indentOf = new Map<number, number>();
     for (const item of items) {
       const plan = planFor(item);
-      const shares = splitPreview(item.demand, planTotal(plan), fixedShares(item, plan));
+      const shares = splitPreview(
+        item.demand, planTotal(plan), fixedShares(item, plan), item.uom_decimals);
       for (const line of item.demand) indentOf.set(line.indent_item_id, line.indent_id);
       for (const decision of buildDecisions(item, plan, shares)) {
         const indentId = indentOf.get(decision.indent_item_id)!;

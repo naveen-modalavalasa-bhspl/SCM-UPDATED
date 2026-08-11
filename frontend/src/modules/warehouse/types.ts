@@ -105,8 +105,8 @@ export interface Bin {
   bin_type?: string | null;
   storage_type_id?: number | null;
   barcode?: string | null;
-  floor_level?: string | null;
-  shelf_level?: string | null;
+  floor_level?: number | null;
+  shelf_level?: number | null;
   /** Ancestry, e.g. `block A/flr-1/rack-1`. Derived by the tree endpoint. */
   path?: string | null;
   /** Depth in the tree, 1 at the root. Derived by the tree endpoint. */
@@ -139,8 +139,8 @@ export interface BinWrite {
   capacity_qty?: number | null;
   storage_type_id?: number | null;
   barcode?: string | null;
-  floor_level?: string | null;
-  shelf_level?: string | null;
+  floor_level?: number | null;
+  shelf_level?: number | null;
   capacity_volume?: number | null;
   max_weight_capacity?: number | null;
   height_cm?: number | null;
@@ -164,8 +164,8 @@ export interface WarehouseLocation {
   name?: string | null;
   description?: string | null;
   barcode?: string | null;
-  floor_level?: string | null;
-  shelf_level?: string | null;
+  floor_level?: number | null;
+  shelf_level?: number | null;
   capacity_weight?: number | null;
   capacity_volume?: number | null;
   max_weight_capacity?: number | null;
@@ -597,6 +597,12 @@ export interface Issue {
    * one named in the approval chain may act. Gate the Approve button on this.
    */
   can_approve?: boolean;
+  /**
+   * False until the indent raiser has confirmed this issue's quantities in My
+   * deliveries. Per ISSUE, not per indent: a 10-unit indent served by a 4-unit issue
+   * unlocks once those 4 are confirmed. Gate the Acknowledge button on this.
+   */
+  can_acknowledge?: boolean;
 }
 
 /**
