@@ -9,7 +9,7 @@ from decimal import Decimal
 import re
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -1329,6 +1329,41 @@ def bom_out(b: Bom) -> dict:
             "is_active": b.is_active}
 
 
+async def scope_boms(db: AsyncSession, user, stmt):
+    """Only the kits tagged to the hat this session is wearing.
+
+    Applied on ?mine=true, not always: the BOM master screen has to keep showing every
+    kit or an admin could not maintain the ones they do not personally draw. The indent
+    picker is the caller that asks to be narrowed.
+
+    The ACTIVE position's profile, not every post the person holds — `profile_keys_for
+    _user` is already written that way, and a kit handed to one job must not follow
+    somebody into another. Switching hats switches the kits.
+
+    A profile nobody has paired a BOM with sees NO BOMs, not all of them. The opposite
+    of the item master's unmapped-general-name rule on purpose: an untagged general
+    name would block every item create, whereas an untagged profile can still raise an
+    indent by picking items directly, so strict here costs nothing.
+    """
+    from app.platform.rbac.profiles import profile_keys_for_user
+
+    keys = await profile_keys_for_user(db, user)
+    if not keys:
+        return stmt.where(false())
+
+    today = date.today()
+    paired = (
+        select(BomGroup.bom_id)
+        .where(BomGroup.profile_key.in_(keys),
+               BomGroup.is_active.is_(True),
+               or_(BomGroup.effective_from.is_(None),
+                   BomGroup.effective_from <= today),
+               or_(BomGroup.effective_to.is_(None),
+                   BomGroup.effective_to >= today))
+    )
+    return stmt.where(Bom.id.in_(paired))
+
+
 async def apply_bom(db: AsyncSession, row: Bom, data: BomIn) -> None:
     check_validity_window(data)
     project = await db.get(Project, data.project_id) if data.project_id else None
@@ -1649,10 +1684,13 @@ MASTERS: list[MasterDef] = [
               usage=((*USED_BY_ITEMS, "hsn_id"),)),
 
     # ---- bills of material ----
+    # `scope_to_user` without `scope_always`: the master screen keeps listing every
+    # kit so an admin can maintain them, and the indent picker asks to be narrowed to
+    # the caller's own job by passing ?mine=true.
     MasterDef(path="boms", name="BOM", model=Bom, schema=BomIn,
               manage_perm=perms.MASTER_BOM_MANAGE, serialize=bom_out,
               search_cols=("name", "code"), apply=apply_bom,
-              filters=("project_id",),
+              filters=("project_id",), scope_to_user=scope_boms,
               usage=(("BOM lines", "mst_bom_items", "bom_id"),
                      ("Job profiles", "mst_bom_groups", "bom_id"))),
 

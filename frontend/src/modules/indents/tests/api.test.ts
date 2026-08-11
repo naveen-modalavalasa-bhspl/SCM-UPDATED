@@ -179,8 +179,10 @@ describe("indents api", () => {
     await masterApi.boms();
     await masterApi.bomItems(1);
 
+    // mine=true, or the picker offers every kit in the company and the BOM-group
+    // tagging means nothing.
     expect(apiMock.get).toHaveBeenNthCalledWith(1, "/api/boms", {
-      params: { size: 500 },
+      params: { mine: "true", size: 500 },
     });
     expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/bom-items", {
       params: { bom_id: 1, size: 500 },

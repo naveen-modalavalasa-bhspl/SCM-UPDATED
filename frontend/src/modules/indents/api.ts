@@ -284,7 +284,9 @@ export const masterApi = {
     allMasterRows<Option>("/api/items", { search }),
   facilities: () => api.get<{ items: Option[] }>("/api/facilities").then((r) => r.data.items),
   boms: () =>
-    allMasterRows<BomChoice>("/api/boms")
+    // mine=true: only the kits tagged to the hat this session is wearing. Without it
+    // the picker listed every BOM in the company and the tagging did nothing at all.
+    allMasterRows<BomChoice>("/api/boms", { mine: "true" })
       // is_effective is the switch AND the BOM's optional validity window, decided
       // by the server against its own clock. Undefined only where the row predates
       // the field, which is not a reason to hide a kit.
