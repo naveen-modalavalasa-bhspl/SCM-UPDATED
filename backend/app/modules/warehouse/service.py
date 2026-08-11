@@ -3435,17 +3435,23 @@ async def _raise_consignment_for_picking(
     # Serial-tracked lines have to name their serials, and only the ones this issue
     # actually put out; the packer validates against exactly that set.
     serials_by_key: dict[tuple[int, int], list[str]] = {}
+    serials_by_item: dict[int, list[str]] = {}
     for row in (await _issued_serial_index(db, issue)).values():
         serials_by_key.setdefault(
             (row.item_id, row.batch_id or m.NO_BATCH), []
         ).append(row.serial_number)
+        serials_by_item.setdefault(row.item_id, []).append(row.serial_number)
 
     lines: list[s.ConsignmentPackageItemWrite] = []
     for (item_id, batch_id), qty in _issue_qty_by_item_batch(issue).items():
         if qty <= ZERO:
             continue
         item = await db.get(Item, item_id)
-        picked = serials_by_key.get((item_id, batch_id), [])
+        picked = serials_by_key.get((item_id, batch_id))
+        if not picked and (not batch_id or batch_id == m.NO_BATCH):
+            picked = serials_by_item.get(item_id, [])
+        if picked is None:
+            picked = []
         if item is not None and item.is_serial_tracked and len(picked) != int(qty):
             return None       # serials incomplete — let the storekeeper pack by hand
         lines.append(s.ConsignmentPackageItemWrite(
@@ -7760,6 +7766,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         for item in (await db.execute(select(Item).where(Item.id.in_(item_ids)))).scalars().all()
     } if item_ids else {}
     serials_by_item_batch: dict[tuple[int, int], list[str]] = {}
+    serials_by_item: dict[int, list[str]] = {}
     serial_rows = (await db.execute(
         select(m.SerialNumber).where(
             m.SerialNumber.warehouse_id == issue.warehouse_id,
@@ -7773,6 +7780,15 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
             (serial.item_id, serial.batch_id or m.NO_BATCH),
             [],
         ).append(serial.serial_number)
+        serials_by_item.setdefault(serial.item_id, []).append(serial.serial_number)
+
+    def _get_line_serials(line) -> list[str]:
+        batch_key = line.batch_id or m.NO_BATCH
+        found = serials_by_item_batch.get((line.item_id, batch_key))
+        if not found and (not line.batch_id or line.batch_id == m.NO_BATCH):
+            found = serials_by_item.get(line.item_id, [])
+        return found or []
+
     return {
         "issue_id": issue.id,
         "issue_no": issue.issue_no,
@@ -7793,10 +7809,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                     bool(item_by_id[line.item_id].is_serial_tracked)
                     if line.item_id in item_by_id else False
                 ),
-                "serial_numbers": serials_by_item_batch.get(
-                    (line.item_id, line.batch_id or m.NO_BATCH),
-                    [],
-                ),
+                "serial_numbers": _get_line_serials(line),
                 "quantity": _d(line.issued_qty),
                 "rate": line.rate,
                 "remarks": line.remarks,
