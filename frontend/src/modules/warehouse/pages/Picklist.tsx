@@ -99,16 +99,18 @@ export default function Picklist() {
       deletePermission={DRAFT_DELETE_PERMISSION.picking}
       deleteLabel="picklist"
       labelOf={(r) => r.pick_no ?? `Picklist ${r.id}`}
+      kpiCounts={[
+        { label: "Released", statuses: ["RELEASED"], tone: "text-warn" },
+        { label: "In progress", statuses: ["IN_PROGRESS"] },
+        { label: "Completed", statuses: ["COMPLETED"] },
+      ]}
       kpis={(rows) => [
-        { label: "Released", value: rows.filter((r) => r.status === "RELEASED").length, tone: "text-warn" },
-        { label: "In progress", value: rows.filter((r) => r.status === "IN_PROGRESS").length },
         {
           label: "Lines to pick",
           value: rows
             .filter((r) => !["COMPLETED", "CANCELLED"].includes(r.status))
             .reduce((s, r) => s + (r.total_lines - r.picked_lines), 0),
         },
-        { label: "Completed", value: rows.filter((r) => r.status === "COMPLETED").length },
       ]}
       renderCard={(r) => (
         <div className="space-y-1">

@@ -118,9 +118,12 @@ export default function Putaway() {
       deletePermission={DRAFT_DELETE_PERMISSION.putaway}
       deleteLabel="put-away task"
       labelOf={(r) => r.putaway_no ?? `Task ${r.id}`}
+      kpiCounts={[
+        { label: "Pending", statuses: ["pending"], tone: "text-warn" },
+        { label: "In progress", statuses: ["in_progress"] },
+        { label: "Skipped", statuses: ["skipped"], tone: "text-bad" },
+      ]}
       kpis={(rows) => [
-        { label: "Pending", value: rows.filter((r) => r.status === "pending").length, tone: "text-warn" },
-        { label: "In progress", value: rows.filter((r) => r.status === "in_progress").length },
         {
           label: "Qty to place",
           value: fmtQty(
@@ -128,7 +131,6 @@ export default function Putaway() {
               .reduce((s, r) => s + Number(r.qty ?? 0), 0),
           ),
         },
-        { label: "Skipped", value: rows.filter((r) => r.status === "skipped").length, tone: "text-bad" },
       ]}
       renderCard={(r) => (
         <div className="space-y-1">

@@ -191,6 +191,27 @@ def _apply_warehouse_scope(stmt, column, warehouse_ids: set[int] | None):
     return stmt if warehouse_ids is None else stmt.where(column.in_(warehouse_ids))
 
 
+def costed_value_sum(qty_col, rate_col, price_col):
+    """The one expression for what stock on hand is worth.
+
+    A balance row that was never costed carries `valuation_rate` 0 — a GRN raised
+    against an indent has no price to quote. Zero is not "worthless", it is "not
+    known here", so the item's last costed price stands in. That is what
+    get_stock_valuation() has always done in Python; the two SQL callers summed
+    `total_qty * valuation_rate` with no fallback and so reported a SMALLER number
+    than Inventory > Overview for the very same stock. One expression, three
+    screens, so they cannot drift apart again.
+
+    Takes columns rather than a model so it works over a subquery as well as over
+    Stock itself. `price_col` must be reached by an OUTER join — an inner join here
+    would silently drop balance rows whose item is missing and change the count.
+    """
+    return func.coalesce(func.sum(qty_col * case(
+        (or_(rate_col.is_(None), rate_col == 0), func.coalesce(price_col, 0)),
+        else_=rate_col,
+    )), 0)
+
+
 # ---------------- stock: the single mutation point ----------------
 
 async def default_warehouse_for_facility(db: AsyncSession, facility_id: int) -> Warehouse:
@@ -583,7 +604,11 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
         select(
             func.count(rows.c.id),
             func.count(func.distinct(rows.c.item_id)),
-            func.coalesce(func.sum(rows.c.total_qty * rows.c.valuation_rate), 0),
+            # Same formula as Inventory > Overview and the warehouse dashboard.
+            # The join is OUTER so a balance row whose item is missing still counts
+            # in the two counts either side of it.
+            costed_value_sum(rows.c.total_qty, rows.c.valuation_rate,
+                             Item.purchase_price),
             # MySQL has no FILTER clause, so the window is a CASE inside the SUM.
             func.coalesce(func.sum(case((and_(
                 rows.c.expiry_date.isnot(None),
@@ -591,6 +616,8 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
                 rows.c.expiry_date <= today_date + timedelta(days=30),
             ), 1), else_=0)), 0),
         )
+        .select_from(rows)
+        .outerjoin(Item, Item.id == rows.c.item_id)
     )).one()
 
     # "Below reorder" compares stk_balance against mst_items.reorder_level, which is

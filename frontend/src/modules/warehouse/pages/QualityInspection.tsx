@@ -93,14 +93,17 @@ export default function QualityInspection({
       deletePermission={DRAFT_DELETE_PERMISSION.inspection}
       deleteLabel="inspection"
       labelOf={(r) => r.inspection_no ?? `Inspection ${r.id}`}
+      kpiCounts={[
+        { label: "In progress", statuses: ["IN_PROGRESS"], tone: "text-warn" },
+        { label: "Completed", statuses: ["COMPLETED"] },
+      ]}
       kpis={(rows) => {
         const passed = rows.reduce((s, r) => s + r.passed_items, 0);
         const failed = rows.reduce((s, r) => s + r.failed_items, 0);
         return [
-          { label: "In progress", value: rows.filter((r) => r.status === "IN_PROGRESS").length, tone: "text-warn" },
-          { label: "Completed", value: rows.filter((r) => r.status === "COMPLETED").length },
           { label: "Failed lines", value: failed, tone: "text-bad" },
           {
+            ratio: true,
             // Over lines that have actually been judged, not over every line raised.
             // Against `total_items` an inspection with nothing failed and half its
             // lines still un-inspected read as a 50% pass rate, so the tile said

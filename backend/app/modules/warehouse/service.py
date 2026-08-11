@@ -7035,8 +7035,23 @@ async def dashboard(db: AsyncSession, warehouse_id: int | None = None, user=None
                                      ReturnStatus.PENDING_APPROVAL.value,
                                      ReturnStatus.APPROVED.value]))
 
-    value_stmt = select(func.coalesce(func.sum(Stock.total_qty * Stock.valuation_rate), 0)) \
-        if hasattr(Stock, "valuation_rate") else select(func.coalesce(func.sum(Stock.total_qty), 0))
+    # The same costed value Inventory > Overview and the stock balance tiles report:
+    # an uncosted row falls back to the item's last known price rather than counting
+    # as worthless. Summing total_qty * valuation_rate here made this tile disagree
+    # with Overview on the very same warehouse. The join is OUTER so a balance row
+    # whose item has gone still contributes its qty at zero rather than vanishing.
+    from app.shared.models.master import Item as _Item
+    from app.modules.inventory.service import costed_value_sum
+
+    if hasattr(Stock, "valuation_rate"):
+        value_stmt = (
+            select(costed_value_sum(Stock.total_qty, Stock.valuation_rate,
+                                    _Item.purchase_price))
+            .select_from(Stock)
+            .outerjoin(_Item, _Item.id == Stock.item_id)
+        )
+    else:
+        value_stmt = select(func.coalesce(func.sum(Stock.total_qty), 0))
     stock_value = _d(await db.scalar(scoped(value_stmt, Stock.warehouse_id)))
 
     # Utilisation is bins in use over active bins: capacity per item is not modelled,

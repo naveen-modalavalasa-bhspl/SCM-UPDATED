@@ -111,8 +111,10 @@ export default function GRN() {
       deletePermission={DRAFT_DELETE_PERMISSION.receipt}
       deleteLabel="GRN"
       labelOf={(r) => r.grn_no ?? `GRN ${r.id}`}
+      kpiCounts={[
+        { label: "Awaiting QC", statuses: ["PENDING_QC"], tone: "text-warn" },
+      ]}
       kpis={(rows) => [
-        { label: "Awaiting QC", value: rows.filter((r) => r.status === "PENDING_QC").length, tone: "text-warn" },
         { label: "Not posted", value: rows.filter((r) => !r.is_stock_posted && r.status !== "CANCELLED").length },
         {
           label: "Rejected qty",

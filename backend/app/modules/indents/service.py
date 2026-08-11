@@ -4817,6 +4817,57 @@ def _ensure_allocation_eligible(indent: Indent) -> None:
         )
 
 
+def _quantities_recorded(indent: Indent) -> bool:
+    """Did this indent's approval chain actually write quantities.
+
+    `approved_quantity` 0 is ambiguous. It means either "the approver cut this line to
+    nothing" or "no approval ever recorded a quantity here" — an indent approved
+    through the plain approve endpoint, or one raised before submit-time seeding
+    existed, carries 0 on every line having recorded nothing.
+
+    One quantity above zero anywhere on the indent settles it: this chain records
+    quantities, so a zero on a sibling line is a deliberate zero. Same test
+    `approvals.service._recorded_quantities` applies, kept in step with it on purpose.
+
+    Ladder-agnostic by construction: it asks whether numbers were written, never how
+    many rungs wrote them or which rung the document is on, so reconfiguring a ladder
+    cannot change the answer.
+    """
+    return any(Decimal(str(line.approved_quantity or 0)) > 0 for line in indent.items)
+
+
+def _owed_quantity(line, quantities_recorded: bool) -> Decimal:
+    """What a line is actually owed — the number every fulfilment screen must agree on.
+
+    With quantities recorded, `approved_quantity` stands as written, including zero.
+    Without, nothing was approved line by line and the request itself is the figure.
+
+    The old `approved_quantity or line.quantity` collapsed those two cases, and since
+    zero is falsy in Python a line an approver had cut to nothing reappeared in the
+    fulfilment queue asking for its full original quantity.
+    """
+    if quantities_recorded:
+        return Decimal(str(line.approved_quantity or 0))
+    return Decimal(str(line.quantity or 0))
+
+
+async def _recorded_indent_ids(db: AsyncSession, indent_ids) -> set[int]:
+    """`_quantities_recorded` for many indents at once.
+
+    Readers that hold one line per indent (the item-first demand view) cannot run the
+    any()-test in memory. One grouped query answers it for the whole page rather than
+    one query per indent.
+    """
+    if not indent_ids:
+        return set()
+    return set((await db.execute(
+        select(IndentItem.indent_id)
+        .where(IndentItem.indent_id.in_(indent_ids),
+               IndentItem.approved_quantity > 0)
+        .distinct()
+    )).scalars().all())
+
+
 async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> dict:
     """What the allocation screen needs: the indent lines, what is still owed on each,
     which stocking points hold it, and how much other indents are already waiting on.
@@ -4839,6 +4890,8 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
     #
     # The write path (`decide_allocation`) still calls `_ensure_allocation_eligible` —
     # that is the guard that matters, and no screen state can talk past it.
+    recorded = _quantities_recorded(indent)
+
     blocked_reason = None
     if indent.status not in _ALLOCATION_ELIGIBLE_STATUSES:
         blocked_reason = (
@@ -4846,7 +4899,7 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
             f"there is nothing to allocate."
         )
     elif indent.items and not any(
-        Decimal(str(line.approved_quantity or line.quantity or 0))
+        _owed_quantity(line, recorded)
         - Decimal(str(line.allocated_quantity or 0))
         - committed.get(line.id, Decimal("0")) > 0
         for line in indent.items
@@ -4873,9 +4926,10 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "uom_code": line.uom_code,
         # What is STILL owed, not what was originally approved. A line another rung has
         # already committed would otherwise be offered again in full, and the screen
-        # would happily promise the same goods twice.
+        # would happily promise the same goods twice. A line approved at zero is owed
+        # nothing and clamps to zero here.
         "requested_qty": float(max(
-            Decimal(str(line.approved_quantity or line.quantity or 0))
+            _owed_quantity(line, recorded)
             - Decimal(str(line.allocated_quantity or 0))
             - committed.get(line.id, Decimal("0")),
             Decimal("0"),
@@ -5300,11 +5354,17 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
     total_allocated = Decimal("0")
 
     await db.refresh(indent, attribute_names=["items"])
+    recorded = _quantities_recorded(indent)
     for item_line in indent.items:
-        requested = Decimal(str(item_line.approved_quantity or item_line.quantity or 0))
+        requested = _owed_quantity(item_line, recorded)
         allocated = allocated_by_line.get(item_line.id, Decimal("0"))
         item_line.allocated_quantity = allocated
-        if allocated >= requested and requested > 0:
+        if requested <= 0:
+            # Approved at zero. Nothing is owed, so the line is settled — calling it
+            # SHORT would put a line nobody approved back in front of the store as
+            # something still to find.
+            item_line.status = IndentItemStatus.ALLOCATED.value
+        elif allocated >= requested:
             item_line.status = IndentItemStatus.ALLOCATED.value
         elif indent.status != IndentStatus.AWAITING_ALLOCATION.value or allocated > 0:
             item_line.status = IndentItemStatus.SHORT.value
@@ -5313,7 +5373,12 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
         total_requested += requested
         total_allocated += allocated
 
-    if total_allocated <= 0:
+    if total_requested <= 0:
+        # Every line approved at zero: there is nothing to allocate and nothing to
+        # buy. Falling through to PENDING_PROCUREMENT would ask procurement to source
+        # nothing. Rejecting it is the approver's call, not this function's.
+        indent.status = IndentStatus.ALLOCATED.value
+    elif total_allocated <= 0:
         indent.status = IndentStatus.PENDING_PROCUREMENT.value
     elif total_requested > 0 and total_allocated >= total_requested:
         indent.status = IndentStatus.ALLOCATED.value
@@ -5344,6 +5409,12 @@ async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
         stmt = stmt.where(await _indent_visibility(db, user))
     rows = (await db.execute(stmt)).all()
 
+    # This view holds one line per indent, so the any()-test cannot run in memory.
+    # One grouped query says which of these indents had quantities approved onto
+    # them, so a line cut to zero is shown as zero instead of reverting to the full
+    # original request and putting goods nobody approved in front of the store.
+    recorded = await _recorded_indent_ids(db, {ind.id for ind, _ in rows})
+
     item = await db.get(Item, item_id)
     proposal = await allocations.propose(db, 0, [
         {"indent_item_id": 0, "item_id": item_id, "project_id": None}])
@@ -5362,6 +5433,10 @@ async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
         "available_total": float(stock["available_total"]),
         "warehouses": [{**w, "available_qty": float(w["available_qty"])}
                        for w in stock["warehouses"]],
+        # A line approved at zero is owed nothing, so it is not demand and is left
+        # out entirely rather than listed asking for 0 — the allocator splits what is
+        # on the shelf across this list, and a row nobody approved should not be
+        # competing for it.
         "demand": [{
             "indent_id": ind.id,
             "indent_no": ind.indent_no,
@@ -5371,9 +5446,12 @@ async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
             "project_name": ind.project_name,
             "priority": ind.priority,
             "required_date": ind.required_date.isoformat() if ind.required_date else None,
-            "requested_qty": float(line.approved_quantity or line.quantity or 0),
+            "requested_qty": float(owed),
             "raised_at": ind.created_at.isoformat() if ind.created_at else None,
-        } for ind, line in rows],
+        } for ind, line, owed in (
+            (ind, line, _owed_quantity(line, ind.id in recorded))
+            for ind, line in rows
+        ) if owed > 0],
     }
 
 

@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import {
   Button, Can, PageHeader, ResponsiveList, StatCard, type Column,
@@ -38,7 +38,13 @@ const POINT_LABEL: Record<string, string> = {
 
 /** How many rows the KPI strip scans. The tiles are aggregates over the filtered
  *  queue, and no warehouse list endpoint offers a summary route yet; 500 is the
- *  server's own MAX_PAGE_SIZE, so this asks for the most it will ever give. */
+ *  server's own MAX_PAGE_SIZE, so this asks for the most it will ever give.
+ *
+ *  Anything counted this way STOPS at 500. Past that the tile is an aggregate over a
+ *  sample, not over the queue, so `truncated` is passed to `kpis` and the value is
+ *  suffixed with "+" — a tile is allowed to be approximate, never allowed to look
+ *  exact while it isn't. Prefer `kpiCounts` for anything that is a status count:
+ *  those are answered by the server's own COUNT and stay exact at any depth. */
 const KPI_SCAN_SIZE = 500;
 
 export interface DocumentListProps<T> {
@@ -58,8 +64,33 @@ export interface DocumentListProps<T> {
   statuses?: { value: string; label: string }[];
   /** Extra server-side filters merged into the request. */
   extraParams?: Record<string, unknown>;
-  /** KPI tiles computed from the rows on screen. */
-  kpis?: (rows: T[]) => { label: string; value: ReactNode; tone?: string }[];
+  /** Tiles that are a straight count of documents in one or more statuses.
+   *
+   *  Answered by the server's own COUNT — one `size: 1` request per status, reading
+   *  `total` and never the rows — so these stay exact however deep the queue gets, and
+   *  are scoped by exactly the same filters and permissions as the list itself.
+   *  Statuses are disjoint, so summing across several is a true total.
+   *
+   *  Anything that is a count of documents belongs here rather than in `kpis`. */
+  kpiCounts?: { label: string; statuses: string[]; tone?: string }[];
+  /** Tiles that cannot be expressed as a status count — sums of quantity or value,
+   *  date arithmetic, flag combinations. Computed over the scanned rows.
+   *
+   *  `meta.truncated` says the scan hit KPI_SCAN_SIZE and the queue is deeper than
+   *  what was counted; `meta.total` is the true filtered count. Values are marked
+   *  "+" automatically when truncated, so a tile never reads as exact when it is a
+   *  sample. */
+  kpis?: (
+    rows: T[],
+    meta: { total: number; truncated: boolean },
+  ) => {
+    label: string;
+    value: ReactNode;
+    tone?: string;
+    /** Set on a proportion (a pass rate, an average). Truncation makes those a
+     *  sample rather than an undercount, so they are not marked "+". */
+    ratio?: boolean;
+  }[];
   onRowClick?: (row: T) => void;
   /** Route to push for "new"; omit to hide the button. */
   createTo?: string;
@@ -103,6 +134,7 @@ export function DocumentList<T>({
   searchPlaceholder = "Search…",
   statuses = [],
   extraParams,
+  kpiCounts,
   kpis,
   onRowClick,
   createTo,
@@ -166,16 +198,51 @@ export function DocumentList<T>({
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  // The tiles describe the queue, not the page, so they read the filtered set rather
-  // than the twenty rows on screen — the same mistake the stock screens made. Capped
-  // at the server's own page ceiling, and skipped entirely when a list has no tiles.
+  // Status counts come from the server's own COUNT: ask for one row in that status
+  // and read `total`. Exact at any queue depth, filtered and permission-scoped by the
+  // very endpoint the list uses, and it transfers a single row per status rather than
+  // five hundred. This is what the tiles should have been doing all along — the scan
+  // below stops at 500 and quietly under-counted every queue bigger than that.
+  const countKeys = (kpiCounts ?? []).flatMap((t) => t.statuses);
+  const countQueries = useQueries({
+    queries: countKeys.map((s) => ({
+      queryKey: [queryKey, "count", filters, s],
+      queryFn: () => fetch({ ...filters, status: s, page: 1, size: 1 }),
+    })),
+  });
+  const countByStatus = new Map(
+    countKeys.map((s, i) => [s, countQueries[i]?.data?.total]),
+  );
+
+  const countTiles = (kpiCounts ?? []).map((t) => {
+    // Undefined until every status behind this tile has answered — showing a partial
+    // sum would tick upward as the requests land and read as the queue moving.
+    const parts = t.statuses.map((s) => countByStatus.get(s));
+    const value = parts.some((n) => n === undefined)
+      ? "…"
+      : parts.reduce<number>((sum, n) => sum + (n ?? 0), 0);
+    return { label: t.label, value, tone: t.tone };
+  });
+
+  // Everything a status count cannot express — sums of quantity or value, date
+  // arithmetic — still reads rows, and still stops at the server's page ceiling.
   const { data: kpiPage } = useQuery({
     queryKey: [queryKey, "kpis", filters],
     queryFn: () => fetch({ ...filters, page: 1, size: KPI_SCAN_SIZE }),
     enabled: Boolean(kpis),
   });
 
-  const tiles = kpis?.(kpiPage?.items ?? []) ?? [];
+  const scanned = kpiPage?.items ?? [];
+  const scanTotal = kpiPage?.total ?? 0;
+  const truncated = scanTotal > scanned.length;
+  const scanTiles = (kpis?.(scanned, { total: scanTotal, truncated }) ?? []).map((t) => ({
+    ...t,
+    // Marked, not hidden: an aggregate over the first 500 of 1,340 is still useful,
+    // but it must not sit on the screen looking like the whole queue.
+    value: truncated && !t.ratio ? `${t.value}+` : t.value,
+  }));
+
+  const tiles = [...countTiles, ...scanTiles];
 
   // The heading says what the point IS, not what the module is called. A DM working
   // their MDP should read "MDP · Kadapa Store", not "Warehouse" — the picker already

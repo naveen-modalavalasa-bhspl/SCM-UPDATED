@@ -101,9 +101,11 @@ export default function PurchaseReturns() {
       deletePermission={DRAFT_DELETE_PERMISSION.return}
       deleteLabel="return"
       labelOf={(r) => r.return_no ?? `Return ${r.id}`}
+      kpiCounts={[
+        { label: "In approval", statuses: ["PENDING_APPROVAL"], tone: "text-warn" },
+        { label: "Sent back", statuses: ["DISPATCHED"] },
+      ]}
       kpis={(rows) => [
-        { label: "In approval", value: rows.filter((r) => r.status === "PENDING_APPROVAL").length, tone: "text-warn" },
-        { label: "Sent back", value: rows.filter((r) => r.status === "DISPATCHED").length },
         {
           label: "Awaiting credit note",
           value: rows.filter((r) => !r.credit_note_no && r.status === "COMPLETED").length,

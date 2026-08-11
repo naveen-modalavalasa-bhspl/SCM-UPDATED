@@ -125,10 +125,16 @@ export default function Dispatch() {
         deletePermission={DRAFT_DELETE_PERMISSION.dispatch}
         deleteLabel="dispatch"
         labelOf={(r) => r.dispatch_no ?? `Dispatch ${r.id}`}
+        kpiCounts={[
+          { label: "In transit", statuses: ["DISPATCHED", "IN_TRANSIT"] },
+          { label: "Awaiting gate-out", statuses: ["PACKED"], tone: "text-warn" },
+        ]}
         kpis={(rows) => [
-          { label: "In transit", value: rows.filter((r) => ["DISPATCHED", "IN_TRANSIT"].includes(r.status)).length },
-          { label: "Awaiting gate-out", value: rows.filter((r) => r.status === "PACKED").length, tone: "text-warn" },
           {
+            // Overdue dispatches are the OLDEST rows, so on a deep queue they sit
+            // past the scan ceiling and this reads low precisely when it matters.
+            // The "+" marks that; an expected_delivery filter on the endpoint is
+            // what would make it exact.
             label: "Late",
             value: rows.filter((r) => (daysUntil(r.expected_delivery) ?? 1) < 0 && !SETTLED.includes(r.status)).length,
             tone: "text-bad",

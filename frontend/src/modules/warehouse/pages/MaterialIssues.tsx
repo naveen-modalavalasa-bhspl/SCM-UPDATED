@@ -138,14 +138,13 @@ export default function MaterialIssues({
       deletePermission={DRAFT_DELETE_PERMISSION.issue}
       deleteLabel="issue"
       labelOf={(r) => r.issue_no ?? `Issue ${r.id}`}
+      kpiCounts={[
+        { label: "In approval", statuses: ["PENDING_APPROVAL"], tone: "text-warn" },
+        { label: "Approved, not issued", statuses: ["APPROVED"] },
+        { label: "Awaiting acknowledgement", statuses: ["ISSUED", "DISPATCHED"] },
+      ]}
       kpis={(rows) => [
-        { label: "In approval", value: rows.filter((r) => r.status === "PENDING_APPROVAL").length, tone: "text-warn" },
-        { label: "Approved, not issued", value: rows.filter((r) => r.status === "APPROVED").length },
         { label: "Qty issued", value: fmtQty(rows.filter((r) => r.is_stock_posted).reduce((s, r) => s + Number(r.total_qty ?? 0), 0)) },
-        {
-          label: "Awaiting acknowledgement",
-          value: rows.filter((r) => ["ISSUED", "DISPATCHED"].includes(r.status)).length,
-        },
       ]}
       renderCard={(r) => (
         <div className="space-y-1">

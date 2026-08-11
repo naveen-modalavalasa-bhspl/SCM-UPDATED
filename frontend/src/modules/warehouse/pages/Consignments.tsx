@@ -110,13 +110,15 @@ export default function Consignments() {
         deletePermission={DRAFT_DELETE_PERMISSION.dispatch}
         deleteLabel="consignment"
         labelOf={(row) => row.dispatch_no ?? `Consignment ${row.id}`}
+        kpiCounts={[
+          { label: "Ready", statuses: ["PACKED"], tone: "text-ok" },
+          { label: "Dispatched", statuses: ["DISPATCHED", "IN_TRANSIT"] },
+        ]}
         kpis={(rows) => [
-          { label: "Ready", value: rows.filter((row) => row.status === "PACKED").length, tone: "text-ok" },
           // num(), not `?? 0`: MySQL DECIMALs arrive as strings, so a bare `+` built
           // "03.00020.000" and fmtQty turned that into "0".
           { label: "Packages", value: rows.reduce((sum, row) => sum + num(row.total_packages), 0) },
           { label: "Quantity", value: fmtQty(rows.reduce((sum, row) => sum + num(row.total_qty), 0)) },
-          { label: "Dispatched", value: rows.filter((row) => ["DISPATCHED", "IN_TRANSIT"].includes(row.status)).length },
         ]}
         renderCard={(row) => (
           <div className="space-y-1">
