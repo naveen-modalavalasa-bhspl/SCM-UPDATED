@@ -149,7 +149,10 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
           everyone else. */}
       {serving && <section className="space-y-2">
         <h2 className="font-semibold text-ink">Serve from your own stock</h2>
-        <IssueFromStockPanel indentId={indentId} />
+        {/* Serving every line IS the decision: the ladder ends there, so the screen
+            leaves exactly as it does after Approve rather than refetching a document
+            that is no longer awaiting anyone. */}
+        <IssueFromStockPanel indentId={indentId} onClosed={finish("approve")} />
       </section>}
 
       <section>

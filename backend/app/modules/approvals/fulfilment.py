@@ -23,13 +23,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
+from app.modules.indents.enums import IndentStatus
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.inventory import locations
 from app.modules.inventory.allocations import ACTIVE_ALLOCATION_STATUSES as LIVE_ALLOCATION_STATUSES
 from app.modules.inventory.models import NO_PROJECT, Allocation, AllocationItem, Stock
 from app.platform.hcm.models import HcmPositionAssignment
 from app.platform.settings.service import write_audit
-from app.shared.enums import AuditAction
+from app.shared.enums import AuditAction, DocType, InstanceStatus
 from app.shared.models.warehouse import Warehouse
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,34 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
     }
 
 
+async def _may_settle(db: AsyncSession, indent_id: int, user) -> bool:
+    """Is this login the approver the indent is currently waiting on?
+
+    The same three conditions `approvals.service._load_indent_task` enforces, asked
+    instead of raised: issuing stock must keep working for anyone who holds
+    INDENT_APPROVE, and only the current approver's issue also settles the ladder.
+    """
+    from app.platform.workflow.models import Instance, Pending
+
+    indent = await db.get(Indent, indent_id)
+    if indent is None or indent.status != IndentStatus.PENDING_APPROVAL.value:
+        return False
+    if indent.requested_by_id == user.id:
+        return False
+    instance = (await db.execute(select(Instance).where(
+        Instance.doc_type == DocType.INDENT.value,
+        Instance.doc_id == indent_id,
+        Instance.status == InstanceStatus.IN_PROGRESS.value,
+    ))).scalars().first()
+    if instance is None:
+        return False
+    return bool(await db.scalar(select(func.count(Pending.id)).where(
+        Pending.instance_id == instance.id,
+        Pending.stage_sequence == instance.current_sequence,
+        Pending.approver_id == user.id,
+    )))
+
+
 async def issue_from_my_stock(
     db: AsyncSession, indent_id: int, requests: list, user, reason: str = "",
     forward_remainder: bool = False,
@@ -290,12 +319,23 @@ async def issue_from_my_stock(
         Decimal("0"),
     )
 
-    # Hand the rest upward. The approved quantities are passed through untouched —
-    # this approver already decided them, and issuing is not a second decision — so
-    # the next rung inherits exactly the remainder. The engine owns the advance
+    # Nothing left owed, or the rest handed upward — either way the decision is made
+    # here and `approve_indent` records it. It ends the ladder by itself when nothing
+    # is owed (`_nothing_owed` -> `final`), so a fully-served indent stops at this rung
+    # instead of climbing for goods that are already committed, and the approve button
+    # goes away because the indent is no longer awaiting approval.
+    #
+    # The approved quantities are passed through untouched — this approver already
+    # decided them, and issuing is not a second decision. The engine owns the advance
     # (rule 8); nothing here moves the document itself.
     forwarded = False
-    if forward_remainder and outstanding > 0:
+    closed = False
+    settle = outstanding == 0 or (forward_remainder and outstanding > 0)
+    # Only the person the stage is actually waiting on may settle it. Issuing stock is
+    # gated on INDENT_APPROVE, which is not the same thing as being THIS indent's
+    # current approver — an inventory desk serving someone else's document must leave
+    # the ladder exactly where it was rather than signing it off by side effect.
+    if settle and await _may_settle(db, indent_id, user):
         from . import service as approvals_service
         from .schemas import ApprovalQuantityIn
 
@@ -309,10 +349,13 @@ async def issue_from_my_stock(
                 for line in remaining
             ],
             (f"Allocated {alloc.allocation_no} from own stock. "
-             f"{outstanding} still owed." + (f" {reason}" if reason else "")),
+             + ("Served in full." if outstanding == 0
+                else f"{outstanding} still owed.")
+             + (f" {reason}" if reason else "")),
             user,
         )
-        forwarded = True
+        forwarded = outstanding > 0
+        closed = outstanding == 0
 
     return {
         "indent_id": indent_id,
@@ -324,4 +367,8 @@ async def issue_from_my_stock(
         # Nothing left owed anywhere: the indent has no reason to climb further.
         "fully_served": outstanding == 0,
         "forwarded": forwarded,
+        # The ladder was ended here. False when the issuer was not the current
+        # approver — the document is untouched and still waiting on whoever it was
+        # waiting on, exactly as before.
+        "closed": closed,
     }

@@ -3830,11 +3830,9 @@ async def _decorate_issue_destination(
     db: AsyncSession,
     issue: m.MaterialIssue,
 ) -> m.MaterialIssue:
-    from app.platform.hcm.models import HcmEmployee
-
-    employee = await db.get(HcmEmployee, issue.issued_to_id) if issue.issued_to_id else None
-    setattr(issue, "destination_office_id", employee.office_id if employee else None)
-    setattr(issue, "destination_office_name", employee.office_name if employee else None)
+    office_id, office_name = await _issue_destination(db, issue)
+    setattr(issue, "destination_office_id", office_id)
+    setattr(issue, "destination_office_name", office_name)
     return issue
 
 
@@ -3842,15 +3840,29 @@ async def _issue_destination(
     db: AsyncSession,
     issue: m.MaterialIssue | None,
 ) -> tuple[int | None, str | None]:
-    from app.platform.hcm.models import HcmEmployee
+    """Where an issue is headed: the office it is going to, id and name.
 
-    if not issue or not issue.issued_to_id:
+    `issued_to_id` is the direct answer but it is empty on most live issues — an
+    allocation-approval draft names a warehouse and an indent, not a person. Falling
+    back to the INDENT's own office is the same answer arrived at the other way: the
+    goods are for whoever raised the request. Without the fallback the consignment
+    screen showed "Destination —" and left the delivery address blank on every issue
+    the allocation created.
+    """
+    from app.platform.hcm.models import HcmEmployee
+    from app.modules.indents.models import Indent
+
+    if not issue:
         return None, None
-    employee = await db.get(HcmEmployee, issue.issued_to_id)
-    return (
-        employee.office_id if employee else None,
-        employee.office_name if employee else None,
-    )
+    if issue.issued_to_id:
+        employee = await db.get(HcmEmployee, issue.issued_to_id)
+        if employee is not None and employee.office_id:
+            return employee.office_id, employee.office_name
+    if issue.indent_id:
+        indent = await db.get(Indent, issue.indent_id)
+        if indent is not None and getattr(indent, "office_id", None):
+            return indent.office_id, indent.office_name
+    return None, None
 
 
 async def _destination_warehouse(
@@ -3875,24 +3887,32 @@ async def _destination_warehouse(
     being the same point is not a delivery, and `create_dispatch` rejects it, so that
     case stays blank rather than writing a row its own guard would refuse.
     """
-    from app.modules.indents.models import Indent
+    warehouse = await _requesting_point(db, issue)
+    if warehouse is None or warehouse.id == origin_warehouse_id:
+        return None
+    return warehouse
 
+
+async def _requesting_point(
+    db: AsyncSession,
+    issue: m.MaterialIssue,
+) -> Warehouse | None:
+    """The stocking point serving the office this issue is for — origin or not.
+
+    `_destination_warehouse` drops the case where that point IS the origin, because a
+    consignment cannot be addressed to the point it leaves. The screens still need to
+    know which point it was, so they can say WHY the destination came back blank
+    instead of showing an empty box nobody can explain.
+    """
     office_id, _ = await _issue_destination(db, issue)
-    if office_id is None and issue.indent_id:
-        indent = await db.get(Indent, issue.indent_id)
-        office_id = getattr(indent, "office_id", None) if indent else None
     if office_id is None:
         return None
-
-    warehouse = (await db.execute(
+    return (await db.execute(
         select(Warehouse)
         .where(Warehouse.office_id == office_id, Warehouse.is_active.is_(True))
         .order_by(Warehouse.id)
         .limit(1)
     )).scalar_one_or_none()
-    if warehouse is None or warehouse.id == origin_warehouse_id:
-        return None
-    return warehouse
 
 
 async def _decorate_dispatch_destination(
@@ -5409,6 +5429,20 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         raise ValidationError("A stock transfer consignment needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
         raise ValidationError("A transfer cannot have the same origin and destination")
+    # Nothing to carry. The issue came OUT of the very point that raised the indent —
+    # an OE serving his own LIP — so the goods are already on the requester's shelf.
+    # Left to run, this wrote a consignment with a blank destination, and a blank
+    # destination is the one thing `incoming_dispatch_options` cannot match: the
+    # storekeeper acknowledged the delivery and then had no consignment to raise a
+    # GRN against. Say it here, where it can still be acted on.
+    if to_wh is None and not data.customer_id and not data.vendor_id:
+        same_point = await _requesting_point(db, issue)
+        if same_point is not None and same_point.id == wh.id:
+            raise ValidationError(
+                f"{issue.issue_no} was issued at {wh.name}, the point that raised the "
+                "indent — the goods are already there. Acknowledge the issue instead "
+                "of raising a consignment, or pick a destination to forward it on."
+            )
     _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
@@ -7463,21 +7497,35 @@ async def dispatch_receipt_source(
     wh = await _warehouse(db, warehouse_id)
     indent_id = next((l.indent_id for l in dispatch.items if l.indent_id), None)
     indent_no = next((l.indent_no for l in dispatch.items if l.indent_no), None)
-    return {
-        "dispatch_id": dispatch.id,
-        "dispatch_no": dispatch.dispatch_no,
-        "warehouse_id": wh.id,
-        "warehouse_name": wh.name,
-        "is_bin_managed": wh.is_bin_managed,
-        "from_warehouse_id": dispatch.warehouse_id,
-        "from_warehouse_name": dispatch.warehouse_name,
-        "project_id": dispatch.project_id,
-        "dispatch_date": dispatch.dispatch_date,
-        "lr_no": dispatch.lr_no,
-        "vehicle_number": dispatch.vehicle_number,
-        "indent_id": indent_id,
-        "indent_no": indent_no,
-        "items": [{
+
+    # The dispatch line only snapshots batch_no and has no expiry column at all, so
+    # the storekeeper retyped both off the carton on every line. The dates live on
+    # stk_batches; resolve the lines to their batch rows in two queries (a 40-line
+    # consignment is not 40 round trips) and prefill what was actually sent.
+    batch_ids = {l.batch_id for l in dispatch.items
+                 if l.batch_id and l.batch_id != m.NO_BATCH}
+    # A serialised line names units, not a batch — the serial row knows its batch.
+    serials = [l.serial_no for l in dispatch.items if l.serial_no]
+    serial_batch: dict[str, int] = {}
+    if serials:
+        for serial_no, batch_id in (await db.execute(
+            select(m.SerialNumber.serial_number, m.SerialNumber.batch_id)
+            .where(m.SerialNumber.serial_number.in_(serials))
+        )).all():
+            if batch_id and batch_id != m.NO_BATCH:
+                serial_batch[serial_no] = batch_id
+                batch_ids.add(batch_id)
+    batches = {b.id: b for b in (await db.execute(
+        select(m.Batch).where(m.Batch.id.in_(batch_ids))
+    )).scalars().all()} if batch_ids else {}
+
+    items = []
+    for line in dispatch.items:
+        batch_id = line.batch_id if (
+            line.batch_id and line.batch_id != m.NO_BATCH
+        ) else serial_batch.get(line.serial_no or "")
+        batch = batches.get(batch_id) if batch_id else None
+        items.append({
             "item_id": line.item_id,
             # The snapshot the consignment carries. Without these the inward form had
             # an item id and nothing to show for it, so every line rendered as the
@@ -7493,9 +7541,29 @@ async def dispatch_receipt_source(
             "received_qty": _d(line.quantity),
             "accepted_qty": _d(line.quantity),
             "rate": line.rate,
-            "batch_no": line.batch_no,
+            # The line's own snapshot wins: a hand-corrected consignment keeps
+            # showing what was actually sent.
+            "batch_no": line.batch_no or (batch.batch_no if batch else None),
+            "mfg_date": batch.mfg_date if batch else None,
+            "expiry_date": batch.expiry_date if batch else None,
             "serial_numbers": [line.serial_no] if line.serial_no else None,
-        } for line in dispatch.items],
+        })
+
+    return {
+        "dispatch_id": dispatch.id,
+        "dispatch_no": dispatch.dispatch_no,
+        "warehouse_id": wh.id,
+        "warehouse_name": wh.name,
+        "is_bin_managed": wh.is_bin_managed,
+        "from_warehouse_id": dispatch.warehouse_id,
+        "from_warehouse_name": dispatch.warehouse_name,
+        "project_id": dispatch.project_id,
+        "dispatch_date": dispatch.dispatch_date,
+        "lr_no": dispatch.lr_no,
+        "vehicle_number": dispatch.vehicle_number,
+        "indent_id": indent_id,
+        "indent_no": indent_no,
+        "items": items,
     }
 
 
@@ -7789,6 +7857,12 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
             found = serials_by_item.get(line.item_id, [])
         return found or []
 
+    # The point the indent was raised from, so the form can PREFILL "To warehouse"
+    # rather than leaving it blank and hoping. The server derived it either way, but
+    # nobody could see the decision until they had saved — and a consignment saved
+    # with a blank destination is one the receiving point cannot raise a GRN against.
+    requesting = await _requesting_point(db, issue)
+
     return {
         "issue_id": issue.id,
         "issue_no": issue.issue_no,
@@ -7796,6 +7870,16 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         "project_id": issue.project_id,
         "destination_office_id": getattr(issue, "destination_office_id", None),
         "destination_office_name": getattr(issue, "destination_office_name", None),
+        "destination_warehouse_id": (
+            requesting.id if requesting and requesting.id != issue.warehouse_id else None
+        ),
+        "destination_warehouse_name": (
+            requesting.name if requesting and requesting.id != issue.warehouse_id else None
+        ),
+        # The issue was made AT the point that asked for it, so the goods are already
+        # there: no consignment, no dispatch, no GRN. The screen says so instead of
+        # showing an unexplained empty destination.
+        "destination_is_origin": bool(requesting and requesting.id == issue.warehouse_id),
         "items": [
             {
                 "indent_id": issue.indent_id,

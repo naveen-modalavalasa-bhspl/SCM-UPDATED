@@ -13,6 +13,10 @@ import type { Allocation } from "../types";
 const fmt = (value: number) =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(value);
 
+/** How many of the listed allocations are fetched in full so their line totals can be
+ *  shown in the table. One request each, so it is a window, not the whole history. */
+const DETAIL_LIMIT = 40;
+
 /**
  * The review itself lives at /inventory/allocation-approvals/:id
  * (AllocationApprovalDetailPage) — a real screen, not a popup card. This page is
@@ -34,9 +38,10 @@ export function AllocationApprovalsPage() {
   // Which decisions to list. The screen was an inbox and nothing else: it asked only
   // for what is WAITING on this hat, so an allocation vanished the moment it was
   // signed and there was no way to look up what was approved or why something was
-  // rejected. Waiting stays the default — that is the work — but the decided ones
-  // are now reachable from the same place instead of nowhere.
-  const [decision, setDecision] = useState("WAITING");
+  // rejected. Every decision is the default now — signing something must not make it
+  // disappear from the screen you signed it on — and "Waiting for me" narrows back to
+  // the work in one click.
+  const [decision, setDecision] = useState("ALL");
 
   const queue = useQuery({
     queryKey: ["inventory", "allocation-approvals", decision],
@@ -52,7 +57,19 @@ export function AllocationApprovalsPage() {
       const pages = await Promise.all(
         wanted.map((status) => listAllocations({ status })));
       const rows = pages.flatMap((p) => p.items ?? []);
-      return Promise.all(rows.map((row) => getAllocation(row.id)));
+      // Newest first, and only the newest few carry their lines: pulling every
+      // allocation's detail was one request per row, which was survivable while this
+      // list was an inbox of a handful and is not now that it opens on every
+      // decision ever made. The rest show their totals when they are opened.
+      rows.sort((a, b) => b.id - a.id);
+      const detailed = await Promise.all(
+        rows.slice(0, DETAIL_LIMIT).map((row) => getAllocation(row.id)));
+      return [
+        ...detailed,
+        ...rows.slice(DETAIL_LIMIT).map((row) => ({
+          ...row, remarks: null, items: [],
+        } as unknown as Allocation)),
+      ];
     },
   });
 
@@ -132,7 +149,9 @@ export function AllocationApprovalsPage() {
     {
       key: "decision",
       header: "Inventory decision",
-      render: (row) => (
+      // A row outside the detail window has no lines to add up. "Open to see" is the
+      // truth; a confident 0 is not.
+      render: (row) => (row.items.length ? (
         <div>
           <div className="text-sm text-ink">
             {fmt(row.items.reduce((sum, item) => sum + Number(item.quantity), 0))} approved to give
@@ -141,7 +160,7 @@ export function AllocationApprovalsPage() {
             of {fmt(row.items.reduce((sum, item) => sum + Number(item.requested_qty), 0))} requested
           </div>
         </div>
-      ),
+      ) : <span className="text-xs text-muted">Open to see</span>),
     },
     {
       key: "allocator",
@@ -169,9 +188,13 @@ export function AllocationApprovalsPage() {
           <div className="text-2xl font-bold text-ink">{queue.isLoading ? "…" : rows.length}</div>
         </div>
         <div className="rounded-xl border border-line/70 bg-content1 p-3 text-left">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Total Lines</div>
+          {/* Was "total lines", which only counted the rows whose detail happened to
+              be loaded. Still pending is the number this screen is actually for. */}
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Still Pending</div>
           <div className="text-2xl font-bold text-ink">
-            {queue.isLoading ? "…" : rows.reduce((sum, r) => sum + r.items.length, 0)}
+            {queue.isLoading
+              ? "…"
+              : rows.filter((r) => r.status === "PENDING_APPROVAL").length}
           </div>
         </div>
       </div>
@@ -183,24 +206,24 @@ export function AllocationApprovalsPage() {
         onClear={() => {
           setSearch("");
           setAllocatorFilter("");
-          setDecision("WAITING");
+          setDecision("ALL");
           setPage(1);
         }}
         active={(search ? 1 : 0) + (allocatorFilter ? 1 : 0) + (showDone ? 1 : 0)
-          + (decision === "WAITING" ? 0 : 1)}
+          + (decision === "ALL" ? 0 : 1)}
       >
-        {/* Waiting first and selected by default: this screen is somewhere work is
-            done, not an archive. The decided ones are one choice away. */}
+        {/* Every decision by default; "Waiting for me" is the first narrowing, so the
+            screen is both the queue and the record of what it decided. */}
         <FilterSelect
           value={decision}
-          onChange={(v) => { setDecision(v || "WAITING"); setPage(1); }}
+          onChange={(v) => { setDecision(v || "ALL"); setPage(1); }}
           options={[
+            { value: "ALL", label: "All decisions" },
             { value: "WAITING", label: "Waiting for me" },
             { value: "APPROVED", label: "Approved" },
             { value: "REJECTED", label: "Rejected" },
-            { value: "ALL", label: "All decisions" },
           ]}
-          placeholder="Waiting for me"
+          placeholder="All decisions"
         />
         <FilterSelect
           value={allocatorFilter}

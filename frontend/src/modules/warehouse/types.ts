@@ -970,6 +970,11 @@ export interface IssueDispatchSource {
   project_id?: number | null;
   destination_office_id?: number | null;
   destination_office_name?: string | null;
+  /** The stocking point serving the requesting office — what "To warehouse"
+   *  defaults to. Null when that point is the origin (`destination_is_origin`). */
+  destination_warehouse_id?: number | null;
+  destination_warehouse_name?: string | null;
+  destination_is_origin?: boolean;
   items: IssueDispatchSourceItem[];
 }
 

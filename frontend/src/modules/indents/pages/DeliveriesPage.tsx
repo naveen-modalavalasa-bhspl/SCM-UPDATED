@@ -4,7 +4,7 @@ import {
   Camera, CheckCircle2, Circle, FileText, ListFilter, PackageCheck, Trash2,
 } from "lucide-react";
 import {
-  Button, Card, ConfirmModal, EmptyState, ErrorBanner, Input, ResponsiveList, Select,
+  Button, Can, Card, ConfirmModal, EmptyState, ErrorBanner, Input, ResponsiveList, Select,
   type Column,
 } from "@/shared/components";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
@@ -444,10 +444,14 @@ export default function DeliveriesPage() {
     {
       key: "action",
       header: "",
+      // can_acknowledge is the document's answer ("is this line mine to receive");
+      // the permission is the login's. Both have to hold.
       render: (row) => (row.can_acknowledge ? (
-        <Button onClick={() => setOpen(row)}>
-          <CheckCircle2 className="h-4 w-4" /> Confirm
-        </Button>
+        <Can do="indent.acknowledge">
+          <Button onClick={() => setOpen(row)}>
+            <CheckCircle2 className="h-4 w-4" /> Confirm
+          </Button>
+        </Can>
       ) : null),
     },
   ];
@@ -529,9 +533,11 @@ export default function DeliveriesPage() {
               {row.required_date ? ` · needed by ${row.required_date}` : ""}
             </div>
             {row.can_acknowledge && (
-              <Button onClick={() => setOpen(row)}>
-                <CheckCircle2 className="h-4 w-4" /> Confirm receipt
-              </Button>
+              <Can do="indent.acknowledge">
+                <Button onClick={() => setOpen(row)}>
+                  <CheckCircle2 className="h-4 w-4" /> Confirm receipt
+                </Button>
+              </Can>
             )}
           </div>
         )}

@@ -97,18 +97,26 @@ USERS = [
 PAGE_TREE = [
     ("home", "/", "Home", "home", None, 0, None),
 
-    ("grp_indents", "/indents/dashboard", "Indents", "file-text", P.INDENT_VIEW, 10, None),
-    ("ind_dashboard", "/indents/dashboard", "Overview", "layout-dashboard", P.INDENT_VIEW, 11, "grp_indents"),
-    ("ind_list", "/indents", "All Requests", "list", P.INDENT_VIEW, 12, "grp_indents"),
+    # One code per page (P.page_view_code), not one shared indent.view: ticking
+    # Overview must not hand out the Activity Ledger.
+    ("grp_indents", "/indents/dashboard", "Indents", "file-text",
+     P.page_view_code("grp_indents"), 10, None),
+    ("ind_dashboard", "/indents/dashboard", "Overview", "layout-dashboard",
+     P.page_view_code("ind_dashboard"), 11, "grp_indents"),
+    ("ind_list", "/indents", "All Requests", "list",
+     P.page_view_code("ind_list"), 12, "grp_indents"),
     # Parked (rbac_pages.is_active = 0); route and BoardPage still exist. Leaving the
     # row here would put it back on the menu at the next seed.
     # ("ind_board", "/indents/board", "Status Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
-    ("ind_deliveries", "/indents/deliveries", "My Deliveries", "package-check", P.INDENT_VIEW, 13, "grp_indents"),
+    ("ind_deliveries", "/indents/deliveries", "My Deliveries", "package-check",
+     P.page_view_code("ind_deliveries"), 13, "grp_indents"),
     # Parked (rbac_pages.is_active = 0); route and the page still exist. Leaving the
     # row here would put it back on the menu at the next seed.
     # ("ind_ack", "/indents/acknowledgments", "Acknowledgments", "check-circle", P.INDENT_VIEW, 14, "grp_indents"),
-    ("ind_reports", "/indents/reports", "Activity Ledger", "bar-chart", P.INDENT_VIEW, 15, "grp_indents"),
-    ("ind_notifications", "/indents/notifications", "Notifications", "bell", P.INDENT_VIEW, 16, "grp_indents"),
+    ("ind_reports", "/indents/reports", "Activity Ledger", "bar-chart",
+     P.page_view_code("ind_reports"), 15, "grp_indents"),
+    ("ind_notifications", "/indents/notifications", "Notifications", "bell",
+     P.page_view_code("ind_notifications"), 16, "grp_indents"),
 
     ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
     ("approval_waiting", "/approvals", "Waiting for Me", "check-circle", P.INDENT_VIEW, 21, "approvals"),

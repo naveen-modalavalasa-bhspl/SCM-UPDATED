@@ -57,7 +57,7 @@ async def list_indents(params: PageParams = Depends(), search: str | None = None
                        has_remainder: bool = False,
                        sort_by: str = "created_at", sort_dir: str = "desc",
                        db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission("indent.view"))):
+                       user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.list_indents(
         db, params, search=search, has_remainder=has_remainder,
         date_from=created_date_from or start_date,
@@ -73,7 +73,7 @@ async def list_indents(params: PageParams = Depends(), search: str | None = None
 @indent_router.get("/approved-pending-po", response_model=Page[IndentListRow])
 async def approved_pending_po(params: PageParams = Depends(),
                               db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission("indent.view"))):
+                              user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.approved_pending_po(db, params, user=user)
 
 
@@ -90,7 +90,7 @@ async def stats(search: str | None = None, created_date_from: date | None = None
                 region_unassigned: bool = False,
                 is_bookmarked: str | None = None,
                 db: AsyncSession = Depends(get_db),
-                user=Depends(require_permission("indent.view"))):
+                user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.indent_stats(
         db, search=search, date_from=created_date_from or start_date,
         date_to=created_date_to or end_date, required_by_from=required_by_from,
@@ -115,7 +115,7 @@ async def activity(params: PageParams = Depends(), search: str | None = None,
                    transaction_type: IndentActivityType | None = None,
                    direction: MaterialDirection | None = None,
                    db: AsyncSession = Depends(get_db),
-                   user=Depends(require_permission("indent.view"))):
+                   user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.activity_ledger(db, params, user=user, search=search, date_from=date_from,
         date_to=date_to, required_from=required_from, required_to=required_to,
         item_id=item_id, statuses=status, priorities=priority,
@@ -132,7 +132,7 @@ async def acknowledgments(params: PageParams = Depends(), search: str | None = N
                           status: list[AcknowledgmentStatus] | None = Query(None),
                           priority: list[Priority] | None = Query(None),
                           db: AsyncSession = Depends(get_db),
-                          user=Depends(require_permission("indent.view"))):
+                          user=Depends(require_permission(perms.INDENT_ACKNOWLEDGE))):
     return await service.list_acknowledgments(
         db, params, search=search, date_from=date_from or start_date,
         date_to=date_to or end_date, required_from=required_from,
@@ -145,7 +145,7 @@ async def notifications(params: PageParams = Depends(), search: str | None = Non
                         date_from: date | None = None, date_to: date | None = None,
                         status: list[IndentStatus] | None = Query(None),
                         db: AsyncSession = Depends(get_db),
-                        user=Depends(require_permission("indent.view"))):
+                        user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.list_notifications(
         db, params, user, search=search, date_from=date_from, date_to=date_to,
         statuses=status,
@@ -154,7 +154,7 @@ async def notifications(params: PageParams = Depends(), search: str | None = Non
 
 @indent_router.post("", response_model=IndentOut)
 async def create(data: IndentCreate, db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission("indent.create"))):
+                 user=Depends(require_permission(perms.INDENT_CREATE))):
     return await service.create_indent(db, data, user)
 
 
@@ -189,7 +189,7 @@ async def submit_monthly_cycle(body: MonthlySubmitIn,
 
 @indent_router.get("/options/offices")
 async def office_options(db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission("indent.view"))):
+                         user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.list_office_options(db)
 
 
@@ -208,38 +208,38 @@ async def vehicle_options(search: str | None = None,
 
 @indent_router.get("/{indent_id}", response_model=IndentOut)
 async def get_one(indent_id: int, db: AsyncSession = Depends(get_db),
-                  user=Depends(require_permission("indent.view"))):
+                  user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.get_indent(db, indent_id, user)
 
 
 @indent_router.get("/{indent_id}/journey", response_model=IndentJourneyOut)
 async def journey(indent_id: int, db: AsyncSession = Depends(get_db),
-                  user=Depends(require_permission("indent.view"))):
+                  user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.indent_journey(db, indent_id, user)
 
 
 @indent_router.put("/{indent_id}", response_model=IndentOut)
 async def update(indent_id: int, data: IndentUpdate, db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission("indent.view"))):
+                 user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.update_indent(db, indent_id, data, user)
 
 
 @indent_router.delete("/{indent_id}", status_code=204)
 async def delete_draft(indent_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission("indent.view"))):
+                       user=Depends(require_permission(perms.INDENT_VIEW))):
     await service.delete_indent(db, indent_id, user)
 
 
 @indent_router.post("/{indent_id}/submit", response_model=IndentOut)
 async def submit(indent_id: int, db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission("indent.submit"))):
+                 user=Depends(require_permission(perms.INDENT_SUBMIT))):
     return await service.submit_indent(db, indent_id, user)
 
 
 @indent_router.post("/{indent_id}/return-for-correction", response_model=IndentOut)
 async def return_for_correction(indent_id: int, body: ActionIn = ActionIn(),
                                 db: AsyncSession = Depends(get_db),
-                                user=Depends(require_permission("indent.approve"))):
+                                user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.return_indent_for_correction(
         db, indent_id, body.comments, user,
     )
@@ -247,7 +247,7 @@ async def return_for_correction(indent_id: int, body: ActionIn = ActionIn(),
 
 @indent_router.post("/{indent_id}/resubmit-correction", response_model=IndentOut)
 async def resubmit_correction(indent_id: int, db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission("indent.view"))):
+                              user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.resubmit_indent_correction(db, indent_id, user)
 
 
@@ -288,20 +288,20 @@ async def delete_receipt_attachment(
 
 @indent_router.post("/{indent_id}/bookmark", response_model=IndentOut)
 async def bookmark(indent_id: int, db: AsyncSession = Depends(get_db),
-                   user=Depends(require_permission("indent.view"))):
+                   user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.set_indent_bookmark(db, indent_id, user, is_bookmarked=True)
 
 
 @indent_router.post("/{indent_id}/unbookmark", response_model=IndentOut)
 async def unbookmark(indent_id: int, db: AsyncSession = Depends(get_db),
-                     user=Depends(require_permission("indent.view"))):
+                     user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.set_indent_bookmark(db, indent_id, user, is_bookmarked=False)
 
 
 @indent_router.post("/{indent_id}/approve", response_model=IndentOut)
 async def approve(indent_id: int, body: ActionIn = ActionIn(),
                   db: AsyncSession = Depends(get_db),
-                  user=Depends(require_permission("indent.approve"))):
+                  user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.act_on_indent(
         db, indent_id, ApprovalAction.APPROVED, body.comments, user,
     )
@@ -310,7 +310,7 @@ async def approve(indent_id: int, body: ActionIn = ActionIn(),
 @indent_router.post("/{indent_id}/reject", response_model=IndentOut)
 async def reject(indent_id: int, body: ActionIn = ActionIn(),
                  db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission("indent.reject"))):
+                 user=Depends(require_permission(perms.INDENT_REJECT))):
     return await service.act_on_indent(
         db, indent_id, ApprovalAction.REJECTED, body.comments, user,
     )
@@ -373,6 +373,13 @@ async def item_demand(item_id: int, db: AsyncSession = Depends(get_db),
                       user=Depends(require_permission(perms.ALLOCATION_VIEW))):
     """All open demand for one item, so it can be split deliberately."""
     return await service.item_demand(db, item_id, user)
+
+
+@alloc_router.get("/claims/{item_id}")
+async def item_claims(item_id: int, indent_id: int = Query(...),
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+    return await service.item_claims(db, item_id, indent_id, user=user)
 
 
 @alloc_router.get("/approval-batches")

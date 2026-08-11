@@ -4,6 +4,8 @@ import {
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
+import { useAuth } from "@/shared/auth/AuthContext";
+
 /**
  * Sub-navigation for Indent.
  */
@@ -20,6 +22,17 @@ const destinations = [
 
 export function IndentsNav({ embedded = false }: { embedded?: boolean }) {
   const prefersReducedMotion = useReducedMotion();
+  // AppLayout keeps grp_indents out of the data-driven tab strip, so these tabs are
+  // the only place indents screens are listed. Hardcoding them ignored rbac_pages:
+  // unticking a page in Job Profiles left the tab up and only failed on click.
+  const { me } = useAuth();
+  const granted = new Set(
+    (me?.menu ?? [])
+      .filter((root) => root.code === "grp_indents")
+      .flatMap((root) => [root.path, ...(root.children ?? []).map((c) => c.path)]),
+  );
+  const visible = destinations.filter((d) => granted.has(d.key));
+  if (!visible.length) return null;
 
   return (
     <nav
@@ -28,7 +41,7 @@ export function IndentsNav({ embedded = false }: { embedded?: boolean }) {
     >
       <LayoutGroup id="indent-navigation">
         <div className="flex min-w-max items-stretch gap-5">
-          {destinations.map(({ key, label, icon: Icon, end }) => (
+          {visible.map(({ key, label, icon: Icon, end }) => (
             <NavLink
               key={key}
               to={key}

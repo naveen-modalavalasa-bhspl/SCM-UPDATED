@@ -143,6 +143,87 @@ async def competing_demand(db: AsyncSession, item_id: int,
     return _d((await db.execute(stmt)).scalar())
 
 
+async def competing_claims(
+    db: AsyncSession, item_id: int, exclude_indent_id: int,
+    warehouse_ids: set[int] | None = None,
+) -> dict:
+    """WHO is holding that claim — the same number `competing_demand` returns, itemised.
+
+    "12 claimed by other indents" on its own is a number an allocator cannot act on:
+    the next question is always which indents, how much each, and whether those claims
+    are signed or still waiting. Same filter as `competing_demand` (DRAFT and
+    PENDING_APPROVAL against a different indent) so the total below the list is always
+    the total on the line above it.
+
+    `warehouse_ids` scopes the stock summary to the points this login may draw from —
+    the claims themselves are not scoped, because a claim raised somewhere else is
+    exactly what the allocator needs to know about.
+    """
+    from app.modules.indents.models import Indent
+
+    rows = (await db.execute(
+        select(
+            Allocation.id, Allocation.allocation_no, Allocation.status,
+            Allocation.indent_id, Allocation.indent_no, Allocation.allocated_by_name,
+            Allocation.created_at,
+            AllocationItem.requested_qty, AllocationItem.quantity,
+            AllocationItem.warehouse_id, AllocationItem.warehouse_name,
+            Indent.requested_by_name, Indent.office_name, Indent.priority,
+        )
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .outerjoin(Indent, Indent.id == Allocation.indent_id)
+        .where(AllocationItem.item_id == item_id,
+               Allocation.indent_id != exclude_indent_id,
+               Allocation.status.in_([AllocationStatus.DRAFT.value,
+                                      AllocationStatus.PENDING_APPROVAL.value]))
+        .order_by(Allocation.created_at.desc(), Allocation.id.desc())
+    )).all()
+
+    claims = [{
+        "allocation_id": row.id,
+        "allocation_no": row.allocation_no,
+        "status": row.status,
+        "indent_id": row.indent_id,
+        "indent_no": row.indent_no,
+        "requested_by_name": row.requested_by_name,
+        "office_name": row.office_name,
+        "priority": row.priority,
+        "allocated_by_name": row.allocated_by_name,
+        # What the claim is FOR and what it actually promises: an allocation that
+        # asked for 10 and gave 4 is holding 10 off the shelf until it is signed.
+        "claimed_qty": float(_d(row.requested_qty)),
+        "giving_qty": float(_d(row.quantity)),
+        "warehouse_id": row.warehouse_id,
+        "warehouse_name": row.warehouse_name,
+        "created_at": row.created_at,
+    } for row in rows]
+
+    item = await db.get(Item, item_id)
+    stock_stmt = (
+        select(func.coalesce(func.sum(Stock.total_qty), 0),
+               func.coalesce(func.sum(Stock.available_qty), 0),
+               func.coalesce(func.sum(Stock.reserved_qty), 0))
+        .where(Stock.item_id == item_id)
+    )
+    if warehouse_ids is not None:
+        stock_stmt = stock_stmt.where(Stock.warehouse_id.in_(warehouse_ids or {0}))
+    total_qty, available_qty, reserved_qty = (await db.execute(stock_stmt)).one()
+
+    return {
+        "item_id": item_id,
+        "item_code": item.code if item else None,
+        "item_name": item.name if item else None,
+        "uom_code": item.uom_code if item else None,
+        "total_qty": float(_d(total_qty)),
+        "available_qty": float(_d(available_qty)),
+        "reserved_qty": float(_d(reserved_qty)),
+        "claimed_total": float(sum(
+            (_d(row.requested_qty) for row in rows), ZERO)),
+        "indent_count": len({row.indent_id for row in rows}),
+        "claims": claims,
+    }
+
+
 # ---------------- the decision ----------------
 
 async def doc_type_for(db: AsyncSession, allocation_id: int) -> str:

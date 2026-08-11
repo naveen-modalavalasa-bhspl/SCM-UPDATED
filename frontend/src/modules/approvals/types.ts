@@ -312,4 +312,7 @@ export interface IssueFromStockResult {
   outstanding_quantity: number;
   /** Nothing owed anywhere — the indent has no reason to climb further. */
   fully_served: boolean;
+  /** The ladder ended with this act: the indent is out of approval, so the screen
+   *  must leave rather than refetch a document that is no longer awaiting anyone. */
+  closed?: boolean;
 }

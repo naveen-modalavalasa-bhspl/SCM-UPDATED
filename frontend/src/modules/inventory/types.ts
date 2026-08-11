@@ -347,6 +347,40 @@ export interface AllocationProposal {
   lines: AllocationProposalLine[];
 }
 
+/** One live claim on an item, raised by an allocation against a different indent. */
+export interface ItemClaim {
+  allocation_id: number;
+  allocation_no: string;
+  status: string;
+  indent_id: number;
+  indent_no: string | null;
+  requested_by_name: string | null;
+  office_name: string | null;
+  priority: string | null;
+  allocated_by_name: string | null;
+  /** What the claim holds off the shelf. */
+  claimed_qty: number;
+  /** What it actually promises to give. */
+  giving_qty: number;
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+  created_at: string | null;
+}
+
+/** The breakdown behind "N claimed by other indents" on an allocation line. */
+export interface ItemClaims {
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  claimed_total: number;
+  indent_count: number;
+  claims: ItemClaim[];
+}
+
 export interface AllocationDecision {
   indent_item_id: number;
   item_id: number;

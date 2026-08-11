@@ -4,7 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, XCircle } from "lucide-react";
 import { Button, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import {
-  approveAllocation, getAllocation, getAllocationHistory, rejectAllocation,
+  approveAllocation, getAllocation, getAllocationHistory,
+  getPendingInventoryApprovals, rejectAllocation,
 } from "../api";
 import { alerts } from "@/modules/alerts";
 
@@ -43,6 +44,16 @@ export function AllocationApprovalDetailPage() {
     queryFn: () => getAllocationHistory(allocationId),
     enabled: Number.isFinite(allocationId) && allocationId > 0,
   });
+
+  // Status alone does not answer "is this mine to sign": a two-rung allocation is
+  // still PENDING_APPROVAL after the first signature, and it was still offering
+  // Approve to the person who had just signed it — a button whose only outcome was
+  // the server's refusal. The inbox is the authority on whose turn it is.
+  const pending = useQuery({
+    queryKey: ["inventory", "allocation-pending-mine"],
+    queryFn: getPendingInventoryApprovals,
+  });
+  const waitingOnMe = (pending.data ?? []).some((row) => row.doc_id === allocationId);
 
   const goBack = () => nav(decisionView ? "/approvals/decisions" : "/inventory/allocation-approvals");
 
@@ -158,7 +169,18 @@ export function AllocationApprovalDetailPage() {
             </div>
           </Card>
 
-          {!decisionView && (
+          {/* A decided allocation has nothing left to sign. The buttons used to show
+              on every allocation this screen could open — including one that was just
+              approved — and clicking them only produced the server's refusal. */}
+          {!decisionView && !pending.isLoading && !waitingOnMe && (
+            <Card className="p-4 text-sm text-muted">
+              {a.status === "PENDING_APPROVAL"
+                ? "Signed at your level — this allocation is now waiting on the next approver."
+                : `This allocation is ${a.status === "APPROVED" ? "approved" : a.status.toLowerCase()} — there is nothing left to decide here.`}
+            </Card>
+          )}
+
+          {!decisionView && waitingOnMe && (
             <Card className="p-4">
               <Field label="Comments">
                 <Input

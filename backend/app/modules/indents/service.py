@@ -827,7 +827,7 @@ async def _assert_can_view_indent(db: AsyncSession, indent_id: int, user) -> Ind
         select(Indent)
         .options(selectinload(Indent.items))
         .where(Indent.id == indent_id)
-        .where(await indent_access_condition(db, user))
+        .where(await _indent_visibility(db, user))
     )
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if not indent:
@@ -999,7 +999,7 @@ async def _get_indent_for_journey(db: AsyncSession, indent_id: int, user) -> Ind
             Indent.remarks,
         ))
         .where(Indent.id == indent_id)
-        .where(await indent_access_condition(db, user))
+        .where(await _indent_visibility(db, user))
     )
     indent = (await db.execute(stmt)).scalar_one_or_none()
     if not indent:
@@ -1631,7 +1631,7 @@ async def approved_pending_po(db: AsyncSession, params: PageParams, user=None) -
         ))
     )
     if user is not None:
-        stmt = stmt.where(await indent_access_condition(db, user))
+        stmt = stmt.where(await _indent_visibility(db, user))
     stmt = stmt.order_by(Indent.created_at.desc())
     return await paginate(db, stmt, params)
 
@@ -4098,7 +4098,7 @@ async def activity_ledger(
         Indent.created_at,
     )
     if user is not None:
-        visible_stmt = visible_stmt.where(await indent_access_condition(db, user))
+        visible_stmt = visible_stmt.where(await _indent_visibility(db, user))
     # Narrowed on the CTE, not after the UNION: every branch fans one indent out into
     # many rows, so filtering the source keeps the four joins off the excluded indents.
     visible_stmt = _apply_region_filter(
@@ -4545,7 +4545,7 @@ async def list_acknowledgments(
         )
     )
     if user is not None:
-        stmt = stmt.where(await indent_access_condition(db, user))
+        stmt = stmt.where(await _indent_visibility(db, user))
     term = _clean_search(search)
     if term:
         pattern = _like_pattern(term)
@@ -4688,7 +4688,7 @@ async def list_notifications(
             Indent.status,
             Indent.updated_at.label("created_at"),
         )
-        .where(await indent_access_condition(db, user))
+        .where(await _indent_visibility(db, user))
         .where(Indent.status.in_(supported_statuses))
     )
     term = _clean_search(search)
@@ -4832,6 +4832,22 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
 
     committed = await _committed_by_line(db, indent_id)
 
+    # Every line already covered by a live allocation — an approver served it out of
+    # their own stock before it ever reached the queue. The form would open with
+    # "asked 0" on every row and a Submit that can only raise an empty allocation, so
+    # say what happened instead. The queue itself already filters these out; this is
+    # the stale link, the bookmark and the back button.
+    if indent.items and not any(
+        Decimal(str(line.approved_quantity or line.quantity or 0))
+        - Decimal(str(line.allocated_quantity or 0))
+        - committed.get(line.id, Decimal("0")) > 0
+        for line in indent.items
+    ):
+        raise ValidationError(
+            f"Indent {indent.indent_no} has nothing left to allocate — every line is "
+            f"already covered by an allocation. Check Allocation Approvals.",
+        )
+
     lines = [{
         "indent_item_id": line.id,
         "item_id": line.item_id,
@@ -4874,6 +4890,21 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
                                   for w in p["warehouses"]]}
                   for p in proposal],
     }
+
+
+async def item_claims(db: AsyncSession, item_id: int, indent_id: int, user=None) -> dict:
+    """"12 claimed by other indents", opened up: which indents, how much each, and
+    what is on the shelf behind the number.
+
+    The stock half is scoped to the points this login may draw from — the same set
+    the allocation screen counts `available` over, so the two agree. The claims half
+    is not: an allocator has to know a claim exists even when it was raised somewhere
+    they cannot see stock.
+    """
+    warehouse_ids = (await inventory_service.warehouse_ids_for_user(db, user)
+                     if user is not None else None)
+    return await allocations.competing_claims(
+        db, item_id, indent_id, warehouse_ids=warehouse_ids)
 
 
 async def decide_allocation(db: AsyncSession, body, user):

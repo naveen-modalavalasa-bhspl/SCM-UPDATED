@@ -8,6 +8,7 @@ import type {
   AllocationListRow,
   AllocationProposal,
   AllocationApprovalBatch,
+  ItemClaims,
   AllocBatchResult,
   AllocationBatchResult,
   BatchDemand,
@@ -314,6 +315,12 @@ export const getFulfillmentQueue = (status?: string, owedOnly = true) =>
 
 export const getAllocationProposal = (indentId: number) =>
   api.get<AllocationProposal>(`/api/allocations/proposal/${indentId}`).then((r) => r.data);
+
+/** Who is holding the "N claimed by other indents" on an allocation line, itemised.
+ *  `indentId` is the one being allocated, and is excluded from the answer. */
+export const getItemClaims = (itemId: number, indentId: number) =>
+  api.get<ItemClaims>(`/api/allocations/claims/${itemId}`, { params: { indent_id: indentId } })
+    .then((r) => r.data);
 
 /** Every indent in a cycle allocated in one request — one allocation each, exactly
  *  what `createAllocation` writes for a single indent. Not atomic across indents by

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { createAllocation, getAllocationProposal } from "../api";
+import { ClaimsPanel } from "../components/ClaimsPanel";
 import { alerts } from "@/modules/alerts";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
 
@@ -197,15 +198,23 @@ export function AllocationPage() {
                       another indent had already reserved. */}
                   {line.uom_code} · available{" "}
                   <span className="tabular font-semibold text-ink">{line.available_total}</span>
-                  {line.competing_demand > 0 && (
-                    <>
-                      {" "}· <span className="text-warning">
-                        {line.competing_demand} claimed by other indents
-                      </span>
-                    </>
-                  )}
                 </div>
               </div>
+
+              {/* The claim is the one number on this line an allocator cannot act on as
+                  a total — it opens into who is holding what. Full width under the
+                  header rather than inside it: the breakdown is a table, and the
+                  header's right-hand column is a caption. */}
+              {line.competing_demand > 0 && (
+                <div className="mb-3">
+                  <ClaimsPanel
+                    itemId={line.item_id}
+                    indentId={id}
+                    demand={line.competing_demand}
+                    uom={line.uom_code}
+                  />
+                </div>
+              )}
 
               {line.warehouses.length === 0 ? (
                 <p className="text-sm text-danger">

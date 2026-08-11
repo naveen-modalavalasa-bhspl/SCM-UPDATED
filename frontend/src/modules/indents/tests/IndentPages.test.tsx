@@ -3336,124 +3336,15 @@ describe("indent UI shell", () => {
     expect(screen.getByRole("button", { name: "Clear all" })).toBeInTheDocument();
   });
 
-  it("shows only server-authorized approve and reject actions", async () => {
+  // Deciding on an indent belongs to the Approvals module; this page never offers it.
+  it("never offers approve or reject, even when the server authorizes them", async () => {
     vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }));
 
     renderWithProviders(<IndentDetailPage />, "/indents/42");
 
-    expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
-  });
-
-  it("prevents duplicate approval clicks and writes the confirmed response to cache immediately", async () => {
-    const approval = deferred<Indent>();
-    const detailRefetch = deferred<Indent>();
-    const journeyRefetch = deferred<IndentJourney>();
-    const client = createTestQueryClient();
-    const scope = { employeeId: 1, activePositionId: 10 };
-    vi.mocked(indentApi.get)
-      .mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }))
-      .mockReturnValueOnce(detailRefetch.promise);
-    vi.mocked(indentApi.approve).mockReturnValueOnce(approval.promise);
-    vi.mocked(indentApi.journey).mockReturnValueOnce(journeyRefetch.promise);
-
-    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
-    const approve = await screen.findByRole("button", { name: "Approve" });
-    fireEvent.click(approve);
-    fireEvent.click(approve);
-
-    const processing = await screen.findByRole("button", { name: "Approving..." });
-    expect(processing).toBeDisabled();
-    expect(indentApi.approve).toHaveBeenCalledTimes(1);
-
-    const updated = detailIndent({ status: "AWAITING_ALLOCATION", can_approve: false, can_reject: false });
-    await act(async () => {
-      approval.resolve(updated);
-      await approval.promise;
-    });
-
-    await waitFor(() => expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))).toEqual(updated));
-    expect(screen.getByText("AWAITING ALLOCATION")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
-
-    detailRefetch.resolve(updated);
-    journeyRefetch.resolve(journeyData());
-  });
-
-  it("closes Reject only after success and refreshes the authoritative rejection action", async () => {
-    const rejection = deferred<Indent>();
-    const detailRefetch = deferred<Indent>();
-    const journeyRefetch = deferred<IndentJourney>();
-    const client = createTestQueryClient();
-    const scope = { employeeId: 1, activePositionId: 10 };
-    const pendingJourney = journeyData({
-      status: "PENDING_APPROVAL",
-      current_stage: "Finance Assurance",
-      current_stage_message: "Waiting for Finance Assurance",
-      phases: journeyData().phases.map((phase, index) => index === 2
-        ? { ...phase, status: "PENDING", is_current: true }
-        : index > 2 ? { ...phase, status: "PENDING", is_current: false } : phase),
-      stages: [
-        { sequence: 1, title: "Request submitted", status: "SUBMITTED", stage_type: "submission", timestamp: "2026-07-27T09:30:00Z" },
-        { sequence: 2, title: "Finance Assurance", status: "PENDING", stage_type: "approval", is_current: true, approver_name: "Finance Holder" },
-        { sequence: 3, title: "Allocation", status: "PENDING", stage_type: "allocation" },
-      ],
-      history: [],
-    });
-    client.setQueryData(indentKeys.journey(scope, 42), pendingJourney);
-    vi.mocked(indentApi.get)
-      .mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }))
-      .mockReturnValueOnce(detailRefetch.promise);
-    vi.mocked(indentApi.reject).mockReturnValueOnce(rejection.promise);
-    vi.mocked(indentApi.journey).mockReturnValueOnce(journeyRefetch.promise);
-
-    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
-    fireEvent.click(await screen.findByRole("button", { name: "Reject" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.change(within(dialog).getByLabelText("Reason for rejection"), {
-      target: { value: "Budget code is invalid" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Reject indent" }));
-
-    expect(await within(dialog).findByRole("button", { name: "Rejecting..." })).toBeDisabled();
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-
-    const updated = detailIndent({ status: "REJECTED", can_approve: false, can_reject: false });
-    await act(async () => {
-      rejection.resolve(updated);
-      await rejection.promise;
-    });
-
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))).toEqual(updated);
-    const projected = client.getQueryData<IndentJourney>(indentKeys.journey(scope, 42));
-    expect(projected?.status).toBe("REJECTED");
-    expect(projected?.stages).toHaveLength(1);
-    expect(projected?.stages.some((stage) => stage.status === "REJECTED")).toBe(false);
-    expect(screen.getByText("REJECTED")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
-
-    detailRefetch.resolve(updated);
-    journeyRefetch.resolve(projected!);
-  });
-
-  it("keeps Reject open with its reason and the previous cache when rejection fails", async () => {
-    const client = createTestQueryClient();
-    const scope = { employeeId: 1, activePositionId: 10 };
-    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({ can_approve: true, can_reject: true }));
-    vi.mocked(indentApi.reject).mockRejectedValueOnce(new Error("Server error"));
-
-    renderWithProviders(<IndentDetailPage />, "/indents/42", client);
-    fireEvent.click(await screen.findByRole("button", { name: "Reject" }));
-    const dialog = await screen.findByRole("dialog");
-    const reason = within(dialog).getByLabelText("Reason for rejection");
-    fireEvent.change(reason, { target: { value: "Keep this reason" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Reject indent" }));
-
-    expect(await within(dialog).findByText("Server error")).toBeInTheDocument();
-    expect(reason).toHaveValue("Keep this reason");
-    expect(within(dialog).getByRole("button", { name: "Reject indent" })).toBeEnabled();
-    expect(client.getQueryData<Indent>(indentKeys.detail(scope, 42))?.status).toBe("PENDING_APPROVAL");
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Approve/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Reject/i })).not.toBeInTheDocument();
   });
 
   function rejectedJourney(stage: Partial<IndentJourney["stages"][number]>) {

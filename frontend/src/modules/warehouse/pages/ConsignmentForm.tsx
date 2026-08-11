@@ -297,6 +297,12 @@ export default function ConsignmentForm() {
         ...current,
         issue_id: result.issue_id,
         project_id: result.project_id ?? current.project_id,
+        // Default the destination to the point that raised the indent. The server
+        // derives the same value when this is left blank, but nobody could see the
+        // decision before saving — and half the consignments went out with nothing
+        // for the receiving point to raise a GRN against. Still editable: the packer
+        // can route it to any other point he holds.
+        to_warehouse_id: current.to_warehouse_id ?? result.destination_warehouse_id ?? null,
         delivery_address: current.delivery_address || result.destination_office_name || "",
       }));
     },
@@ -574,6 +580,23 @@ export default function ConsignmentForm() {
       />
 
       <ErrorBanner error={save.error ?? loadIssue.error} />
+
+      {/* The issue came out of the point that raised the indent, so there is no
+          journey to record. Saying nothing left a blank destination on screen, a
+          consignment that could be dispatched, and a storekeeper with no consignment
+          to raise a GRN against — the server now refuses it, so say why up front. */}
+      {source?.destination_is_origin && !editing && (
+        <div className="mb-4 rounded-lg border border-warn/30 bg-warn-bg px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-warn">
+            <AlertCircle className="h-4 w-4" /> No consignment needed
+          </div>
+          <p className="mt-1 text-xs text-body">
+            {source.issue_no} was issued at {originName || "this point"}, which is the point
+            that raised the indent — the goods are already there. Acknowledge the issue
+            instead, or pick a destination above to forward it on.
+          </p>
+        </div>
+      )}
 
       {doc && (
         <MetaCard title="Consignment identity">

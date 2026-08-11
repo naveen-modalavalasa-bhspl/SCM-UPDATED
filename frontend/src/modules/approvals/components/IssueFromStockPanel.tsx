@@ -19,7 +19,16 @@ const fmt = (value: number) => {
  *  The user never says what kind of movement this is — the server derives that from
  *  the two stocking points. All they add is a reason.
  */
-export function IssueFromStockPanel({ indentId }: { indentId: number }) {
+export function IssueFromStockPanel(
+  { indentId, onClosed }: {
+    indentId: number;
+    /** Called when the issue ended the indent's approval (nothing left owed, and the
+     *  issuer was the approver the stage was waiting on). The screen this panel sits
+     *  on has to leave: refetching an indent that is no longer awaiting approval
+     *  answers 422 and paints an error over an act that succeeded. */
+    onClosed?: () => void;
+  },
+) {
   const queryClient = useQueryClient();
   const [quantities, setQuantities] = useState<Record<number, string>>({});
   const [sources, setSources] = useState<Record<number, string>>({});
@@ -46,9 +55,15 @@ export function IssueFromStockPanel({ indentId }: { indentId: number }) {
         .filter((line) => line.quantity > 0 && line.warehouse_id > 0);
       return approvalsApi.issueFromStock(indentId, lines, reason, forward);
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       setQuantities({});
       setReason("");
+      // The host screen takes over only when it said it would; anywhere else the
+      // ordinary refresh still has to run or the list keeps showing a settled row.
+      if (result.closed && onClosed) {
+        onClosed();
+        return;
+      }
       queryClient.invalidateQueries({ queryKey: ["approvals"] });
       queryClient.invalidateQueries({ queryKey: ["inventory"] });
     },

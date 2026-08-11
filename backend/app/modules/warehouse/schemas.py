@@ -1294,6 +1294,11 @@ class IssueDispatchSource(BaseModel):
     project_id: int | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None
+    # The stocking point serving the requesting office — what "To warehouse" defaults
+    # to. Blank when that point IS the origin, which `destination_is_origin` explains.
+    destination_warehouse_id: int | None = None
+    destination_warehouse_name: str | None = None
+    destination_is_origin: bool = False
     items: list[IssueDispatchSourceItem] = []
 
 
