@@ -6,9 +6,17 @@ export interface SyncResult {
   error_message?: string | null;
 }
 
+/** One piece of follow-up work a sync triggers, and whether it landed. */
+export interface SyncFollowUp {
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
 export interface SyncStatus {
   running: boolean;
   items: SyncResult[];
+  follow_up?: SyncFollowUp[];
 }
 
 export interface Schedule {

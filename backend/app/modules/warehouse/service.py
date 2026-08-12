@@ -40,7 +40,7 @@ from app.modules.warehouse.enums import (
     PickingStatus, PutawayStatus, PutawayType, QcStatus, ReceiptStatus, ReceiptType,
     ReturnStatus, SerialStatus, WarehouseDocType,
 )
-from app.platform.settings import attachments
+from app.platform.settings import attachments, codeformat
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance as WfInstance
@@ -2499,6 +2499,11 @@ async def _place_serials(
 
     The code is generated here rather than in masters (CLAUDE.md, masters overhaul):
     a unit only becomes an asset once it is physically somewhere.
+
+    Its SHAPE, though, is not decided here. The formula lives in
+    Settings > Code Formats (`platform/settings/codeformat.py`) because the business
+    changes it — item-code plus a running number one quarter, item-code plus a
+    new/old flag plus an 8-digit serial the next — and each change was a code change.
     """
     if not serial_numbers:
         return
@@ -2515,6 +2520,7 @@ async def _place_serials(
 
     item = await db.get(Item, task.item_id)
     is_asset = bool(getattr(item, "is_asset", False)) if item else False
+    warehouse = await db.get(Warehouse, task.warehouse_id) if task.warehouse_id else None
 
     for serial in serials:
         serial.batch_id = task.batch_id or receipt_item.batch_id or serial.batch_id
@@ -2522,7 +2528,14 @@ async def _place_serials(
         serial.bin_id = target.id
         serial.status = SerialStatus.AVAILABLE.value
         serial.lot_no = task.lot_no
-        code = f"{(item.code if item else 'ITM')}-{serial.id:06d}"
+        code = await codeformat.unit_code(
+            db, item=item, is_asset=is_asset,
+            serial=serial.serial_number, seq=serial.id,
+            warehouse_code=getattr(warehouse, "code", None),
+        )
+        # Never re-stamped: a unit's code is on its label and in every document that
+        # has already quoted it, so changing the formula only affects units put away
+        # from now on.
         if is_asset:
             serial.asset_code = serial.asset_code or code
         else:
@@ -5097,8 +5110,10 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
 
 async def _dispatch_for_issue(db: AsyncSession, issue_id: int) -> m.Dispatch | None:
     """The consignment carrying this issue, if one was ever raised for it."""
+    # Eager-loaded: `acknowledge_issue` books delivered quantities onto these lines,
+    # and a lazy load on an async session raises MissingGreenlet.
     return (await db.execute(
-        select(m.Dispatch).where(
+        select(m.Dispatch).options(selectinload(m.Dispatch.items)).where(
             m.Dispatch.ref_type == WarehouseDocType.WH_ISSUE.value,
             m.Dispatch.ref_id == issue_id,
             m.Dispatch.status != DispatchStatus.CANCELLED.value,
@@ -5123,7 +5138,8 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
 
     Acknowledgement used to stop at the issue: the indent behind it sat at
     ALLOCATED forever, so nothing on any screen ever showed a request as finished.
-    An indent is only closed when no live issue against it is still outstanding.
+    An indent is only closed when no live issue against it is still outstanding AND
+    nothing is still owed on it.
     """
     if not indent_id:
         return
@@ -5144,6 +5160,46 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
     )
     if outstanding:
         return
+
+    # A part-served indent is not finished just because the issue carrying that part
+    # was acknowledged. An approver who gives 13 of the 20 asked for leaves 7 owed, and
+    # that remainder still has to reach the Fulfilment Queue for a second allocation.
+    # Closing ended it instead: CLOSED is not in `_ALLOCATION_ELIGIBLE_STATUSES`, so
+    # the allocate screen answered "this indent is closed — there is nothing to
+    # allocate" and the 7 was lost with the first 13 already in the requester's hands.
+    #
+    # Only the closing is withheld. The status the allocation path already set
+    # (PARTIALLY_FULFILLED, or PENDING_APPROVAL while the remainder is still climbing)
+    # is left exactly as it is — both are allocation-eligible and both already list in
+    # the queue, so the remainder rejoins the ordinary flow with nothing else touched.
+    #
+    # `_committed_by_line` is the same arithmetic `list_indents(has_remainder=True)`
+    # runs, so the queue and this check can never disagree about whether a request is
+    # finished.
+    from app.modules.indents.models import IndentItem
+    from app.modules.indents.service import _committed_by_line, owed_quantity
+
+    committed = await _committed_by_line(db, indent_id)
+    owed_lines = (await db.execute(
+        select(IndentItem).where(IndentItem.indent_id == indent_id)
+    )).scalars().all()
+    # "And something actually covers it", the same half `approvals.service._nothing_owed`
+    # carries and for the same reason: an indent issued without ever passing through an
+    # allocation has 0 allocated against a full approved quantity, which reads as
+    # entirely unserved. Those close on the acknowledgement exactly as they always did —
+    # the remainder guard below only speaks for indents the allocation flow has touched.
+    covered = sum(
+        (_d(line.allocated_quantity) + committed.get(line.id, ZERO)
+         for line in owed_lines),
+        ZERO,
+    )
+    if covered > ZERO and any(
+        owed_quantity(line) - _d(line.allocated_quantity)
+        - committed.get(line.id, ZERO) > ZERO
+        for line in owed_lines
+    ):
+        return
+
     before_status = indent.status
     indent.status = IndentStatus.CLOSED.value
     await write_audit(db, entity="ind_indents", entity_id=indent.id,
@@ -5183,6 +5239,13 @@ async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None
         dispatch.acknowledged_by_name = issue.acknowledged_by_name
         dispatch.acknowledged_at = issue.acknowledged_at
         dispatch.delivered_at = dispatch.delivered_at or issue.acknowledged_at
+        # The requester has already confirmed every quantity carried by this issue
+        # (_receiver_confirmed is the guard above). Keep the linked consignment's line
+        # evidence in sync when the warehouse signs off through the issue page —
+        # without it `out_dispatch_items.delivered_qty` stays 0 forever, and the
+        # Journey's Delivery phase sits PENDING on an indent that is already closed.
+        for line in dispatch.items:
+            line.delivered_qty = _d(line.quantity)
 
     await _close_indents_on_issue(db, issue, user)
 
@@ -6628,6 +6691,58 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
     page["items"] = [await _decorate_serial(db, row) for row in page["items"]]
     return page
+
+
+async def serial_summary(db: AsyncSession, *, item_ids: list[int],
+                         warehouse_ids: list[int] | None = None,
+                         user=None) -> list[dict]:
+    """Serials and their asset/consumable codes, grouped by item and stocking point.
+
+    The stock screens live in inventory, which may not import this module (rule 5) and
+    has nowhere to keep a per-unit identity: `stk_balance` is one row per LOT and a lot
+    here holds up to 88 serials, so its single `serial_number` column cannot answer
+    "which units are these". Rather than denormalise 10,000 serials into a column that
+    only fits one, the screens ask this endpoint for the page they are showing and
+    merge — the same shape as the KPI summary calls beside them.
+
+    Returns a few sample codes plus the count, which is what a list row can show; the
+    full list is one `/serials?item_id=&warehouse_id=` call away for the detail panel.
+    """
+    if not item_ids:
+        return []
+    stmt = (
+        select(m.SerialNumber.item_id, m.SerialNumber.warehouse_id,
+               m.SerialNumber.serial_number, m.SerialNumber.imei,
+               m.SerialNumber.asset_code, m.SerialNumber.consumable_code)
+        .where(m.SerialNumber.item_id.in_(item_ids),
+               m.SerialNumber.is_active.is_(True))
+        .order_by(m.SerialNumber.id)
+    )
+    if warehouse_ids:
+        stmt = stmt.where(m.SerialNumber.warehouse_id.in_(warehouse_ids))
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.SerialNumber.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        ))
+
+    grouped: dict[tuple[int, int], dict] = {}
+    for item_id, warehouse_id, serial, imei, asset, consumable in (
+            await db.execute(stmt)).all():
+        key = (item_id, warehouse_id)
+        bucket = grouped.setdefault(key, {
+            "item_id": item_id, "warehouse_id": warehouse_id,
+            "count": 0, "serials": [], "codes": [],
+        })
+        bucket["count"] += 1
+        # Five is enough to recognise the lot; the rest are behind the detail panel.
+        if len(bucket["serials"]) < 5 and (serial or imei):
+            bucket["serials"].append(imei or serial)
+        code = asset or consumable
+        if code and len(bucket["codes"]) < 5:
+            bucket["codes"].append(code)
+    return list(grouped.values())
 
 
 async def _decorate_serial(db: AsyncSession, row: m.SerialNumber) -> dict:

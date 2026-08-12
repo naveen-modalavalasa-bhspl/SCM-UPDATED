@@ -1,6 +1,11 @@
+import { useMemo } from "react";
 import { Select } from "@/shared/components";
 import { useQuery } from "@tanstack/react-query";
 import type { Option } from "../types";
+
+/** One shared empty array, so the default `fallback` does not arrive with a new
+ *  identity on every render and invalidate the memos below. */
+const NO_FALLBACK: Option[] = [];
 
 /**
  * A master lookup that fetches its own options.
@@ -44,7 +49,7 @@ export function Lookup({
   isInvalid,
   errorMessage,
   serverSearch,
-  fallback = [],
+  fallback = NO_FALLBACK,
 }: Props) {
   // A disabled lookup with nothing chosen has nothing to say, so it stays unfetched.
   // A disabled lookup WITH a value still has to fetch: the Select renders the option
@@ -64,15 +69,28 @@ export function Lookup({
   // an indent that has left the "still to be issued" list because this very document
   // issued it — would otherwise discard the fallback and render the placeholder over
   // a value that exists.
-  const loaded = data ?? [];
-  const rows = [
-    ...loaded,
-    ...fallback.filter((row) => !loaded.some((known) => known.id === row.id)),
-  ];
-  const options = rows.map((o) => ({
-    value: o.id,
-    label: o.code ? `${o.code} — ${o.name}` : o.name,
-  }));
+  //
+  // Memoised because the identity of this array is what the Autocomplete underneath
+  // keys its collection on. Rebuilt every render, it made the host form pay for a
+  // fresh collection on every keystroke — survivable for a ten-row master, not for
+  // the stocking points: whs_warehouses went from ~20 rows to 993 when the LIP/MDP
+  // backfill landed, and the consignment screen (which re-renders on every package
+  // and serial edit) spent seconds rebuilding a 993-node collection over and over.
+  // The list itself is unchanged — the same rows, in the same order, built once.
+  const rows = useMemo(() => {
+    const loaded = data ?? [];
+    return [
+      ...loaded,
+      ...fallback.filter((row) => !loaded.some((known) => known.id === row.id)),
+    ];
+  }, [data, fallback]);
+  const options = useMemo(
+    () => rows.map((o) => ({
+      value: o.id,
+      label: o.code ? `${o.code} — ${o.name}` : o.name,
+    })),
+    [rows],
+  );
 
   return (
     <Select

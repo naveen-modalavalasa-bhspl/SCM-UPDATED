@@ -1128,6 +1128,119 @@ async def current_approvers(db, doc_type: str, doc_id: int) -> list:
     return [employee for employee in employees if employee is not None]
 
 
+# ---------------- the queue belongs to a HAT, not just to a person ----------------
+#
+# `wf_pending` is keyed on the EMPLOYEE, because that is who signs. But the ladder
+# resolves to a POST, and one person can hold several: Kolli Venkata Surya Srikant
+# holds DM-104-PADERU and DM-104-VIZIANAGARAM at once. A Vizianagaram storekeeper's
+# indent resolves to the Vizianagaram post — one chain, one pending row, correctly
+# routed — and the queue then showed it under BOTH hats, because it never asked which
+# one was being worn.
+#
+# That is not only cosmetic. Acting on it from the wrong hat half-succeeded: the
+# allocation was written and committed, and the settle step behind it then failed the
+# profile's SUBTREE rung (`shared/scope.py` keys the rung to the active position too),
+# so `IND/2026-27/00639` came back "Indent 640 not found" with 5.612 already promised
+# and the ladder still sitting on the District Manager.
+#
+# The predicate below is exactly the one `_act_ladder` and `actionable_doc_ids`
+# already enforce — the ladder's own `allowed_position_ids`, which is the approval
+# CONFIG speaking, not a rule invented here. So the queue can now only show what the
+# current hat may actually sign, and it agrees with the RBAC rung by construction:
+# both are keyed on `active_position_id`.
+#
+# Every gate below is a reason to KEEP the row. Nothing is hidden unless the ladder
+# positively says another post owns it:
+#   * no active position (System Admin, an unmapped login)      -> hide nothing
+#   * the login holds one post                                  -> hide nothing
+#   * a non-ladder instance, or a chain with no rung to read     -> keep
+#   * a fallback rung, which names people and not a post         -> keep
+#   * a delegate, who holds none of the rung's posts             -> keep
+
+
+async def _active_position_count(db, employee_id: int) -> int:
+    return int(await db.scalar(
+        select(func.count(HcmPositionAssignment.id)).where(
+            HcmPositionAssignment.employee_id == employee_id,
+            HcmPositionAssignment.is_active.is_(True),
+        )
+    ) or 0)
+
+
+def _chain_link_at(chain, sequence) -> dict | None:
+    """The rung at `sequence` in a raw resolved_chain — no Instance needed."""
+    for link in chain or []:
+        if isinstance(link, dict) and link.get("sequence") == sequence:
+            return link
+    return None
+
+
+async def instances_for_other_hats(db, user,
+                                   doc_types: list[str] | None = None) -> set[int]:
+    """Instances waiting on a post this login holds but is NOT currently wearing.
+
+    One extra read, and only for a login that holds more than one post — a single-hat
+    approver takes the same path they always did, and pays for nothing.
+
+    Three columns, not Instance objects: a monthly cycle can put several hundred
+    documents in one approver's queue, and this needs the chain and nothing else.
+    Memoised on the session, which `get_db` gives out one per request — the queue, its
+    tiles and the consolidation tab all ask the same question of the same hat, and it
+    cannot change inside one call.
+    """
+    active_position_id = getattr(user, "active_position_id", None)
+    if active_position_id is None:
+        return set()
+
+    key = (user.id, active_position_id, tuple(sorted(doc_types)) if doc_types else None)
+    memo = db.info.setdefault("workflow_other_hats", {})
+    if key in memo:
+        return memo[key]
+
+    if await _active_position_count(db, user.id) < 2:
+        memo[key] = set()
+        return memo[key]
+
+    conditions = [
+        Pending.approver_id == user.id,
+        Instance.status == InstanceStatus.IN_PROGRESS.value,
+    ]
+    if doc_types:
+        conditions.append(Pending.doc_type.in_(doc_types))
+    rows = (await db.execute(
+        select(Pending.instance_id, Pending.stage_sequence, Instance.resolved_chain)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(*conditions)
+    )).all()
+
+    hidden: set[int] = set()
+    for instance_id, stage_sequence, chain in rows:
+        # The rung the ROW is about, not whatever the instance has since moved to.
+        link = _chain_link_at(chain, stage_sequence)
+        if link is None:
+            continue
+        allowed = ladder.allowed_position_ids(link)
+        if not allowed:
+            continue
+        if int(user.id) not in {int(value) for value in link.get("approver_ids", [])}:
+            continue
+        if int(active_position_id) in allowed:
+            continue
+        hidden.add(instance_id)
+    memo[key] = hidden
+    return hidden
+
+
+async def other_hat_condition(db, user, doc_types: list[str] | None = None):
+    """The WHERE clause that keeps another hat's work out of this queue, or None.
+
+    None means "add nothing" — the overwhelmingly common case, and the one where the
+    query must stay byte-for-byte what it was.
+    """
+    hidden = await instances_for_other_hats(db, user, doc_types)
+    return Pending.instance_id.notin_(hidden) if hidden else None
+
+
 def _pending_row(row) -> dict:
     due_at = row.Pending.due_at
     return {
@@ -1161,10 +1274,14 @@ def _pending_conditions(user, doc_types: list[str] | None = None) -> list:
 
 
 async def pending_for_user(db, user, doc_types: list[str] | None = None) -> list[dict]:
+    conditions = _pending_conditions(user, doc_types)
+    other_hat = await other_hat_condition(db, user, doc_types)
+    if other_hat is not None:
+        conditions.append(other_hat)
     rows = (await db.execute(
         select(Pending, Instance)
         .join(Instance, Instance.id == Pending.instance_id)
-        .where(*_pending_conditions(user, doc_types))
+        .where(*conditions)
         .order_by(Pending.created_at.desc())
     )).all()
     return [_pending_row(row) for row in rows]
@@ -1174,6 +1291,9 @@ async def pending_page(db, user, page: int, size: int,
                        doc_types: list[str] | None = None) -> dict:
     """`pending_for_user` as a page. Rule 11: every list answers {items,total,page,size}."""
     conditions = _pending_conditions(user, doc_types)
+    other_hat = await other_hat_condition(db, user, doc_types)
+    if other_hat is not None:
+        conditions.append(other_hat)
     total = int(await db.scalar(
         select(func.count(Pending.id))
         .select_from(Pending)

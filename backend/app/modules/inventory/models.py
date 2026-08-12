@@ -9,8 +9,8 @@ Inventory is the base module — it imports nothing from app.modules — so ever
 module can call move_stock() without inverting the import chain.
 """
 from sqlalchemy import (
-    BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String,
-    Text, UniqueConstraint,
+    JSON, BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric,
+    String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -50,9 +50,15 @@ class Stock(Base):
     expiry_date = Column(Date, nullable=True)
     project_id = Column(BigInteger, index=True, nullable=False, default=NO_PROJECT)
     project_name = Column(String(200), nullable=True)     # snapshot
-    serial_number = Column(String(50), nullable=True)
-    asset_code = Column(String(40), nullable=True)
-    consumable_code = Column(String(40), nullable=True)
+    # JSON, not a string: the live column is `json` and a lot holds many units, so it
+    # is a LIST of serials / IMEIs. It was mapped as String(50) here, which is why
+    # nothing ever managed to write one — MySQL rejects a bare string into a json
+    # column, and 50 characters would not have held one code anyway.
+    serial_number = Column(JSON, nullable=True)
+    # 100, matching whs_serial_numbers. At 40 the generated code did not fit: the item
+    # code alone is ~40 characters, so every write failed with "Data too long".
+    asset_code = Column(String(100), nullable=True)
+    consumable_code = Column(String(100), nullable=True)
     available_qty = Column(Numeric(16, 3), nullable=False, default=0)
     reserved_qty = Column(Numeric(16, 3), nullable=False, default=0)
     transit_qty = Column(Numeric(16, 3), nullable=False, default=0)
@@ -89,6 +95,17 @@ class StockMovement(Base):
     direction = Column(String(3), nullable=False)   # StockDirection: IN | OUT
     quantity = Column(Numeric(16, 3), nullable=False)
     balance_after = Column(Numeric(16, 3), nullable=False)
+    # What the movement was worth. `rate` is the costed rate the balance row carries
+    # AFTER this move (weighted average for an inward, the standing rate for an
+    # outward) and `value` is rate * quantity, so a ledger line answers "how much
+    # money moved" without re-deriving it from a balance that has since changed.
+    # Both columns have always existed on stk_ledger; they were simply never mapped,
+    # which is why the ledger screen showed no prices at all.
+    rate = Column(Numeric(16, 4), nullable=True)
+    value = Column(Numeric(16, 2), nullable=True)
+    # The identities that moved — a JSON list, matching the live column. Plural
+    # because one ledger line can carry a whole putaway of serials.
+    serial_numbers = Column(JSON, nullable=True)
     ref_type = Column(String(30), nullable=False)   # RefType
     ref_id = Column(BigInteger, nullable=True)
     ref_no = Column(String(50), nullable=True)
@@ -96,7 +113,6 @@ class StockMovement(Base):
     created_by_id = soft_fk()
     created_by_name = Column(String(200), nullable=True)
     created_at = created_at_col()
-    # rate and value are left unmapped, as above.
 
 
 Index("ix_stk_ledger_item_created", StockMovement.item_id,

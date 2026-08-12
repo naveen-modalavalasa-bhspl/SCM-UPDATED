@@ -639,3 +639,62 @@ async def test_the_project_falls_back_to_the_raisers_own(db):
 
     assert project_id == PROJECT
     assert name == PROJECT_NAME
+
+
+# ---------------- the queue belongs to a hat, not to a person ----------------
+
+
+async def test_queue_shows_a_task_only_under_the_post_that_may_sign_it(db):
+    """One person, two District Manager posts, two districts.
+
+    The live case: Kolli Venkata Surya Srikant holds DM-104-PADERU and
+    DM-104-VIZIANAGARAM. A Vizianagaram storekeeper's indent resolves to the
+    Vizianagaram post — one chain, one wf_pending row, correctly routed — and the
+    queue then showed it under BOTH hats, because wf_pending is keyed on the employee
+    and nothing asked which post was being worn.
+
+    Not cosmetic: acting on it from the wrong hat wrote the allocation and then failed
+    the profile's SUBTREE rung on the way to settling the ladder, so IND/2026-27/00639
+    ended up with 5.612 promised out of stock and its remainder never passed upward.
+    """
+    holders = await _org(db, with_second_branch=True)
+    dm = holders[604]
+    # The same person also holds the OTHER branch's District Manager post.
+    db.add(HcmPositionAssignment(id=1614, employee_id=dm.id, position_id=614,
+                                 is_active=True, is_primary=False, synced_at=utcnow()))
+    await db.flush()
+    await _save(db, holders[601])
+
+    # Branch 2's pilot raises, so the climb reaches DM-2 (614) and never DM (604).
+    instance = await engine.start(db, "INDENT", 71, {
+        "requester_position_id": 616,
+    }, holders[616])
+    assert instance.status == InstanceStatus.IN_PROGRESS.value
+    # Past OE-2, so the document is sitting on the District Manager rung.
+    await engine.act(db, "INDENT", 71, "APPROVE", holders[615])
+
+    dm.active_position_id = 614
+    assert [row["doc_id"] for row in await engine.pending_for_user(db, dm)] == [71]
+
+    dm.active_position_id = 604
+    assert await engine.pending_for_user(db, dm) == []
+    assert (await engine.pending_page(db, dm, 1, 20))["total"] == 0
+
+    # The other branch's own District Manager holds ONE post, so nothing is ever
+    # hidden from them — a single-hat login takes exactly the path it always did.
+    assert [row["doc_id"]
+            for row in await engine.pending_for_user(db, holders[614])] == [71]
+
+
+async def test_a_login_with_no_active_position_keeps_its_whole_queue(db):
+    """System Admin, and any login HCM has not seated, must not lose work to a rule
+    about which hat is being worn — they are wearing none."""
+    holders = await _org(db)
+    await _save(db, holders[601])
+    await engine.start(db, "INDENT", 72, {"requester_position_id": 606}, holders[606])
+
+    oe = holders[605]
+    oe.active_position_id = None
+
+    assert not await engine.instances_for_other_hats(db, oe)
+    assert [row["doc_id"] for row in await engine.pending_for_user(db, oe)] == [72]

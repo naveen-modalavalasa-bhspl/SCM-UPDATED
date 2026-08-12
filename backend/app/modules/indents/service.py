@@ -3099,6 +3099,10 @@ async def _journey_operational_evidence(
     )
     events.extend(receipt_events)
     fully_received = lines_complete(received_by_line)
+    warehouse_acknowledged = (
+        any(row.acknowledged_at is not None for row in issues)
+        or any(row.acknowledged_at is not None for row in dispatches)
+    )
     if received_total > 0:
         latest_receipt = receipt_events[-1] if receipt_events else None
         stage(
@@ -3150,9 +3154,9 @@ async def _journey_operational_evidence(
         missing_sources.append("remaining posted out_issue_items.issued_qty")
     elif not dispatched:
         missing_sources.append("out_dispatches.gate_out_at")
-    elif not delivered:
+    elif not delivered and not fully_received:
         missing_sources.append("out_dispatches.delivered_at")
-    elif not delivery_complete:
+    elif not delivery_complete and not fully_received:
         missing_sources.append("remaining out_dispatch_items.delivered_qty")
     elif received_total <= 0:
         missing_sources.append(
@@ -3187,6 +3191,7 @@ async def _journey_operational_evidence(
         ),
         "has_receipt": received_total > 0,
         "receipt_complete": fully_received,
+        "has_warehouse_acknowledgement": warehouse_acknowledged,
         "is_complete": is_complete,
     }
 
@@ -3594,7 +3599,7 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         "has_allocation": False, "allocation_complete": False,
         "has_material_request": False, "has_issue": False, "issue_complete": False,
         "has_dispatch": False, "has_delivery": False, "delivery_complete": False,
-        "has_acknowledgement": False,
+        "has_acknowledgement": False, "has_warehouse_acknowledgement": False,
         "has_receipt": False,
         "receipt_complete": False, "is_complete": False,
     }
@@ -3682,14 +3687,20 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
 
     allocation_done = bool(operational["has_allocation"])
     warehouse_done = bool(operational["issue_complete"])
-    delivery_done = bool(operational["delivery_complete"])
-    acknowledgement_done = bool(operational["is_complete"])
+    # The two final phases are separate signatures. The requester confirms physical
+    # receipt in My Deliveries; only the later warehouse sign-off completes
+    # Acknowledgement. Dispatch-line delivered_qty remains useful evidence, but it is
+    # not the requester's confirmation and must not swap these two phases around —
+    # keying Delivery off it left the phase PENDING forever on indents acknowledged
+    # through the issue page, which never wrote that column.
+    delivery_done = bool(operational["receipt_complete"])
+    acknowledgement_done = bool(
+        delivery_done and operational["has_warehouse_acknowledgement"]
+    )
     allocation_current = approvals_complete and not allocation_done
     warehouse_current = allocation_done and not warehouse_done
-    delivery_current = warehouse_done and not delivery_done and not operational["has_receipt"]
-    acknowledgement_current = (
-        (delivery_done or operational["has_receipt"]) and not acknowledgement_done
-    )
+    delivery_current = warehouse_done and not delivery_done
+    acknowledgement_current = delivery_done and not acknowledgement_done
 
     phases = [
         phase(1, "Draft", "APPROVED" if request_submitted else "PENDING",
@@ -3725,12 +3736,13 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
     elif warehouse_current:
         current_stage = "Waiting for warehouse issue"
     elif delivery_current:
-        current_stage = "In delivery" if operational["has_dispatch"] else "Waiting for dispatch"
-    elif acknowledgement_current:
         current_stage = (
             "Partially received"
-            if operational["has_receipt"] else "Waiting for acknowledgement"
+            if operational["has_receipt"]
+            else "In delivery" if operational["has_dispatch"] else "Waiting for dispatch"
         )
+    elif acknowledgement_current:
+        current_stage = "Waiting for warehouse acknowledgement"
     elif acknowledgement_done:
         current_stage = "Completed"
 

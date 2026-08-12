@@ -73,13 +73,19 @@ async def pending_summary(db: AsyncSession, user) -> dict:
     a queue passes 500 rows.
     """
     now = ist_now()
+    conditions = [
+        Pending.approver_id == user.id,
+        Instance.status == InstanceStatus.IN_PROGRESS.value,
+    ]
+    # Same hat rule the list below applies, or the tiles would keep counting work the
+    # list no longer shows (see engine.instances_for_other_hats).
+    other_hat = await engine.other_hat_condition(db, user)
+    if other_hat is not None:
+        conditions.append(other_hat)
     base = (
         select(Pending.doc_type, Pending.doc_id, Pending.due_at, Pending.created_at)
         .join(Instance, Instance.id == Pending.instance_id)
-        .where(
-            Pending.approver_id == user.id,
-            Instance.status == InstanceStatus.IN_PROGRESS.value,
-        )
+        .where(*conditions)
     )
     rows = (await db.execute(base)).all()
 
@@ -118,6 +124,12 @@ async def pending_page(
         Pending.approver_id == user.id,
         Instance.status == InstanceStatus.IN_PROGRESS.value,
     ]
+    # A task belongs to the POST the ladder resolved to, not merely to the person
+    # holding it. Someone wearing two District Manager hats must not be shown the other
+    # district's work — they cannot sign it, and acting on it half-succeeded.
+    other_hat = await engine.other_hat_condition(db, user)
+    if other_hat is not None:
+        conditions.append(other_hat)
     now = ist_now()
     term = search.strip()
     if term:
@@ -621,14 +633,22 @@ async def _monthly_pending_indents(
     the doc_ids in play, ind_indents needs its items eager-loaded to sum quantities,
     and doing that through a join would re-fetch the instance per line.
     """
+    conditions = [
+        Pending.approver_id == user.id,
+        Pending.doc_type == DocType.INDENT.value,
+        Instance.status == InstanceStatus.IN_PROGRESS.value,
+    ]
+    # The Consolidation tab is the Monthly half of the same inbox, so it obeys the same
+    # hat rule as Waiting for Me. Without it a District Manager wearing the Paderu hat
+    # was offered Vizianagaram's monthly batch — and "Serve from own stock" on it wrote
+    # the allocation, then failed the profile rung on the way to settling the ladder.
+    other_hat = await engine.other_hat_condition(db, user, [DocType.INDENT.value])
+    if other_hat is not None:
+        conditions.append(other_hat)
     pending_rows = (await db.execute(
         select(Pending.doc_id, Instance)
         .join(Instance, Instance.id == Pending.instance_id)
-        .where(
-            Pending.approver_id == user.id,
-            Pending.doc_type == DocType.INDENT.value,
-            Instance.status == InstanceStatus.IN_PROGRESS.value,
-        )
+        .where(*conditions)
     )).all()
     if not pending_rows:
         return []
@@ -1161,16 +1181,20 @@ async def approve_consolidation(
             # signing a month took minutes. The task is handed down instead.
             task = await _load_indent_task(db, indent_id, user)
             indent, _instance, has_previous = task
-            # Already served in full — approving it again would only push a settled
-            # document up the ladder. Reported rather than silently dropped so the
-            # screen can say why it is not in the approved count.
-            if await _nothing_owed(db, indent):
-                failed.append(ConsolidationApprovalFailureOut(
-                    indent_id=indent_id,
-                    reason="Already served in full — nothing left to send on.",
-                    skipped=True,
-                ))
-                continue
+            # An indent with nothing left owed is NOT skipped here, it is approved and
+            # ended. `approve_indent` already passes `final=_nothing_owed(...)` to the
+            # engine, which closes the ladder at this rung rather than sending a settled
+            # document upward — the exact protection the skip was reaching for.
+            #
+            # Skipping did not achieve it. It returned before the engine was ever
+            # called, so the instance stayed IN_PROGRESS and the indent stayed
+            # PENDING_APPROVAL: the batch came back to the same approver, was judged
+            # served again, and was skipped again, forever. IND/2026-27/00639 in
+            # CON/2026-27/00004 sat at the District Manager rung this way — 9.875
+            # approved, covered by one APPROVED allocation of 4.263 and one still-
+            # pending 5.612 — while its batch-mate, which had no pending allocation,
+            # completed normally. A document the screen refuses to act on has to be
+            # finished by something; nothing else was going to finish this one.
             if not quantities:
                 # Nothing edited for this indent: hand on what it is already entitled
                 # to rather than sending an empty list, which approve_indent rejects.

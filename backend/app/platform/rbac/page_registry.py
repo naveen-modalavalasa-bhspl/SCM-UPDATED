@@ -60,11 +60,28 @@ PAGES: list[PageDef] = [
     # the whole module then 404s. New screens go at the end of their group.
     PageDef("rbac_job_profiles", "/rbac/job-profiles", "Job Profiles",
             parent="grp_rbac", module="rbac", sort_order=83),
+    # The asset / consumable code formula. Last in Settings for the reason above.
+    PageDef("admin_code_formats", "/admin/code-formats", "Code Formats",
+            parent="grp_settings", module="admin", icon="hash", sort_order=102),
 ]
 
 
 async def sync_permission_labels(db: AsyncSession) -> list[str]:
-    """Refresh the descriptive columns of rbac_permissions from the catalogue.
+    """Insert catalogue permissions that are missing, and refresh the labels of the rest.
+
+    Inserting is safe and it is the only way a new permission ever becomes grantable:
+    the seed is the only thing that ever wrote rbac_permissions, and the seed must not
+    run against a live database. Without this, an endpoint added with a new permission
+    code checks a permission that exists nowhere, so it 403s for everybody forever and
+    no admin can even see it on the Job Profiles screen to tick it on.
+
+    A new permission is granted to Admin and to nobody else, the same fail-closed rule
+    `sync_pages` applies to a new screen: inserting the row alone left even the
+    administrator 403ing on the endpoint that had just shipped, which is not
+    "fail-closed", it is "unreachable". Only on first insert — re-granting on every
+    start would undo an admin who deliberately took it off Admin.
+
+    Then, the labels.
 
     `seed_permissions` inserts through `get_or_create`, whose defaults only apply on
     INSERT. So a permission's module/description is frozen at whatever it was the day
@@ -76,12 +93,28 @@ async def sync_permission_labels(db: AsyncSession) -> list[str]:
     buttons under a module the screen left. The grouping was never the bug; the label
     was, and nothing was refreshing it.
 
-    Only labels. `code` is the identity and is never touched, and no grant is read or
-    written, so this cannot widen or narrow anyone's access.
+    `code` is the identity and is never touched, and no grant on an EXISTING permission
+    is read or written, so a relabel cannot widen or narrow anyone's access.
     """
     catalogue = {p.code: p for p in perms.ALL_PERMISSIONS}
     rows = (await db.execute(select(Permission))).scalars().all()
+    admin_role = (await db.execute(
+        select(Role).where(Role.code == ADMIN_ROLE_CODE)
+    )).scalars().first()
     changed = []
+
+    for code in sorted(catalogue.keys() - {row.code for row in rows}):
+        spec = catalogue[code]
+        permission = Permission(code=spec.code, module=spec.module,
+                                resource=spec.resource, action=spec.action,
+                                description=spec.description)
+        db.add(permission)
+        changed.append(f"{code}: added")
+        if admin_role is not None:
+            await db.flush()
+            db.add(RolePermission(role_id=admin_role.id,
+                                  permission_id=permission.id))
+
     for row in rows:
         spec = catalogue.get(row.code)
         if spec is None:

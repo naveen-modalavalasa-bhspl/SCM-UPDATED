@@ -436,24 +436,59 @@ async def _holders_of(db: AsyncSession, position_ids: set[int]) -> dict[int, lis
     return holders
 
 
-async def stock_at_points(db: AsyncSession, warehouse_ids: set[int]) -> dict[int, dict]:
-    """On-hand at each stocking point: how many distinct items, and how much in total.
+async def stock_at_points(db: AsyncSession, warehouse_ids: set[int],
+                          user=None) -> tuple[dict[int, dict], dict]:
+    """On-hand at each stocking point, counted exactly as Stock Balance counts it.
 
-    Unscoped on purpose — the caller has already decided which points may be read, and
-    the number has to be the point's real holding or "what has this OE got" answers
-    with a figure nobody can reconcile against the stock screens.
+    Returns `(per_point, totals)`.
+
+    Every rule here is Stock Balance's rule, because the two screens are read against
+    each other and any difference is a defect:
+
+    * `total_qty > 0`, not `available_qty > 0`. Stock Balance's default page is
+      `include_zero=False`, which is a test on total. A row whose stock is fully
+      reserved is on hand — it is in the building — so counting it as nothing here
+      made a point look empty on one screen and stocked on the other.
+    * The quantity is `total_qty` for the same reason: available alone silently
+      subtracts every reservation from what the point is holding.
+    * The same warehouse scope the stock screens apply. Without it a login saw points
+      totalling stock it is not allowed to open.
+    * `totals["stock_items"]` counts DISTINCT items across the whole set. Adding the
+      per-point counts counted one item held at four points four times, which is why
+      the card never matched Stock Balance's "Distinct Items".
     """
+    # Local import: service imports this module, so it cannot be imported at the top.
+    from .service import _scoped_warehouse_ids
+
+    empty = {"stock_points": 0, "stock_items": 0, "stock_qty": 0.0}
     if not warehouse_ids:
-        return {}
+        return {}, empty
+    allowed = await _scoped_warehouse_ids(db, user)
+    if allowed is not None:
+        warehouse_ids = warehouse_ids & allowed
+        if not warehouse_ids:
+            return {}, empty
+
+    held = (Stock.warehouse_id.in_(warehouse_ids), Stock.total_qty > 0)
+
     rows = (await db.execute(
         select(Stock.warehouse_id,
                func.count(func.distinct(Stock.item_id)),
-               func.sum(Stock.available_qty))
-        .where(Stock.warehouse_id.in_(warehouse_ids), Stock.available_qty > 0)
+               func.sum(Stock.total_qty))
+        .where(*held)
         .group_by(Stock.warehouse_id)
     )).all()
-    return {wid: {"stock_items": int(items or 0), "stock_qty": float(qty or 0)}
-            for wid, items, qty in rows}
+    per_point = {wid: {"stock_items": int(items or 0), "stock_qty": float(qty or 0)}
+                 for wid, items, qty in rows}
+
+    distinct_items = await db.scalar(
+        select(func.count(func.distinct(Stock.item_id))).where(*held)
+    )
+    return per_point, {
+        "stock_points": len(per_point),
+        "stock_items": int(distinct_items or 0),
+        "stock_qty": sum(point["stock_qty"] for point in per_point.values()),
+    }
 
 
 async def search_tags(db: AsyncSession, user, *, search: str | None = None,
@@ -544,7 +579,7 @@ async def search_tags(db: AsyncSession, user, *, search: str | None = None,
     point_ids = set((await db.execute(
         joined(PositionLocation.warehouse_id).distinct()
     )).scalars().all())
-    stock = await stock_at_points(db, point_ids)
+    stock, stock_totals = await stock_at_points(db, point_ids, user=user)
 
     rows = (await db.execute(
         joined(PositionLocation, Warehouse.code, Warehouse.name,
@@ -566,11 +601,11 @@ async def search_tags(db: AsyncSession, user, *, search: str | None = None,
         "items": items,
         "total": total, "page": page, "size": size,
         "tier_counts": {str(k): v for k, v in counts.items()},
-        # Distinct points, so a point tagged to four posts is counted once — the cards
-        # above the list already count points that way and the two must agree.
-        "stock_points": sum(1 for wid in point_ids if wid in stock),
-        "stock_items": sum(s["stock_items"] for s in stock.values()),
-        "stock_qty": sum(s["stock_qty"] for s in stock.values()),
+        # Counted over the whole filtered set by the same query Stock Balance uses:
+        # distinct points, distinct ITEMS (not the sum of per-point counts), and
+        # total_qty. Filtering this screen to one point must give the same three
+        # numbers as opening Stock Balance on that point.
+        **stock_totals,
     }
 
 
@@ -792,7 +827,39 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
     return result
 
 
+async def stocking_point_link_status(db: AsyncSession) -> dict:
+    """Did the rebuild above actually reach every position that should have a point.
+
+    A position belongs here when its office was classified as a stocking point; the
+    same condition `rebuild_stocking_points` links on. Any gap means the rebuild did
+    not run or did not finish, which is invisible everywhere else — the sync reports
+    seven green entities either way, and the only symptom is an OE who cannot see
+    their own store.
+    """
+    linked = await db.scalar(
+        select(func.count()).select_from(PositionLocation)
+        .where(PositionLocation.is_active == 1)
+    ) or 0
+    expected = await db.scalar(
+        select(func.count()).select_from(HcmPosition)
+        .join(Warehouse, Warehouse.office_id == HcmPosition.office_id)
+        .where(HcmPosition.is_active.is_(True),
+               HcmPosition.office_id.isnot(None),
+               Warehouse.code.regexp_match(DERIVED_CODE))
+    ) or 0
+    missing = max(expected - linked, 0)
+    return {
+        "label": "Stocking point links",
+        "ok": linked > 0 and missing == 0,
+        "detail": (
+            f"{linked} of {expected} position links"
+            + (f" · {missing} missing" if missing else " · all positions covered")
+        ),
+    }
+
+
 # Registered, not called: platform must never import a module (rule 5), so the sync
 # offers a hook and inventory — which owns stocking points — puts itself in it. Every
 # "Sync now" and every scheduled run therefore ends with the points up to date.
 hcm_sync.POST_SYNC_HOOKS.append(rebuild_stocking_points)
+hcm_sync.SYNC_STATUS_PROVIDERS.append(stocking_point_link_status)

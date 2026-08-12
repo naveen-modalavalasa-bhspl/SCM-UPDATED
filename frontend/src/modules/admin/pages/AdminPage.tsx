@@ -4,7 +4,7 @@ import { RefreshCw, Clock, Check, AlertTriangle } from "lucide-react";
 import { Spinner, Switch } from "@heroui/react";
 import { PageHeader, Card, Button, Field, Input } from "@/shared/components";
 import { adminApi } from "../api";
-import type { SyncResult } from "../types";
+import type { SyncFollowUp, SyncResult } from "../types";
 
 const PRESETS = [
   { label: "Hourly", minutes: 60 },
@@ -58,6 +58,25 @@ function EntityRow({ label, r }: { label: string; r?: SyncResult }) {
   );
 }
 
+/** Follow-up work the sync triggers. Shown beside the entities because a sync whose
+ *  entities are all green can still have left the stocking-point links unwritten, and
+ *  the only previous symptom was a storekeeper who could not see their own store. */
+function FollowUpRow({ f }: { f: SyncFollowUp }) {
+  return (
+    <div className="border-b border-line/60 py-2.5 last:border-0">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          {f.ok
+            ? <Check className="h-4 w-4 text-ok" />
+            : <AlertTriangle className="h-4 w-4 text-bad" />}
+          <span className="text-sm font-medium text-body">{f.label}</span>
+        </div>
+        <span className={`text-xs tabular ${f.ok ? "text-muted" : "text-bad"}`}>{f.detail}</span>
+      </div>
+    </div>
+  );
+}
+
 export function AdminPage() {
   const qc = useQueryClient();
   const [enabled, setEnabled] = useState(false);
@@ -75,6 +94,7 @@ export function AdminPage() {
   });
   const running = status.data?.running ?? false;
   const byEntity = latestByEntity(status.data?.items ?? []);
+  const followUp = status.data?.follow_up ?? [];
 
   useEffect(() => {
     if (schedule.data) {
@@ -130,6 +150,13 @@ export function AdminPage() {
           <div className="mt-4">
             {ENTITIES.map(([key, label]) => <EntityRow key={key} label={label} r={byEntity[key]} />)}
           </div>
+
+          {followUp.length > 0 && (
+            <div className="mt-4 border-t border-line pt-3">
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted">After the sync</p>
+              {followUp.map((f) => <FollowUpRow key={f.label} f={f} />)}
+            </div>
+          )}
         </Card>
 
         {/* Scheduled sync */}

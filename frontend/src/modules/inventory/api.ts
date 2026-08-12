@@ -26,6 +26,7 @@ import type {
   StockLedgerFilter,
   StockLedgerItem,
   StockSummary,
+  SerialSummaryRow,
   LedgerSummary,
   StockRow,
   StockTransferCreate,
@@ -80,7 +81,8 @@ const toBalance = (r: StockRow): StockBalanceItem => ({
   storage_location: r.bin_code ?? undefined,
   bin_code: r.bin_code ?? undefined,
   project_name: r.project_name ?? undefined,
-  serial_number: r.serial_number ?? undefined,
+  // Flattened for display: the list column shows the first and counts the rest.
+  serial_number: r.serial_number?.length ? r.serial_number.join(", ") : undefined,
   asset_code: r.asset_code ?? undefined,
   consumable_code: r.consumable_code ?? undefined,
   barcode_value: r.barcode_value ?? undefined,
@@ -102,8 +104,14 @@ const toLedger = (r: MovementRow): StockLedgerItem => ({
   in_qty: r.direction === "IN" ? num(r.quantity) : 0,
   out_qty: r.direction === "OUT" ? num(r.quantity) : 0,
   balance_qty: num(r.balance_after),
-  unit_rate: 0,
-  total_value: 0,
+  // Kept null when the ledger row has no rate rather than coerced to 0: a zero here
+  // reads as "this stock is worthless", which is a different claim from "nobody
+  // costed it". Rows written before stk_ledger.rate/.value were mapped are null.
+  unit_rate: r.rate == null ? null : num(r.rate),
+  total_value: r.value == null ? null : num(r.value),
+  serial_number: r.serial_numbers?.length ? r.serial_numbers.join(", ") : undefined,
+  asset_code: r.asset_code ?? undefined,
+  consumable_code: r.consumable_code ?? undefined,
   reference_no: r.ref_no ?? undefined,
   performed_by: r.created_by_name ?? undefined,
   batch_number: r.batch_no ?? undefined,
@@ -123,6 +131,28 @@ export const getWarehouses = () =>
   api
     .get<WarehouseOption[]>("/api/warehouse/options/warehouses")
     .then((r) => r.data);
+
+/**
+ * Serial / IMEI and asset-or-consumable codes for the rows on screen, grouped by item
+ * and stocking point.
+ *
+ * They are not on the stock tables: `stk_balance` is one row per LOT and a lot here
+ * holds up to 88 units, so its single `serial_number` column cannot say which units
+ * they are. The warehouse module owns per-unit identity, and inventory may not import
+ * it (rule 5), so the screens ask for the page they are showing and merge — the same
+ * shape as the KPI summary call beside them.
+ */
+export const getSerialSummary = (itemIds: number[], warehouseIds: number[]) =>
+  itemIds.length === 0
+    ? Promise.resolve([] as SerialSummaryRow[])
+    : api
+        .get<{ items: SerialSummaryRow[] }>("/api/warehouse/serials/summary", {
+          params: {
+            item_ids: [...new Set(itemIds)].join(","),
+            warehouse_ids: [...new Set(warehouseIds)].join(","),
+          },
+        })
+        .then((r) => r.data.items);
 
 export const getCatalogItems = () =>
   api

@@ -225,6 +225,61 @@ async def _may_settle(db: AsyncSession, indent_id: int, user) -> bool:
     )))
 
 
+async def _wrong_hat_message(db: AsyncSession, indent_id: int, user) -> str | None:
+    """Refuse BEFORE anything is written when the wrong post is being worn.
+
+    Issuing is two acts in one call: the allocation is created and committed, and then
+    the ladder is settled so the remainder travels on. The second half runs through
+    `act_on_indent` -> `get_indent(user)`, which applies the profile's scope rung — and
+    that rung is keyed to the ACTIVE position (`shared/scope.py`), exactly as the
+    ladder's own `allowed_position_ids` is.
+
+    So a District Manager holding both DM-104-PADERU and DM-104-VIZIANAGARAM, acting on
+    a Vizianagaram indent while wearing the Paderu hat, got the allocation written and
+    then a 404 on the settle: `IND/2026-27/00639` ended up with 5.612 promised out of
+    stock and its ladder still parked on the District Manager, so the remainder never
+    reached the level above. Half an act is worse than none.
+
+    Only asked of the person the stage is actually waiting on — the same gate
+    `_may_settle` applies. An inventory desk serving somebody else's document never
+    settles the ladder, so it has no hat to be wrong about and is untouched.
+
+    The set is the engine's own, so this refuses EXACTLY what the approval queue now
+    hides: a login with one post, or none, is never in it and reaches this screen
+    unchanged.
+    """
+    from app.platform.workflow import engine
+    from app.platform.workflow.models import Instance
+
+    if not await _may_settle(db, indent_id, user):
+        return None
+    instance = (await db.execute(select(Instance).where(
+        Instance.doc_type == DocType.INDENT.value,
+        Instance.doc_id == indent_id,
+        Instance.status == InstanceStatus.IN_PROGRESS.value,
+    ))).scalars().first()
+    if instance is None:
+        return None
+    other_hats = await engine.instances_for_other_hats(
+        db, user, [DocType.INDENT.value])
+    if instance.id not in other_hats:
+        return None
+
+    post = next(
+        (link.get("position_name")
+         for link in (getattr(instance, "resolved_chain", None) or [])
+         if isinstance(link, dict)
+         and link.get("sequence") == getattr(instance, "current_sequence", None)),
+        None,
+    )
+    return (
+        "This indent is waiting on "
+        + (post or "another of your positions")
+        + ". Switch to that position before serving it from stock — issuing under this "
+          "one would raise the allocation and then be unable to pass the remainder on."
+    )
+
+
 async def issue_from_my_stock(
     db: AsyncSession, indent_id: int, requests: list, user, reason: str = "",
     forward_remainder: bool = False,
@@ -241,6 +296,11 @@ async def issue_from_my_stock(
     )).scalars().first()
     if indent is None:
         raise NotFoundError("Indent not found")
+
+    # Before a single row is written: see _wrong_hat_message.
+    wrong_hat = await _wrong_hat_message(db, indent_id, user)
+    if wrong_hat:
+        raise ValidationError(wrong_hat)
 
     target = await _requester_point(db, indent)
     if target is None:

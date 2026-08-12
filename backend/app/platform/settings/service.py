@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.pagination import PageParams, paginate
 from app.platform.settings.models import AuditLog, Setting
 from app.platform.settings.schemas import (
-    CompanySettings, FallbackSettings, HcmSyncSettings, NotificationSettings,
-    NumberingSettings, RegionalSettings, SettingsIn, SettingsOut,
+    CodeFormatSettings, CompanySettings, FallbackSettings, HcmSyncSettings,
+    NotificationSettings, NumberingSettings, RegionalSettings, SettingsIn, SettingsOut,
 )
 from app.shared.enums import AuditAction
 
@@ -52,6 +52,47 @@ SETTINGS_SPEC = {
         "allow_auto_admin_fallback": ("fallback.allow_auto_admin", "bool"),
     }),
 }
+
+# The code formula is kept out of SETTINGS_SPEC and off the general settings PUT: it
+# has its own permission, because it decides what every unit received from now on is
+# labelled with. Same key names codeformat.code_settings() reads at putaway — two
+# spellings of one setting is two settings.
+CODE_FORMAT_FIELDS = {
+    "asset_format": "codes.asset_format",
+    "consumable_format": "codes.consumable_format",
+    "new_flag": "codes.new_flag",
+    "legacy_flag": "codes.legacy_flag",
+    "legacy_before": "codes.legacy_before",
+}
+
+
+async def get_code_formats(db: AsyncSession) -> CodeFormatSettings:
+    """The configured formula, falling back to the shipped default per field."""
+    defaults = CodeFormatSettings().model_dump()
+    values = {}
+    for field, key in CODE_FORMAT_FIELDS.items():
+        raw = await get_setting(db, key)
+        # An empty string is a real answer for legacy_before ("nothing is old yet"),
+        # but for a template it means "never set", so the default stands.
+        values[field] = defaults[field] if raw is None else raw
+    return CodeFormatSettings(**values)
+
+
+async def update_code_formats(db: AsyncSession, data: CodeFormatSettings,
+                              user) -> CodeFormatSettings:
+    """Save the formula. Audited like every other state change — "who changed the
+    asset code shape, and to what" is the first question asked when labels change."""
+    before = (await get_code_formats(db)).model_dump()
+    for field, key in CODE_FORMAT_FIELDS.items():
+        await set_setting(db, key, getattr(data, field), "string", "codes")
+    after = (await get_code_formats(db)).model_dump()
+    await write_audit(
+        db, entity="sys_settings", entity_id=0, action=AuditAction.UPDATE,
+        actor=user, before=before, after=after,
+        summary="Asset / consumable code formula updated",
+    )
+    await db.commit()
+    return await get_code_formats(db)
 
 
 async def get_setting(db: AsyncSession, key: str, default: str | None = None) -> str | None:

@@ -49,7 +49,13 @@ async def sync_now(user=Depends(require_permission(ADMIN))):
 async def sync_status(db: AsyncSession = Depends(get_db),
                       user=Depends(require_permission(ADMIN))):
     rows = await db.execute(select(HcmSyncLog).order_by(HcmSyncLog.id.desc()).limit(20))
-    return {"running": sync.is_syncing(), "items": [_log_out(l) for l in rows.scalars().all()]}
+    return {
+        "running": sync.is_syncing(),
+        "items": [_log_out(l) for l in rows.scalars().all()],
+        # The follow-up work each sync triggers, so a rebuild that silently wrote
+        # nothing is visible on the same card that claims the sync succeeded.
+        "follow_up": await sync.collect_sync_status(db),
+    }
 
 
 @router.post("/sync/{entity}")

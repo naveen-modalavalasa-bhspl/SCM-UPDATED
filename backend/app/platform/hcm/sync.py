@@ -59,14 +59,98 @@ _DT_FIELDS = {"valid_from", "valid_to"}
 # and owns its own commit; one failing hook must not lose the sync that preceded it.
 POST_SYNC_HOOKS: list[Callable] = []
 
+# What a hook produced, for the sync screen to show. Registered the same way and for
+# the same reason (rule 5): the counts live in module tables platform may not import.
+# A provider takes the session and returns {label, ok, detail}.
+SYNC_STATUS_PROVIDERS: list[Callable] = []
 
-async def _run_post_sync_hooks(db: AsyncSession) -> None:
-    for hook in POST_SYNC_HOOKS:
+
+async def collect_sync_status(db: AsyncSession) -> list[dict]:
+    """The state of the follow-up work, so the sync screen can show whether it landed.
+
+    A sync that reports seven green entities while its follow-up quietly wrote nothing
+    is the exact failure that left every OE without a stocking point, and nothing on
+    any screen said so.
+    """
+    out = []
+    for provider in SYNC_STATUS_PROVIDERS:
         try:
-            await hook(db)
-        except Exception:  # noqa: BLE001 — a hook is follow-up work, not the sync
-            await db.rollback()
-            logger.exception("post-sync hook %s failed", getattr(hook, "__name__", hook))
+            out.append(await provider(db))
+        except Exception as exc:  # noqa: BLE001 — a broken panel must not 500 the page
+            logger.exception("sync status provider failed")
+            out.append({
+                "label": getattr(provider, "__name__", "follow-up"),
+                "ok": False,
+                "detail": f"could not be read: {exc}"[:200],
+            })
+    return out
+
+
+def _hook_did_nothing(result) -> bool:
+    """A hook that reported only zeros did not do its job.
+
+    Every hook returns a dict of counts. `rebuild_stocking_points` came back
+    `{"warehouses": 983, "links": 4004}` on a healthy run and would come back all-zero
+    if it found nothing to write — which is the shape a silently-wedged run takes.
+    Anything that is not a dict of numbers is taken at face value and left alone.
+    """
+    if not isinstance(result, dict) or not result:
+        return False
+    values = [v for v in result.values() if isinstance(v, (int, float))]
+    return bool(values) and not any(values)
+
+
+async def _record_hook_failure(name: str, error: str) -> None:
+    """Failed follow-up work belongs in the sync log, not only in a console nobody reads.
+
+    The whole reason this exists: the stocking-point rebuild stopped running against
+    the live mirror and left every OE without their own point, and because the failure
+    was swallowed the only evidence was that the numbers never moved.
+    """
+    from app.core.database import SessionLocal
+    try:
+        async with SessionLocal() as session:
+            session.add(HcmSyncLog(
+                entity=name, source="HOOK", started_at=utcnow(), finished_at=utcnow(),
+                status="FAILED", records_fetched=0, records_upserted=0,
+                error_message=error[:1000],
+            ))
+            await session.commit()
+    except Exception:  # noqa: BLE001 — logging a failure must never raise one
+        logger.exception("could not record post-sync hook failure for %s", name)
+
+
+async def _run_post_sync_hooks() -> None:
+    """Run each hook on its OWN session, verify it did something, retry once if not.
+
+    Not `db`: that session has just carried the entire sync, and a hook handed a
+    session left dirty by earlier work does its queries inside a transaction that can
+    no longer commit — the hook then appears to succeed while writing nothing at all.
+    A fresh session per hook removes the shared state entirely.
+
+    The retry is free because every hook is idempotent by contract (the rebuild is
+    named for it), and it turns the one failure mode that matters — follow-up work
+    that quietly does not happen — into either a fixed run or a logged one.
+    """
+    from app.core.database import SessionLocal
+
+    for hook in POST_SYNC_HOOKS:
+        name = getattr(hook, "__name__", str(hook))
+        problem = "did not run"
+        for attempt in (1, 2):
+            try:
+                async with SessionLocal() as session:
+                    result = await hook(session)
+                logger.info("post-sync hook %s (attempt %s): %s", name, attempt, result)
+                if not _hook_did_nothing(result):
+                    problem = ""
+                    break
+                problem = f"returned {result!r} — nothing was written"
+            except Exception as exc:  # noqa: BLE001 — a hook is follow-up work, not the sync
+                problem = f"{type(exc).__name__}: {exc}"
+                logger.exception("post-sync hook %s failed (attempt %s)", name, attempt)
+        if problem:
+            await _record_hook_failure(name, problem)
 
 # mst_projects is SCM-owned, not an hcm_ mirror: it has no raw/synced_at columns and
 # admins may edit it. HCM is treated as the source for identity (id, code, name,
@@ -324,7 +408,7 @@ async def sync_all(db: AsyncSession, client: HcmClient | None = None) -> list[Hc
     await db.commit()
     # A joiner HCM sent us can sign in without waiting for an admin.
     await _issue_missing_logins(db)
-    await _run_post_sync_hooks(db)
+    await _run_post_sync_hooks()
     return logs
 
 
@@ -356,7 +440,7 @@ async def sync_needed(db: AsyncSession, client: HcmClient | None = None) -> list
     await db.commit()
     # A joiner HCM sent us can sign in without waiting for an admin.
     await _issue_missing_logins(db)
-    await _run_post_sync_hooks(db)
+    await _run_post_sync_hooks()
     return logs
 
 

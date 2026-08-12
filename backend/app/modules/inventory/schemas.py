@@ -25,13 +25,21 @@ class StockRow(BaseModel):
     expiry_date: date | None = None
     project_id: int
     project_name: str | None = None
-    serial_number: str | None = None
+    # A JSON list on the table — a lot holds many units. Sent as a list so the screen
+    # can say "…and 84 more" instead of pretending a lot has one identity.
+    serial_number: list[str] | None = None
     asset_code: str | None = None
     consumable_code: str | None = None
     available_qty: float
     reserved_qty: float
     transit_qty: float = 0
     total_qty: float
+    # The costed rate and what the lot is worth. Both are real stk_balance columns and
+    # were simply missing from this model, so response_model dropped them on the way
+    # out and the screen showed "Not costed" against stock that had a perfectly good
+    # rate in the database.
+    valuation_rate: float = 0
+    stock_value: float = 0
     last_movement_at: datetime | None = None
     updated_at: datetime | None = None
     # Not stk_balance columns — filled from mst_items by service.list_stock so the
@@ -54,6 +62,17 @@ class MovementRow(BaseModel):
     direction: str
     quantity: float
     balance_after: float
+    # What the movement cost and what it was worth. Nullable because every row written
+    # before these columns were mapped has NULL, and a NULL must read as "not costed"
+    # rather than as a confident zero.
+    rate: float | None = None
+    value: float | None = None
+    # Serial / IMEI carried by the line, and the asset or consumable code the same
+    # unit holds. The codes are not on stk_ledger — service.list_movements reads them
+    # off the balance row the movement touched.
+    serial_numbers: list[str] | None = None
+    asset_code: str | None = None
+    consumable_code: str | None = None
     ref_type: str | None = None
     ref_no: str | None = None
     created_by_name: str | None = None
@@ -65,6 +84,9 @@ class StockSummaryOut(BaseModel):
     they do not change when the page size does."""
     stock_lines: int
     distinct_items: int
+    # On hand including reserved — the same figure Stocking Points shows, so the two
+    # screens can be reconciled instead of only compared by row count.
+    total_qty: float = 0
     total_value: float
     expiring_30_days: int
     below_reorder: int

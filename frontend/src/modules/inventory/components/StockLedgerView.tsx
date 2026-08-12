@@ -6,8 +6,10 @@ import { ArrowDownLeft, ArrowUpRight, FileSpreadsheet } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
-import { getStockLedger, getStockLedgerSummary, getWarehouses } from "../api";
-import type { StockLedgerItem } from "../types";
+import {
+  getSerialSummary, getStockLedger, getStockLedgerSummary, getWarehouses,
+} from "../api";
+import type { SerialSummaryRow, StockLedgerItem } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { fmtDate, fmtTime } from "@/shared/datetime";
 
@@ -57,6 +59,17 @@ const TODAY = new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
 /** Comma-safe CSV cell. Export is a plain Blob — no library for six columns. */
 const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 
+/** Same rule as Stock Balance: a null rate is "not costed", never a confident ₹0. */
+const money = (n?: number | null) =>
+  n == null || n === 0
+    ? <span className="text-muted">—</span>
+    : `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
+
+/** Serial / IMEI first, then whichever code the unit carries. One column, because a
+ *  unit is either an asset or a consumable and never both. */
+const ownTag = (r: StockLedgerItem) =>
+  r.serial_number || r.asset_code || r.consumable_code || "";
+
 export function StockLedgerView() {
   const [params] = useSearchParams();
   const [search, setSearch] = useState("");
@@ -104,6 +117,30 @@ export function StockLedgerView() {
   const num = (n?: number) =>
     totalsLoading || n === undefined ? "—" : n.toLocaleString("en-IN");
 
+  // stk_ledger stores at most one serial per row, and older rows store none at all.
+  // The units standing at that item + point are fetched for the page and merged, the
+  // same way Stock Balance does it — see getSerialSummary.
+  const { data: serialRows = [] } = useQuery({
+    queryKey: ["ledger-serials", rows.map((r) => `${r.item_id}:${r.warehouse_id}`).join(",")],
+    queryFn: () => getSerialSummary(rows.map((r) => r.item_id),
+                                    rows.map((r) => r.warehouse_id)),
+    enabled: rows.length > 0,
+  });
+  const serialsByRow = new Map<string, SerialSummaryRow>(
+    serialRows.map((s) => [`${s.item_id}:${s.warehouse_id}`, s]),
+  );
+  const unitsOf = (r: StockLedgerItem) =>
+    serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
+
+  /** The code on the row itself, or the first code of the units at that point. */
+  const unitTag = (r: StockLedgerItem) => {
+    const own = ownTag(r);
+    if (own) return { text: own, extra: 0 };
+    const units = unitsOf(r);
+    const first = units?.codes[0] ?? units?.serials[0];
+    return first ? { text: first, extra: (units?.count ?? 1) - 1 } : null;
+  };
+
   const activeFilters = [search, itemId, warehouseId, refType, direction, dateFrom, dateTo].filter(Boolean).length;
 
   const clear = () => {
@@ -113,10 +150,14 @@ export function StockLedgerView() {
   };
 
   const exportCsv = () => {
-    const header = ["Date", "Reference", "Type", "Item Code", "Item", "Warehouse", "Batch", "In", "Out", "Balance", "By"];
+    const header = ["Date", "Reference", "Type", "Item Code", "Item", "Warehouse", "Batch",
+                    "Serial / Asset code", "In", "Out", "Balance", "Rate", "Value", "By"];
     const body = rows.map((r) => [
       r.transaction_date, r.transaction_no, r.transaction_type, r.item_code, r.item_name,
-      r.warehouse_name, r.batch_number, r.in_qty, r.out_qty, r.balance_qty, r.performed_by,
+      // Every code in the export, not the one the cell has room for.
+      r.warehouse_name, r.batch_number,
+      ownTag(r) || unitsOf(r)?.codes.join(" | "),
+      r.in_qty, r.out_qty, r.balance_qty, r.unit_rate, r.total_value, r.performed_by,
     ]);
     const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -170,6 +211,26 @@ export function StockLedgerView() {
       ),
     },
     {
+      // Serial/IMEI or the asset/consumable code — the identity of the unit that
+      // moved. Asked for on this screen because tracing one physical device through
+      // its receipts and issues is the reason the ledger gets opened.
+      key: "unit",
+      header: "Serial / Asset code",
+      hideOnNarrow: true,
+      render: (r) => {
+        const tag = unitTag(r);
+        if (!tag) return <span className="text-xs text-muted">—</span>;
+        return (
+          <div className="min-w-0">
+            <div className="truncate font-mono text-xs text-body">{tag.text}</div>
+            {tag.extra > 0 && (
+              <div className="text-[11px] text-muted">+{tag.extra} more units</div>
+            )}
+          </div>
+        );
+      },
+    },
+    {
       key: "in",
       header: "In",
       className: "text-right",
@@ -186,6 +247,20 @@ export function StockLedgerView() {
       header: "Balance After",
       className: "text-right",
       render: (r) => <span className="font-medium text-ink">{r.balance_qty} <span className="text-[11px] text-muted">{r.uom_code}</span></span>,
+    },
+    {
+      key: "rate",
+      header: "Rate",
+      className: "text-right",
+      hideOnNarrow: true,
+      render: (r) => <span className="text-sm">{money(r.unit_rate)}</span>,
+    },
+    {
+      key: "value",
+      header: "Value",
+      className: "text-right",
+      hideOnNarrow: true,
+      render: (r) => <span className="text-sm">{money(r.total_value)}</span>,
     },
     {
       key: "by",
@@ -305,8 +380,15 @@ export function StockLedgerView() {
               <SheetRow label="When" value={new Date(selected.transaction_date).toLocaleString()} />
               <SheetRow label="By" value={selected.performed_by} />
             </SheetSection>
+            <SheetSection title="Value">
+              <SheetRow label="Rate" value={money(selected.unit_rate)} />
+              <SheetRow label="Movement value" value={money(selected.total_value)} />
+            </SheetSection>
             <SheetSection title="Context">
               <SheetRow label="Item code" value={selected.item_code} />
+              <SheetRow label="Serial / IMEI" value={selected.serial_number} />
+              <SheetRow label="Asset code" value={selected.asset_code} />
+              <SheetRow label="Consumable code" value={selected.consumable_code} />
               <SheetRow label="Warehouse" value={selected.warehouse_name} />
               <SheetRow label="Batch" value={selected.batch_number} />
               <SheetRow label="Source document" value={selected.reference_no} />

@@ -22,6 +22,10 @@ import type { IndentJourneyHistoryEvent, IndentJourneyStage } from "../types";
 
 export { isOccurredJourneyStage, isUpcomingJourneyStage, sortOccurredStages };
 
+const COMPLETED_PHASE_STATUSES = new Set([
+  "APPROVED", "COMPLETED", "SUBMITTED", "ACKNOWLEDGED", "NOT_REQUIRED", "SKIPPED",
+]);
+
 function formatDuration(seconds?: number | null) {
   if (!seconds || seconds < 60) return null;
   const minutes = Math.floor(seconds / 60);
@@ -293,6 +297,12 @@ export function IndentJourneyPage() {
 
   if (isLoading || !data) return <Skeleton className="h-64 rounded-2xl" />;
 
+  // A finished journey has nothing missing. The banner listed the columns the
+  // evidence walk never needed to read on a request that is already closed.
+  const journeyCompleted = data.phases.length > 0 && data.phases.every((phase) => (
+    COMPLETED_PHASE_STATUSES.has(stageStatus(phase))
+  ));
+
   return (
     <div className="min-w-0 space-y-5">
       <button
@@ -340,7 +350,7 @@ export function IndentJourneyPage() {
 
       {error && <p className="rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}
 
-      {data.missing_sources?.length > 0 && (
+      {!journeyCompleted && data.missing_sources?.length > 0 && (
         <p className="flex items-start gap-2 rounded-lg border border-warn/30 bg-warn-bg px-4 py-3 text-sm text-warn">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <span className="break-words">

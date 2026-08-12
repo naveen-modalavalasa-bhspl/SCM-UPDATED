@@ -6,8 +6,10 @@ import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpread
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect, FilterToggle } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
-import { getStockBalances, getStockDetail, getStockSummary, getWarehouses } from "../api";
-import type { StockBalanceItem, StockDetail, StockLot } from "../types";
+import {
+  getSerialSummary, getStockBalances, getStockDetail, getStockSummary, getWarehouses,
+} from "../api";
+import type { SerialSummaryRow, StockBalanceItem, StockDetail, StockLot } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
 /** Value columns read off stk_balance.valuation_rate / stock_value. Both are 0 across
@@ -157,6 +159,33 @@ export function StockBalanceView() {
   const stat = (n?: number) =>
     summaryLoading || n === undefined ? "—" : n.toLocaleString("en-IN");
 
+  // Per-unit identity for the rows on screen. A balance row is a LOT, and its single
+  // serial_number column cannot hold the 88 units a lot can contain, so the codes are
+  // fetched for the page and merged. Keyed on the page's rows, so paging refetches.
+  const { data: serialRows = [] } = useQuery({
+    queryKey: ["stock-serials", rows.map((r) => `${r.item_id}:${r.warehouse_id}`).join(",")],
+    queryFn: () => getSerialSummary(rows.map((r) => r.item_id),
+                                    rows.map((r) => r.warehouse_id)),
+    enabled: rows.length > 0,
+  });
+  const serialsByRow = new Map<string, SerialSummaryRow>(
+    serialRows.map((s) => [`${s.item_id}:${s.warehouse_id}`, s]),
+  );
+  const unitsOf = (r: StockBalanceItem) =>
+    serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
+
+  /** What the row's units are called. The lot's own code when stk_balance carries one,
+   *  otherwise the codes of the units standing in it — with a count, because "+84 more"
+   *  is the honest way to show 88 codes in one cell. */
+  const unitTag = (r: StockBalanceItem) => {
+    const own = r.serial_number ?? r.asset_code ?? r.consumable_code;
+    if (own) return { text: own, extra: 0 };
+    const units = unitsOf(r);
+    const first = units?.codes[0] ?? units?.serials[0];
+    if (!first) return null;
+    return { text: first, extra: (units?.count ?? 1) - 1 };
+  };
+
   const activeFilters =
     [search, warehouseId, expiringIn, expiryFrom, expiryTo].filter(Boolean).length +
     (includeZero ? 1 : 0) +
@@ -171,7 +200,8 @@ export function StockBalanceView() {
 
   const exportCsv = () => {
     const header = ["Item Code", "Item Name", "Category", "Warehouse", "Bin", "Batch",
-                    "Expiry", "Available", "Reserved", "Serial / Asset code", "Value"];
+                    "Expiry", "Available", "Reserved", "Serial / Asset code",
+                    "Rate", "Value"];
     const cell = (v: any) => {
       if (v == null) return '""';
       const s = String(v).replace(/"/g, '""');
@@ -180,7 +210,10 @@ export function StockBalanceView() {
     const body = rows.map((r) => [
       r.item_code, r.item_name, r.category_name, r.warehouse_name, r.bin_code, r.batch_number, r.expiry_date,
       r.available_qty, r.reserved_qty,
-      r.serial_number ?? r.asset_code ?? r.consumable_code, r.total_value,
+      // The export gets every code, not the "+N more" the cell has room for.
+      unitsOf(r)?.codes.join(" | ")
+        || (r.serial_number ?? r.asset_code ?? r.consumable_code),
+      r.valuation_rate, r.total_value,
     ]);
     const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -251,11 +284,24 @@ export function StockBalanceView() {
       header: "Serial / Asset code",
       hideOnNarrow: true,
       render: (r) => {
-        const tag = r.serial_number ?? r.asset_code ?? r.consumable_code;
-        return tag
-          ? <span className="font-mono text-xs text-body">{tag}</span>
-          : <span className="text-xs text-muted">—</span>;
+        const tag = unitTag(r);
+        if (!tag) return <span className="text-xs text-muted">—</span>;
+        return (
+          <div className="min-w-0">
+            <div className="truncate font-mono text-xs text-body">{tag.text}</div>
+            {tag.extra > 0 && (
+              <div className="text-[11px] text-muted">+{tag.extra} more units</div>
+            )}
+          </div>
+        );
       },
+    },
+    {
+      key: "rate",
+      header: "Rate",
+      className: "text-right",
+      hideOnNarrow: true,
+      render: (r) => <span className="text-sm">{money(r.valuation_rate)}</span>,
     },
     {
       key: "value",
@@ -295,7 +341,18 @@ export function StockBalanceView() {
 
       {/* An em dash while the count is in flight. Rendering 0 0 0 0 read as a real
           answer — "no stock, nothing expiring" — on a screen that was still loading. */}
-      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
+        {/* On hand is the figure Stocking Points puts on its own card, counted by the
+            same query over the same rows. It is first because it is the number the two
+            screens get read against each other on; without it here the only comparable
+            figure was a row count, which is not a quantity. */}
+        <StatCard
+          label="On Hand"
+          value={summaryLoading || summary?.total_qty === undefined
+            ? "—"
+            : summary.total_qty.toLocaleString("en-IN", { maximumFractionDigits: 3 })}
+          icon={<Boxes size={16} />}
+        />
         <StatCard label="Stock Lines" value={stat(summary?.stock_lines)} icon={<Layers size={16} />} />
         <StatCard label="Distinct Items" value={stat(summary?.distinct_items)} icon={<Boxes size={16} />} />
         <StatCard
@@ -459,6 +516,30 @@ export function StockBalanceView() {
               <SheetRow label="Category" value={selected.category_name} />
               <SheetRow label="Asset code" value={selected.asset_code} />
               <SheetRow label="Barcode" value={selected.barcode_value} />
+              {/* The units themselves. The list row only has space for the first one,
+                  and "which serials are actually here" is the question that follows. */}
+              {(() => {
+                const units = unitsOf(selected);
+                if (!units) return null;
+                return (
+                  <>
+                    <SheetRow label="Units tracked" value={units.count} />
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {units.codes.concat(units.codes.length ? [] : units.serials)
+                        .map((code) => (
+                          <span key={code} className="rounded bg-content2 px-2 py-0.5 font-mono text-[11px] text-body">
+                            {code}
+                          </span>
+                        ))}
+                      {units.count > units.codes.length && (
+                        <span className="px-1 text-[11px] text-muted">
+                          +{units.count - units.codes.length} more
+                        </span>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
             </SheetSection>
 
             <SheetSection title={`Lots in ${selected.warehouse_name || "this warehouse"}`}>

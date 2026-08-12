@@ -88,9 +88,21 @@ export interface StockBalanceFilter {
 export interface StockSummary {
   stock_lines: number;
   distinct_items: number;
+  /** On hand including reserved — the figure Stocking Points shows on its card. */
+  total_qty: number;
   total_value: number;
   expiring_30_days: number;
   below_reorder: number;
+}
+
+/** GET /api/warehouse/serials/summary — per item + stocking point. */
+export interface SerialSummaryRow {
+  item_id: number;
+  warehouse_id: number;
+  /** How many units are tracked there. `serials`/`codes` hold the first five. */
+  count: number;
+  serials: string[];
+  codes: string[];
 }
 
 /** GET /api/stock/movements/summary. */
@@ -126,8 +138,13 @@ export interface StockLedgerItem {
   in_qty: number;
   out_qty: number;
   balance_qty: number;
-  unit_rate: number;
-  total_value: number;
+  /** Null, not 0, when the movement was never costed — "not costed" is not "free". */
+  unit_rate: number | null;
+  total_value: number | null;
+  /** Serial / IMEI on the line, and the code the same unit carries. */
+  serial_number?: string;
+  asset_code?: string;
+  consumable_code?: string;
   reference_no?: string;
   performed_by?: string;
   remarks?: string;
@@ -246,7 +263,8 @@ export interface StockRow {
   expiry_date?: string | null;
   project_id: number;
   project_name?: string | null;
-  serial_number?: string | null;
+  /** stk_balance.serial_number is a JSON list — a lot holds many units. */
+  serial_number?: string[] | null;
   asset_code?: string | null;
   consumable_code?: string | null;
   available_qty: number;
@@ -276,6 +294,13 @@ export interface MovementRow {
   direction: "IN" | "OUT";
   quantity: number;
   balance_after: number;
+  /** stk_ledger.rate / .value — null on rows written before they were mapped. */
+  rate?: number | null;
+  value?: number | null;
+  /** JSON list — one movement can carry a whole putaway of serials. */
+  serial_numbers?: string[] | null;
+  asset_code?: string | null;
+  consumable_code?: string | null;
   ref_type?: string | null;
   ref_no?: string | null;
   created_by_name?: string | null;

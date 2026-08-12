@@ -10,6 +10,7 @@ import {
   quantityValue, wasReducedBelow,
 } from "../quantityRules";
 import { isIndentModuleQuery } from "@/modules/indents/api";
+import { displayUom } from "@/modules/indents/displayFormat";
 import { alerts } from "@/modules/alerts";
 
 type Decision = "approve" | "reject" | "return" | null;
@@ -171,13 +172,19 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       <section>
         <h2 className="font-semibold text-ink">Quantity comparison</h2>
         <p className="mb-2 max-w-3xl text-xs leading-relaxed text-muted">A quantity may be reduced down to zero, never increased, and what you approve becomes the maximum the next approver can pass on. {anyReducedBelow ? "Lines already cut by an earlier approver are capped at that lower quantity, not at the original request." : "Each field shows the range you may enter."}</p>
+        {/* The one thing an approver holding part of the stock gets wrong. Cutting the
+            quantity here and issuing what you hold LOOK the same on this screen and are
+            opposites: a cut ends the request, an issue leaves the rest travelling. Said
+            beside the boxes that do it, because that is where the choice is made. */}
+        <p className="mb-2 max-w-3xl text-xs leading-relaxed text-warn">Reduce a quantity only to cut the request for good — the difference is not owed to anyone afterwards. If you simply do not hold enough, leave the quantity as it is and enter what you can give under <strong>Serve from own stock</strong>; the remainder stays on this indent and carries on to the fulfilment queue.</p>
         <div className="overflow-x-auto rounded-xl border border-line"><table className="w-full min-w-[980px] table-fixed text-left text-sm"><colgroup><col className="w-[34%]" /><col className="w-[13%]" /><col className="w-[22%]" /><col className="w-[19%]" /><col className="w-[12%]" /></colgroup><thead className="bg-content2 text-xs text-muted"><tr><th className="px-4 py-3 text-left font-semibold">Item</th><th className="px-4 py-3 text-right font-semibold">Requested</th><th className="px-4 py-3 text-right font-semibold">Most you can approve</th><th className="px-4 py-3 text-right font-semibold">Approved at this level</th><th className="px-4 py-3 text-right font-semibold">Difference</th></tr></thead><tbody className="divide-y divide-line">{indent.data.items.map((line) => {
           const ceiling = approvalCeiling(line);
           const raw = quantities[line.id] ?? "";
           const lineError = errorByLine[line.id];
           const difference = lineError ? null : quantityValue(raw) - ceiling;
           const reduced = wasReducedBelow(line);
-          return <tr key={line.id}><td className="px-4 py-3 align-top"><strong className="block truncate text-ink" title={line.item_name ?? undefined}>{line.item_name}</strong><p className="font-mono text-xs text-muted">{line.item_code}</p></td><td className="whitespace-nowrap px-4 py-3 text-right align-top tabular-nums">{formatQuantity(line.requested_quantity)} {line.uom_code}</td><td className="px-4 py-3 text-right align-top"><span className={`whitespace-nowrap tabular-nums ${reduced ? "font-semibold text-warning" : "text-body"}`}>{formatQuantity(ceiling)} {line.uom_code}</span>{reduced && <p className="text-xs text-muted">Cut by a previous approver</p>}</td><td className="px-4 py-3 text-right align-top">
+          const unit = displayUom(line.uom_code);
+          return <tr key={line.id}><td className="px-4 py-3 align-top"><strong className="block truncate text-ink" title={line.item_name ?? undefined}>{line.item_name}</strong><p className="font-mono text-xs text-muted">{line.item_code}</p></td><td className="whitespace-nowrap px-4 py-3 text-right align-top tabular-nums">{formatQuantity(line.requested_quantity)} {unit}</td><td className="px-4 py-3 text-right align-top"><span className={`whitespace-nowrap tabular-nums ${reduced ? "font-semibold text-warning" : "text-body"}`}>{formatQuantity(ceiling)} {unit}</span>{reduced && <p className="text-xs text-muted">Cut by a previous approver</p>}</td><td className="px-4 py-3 text-right align-top">
             {/* One right-aligned block per cell, the same width as the column's
                 right-aligned header: the input, its unit and the help line share
                 the block's left and right edges, so nothing drifts out from under
@@ -193,7 +200,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                   ring move to the wrapper so it still reads as one control. */}
               <div className={`flex h-10 items-center rounded-lg border bg-content1 pr-3 transition focus-within:ring-2 ${lineError ? "border-danger bg-danger/5 focus-within:ring-danger/30" : "border-line focus-within:border-brand focus-within:ring-brand/25"}`}>
                 <input type="text" inputMode="decimal" autoComplete="off" aria-label={`Approved quantity for ${line.item_name ?? line.id}`} aria-invalid={Boolean(lineError)} aria-describedby={`qty-help-${line.id}`} value={raw} onChange={(event) => setQuantity(line, event.target.value)} className="h-full min-w-0 flex-1 rounded-lg bg-transparent px-3 text-right tabular-nums text-ink outline-none" />
-                <span className="shrink-0 whitespace-nowrap text-xs text-muted">{line.uom_code}</span>
+                <span className="shrink-0 whitespace-nowrap text-xs text-muted">{unit}</span>
               </div>
               {/* The range is on screen before anything goes wrong, and repeated inside
                   the error when it does — the approver never has to work out the cap. */}
@@ -202,7 +209,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                 <span>{lineError ?? `You can approve ${allowedRange(line)}.`}</span>
               </p>
             </div>
-          </td><td className={`whitespace-nowrap px-4 py-3 text-right align-top tabular-nums ${difference != null && difference < 0 ? "font-semibold text-warning" : "text-muted"}`}>{difference == null ? "—" : difference === 0 ? "No change" : `${formatQuantity(difference)} ${line.uom_code ?? ""}`.trim()}</td></tr>;
+          </td><td className={`whitespace-nowrap px-4 py-3 text-right align-top tabular-nums ${difference != null && difference < 0 ? "font-semibold text-warning" : "text-muted"}`}>{difference == null ? "—" : difference === 0 ? "No change" : `${formatQuantity(difference)} ${unit}`.trim()}</td></tr>;
         })}</tbody></table></div>
       </section>
 

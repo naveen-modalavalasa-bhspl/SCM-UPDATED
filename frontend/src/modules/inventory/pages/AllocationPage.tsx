@@ -134,6 +134,12 @@ export function AllocationPage() {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["fulfillment-queue"] }),
         qc.invalidateQueries({ queryKey: ["allocations", "PENDING_APPROVAL"] }),
+        // The screen this allocation is now waiting on. Neither key above matches
+        // it, so Allocation Approvals opened on its cached list: the allocation just
+        // raised was missing until the background refetch landed, which is the pause
+        // and the "refresh before it appears" both.
+        qc.invalidateQueries({ queryKey: ["inventory", "allocation-approvals"] }),
+        qc.invalidateQueries({ queryKey: ["allocation-approval-batches"] }),
       ]);
       nav("/inventory/fulfillment");
     },

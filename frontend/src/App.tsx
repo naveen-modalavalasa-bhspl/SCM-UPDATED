@@ -64,6 +64,7 @@ import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
 import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
 import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
+import { CodeFormatsPage } from "@/modules/settings/pages/CodeFormatsPage";
 // One screen serves all four report ledgers; the ledger key is a route param.
 import { ReportLedgerPage } from "@/modules/reports";
 // Mounts the alert/confirm dialog host and pulls the server's copy catalog once.
@@ -165,6 +166,7 @@ function AppRoutes() {
         <Route path="inventory/material-requests/:id" element={<MaterialRequestDetailPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/settings" element={<SettingsPage />} />
+        <Route path="admin/code-formats" element={<CodeFormatsPage />} />
         <Route path="rbac/access" element={<UsersPage />} />
         <Route path="rbac/groups" element={<GroupsPage />} />
         {/* Job Profiles: reachable by URL only for now. Adding a menu row means a

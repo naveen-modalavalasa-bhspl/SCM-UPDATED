@@ -151,6 +151,10 @@ ADMIN_NUMBERING_MANAGE = "admin.numbering.manage"
 ADMIN_AUDIT_VIEW = "admin.audit.view"
 ADMIN_NOTIFICATIONS_MANAGE = "admin.notifications.manage"
 ADMIN_SETTINGS_MANAGE = "admin.settings.manage"
+# Separate from admin.settings.manage on purpose: the asset/consumable code formula
+# decides what every future unit is labelled with, so it is granted deliberately
+# rather than riding along with "can edit the company address".
+ADMIN_CODE_FORMATS_MANAGE = "admin.code_formats.manage"
 
 
 ALL_PERMISSIONS: list[Perm] = [
@@ -275,6 +279,8 @@ ALL_PERMISSIONS: list[Perm] = [
          "Manage notification settings"),
     Perm(ADMIN_SETTINGS_MANAGE, "admin", "settings", "manage",
          "Manage system settings"),
+    Perm(ADMIN_CODE_FORMATS_MANAGE, "admin", "code_formats", "manage",
+         "Set the asset & consumable code formula"),
     Perm(REPORT_VIEW, "reports", "report", "view",
          "View the cross-module report ledgers"),
     Perm(REPORT_EXPORT, "reports", "report", "export",

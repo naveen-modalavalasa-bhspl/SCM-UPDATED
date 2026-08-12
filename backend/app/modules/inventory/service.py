@@ -8,7 +8,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import case, func, select, or_, and_, text, true
+from sqlalchemy import String, case, cast, func, select, or_, and_, text, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -360,6 +360,13 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         # cost for screens that value stock without a balance row to read.
         item.purchase_price = unit_cost
 
+    # stk_balance.stock_value was never written — only the rate was — so the column
+    # stayed 0 on every row and the Value column read "Not costed" against stock that
+    # had a perfectly good rate beside it. Value is rate * what is on hand, restated
+    # on every move so the two can never disagree.
+    posted_rate = _d(stock.valuation_rate) or _d(getattr(item, "purchase_price", None) or 0)
+    stock.stock_value = (stock.total_qty * posted_rate).quantize(Decimal("0.01"))
+
     db.add(StockMovement(
         warehouse_id=warehouse_id,
         warehouse_name=stock.warehouse_name,
@@ -367,6 +374,9 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         uom_code=stock.uom_code,
         bin_id=bin_id, batch_id=batch_id, batch_no=batch_no, project_id=project_id,
         direction=direction, quantity=qty, balance_after=new_balance,
+        rate=posted_rate,
+        value=(qty * posted_rate).quantize(Decimal("0.01")),
+        serial_numbers=stock.serial_number,
         ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
         created_by_id=user.id, created_by_name=user.full_name,
     ))
@@ -526,7 +536,11 @@ async def _stock_query(db: AsyncSession, item_id: int | None = None,
         stmt = stmt.where(or_(
             Stock.item_code.like(like), Stock.item_name.like(like),
             Stock.batch_no.like(like), Stock.bin_code.like(like),
-            Stock.serial_number.like(like), Stock.asset_code.like(like),
+            # serial_number is a JSON list of the units in the lot. Cast to text and
+            # LIKE it: scanning a label has to find the lot holding that serial, and
+            # a JSON column has no LIKE of its own.
+            cast(Stock.serial_number, String).like(like),
+            Stock.asset_code.like(like), Stock.consumable_code.like(like),
             Stock.item_id.in_(barcoded),
         ))
     if category_id is not None:
@@ -604,6 +618,11 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
         select(
             func.count(rows.c.id),
             func.count(func.distinct(rows.c.item_id)),
+            # On hand, including what is reserved — the same figure Stocking Points
+            # puts on its "Stock on hand" card, so the two screens can be read against
+            # each other. Without it this screen had no quantity at all and the only
+            # comparable number was a row count.
+            func.coalesce(func.sum(rows.c.total_qty), 0),
             # Same formula as Inventory > Overview and the warehouse dashboard.
             # The join is OUTER so a balance row whose item is missing still counts
             # in the two counts either side of it.
@@ -632,8 +651,9 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
     return {
         "stock_lines": int(totals[0] or 0),
         "distinct_items": int(totals[1] or 0),
-        "total_value": float(totals[2] or 0),
-        "expiring_30_days": int(totals[3] or 0),
+        "total_qty": float(totals[2] or 0),
+        "total_value": float(totals[3] or 0),
+        "expiring_30_days": int(totals[4] or 0),
         "below_reorder": below,
     }
 
@@ -664,6 +684,10 @@ async def _movement_query(db: AsyncSession, item_id: int | None = None,
         stmt = stmt.where(or_(
             StockMovement.item_code.like(like), StockMovement.item_name.like(like),
             StockMovement.ref_no.like(like), StockMovement.batch_no.like(like),
+            # A serial or IMEI off a label is the one thing a store user has in hand
+            # when they come to the ledger asking "where did THIS unit go". JSON list,
+            # so it is matched as text — same as stk_balance.serial_number.
+            cast(StockMovement.serial_numbers, String).like(like),
         ))
     return stmt
 
@@ -676,7 +700,35 @@ async def list_movements(db: AsyncSession, params: PageParams,
     """The stock ledger."""
     stmt = await _movement_query(db, item_id, warehouse_id, direction, ref_type,
                                  search, date_from, date_to, user=user)
-    return await paginate(db, stmt.order_by(StockMovement.created_at.desc()), params)
+    page = await paginate(db, stmt.order_by(StockMovement.created_at.desc()), params)
+
+    # The asset / consumable code is generated at putaway and lives on the balance row,
+    # not on the ledger. One lookup per page keyed the same way stk_balance is keyed,
+    # so a movement shows the code of the exact lot it touched rather than any code
+    # the item has ever carried. Rows whose lot has since been emptied and removed
+    # simply show nothing — the movement itself is still the record.
+    keys = {(r.item_id, r.warehouse_id, r.bin_id, r.batch_id, r.project_id)
+            for r in page["items"]}
+    codes: dict[tuple, tuple] = {}
+    if keys:
+        lots = (await db.execute(
+            select(Stock.item_id, Stock.warehouse_id, Stock.bin_id, Stock.batch_id,
+                   Stock.project_id, Stock.asset_code, Stock.consumable_code,
+                   Stock.serial_number)
+            .where(Stock.item_id.in_({k[0] for k in keys}),
+                   Stock.warehouse_id.in_({k[1] for k in keys}))
+        )).all()
+        codes = {(l[0], l[1], l[2], l[3], l[4]): (l[5], l[6], l[7]) for l in lots}
+    for row in page["items"]:
+        asset, consumable, serial = codes.get(
+            (row.item_id, row.warehouse_id, row.bin_id, row.batch_id, row.project_id),
+            (None, None, None))
+        row.asset_code = asset
+        row.consumable_code = consumable
+        # Ledger rows written before serial_numbers was mapped carry NULL; the lot's
+        # own serial is the best answer available for those.
+        row.serial_numbers = row.serial_numbers or serial
+    return page
 
 
 async def movement_summary(db: AsyncSession, item_id: int | None = None,

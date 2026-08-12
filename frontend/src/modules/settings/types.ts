@@ -34,3 +34,19 @@ export interface AppSettings {
     allow_auto_admin_fallback: boolean;
   };
 }
+
+/** GET/PUT /api/settings/code-formats — the asset & consumable code formula.
+ *  Separate from AppSettings because it has its own permission. */
+export interface CodeFormats {
+  asset_format: string;
+  consumable_format: string;
+  new_flag: string;
+  legacy_flag: string;
+  /** ISO date. Items created before it render `legacy_flag` for {new_flag}. */
+  legacy_before: string;
+}
+
+export interface CodeFormatToken {
+  token: string;
+  description: string;
+}

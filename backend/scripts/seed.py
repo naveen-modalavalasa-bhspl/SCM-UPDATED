@@ -242,6 +242,10 @@ PAGE_TREE = [
      P.ADMIN_AUDIT_VIEW, 100, "grp_settings"),
     ("admin_app_logs", "/admin/app-logs", "App Logs", "bug",
      P.ADMIN_AUDIT_VIEW, 101, "grp_settings"),
+    # The asset / consumable code formula. Also in page_registry.PAGES so a live
+    # database picks it up on startup without a reseed.
+    ("admin_code_formats", "/admin/code-formats", "Code Formats", "hash",
+     P.ADMIN_CODE_FORMATS_MANAGE, 102, "grp_settings"),
 ]
 
 

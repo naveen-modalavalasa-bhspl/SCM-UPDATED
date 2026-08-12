@@ -1,3 +1,5 @@
+import { displayUom } from "@/modules/indents/displayFormat";
+
 import type { ApprovalIndentLine } from "./types";
 
 /** Quantities are stored as NUMERIC(16,3); anything finer cannot be persisted. */
@@ -31,8 +33,8 @@ export const wasReducedBelow = (line: ApprovalIndentLine) =>
 
 /** "15 EA" — the cap with its unit, for messages that name the limit itself. */
 export function ceilingLabel(line: ApprovalIndentLine): string {
-  const unit = line.uom_code ? ` ${line.uom_code}` : "";
-  return `${formatQuantity(approvalCeiling(line))}${unit}`;
+  const unit = displayUom(line.uom_code);
+  return `${formatQuantity(approvalCeiling(line))}${unit ? ` ${unit}` : ""}`;
 }
 
 /**

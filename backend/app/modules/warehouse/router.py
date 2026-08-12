@@ -705,6 +705,19 @@ async def list_serials(params: PageParams = Depends(), status: str | None = None
                                       bin_id=bin_id, search=search, user=user)
 
 
+@router.get("/serials/summary")
+async def serial_summary(item_ids: str, warehouse_ids: str | None = None,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(STOCK_VIEW))):
+    """Serial / asset / consumable codes for a page of stock rows, grouped by item and
+    stocking point. Called by the inventory stock screens, which cannot read this
+    module's tables themselves."""
+    def ids(raw: str | None) -> list[int]:
+        return [int(part) for part in (raw or "").split(",") if part.strip().isdigit()]
+    return {"items": await service.serial_summary(
+        db, item_ids=ids(item_ids), warehouse_ids=ids(warehouse_ids) or None, user=user)}
+
+
 @router.get("/batches", response_model=Page[s.BatchRead])
 async def list_batches(params: PageParams = Depends(), item_id: int | None = None,
                        expiring_days: int | None = None, search: str | None = None,

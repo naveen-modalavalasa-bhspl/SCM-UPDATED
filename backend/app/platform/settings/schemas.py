@@ -5,7 +5,7 @@ grouped contract so the screen does not know about individual setting keys.
 """
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AttachmentRead(BaseModel):
@@ -66,6 +66,37 @@ class FallbackSettings(BaseModel):
     allow_auto_admin_fallback: bool = True
 
 
+class CodeFormatSettings(BaseModel):
+    """How an asset / consumable code is built at putaway.
+
+    Configured because the shape of the code is a business decision that keeps
+    changing, and it used to be an f-string in warehouse putaway — every change was a
+    deploy. The templates are validated here so a bad one is rejected on the screen
+    that typed it, never at the dock.
+    """
+    asset_format: str = "{item_code}-{new_flag}-{serial:8}"
+    consumable_format: str = "{item_code}-{new_flag}-{serial:8}"
+    # What {new_flag} renders as. Two strings rather than a hardcoded 1/0 so the next
+    # request ("make it N and O") is a setting change, not another code change.
+    new_flag: str = "1"
+    legacy_flag: str = "0"
+    # Items created before this date count as old and get `legacy_flag`. Empty means
+    # nothing is old — the safe reading, since it cannot silently re-brand a catalogue.
+    legacy_before: str = ""
+
+    @field_validator("asset_format", "consumable_format")
+    @classmethod
+    def _check(cls, value: str) -> str:
+        # Validated by the same function that renders at putaway, so the screen cannot
+        # accept a template the dock would then reject.
+        from app.platform.settings.codeformat import validate_format
+        from app.core.exceptions import ValidationError
+        try:
+            return validate_format(value)
+        except ValidationError as exc:
+            raise ValueError(str(exc)) from exc
+
+
 class SettingsOut(BaseModel):
     company: CompanySettings = Field(default_factory=CompanySettings)
     regional: RegionalSettings = Field(default_factory=RegionalSettings)
@@ -73,6 +104,8 @@ class SettingsOut(BaseModel):
     numbering: NumberingSettings = Field(default_factory=NumberingSettings)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     fallback: FallbackSettings = Field(default_factory=FallbackSettings)
+    # `codes` is deliberately NOT here. It has its own endpoints and its own
+    # permission, so editing the company address cannot re-shape every asset code.
 
 
 class SettingsIn(SettingsOut):

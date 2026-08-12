@@ -323,6 +323,13 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       qc.invalidateQueries({ queryKey: ["wh-issue", id] });
       qc.invalidateQueries({ queryKey: ["wh-issue-approvals", id] });
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
+      // A posted issue is exactly what the consignment screen offers as its source,
+      // and that picker is a Lookup holding its list for five minutes. Without this
+      // the storekeeper who has just posted an issue opens Consignments, cannot find
+      // it, and has to hard-refresh the browser before the flow will continue.
+      // Every act here changes dispatchability one way or the other — post adds the
+      // issue to that list, cancel and acknowledge take it back off.
+      qc.invalidateQueries({ queryKey: ["wh-lookup", "posted-issues"] });
       setConfirming(null);
       setReason("");
     },
