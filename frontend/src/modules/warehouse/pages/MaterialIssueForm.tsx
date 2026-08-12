@@ -91,6 +91,10 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const [reason, setReason] = useState("");
   const [serialLine, setSerialLine] = useState<number | null>(null);
   const [destination, setDestination] = useState("");
+  // The employee dropdown loads one page of names, so the indent raiser this form
+  // defaults to is usually not in it. Hold the name that came with the id, or the
+  // field shows its placeholder over a person who IS selected.
+  const [issuedToName, setIssuedToName] = useState<string | null>(null);
   // Some of the reserved stock was received for another project, or for none.
   // Worth saying out loud — the issue still goes through.
   const [mixedProjects, setMixedProjects] = useState(false);
@@ -118,6 +122,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   useEffect(() => {
     if (!doc) return;
     setDestination(doc.destination_office_name ?? "");
+    setIssuedToName(doc.issued_to_name ?? null);
     if (doc.warehouse_id) {
       warehouseOptions().then((opts) => {
         const w = opts.find(o => o.id === doc.warehouse_id);
@@ -160,6 +165,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     if (!pickingSource.data) return;
     const source = pickingSource.data;
     setMixedProjects(!!source.mixed_projects);
+    if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
     setForm((current) => ({
       ...current,
       picking_id: source.picking_id,
@@ -167,6 +173,9 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       indent_id: source.indent_id ?? null,
       department_id: source.department_id ?? null,
       project_id: source.project_id ?? null,
+      issued_to_id: source.issued_to_id ?? current.issued_to_id,
+      vehicle_id: source.vehicle_id ?? current.vehicle_id,
+      vehicle_number: source.vehicle_number ?? current.vehicle_number,
       items: source.items,
     }));
   }, [pickingSource.data]);
@@ -252,12 +261,15 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     onSuccess: (source) => {
       setDestination(source.destination_office_name ?? "");
       setMixedProjects(!!source.mixed_projects);
+      if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
       setForm((current) => ({
         ...current,
         indent_id: source.indent_id,
         department_id: source.department_id ?? current.department_id,
         project_id: source.project_id ?? current.project_id,
         issued_to_id: source.issued_to_id ?? current.issued_to_id,
+        vehicle_id: source.vehicle_id ?? current.vehicle_id,
+        vehicle_number: source.vehicle_number ?? current.vehicle_number,
         items: source.items,
       }));
     },
@@ -675,7 +687,16 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           </Field>
           <Field label="Issued to">
             <Lookup name="employees" load={employeeOptions} value={form.issued_to_id ?? ""} isDisabled={locked}
-                    onChange={(v) => set("issued_to_id", v === "" ? null : v)} placeholder="Person" />
+                    // The list is the first page of employees, so a person outside it
+                    // — the indent raiser this draft defaulted to — would render as the
+                    // grey "Person" placeholder over a value that is set.
+                    fallback={form.issued_to_id
+                      ? [{ id: form.issued_to_id, name: issuedToName ?? String(form.issued_to_id) }]
+                      : []}
+                    onChange={(v, option) => {
+                      set("issued_to_id", v === "" ? null : v);
+                      setIssuedToName(option?.name ?? null);
+                    }} placeholder="Person" />
           </Field>
           <Field label="Vehicle">
             <Input value={form.vehicle_number ?? ""} disabled={locked}

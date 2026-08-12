@@ -67,7 +67,23 @@ export function resolveItem(item: ConsolidatedItem, decision: ItemDecision | und
     ? item.total_ceiling_quantity
     : included.reduce((sum, a) => sum + capOf(a), 0);
   const over = parsed !== null && !invalid && parsed > ceiling;
-  const total = parsed === null || invalid ? ceiling : Math.min(parsed, ceiling);
+  // Stepped to the unit BEFORE anything is shown or split. UOM-BOX is a countable
+  // unit, so 1.3 boxes is not a quantity — but the box only refused to step the
+  // arrows, and a typed 1.3 sailed through: the header read "1.3 going out", the
+  // split handed 1 to one indent and 0 to the rest, and 0.3 of a box existed
+  // nowhere. Down, like every other quantity door in the system, so a number that
+  // has cleared the ceiling can never grow back over it.
+  const stepped = (value: number) => {
+    const places = item.uom_decimals ?? 3;
+    const factor = 10 ** places;
+    return Math.floor(value * factor) / factor;
+  };
+  const total = parsed === null || invalid
+    ? stepped(ceiling)
+    : stepped(Math.min(parsed, ceiling));
+  /** The typed number carried more precision than the unit has. The screen says so
+   *  rather than silently showing a different figure than the one keyed in. */
+  const rounded = parsed !== null && !invalid && !over && stepped(parsed) !== parsed;
 
   const shares = splitQuantity(
     total,
@@ -78,7 +94,8 @@ export function resolveItem(item: ConsolidatedItem, decision: ItemDecision | und
   const split = new Map<number, number>(allocations.map((a) => [a.line_id, 0]));
   included.forEach((a, index) => split.set(a.line_id, shares[index]));
 
-  return { allocations, included, droppedCount, invalid, over, ceiling, total, split };
+  return { allocations, included, droppedCount, invalid, over, rounded,
+           ceiling, total, split };
 }
 
 /** The filter bar, in display order. `param` is the query param the backend reads;
@@ -376,7 +393,12 @@ function ItemList({ items, decisions, onOpen }: {
  *  computed fresh on every request and stored nowhere. This reference is derived from
  *  the cycle it groups, so it is stable for as long as the cycle is, and it never
  *  pretends to be a saved document id. */
-export const batchRef = (batch: ConsolidationBatch) => `CONS-${batch.cycle}`;
+/** The document's own number — the SAME string the Fulfilment Queue and Allocation
+ *  Approvals print for this set of indents. `CONS-<month>` was a name only this screen
+ *  used, for a batch the other two already called `CON/2026-27/00001`. Only monthly
+ *  indents raised before documents existed still fall back to it. */
+export const batchRef = (batch: ConsolidationBatch) =>
+  batch.consolidation_no ?? `CONS-${batch.cycle}`;
 
 const batchTotalRequested = (batch: ConsolidationBatch) =>
   batch.consolidated_items.reduce((sum, item) => sum + item.total_requested_quantity, 0);
@@ -572,6 +594,21 @@ export function BatchCard({ batch, onBack }: {
   const queryClient = useQueryClient();
   const nav = useNavigate();
 
+  // The members this batch had when it was opened, frozen. Indents keep arriving in
+  // the month while the batch is being read, and this screen groups on the MONTH — a
+  // consolidation id only exists after approval, so there is no sealed document to
+  // hold the set still the way the fulfilment and allocation screens have one. Without
+  // this, a refetch quietly grew the batch between reading it and clicking Approve all,
+  // and an indent nobody had seen was signed. Arrivals are announced instead.
+  const [reload, setReload] = useState(0);
+  const frozenIds = useMemo(
+    () => new Set(batch.indents.map((row) => row.id)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately NOT `batch`:
+    // the set is captured once per cycle and only re-taken when the approver asks.
+    [batch.cycle, reload],
+  );
+  const arrived = batch.indents.filter((row) => !frozenIds.has(row.id));
+
   // A bad number anywhere in the batch blocks the whole approval: the split it feeds
   // would be wrong for every indent holding that item, not just one.
   const blocked = batch.consolidated_items.some((item) => {
@@ -605,7 +642,8 @@ export function BatchCard({ batch, onBack }: {
   /** How many indents Approve all actually sends — the button, the progress bar and
    *  the request all count the same set, so a held indent never shows up as one that
    *  failed to approve. */
-  const sending = batch.indents.length - held.size;
+  const sending = batch.indents.filter(
+    (row) => frozenIds.has(row.id) && !held.has(row.id)).length;
 
   const approve = useMutation({
     mutationFn: async () => {
@@ -619,7 +657,11 @@ export function BatchCard({ batch, onBack }: {
           approved_quantity: split.get(allocation.line_id) ?? 0,
         }));
       });
-      const indentIds = batch.indents.map((row) => row.id).filter((id) => !held.has(id));
+      // The frozen set, never whatever the server holds at click time: an indent that
+      // joined the month while this screen was open has not been read by anybody here.
+      const indentIds = batch.indents
+        .map((row) => row.id)
+        .filter((id) => frozenIds.has(id) && !held.has(id));
 
       // Sent in small chunks, not one request. The backend walks the batch one indent
       // at a time — engine-owned chains cannot be short-cut — so a monthly cycle would
@@ -663,6 +705,18 @@ export function BatchCard({ batch, onBack }: {
 
   return (
     <Card className="mb-4 space-y-4 p-4">
+      {arrived.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/40 bg-warn/5 p-3 text-sm">
+          <p className="text-warn">
+            {arrived.length} indent{arrived.length === 1 ? "" : "s"} joined this month
+            since you opened the batch ({arrived.map((row) => row.indent_no).join(", ")}).
+            They are not counted below and Approve all will not sign them.
+          </p>
+          <Button variant="secondary" onClick={() => setReload((n) => n + 1)}>
+            Include them
+          </Button>
+        </div>
+      )}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-mono text-xs font-semibold uppercase tracking-wide text-muted">{batchRef(batch)}</p>

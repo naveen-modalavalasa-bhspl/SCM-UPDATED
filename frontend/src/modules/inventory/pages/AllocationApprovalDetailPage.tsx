@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle2, XCircle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, RefreshCw, XCircle } from "lucide-react";
 import { Button, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import {
-  approveAllocation, getAllocation, getAllocationHistory,
+  approveAllocation, getAllocation, getAllocationAvailability, getAllocationHistory,
   getPendingInventoryApprovals, rejectAllocation,
 } from "../api";
 import { alerts } from "@/modules/alerts";
@@ -18,10 +18,11 @@ const fmt = (value: number) =>
  * bookmark or come back to mid-decision. This is the same content, routed at
  * /inventory/allocation-approvals/:id so it is a real page.
  *
- * Give quantities are read-only here on purpose. Approving reserves exactly what
- * inventory decided to give; changing that number at approval time is a decision
- * for the indents module (it owns /api/allocations/{id}/approve and the workflow
- * that follows it), not something this module's screen can commit to.
+ * The give quantity is editable for whoever the allocation is currently waiting on.
+ * It was read-only, so an approver who thought 60 was too generous could only reject
+ * the whole thing and ask for it to be raised again. A revision is capped at what was
+ * requested and at what is genuinely free at that point — the server re-checks both
+ * under a row lock, so the number on screen is a guide, not the authority.
  */
 export function AllocationApprovalDetailPage() {
   const { id } = useParams();
@@ -32,12 +33,30 @@ export function AllocationApprovalDetailPage() {
   const qc = useQueryClient();
   const [comments, setComments] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Only the lines the approver actually touched. An untouched line is not sent, so
+  // approving without editing stays exactly the act it always was.
+  const [edits, setEdits] = useState<Record<number, string>>({});
 
   const allocation = useQuery({
     queryKey: ["inventory", "allocation-decision", allocationId],
     queryFn: () => getAllocation(allocationId),
     enabled: Number.isFinite(allocationId) && allocationId > 0,
   });
+
+  // The shelf moves while an allocation waits for a signature. This is what is free
+  // at each chosen point right now, less what other un-approved allocations have
+  // already promised out of it.
+  const availability = useQuery({
+    queryKey: ["inventory", "allocation-availability", allocationId],
+    queryFn: () => getAllocationAvailability(allocationId),
+    enabled: Number.isFinite(allocationId) && allocationId > 0,
+    // Stale free stock is worse than none: it is the number the approver is about to
+    // commit against, so it is re-read whenever the screen comes back into focus.
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  });
+  const freeFor = (lineId: number) =>
+    (availability.data ?? []).find((row) => row.id === lineId);
 
   const history = useQuery({
     queryKey: ["inventory", "allocation-history", allocationId],
@@ -57,19 +76,42 @@ export function AllocationApprovalDetailPage() {
 
   const goBack = () => nav(decisionView ? "/approvals/decisions" : "/inventory/allocation-approvals");
 
+  const a = allocation.data;
+
+  // A revision only counts if the number actually changed — retyping 40 over 40 is
+  // not a decision and must not read as one in the audit trail.
+  const revisions = (a?.items ?? []).flatMap((item) => {
+    const typed = edits[item.id];
+    if (typed === undefined || typed === "") return [];
+    const quantity = Number(typed);
+    if (!Number.isFinite(quantity) || quantity < 0) return [];
+    return quantity === Number(item.quantity) ? [] : [{ id: item.id, quantity }];
+  });
+  const overCap = (a?.items ?? []).some((item) => {
+    const typed = edits[item.id];
+    if (typed === undefined || typed === "") return false;
+    const cap = freeFor(item.id)?.max_allowed;
+    return cap !== undefined && Number(typed) > cap;
+  });
+
   const act = useMutation({
     mutationFn: ({ approve }: { approve: boolean }) =>
-      approve ? approveAllocation(allocationId, comments) : rejectAllocation(allocationId, comments),
+      approve
+        ? approveAllocation(allocationId, comments, revisions)
+        : rejectAllocation(allocationId, comments),
     onSuccess: (_result, { approve }) => {
       void alerts.success(approve ? "allocation.approved" : "allocation.rejected");
       qc.invalidateQueries({ queryKey: ["inventory"] });
       qc.invalidateQueries({ queryKey: ["fulfillment-queue"] });
       goBack();
     },
-    onError: (err: Error) => setError(err.message),
+    onError: (err: Error) => {
+      setError(err.message);
+      // The refusal is almost always "the shelf moved" — so re-read the shelf, and
+      // the approver sees the new number instead of the one that was just rejected.
+      void availability.refetch();
+    },
   });
-
-  const a = allocation.data;
 
   return (
     <div>
@@ -104,36 +146,101 @@ export function AllocationApprovalDetailPage() {
             </div>
           </Card>
 
-          <Card className="overflow-x-auto p-0">
+          <Card className="p-0">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
+              <p className="text-xs text-muted">
+                {waitingOnMe
+                  ? "Change a Give quantity to approve a different number. Free is what is on the shelf now, less what other pending allocations have promised."
+                  : "Free is what is on the shelf now, less what other pending allocations have promised."}
+              </p>
+              <Button
+                variant="subtle"
+                onClick={() => void availability.refetch()}
+                disabled={availability.isFetching}
+              >
+                <RefreshCw size={14} className={availability.isFetching ? "animate-spin" : ""} />
+                {availability.isFetching ? "Checking…" : "Recheck stock"}
+              </Button>
+            </div>
+            <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead className="bg-content2 text-xs text-muted">
                 <tr>
                   <th className="p-3">Item</th>
                   <th className="p-3">Requested</th>
                   <th className="p-3">Give</th>
+                  <th className="p-3">Free now</th>
                   <th className="p-3">Warehouse</th>
                   <th className="p-3">Shortage</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
-                {a.items.map((item) => (
-                  <tr key={item.id}>
-                    <td className="p-3">
-                      <div className="font-medium text-ink">{item.item_name}</div>
-                      <div className="text-xs text-muted">{item.item_code}</div>
-                    </td>
-                    <td className="p-3">{fmt(item.requested_qty)} {item.uom_code}</td>
-                    <td className="p-3 font-semibold text-ok">
-                      {fmt(item.quantity)} {item.uom_code}
-                    </td>
-                    <td className="p-3">{item.warehouse_name ?? "Not allocated"}</td>
-                    <td className="p-3 text-warn">
-                      {fmt(Math.max(0, item.requested_qty - item.quantity))} {item.uom_code}
-                    </td>
-                  </tr>
-                ))}
+                {a.items.map((item) => {
+                  const live = freeFor(item.id);
+                  const typed = edits[item.id];
+                  const give = typed === undefined || typed === ""
+                    ? Number(item.quantity) : Number(typed);
+                  const cap = live?.max_allowed;
+                  const tooMuch = cap !== undefined && give > cap;
+                  return (
+                    <tr key={item.id}>
+                      <td className="p-3">
+                        <div className="font-medium text-ink">{item.item_name}</div>
+                        <div className="text-xs text-muted">{item.item_code}</div>
+                      </td>
+                      <td className="p-3">{fmt(item.requested_qty)} {item.uom_code}</td>
+                      <td className="p-3">
+                        {waitingOnMe ? (
+                          <div className="w-32">
+                            <Input
+                              type="number"
+                              min={0}
+                              max={cap}
+                              step="any"
+                              value={typed ?? String(item.quantity)}
+                              onChange={(event) => setEdits((prev) => ({
+                                ...prev, [item.id]: event.target.value,
+                              }))}
+                              aria-label={`Give quantity for ${item.item_name ?? item.item_code}`}
+                            />
+                            {tooMuch && (
+                              <p className="mt-1 text-[11px] text-bad">
+                                Max {fmt(cap!)} {item.uom_code}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="font-semibold text-ok">
+                            {fmt(item.quantity)} {item.uom_code}
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        {availability.isLoading || !live ? (
+                          <span className="text-xs text-muted">…</span>
+                        ) : (
+                          <div>
+                            <div className={live.free < give ? "font-semibold text-bad" : "text-ink"}>
+                              {fmt(live.free)} {item.uom_code}
+                            </div>
+                            {live.pledged_elsewhere > 0 && (
+                              <div className="text-[11px] text-muted">
+                                {fmt(live.on_shelf)} on shelf · {fmt(live.pledged_elsewhere)} promised
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td className="p-3">{item.warehouse_name ?? "Not allocated"}</td>
+                      <td className="p-3 text-warn">
+                        {fmt(Math.max(0, item.requested_qty - give))} {item.uom_code}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+            </div>
           </Card>
 
           <Card className="p-4">
@@ -182,20 +289,34 @@ export function AllocationApprovalDetailPage() {
 
           {!decisionView && waitingOnMe && (
             <Card className="p-4">
+              {revisions.length > 0 && (
+                <div className="mb-3 rounded-lg bg-warn-bg p-3 text-sm text-warn">
+                  {revisions.length} quantit{revisions.length === 1 ? "y" : "ies"} revised.
+                  Approving reserves your numbers, not the ones inventory proposed, and
+                  records the change against your name.
+                </div>
+              )}
               <Field label="Comments">
                 <Input
                   value={comments}
                   onChange={(event) => setComments(event.target.value)}
-                  placeholder="Optional reason or instruction"
+                  placeholder={revisions.length ? "Why the quantity changed" : "Optional reason or instruction"}
                 />
               </Field>
               <div className="mt-4 flex flex-wrap justify-end gap-2">
                 <Button variant="subtle" onClick={goBack}>Cancel</Button>
+                {revisions.length > 0 && (
+                  <Button variant="subtle" onClick={() => setEdits({})}>Undo edits</Button>
+                )}
                 <Button variant="danger" disabled={act.isPending} onClick={() => act.mutate({ approve: false })}>
                   <XCircle className="h-4 w-4" /> Reject
                 </Button>
-                <Button disabled={act.isPending} onClick={() => act.mutate({ approve: true })}>
-                  <CheckCircle2 className="h-4 w-4" /> Approve and reserve
+                <Button
+                  disabled={act.isPending || overCap}
+                  onClick={() => act.mutate({ approve: true })}
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  {revisions.length ? "Approve revised and reserve" : "Approve and reserve"}
                 </Button>
               </div>
             </Card>

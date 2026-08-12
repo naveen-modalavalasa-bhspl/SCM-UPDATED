@@ -5,6 +5,7 @@ import type {
   AllocationDecision,
   AllocationHistoryRow,
   Allocation,
+  AllocationLineAvailability,
   AllocationListRow,
   AllocationProposal,
   AllocationApprovalBatch,
@@ -345,6 +346,20 @@ export const listAllocations = (params?: { status?: string; indent_id?: number }
 export const getAllocation = (id: number) =>
   api.get<Allocation>(`/api/allocations/${id}`).then((r) => r.data);
 
+/** Live free stock behind every line of one allocation — what the approver may give. */
+export const getAllocationAvailability = (id: number) =>
+  api
+    .get<AllocationLineAvailability[]>(`/api/allocations/${id}/availability`)
+    .then((r) => r.data);
+
+/** Every allocation's history in ONE call. Opening a 900-allocation cycle used to
+ *  fire 900 requests, which is why the screen took minutes. */
+export const getAllocationHistories = (allocationIds: number[]) =>
+  api
+    .post<{ items: Record<string, AllocationHistoryRow[]> }>(
+      "/api/allocations/history-batch", { allocation_ids: allocationIds })
+    .then((r) => r.data.items ?? {});
+
 /** Who has signed this allocation so far, and under which hat. */
 export const getAllocationHistory = (id: number) =>
   api
@@ -431,8 +446,13 @@ export const dispatchSTO = (id: number) =>
 export const receiveSTO = (id: number) =>
   api.post(`/api/stock/sto/${id}/receive`).then((r) => r.data);
 
-export const approveAllocation = (id: number, comments = "") =>
-  api.post(`/api/allocations/${id}/approve`, { comments }).then((r) => r.data);
+/** `revisions` are the approver's own quantities, one entry per changed line. Sending
+ *  none approves exactly what inventory decided, as before. */
+export const approveAllocation = (
+  id: number, comments = "", revisions: { id: number; quantity: number }[] = [],
+) =>
+  api.post(`/api/allocations/${id}/approve`, { comments, revisions })
+    .then((r) => r.data);
 
 export const rejectAllocation = (id: number, comments = "") =>
   api.post(`/api/allocations/${id}/reject`, { comments }).then((r) => r.data);

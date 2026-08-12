@@ -3124,13 +3124,36 @@ async def _already_picking(db: AsyncSession, indent_id: int,
     return {item_id: _d(qty) for item_id, qty in rows}
 
 
+async def _live_issue_labels(db: AsyncSession, indent_id: int,
+                             warehouse_id: int | None) -> str:
+    """The issues already holding this indent's quantity here, named and with status.
+
+    "Nothing is outstanding" is a true answer to the wrong question when the thing
+    holding the quantity is a draft the same person raised a minute ago. Name it:
+    the store can open it and finish it instead of guessing what drew the stock.
+    """
+    conditions = [
+        m.MaterialIssue.indent_id == indent_id,
+        m.MaterialIssue.direction == IssueDirection.OUT.value,
+        m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+    ]
+    if warehouse_id is not None:
+        conditions.append(m.MaterialIssue.warehouse_id == warehouse_id)
+    rows = (await db.execute(
+        select(m.MaterialIssue.issue_no, m.MaterialIssue.status)
+        .where(*conditions).order_by(m.MaterialIssue.id)
+    )).all()
+    return ", ".join(f"{issue_no} ({status})" for issue_no, status in rows)
+
+
 async def _guard_indent_quantity(db: AsyncSession, indent_id: int, indent_no: str,
                                  wanted: dict[int, Decimal], taken: dict[int, Decimal],
-                                 doc: str) -> None:
+                                 doc: str, holders: str = "") -> None:
     """Refuses a document that would take an indent past what was approved.
 
     `taken` is what documents of this same kind already hold — the new document's own
     lines are not in it yet, so the sum is what the indent would stand at afterwards.
+    `holders` names those documents, so the refusal says what to go and look at.
     """
     caps = await _indent_cap(db, indent_id)
     if not caps:
@@ -3145,15 +3168,16 @@ async def _guard_indent_quantity(db: AsyncSession, indent_id: int, indent_no: st
         if qty > outstanding:
             name = (await db.get(Item, item_id)) if item_id else None
             label = getattr(name, "name", None) or f"item {item_id}"
+            by = f" by {holders}" if holders else ""
             if outstanding <= ZERO:
                 raise ValidationError(
-                    f"{indent_no} is fully served for {label} — {cap} of {cap} already "
-                    f"covered. Nothing is outstanding, so there is nothing to "
-                    f"{doc.lower()}."
+                    f"{indent_no} is already covered for {label} — {cap} of {cap}"
+                    f"{by}. Open that document to continue; there is nothing left to "
+                    f"{doc.lower()} against this indent."
                 )
             raise ValidationError(
                 f"{indent_no} only has {outstanding} of {label} outstanding "
-                f"({taken.get(item_id, ZERO)} of {cap} already covered). "
+                f"({taken.get(item_id, ZERO)} of {cap} already covered{by}). "
                 f"Reduce this {doc.lower()} to {outstanding} or less."
             )
 
@@ -3304,6 +3328,19 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
             if seen["indent_item_id"] != line.indent_item_id:
                 seen["indent_item_id"] = None
 
+    # The person the goods are for is the one who raised the indent — the same answer
+    # _issue_destination already falls back to. Filling it here means the draft opens
+    # with "Issued to" named instead of blank; the store can still change it.
+    from app.modules.indents.models import Indent
+    indent = await db.get(Indent, alloc.indent_id) if alloc.indent_id else None
+    issued_to_id = getattr(indent, "requested_by_id", None) if indent else None
+    # The indent already named the vehicle it is going out on. Same rule as the
+    # person: default it in, leave it typeable.
+    vehicle_id = getattr(indent, "vehicle_id", None) if indent else None
+    vehicle_number = (getattr(indent, "vehicle_number", None) if indent else None) or (
+        _vehicle_from_office_name(getattr(indent, "office_name", None) if indent else None)
+    )
+
     drafts: list[m.MaterialIssue] = []
     for warehouse_id, lines in by_warehouse.items():
         project_id = next(
@@ -3319,6 +3356,9 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
             warehouse_id=warehouse_id,
             indent_id=alloc.indent_id,
             project_id=project_id,
+            issued_to_id=issued_to_id,
+            vehicle_id=vehicle_id,
+            vehicle_number=vehicle_number,
             items=items,
         )
         drafts.append(await _build_issue(db, data, user))
@@ -3620,6 +3660,7 @@ async def _issue_snapshot_values(
     project_id: int | None,
     vehicle_id: int | None,
     issued_to_id: int | None,
+    vehicle_number: str | None = None,
 ) -> dict[str, str | None]:
     from app.platform.hcm.models import HcmDepartment, HcmEmployee
     from app.shared.models.master import Project
@@ -3632,7 +3673,8 @@ async def _issue_snapshot_values(
     return {
         "department_name": department.name if department else None,
         "project_name": project.name if project else None,
-        "vehicle_number": vehicle["name"] if vehicle else None,
+        # A registered vehicle names itself; otherwise keep what was typed.
+        "vehicle_number": vehicle["name"] if vehicle else (vehicle_number or None),
         "issued_to_name": employee.full_name if employee else None,
     }
 
@@ -3792,6 +3834,15 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             # a material issue came to be worth ₹ -62,617. Goods leaving a store have
             # a cost or they have none; they never have a negative one.
             raise ValidationError(f"Line {index}: rate cannot be negative")
+        if rate <= ZERO:
+            # A drafted line carries no rate — the allocation and the picklist both
+            # name goods, never a cost — so every automatic issue was worth ₹ 0. The
+            # cost is already recorded: the batch was received at one, and the item
+            # keeps the last purchase price as the valuation fallback (masters). Read
+            # it here, once, so every creation path is costed the same way. Still
+            # editable, and still ₹ 0 when nothing knows the cost.
+            rate = _d(batch.rate if batch and batch.rate else None) or _d(
+                getattr(item, "purchase_price", None))
         issue.items.append(m.MaterialIssueLine(
             line_no=index, indent_item_id=line.indent_item_id,
             item_id=item.id, item_code=item.code, item_name=item.name, uom_code=item.uom_code,
@@ -3934,6 +3985,26 @@ async def _decorate_issue_destination(
     return issue
 
 
+_VEHICLE_IN_NAME = re.compile(r"([A-Z]{2}\d{1,2}[A-Z]{1,3}\d{3,4})$")
+
+
+def _vehicle_from_office_name(office_name: str | None) -> str | None:
+    """The registration number an MMU office carries in its own name.
+
+    An indent can name a vehicle, but no live indent does and `trn_vehicles` is empty
+    — the register was never populated, so there is nothing to look up. The number is
+    recorded anyway: 2660 of 3282 offices are named for the vehicle that serves them
+    (`AP-104-MMU-Guraja Phc-AP39TL9202`). Read the trailing token so the issue opens
+    with the vehicle already filled. A prefill only — it is typed over freely, and a
+    cleared box stays cleared.
+    """
+    if not office_name:
+        return None
+    tail = office_name.replace(" ", "").upper().split("-")[-1]
+    found = _VEHICLE_IN_NAME.search(tail)
+    return found.group(1) if found else None
+
+
 async def _issue_destination(
     db: AsyncSession,
     issue: m.MaterialIssue | None,
@@ -4070,6 +4141,7 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
                 # Scoped to THIS point: the same indent is served down a chain, and the
                 # warehouse's leg must not consume the MDP's allowance to forward on.
                 await _already_issued(db, served.id, wh.id), "issue",
+                await _live_issue_labels(db, served.id, wh.id),
             )
 
     if not data.items:
@@ -4111,6 +4183,7 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
         project_id=data.project_id,
         vehicle_id=data.vehicle_id,
         issued_to_id=data.issued_to_id,
+        vehicle_number=data.vehicle_number,
     )
 
     issue = m.MaterialIssue(
@@ -4303,6 +4376,7 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
         project_id=data.project_id,
         vehicle_id=data.vehicle_id,
         issued_to_id=data.issued_to_id,
+        vehicle_number=data.vehicle_number,
     )
     issue.issue_type = data.issue_type.value
     issue.issue_date = data.issue_date
@@ -7801,6 +7875,12 @@ async def indent_issue_source(
         "project_id": getattr(indent, "project_id", None) or None,
         "mixed_projects": mixed_projects,
         "issued_to_id": requested_by_id,
+        "issued_to_name": requested_by.full_name if requested_by else None,
+        "vehicle_id": getattr(indent, "vehicle_id", None),
+        "vehicle_number": (
+            getattr(indent, "vehicle_number", None)
+            or _vehicle_from_office_name(requested_by.office_name if requested_by else None)
+        ),
         "destination_office_id": requested_by.office_id if requested_by else None,
         "destination_office_name": requested_by.office_name if requested_by else None,
         "items": [
@@ -7827,6 +7907,7 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
     """Turn a completed physical pick into the material-issue draft that posts it."""
     from app.modules.indents.models import Indent
     from app.modules.inventory.models import Reservation
+    from app.platform.hcm.models import HcmEmployee
 
     picking = await get_picking(db, picking_id)
     _guard(
@@ -7836,6 +7917,8 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
     )
     indent_id = picking.ref_id if picking.ref_type == "INDENT" else None
     indent = await db.get(Indent, indent_id) if indent_id else None
+    requested_by_id = getattr(indent, "requested_by_id", None) if indent else None
+    requested_by = await db.get(HcmEmployee, requested_by_id) if requested_by_id else None
 
     reservations = []
     if indent_id:
@@ -7896,6 +7979,14 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
         "department_id": getattr(indent, "department_id", None) if indent else None,
         "project_id": indent_project or None,
         "mixed_projects": mixed_projects,
+        # Same default as indent_issue_source: whoever raised the request.
+        "issued_to_id": requested_by_id,
+        "issued_to_name": requested_by.full_name if requested_by else None,
+        "vehicle_id": getattr(indent, "vehicle_id", None) if indent else None,
+        "vehicle_number": (
+            (getattr(indent, "vehicle_number", None) if indent else None)
+            or _vehicle_from_office_name(requested_by.office_name if requested_by else None)
+        ),
         "items": items,
     }
 
@@ -8296,7 +8387,9 @@ async def issue_cycles(db: AsyncSession, user) -> list[dict]:
     """
     from app.modules.indents.models import Indent
     from app.modules.indents.enums import IndentType
-    from app.modules.indents.service import cycle_key, _month_label
+    from app.modules.indents.service import (
+        consolidation_key, cycle_key, _month_label,
+    )
 
     stmt = (
         select(m.MaterialIssue, Indent)
@@ -8321,11 +8414,16 @@ async def issue_cycles(db: AsyncSession, user) -> list[dict]:
 
     groups: dict[tuple, dict] = {}
     for issue, indent in (await db.execute(stmt)).all():
-        cycle = cycle_key(indent)
+        # The consolidation document, not the month: two cycles for the same month are
+        # two separate lots to pick, and merging them here would hand a storekeeper a
+        # batch that no approval screen upstream ever showed as one thing.
+        cycle = consolidation_key(indent.consolidation_id, indent)
         key = (cycle, issue.warehouse_id)
         row = groups.setdefault(key, {
             "cycle": cycle,
-            "cycle_label": _month_label(cycle),
+            "_cycle_month": cycle_key(indent),
+            "_consolidation_id": indent.consolidation_id or 0,
+            "cycle_label": _month_label(cycle_key(indent)),
             "warehouse_id": issue.warehouse_id,
             "warehouse_name": issue.warehouse_name,
             "issue_count": 0,
@@ -8355,8 +8453,10 @@ async def issue_cycles(db: AsyncSession, user) -> list[dict]:
         row["total_qty"] = float(row["total_qty"])
         out.append(row)
     # Newest cycle first, and the fullest warehouse within it — the queue a person
-    # opens the screen to clear.
-    out.sort(key=lambda r: (r["cycle"], r["issue_count"]), reverse=True)
+    # opens the screen to clear. Sorted on the month and the document id rather than on
+    # the key, which would order C9 after C10.
+    out.sort(key=lambda r: (r.pop("_cycle_month"), r.pop("_consolidation_id"),
+                            r["issue_count"]), reverse=True)
     return out
 
 

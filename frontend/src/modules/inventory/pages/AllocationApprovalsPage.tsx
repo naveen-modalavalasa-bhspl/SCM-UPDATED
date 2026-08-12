@@ -6,16 +6,12 @@ import { Pagination } from "@heroui/react";
 import {
   Button, Card, PageHeader, ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
-import { getAllocation, getPendingInventoryApprovals, listAllocations } from "../api";
+import { getPendingInventoryApprovals, listAllocations } from "../api";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import type { Allocation } from "../types";
 
 const fmt = (value: number) =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(value);
-
-/** How many of the listed allocations are fetched in full so their line totals can be
- *  shown in the table. One request each, so it is a window, not the whole history. */
-const DETAIL_LIMIT = 40;
 
 /**
  * The review itself lives at /inventory/allocation-approvals/:id
@@ -47,8 +43,17 @@ export function AllocationApprovalsPage() {
     queryKey: ["inventory", "allocation-approvals", decision],
     queryFn: async () => {
       if (decision === "WAITING") {
-        const pending = await getPendingInventoryApprovals();
-        return Promise.all(pending.map((item) => getAllocation(item.doc_id)));
+        // Two requests, not one per row: the inbox says WHICH allocations are mine,
+        // the list carries the rows themselves. Opening each one was fine for an inbox
+        // of five and unusable for a monthly cycle of nine hundred.
+        const [pending, all] = await Promise.all([
+          getPendingInventoryApprovals(),
+          listAllocations({ status: "PENDING_APPROVAL" }),
+        ]);
+        const mine = new Set(pending.map((item) => item.doc_id));
+        return (all.items ?? [])
+          .filter((row) => mine.has(row.id))
+          .map((row) => ({ ...row, remarks: null, items: [] } as unknown as Allocation));
       }
       // A decided allocation is read from the allocation list, not the approval
       // inbox: the inbox only ever holds what is still owed a signature.
@@ -57,19 +62,11 @@ export function AllocationApprovalsPage() {
       const pages = await Promise.all(
         wanted.map((status) => listAllocations({ status })));
       const rows = pages.flatMap((p) => p.items ?? []);
-      // Newest first, and only the newest few carry their lines: pulling every
-      // allocation's detail was one request per row, which was survivable while this
-      // list was an inbox of a handful and is not now that it opens on every
-      // decision ever made. The rest show their totals when they are opened.
+      // Newest first. The line totals come down with the list itself now — this used
+      // to open the newest forty allocations one request at a time just to add their
+      // quantities up, which is forty round trips before the screen could paint.
       rows.sort((a, b) => b.id - a.id);
-      const detailed = await Promise.all(
-        rows.slice(0, DETAIL_LIMIT).map((row) => getAllocation(row.id)));
-      return [
-        ...detailed,
-        ...rows.slice(DETAIL_LIMIT).map((row) => ({
-          ...row, remarks: null, items: [],
-        } as unknown as Allocation)),
-      ];
+      return rows.map((row) => ({ ...row, remarks: null, items: [] } as unknown as Allocation));
     },
   });
 
@@ -106,18 +103,26 @@ export function AllocationApprovalsPage() {
     const cycleRows = (batches.data?.items ?? []).map((b) => ({
       // Negative, so a synthetic row can never collide with a real allocation id.
       id: -Math.abs([...b.cycle].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 1e6, 7) || 1),
-      allocation_no: `${b.month_label} — consolidated`,
+      allocation_no: b.consolidation_no
+        ? `${b.month_label} — ${b.consolidation_no}`
+        : `${b.month_label} — consolidated`,
       // What this hat can still sign, not the raw pending count: after level 1 the
       // rows stay pending at level 2, and the row read "6 allocations" while the
       // buttons inside could sign none of them.
-      indent_no: `${b.actionable_count || b.allocation_count} allocations`
-        + ` · ${b.indent_count} indents`,
+      // `indent_count` is the consolidation's membership, so it is the same figure
+      // the Fulfilment Queue prints for this cycle — the two screens can no longer
+      // answer different questions under the same word.
+      // Both numbers, always. Printing the actionable count alone under the word
+      // "allocations" made this row read "7 allocations" over a screen headed 51 —
+      // two true answers to two different questions, under one label.
+      indent_no: `${b.actionable_count} to sign · ${b.allocation_count} allocation`
+        + `${b.allocation_count === 1 ? "" : "s"} · ${b.indent_count} indents`,
       status: b.pending_count ? "PENDING_APPROVAL" : "APPROVED",
       allocated_by_name: "Monthly cycle",
       cycle: b.cycle,
-      items: b.allocations.flatMap((a) => a.lines.map((l) => ({
-        quantity: l.quantity, requested_qty: l.quantity,
-      }))),
+      total_qty: b.total_qty,
+      requested_total: b.total_qty,
+      items: [],
     })) as unknown as Allocation[];
 
     // The individual allocations inside a cycle are represented by their cycle row;
@@ -149,18 +154,17 @@ export function AllocationApprovalsPage() {
     {
       key: "decision",
       header: "Inventory decision",
-      // A row outside the detail window has no lines to add up. "Open to see" is the
-      // truth; a confident 0 is not.
-      render: (row) => (row.items.length ? (
+      // Totals come off the row itself — the server adds them up in one grouped query.
+      render: (row) => (row.total_qty === undefined ? (
+        <span className="text-xs text-muted">Open to see</span>
+      ) : (
         <div>
-          <div className="text-sm text-ink">
-            {fmt(row.items.reduce((sum, item) => sum + Number(item.quantity), 0))} approved to give
-          </div>
+          <div className="text-sm text-ink">{fmt(row.total_qty)} approved to give</div>
           <div className="text-xs text-muted">
-            of {fmt(row.items.reduce((sum, item) => sum + Number(item.requested_qty), 0))} requested
+            of {fmt(row.requested_total ?? row.total_qty)} requested
           </div>
         </div>
-      ) : <span className="text-xs text-muted">Open to see</span>),
+      )),
     },
     {
       key: "allocator",
@@ -266,8 +270,7 @@ export function AllocationApprovalsPage() {
                 </div>
                 <p className="text-sm text-body">{row.indent_no}</p>
                 <p className="text-xs text-muted">
-                  {fmt(row.items.reduce((sum, item) => sum + Number(item.quantity), 0))}
-                  {" "}to give · decided by {row.allocated_by_name ?? "—"}
+                  {fmt(row.total_qty ?? 0)} to give · decided by {row.allocated_by_name ?? "—"}
                 </p>
               </div>
             )}

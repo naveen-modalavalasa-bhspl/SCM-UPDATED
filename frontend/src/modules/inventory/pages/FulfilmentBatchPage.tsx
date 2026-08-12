@@ -14,6 +14,16 @@ import { getFulfilmentBatches } from "../api";
  * back onto each indent visible and editable, and the shelf it leaves from chosen once
  * rather than nine hundred times.
  */
+function Stat({ label, value, tone = "text-ink" }:
+              { label: string; value: number; tone?: string }) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wide text-muted">{label}</div>
+      <div className={`text-lg font-bold ${tone}`}>{value}</div>
+    </div>
+  );
+}
+
 export function FulfilmentBatchPage() {
   const { cycle = "" } = useParams();
   const nav = useNavigate();
@@ -32,7 +42,9 @@ export function FulfilmentBatchPage() {
     <div>
       <PageHeader
         eyebrow="Inventory · Fulfilment Queue"
-        title={batch ? `${batch.month_label} — consolidated` : "Consolidated cycle"}
+        title={batch
+          ? `${batch.month_label} — ${batch.consolidation_no ?? "consolidated"}`
+          : "Consolidated cycle"}
         actions={
           <Button variant="ghost" onClick={() => nav("/inventory/fulfillment")}>
             <ArrowLeft className="h-4 w-4" /> Back to queue
@@ -41,29 +53,52 @@ export function FulfilmentBatchPage() {
       />
 
       {batch && (
-        <Card className="mb-4 flex flex-wrap gap-6 p-4 text-sm">
-          <div>
-            <div className="text-[11px] uppercase tracking-wide text-muted">Indents</div>
-            <div className="text-lg font-bold text-ink">{batch.indent_count}</div>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wide text-muted">Requesters</div>
-            <div className="text-lg font-bold text-ink">{batch.requester_count}</div>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wide text-muted">Items</div>
-            <div className="text-lg font-bold text-ink">{batch.item_count}</div>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wide text-muted">Total asked</div>
-            <div className="text-lg font-bold text-ink">{batch.total_qty}</div>
-          </div>
-          {batch.urgent_count > 0 && (
+        <Card className="mb-4 p-4 text-sm">
+          {/* The flex row lives on an inner div: HeroUI's Card is itself a column
+              flex container, so `flex-wrap` on the Card never won against its
+              `flex-col` and every figure stacked down the page. */}
+          <div className="flex flex-wrap items-start gap-x-10 gap-y-4">
+            {/* The same two numbers the queue row shows, off the same document. */}
+            <Stat label="Indents" value={batch.indent_count} />
+            <Stat label="Still to allocate"
+                  value={batch.owed_indent_count ?? batch.indent_count} />
+            {/* Waiting on an allocation already raised. Counted under "still to
+                allocate" it produced a Submit that came back with one refusal per
+                indent — inventory refuses a second proposal while one is in flight. */}
+            {(batch.in_approval_indent_count ?? 0) > 0 && (
+              <Stat label="In approval" value={batch.in_approval_indent_count ?? 0} />
+            )}
+            <Stat label="Requesters" value={batch.requester_count} />
+            {/* What is still owed, because that is what the list below shows. The
+                document's own totals (29 items, 78 lines for August) described the
+                whole cycle and sat above a list of 7. */}
+            <Stat label="Items" value={batch.owed_item_count ?? batch.item_count} />
+            {(batch.owed_line_count ?? batch.line_count) !== undefined && (
+              <Stat label="Lines"
+                    value={batch.owed_line_count ?? batch.line_count ?? 0} />
+            )}
+            {batch.urgent_count > 0 && (
+              <Stat label="Urgent" value={batch.urgent_count} tone="text-bad" />
+            )}
+            {/* One figure per unit. A single "total asked" summed millilitres, boxes
+                and pieces into 985.324 — a quantity nobody can pick off a shelf. */}
             <div>
-              <div className="text-[11px] uppercase tracking-wide text-muted">Urgent</div>
-              <div className="text-lg font-bold text-bad">{batch.urgent_count}</div>
+              <div className="text-[11px] uppercase tracking-wide text-muted">Total asked</div>
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                {(batch.totals_by_uom ?? []).map((total) => (
+                  <span key={total.uom_code} className="text-lg font-bold text-ink">
+                    {total.quantity}
+                    <span className="ml-1 text-xs font-medium text-muted">
+                      {total.uom_code}
+                    </span>
+                  </span>
+                ))}
+                {!batch.totals_by_uom?.length && (
+                  <span className="text-lg font-bold text-ink">—</span>
+                )}
+              </div>
             </div>
-          )}
+          </div>
         </Card>
       )}
 

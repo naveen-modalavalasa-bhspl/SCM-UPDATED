@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm import service as hcm_service
-from app.platform.hcm.models import HcmPositionAssignment
+from app.platform.hcm.models import HcmEmployee, HcmPositionAssignment
 from app.platform.notifications import service as notifications
 from app.platform.workflow import custom_ladder, fallback, ladder, resolver
 from app.platform.workflow.conditions import stage_applies
@@ -1245,4 +1245,36 @@ async def actionable_doc_ids(db, doc_type, doc_ids: list[int], user) -> set[int]
                 and active_position_id not in allowed):
             continue
         out.add(doc_id)
+    return out
+
+
+async def pending_approver_names(db, doc_type, doc_ids: list[int]) -> dict[int, list[str]]:
+    """{doc_id: who it is waiting on} for a whole screenful, in one query.
+
+    `current_approvers` answers this one document at a time and loads an employee per
+    approver; a 900-allocation cycle cannot ask it 900 times. Names only — a screen
+    saying "waiting on someone else" tells the reader nothing they can act on.
+
+    Reads `wf_pending` and the HCM mirror. Writes nothing, and decides nothing about
+    who MAY approve: that is `actionable_doc_ids`, which stays the only answer the
+    buttons are allowed to use.
+    """
+    if not doc_ids:
+        return {}
+    rows = (await db.execute(
+        select(Pending.doc_id, HcmEmployee.full_name)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .join(HcmEmployee, HcmEmployee.id == Pending.approver_id)
+        .where(
+            Pending.doc_type.in_(
+                [doc_type] if isinstance(doc_type, str) else list(doc_type)),
+            Pending.doc_id.in_(doc_ids),
+            Pending.stage_sequence == Instance.current_sequence,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        )
+    )).all()
+    out: dict[int, list[str]] = {}
+    for doc_id, name in rows:
+        if name and name not in out.setdefault(doc_id, []):
+            out[doc_id].append(name)
     return out

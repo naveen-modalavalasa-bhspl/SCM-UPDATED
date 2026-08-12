@@ -45,11 +45,11 @@ from app.shared.models.master import Item
 from app.shared.models.warehouse import Warehouse
 from app.shared.numbering import next_number
 from app.modules.indents.enums import (
-    AcknowledgmentStatus, AllocationStatus, ApprovalAction, AuditAction, DocType,
-    IndentActivityType, IndentItemStatus, IndentStatus, IndentType, InstanceStatus,
-    MRStatus, MaterialDirection, Priority, RuleActionType,
+    AcknowledgmentStatus, AllocationStatus, ApprovalAction, AuditAction,
+    ConsolidationStatus, DocType, IndentActivityType, IndentItemStatus, IndentStatus,
+    IndentType, InstanceStatus, MRStatus, MaterialDirection, Priority, RuleActionType,
 )
-from app.modules.indents.models import Indent, IndentItem
+from app.modules.indents.models import Consolidation, Indent, IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.time import to_ist
@@ -1123,12 +1123,15 @@ async def list_indents(
         # `allocated_quantity` does not move until an allocation is signed off, so a
         # line an approver has just committed would otherwise sit in the queue looking
         # untouched and invite a second allocation for the same goods.
+        # UNAPPROVED, not ACTIVE: `allocated_quantity` on the right-hand side already
+        # holds every APPROVED line, and counting those here as well subtracted them
+        # twice — a line owing 16 with 6 approved read as fully covered.
         committed = (
             select(func.coalesce(func.sum(AllocationItem.quantity), 0))
             .join(Allocation, Allocation.id == AllocationItem.allocation_id)
             .where(
                 AllocationItem.indent_item_id == IndentItem.id,
-                Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES),
+                Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES),
             )
             .correlate(IndentItem)
             .scalar_subquery()
@@ -1323,6 +1326,12 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         raise ValidationError(f"Cannot submit an indent in {indent.status} status")
 
     _seed_approval_quantities(indent)
+    # A monthly indent joins its cycle document HERE, not when it is approved. It used
+    # to join on approval, which left the approver's Consolidation screen with no
+    # document to group on — it grouped on the month and called the batch `CONS-2026-08`
+    # while the two screens downstream called the same set of indents
+    # `CON/2026-27/00001`. One document, named once, from submit onwards.
+    await _join_consolidation(db, indent, user)
     workflow_context = _workflow_context_for_indent(indent)
     await engine.start(
         db, doc_type=DocType.INDENT.value, doc_id=indent.id,
@@ -1715,6 +1724,11 @@ async def _fulfil(db: AsyncSession, indent: Indent, user) -> None:
             else IndentItemStatus.PENDING.value
         )
     indent.status = IndentStatus.AWAITING_ALLOCATION.value
+    # The one place a monthly indent enters the fulfilment queue, so the one place it
+    # can pick up its consolidation. Every downstream screen groups by that document
+    # rather than by the month, which is what stops a row and the screen it opens from
+    # counting two different sets of indents.
+    await _join_consolidation(db, indent, user)
 
 
 async def _refresh_current_approver(db: AsyncSession, indent: Indent) -> None:
@@ -4795,16 +4809,20 @@ _ALLOCATION_ELIGIBLE_STATUSES = {
 
 
 async def _committed_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
-    """Per line, what a live allocation has already promised but not yet delivered.
+    """Per line, what an UNSIGNED allocation has already promised.
 
     `allocated_quantity` only moves when an allocation is APPROVED, so without this a
     line another rung committed an hour ago still reads as completely unserved.
+
+    Only the unsigned ones, because every caller adds this to `allocated_quantity` —
+    which is itself the APPROVED sum. Including approved allocations here counted them
+    on both sides and hid real demand from the allocate screen.
     """
     rows = (await db.execute(
         select(AllocationItem.indent_item_id, func.sum(AllocationItem.quantity))
         .join(Allocation, Allocation.id == AllocationItem.allocation_id)
         .where(Allocation.indent_id == indent_id,
-               Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES))
+               Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES))
         .group_by(AllocationItem.indent_item_id)
     )).all()
     return {line_id: Decimal(str(qty or 0)) for line_id, qty in rows}
@@ -5029,8 +5047,17 @@ async def decide_allocations_batch(db: AsyncSession, body, user) -> dict:
                 "indent_no": indent.indent_no if indent else None,
                 "reason": str(getattr(exc, "message", None) or exc),
             })
+    # This click was the cycle decision, so the batch it decided stops accepting
+    # members. A monthly indent approved after this opens the next consolidation for
+    # the month instead of quietly joining work already allocated.
+    # Its own commit: every allocation above committed inside
+    # `create_allocation_for_indent`, so the seal is left as the only pending change
+    # and nothing further down the request would write it.
+    sealed = await seal_consolidations(db, created, user)
+    if sealed:
+        await db.commit()
     return {"created_count": len(created), "created_indent_ids": created,
-            "failed": failed}
+            "sealed_consolidations": sealed, "failed": failed}
 
 
 def _reject_over_allocation(indent: Indent, decisions: list[dict]) -> None:
@@ -5085,9 +5112,13 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # inventory knows about allocations and only indents knows the remainder, so the
     # answer is worked out here and handed over.
     await db.refresh(indent, attribute_names=["items"])
+    # `owed_quantity`, not the raw approved column: 69 of the live lines predate the
+    # approval flow and carry approved_quantity 0, which read literally says "owes
+    # nothing" and let an already-approved allocation block the cascade forever. The
+    # fulfilment queue computes its remainder the same way — the two must agree or the
+    # queue offers an indent whose submit can never pass.
     still_owed = any(
-        Decimal(str(line.approved_quantity or 0))
-        > Decimal(str(line.allocated_quantity or 0))
+        owed_quantity(line) > Decimal(str(line.allocated_quantity or 0))
         for line in indent.items
     )
     _reject_over_allocation(indent, decisions)
@@ -5173,7 +5204,7 @@ async def allocation_approval_batches(db: AsyncSession, user,
 
     groups: dict[str, list] = defaultdict(list)
     for alloc, indent in rows:
-        groups[cycle_key(indent)].append((alloc, indent))
+        groups[consolidation_key(indent.consolidation_id, indent)].append((alloc, indent))
 
     # Which of these this login can sign under the hat they are currently wearing.
     # One person is often both the level-1 and the level-2 approver (Assistant Manager
@@ -5184,17 +5215,42 @@ async def allocation_approval_batches(db: AsyncSession, user,
     actionable = await engine.actionable_doc_ids(
         db, [DocType.ALLOCATION.value, DocType.OWN_STOCK_ALLOCATION.value],
         all_alloc_ids, user)
+    # …and who the others are waiting on. One query for the screen: "waiting on
+    # somebody else" is not something an approver can act on, and chasing it meant
+    # opening each allocation to read its history.
+    waiting_on = await engine.pending_approver_names(
+        db, [DocType.ALLOCATION.value, DocType.OWN_STOCK_ALLOCATION.value],
+        all_alloc_ids)
+    # One query for every line in every cycle, and one for the units they are counted
+    # in — this used to be a query per cycle inside the loop below.
+    all_lines = (await db.execute(
+        select(AllocationItem).where(AllocationItem.allocation_id.in_(all_alloc_ids))
+    )).scalars().all() if all_alloc_ids else []
+    lines_by_alloc: dict[int, list] = defaultdict(list)
+    for line in all_lines:
+        lines_by_alloc[line.allocation_id].append(line)
+    uom_decimals = await uom.decimals_by_code(
+        db, {line.uom_code for line in all_lines})
+    docs = await _consolidations_by_key(db, groups.keys())
+    # How many indents the CONSOLIDATION holds — not how many happen to have an
+    # allocation in this approver's inbox. The screen says "indents in this cycle", and
+    # that has to be the same number the Fulfilment Queue prints for the same cycle,
+    # whoever is looking and whatever they have already signed.
+    members = await _consolidation_member_counts(db, docs.values())
 
     out = []
-    for cycle, group in groups.items():
+    for key, group in groups.items():
         ids = [alloc.id for alloc, _ in group]
-        lines = (await db.execute(
-            select(AllocationItem).where(AllocationItem.allocation_id.in_(ids))
-        )).scalars().all() if ids else []
+        lines = [line for alloc_id in ids for line in lines_by_alloc.get(alloc_id, [])]
         actionable_ids = [i for i in ids if i in actionable]
+        doc = docs.get(key)
         out.append({
-            "cycle": cycle,
-            "month_label": _month_label(cycle),
+            "_cycle": doc.cycle if doc else key,
+            "_id": doc.id if doc else 0,
+            "cycle": key,
+            "consolidation_no": doc.consolidation_no if doc else None,
+            "consolidation_status": doc.status if doc else None,
+            "month_label": _month_label(doc.cycle if doc else key),
             "allocation_ids": ids,
             "allocation_count": len(ids),
             # What the buttons act on. Empty means this hat has already signed
@@ -5208,13 +5264,25 @@ async def allocation_approval_batches(db: AsyncSession, user,
             "approved_count": sum(
                 1 for alloc, _ in group
                 if alloc.status == AllocationStatus.APPROVED.value),
-            "indent_count": len({alloc.indent_id for alloc, _ in group}),
+            # The document's membership, so this figure matches the Fulfilment Queue's
+            # for the same cycle. `allocated_indent_count` is the old reading — how
+            # many of those members this inbox is actually holding allocations for.
+            "indent_count": (members.get(doc.id) if doc
+                             else len({alloc.indent_id for alloc, _ in group})),
+            "allocated_indent_count": len({alloc.indent_id for alloc, _ in group}),
             "item_count": len({line.item_id for line in lines}),
+            "line_count": len(lines),
             "total_qty": float(sum((_d(line.quantity) for line in lines), Decimal("0"))),
+            # Per unit, because the flat total adds millilitres to boxes.
+            "totals_by_uom": _totals_by_uom(
+                [(line.uom_code, line.quantity) for line in lines], uom_decimals),
             "allocations": [{
                 "id": alloc.id,
                 "status": alloc.status,
                 "can_act": alloc.id in actionable,
+                # Names, not a rung number: the approver reading this wants to know
+                # who to ring, and "another rung" told them nothing.
+                "pending_with": waiting_on.get(alloc.id, []),
                 "allocation_no": alloc.allocation_no,
                 "indent_id": alloc.indent_id,
                 "indent_no": alloc.indent_no,
@@ -5229,10 +5297,14 @@ async def allocation_approval_batches(db: AsyncSession, user,
                     "quantity": float(_d(line.quantity)),
                     "warehouse_id": line.warehouse_id,
                     "warehouse_name": line.warehouse_name,
-                } for line in lines if line.allocation_id == alloc.id],
+                    # Indexed, not re-scanned: a 900-allocation cycle walked the whole
+                    # line list once per allocation.
+                } for line in lines_by_alloc.get(alloc.id, [])],
             } for alloc, indent in group],
         })
-    out.sort(key=lambda row: row["cycle"], reverse=True)
+    # Newest month first, newest document within it — string-sorting the key alone
+    # would put C9 after C10.
+    out.sort(key=lambda row: (row.pop("_cycle"), row.pop("_id")), reverse=True)
     return out
 
 
@@ -5273,8 +5345,46 @@ async def act_on_allocations_batch(db: AsyncSession, allocation_ids: list[int],
     return {"done_count": len(done), "done_ids": done, "failed": failed}
 
 
+async def allocation_line_availability(db: AsyncSession, allocation_id: int,
+                                       user=None) -> list[dict]:
+    """Live free stock behind each line of one allocation — the approval screen's data."""
+    return await allocations.line_availability(db, allocation_id)
+
+
+async def allocation_histories(db: AsyncSession,
+                               allocation_ids: list[int]) -> dict[int, list[dict]]:
+    """Approval history for many allocations in ONE query.
+
+    The cycle screen showed a history block per allocation and fetched them one at a
+    time: a 900-allocation cycle opened 900 requests and took minutes to render. Same
+    rows, same order, one round trip.
+    """
+    if not allocation_ids:
+        return {}
+    rows = (await db.execute(
+        select(Instance.doc_id, Action)
+        .join(Instance, Instance.id == Action.instance_id)
+        .where(Instance.doc_type.in_(
+                   [DocType.ALLOCATION.value, DocType.OWN_STOCK_ALLOCATION.value]),
+               Instance.doc_id.in_(allocation_ids))
+        .order_by(Instance.doc_id, Action.acted_at, Action.id)
+    )).all()
+    out: dict[int, list[dict]] = {doc_id: [] for doc_id in allocation_ids}
+    for doc_id, action in rows:
+        out.setdefault(doc_id, []).append({
+            "stage_sequence": action.stage_sequence,
+            "stage_name": action.stage_name,
+            "action": action.action,
+            "actor_name": action.actor_name,
+            "actor_position": action.actor_position,
+            "comments": action.comments,
+            "acted_at": action.acted_at,
+        })
+    return out
+
+
 async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, user,
-                            comments: str = ""):
+                            comments: str = "", revisions: list[dict] | None = None):
     """Approve or reject. Approval reserves the stock and updates the indent."""
     # Imported at the handoff rather than module load: Warehouse reads indent models
     # for fulfilment sources, so a top-level import would make the dependency circular.
@@ -5289,6 +5399,7 @@ async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, u
         ctx={"project_id": getattr(indent, "project_id", None),
              "project_name": getattr(indent, "project_name", None)},
         on_approved=warehouse_service.create_fulfilment_drafts_for_allocation,
+        revisions=revisions,
     )
 
     if alloc.status == AllocationStatus.APPROVED.value:
@@ -5543,13 +5654,124 @@ _BATCH_DONE_STATUSES = (
 
 
 def cycle_key(indent: Indent) -> str:
-    """Which monthly batch an indent belongs to.
+    """Which month an indent was raised in.
 
-    Deliberately the same key `approvals/service.py::_cycle_key` uses. The approver and
-    the storekeeper must be looking at the same batch, or "approve the March lot" and
-    "issue the March lot" quietly mean different sets of indents.
+    Still the key `approvals/service.py::_cycle_key` groups by, because before approval
+    there is no document yet — the consolidation screen is a working set of whatever is
+    pending, and the approver must see this month's requests together.
+
+    After approval the month stops being the identity: `consolidation_key` is, and it
+    is the only thing the downstream screens group by. Two consolidations for the same
+    month is the normal case (see `Consolidation`), so grouping by month past this point
+    would merge a sealed batch with the one that came after it.
     """
     return indent.indent_date.strftime("%Y-%m") if indent.indent_date else "UNDATED"
+
+
+def consolidation_key(consolidation_id: int | None, indent: Indent | None = None) -> str:
+    """The stable, URL-safe key one consolidation is known by across the API.
+
+    `C41` rather than the document number, because `CON/2026-27/00041` carries slashes
+    and every one of these screens puts the key in a path segment. Falls back to the
+    month for a monthly indent that has no consolidation yet, so nothing 500s while a
+    database is mid-backfill.
+    """
+    if consolidation_id:
+        return f"C{consolidation_id}"
+    return cycle_key(indent) if indent is not None else "UNDATED"
+
+
+async def _join_consolidation(db: AsyncSession, indent: Indent, user) -> None:
+    """Put a freshly approved MONTHLY indent into its month's OPEN consolidation.
+
+    Called from `_fulfil`, so it runs exactly once per indent — on the transition into
+    the fulfilment queue — whatever route the approval took (a ladder, the consolidated
+    approve, or the no-approval path). Regular indents are one-off requests and never
+    belong to a cycle.
+
+    The consolidation is created on first use rather than on a schedule: a month with
+    no monthly indents should not leave an empty document behind.
+    """
+    if indent.indent_type != IndentType.MONTHLY.value or indent.consolidation_id:
+        return
+    cycle = cycle_key(indent)
+    # Newest OPEN one for this month. Locked because the seal below reads the same row:
+    # a seal landing between this SELECT and the assignment would leave the indent
+    # attached to a document that says its membership is final.
+    row = (await db.execute(
+        select(Consolidation)
+        .where(Consolidation.cycle == cycle,
+               Consolidation.status == ConsolidationStatus.OPEN.value)
+        .order_by(Consolidation.id.desc())
+        .limit(1)
+        .with_for_update()
+    )).scalars().first()
+    if row is None:
+        row = Consolidation(
+            consolidation_no=await next_number(db, "consolidation"),
+            cycle=cycle,
+            status=ConsolidationStatus.OPEN.value,
+            created_by_id=getattr(user, "id", None),
+            created_by_name=getattr(user, "full_name", None),
+        )
+        db.add(row)
+        await db.flush()
+        logger.info("Opened consolidation %s for cycle %s", row.consolidation_no, cycle)
+    indent.consolidation_id = row.id
+
+
+async def seal_consolidations(db: AsyncSession, indent_ids: list[int], user) -> list[str]:
+    """Freeze the membership of every consolidation these indents belong to.
+
+    Called when the storekeeper submits the allocation batch — that click IS the cycle
+    decision, and everything decided in it has to stay countable as one set forever.
+    Indents approved afterwards open the next consolidation for the month instead of
+    joining a batch somebody has already worked.
+
+    Deliberately NOT called by the single-indent allocate screen: serving one request
+    out of a cycle is not deciding the cycle, and sealing there would shatter a month
+    into a document per indent.
+    """
+    if not indent_ids:
+        return []
+    ids = [row[0] for row in (await db.execute(
+        select(Indent.consolidation_id)
+        .where(Indent.id.in_(indent_ids), Indent.consolidation_id.isnot(None))
+        .distinct()
+    )).all()]
+    if not ids:
+        return []
+    rows = (await db.execute(
+        select(Consolidation).where(
+            Consolidation.id.in_(ids),
+            Consolidation.status == ConsolidationStatus.OPEN.value)
+    )).scalars().all()
+    for row in rows:
+        row.status = ConsolidationStatus.SEALED.value
+        row.sealed_at = utcnow()
+        row.sealed_by_id = getattr(user, "id", None)
+        row.sealed_by_name = getattr(user, "full_name", None)
+        logger.info("Sealed consolidation %s", row.consolidation_no)
+    return [row.consolidation_no for row in rows]
+
+
+def _totals_by_uom(pairs, uom_decimals: dict[str, int]) -> list[dict]:
+    """Cycle totals, one per unit, each rounded to what that unit can actually hold.
+
+    A single "total asked" across a cycle added millilitres to boxes to pieces and
+    printed 985.324 — a number no storekeeper can act on, and the .324 came from a
+    unit that is only ever whole. Grouping by `uom_code` and quantizing with
+    `shared/uom` keeps each figure in a unit somebody can count out.
+    """
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    for uom_code, quantity in pairs:
+        totals[uom_code or "—"] += _d(quantity)
+    return [
+        {"uom_code": code,
+         "quantity": float(uom.quantize(
+             total, uom_decimals.get(code, uom.MAX_DECIMALS)))}
+        for code, total in sorted(totals.items(), key=lambda kv: -kv[1])
+    ]
 
 
 async def fulfilment_batches(db: AsyncSession, user,
@@ -5560,42 +5782,182 @@ async def fulfilment_batches(db: AsyncSession, user,
     Regular indents are not grouped: they are one-off requests and the queue has always
     shown them individually. Only MONTHLY indents collapse.
     """
+    # The WHOLE consolidation, every time — not only the members that are still owed
+    # stock. `include_done` decides which cycles appear in the list, never how a cycle
+    # is counted: a document that reported 43 members yesterday and 9 today because 34
+    # of them were served is the drift this design exists to end. What is still owed is
+    # reported alongside, as `owed_indent_count`.
     indents = (await db.execute(
         select(Indent)
         .options(selectinload(Indent.items))
         .where(await _indent_visibility(db, user))
-        # ALLOCATED and CLOSED are not "still owed", so they leave the queue — which
-        # is right until somebody wants to look back at the cycle they just finished
-        # and finds it gone, with no filter that brings it back.
-        .where(Indent.status.in_(
-            _BATCH_STATUSES + _BATCH_DONE_STATUSES if include_done
-            else _BATCH_STATUSES))
+        .where(Indent.status.in_(_BATCH_STATUSES + _BATCH_DONE_STATUSES))
         .where(Indent.indent_type == IndentType.MONTHLY.value)
     )).scalars().unique().all()
 
     groups: dict[str, list[Indent]] = defaultdict(list)
     for indent in indents:
-        groups[cycle_key(indent)].append(indent)
+        groups[consolidation_key(indent.consolidation_id, indent)].append(indent)
+
+    uom_decimals = await uom.decimals_by_code(
+        db, {line.uom_code for ind in indents for line in ind.items})
+    docs = await _consolidations_by_key(db, groups.keys())
+    # "Still to allocate" has to mean the same thing here as on the screen this row
+    # opens: a line with QUANTITY left, not merely an indent whose status has not
+    # caught up. One August indent sat in AWAITING_ALLOCATION with every line already
+    # covered by a live allocation — counted by the row, absent from the list below.
+    committed = await _committed_by_lines(
+        db, [line.id for ind in indents for line in ind.items])
+    in_approval = await _indents_in_allocation_approval(
+        db, [ind.id for ind in indents])
 
     rows = []
-    for cycle, group in groups.items():
+    for key, group in groups.items():
+        lines = [line for ind in group for line in ind.items]
+        owed = [ind for ind in group
+                if ind.status in _BATCH_STATUSES and ind.id not in in_approval
+                and _has_demand(ind, committed)]
+        waiting = [ind for ind in group if ind.id in in_approval]
+        # A cycle with nothing left to allocate leaves the queue — right until somebody
+        # wants to look back at the one they just finished and finds it gone, with no
+        # filter that brings it back. That is what `include_done` is for. A cycle whose
+        # remainder is all sitting in allocation approval stays listed too, showing 0 to
+        # allocate: it is not done, and vanishing from the queue is how you lose it.
+        if not owed and not waiting and not include_done:
+            continue
+        owed_lines = [line for ind in owed for line in ind.items]
+        doc = docs.get(key)
+        cycle = doc.cycle if doc else key
         rows.append({
-            "cycle": cycle,
+            "_cycle": cycle,
+            "_id": doc.id if doc else 0,
+            "cycle": key,
+            "consolidation_no": doc.consolidation_no if doc else None,
+            "consolidation_status": doc.status if doc else None,
             "month_label": _month_label(cycle),
+            # Members of the document. Frozen once it is sealed, so this is the number
+            # every other screen showing this cycle also reports.
             "indent_count": len(group),
-            "item_count": len({line.item_id for ind in group for line in ind.items}),
+            # …and how many of those still owe something. The queue row and the cycle
+            # screen both print this one as "still to allocate".
+            "owed_indent_count": len(owed),
+            # …and how many are waiting on an allocation somebody already raised.
+            # Neither allocatable nor done, and the difference is the whole reason the
+            # row and the Submit button used to disagree.
+            "in_approval_indent_count": len(waiting),
+            # Items/lines in the document as a whole…
+            "item_count": len({line.item_id for line in lines}),
+            "line_count": len(lines),
+            # …and the ones still owing something, which is exactly what the cycle
+            # screen lists. The screen showed the document's 29 items above a list of
+            # 7 — true figures, different questions, printed under one word.
+            "owed_item_count": len({
+                line.item_id for ind in owed for line in ind.items
+                if owed_quantity(line) - _d(line.allocated_quantity)
+                - committed.get(line.id, Decimal("0")) > 0}),
+            "owed_line_count": len([
+                line for ind in owed for line in ind.items
+                if owed_quantity(line) - _d(line.allocated_quantity)
+                - committed.get(line.id, Decimal("0")) > 0]),
             "requester_count": len({ind.requested_by_id for ind in group}),
-            "urgent_count": sum(1 for ind in group
+            "urgent_count": sum(1 for ind in owed
                                 if ind.priority == Priority.URGENT.value),
-            "total_qty": float(sum((owed_quantity(line)
-                                    for ind in group for line in ind.items),
+            # Kept for callers that already read it, but it adds millilitres to boxes
+            # and means nothing on its own. `totals_by_uom` is the honest figure.
+            "total_qty": float(sum((owed_quantity(line) for line in owed_lines),
                                    Decimal("0"))),
+            "totals_by_uom": _totals_by_uom(
+                [(line.uom_code, owed_quantity(line)) for line in owed_lines],
+                uom_decimals),
             "oldest_raised_at": min(
                 (ind.created_at for ind in group if ind.created_at), default=None,
             ),
         })
-    rows.sort(key=lambda row: row["cycle"], reverse=True)
+    # Newest month first, newest document within it. Sorting on the key alone would put
+    # C9 after C10, and sorting on the label would put April after August.
+    rows.sort(key=lambda row: (row.pop("_cycle"), row.pop("_id")), reverse=True)
     return rows
+
+
+async def _committed_by_lines(db: AsyncSession,
+                              line_ids: list[int]) -> dict[int, Decimal]:
+    """`_committed_by_line` for many indents at once — one query for a whole cycle.
+
+    Unsigned allocations only, for the reason spelled out on
+    `allocations.UNAPPROVED_ALLOCATION_STATUSES`.
+    """
+    if not line_ids:
+        return {}
+    return {row[0]: _d(row[1]) for row in (await db.execute(
+        select(AllocationItem.indent_item_id, func.sum(AllocationItem.quantity))
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .where(AllocationItem.indent_item_id.in_(line_ids),
+               Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES))
+        .group_by(AllocationItem.indent_item_id)
+    )).all()}
+
+
+async def _indents_in_allocation_approval(db: AsyncSession,
+                                          indent_ids: list[int]) -> set[int]:
+    """Indents an unapproved allocation is already in flight for.
+
+    `allocations.ensure_no_active` refuses a second proposal for these, whatever is
+    left on their lines, so the queue must not offer them either: the cycle screen
+    counted three of them as "still to allocate", and Submit came back with three
+    "already awaiting approval" errors and nothing raised.
+    """
+    if not indent_ids:
+        return set()
+    return {row[0] for row in (await db.execute(
+        select(Allocation.indent_id)
+        .where(Allocation.indent_id.in_(indent_ids),
+               Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES))
+    )).all()}
+
+
+def _has_demand(indent: Indent, committed: dict[int, Decimal]) -> bool:
+    """Is any quantity on this indent still unspoken for?
+
+    The same arithmetic `fulfilment_batch` builds its item rows from, so a cycle's
+    "still to allocate" count and the list of what to allocate cannot disagree.
+    """
+    return any(
+        owed_quantity(line) - _d(line.allocated_quantity)
+        - committed.get(line.id, Decimal("0")) > 0
+        for line in indent.items
+    )
+
+
+async def _consolidations_by_key(db: AsyncSession, keys) -> dict[str, Consolidation]:
+    """{`C41`: Consolidation} for the cycles on screen, in one query.
+
+    Keys that are not `C<id>` belong to monthly indents raised before consolidations
+    existed and not yet backfilled; they simply have no document and fall back to
+    reading the month out of the key itself.
+    """
+    ids = [int(key[1:]) for key in keys if key.startswith("C") and key[1:].isdigit()]
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(Consolidation).where(Consolidation.id.in_(ids)))).scalars().all()
+    return {f"C{row.id}": row for row in rows}
+
+
+async def _consolidation_member_counts(db: AsyncSession, docs) -> dict[int, int]:
+    """{consolidation_id: how many indents belong to it}, in one grouped query.
+
+    Deliberately unscoped: it is the size of the document, not the slice of it this
+    login may open. A count that shrank per viewer would put two people on the phone
+    disagreeing about the same batch.
+    """
+    ids = [doc.id for doc in docs]
+    if not ids:
+        return {}
+    return {row[0]: row[1] for row in (await db.execute(
+        select(Indent.consolidation_id, func.count(Indent.id))
+        .where(Indent.consolidation_id.in_(ids))
+        .group_by(Indent.consolidation_id)
+    )).all()}
 
 
 _MONTH_NAMES = (
@@ -5639,10 +6001,12 @@ async def fulfilment_batch(db: AsyncSession, user,
         stmt = stmt.where(Indent.indent_type == indent_type)
     indents = (await db.execute(stmt)).scalars().unique().all()
     if cycle:
-        # Filtered in Python, not SQL: the key is a formatted month and has to be
-        # derived exactly the way `cycle_key` derives it, or the batch the storekeeper
-        # opens is not the batch the queue counted.
-        indents = [indent for indent in indents if cycle_key(indent) == cycle]
+        # The consolidation this key names, and nothing else. This used to re-derive
+        # the month per indent, which meant the screen quietly re-answered "everything
+        # raised in August" rather than "the batch you clicked" — two different sets the
+        # moment a month holds more than one consolidation.
+        indents = [indent for indent in indents
+                   if consolidation_key(indent.consolidation_id, indent) == cycle]
 
     # Quantities a signed-off or in-flight allocation has already claimed. One grouped
     # query for the whole screen: a batch of 900 indents must not cost 900 round trips.
@@ -5653,12 +6017,24 @@ async def fulfilment_batch(db: AsyncSession, user,
             select(AllocationItem.indent_item_id, func.sum(AllocationItem.quantity))
             .join(Allocation, Allocation.id == AllocationItem.allocation_id)
             .where(AllocationItem.indent_item_id.in_(line_ids),
-                   Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES))
+                   # UNSIGNED only. `allocated_quantity`, subtracted alongside this a
+                   # few lines below, is already the APPROVED sum — counting approved
+                   # allocations here as well deducted them twice, and a line owing 16
+                   # with 6 approved offered 4 instead of 10.
+                   Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES))
             .group_by(AllocationItem.indent_item_id)
         )).all()}
 
+    # An allocation already in flight owns the whole indent until it is signed or
+    # cancelled (`allocations.ensure_no_active`), so these lines are not on offer here
+    # however much is left on them. Listing them produced a Submit that could only fail.
+    in_approval = await _indents_in_allocation_approval(
+        db, [indent.id for indent in indents])
+
     by_item: dict[int, list[dict]] = defaultdict(list)
     for indent in indents:
+        if indent.id in in_approval:
+            continue
         for line in indent.items:
             pending = (owed_quantity(line)
                        - _d(line.allocated_quantity)

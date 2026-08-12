@@ -26,7 +26,8 @@ from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance
 from app.shared.enums import (
-    AllocationStatus, AuditAction, DocType, IndentStatus, InstanceStatus, RefType,
+    AllocationStatus, ApprovalAction, AuditAction, DocType, IndentStatus,
+    InstanceStatus, RefType,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
@@ -48,6 +49,19 @@ ACTIVE_ALLOCATION_STATUSES = (
     AllocationStatus.DRAFT.value,
     AllocationStatus.PENDING_APPROVAL.value,
     AllocationStatus.APPROVED.value,
+)
+# The live claims `ind_indent_items.allocated_qty` does NOT already hold. That column
+# is recomputed as the sum of APPROVED allocation lines
+# (`indents.service._recalculate_indent_allocation_state`), so any "what is still
+# owed" arithmetic that writes `owed - allocated_quantity - committed` must count only
+# the unsigned promises here, or every approved allocation is subtracted twice.
+#
+# It was: a line owing 16 with 6 approved reported 4 outstanding instead of 10, and
+# the monthly demand screen offered 2 indents where 8 still wanted stock — the rest
+# of the demand reached neither the storekeeper nor procurement.
+UNAPPROVED_ALLOCATION_STATUSES = (
+    AllocationStatus.DRAFT.value,
+    AllocationStatus.PENDING_APPROVAL.value,
 )
 
 
@@ -153,6 +167,7 @@ UNRESERVED_ALLOCATION_STATUSES = (
 async def pledged_by_point(
     db: AsyncSession, item_ids: set[int], warehouse_ids: set[int],
     exclude_indent_id: int | None = None,
+    exclude_allocation_id: int | None = None,
 ) -> dict[tuple[int, int], Decimal]:
     """Per (item, point), how much an un-approved allocation has already promised.
 
@@ -175,6 +190,10 @@ async def pledged_by_point(
     ]
     if exclude_indent_id is not None:
         conditions.append(Allocation.indent_id != exclude_indent_id)
+    if exclude_allocation_id is not None:
+        # For a caller asking "what would be free if this allocation were not here" —
+        # the approval screen, quoting the room its own line has to grow into.
+        conditions.append(Allocation.id != exclude_allocation_id)
     rows = (await db.execute(
         select(AllocationItem.item_id, AllocationItem.warehouse_id,
                func.coalesce(func.sum(AllocationItem.quantity), 0))
@@ -279,6 +298,170 @@ async def competing_claims(
         "indent_count": len({row.indent_id for row in rows}),
         "claims": claims,
     }
+
+
+# ---------------- what an approver may still give ----------------
+
+async def _free_by_point(db: AsyncSession, lines, exclude_allocation_id: int,
+                         lock: bool = False) -> dict[tuple[int, int], Decimal]:
+    """Free quantity per (item, point) for a set of allocation lines, in two queries.
+
+    One grouped read of the shelf and one of the outstanding pledges — not a query per
+    line, because a monthly cycle carries thousands of them. `lock` takes the balance
+    rows FOR UPDATE so an approval that is about to reserve cannot be overtaken between
+    the check and the reservation.
+    """
+    pairs = {(line.item_id, line.warehouse_id) for line in lines
+             if line.warehouse_id and _d(line.quantity) >= ZERO}
+    if not pairs:
+        return {}
+    item_ids = {item_id for item_id, _ in pairs}
+    warehouse_ids = {warehouse_id for _, warehouse_id in pairs}
+
+    stmt = (
+        select(Stock.item_id, Stock.warehouse_id,
+               func.coalesce(func.sum(Stock.available_qty), 0))
+        .where(Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids))
+        .group_by(Stock.item_id, Stock.warehouse_id)
+    )
+    if lock:
+        # Lock the balance rows themselves, not the aggregate: MySQL cannot lock a
+        # GROUP BY result, so take the rows first and then add them up.
+        await db.execute(
+            select(Stock.id)
+            .where(Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids))
+            .with_for_update()
+        )
+    on_shelf = {(item_id, warehouse_id): _d(qty)
+                for item_id, warehouse_id, qty in (await db.execute(stmt)).all()}
+    pledged = await pledged_by_point(
+        db, item_ids, warehouse_ids, exclude_allocation_id=exclude_allocation_id)
+    return {pair: max(on_shelf.get(pair, ZERO) - pledged.get(pair, ZERO), ZERO)
+            for pair in pairs}
+
+
+async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
+    """Per line: what is on the shelf now, what others have promised, what is left.
+
+    The approval screen quoted the quantity inventory decided and nothing else, so an
+    approver signing an hour-old proposal had no way to see the shelf had moved under
+    it. Read-only.
+    """
+    alloc = await get(db, allocation_id)
+    lines = (await db.execute(
+        select(AllocationItem).where(AllocationItem.allocation_id == alloc.id)
+        .order_by(AllocationItem.id)
+    )).scalars().all()
+    free_map = await _free_by_point(db, lines, exclude_allocation_id=alloc.id)
+
+    out = []
+    for line in lines:
+        pair = (line.item_id, line.warehouse_id)
+        free = free_map.get(pair, ZERO)
+        on_shelf = _d(await db.scalar(
+            select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
+                Stock.item_id == line.item_id,
+                Stock.warehouse_id == line.warehouse_id,
+            )
+        )) if line.warehouse_id else ZERO
+        # An APPROVED allocation already holds its quantity in reserved_qty, so the
+        # shelf no longer counts it and it is not free to be given again.
+        already_held = (_d(line.quantity)
+                        if alloc.status == AllocationStatus.APPROVED.value else ZERO)
+        out.append({
+            "id": line.id,
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "warehouse_id": line.warehouse_id,
+            "warehouse_name": line.warehouse_name,
+            "requested_qty": float(_d(line.requested_qty)),
+            "quantity": float(_d(line.quantity)),
+            "on_shelf": float(on_shelf),
+            "pledged_elsewhere": float(max(on_shelf - free, ZERO)),
+            "free": float(free + already_held),
+            # Never more than was asked for: an approver revises downward, or back up
+            # to the request — raising it above is a new requirement, not an approval.
+            "max_allowed": float(min(_d(line.requested_qty), free + already_held)),
+        })
+    return out
+
+
+async def revise(db: AsyncSession, alloc: Allocation,
+                 revisions: list[dict]) -> list[dict]:
+    """Apply the approver's own quantities before the signature lands.
+
+    Only the quantity moves. The line already names its item and its point, and
+    changing either would make it a different decision that nobody proposed.
+    Returns the changes made, for the audit row the caller writes.
+    """
+    if not revisions:
+        return []
+    by_id = {int(r["id"]): _d(r["quantity"]) for r in revisions}
+    lines = (await db.execute(
+        select(AllocationItem).where(AllocationItem.allocation_id == alloc.id,
+                                     AllocationItem.id.in_(by_id))
+    )).scalars().all()
+    missing = by_id.keys() - {line.id for line in lines}
+    if missing:
+        raise ValidationError(
+            f"Line {sorted(missing)[0]} does not belong to {alloc.allocation_no}")
+
+    for line in lines:
+        wanted = by_id[line.id]
+        if wanted > _d(line.requested_qty):
+            raise ValidationError(
+                f"{line.item_name or line.item_id}: cannot give {wanted} — only "
+                f"{_d(line.requested_qty)} was requested.")
+        if wanted > ZERO and not line.warehouse_id:
+            raise ValidationError(
+                f"{line.item_name or line.item_id}: no warehouse on this line, so "
+                "there is nowhere to give it from.")
+
+    free_map = await _free_by_point(db, lines, exclude_allocation_id=alloc.id, lock=True)
+    changed = []
+    for line in lines:
+        wanted, before = by_id[line.id], _d(line.quantity)
+        if wanted == before:
+            continue
+        free = free_map.get((line.item_id, line.warehouse_id), ZERO)
+        if wanted > free:
+            raise ValidationError(
+                f"{line.item_name or line.item_id}: only {free} is free at "
+                f"{line.warehouse_name or 'that point'} — {wanted} cannot be given.")
+        line.quantity = wanted
+        changed.append({"line_id": line.id, "item_code": line.item_code,
+                        "from": float(before), "to": float(wanted)})
+    await db.flush()
+    return changed
+
+
+async def _assert_still_available(db: AsyncSession, alloc: Allocation) -> None:
+    """The shelf has not moved out from under this decision since it was proposed.
+
+    `allocation.reserve` is deliberately partial-tolerant — an indent for 100 against
+    60 reserves 60 — which is right when inventory is deciding, and wrong at the
+    moment of signature: it would report the decision as given and quietly hold less.
+    Checked under the same row locks the reservation takes, so two approvers signing
+    the same stock at the same instant queue instead of both winning.
+    """
+    lines = [line for line in alloc.items if _d(line.quantity) > ZERO]
+    if not lines:
+        return
+    free_map = await _free_by_point(db, lines, exclude_allocation_id=alloc.id, lock=True)
+    short = [
+        (line, free_map.get((line.item_id, line.warehouse_id), ZERO))
+        for line in lines
+        if _d(line.quantity) > free_map.get((line.item_id, line.warehouse_id), ZERO)
+    ]
+    if short:
+        line, free = short[0]
+        raise ValidationError(
+            f"{line.item_name or line.item_id}: only {free} is free at "
+            f"{line.warehouse_name or 'that point'} now, but this allocation promises "
+            f"{_d(line.quantity)}. Revise the quantity, or reject it and allocate again."
+        )
 
 
 # ---------------- the decision ----------------
@@ -493,17 +676,49 @@ async def list_allocations(db: AsyncSession, params: PageParams,
         stmt = stmt.where(Allocation.status == status)
     if indent_id is not None:
         stmt = stmt.where(Allocation.indent_id == indent_id)
-    return await paginate(db, stmt.order_by(Allocation.created_at.desc()), params)
+    page = await paginate(db, stmt.order_by(Allocation.created_at.desc()), params)
+    await _attach_totals(db, page["items"])
+    return page
+
+
+async def _attach_totals(db: AsyncSession, rows) -> None:
+    """Line totals for a page of allocations, in one query.
+
+    The approvals screen needs "40 of 60 given" on every row and used to fetch each
+    allocation in full to get it — one HTTP round trip per row, forty per page. The
+    numbers are a GROUP BY; the schema reads them straight off the row.
+    """
+    ids = [row.id for row in rows]
+    if not ids:
+        return
+    totals = {
+        allocation_id: (given, requested)
+        for allocation_id, given, requested in (await db.execute(
+            select(AllocationItem.allocation_id,
+                   func.coalesce(func.sum(AllocationItem.quantity), 0),
+                   func.coalesce(func.sum(AllocationItem.requested_qty), 0))
+            .where(AllocationItem.allocation_id.in_(ids))
+            .group_by(AllocationItem.allocation_id)
+        )).all()
+    }
+    for row in rows:
+        given, requested = totals.get(row.id, (ZERO, ZERO))
+        row.total_qty = float(_d(given))
+        row.requested_total = float(_d(requested))
 
 
 async def act(db: AsyncSession, allocation_id: int, action: str, user,
               comments: str = "", ctx: dict | None = None,
-              on_approved=None) -> Allocation:
+              on_approved=None, revisions: list[dict] | None = None) -> Allocation:
     """Approve or reject the decision. Approval is what finally moves stock.
 
     `ctx` carries what only the indent knows — its project — down to the material
     request approval raises. Inventory cannot read ind_indents itself (it is the base
     module), so the caller in indents hands it over.
+
+    `revisions` lets the approver change how much a line gives before signing it. They
+    are applied and audited whether or not the signature completes the ladder, because
+    the next approver must see the number this one actually agreed to.
     """
     ctx = ctx or {}
     alloc = await get(db, allocation_id)
@@ -512,6 +727,19 @@ async def act(db: AsyncSession, allocation_id: int, action: str, user,
             f"Allocation is not awaiting approval (status {alloc.status})")
 
     before = alloc.status
+    await db.refresh(alloc, ["items"])
+    changed = await revise(db, alloc, revisions or []) if revisions else []
+    if action == ApprovalAction.APPROVED.value:
+        # Before the engine writes anything: a refusal here must leave the ladder
+        # exactly where it was, not consume the approver's turn.
+        await _assert_still_available(db, alloc)
+    if changed:
+        await write_audit(
+            db, entity="inv_allocations", entity_id=alloc.id,
+            entity_no=alloc.allocation_no, action=AuditAction.UPDATE, actor=user,
+            after={"revisions": changed},
+            summary=f"Quantities revised at approval by {getattr(user, 'full_name', '')}".strip(),
+        )
     # Whichever event it was raised under — the inventory desk's, or the point
     # owner's. The instance is the record of that; nothing else needs to know.
     doc_type = await doc_type_for(db, alloc.id)

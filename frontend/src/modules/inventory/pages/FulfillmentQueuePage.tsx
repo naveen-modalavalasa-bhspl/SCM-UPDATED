@@ -37,7 +37,10 @@ interface QueueRow {
    *  rather than 900 separate allocation screens. */
   cycle?: string;
   month_label?: string;
+  consolidation_no?: string | null;
   indent_count?: number;
+  owed_indent_count?: number;
+  in_approval_indent_count?: number;
 }
 
 const STATUS_OPTIONS = [
@@ -129,10 +132,18 @@ export function FulfillmentQueuePage() {
     const cycleRows: QueueRow[] = (batches.data?.items ?? []).map((b) => ({
       // Negative, so a synthetic row can never collide with a real indent id.
       id: -Math.abs(hashCycle(b.cycle)),
-      indent_no: `${b.month_label} — consolidated`,
+      // The document number, not just the month: a month can hold more than one
+      // consolidation once a batch has been sealed, and two rows both reading
+      // "August 2026 — consolidated" would be indistinguishable.
+      indent_no: b.consolidation_no
+        ? `${b.month_label} — ${b.consolidation_no}`
+        : `${b.month_label} — consolidated`,
       cycle: b.cycle,
       month_label: b.month_label,
+      consolidation_no: b.consolidation_no,
       indent_count: b.indent_count,
+      owed_indent_count: b.owed_indent_count,
+      in_approval_indent_count: b.in_approval_indent_count,
       requested_by_name: `${b.requester_count} requester${b.requester_count === 1 ? "" : "s"}`,
       department_name: `${b.item_count} item${b.item_count === 1 ? "" : "s"}`,
       priority: b.urgent_count > 0 ? "URGENT" : "NORMAL",
@@ -179,8 +190,17 @@ export function FulfillmentQueuePage() {
             {r.indent_no}
           </div>
           <div className="text-[11px] text-muted">
+            {/* Members first, then what is left in them. Both figures come off the
+                consolidation document, so the screen this row opens prints the same
+                two numbers — which is the whole point of the document existing. */}
             {r.cycle
-              ? `${r.indent_count} indents · ${r.total_items} item${r.total_items === 1 ? "" : "s"}`
+              ? [`${r.indent_count} indents`,
+                 `${r.owed_indent_count ?? r.indent_count} still to allocate`,
+                 // Waiting on an allocation somebody already raised: not allocatable,
+                 // not done. Left out, the row read "3 still to allocate" over a screen
+                 // whose Submit could only come back with three refusals.
+                 ...(r.in_approval_indent_count
+                   ? [`${r.in_approval_indent_count} in approval`] : [])].join(" · ")
               : `${r.total_items} line${r.total_items === 1 ? "" : "s"}`}
           </div>
         </div>

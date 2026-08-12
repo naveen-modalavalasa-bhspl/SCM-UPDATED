@@ -671,6 +671,14 @@ async def _monthly_pending_indents(
 # the two copies had to agree forever or "approve the March lot" and "issue the March
 # lot" would quietly mean different sets of indents.
 from app.modules.indents.service import cycle_key as _cycle_key   # noqa: E402
+# The consolidation DOCUMENT the indents belong to. Monthly indents join it at submit,
+# so this screen can name the batch the same way the Fulfilment Queue and Allocation
+# Approvals name it — `CON/2026-27/00001`, not a made-up `CONS-2026-08`. Same reason
+# the cycle key is imported rather than copied: one concept, one owner.
+from app.modules.indents.service import (  # noqa: E402
+    _consolidations_by_key as _consolidation_docs,
+    consolidation_key as _consolidation_key,
+)
 
 
 _MONTH_NAMES = (
@@ -717,7 +725,12 @@ def _matches(indent: Indent, filters: ConsolidationFilters) -> bool:
     Region A is asking for Region A, and an indent whose requester HCM has no
     location for is not in Region A.
     """
-    if filters.cycle and _cycle_key(indent) != filters.cycle:
+    # Either key: the month (what the cycle dropdown offers) or the consolidation
+    # document (what a batch is now keyed and linked by). One filter, both spellings,
+    # so a bookmarked `?cycle=2026-08` keeps working next to a `?cycle=C2` batch link.
+    if filters.cycle and filters.cycle not in (
+            _cycle_key(indent),
+            _consolidation_key(getattr(indent, "consolidation_id", None), indent)):
         return False
     if filters.region_id is not None and indent.region_id != filters.region_id:
         return False
@@ -817,6 +830,7 @@ def _only(values: set):
 def _build_batch(
     cycle: str, group: list, filters: ConsolidationFilters,
     decimals_by_uom: dict[str, int] | None = None,
+    doc=None,
 ) -> ConsolidationBatchOut:
     items_totals: dict[int, dict] = {}
     for indent, _instance, has_previous in group:
@@ -877,10 +891,15 @@ def _build_batch(
         ))
 
     indents = [i for i, _, _ in group]
+    # The month the DOCUMENT is for, not the key it is filed under: once indents group
+    # by consolidation the key reads `C2`, which is nobody's idea of a month.
+    month = doc.cycle if doc is not None else cycle
     return ConsolidationBatchOut(
         batch_key=cycle,
         cycle=cycle,
-        month_label=_month_label(cycle),
+        consolidation_no=getattr(doc, "consolidation_no", None),
+        consolidation_status=getattr(doc, "status", None),
+        month_label=_month_label(month),
         region_id=_only({i.region_id for i in indents}),
         region_name=_only({i.region_name for i in indents}),
         project_id=_only({i.project_id for i in indents}),
@@ -921,7 +940,16 @@ async def consolidation_batches_for_user(
     """
     filters = filters or ConsolidationFilters()
     members = await _monthly_pending_indents(db, user)
-    return _batches_from(members, filters, await _member_uom_decimals(db, members))
+    return _batches_from(members, filters, await _member_uom_decimals(db, members),
+                         await _docs_for(db, members))
+
+
+async def _docs_for(db: AsyncSession, members: list) -> dict:
+    """{key: Consolidation} for the batches these indents form, in one query."""
+    return await _consolidation_docs(db, {
+        _consolidation_key(getattr(indent, "consolidation_id", None), indent)
+        for indent, _instance, _has_previous in members
+    })
 
 
 async def _member_uom_decimals(db: AsyncSession, members: list) -> dict[str, int]:
@@ -935,13 +963,21 @@ async def _member_uom_decimals(db: AsyncSession, members: list) -> dict[str, int
 def _batches_from(
     members: list, filters: ConsolidationFilters,
     decimals_by_uom: dict[str, int] | None = None,
+    docs: dict | None = None,
 ) -> list[ConsolidationBatchOut]:
+    """Grouped by the consolidation DOCUMENT, falling back to the month for indents
+    raised before documents existed. Grouping on the month alone put every August
+    indent in one heap and named it `CONS-2026-08`, while the fulfilment and allocation
+    screens were already calling the same set `CON/2026-27/00001`. Same set, three
+    names — and once a document is sealed, the month is no longer even the same set."""
     groups: dict[str, list] = defaultdict(list)
     for indent, instance, has_previous in members:
         if _matches(indent, filters):
-            groups[_cycle_key(indent)].append((indent, instance, has_previous))
+            key = _consolidation_key(getattr(indent, "consolidation_id", None), indent)
+            groups[key].append((indent, instance, has_previous))
 
-    batches = [_build_batch(cycle, group, filters, decimals_by_uom)
+    batches = [_build_batch(cycle, group, filters, decimals_by_uom,
+                            (docs or {}).get(cycle))
                for cycle, group in groups.items()]
     batches.sort(key=lambda b: b.cycle, reverse=True)
     return batches
@@ -958,7 +994,8 @@ async def consolidation_workspace(
     """
     filters = filters or ConsolidationFilters()
     members = await _monthly_pending_indents(db, user)
-    batches = _batches_from(members, filters, await _member_uom_decimals(db, members))
+    batches = _batches_from(members, filters, await _member_uom_decimals(db, members),
+                            await _docs_for(db, members))
     return ConsolidationOut(
         items=batches,
         filter_options=_filter_options(members),
@@ -1041,9 +1078,13 @@ async def _nothing_owed(db: AsyncSession, indent) -> bool:
 
 async def approve_indent(
     db: AsyncSession, indent_id: int, quantities: list[ApprovalQuantityIn],
-    comments: str, user,
+    comments: str, user, task: tuple[Indent, Instance, bool] | None = None,
 ) -> ApprovalIndentOut:
-    indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
+    """`task` is the already-loaded (indent, instance, has_previous) for callers that
+    have just validated it — the consolidated approval, which would otherwise pay for
+    the same three-query load twice per indent, 900 times over. Loaded here when it is
+    not supplied, so the single-indent route is unchanged."""
+    indent, instance, has_previous = task or await _load_indent_task(db, indent_id, user)
     approved_by_line = _validated_quantities(indent, quantities, has_previous)
 
     before: dict[str, float] = {}
@@ -1112,11 +1153,18 @@ async def approve_consolidation(
     for indent_id in body.indent_ids:
         try:
             quantities = quantities_by_indent.get(indent_id)
+            # ONE load per indent for the whole approval. This used to read the indent
+            # three times over — `db.get` for the served check, `_load_indent_task` for
+            # the ceilings, and `_load_indent_task` again inside `approve_indent` — plus
+            # their instance and pending lookups. On a 900-indent cycle that is thousands
+            # of round trips spent re-reading rows already in hand, and it is most of why
+            # signing a month took minutes. The task is handed down instead.
+            task = await _load_indent_task(db, indent_id, user)
+            indent, _instance, has_previous = task
             # Already served in full — approving it again would only push a settled
             # document up the ladder. Reported rather than silently dropped so the
             # screen can say why it is not in the approved count.
-            indent_now = await db.get(Indent, indent_id, options=[selectinload(Indent.items)])
-            if indent_now is not None and await _nothing_owed(db, indent_now):
+            if await _nothing_owed(db, indent):
                 failed.append(ConsolidationApprovalFailureOut(
                     indent_id=indent_id,
                     reason="Already served in full — nothing left to send on.",
@@ -1126,7 +1174,6 @@ async def approve_consolidation(
             if not quantities:
                 # Nothing edited for this indent: hand on what it is already entitled
                 # to rather than sending an empty list, which approve_indent rejects.
-                indent, _instance, has_previous = await _load_indent_task(db, indent_id, user)
                 quantities = [
                     ApprovalQuantityIn(
                         line_id=line.id,
@@ -1134,7 +1181,7 @@ async def approve_consolidation(
                     )
                     for line in indent.items
                 ]
-            await approve_indent(db, indent_id, quantities, body.comments, user)
+            await approve_indent(db, indent_id, quantities, body.comments, user, task=task)
             approved.append(indent_id)
         except AppException as exc:
             # One document's problem is not the batch's: record it and carry on.
@@ -1198,6 +1245,9 @@ async def allocation_cycles_for_user(db: AsyncSession, user) -> list[dict]:
     return [{
         "cycle": batch["cycle"],
         "month_label": batch["month_label"],
+        # The document number, so the inbox names the same thing the cycle screen
+        # does when a month holds more than one consolidation.
+        "consolidation_no": batch["consolidation_no"],
         "allocation_count": batch["allocation_count"],
         "actionable_count": batch["actionable_count"],
         "indent_count": batch["indent_count"],

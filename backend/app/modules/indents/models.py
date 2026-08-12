@@ -16,11 +16,51 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
-from app.modules.indents.enums import IndentType
+from app.modules.indents.enums import ConsolidationStatus, IndentType
 from app.shared.enums import IndentItemStatus
 from app.shared.models.base import (
     BigIntPortable, created_at_col, pk, soft_fk, updated_at_col,
 )
+
+
+class Consolidation(Base):
+    """A monthly cycle as a DOCUMENT, with frozen membership.
+
+    "August 2026 — consolidated" used to be a live GROUP BY on `indent_date`, recomputed
+    by every screen from whatever happened to match at that instant. Nothing was wrong
+    with any single query, but they asked different questions of the same month — the
+    fulfilment queue counted indents still owed stock, the approval screen counted
+    indents whose allocations were awaiting a signature — and both printed the answer
+    under the word "indents". One row said 9, the screen it opened said 43.
+
+    A consolidation is minted when the first monthly indent of a month finishes
+    approval, and sealed when the storekeeper submits the allocation batch. After that
+    its member list never changes, so every screen counting "indents in this cycle"
+    reaches the same number. Indents approved later start the next consolidation for
+    that same month instead of joining work already decided.
+    """
+
+    __tablename__ = "ind_consolidations"
+    id = pk()
+    consolidation_no = Column(String(50), unique=True, nullable=False)
+    #: The month it serves, `YYYY-MM`, or `UNDATED`. NOT the identity — two
+    #: consolidations for the same month is the normal case, not a fault.
+    cycle = Column(String(10), nullable=False, index=True)
+    status = Column(String(20), nullable=False,
+                    default=ConsolidationStatus.OPEN.value,
+                    server_default=ConsolidationStatus.OPEN.value, index=True)
+    sealed_at = Column(DateTime(timezone=True), nullable=True)
+    sealed_by_id = soft_fk()
+    sealed_by_name = Column(String(200), nullable=True)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+
+# "Which consolidation is still open for this month" is the one question the mint path
+# asks, on every monthly approval.
+Index("ix_ind_cons_cycle_status", Consolidation.cycle, Consolidation.status)
 
 
 class Indent(Base):
@@ -69,6 +109,16 @@ class Indent(Base):
 
     bom_id = Column(BigIntPortable, nullable=True)            # not written yet
     bom_name = Column(String(200), nullable=True)
+
+    # Which consolidation document this indent belongs to — set once, when approval
+    # finishes, and never moved afterwards. NULL for every REGULAR indent (a one-off
+    # request is not part of a cycle) and for monthly indents still in approval, which
+    # are a working set on the approver's screen rather than a document yet.
+    # Hard FK: both tables belong to this module, and RESTRICT because a consolidation
+    # that still has members must not be deletable out from under them.
+    consolidation_id = Column(
+        BigIntPortable, ForeignKey("ind_consolidations.id", ondelete="RESTRICT"),
+        nullable=True, index=True)
 
     # state
     status = Column(String(30), nullable=False, index=True)

@@ -169,6 +169,50 @@ class AllocBatchActionIn(BaseModel):
     comments: str = ""
 
 
+class AllocationRevisionIn(BaseModel):
+    """The approver's own number for one allocation line.
+
+    Approving used to reserve exactly what inventory proposed, so an approver who
+    disagreed could only reject the whole allocation and ask for it again. `id` is the
+    allocation LINE id — the line is already tied to its item and warehouse, so a
+    revision can only change how much, never what or from where.
+    """
+    id: int
+    quantity: float = Field(ge=0)
+
+
+class AllocApproveIn(BaseModel):
+    """Approve, optionally revising the quantities first."""
+    comments: str = ""
+    revisions: list[AllocationRevisionIn] = Field(default_factory=list)
+
+
+class AllocationLineAvailability(BaseModel):
+    """What one allocation line could actually be given, read right now.
+
+    `free` is the shelf at the chosen point less what other un-approved allocations
+    have already promised out of it — the same arithmetic the allocation screen does,
+    so an approver is never shown stock somebody else has already spoken for.
+    """
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    requested_qty: float
+    quantity: float
+    on_shelf: float
+    pledged_elsewhere: float
+    free: float
+    max_allowed: float
+
+
+class AllocationHistoryBatchIn(BaseModel):
+    allocation_ids: list[int]
+
+
 class AllocationBatchIn(BaseModel):
     """Every indent in a monthly cycle decided in one go.
 
@@ -217,6 +261,11 @@ class AllocationListRow(BaseModel):
     current_approver_name: str | None = None
     approved_at: datetime | None = None
     created_at: datetime
+    # Line totals, filled by one grouped query in `list_allocations`. The approvals
+    # screen used to fetch every allocation in full just to add these two numbers up,
+    # which was one request per row.
+    total_qty: float = 0
+    requested_total: float = 0
 
 
 class AllocationOut(AllocationListRow):

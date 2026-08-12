@@ -367,9 +367,18 @@ export function ConsolidationItemPage() {
                         ? <span className="text-danger">Enter a quantity of 0 or more.</span>
                         : resolved.over
                           ? <span className="text-danger">Capped at {formatQty(resolved.ceiling)}.</span>
-                          : <span className="text-muted">
-                              Blank sends the full {formatQty(resolved.ceiling)}.
-                            </span>}
+                          : resolved.rounded
+                            // A countable unit has no fractions to give away. Said out
+                            // loud, because the number keyed in is not the number that
+                            // goes out — 1.3 boxes used to read back as 1.3 while the
+                            // split handed over 1.
+                            ? <span className="text-warn">
+                                {item.uom_code ?? "This unit"} goes out in whole units
+                                — sending {formatQty(resolved.total)}.
+                              </span>
+                            : <span className="text-muted">
+                                Blank sends the full {formatQty(resolved.ceiling)}.
+                              </span>}
                     </span>
                   </label>
 

@@ -754,6 +754,10 @@ class IssueWrite(BaseModel):
     department_id: int | None = None
     project_id: int | None = None
     vehicle_id: int | None = None
+    # Typed, not picked: transport owns `trn_vehicles` and most site deliveries go on
+    # a vehicle nobody registered there. Without this the number the store typed was
+    # dropped on the way in and the column was written from `vehicle_id` alone.
+    vehicle_number: str | None = Field(default=None, max_length=50)
     issued_to_id: int | None = None
     direction: IssueDirection = IssueDirection.OUT
     original_issue_id: int | None = None
@@ -1276,6 +1280,11 @@ class IndentIssueSource(BaseModel):
     # none). Informational: the screen says so, nothing blocks the issue.
     mixed_projects: bool = False
     issued_to_id: int | None = None
+    # Carried beside the id because the employee dropdown holds only its first page:
+    # without the name the form has a value it cannot label, and shows a placeholder.
+    issued_to_name: str | None = None
+    vehicle_id: int | None = None
+    vehicle_number: str | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None
     items: list[IssueItemWrite] = []
@@ -1288,6 +1297,10 @@ class PickingIssueSource(BaseModel):
     department_id: int | None = None
     project_id: int | None = None
     mixed_projects: bool = False
+    issued_to_id: int | None = None
+    issued_to_name: str | None = None
+    vehicle_id: int | None = None
+    vehicle_number: str | None = None
     items: list[IssueItemWrite] = []
 
 

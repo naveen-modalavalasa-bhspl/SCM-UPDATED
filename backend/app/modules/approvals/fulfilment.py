@@ -26,7 +26,12 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.modules.indents.enums import IndentStatus
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.inventory import allocations, locations
-from app.modules.inventory.allocations import ACTIVE_ALLOCATION_STATUSES as LIVE_ALLOCATION_STATUSES
+# Unsigned promises only. Every caller pairs this with `allocated_quantity`, which is
+# already the APPROVED sum, so counting approved allocations as "live" here deducted
+# them twice and reported lines as covered while stock was still owed.
+from app.modules.inventory.allocations import (
+    UNAPPROVED_ALLOCATION_STATUSES as LIVE_ALLOCATION_STATUSES,
+)
 from app.modules.inventory.models import NO_PROJECT, Allocation, AllocationItem, Stock
 from app.platform.hcm.models import HcmPositionAssignment
 from app.platform.settings.service import write_audit

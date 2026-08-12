@@ -337,6 +337,11 @@ class ConsolidationBatchOut(BaseModel):
 
     batch_key: str
     cycle: str
+    #: The consolidation document these indents belong to — the SAME number the
+    #: Fulfilment Queue and Allocation Approvals print for this set. Null only for
+    #: monthly indents raised before documents existed.
+    consolidation_no: str | None = None
+    consolidation_status: str | None = None
     month_label: str
     region_id: int | None = None
     region_name: str | None = None

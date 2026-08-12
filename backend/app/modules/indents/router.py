@@ -24,8 +24,9 @@ from app.modules.indents.schemas import (
 # mechanics are in modules/inventory/allocations.py -- indents may import inventory,
 # never the reverse.
 from app.modules.inventory.schemas import (
-    AllocationBatchIn, AllocationBatchOut,
-    AllocationIn, AllocationListRow, AllocationOut,
+    AllocApproveIn, AllocationBatchIn, AllocationBatchOut,
+    AllocationHistoryBatchIn, AllocationIn, AllocationLineAvailability,
+    AllocationListRow, AllocationOut,
 )
 from app.modules.inventory.schemas import ActionIn as AllocActionIn
 from app.modules.inventory.schemas import AllocBatchActionIn
@@ -395,6 +396,22 @@ async def allocation_approval_batches(include_done: bool = False,
         db, user, include_done=include_done)}
 
 
+@alloc_router.post("/history-batch")
+async def allocation_histories(body: AllocationHistoryBatchIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+    """Approval history for a whole cycle in one call, keyed by allocation id."""
+    return {"items": await service.allocation_histories(db, body.allocation_ids)}
+
+
+@alloc_router.get("/{allocation_id}/availability",
+                  response_model=list[AllocationLineAvailability])
+async def allocation_availability(allocation_id: int, db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+    """What each line of this allocation could actually be given, right now."""
+    return await service.allocation_line_availability(db, allocation_id, user)
+
+
 @alloc_router.get("/{allocation_id}", response_model=AllocationOut)
 async def get_allocation(allocation_id: int, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.ALLOCATION_VIEW))):
@@ -419,11 +436,14 @@ async def reject_allocations_batch(body: AllocBatchActionIn,
 
 
 @alloc_router.post("/{allocation_id}/approve", response_model=AllocationOut)
-async def approve_allocation(allocation_id: int, body: AllocActionIn,
+async def approve_allocation(allocation_id: int, body: AllocApproveIn,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(perms.ALLOCATION_APPROVE))):
+    """Approve, optionally revising the give quantities first — same permission, because
+    revising is part of the approver's decision, not a separate one."""
     return await service.act_on_allocation(
-        db, allocation_id, ApprovalAction.APPROVED.value, user, body.comments)
+        db, allocation_id, ApprovalAction.APPROVED.value, user, body.comments,
+        revisions=[r.model_dump() for r in body.revisions])
 
 
 @alloc_router.post("/{allocation_id}/reject", response_model=AllocationOut)

@@ -63,16 +63,37 @@ def quantize(value, decimals: int = MAX_DECIMALS) -> Decimal:
 async def decimals_by_code(db: AsyncSession, codes: Iterable[str | None]) -> dict[str, int]:
     """{uom_code: decimals} for the codes given, in one query.
 
-    Documents snapshot `uom_code`, not `uom_id`, so this is keyed on the code. A code
-    that is not in mst_uom is simply absent, and callers fall back to MAX_DECIMALS.
+    Documents snapshot `uom_code`, not `uom_id`, so this is keyed on the code — but
+    what they snapshot is not always a code. 14 live items carry `NOS` and one carries
+    `ml`: the unit's NAME, since `UOM-NOS` is named "nos" and `UOM-ML` is named "ml".
+    An exact-code lookup missed every one of them, fell back to three decimals, and
+    split 33 countable items into 4.643 and 1.857 — quantities nobody can hand over.
+
+    So: match the code, else the code case-folded, else the NAME case-folded. Anything
+    still unmatched (`g`, `Kg` — units nobody has added) keeps MAX_DECIMALS, which is
+    the safe answer for a unit whose class is unknown.
     """
     wanted = {code for code in codes if code}
     if not wanted:
         return {}
-    rows = (await db.execute(
-        select(Uom.code, Uom.uom_class).where(Uom.code.in_(wanted))
-    )).all()
-    return {code: decimals_for(uom_class) for code, uom_class in rows}
+    # Every unit, not a filtered set: the table is ~33 rows, and the fallbacks below
+    # cannot be expressed as one IN clause across two columns.
+    rows = (await db.execute(select(Uom.code, Uom.name, Uom.uom_class))).all()
+    by_code = {row.code: row.uom_class for row in rows if row.code}
+    folded = {row.code.strip().lower(): row.uom_class for row in rows if row.code}
+    by_name = {row.name.strip().lower(): row.uom_class
+               for row in rows if row.name}
+
+    out: dict[str, int] = {}
+    for code in wanted:
+        key = code.strip().lower()
+        if code in by_code:
+            out[code] = decimals_for(by_code[code])
+        elif key in folded:
+            out[code] = decimals_for(folded[key])
+        elif key in by_name:
+            out[code] = decimals_for(by_name[key])
+    return out
 
 
 def share_out(

@@ -409,7 +409,10 @@ export interface AllocationBatchResult {
 
 /** One monthly cycle's worth of allocations waiting on this approver. */
 export interface AllocationApprovalBatch {
+  /** The consolidation document's key — the same `C41` the Fulfilment Queue uses. */
   cycle: string;
+  consolidation_no?: string | null;
+  consolidation_status?: string | null;
   month_label: string;
   allocation_ids: number[];
   allocation_count: number;
@@ -422,11 +425,25 @@ export interface AllocationApprovalBatch {
    *  rather than simply vanishing from the list. */
   pending_count: number;
   approved_count: number;
+  /** Members of the consolidation — deliberately NOT "indents I hold allocations
+   *  for", so this matches the Fulfilment Queue's figure for the same cycle. */
   indent_count: number;
+  /** How many of those members this inbox is actually holding allocations for. */
+  allocated_indent_count?: number;
   item_count: number;
+  line_count?: number;
+  /** Mixed units added together — kept for old callers, never shown to a user. */
   total_qty: number;
+  totals_by_uom?: UomTotal[];
   allocations: {
     id: number;
+    /** PENDING_APPROVAL or APPROVED — the cycle screen loads both, so a row has to
+     *  say which it is. */
+    status?: string;
+    /** Whether this login's ACTIVE position is the rung this one is waiting on. */
+    can_act?: boolean;
+    /** Who it IS waiting on, by name. Empty once nothing is pending on it. */
+    pending_with?: string[];
     allocation_no: string;
     indent_id: number;
     indent_no: string | null;
@@ -457,6 +474,29 @@ export interface AllocationListRow {
   current_approver_name: string | null;
   approved_at: string | null;
   created_at: string;
+  /** Line totals, added by the server so a queue screen never has to open every row
+   *  just to add them up. */
+  total_qty?: number;
+  requested_total?: number;
+}
+
+/** What one allocation line could actually be given right now: the shelf at its point,
+ *  less what other un-approved allocations have already promised out of it. */
+export interface AllocationLineAvailability {
+  id: number;
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+  requested_qty: number;
+  quantity: number;
+  on_shelf: number;
+  pledged_elsewhere: number;
+  free: number;
+  /** Never above what was requested — an approver revises down, or back up to the ask. */
+  max_allowed: number;
 }
 
 export interface AllocationItem {
@@ -886,14 +926,42 @@ export interface BatchDemandItem {
 }
 
 /** One monthly cycle waiting to be fulfilled, as the queue lists it. */
+/** A cycle total in one unit. Quantities only add up within a unit — a cycle asking
+ *  for boxes, pieces and millilitres has three totals, not one. */
+export interface UomTotal {
+  uom_code: string;
+  quantity: number;
+}
+
 export interface FulfilmentBatch {
+  /** Opaque, URL-safe key for the consolidation document (`C41`). Not the month:
+   *  one month can hold several consolidations once a batch has been sealed. */
   cycle: string;
+  /** `CON/2026-27/00001` — the document number, shown beside the month so two
+   *  cycles in the same month are told apart at a glance. */
+  consolidation_no?: string | null;
+  /** OPEN accepts new indents; SEALED means the membership below is final. */
+  consolidation_status?: string | null;
   month_label: string;
+  /** Members of the document — frozen once it is sealed, and the same number every
+   *  other screen reports for this cycle. */
   indent_count: number;
+  /** How many of those members still owe stock. This is what the queue is for. */
+  owed_indent_count?: number;
+  /** Members whose allocation is already raised and awaiting approval. Not
+   *  allocatable (a second proposal is refused) and not done. */
+  in_approval_indent_count?: number;
   item_count: number;
+  /** Items/lines that still owe something — what the cycle screen actually lists.
+   *  `item_count` above is the document's total and will be larger. */
+  owed_item_count?: number;
+  owed_line_count?: number;
+  line_count?: number;
   requester_count: number;
   urgent_count: number;
+  /** Mixed units added together — kept for old callers, never shown to a user. */
   total_qty: number;
+  totals_by_uom?: UomTotal[];
   oldest_raised_at?: string | null;
 }
 

@@ -530,6 +530,9 @@ export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
     project_id?: number | null;
     mixed_projects?: boolean;
     issued_to_id?: number | null;
+    issued_to_name?: string | null;
+    vehicle_id?: number | null;
+    vehicle_number?: string | null;
     destination_office_id?: number | null;
     destination_office_name?: string | null;
     items: IssueWrite["items"];
@@ -542,6 +545,10 @@ export const getPickingIssueSource = (picking_id: number) =>
     indent_id?: number | null;
     department_id?: number | null;
     project_id?: number | null;
+    issued_to_id?: number | null;
+    issued_to_name?: string | null;
+    vehicle_id?: number | null;
+    vehicle_number?: string | null;
     mixed_projects?: boolean;
     items: IssueWrite["items"];
   }>(`${BASE}/options/picking-issue-source`, { picking_id });

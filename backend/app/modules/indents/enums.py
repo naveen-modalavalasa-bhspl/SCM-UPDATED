@@ -41,6 +41,24 @@ class IndentType(str, Enum):
     MONTHLY = "MONTHLY"
 
 
+class ConsolidationStatus(str, Enum):
+    """Whether a monthly consolidation still accepts members.
+
+    Module-owned for the same reason as `IndentType`: nothing outside indents
+    branches on it — the other modules only ever read the document it labels.
+
+    OPEN accepts every monthly indent that finishes approval in the same month.
+    SEALED is set the moment the storekeeper submits the allocation batch: from then
+    on the membership is frozen, so the counts on the queue row, the cycle screen and
+    the approval screen can never drift apart again. A monthly indent approved after
+    the seal opens a NEW consolidation for the same month rather than joining work
+    that has already been decided.
+    """
+
+    OPEN = "OPEN"
+    SEALED = "SEALED"
+
+
 class IndentActivityType(str, Enum):
     REQUEST_CREATED = "REQUEST_CREATED"
     REQUEST_SUBMITTED = "REQUEST_SUBMITTED"
@@ -71,6 +89,7 @@ __all__ = [
     "AllocationStatus",
     "ApprovalAction",
     "AuditAction",
+    "ConsolidationStatus",
     "DocType",
     "IndentActivityType",
     "IndentItemStatus",

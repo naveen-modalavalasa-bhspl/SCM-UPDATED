@@ -169,6 +169,10 @@ export interface ConsolidationIndentSummary {
 export interface ConsolidationBatch {
   batch_key: string;
   cycle: string;
+  /** The consolidation document — the same number the Fulfilment Queue and Allocation
+   *  Approvals show for this set. Null only for indents that predate the document. */
+  consolidation_no?: string | null;
+  consolidation_status?: string | null;
   month_label: string;
   region_id?: number | null;
   region_name?: string | null;
