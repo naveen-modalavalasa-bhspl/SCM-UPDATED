@@ -334,16 +334,21 @@ async def list_allocations(params: PageParams = Depends(), status: str | None = 
     return await service.list_allocations(db, params, status, indent_id, user=user)
 
 
+# Two permissions, both required: allocation.create says this person decides splits,
+# allocation.submit says they may send the decision into approval. An admin who unticks
+# the Submit action gets a 403 here, not just a hidden button.
 @alloc_router.post("", response_model=AllocationOut)
 async def create_allocation(body: AllocationIn, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.ALLOCATION_CREATE))):
+                            user=Depends(require_permission(perms.ALLOCATION_CREATE)),
+                            _submit=Depends(require_permission(perms.ALLOCATION_SUBMIT))):
     return await service.decide_allocation(db, body, user)
 
 
 @alloc_router.post("/batch", response_model=AllocationBatchOut)
 async def create_allocations_batch(body: AllocationBatchIn,
                                    db: AsyncSession = Depends(get_db),
-                                   user=Depends(require_permission(perms.ALLOCATION_CREATE))):
+                                   user=Depends(require_permission(perms.ALLOCATION_CREATE)),
+                                   _submit=Depends(require_permission(perms.ALLOCATION_SUBMIT))):
     """Every indent in a cycle allocated in one request, one allocation each."""
     return await service.decide_allocations_batch(db, body, user)
 
@@ -419,9 +424,11 @@ async def get_allocation(allocation_id: int, db: AsyncSession = Depends(get_db),
 
 
 @alloc_router.post("/approve-batch")
-async def approve_allocations_batch(body: AllocBatchActionIn,
-                                    db: AsyncSession = Depends(get_db),
-                                    user=Depends(require_permission(perms.ALLOCATION_APPROVE))):
+async def approve_allocations_batch(
+        body: AllocBatchActionIn,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.ALLOCATION_APPROVE)),
+        _reserve=Depends(require_permission(perms.ALLOCATION_APPROVE_RESERVE))):
     """Sign a whole cycle at once — one wf_actions row per allocation, as always."""
     return await service.act_on_allocations_batch(
         db, body.allocation_ids, ApprovalAction.APPROVED.value, user, body.comments)
@@ -436,11 +443,17 @@ async def reject_allocations_batch(body: AllocBatchActionIn,
 
 
 @alloc_router.post("/{allocation_id}/approve", response_model=AllocationOut)
-async def approve_allocation(allocation_id: int, body: AllocApproveIn,
-                             db: AsyncSession = Depends(get_db),
-                             user=Depends(require_permission(perms.ALLOCATION_APPROVE))):
+async def approve_allocation(
+        allocation_id: int, body: AllocApproveIn,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.ALLOCATION_APPROVE)),
+        _reserve=Depends(require_permission(perms.ALLOCATION_APPROVE_RESERVE))):
     """Approve, optionally revising the give quantities first — same permission, because
-    revising is part of the approver's decision, not a separate one."""
+    revising is part of the approver's decision, not a separate one.
+
+    Rejecting is deliberately NOT gated on allocation.approve_reserve: taking the
+    Approve and reserve button away must never leave an approver holding a document
+    they can neither pass nor refuse."""
     return await service.act_on_allocation(
         db, allocation_id, ApprovalAction.APPROVED.value, user, body.comments,
         revisions=[r.model_dump() for r in body.revisions])

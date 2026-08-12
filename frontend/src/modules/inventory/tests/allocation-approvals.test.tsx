@@ -7,6 +7,14 @@ vi.mock("@/shared/api/client", () => ({
   api: { get: vi.fn(), post: vi.fn() },
 }));
 
+/** The Approve and reserve button is behind <Can do="allocation.approve_reserve">, so
+ *  these tests run as somebody who holds it. `heldPermissions` is emptied in the one
+ *  test that checks the button is withheld. */
+const heldPermissions = new Set<string>(["allocation.approve_reserve"]);
+vi.mock("@/shared/auth/AuthContext", () => ({
+  useAuth: () => ({ can: (code: string) => heldPermissions.has(code) }),
+}));
+
 import { api } from "@/shared/api/client";
 import { AllocationApprovalsPage } from "../pages/AllocationApprovalsPage";
 import { AllocationApprovalDetailPage } from "../pages/AllocationApprovalDetailPage";
@@ -76,6 +84,8 @@ const wrap = (ui: React.ReactNode, path = "/") => (
 );
 
 beforeEach(() => {
+  heldPermissions.clear();
+  heldPermissions.add("allocation.approve_reserve");
   mockGet.mockReset();
   mockPost.mockReset();
   mockGet.mockImplementation((url: string) => {
@@ -152,6 +162,17 @@ describe("AllocationApprovalDetailPage", () => {
         comments: "", revisions: [],
       });
     });
+  });
+
+  it("withholds Approve and reserve from a profile without the action, keeping Reject",
+     async () => {
+    heldPermissions.clear();
+    render(wrap(<AllocationApprovalDetailPage />, "/inventory/allocation-approvals/3"));
+
+    // Still the approver's turn — the ladder says so — but the job profile does not
+    // carry the button. Reject stays, or the document would be stuck here.
+    await waitFor(() => expect(screen.getByText("Reject")).toBeInTheDocument());
+    expect(screen.queryByText("Approve and reserve")).toBeNull();
   });
 
   it("is read-only for an allocation that is not waiting on this login", async () => {

@@ -790,6 +790,14 @@ class IssueItemRead(_Read):
     is_imei_tracked: bool = False
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
+    # Which identifier names one unit of this item — SERIAL, IMEI or CODE. The screen
+    # validates on this one and shows the rest of the matched unit beside it.
+    unit_mode: str | None = None
+    # The reserved units, stated in that same currency.
+    unit_keys: list[str] | None = None
+    # Whether this item has identified units in stock at all, so a bulk consumable
+    # line does not offer a picker with nothing in it.
+    has_units: bool = False
 
 
 class IssueRead(_Read):

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { AlertTriangle, ChevronDown, ChevronRight, Plus, Send, Trash2 } from "lucide-react";
-import { Button, Card, Input } from "@/shared/components";
+import { Button, Can, Card, Input } from "@/shared/components";
 import { splitQuantity } from "@/shared/quantity";
 import { createAllocationsBatch, getBatchDemand } from "../api";
 import type {
@@ -548,13 +548,17 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
             ? "Nothing to allocate yet — set a quantity above."
             : `Raises ${indentCount} allocation${indentCount === 1 ? "" : "s"}, one per indent, each going for approval on its own ladder.`}
         </p>
-        <Button
-          disabled={indentCount === 0 || submit.isPending}
-          onClick={() => { setResult(null); submit.mutate(); }}
-        >
-          <Send className="h-4 w-4" />
-          {submit.isPending ? "Submitting…" : `Submit all ${indentCount}`}
-        </Button>
+        {/* Same permission as the single-indent Submit: it is the same decision,
+            raised for a whole cycle at once. */}
+        <Can do="allocation.submit">
+          <Button
+            disabled={indentCount === 0 || submit.isPending}
+            onClick={() => { setResult(null); submit.mutate(); }}
+          >
+            <Send className="h-4 w-4" />
+            {submit.isPending ? "Submitting…" : `Submit all ${indentCount}`}
+          </Button>
+        </Can>
       </Card>
 
       {submit.error && (

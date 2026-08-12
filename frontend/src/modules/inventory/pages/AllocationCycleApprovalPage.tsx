@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, Check, X } from "lucide-react";
-import { Button, Card, PageHeader, StatusPill } from "@/shared/components";
+import { Button, Can, Card, PageHeader, StatusPill } from "@/shared/components";
 import { fmtDateTime } from "@/shared/datetime";
 import {
   approveAllocationsBatch, getAllocationApprovalBatches, getAllocationHistories,
@@ -345,15 +345,20 @@ export function AllocationCycleApprovalPage() {
           >
             <X className="h-4 w-4" /> Reject {signable.length}
           </Button>
-          <Button
-            disabled={act.isPending || signable.length === 0}
-            onClick={() => { setResult(null); setProgress(0); act.mutate({ approve: true }); }}
-          >
-            <Check className="h-4 w-4" />
-            {act.isPending
-              ? `Signing… ${progress}/${signable.length}`
-              : `Approve ${signable.length}`}
-          </Button>
+          {/* `signable` is the ladder's answer; this is the job profile's. Same
+              permission as the single Approve and reserve — signing a cycle is the
+              same decision taken in one go. */}
+          <Can do="allocation.approve_reserve">
+            <Button
+              disabled={act.isPending || signable.length === 0}
+              onClick={() => { setResult(null); setProgress(0); act.mutate({ approve: true }); }}
+            >
+              <Check className="h-4 w-4" />
+              {act.isPending
+                ? `Signing… ${progress}/${signable.length}`
+                : `Approve ${signable.length}`}
+            </Button>
+          </Can>
         </div>
       </Card>
 

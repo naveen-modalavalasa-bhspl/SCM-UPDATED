@@ -18,7 +18,9 @@ import {
 } from "../api";
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
-import type { Issue, IssueItemWrite, IssueWrite, ItemOption } from "../types";
+import type {
+  Issue, IssueItemWrite, IssueWrite, ItemOption, SerialNumber, UnitMode,
+} from "../types";
 import { usePointLabel } from "../usePointLabel";
 
 /**
@@ -150,13 +152,19 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         item_code: l.item_code,
         item_name: l.item_name,
         is_serial_tracked: l.is_serial_tracked,
+        is_imei_tracked: l.is_imei_tracked,
+        unit_mode: l.unit_mode,
+        has_units: l.has_units,
         bin_id: l.bin_id,
         batch_id: l.batch_id,
         requested_qty: num(l.requested_qty),
         issued_qty: num(l.issued_qty),
         rate: l.rate,
         remarks: l.remarks,
-        serial_numbers: l.serial_numbers ?? [],
+        // Stated in the currency the item is validated on — the serial for a
+        // serialized item, the IMEI for a handset, the asset/consumable code
+        // otherwise. The backend resolves any of the three back to the same unit.
+        serial_numbers: l.unit_keys ?? l.serial_numbers ?? [],
       })),
     });
   }, [doc]);
@@ -205,8 +213,40 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         status: "available",
         size: 500,
       }),
-    enabled: serialLine !== null && !!activeSerialLine?.is_serial_tracked && activeSerialLineReady,
+    enabled: serialLine !== null && activeSerialLineReady,
   });
+
+  // Serial -> IMEI -> code. A unit is one row in whs_serial_numbers; which of its
+  // columns identifies it depends on what the item is tracked by, and the ones that
+  // are not the key are shown beside it so validating on one reflects the rest.
+  const unitMode = (line?: IssueItemWrite): UnitMode =>
+    line?.unit_mode
+      ?? (line?.is_serial_tracked ? "SERIAL" : line?.is_imei_tracked ? "IMEI" : "CODE");
+  const activeUnitMode = unitMode(activeSerialLine ?? undefined);
+  const unitKey = (row: SerialNumber, mode: UnitMode) =>
+    mode === "SERIAL"
+      ? row.serial_number
+      : mode === "IMEI"
+        ? row.imei ?? ""
+        : row.asset_code ?? row.consumable_code ?? row.serial_number;
+  const unitNoun = (mode: UnitMode) =>
+    mode === "SERIAL" ? "serial" : mode === "IMEI" ? "IMEI" : "code";
+  const unitRows = (availableSerials.data?.items ?? []).filter(
+    (row) => !!unitKey(row, activeUnitMode),
+  );
+  const unitOptions = unitRows.map((row) => unitKey(row, activeUnitMode));
+  // The rest of the matched unit, under the value being validated.
+  const unitMeta = Object.fromEntries(
+    unitRows.map((row) => {
+      const code = row.asset_code ?? row.consumable_code ?? null;
+      const parts = [
+        activeUnitMode !== "SERIAL" && row.serial_number ? `SN ${row.serial_number}` : null,
+        activeUnitMode !== "IMEI" && row.imei ? `IMEI ${row.imei}` : null,
+        activeUnitMode !== "CODE" && code ? `Code ${code}` : null,
+      ].filter(Boolean);
+      return [unitKey(row, activeUnitMode), parts.join("  ·  ")];
+    }),
+  );
 
   const set = <K extends keyof IssueWrite>(key: K, value: IssueWrite[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
@@ -236,7 +276,10 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const serialsLocked = locked && !(doc?.status === "APPROVED" && !doc?.is_stock_posted);
   const payload = (): IssueWrite => ({
     ...form,
-    items: form.items.map(({ item_code, item_name, is_serial_tracked, ...line }) => line),
+    items: form.items.map(
+      ({ item_code, item_name, is_serial_tracked, is_imei_tracked, unit_mode, unit_keys,
+         has_units, ...line }) => line,
+    ),
   });
 
   const save = useMutation({
@@ -396,7 +439,12 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 item_code: item?.code ?? null,
                 item_name: item?.name ?? null,
                 is_serial_tracked: !!item?.is_serial_tracked,
+                is_imei_tracked: !!item?.is_imei_tracked,
                 is_batch_tracked: !!item?.is_batch_tracked,
+                // Unknown until the backend reads the line back; undefined means
+                // "offer the picker", which is right for a line just picked.
+                unit_mode: null,
+                has_units: undefined,
                 batch_id: null,
                 bin_id: null,
                 serial_numbers: [],
@@ -504,11 +552,16 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     },
     {
       key: "serials",
-      header: "Serials",
+      header: "Units",
       width: "w-32",
       hideOnNarrow: true,
       render: (line, index) => {
-        if (!line.is_serial_tracked) return <span className="text-xs text-muted">—</span>;
+        // Not serial-only any more: an item tracked by IMEI, or one whose units carry
+        // asset/consumable codes, is named the same way. `has_units` is only known
+        // once the backend has read the line, so an unsaved draft still offers it.
+        const pickable =
+          line.is_serial_tracked || line.is_imei_tracked || line.has_units !== false;
+        if (!pickable) return <span className="text-xs text-muted">—</span>;
         const needsBatch = (line as any).is_batch_tracked && !line.batch_id;
         const needsBin = isBinManaged && !line.bin_id;
         // Only while the line is still editable. After approval the batch and bin
@@ -521,7 +574,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
             variant="ghost"
             onClick={() => setSerialLine(index)}
             disabled={serialsLocked || needsSource}
-            title={needsSource ? "Pick batch and from bin first" : "Select serials"}
+            title={
+              needsSource
+                ? "Pick batch and from bin first"
+                : `Select ${unitNoun(unitMode(line))}s`
+            }
           >
             <ScanLine className="h-4 w-4" />
             {line.serial_numbers?.length ?? 0}
@@ -756,7 +813,9 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         onClose={() => setSerialLine(null)}
         quantity={serialLine === null ? 0 : num(form.items[serialLine]?.issued_qty)}
         initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
-        available={availableSerials.data?.items.map((row) => row.serial_number) ?? []}
+        available={unitOptions}
+        metaByValue={unitMeta}
+        noun={unitNoun(activeUnitMode)}
         pickMode="select"
         itemLabel={
           serialLine === null

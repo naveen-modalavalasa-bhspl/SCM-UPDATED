@@ -19,6 +19,7 @@ import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 
 from sqlalchemy import String, and_, false, func, or_, select
 from sqlalchemy.exc import DBAPIError
@@ -2432,7 +2433,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     # one until it is itself confirmed into a bin, which may be a different one.
     task.lot_no = await _next_lot_no(db, await db.get(Warehouse, task.warehouse_id), target)
 
-    await _place_serials(db, task, target, serials, receipt, receipt_item)
+    await _place_serials(db, task, target, serials, receipt, receipt_item, qty=qty)
 
     task.actual_bin_id = target.id
     task.scanned_by = getattr(user, "id", None)
@@ -2494,6 +2495,7 @@ async def _place_serials(
     serial_numbers: list[str],
     receipt: m.Receipt | None,
     receipt_item: m.ReceiptItem | None,
+    qty=None,
 ) -> None:
     """Puts the line's serials in the bin and gives each its asset/consumable code.
 
@@ -2506,6 +2508,7 @@ async def _place_serials(
     new/old flag plus an 8-digit serial the next — and each change was a code change.
     """
     if not serial_numbers:
+        await _place_unit_codes(db, task, target, qty)
         return
     if receipt is None or receipt_item is None:
         raise ValidationError("Serialized putaway is missing its GRN line")
@@ -2540,6 +2543,77 @@ async def _place_serials(
             serial.asset_code = serial.asset_code or code
         else:
             serial.consumable_code = serial.consumable_code or code
+    await db.flush()
+
+
+async def _place_unit_codes(
+    db: AsyncSession,
+    task: m.PutawayTask,
+    target: Bin,
+    qty,
+) -> None:
+    """Gives every UNIT of an unserialised putaway its own asset/consumable code.
+
+    A code names one physical thing. Before this, a line of 30 produced one row in
+    `whs_serial_numbers` at best and usually none, so the issue screen offered a
+    single code for 30 units and the other 29 could not be told apart on a shelf or
+    quoted on a document.
+
+    One row per whole unit, each coded by the same `codeformat.unit_code` the
+    serialized path uses. The code doubles as the row's `serial_number` because for
+    an unserialised unit that IS its identity — the column is NOT NULL and nothing
+    else distinguishes two units of the same item. Assets and consumables both: a
+    consumable is drawn by the unit too, and its code is what the far end quotes.
+
+    AT A WAREHOUSE ONLY. Goods enter the company at the top of the chain and are
+    coded once, there; what an MDP or a LIP inwards is that same unit arriving,
+    already carrying its code from the warehouse that received it. Coding it again
+    at each rung would mint a second identity for one physical thing and break the
+    trail the code exists to keep.
+
+    Serial-tracked items are left alone: their units are named by `_place_serials`
+    and re-coding them here would create a second row for the same physical thing.
+    Fractional quantities are skipped — half a litre of oil is not a unit.
+    """
+    item = await db.get(Item, task.item_id)
+    if item is None or bool(getattr(item, "is_serial_tracked", False)):
+        return
+    units = _d(qty) if qty is not None else _d(task.qty)
+    if units <= ZERO or units != units.to_integral_value():
+        return
+
+    warehouse = await db.get(Warehouse, task.warehouse_id) if task.warehouse_id else None
+    tier = stock_locations.tier_of(getattr(warehouse, "warehouse_type", None))
+    if tier is not stock_locations.LocationTier.WAREHOUSE:
+        return
+    is_asset = bool(getattr(item, "is_asset", False))
+    # Read once for the whole putaway: the formula cannot change between two units of
+    # the same lorry, and it costs five queries every time it is read.
+    config = await codeformat.code_settings(db)
+    rows: list[m.SerialNumber] = []
+    for _ in range(int(units)):
+        row = m.SerialNumber(
+            item_id=task.item_id, serial_number="",
+            batch_id=task.batch_id or None, warehouse_id=task.warehouse_id,
+            bin_id=target.id, lot_no=task.lot_no,
+            status=SerialStatus.AVAILABLE.value, is_active=True,
+        )
+        db.add(row)
+        rows.append(row)
+    # Flushed first: the code formula runs off the row id when there is no serial to
+    # build on, so the rows must exist before they can be named.
+    await db.flush()
+
+    for row in rows:
+        code = await codeformat.unit_code(
+            db, item=item, is_asset=is_asset, seq=row.id,
+            warehouse_code=getattr(warehouse, "code", None), config=config,
+        )
+        row.serial_number = code
+        if is_asset:
+            row.asset_code = code
+        else:
+            row.consumable_code = code
     await db.flush()
 
 
@@ -3708,6 +3782,53 @@ async def _clear_issue_serial_reservations(
         row.remarks = None
 
 
+UNIT_MODE_SERIAL = "SERIAL"
+UNIT_MODE_IMEI = "IMEI"
+UNIT_MODE_CODE = "CODE"
+
+# What one unit is called in a message, per mode.
+_UNIT_NOUN = {
+    UNIT_MODE_SERIAL: "serial numbers",
+    UNIT_MODE_IMEI: "IMEI numbers",
+    UNIT_MODE_CODE: "unit codes",
+}
+
+
+def _unit_mode(item) -> str:
+    """Which identifier names one unit of this item: serial → IMEI → code.
+
+    The fallback ladder the business asked for. A serial is the primary identity
+    whenever the item carries one; an item that has only IMEIs is named by those;
+    everything else is named by the asset / consumable code stamped at putaway.
+    The three are not alternatives on the same unit — they are the same row in
+    `whs_serial_numbers` read through whichever column that item actually fills,
+    so validating on one always yields the other two from the matched row.
+    """
+    if bool(getattr(item, "is_serial_tracked", False)):
+        return UNIT_MODE_SERIAL
+    if bool(getattr(item, "is_imei_tracked", False)):
+        return UNIT_MODE_IMEI
+    return UNIT_MODE_CODE
+
+
+def _unit_keys(row, mode: str) -> list[str]:
+    """Every value that may be typed or scanned to mean this unit, in this mode.
+
+    A code-mode row answers to its code AND to its serial_number, because for an
+    unserialised unit `_place_unit_codes` writes the same string into both.
+    """
+    if mode == UNIT_MODE_SERIAL:
+        return [row.serial_number] if row.serial_number else []
+    if mode == UNIT_MODE_IMEI:
+        return [row.imei] if row.imei else []
+    values = [row.asset_code, row.consumable_code, row.serial_number]
+    seen: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.append(value)
+    return seen
+
+
 async def _reserve_issue_serials(
     db: AsyncSession,
     issue: m.MaterialIssue,
@@ -3719,15 +3840,23 @@ async def _reserve_issue_serials(
         serials = [value.strip() for value in (data.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: serial numbers must be unique")
-        if not item.is_serial_tracked:
-            if serials:
-                raise ValidationError(f"{item.code} is not serial tracked")
-            setattr(line, "serial_numbers", [])
-            continue
+        mode = _unit_mode(item)
+        noun = _UNIT_NOUN[mode]
         issued = _d(line.issued_qty)
-        if issued != issued.to_integral_value():
+        if mode == UNIT_MODE_SERIAL and issued != issued.to_integral_value():
             raise ValidationError(
                 f"{item.code}: a serialized quantity must be a whole number"
+            )
+        if not serials:
+            # Unchanged for every line that names no units, which is most of them:
+            # nothing is reserved and nothing is demanded here.
+            setattr(line, "serial_numbers", [])
+            setattr(line, "unit_keys", [])
+            setattr(line, "unit_mode", mode)
+            continue
+        if issued != issued.to_integral_value():
+            raise ValidationError(
+                f"{item.code}: a quantity named by {noun} must be a whole number"
             )
         # A draft may hold fewer serials than units, and usually holds none.
         #
@@ -3744,38 +3873,56 @@ async def _reserve_issue_serials(
         # entry / GRN split on inbound.
         if len(serials) > int(issued):
             raise ValidationError(
-                f"{item.code}: {len(serials)} serial numbers for {int(issued)} units"
+                f"{item.code}: {len(serials)} {noun} for {int(issued)} units"
             )
         expected_status = (
             SerialStatus.AVAILABLE.value
             if issue.direction == IssueDirection.OUT.value
             else SerialStatus.ISSUED.value
         )
-        rows = (await db.execute(
-            select(m.SerialNumber).where(
-                m.SerialNumber.item_id == line.item_id,
-                m.SerialNumber.serial_number.in_(serials),
-                m.SerialNumber.warehouse_id == issue.warehouse_id,
-                m.SerialNumber.status == expected_status,
-                m.SerialNumber.is_active.is_(True),
-            ).with_for_update()
-        )).scalars().all()
-        if len(rows) != len(serials):
+        stmt = select(m.SerialNumber).where(
+            m.SerialNumber.item_id == line.item_id,
+            m.SerialNumber.warehouse_id == issue.warehouse_id,
+            m.SerialNumber.status == expected_status,
+            m.SerialNumber.is_active.is_(True),
+        )
+        # The one place the ladder is applied to the lookup itself: the same row is
+        # found by whichever column this item names its units with.
+        if mode == UNIT_MODE_SERIAL:
+            stmt = stmt.where(m.SerialNumber.serial_number.in_(serials))
+        elif mode == UNIT_MODE_IMEI:
+            stmt = stmt.where(m.SerialNumber.imei.in_(serials))
+        else:
+            stmt = stmt.where(or_(
+                m.SerialNumber.asset_code.in_(serials),
+                m.SerialNumber.consumable_code.in_(serials),
+                m.SerialNumber.serial_number.in_(serials)))
+        rows = (await db.execute(stmt.with_for_update())).scalars().all()
+
+        by_key: dict[str, m.SerialNumber] = {}
+        for row in rows:
+            for key in _unit_keys(row, mode):
+                by_key.setdefault(key, row)
+        chosen = [by_key.get(value) for value in serials]
+        if any(row is None for row in chosen) or \
+                len({row.id for row in chosen if row}) != len(serials):
             raise ValidationError(
-                f"{item.code}: one or more selected serials are unavailable"
+                f"{item.code}: one or more selected units are unavailable"
             )
-        by_serial = {row.serial_number: row for row in rows}
-        for serial in serials:
-            row = by_serial[serial]
+        for value, row in zip(serials, chosen, strict=True):
             if line.bin_id and row.bin_id != line.bin_id:
-                raise ValidationError(f"{serial} is not in the selected source bin")
+                raise ValidationError(f"{value} is not in the selected source bin")
             if line.batch_id and row.batch_id != line.batch_id:
-                raise ValidationError(f"{serial} is not in the selected batch")
+                raise ValidationError(f"{value} is not in the selected batch")
             if row.remarks and row.remarks.startswith("Reserved for issue ") \
                     and row.remarks != marker:
-                raise ValidationError(f"{serial} is reserved by another issue")
+                raise ValidationError(f"{value} is reserved by another issue")
             row.remarks = marker
-        setattr(line, "serial_numbers", serials)
+        # The document always keeps the canonical serial — in code mode that IS the
+        # code — while `unit_keys` echoes back what the storekeeper actually validated.
+        setattr(line, "serial_numbers", [row.serial_number for row in chosen])
+        setattr(line, "unit_keys", serials)
+        setattr(line, "unit_mode", mode)
 
 
 async def _decorate_issue_serials(
@@ -3797,13 +3944,17 @@ async def _decorate_issue_serials(
     # IMEI travels with the serial, so the issue screen and everything downstream can
     # show both without going back to whs_serial_numbers per line.
     imeis_by_item: dict[int, list[str]] = {}
+    rows_by_item: dict[int, list[m.SerialNumber]] = {}
     for row in rows:
         by_item.setdefault(row.item_id, []).append(row.serial_number)
+        rows_by_item.setdefault(row.item_id, []).append(row)
         if row.imei:
             imeis_by_item.setdefault(row.item_id, []).append(row.imei)
     item_ids = {line.item_id for line in issue.items}
     serial_by_item: dict[int, bool] = {}
     imei_tracked_by_item: dict[int, bool] = {}
+    item_by_id: dict[int, object] = {}
+    coded_items: set[int] = set()
     if item_ids:
         item_rows = (await db.execute(
             select(Item.id, Item.is_serial_tracked, Item.is_imei_tracked)
@@ -3817,11 +3968,36 @@ async def _decorate_issue_serials(
             item_id: bool(is_imei_tracked)
             for item_id, _, is_imei_tracked in item_rows
         }
+        item_by_id = {
+            item_id: SimpleNamespace(is_serial_tracked=bool(serial),
+                                     is_imei_tracked=bool(imei))
+            for item_id, serial, imei in item_rows
+        }
+        # Which items actually have identified units AT THIS POINT. Without it the
+        # screen would offer a unit picker on every bulk line, where there is nothing
+        # to pick — and units coded at the warehouse are not pickable from an MDP.
+        coded_items = set((await db.execute(
+            select(m.SerialNumber.item_id)
+            .where(m.SerialNumber.item_id.in_(item_ids),
+                   m.SerialNumber.warehouse_id == issue.warehouse_id,
+                   m.SerialNumber.is_active.is_(True))
+            .distinct()
+        )).scalars().all())
     for line in issue.items:
+        mode = _unit_mode(item_by_id.get(line.item_id))
         setattr(line, "serial_numbers", by_item.get(line.item_id, []))
         setattr(line, "imei_numbers", imeis_by_item.get(line.item_id, []))
         setattr(line, "is_serial_tracked", serial_by_item.get(line.item_id, False))
         setattr(line, "is_imei_tracked", imei_tracked_by_item.get(line.item_id, False))
+        setattr(line, "unit_mode", mode)
+        setattr(line, "has_units", line.item_id in coded_items)
+        # What the storekeeper validated on, echoed back in the same currency he typed:
+        # the serial for a serialized item, the IMEI for a handset, the code otherwise.
+        setattr(line, "unit_keys", [
+            keys[0] for keys in
+            (_unit_keys(row, mode) for row in rows_by_item.get(line.item_id, []))
+            if keys
+        ])
     return issue
 
 
@@ -4783,8 +4959,13 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
             batch_id=line.batch_id,
             bin_id=line.bin_id,
             remarks=line.remarks,
+            # `unit_keys`, not `serial_numbers`: an untouched line is restated in the
+            # currency its item is validated on, so an IMEI-named unit is not looked
+            # up by a serial the IMEI lookup cannot see.
             serial_numbers=by_line.get(
-                line.id, getattr(line, "serial_numbers", None) or []),
+                line.id,
+                getattr(line, "unit_keys", None)
+                or getattr(line, "serial_numbers", None) or []),
         )
         for line in issue.items
     ]

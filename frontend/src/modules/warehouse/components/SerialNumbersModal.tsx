@@ -35,6 +35,7 @@ export function SerialNumbersModal({
   partial = false,
   available = null,
   imeiBySerial,
+  metaByValue,
   pickMode = "reject",
   noun = "serial",
 }: {
@@ -58,6 +59,11 @@ export function SerialNumbersModal({
   /** serial -> IMEI. Shown beside each unit so a handset is identified by both of
    *  its numbers at the moment it is picked, not retyped at the far end. */
   imeiBySerial?: Record<string, string>;
+  /** The rest of the unit, keyed by the value being validated. Whatever the item is
+   *  validated on — serial, IMEI or code — the other identifiers of the SAME unit are
+   *  shown under it, so picking one identifier reflects the others rather than
+   *  leaving the storekeeper to look them up. */
+  metaByValue?: Record<string, string>;
   /** `reject` is QC semantics; `select` is used when issuing stock from a bin. */
   pickMode?: "reject" | "select";
 }) {
@@ -192,6 +198,11 @@ export function SerialNumbersModal({
                           {imeiBySerial?.[s] && (
                             <span className="block truncate font-mono text-[11px] text-muted">
                               IMEI {imeiBySerial[s]}
+                            </span>
+                          )}
+                          {metaByValue?.[s] && (
+                            <span className="block truncate font-mono text-[11px] text-muted">
+                              {metaByValue[s]}
                             </span>
                           )}
                         </span>

@@ -18,9 +18,14 @@ counted in the report, because a made-up rupee figure is worse than a blank.
     .venv/Scripts/python -m scripts.backfill_codes_and_prices           # prices + codes
     .venv/Scripts/python -m scripts.backfill_codes_and_prices --recode  # also restamp
                                                                         # existing codes
+    .venv/Scripts/python -m scripts.backfill_codes_and_prices --units   # also give every
+                                                                        # unit its own code
 
 Re-runnable: it only writes what is missing. `--recode` is the exception — it
 overwrites codes that already exist, which is the point of it, so it is opt-in.
+`--units` is opt-in for the other reason: it INSERTS a row per physical unit, so a
+balance of 30 becomes 30 codes instead of one. Run `--dry-run --units` first to see
+how many rows that is.
 """
 import asyncio
 import sys
@@ -29,6 +34,7 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
+from app.modules.inventory import locations
 from app.modules.inventory.models import Stock, StockMovement
 from app.modules.warehouse.models import SerialNumber
 from app.platform.settings import codeformat
@@ -229,7 +235,91 @@ async def code_unserialised_lots(db, config, *, dry_run: bool, overwrite: bool) 
     return {"unserialised_lots_coded": coded, "lots_skipped": skipped}
 
 
-async def main(dry_run: bool, recode: bool) -> None:
+async def explode_lots_into_units(db, config, *, dry_run: bool) -> dict:
+    """Give every UNIT of existing unserialised stock its own row and its own code.
+
+    `code_unserialised_lots` above codes the LOT, which is why a balance of 30 shows
+    one code: `stk_balance` is one row per lot however many units are standing in it.
+    Putaway now writes one `whs_serial_numbers` row per unit (`_place_unit_codes`),
+    but stock that was put away BEFORE that has no unit rows at all, so its 30 units
+    still cannot be told apart.
+
+    One row per whole unit of `total_qty`, coded by the same formula, with the code
+    doubling as `serial_number` — for an unserialised unit that IS its identity.
+
+    Skipped, deliberately:
+      * stock held at an MDP or a LIP — goods are coded once, at the warehouse they
+        entered the company through, and arrive down the chain already carrying it.
+        Same rule as `_place_unit_codes`;
+      * items that are serial tracked — their units are already named;
+      * any (item, warehouse, bin, batch) that already has unit rows, so re-running
+        cannot double up;
+      * fractional balances — half a litre is not a unit.
+
+    Opt-in (`--units`) because it is the only step here that INSERTS rows rather than
+    filling blanks, and the count is one per unit in the whole company.
+    """
+    items = {i.id: i for i in (await db.execute(select(Item))).scalars().all()}
+    warehouses = {w.id: w for w in (await db.execute(select(Warehouse))).scalars().all()}
+    top_tier = {
+        w.id for w in warehouses.values()
+        if locations.tier_of(w.warehouse_type) is locations.LocationTier.WAREHOUSE
+    }
+    occupied = {
+        (item_id, warehouse_id, bin_id, batch_id)
+        for item_id, warehouse_id, bin_id, batch_id in (await db.execute(
+            select(SerialNumber.item_id, SerialNumber.warehouse_id,
+                   SerialNumber.bin_id, SerialNumber.batch_id).distinct()
+        )).all()
+    }
+
+    created, lots, skipped = 0, 0, 0
+    for row in (await db.execute(select(Stock))).scalars().all():
+        if row.warehouse_id not in top_tier:
+            continue
+        item = items.get(row.item_id)
+        if item is None or bool(getattr(item, "is_serial_tracked", False)):
+            continue
+        if (row.item_id, row.warehouse_id, row.bin_id, row.batch_id) in occupied:
+            continue
+        units = _d(row.total_qty)
+        if units <= 0 or units != units.to_integral_value():
+            skipped += 1
+            continue
+        is_asset = bool(getattr(item, "is_asset", False))
+        warehouse_code = getattr(warehouses.get(row.warehouse_id), "code", None)
+        lots += 1
+        created += int(units)
+        if dry_run:
+            continue
+        made = []
+        for _ in range(int(units)):
+            unit = SerialNumber(
+                item_id=row.item_id, serial_number="", batch_id=row.batch_id or None,
+                warehouse_id=row.warehouse_id, bin_id=row.bin_id or None,
+                status="available", is_active=True,
+            )
+            db.add(unit)
+            made.append(unit)
+        # Flushed first: the formula runs off the row id when there is no serial.
+        await db.flush()
+        template = config["asset_format"] if is_asset else config["consumable_format"]
+        for unit in made:
+            code = codeformat.render(template, codeformat.build_values(
+                item=item, serial=None, seq=unit.id, warehouse_code=warehouse_code,
+                is_new=codeformat.is_new_item(item, config["legacy_before"]),
+                new_flag=config["new_flag"], legacy_flag=config["legacy_flag"],
+            ))
+            unit.serial_number = code
+            if is_asset:
+                unit.asset_code = code
+            else:
+                unit.consumable_code = code
+    return {"lots_exploded": lots, "units_created": created,
+            "lots_not_whole_units": skipped}
+
+
+async def main(dry_run: bool, recode: bool, units: bool = False) -> None:
     async with SessionLocal() as db:
         config = await codeformat.code_settings(db)
         print(f"asset format:      {config['asset_format']}")
@@ -244,6 +334,10 @@ async def main(dry_run: bool, recode: bool) -> None:
         report.update(await link_single_serial_lots(db, dry_run=dry_run))
         report.update(await code_unserialised_lots(db, config, dry_run=dry_run,
                                                    overwrite=recode))
+        # Last: it reads which lots already have unit rows, so everything above has
+        # had its say first.
+        if units:
+            report.update(await explode_lots_into_units(db, config, dry_run=dry_run))
 
         if not dry_run:
             await db.commit()
@@ -253,4 +347,5 @@ async def main(dry_run: bool, recode: bool) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main("--dry-run" in sys.argv, "--recode" in sys.argv))
+    asyncio.run(main("--dry-run" in sys.argv, "--recode" in sys.argv,
+                     "--units" in sys.argv))

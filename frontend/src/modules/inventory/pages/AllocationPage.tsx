@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
-import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
+import { Can, PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { createAllocation, getAllocationProposal } from "../api";
 import { ClaimsPanel } from "../components/ClaimsPanel";
 import { alerts } from "@/modules/alerts";
@@ -364,10 +364,15 @@ export function AllocationPage() {
           {/* Disabled, not just warned: the backend refuses an over-allocation, so
               leaving the button live only produced a 422 the allocator could do
               nothing with. Withheld entirely when there is no decision left to make. */}
+          {/* Two gates, and they answer different questions. `allocatable` is the
+              document's state — is there anything left to decide. `allocation.submit`
+              is the job profile — is this person one of the people who decides. */}
           {data.allocatable && (
-            <Button onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
-              {save.isPending ? "Submitting…" : "Submit for approval"}
-            </Button>
+            <Can do="allocation.submit">
+              <Button onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
+                {save.isPending ? "Submitting…" : "Submit for approval"}
+              </Button>
+            </Can>
           )}
           <Button variant="subtle" onClick={() => nav("/inventory/fulfillment")}>
             {data.allocatable ? "Cancel" : "Back to the queue"}

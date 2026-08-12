@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, RefreshCw, XCircle } from "lucide-react";
-import { Button, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import {
   approveAllocation, getAllocation, getAllocationAvailability, getAllocationHistory,
   getPendingInventoryApprovals, rejectAllocation,
@@ -311,13 +311,19 @@ export function AllocationApprovalDetailPage() {
                 <Button variant="danger" disabled={act.isPending} onClick={() => act.mutate({ approve: false })}>
                   <XCircle className="h-4 w-4" /> Reject
                 </Button>
-                <Button
-                  disabled={act.isPending || overCap}
-                  onClick={() => act.mutate({ approve: true })}
-                >
-                  <CheckCircle2 className="h-4 w-4" />
-                  {revisions.length ? "Approve revised and reserve" : "Approve and reserve"}
-                </Button>
+                {/* `waitingOnMe` above is the approval config talking — the ladder
+                    decides whose turn it is. This is the job profile talking. Reject
+                    stays outside it on purpose: an approver must never be left with a
+                    document they can neither sign nor refuse. */}
+                <Can do="allocation.approve_reserve">
+                  <Button
+                    disabled={act.isPending || overCap}
+                    onClick={() => act.mutate({ approve: true })}
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    {revisions.length ? "Approve revised and reserve" : "Approve and reserve"}
+                  </Button>
+                </Can>
               </div>
             </Card>
           )}

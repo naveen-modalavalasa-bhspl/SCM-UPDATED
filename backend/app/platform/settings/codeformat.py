@@ -172,13 +172,18 @@ async def code_settings(db: AsyncSession) -> dict:
 
 async def unit_code(db: AsyncSession, *, item, is_asset: bool,
                     serial: str | None = None, seq: int | None = None,
-                    warehouse_code: str | None = None) -> str:
+                    warehouse_code: str | None = None,
+                    config: dict | None = None) -> str:
     """The asset or consumable code for one unit, per the configured formula.
 
     Called at putaway. Falls back rather than raising, for the reason in the module
     docstring: a broken setting must not stop goods being received.
+
+    `config` is the already-read settings, for a caller coding a whole putaway at
+    once: the formula cannot change between two units of the same lorry, and reading
+    five settings per unit turned a 500-unit putaway into 2,500 queries.
     """
-    config = await code_settings(db)
+    config = config or await code_settings(db)
     template = config["asset_format"] if is_asset else config["consumable_format"]
     values = build_values(
         item=item, serial=serial, seq=seq, warehouse_code=warehouse_code,

@@ -72,6 +72,19 @@ ALLOCATION_VIEW = "allocation.view"
 ALLOCATION_CREATE = "allocation.create"
 ALLOCATION_APPROVE = "allocation.approve"
 ALLOCATION_REJECT = "allocation.reject"
+# The two buttons that actually move an allocation, named after what they say on
+# screen so an admin unticking one knows which button goes away.
+#
+# They sit BESIDE allocation.create / allocation.approve rather than replacing them:
+# those two still guard reading and building the decision, these guard committing it.
+# Both are required on the endpoint, so unticking the button permission stops the
+# request as well as hiding the control (rule 6 — hiding a button is not security).
+#
+# Neither one decides WHO may sign: the ladder does, and the Approve and reserve
+# button is only offered to the position the workflow is actually waiting on. This is
+# the second gate, not a replacement for the first.
+ALLOCATION_SUBMIT = "allocation.submit"
+ALLOCATION_APPROVE_RESERVE = "allocation.approve_reserve"
 MR_VIEW = "mr.view"
 MR_CREATE = "mr.create"
 MR_APPROVE = "mr.approve"
@@ -208,6 +221,10 @@ ALL_PERMISSIONS: list[Perm] = [
          "Approve a stock allocation"),
     Perm(ALLOCATION_REJECT, "inventory", "allocation", "reject",
          "Reject a stock allocation"),
+    Perm(ALLOCATION_SUBMIT, "inventory", "allocation", "submit",
+         'Use the "Submit for approval" button on the Fulfilment Queue'),
+    Perm(ALLOCATION_APPROVE_RESERVE, "inventory", "allocation", "approve_reserve",
+         'Use the "Approve and reserve" button on Allocation Approvals'),
     Perm(MR_VIEW, "inventory", "material_request", "view", "View material requests"),
     Perm(MR_CREATE, "inventory", "material_request", "create", "Create material requests"),
     Perm(MR_APPROVE, "inventory", "material_request", "approve",
@@ -288,6 +305,25 @@ ALL_PERMISSIONS: list[Perm] = [
 ]
 
 ALL_CODES: list[str] = [p.code for p in ALL_PERMISSIONS]
+
+
+# --------------------------------------------------------------------------- #
+#  Permissions that SPLIT an existing one
+# --------------------------------------------------------------------------- #
+# A brand-new capability is granted to Admin and nobody else — the fail-closed rule in
+# page_registry. But a permission carved out of one that is already live is not a new
+# capability: everybody holding the old one could already press the button, and
+# shipping it fail-closed would silently take that away from every job profile until
+# an admin noticed.
+#
+# So on FIRST INSERT only, the new code is granted to every role that already holds
+# its source. Behaviour on the day of deploy is identical; from then on the two are
+# independent and unticking the new one removes the button. Re-running changes
+# nothing — the row exists, so the copy never happens twice.
+INHERITS_GRANTS_FROM: dict[str, str] = {
+    ALLOCATION_SUBMIT: ALLOCATION_CREATE,
+    ALLOCATION_APPROVE_RESERVE: ALLOCATION_APPROVE,
+}
 
 
 # --------------------------------------------------------------------------- #

@@ -103,17 +103,32 @@ async def sync_permission_labels(db: AsyncSession) -> list[str]:
     )).scalars().first()
     changed = []
 
-    for code in sorted(catalogue.keys() - {row.code for row in rows}):
+    by_code = {row.code: row for row in rows}
+    for code in sorted(catalogue.keys() - set(by_code)):
         spec = catalogue[code]
         permission = Permission(code=spec.code, module=spec.module,
                                 resource=spec.resource, action=spec.action,
                                 description=spec.description)
         db.add(permission)
         changed.append(f"{code}: added")
-        if admin_role is not None:
-            await db.flush()
-            db.add(RolePermission(role_id=admin_role.id,
-                                  permission_id=permission.id))
+        await db.flush()
+
+        # Admin, plus — for a permission carved out of one already in use — everyone
+        # who holds the source (perms.INHERITS_GRANTS_FROM). Fail-closed is right for
+        # a new capability and wrong for a split: the split would revoke a button the
+        # holder has been pressing since before the deploy.
+        role_ids = {admin_role.id} if admin_role is not None else set()
+        source = by_code.get(perms.INHERITS_GRANTS_FROM.get(code, ""))
+        if source is not None:
+            inherited = (await db.execute(
+                select(RolePermission.role_id)
+                .where(RolePermission.permission_id == source.id)
+            )).scalars().all()
+            role_ids.update(inherited)
+            changed.append(f"{code}: inherited {len(inherited)} grants "
+                           f"from {source.code}")
+        for role_id in sorted(role_ids):
+            db.add(RolePermission(role_id=role_id, permission_id=permission.id))
 
     for row in rows:
         spec = catalogue.get(row.code)

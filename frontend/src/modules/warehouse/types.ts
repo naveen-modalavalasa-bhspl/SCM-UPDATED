@@ -649,7 +649,15 @@ export interface IssueItem {
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
+  /** Which identifier names one unit of this item: SERIAL -> IMEI -> CODE. */
+  unit_mode?: UnitMode | null;
+  /** The reserved units, stated in that same currency. */
+  unit_keys?: string[] | null;
+  /** Whether the item has identified units in stock at all. */
+  has_units?: boolean;
 }
+
+export type UnitMode = "SERIAL" | "IMEI" | "CODE";
 
 export interface IssueItemWrite {
   id?: number;
@@ -658,6 +666,9 @@ export interface IssueItemWrite {
   item_code?: string | null;
   item_name?: string | null;
   is_serial_tracked?: boolean;
+  unit_mode?: UnitMode | null;
+  unit_keys?: string[] | null;
+  has_units?: boolean;
   // Carried on the line so the form knows whether to ask for a batch. Set from the
   // chosen item, alongside is_serial_tracked, when the item is picked.
   is_batch_tracked?: boolean;
