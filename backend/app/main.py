@@ -9,8 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
+from sqlalchemy.exc import DataError
+
 from app.core.exceptions import (
-    AppException, app_exception_handler, http_exception_handler,
+    AppException, app_exception_handler, data_error_handler, http_exception_handler,
     request_validation_exception_handler, unhandled_exception_handler,
 )
 from app.platform.admin.app_logs import capture_backend_error, safe_request_id
@@ -92,6 +94,9 @@ app.add_middleware(
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+# Ahead of the catch-all: a value the column cannot hold is the caller's problem, and
+# answering 500 hid which field it was on every screen that writes a short column.
+app.add_exception_handler(DataError, data_error_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 

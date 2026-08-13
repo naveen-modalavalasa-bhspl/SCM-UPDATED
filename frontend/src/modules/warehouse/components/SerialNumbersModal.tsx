@@ -103,17 +103,53 @@ export function SerialNumbersModal({
       setSerials((rows) =>
         rows.includes(serial) ? rows.filter((r) => r !== serial) : [...rows, serial],
       );
+    const selectMode = pickMode === "select";
+    const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+    /**
+     * One scan of the gun. Enter fires this; the box is cleared either way so the
+     * next barcode lands in an empty field without anyone touching the keyboard.
+     *
+     * The label stuck on the unit carries its SERIAL, but a line validated on an
+     * asset code or an IMEI lists THOSE — so a scanned serial matched nothing at all
+     * and the storekeeper fell back to reading the list by eye. `metaByValue` already
+     * carries the unit's other identifiers for display; matching against it too means
+     * the same scan finds the unit whichever number the line happens to be keyed on.
+     *
+     * A miss now says so. Silence was the worst outcome: the gun beeps on every read,
+     * so nothing on screen changing looked identical to a successful scan.
+     */
     const scanOrSearch = () => {
       const value = entry.trim();
       if (!value) return;
-      const exact = (available ?? []).find((s) => s.toLowerCase() === value.toLowerCase());
-      if (exact) {
-        if (!selected.has(exact)) toggle(exact);
-        setEntry("");
-        setError(null);
+      const rows = available ?? [];
+      const hit =
+        rows.find((s) => same(s, value))
+        ?? rows.find((s) => (metaByValue?.[s] ?? "")
+          .split(/[\s·,]+/)
+          .some((token) => same(token, value)))
+        ?? rows.find((s) => same(imeiBySerial?.[s] ?? "", value));
+      setEntry("");
+      if (!hit) {
+        setError(`${value} is not among the units available here.`);
+        return;
       }
+      if (!selectMode) {
+        if (!selected.has(hit)) toggle(hit);
+        setError(null);
+        return;
+      }
+      if (selected.has(hit)) {
+        setError(`${hit} is already on this line.`);
+        return;
+      }
+      if (selected.size >= required) {
+        setError(`This line is for ${required}; remove one before scanning another.`);
+        return;
+      }
+      setError(null);
+      toggle(hit);
     };
-    const selectMode = pickMode === "select";
 
     return (
       <Modal isOpen={isOpen} onClose={onClose} size="lg" scrollBehavior="inside">

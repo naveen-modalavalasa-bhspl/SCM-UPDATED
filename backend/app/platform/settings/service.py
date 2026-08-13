@@ -9,6 +9,7 @@ from app.platform.settings.models import AuditLog, Setting
 from app.platform.settings.schemas import (
     CodeFormatSettings, CompanySettings, FallbackSettings, HcmSyncSettings,
     NotificationSettings, NumberingSettings, RegionalSettings, SettingsIn, SettingsOut,
+    WarehouseSettings,
 )
 from app.shared.enums import AuditAction
 
@@ -50,6 +51,12 @@ SETTINGS_SPEC = {
         "workflow_fallback_enabled": ("fallback.workflow_enabled", "bool"),
         "notify_admin_on_fallback": ("fallback.notify_admin", "bool"),
         "allow_auto_admin_fallback": ("fallback.allow_auto_admin", "bool"),
+    }),
+    "warehouse": (WarehouseSettings, {
+        # Read by warehouse.service.requires_inward for any stocking point that has
+        # not answered for itself. Same key name the migration seeds — two spellings
+        # of one setting is two settings.
+        "requires_inward_default": ("warehouse.requires_inward_default", "bool"),
     }),
 }
 

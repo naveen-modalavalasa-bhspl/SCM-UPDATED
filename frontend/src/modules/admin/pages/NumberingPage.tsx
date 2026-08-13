@@ -10,6 +10,40 @@ const Code = ({ children }: { children: React.ReactNode }) => (
   <span className="mono font-semibold text-ink">{children}</span>
 );
 
+// Mirrors TOKENS in backend/app/platform/admin/numbering.py — the pattern is rendered
+// there, this is only the crib sheet the admin composes it from.
+const TOKENS: [string, string][] = [
+  ["{PREFIX}", "prefix on this row, e.g. IND"],
+  ["{SEQ:5}", "running number, padded to 5 digits"],
+  ["{FY}", "financial year, e.g. 2026-27"],
+  ["{COMPANY}", "company name (Settings › Company)"],
+  ["{PROJECT}", "project the document belongs to"],
+  ["{YYYY}", "calendar year, e.g. 2026"],
+  ["{YY}", "2-digit year, e.g. 26"],
+  ["{MM}", "month number, 01–12"],
+  ["{MON}", "month name, JAN–DEC"],
+  ["{DD}", "day of month, 01–31"],
+];
+
+const TokenLegend = () => (
+  <div className="mb-4 rounded-xl border border-line bg-content p-4">
+    <div className="text-sm font-semibold text-ink">Pattern tokens</div>
+    <div className="mt-1 text-xs text-muted">
+      Build any format you like, e.g. <span className="mono">{"{COMPANY}/{PROJECT}/{MON}-{YY}/{SEQ:4}"}</span>.
+      Naming <span className="mono">{"{COMPANY}"}</span> or <span className="mono">{"{PROJECT}"}</span> gives
+      each one its own running number; anything else keeps one shared sequence.
+    </div>
+    <div className="mt-3 grid gap-x-6 gap-y-1 sm:grid-cols-2">
+      {TOKENS.map(([token, meaning]) => (
+        <div key={token} className="flex gap-2 text-xs">
+          <span className="mono font-semibold text-ink">{token}</span>
+          <span className="text-muted">{meaning}</span>
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
 const Active = ({ on }: { on: boolean }) => (
   <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
     on ? "bg-ok-bg text-ok" : "bg-default text-muted"
@@ -35,6 +69,7 @@ export function NumberingPage() {
   return (
     <>
       <PageHeader eyebrow="Settings" title="Document numbering" />
+      <TokenLegend />
       <MasterCrud<DocSeries>
         title="Numbering series"
         queryKey="doc-series"
@@ -54,10 +89,15 @@ export function NumberingPage() {
         )}
         fetchList={adminApi.docSeries.list}
         fields={[
-          { key: "doc_type", label: "Document type (INDENT/PO/GRN/ISSUE)", required: true },
-          { key: "fiscal_year", label: "Fiscal year", required: true },
-          { key: "prefix", label: "Prefix", required: true },
-          { key: "pattern", label: "Pattern", placeholder: "{PREFIX}/{FY}/{SEQ:5}" },
+          // maxLength mirrors the sys_doc_series column widths. Without it an over-long
+          // value only failed at the database, which surfaced as "Internal server error".
+          { key: "doc_type", label: "Document type (INDENT/PO/GRN/ISSUE)", required: true,
+            maxLength: 30 },
+          { key: "fiscal_year", label: "Fiscal year", required: true, maxLength: 10 },
+          { key: "prefix", label: "Prefix — plain text, e.g. IND (tokens go in Pattern)",
+            required: true, maxLength: 20 },
+          { key: "pattern", label: "Pattern", placeholder: "{PREFIX}/{FY}/{SEQ:5}",
+            maxLength: 100 },
           { key: "reset_policy", label: "Reset", type: "select", options: RESET_POLICIES },
           { key: "is_active", label: "Active", type: "switch" },
         ]}

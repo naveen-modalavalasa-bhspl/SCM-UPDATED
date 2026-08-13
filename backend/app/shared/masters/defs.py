@@ -448,6 +448,9 @@ class WarehouseIn(BaseModel):
     address: str | None = None
     incharge_id: int | None = None
     is_bin_managed: bool = False
+    # Blank = follow the company default (warehouse.requires_inward_default). True
+    # means arrivals here go through Material Inward -> GRN -> QC before they count.
+    requires_inward: bool | None = None
     is_active: bool = True
 
 
@@ -457,7 +460,7 @@ def warehouse_out(w: Warehouse) -> dict:
             "office_name": w.office_name, "warehouse_type": w.warehouse_type,
             "address": w.address, "incharge_id": w.incharge_id,
             "incharge_name": w.incharge_name, "is_bin_managed": w.is_bin_managed,
-            "is_active": w.is_active}
+            "requires_inward": w.requires_inward, "is_active": w.is_active}
 
 
 async def apply_warehouse(db: AsyncSession, w: Warehouse, data: WarehouseIn) -> None:
@@ -622,8 +625,11 @@ def vendor_item_out(row: VendorItem) -> dict:
             "vendor_code": row.vendor.code if row.vendor else None,
             "item_code": row.item_code, "item_name": row.item_name,
             "vendor_item_code": row.vendor_item_code,
-            "last_rate": row.last_rate, "lead_time_days": row.lead_time_days,
-            "min_order_qty": row.min_order_qty,
+            # _num, not the raw Decimal: this dict is written into the audit row's
+            # JSON column, and json.dumps has no encoder for Decimal — importing
+            # vendor items died on the first row that carried a rate or an MOQ.
+            "last_rate": _num(row.last_rate), "lead_time_days": row.lead_time_days,
+            "min_order_qty": _num(row.min_order_qty),
             "is_preferred": row.is_preferred}
 
 

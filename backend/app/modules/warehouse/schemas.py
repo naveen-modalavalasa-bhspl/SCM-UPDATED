@@ -54,6 +54,8 @@ class WarehouseRead(_Read):
     incharge_id: int | None = None
     incharge_name: str | None = None
     is_bin_managed: bool
+    # None = follow the company default. See service.requires_inward.
+    requires_inward: bool | None = None
     is_active: bool
     created_at: datetime | None = None
 
@@ -67,6 +69,7 @@ class WarehouseWrite(BaseModel):
     address: str | None = None
     incharge_id: int | None = None
     is_bin_managed: bool = False
+    requires_inward: bool | None = None
     is_active: bool = True
 
 
@@ -622,12 +625,19 @@ class StockMovementOrderWrite(BaseModel):
 
 
 class StockMovementOrderItemRead(BaseModel):
-    id: int
+    """One line of a movement, read back off the ledger rows it wrote.
+
+    No `id`: there is no line table. The document is its `order_no`, carried on every
+    `stk_ledger` row the line produced.
+    """
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
+    uom_code: str | None = None
     source_bin_id: int
+    source_bin_code: str | None = None
     destination_bin_id: int
+    destination_bin_code: str | None = None
     quantity: Decimal
     batch_id: int | None = None
     serial_numbers: list[str] | str | None = Field(default_factory=list)
@@ -644,12 +654,17 @@ class StockMovementOrderItemRead(BaseModel):
 
 
 class StockMovementOrderRead(BaseModel):
-    id: int
+    """A movement document. `order_no` is its identity — see the item schema above.
+
+    The list endpoint groups the ledger by `order_no` and cannot cheaply rebuild every
+    line, so `items` is empty there and populated on create.
+    """
     order_no: str
     warehouse_id: int
     warehouse_name: str | None = None
     status: str
     reason: str | None = None
+    total_lines: int = 0
     created_by_name: str | None = None
     created_at: datetime | None = None
     items: list[StockMovementOrderItemRead] = Field(default_factory=list)
@@ -1266,6 +1281,9 @@ class Option(BaseModel):
     code: str | None = None
     name: str
     is_bin_managed: bool | None = None
+    # Only warehouse options carry this. It tells a form whether it is standing at a
+    # main store or at an MDP / LIP, which is what decides the shape of the GRN.
+    warehouse_type: str | None = None
 
 
 class ItemOption(Option):

@@ -150,7 +150,7 @@ export function ItemMasterTab() {
     queryFn: () => mastersApi.items.list({ search, size: 100 }),
   });
   const categories = useQuery({
-    queryKey: ["masters", "categories-all"],
+    queryKey: ["masters", "categories", "all"],
     queryFn: () => mastersApi.categories.list({ size: 300 }).then((r) => r.items),
   });
   const uoms = useQuery({ queryKey: ["masters", "uom"], queryFn: mastersApi.uom.listAll });
@@ -159,7 +159,7 @@ export function ItemMasterTab() {
     queryFn: () => mastersApi.generalNames.list({ size: 300 }).then((r) => r.items),
   });
   const brands = useQuery({
-    queryKey: ["masters", "brands-all"],
+    queryKey: ["masters", "brands", "all"],
     queryFn: () => mastersApi.brands.list({ size: 300 }).then((r) => r.items),
   });
   const manufacturers = useQuery({
@@ -167,14 +167,14 @@ export function ItemMasterTab() {
     queryFn: () => mastersApi.manufacturers.list({ size: 300 }).then((r) => r.items),
   });
   const mappings = useQuery({
-    queryKey: ["masters", "brand-manufacturers", form.brand_id],
+    queryKey: ["masters", "brands", "manufacturers", form.brand_id],
     queryFn: () => mastersApi.brandManufacturers.list({
       brand_id: Number(form.brand_id), size: 300,
     }).then((r) => r.items),
     enabled: Boolean(form.brand_id),
   });
   const classes = useQuery({
-    queryKey: ["masters", "item-classes-all"],
+    queryKey: ["masters", "item-classes", "all"],
     queryFn: () => mastersApi.itemClasses.list({ size: 300 }).then((r) => r.items),
   });
   const subclasses = useQuery({
@@ -185,7 +185,7 @@ export function ItemMasterTab() {
     enabled: Boolean(form.item_class_id),
   });
   const hsn = useQuery({
-    queryKey: ["masters", "hsn-codes-all"],
+    queryKey: ["masters", "hsn-codes", "all"],
     queryFn: () => mastersApi.hsnCodes.list({ size: 500 }).then((r) => r.items),
   });
   const dosage = useQuery({
@@ -195,8 +195,10 @@ export function ItemMasterTab() {
   // Tags on a parent category apply to every child. The Level 3 category may
   // override a repeated tag by defining it closer to the item.
   const categoryTags = useQuery({
+    // Keyed under "category-tags" so saving a tag on the Category Tagging tab
+    // invalidates this too — the CRUD there invalidates ["masters", "category-tags"].
     queryKey: [
-      "masters", "category-tags-for-item", level1, level2, form.category_id,
+      "masters", "category-tags", "for-item", level1, level2, form.category_id,
     ],
     queryFn: async () => {
       const categoryIds = [level1, level2, String(form.category_id)]
@@ -331,7 +333,7 @@ export function ItemMasterTab() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["masters", "items"] });
-      qc.invalidateQueries({ queryKey: ["masters", "hsn-codes-all"] });
+      qc.invalidateQueries({ queryKey: ["masters", "hsn-codes", "all"] });
       setDraftComponents([]);
       setEditing(undefined);
     },
@@ -628,7 +630,7 @@ export function TagFields({ tags, values, onChange }: {
   onChange: (next: Record<string, string>) => void;
 }) {
   const attributes = useQuery({
-    queryKey: ["masters", "attributes-all"],
+    queryKey: ["masters", "attributes", "all"],
     queryFn: () => mastersApi.attributes.list({ size: 300 }).then((r) => r.items),
   });
   const set = (code: string, value: string) =>
@@ -718,7 +720,7 @@ function DraftKitComponents({ itemId, values, onChange }: {
   const [quantity, setQuantity] = useState("1");
   const [remarks, setRemarks] = useState("");
   const items = useQuery({
-    queryKey: ["masters", "items-all"],
+    queryKey: ["masters", "items", "all"],
     queryFn: () => mastersApi.items.list({ size: 300 }).then((r) => r.items),
   });
   const selectedIds = new Set(values.map((line) => line.component_item_id));
@@ -809,7 +811,7 @@ function KitComponents({ itemId }: { itemId: number }) {
       .list({ item_id: itemId, size: 200 }).then((r) => r.items),
   });
   const items = useQuery({
-    queryKey: ["masters", "items-all"],
+    queryKey: ["masters", "items", "all"],
     queryFn: () => mastersApi.items.list({ size: 300 }).then((r) => r.items),
   });
   const add = useMutation({
@@ -916,7 +918,7 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
     queryFn: () => mastersApi.itemPackaging.breakdown(itemId),
   });
   const packages = useQuery({
-    queryKey: ["masters", "packaging-all"],
+    queryKey: ["masters", "packaging", "all"],
     queryFn: () => mastersApi.packaging.list({ size: 200 }).then((r) => r.items),
   });
 

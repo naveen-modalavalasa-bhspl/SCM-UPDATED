@@ -227,15 +227,15 @@ export function CategoryTaggingTab({ categories }: { categories: Option[] }) {
   const [tagType, setTagType] = useState<CategoryTagType>("ATTRIBUTE");
 
   const attributes = useQuery({
-    queryKey: ["masters", "attributes-all"],
+    queryKey: ["masters", "attributes", "all"],
     queryFn: () => mastersApi.attributes.list({ size: 300 }).then((p) => p.items),
   });
   const specs = useQuery({
-    queryKey: ["masters", "specs-all"],
+    queryKey: ["masters", "specs", "all"],
     queryFn: () => mastersApi.specs.list({ size: 300 }).then((p) => p.items),
   });
   const features = useQuery({
-    queryKey: ["masters", "features-all"],
+    queryKey: ["masters", "features", "all"],
     queryFn: () => mastersApi.features.list({ size: 300 }).then((p) => p.items),
   });
 

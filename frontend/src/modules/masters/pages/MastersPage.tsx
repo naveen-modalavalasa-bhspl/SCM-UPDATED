@@ -82,7 +82,7 @@ export function MastersPage() {
     enabled: wanted("uom"),
   });
   const cats = useQuery({
-    queryKey: ["masters", "categories-all"],
+    queryKey: ["masters", "categories", "all"],
     queryFn: () => mastersApi.categories.list({ size: 200 }).then((p) => p.items),
     enabled: wanted("categories"),
   });
@@ -91,12 +91,12 @@ export function MastersPage() {
     enabled: wanted("facilities"),
   });
   const projects = useQuery({
-    queryKey: ["masters", "projects-all"],
+    queryKey: ["masters", "projects", "all"],
     queryFn: () => mastersApi.projects.list({ size: 300 }).then((p) => p.items),
     enabled: wanted("projects"),
   });
   const items = useQuery({
-    queryKey: ["masters", "items-all"],
+    queryKey: ["masters", "items", "all"],
     queryFn: () => mastersApi.items.list({ size: 300 }).then((p) => p.items),
     enabled: wanted("items"),
   });

@@ -10,7 +10,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.platform.settings.models import DocSeries
+from app.platform.settings.models import DocSeries, Setting
 from app.shared.enums import ResetPolicy
 from app.shared.time import now as ist_now, today as ist_today
 
@@ -29,9 +29,39 @@ DEFAULT_PATTERN = "{PREFIX}/{FY}/{SEQ:5}"
 # The DB team's rows use {PREFIX}/{FY}/{SEQ:5}; earlier code wrote {prefix}/{fy}/{num:04d}.
 # Both are accepted, because rejecting either would break live series or existing code.
 # {SEQ:5} means "pad to 5 digits", which is not Python's format spec, so it is rewritten.
+#
+# COMPANY/PROJECT/date tokens were added so a series can read
+# {COMPANY}/{PROJECT}/{MON}-{YY}/{SEQ:4} without a code change. Every one of them
+# always has a value at render time (see `_context`), so adding a token to a pattern
+# can never make a document fail to get a number.
 _ALIASES = {"PREFIX": "prefix", "FY": "fy", "SEQ": "num", "NUM": "num",
-            "prefix": "prefix", "fy": "fy", "seq": "num", "num": "num"}
+            "prefix": "prefix", "fy": "fy", "seq": "num", "num": "num",
+            "COMPANY": "company", "PROJECT": "project",
+            "company": "company", "project": "project",
+            "YYYY": "yyyy", "YY": "yy", "MM": "mm", "MON": "mon", "DD": "dd",
+            "yyyy": "yyyy", "yy": "yy", "mm": "mm", "mon": "mon", "dd": "dd"}
 _FIELD = re.compile(r"\{(\w+)(?::(\d+)d?)?\}")
+
+# Tokens whose value identifies WHO the document belongs to. A pattern that names one
+# gets its own running number per value — see `scope_key_for`.
+_SCOPE_TOKENS = {"company": "COMPANY", "project": "PROJECT"}
+_MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+# What a scope token renders as when the caller has no value for it. Not blank: a blank
+# would collapse "no project" and "project 1" into the same-looking number.
+UNSET = "NA"
+
+
+def slug(value: str | None, limit: int = 12) -> str:
+    """A name as it can appear inside a document number: A-Z0-9 only, uppercased."""
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
+    return cleaned[:limit] or UNSET
+
+
+def tokens_in(pattern: str | None) -> set[str]:
+    """The field names a pattern uses, normalised (`{SEQ:5}` -> `num`)."""
+    return {_ALIASES[m.group(1)] for m in _FIELD.finditer(pattern or "")
+            if m.group(1) in _ALIASES}
 
 
 def normalise_pattern(pattern: str) -> str:
@@ -47,6 +77,23 @@ def normalise_pattern(pattern: str) -> str:
     return _FIELD.sub(swap, pattern or DEFAULT_PATTERN)
 
 
+def _context(now: datetime | None = None, **extra: str) -> dict:
+    """Every token this file can resolve, with a value for each. Caller-supplied
+    values win, so `render(..., project="MEDAK")` overrides the UNSET default."""
+    now = now or ist_now()
+    values = {"company": UNSET, "project": UNSET,
+              "yyyy": f"{now.year}", "yy": f"{now.year % 100:02d}",
+              "mm": f"{now.month:02d}", "mon": _MONTHS[now.month - 1],
+              "dd": f"{now.day:02d}"}
+    for key, value in extra.items():
+        # An empty COMPANY/PROJECT leaves the default standing; an empty token this
+        # file does not own (a lot's {WH}) is passed through exactly as before.
+        if value in (None, "") and key in values:
+            continue
+        values[key] = value
+    return values
+
+
 def render(pattern: str | None, prefix: str, fiscal_year: str, number: int,
            **extra: str) -> str:
     """Format one document number, falling back rather than raising on a bad pattern:
@@ -57,9 +104,24 @@ def render(pattern: str | None, prefix: str, fiscal_year: str, number: int,
     alone by `normalise_pattern`, so they resolve here or fall back."""
     try:
         return normalise_pattern(pattern or DEFAULT_PATTERN).format(
-            prefix=prefix, fy=fiscal_year, num=number, **extra)
+            prefix=prefix, fy=fiscal_year, num=number, **_context(**extra))
     except (KeyError, ValueError, IndexError):
         return f"{prefix}/{fiscal_year}/{number:04d}"
+
+
+def scope_key_for(pattern: str | None, **extra: str) -> str | None:
+    """Which counter a document drawn on this pattern belongs to, or None for the one
+    shared counter — which is what every pattern written before this returns, so an
+    existing series keeps using the row it has always used.
+
+    Only identity tokens split a counter. Date tokens do not: restarting on a date is
+    what `reset_policy` already does, and splitting on both would mint a row a month.
+    """
+    used = tokens_in(pattern) & set(_SCOPE_TOKENS)
+    if not used:
+        return None
+    values = _context(**extra)
+    return "|".join(f"{_SCOPE_TOKENS[t]}:{values[t]}" for t in sorted(used))
 
 
 def current_period(policy: str | None, now: datetime | None = None) -> str | None:
@@ -100,13 +162,25 @@ def default_pattern(doc_type: str) -> str:
     return _DEFAULT_PATTERNS.get(doc_type.lower(), DEFAULT_PATTERN)
 
 
-async def next_number(db: AsyncSession, doc_type: str, **extra: str) -> str:
-    fy = _fiscal_year()
+async def _company(db: AsyncSession) -> str:
+    """The company token, from Settings > Company. Read here rather than passed by
+    every caller — it is the same for every document in the database."""
     row = (await db.execute(
+        select(Setting).where(Setting.setting_key == "company.name")
+    )).scalar_one_or_none()
+    return slug(row.setting_value if row else None)
+
+
+async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = None,
+                      **extra: str) -> str:
+    fy = _fiscal_year()
+    series = (await db.execute(
         select(DocSeries).where(
-            DocSeries.doc_type == doc_type, DocSeries.is_active.is_(True)
+            DocSeries.doc_type == doc_type, DocSeries.is_active.is_(True),
+            DocSeries.scope_key.is_(None),
         ).order_by(DocSeries.fiscal_year.desc()).with_for_update()
     )).scalars().first()
+    row = series
     if row is None:
         # A missing series must not block the document. Numbering is configuration,
         # and configuration that nobody filled in should degrade, not stop work —
@@ -122,6 +196,33 @@ async def next_number(db: AsyncSession, doc_type: str, **extra: str) -> str:
                         last_number=0, is_active=True)
         db.add(row)
         await db.flush()
+        series = row
+
+    # Identity tokens the pattern asks for. Resolved only when asked for, so a plain
+    # {PREFIX}/{FY}/{SEQ} series still costs exactly one query.
+    wanted = tokens_in(series.pattern) & set(_SCOPE_TOKENS)
+    if "project" in wanted:
+        extra["project"] = slug(project)
+    if "company" in wanted:
+        extra["company"] = await _company(db)
+
+    key = scope_key_for(series.pattern, **extra)
+    if key is not None:
+        # One counter per company/project. The counter row holds nothing but its
+        # number: prefix and pattern are read off `series` below, so re-editing the
+        # pattern still governs every project.
+        row = (await db.execute(
+            select(DocSeries).where(
+                DocSeries.doc_type == doc_type, DocSeries.scope_key == key,
+            ).with_for_update()
+        )).scalars().first()
+        if row is None:
+            row = DocSeries(doc_type=doc_type, fiscal_year=series.fiscal_year or fy,
+                            prefix=series.prefix, pattern=series.pattern,
+                            reset_policy=series.reset_policy, scope_key=key,
+                            last_number=0, is_active=True)
+            db.add(row)
+            await db.flush()
 
     # The reset happens here, under the same row lock that guards the increment, so two
     # concurrent documents at a period boundary cannot both reset and both take number 1.
@@ -134,4 +235,6 @@ async def next_number(db: AsyncSession, doc_type: str, **extra: str) -> str:
     n = row.last_number
     await db.flush()
 
-    return render(row.pattern, row.prefix, row.fiscal_year or fy, n, **extra)
+    # Rendered from `series`, never from the counter row: the admin edits one series
+    # and every project it split into follows it.
+    return render(series.pattern, series.prefix, series.fiscal_year or fy, n, **extra)

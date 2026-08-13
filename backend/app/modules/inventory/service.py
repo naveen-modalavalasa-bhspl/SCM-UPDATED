@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation, availability, locations
-from app.modules.inventory.enums import AdjustmentStatus, STOStatus
+from app.modules.inventory.enums import AdjustmentStatus, CycleCountStatus, STOStatus
 from app.modules.inventory.models import (
     NO_BATCH, NO_BIN, NO_PROJECT, MaterialRequest, MaterialRequestItem, Stock,
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
@@ -37,7 +37,7 @@ from app.shared.enums import (
     Priority, RefType, ScopeRung, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item
+from app.shared.models.master import Item, Uom
 from app.shared.models.warehouse import Warehouse, WarehouseLocation
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
@@ -333,8 +333,14 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     if new_balance < 0:
         raise ValidationError("Insufficient stock for this movement")
     stock.available_qty = new_balance
-    # total = what is on hand, including what is spoken for but not yet issued.
-    stock.total_qty = new_balance + (stock.reserved_qty or Decimal("0"))
+    # total = what is on hand: free, spoken for but not yet issued, and in flight.
+    # `transit_qty` was left out of this sum, so anything that ever set it would have
+    # watched the quantity vanish from `total_qty` on the very next movement — while
+    # `get_item_availability` went on reporting it. Nothing writes transit today, so
+    # this is the latent case being closed, not a live correction.
+    stock.total_qty = (new_balance
+                       + (stock.reserved_qty or Decimal("0"))
+                       + (stock.transit_qty or Decimal("0")))
     stock.last_movement_at = utcnow()
 
     unit_cost = _d(rate) if rate is not None else Decimal("0")
@@ -590,7 +596,29 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
             row.category_name = item.category_name if item else None
             row.reorder_level = float(item.reorder_level or 0) if item else 0.0
             row.barcode_value = item.barcode_value if item else None
+        await _fill_uom_names(db, page["items"])
     return page
+
+
+async def _fill_uom_names(db: AsyncSession, rows) -> None:
+    """Attach the readable UOM name to rows that carry a snapshot `uom_code`.
+
+    The code is the identity the whole system is keyed on — stk_balance, stk_ledger,
+    every PO/GRN line and every export snapshot it — so it can never be renamed to
+    tidy up a display. The six oldest masters happen to carry their prefix inside the
+    code (`UOM-GMS`, `UOM-L`, `UOM-NOS`) while everything created since is clean
+    (`PCS`, `MTR`), which is why one grid printed "12 UOM-GMS" and the next "12 PCS".
+    One lookup per page resolves the name; the code goes out unchanged beside it, and
+    a code with no master row simply has no name and the screen falls back to it.
+    """
+    codes = {r.uom_code for r in rows if getattr(r, "uom_code", None)}
+    if not codes:
+        return
+    names = dict((await db.execute(
+        select(Uom.code, Uom.name).where(Uom.code.in_(codes))
+    )).all())
+    for r in rows:
+        r.uom_name = names.get(r.uom_code)
 
 
 async def stock_summary(db: AsyncSession, item_id: int | None = None,
@@ -648,6 +676,15 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
         .where(Item.reorder_level > 0, rows.c.available_qty < Item.reorder_level)
     ) or 0)
 
+    # Is the answer above meaningful at all? "Below reorder: 0" is indistinguishable
+    # from "no item in the master has a reorder level", and today every one of them is
+    # 0 — so the tile reported healthy stock over a question nobody had answered. The
+    # screen hides the tile and the filter when this is false rather than printing a
+    # reassuring zero.
+    reorder_configured = bool(await db.scalar(
+        select(func.count()).select_from(Item).where(Item.reorder_level > 0).limit(1)
+    ))
+
     return {
         "stock_lines": int(totals[0] or 0),
         "distinct_items": int(totals[1] or 0),
@@ -655,6 +692,7 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
         "total_value": float(totals[3] or 0),
         "expiring_30_days": int(totals[4] or 0),
         "below_reorder": below,
+        "reorder_configured": reorder_configured,
     }
 
 
@@ -813,7 +851,7 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
             return existing
 
     mr = MaterialRequest(
-        mr_no=await next_number(db, "mr"),
+        mr_no=await next_number(db, "mr", project=ctx.get("project_name")),
         mr_date=utcnow().date(),
         indent_id=indent_id, indent_no=indent_no,
         requested_by_id=getattr(user, "id", None),
@@ -1527,19 +1565,9 @@ async def list_reservations(db: AsyncSession, params: PageParams, item_id: int |
 
 
 async def release_reservation_by_id(db: AsyncSession, reservation_id: int) -> dict:
-    res = await db.get(Reservation, reservation_id, with_for_update=True)
-    if not res:
-        raise NotFoundError(f"Reservation {reservation_id} not found")
-    if res.status != "ACTIVE":
-        raise ValidationError(f"Reservation is in status {res.status}, cannot release")
-
-    stock = await db.get(Stock, res.stock_id, with_for_update=True)
-    if stock:
-        stock.reserved_qty = (stock.reserved_qty or Decimal("0")) - res.quantity
-        stock.available_qty = (stock.available_qty or Decimal("0")) + res.quantity
-
-    res.status = "RELEASED"
-    res.released_at = utcnow()
+    """Hand one reservation back. The columns are moved by `allocation`, which owns
+    them (rule 7); this only decides that it should happen and reports the result."""
+    res = await allocation.release_one(db, reservation_id)
     await db.commit()
 
     return {
@@ -1885,7 +1913,7 @@ async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrde
         sto_item.dispatched_qty = sto_item.requested_qty
         await move_stock_out(
             db, item_id=sto_item.item_id, qty=sto_item.dispatched_qty,
-            ref_type="STO", ref_id=sto.id, ref_no=sto.sto_no, user=user,
+            ref_type=RefType.STO.value, ref_id=sto.id, ref_no=sto.sto_no, user=user,
             warehouse_id=sto.from_warehouse_id, project_id=sto.from_project_id,
         )
 
@@ -1907,7 +1935,7 @@ async def receive_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder
         sto_item.received_qty = qty
         await move_stock(
             db, item_id=sto_item.item_id, qty=qty, direction=StockDirection.IN.value,
-            ref_type="STO", ref_id=sto.id, ref_no=sto.sto_no, user=user,
+            ref_type=RefType.STO.value, ref_id=sto.id, ref_no=sto.sto_no, user=user,
             warehouse_id=sto.to_warehouse_id, project_id=sto.to_project_id,
         )
 
@@ -1931,7 +1959,7 @@ async def create_cycle_count(db: AsyncSession, data, user) -> CycleCount:
         warehouse_id=data.warehouse_id,
         warehouse_name=wh.name,
         count_date=data.count_date,
-        status="PLANNED",
+        status=CycleCountStatus.PLANNED.value,
         planned_by_name=getattr(user, "full_name", None),
         remarks=data.remarks,
     )
@@ -1997,10 +2025,11 @@ async def list_cycle_counts(db: AsyncSession, params: PageParams, warehouse_id: 
 
 async def update_cycle_count(db: AsyncSession, cc_id: int, data, user) -> CycleCount:
     cc = await get_cycle_count(db, cc_id)
-    if cc.status not in ("PLANNED", "IN_PROGRESS"):
+    if cc.status not in (CycleCountStatus.PLANNED.value,
+                         CycleCountStatus.IN_PROGRESS.value):
         raise ValidationError(f"Cycle count is in status {cc.status}, cannot update")
 
-    cc.status = "IN_PROGRESS"
+    cc.status = CycleCountStatus.IN_PROGRESS.value
     if data.remarks:
         cc.remarks = data.remarks
 
@@ -2021,7 +2050,7 @@ async def update_cycle_count(db: AsyncSession, cc_id: int, data, user) -> CycleC
 async def post_cycle_count(db: AsyncSession, cc_id: int, user) -> CycleCount:
     """Post cycle count variances as stock adjustments via move_stock()."""
     cc = await get_cycle_count(db, cc_id)
-    if cc.status != "IN_PROGRESS":
+    if cc.status != CycleCountStatus.IN_PROGRESS.value:
         raise ValidationError(f"Cycle count is in status {cc.status}, must be IN_PROGRESS to post")
 
     for item in cc.items:
@@ -2036,11 +2065,11 @@ async def post_cycle_count(db: AsyncSession, cc_id: int, user) -> CycleCount:
 
         await move_stock(
             db, item_id=item.item_id, qty=qty, direction=direction,
-            ref_type="CYCLE_COUNT", ref_id=cc.id, ref_no=cc.count_no, user=user,
+            ref_type=RefType.CYCLE_COUNT.value, ref_id=cc.id, ref_no=cc.count_no, user=user,
             warehouse_id=cc.warehouse_id, bin_id=item.bin_id, batch_id=item.batch_id,
         )
 
-    cc.status = "COMPLETED"
+    cc.status = CycleCountStatus.COMPLETED.value
     cc.posted_by_name = getattr(user, "full_name", None)
     cc.posted_at = utcnow()
     await db.commit()

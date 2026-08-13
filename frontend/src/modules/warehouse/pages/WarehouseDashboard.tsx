@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowLeftRight, ClipboardCheck, IndianRupee, PackageCheck, PackageOpen, Send, Truck, Undo2,
+  ArrowLeftRight, ClipboardCheck, IndianRupee, PackageCheck, PackageOpen, Send, Truck,
 } from "lucide-react";
 import { Card, ErrorBanner, PageHeader, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
@@ -44,7 +44,6 @@ const TILES: Tile[] = [
   { key: "open_picklists", label: "Open fulfilments", to: "transactions/fulfilment", icon: ClipboardCheck, can: "picking.view" },
   { key: "pending_issues", label: "Issues pending", to: "transactions/material-issues", icon: Send, can: "issue.view" },
   { key: "in_transit_dispatches", label: "In transit", to: "transactions/dispatch", icon: Truck, can: "dispatch.view" },
-  { key: "open_returns", label: "Open returns", to: "transactions/purchase-returns", icon: Undo2, tone: "text-bad", can: "return.view" },
 ];
 
 const DOC_ROUTE: Record<string, string> = {
@@ -55,7 +54,6 @@ const DOC_ROUTE: Record<string, string> = {
   PICKING: "transactions/fulfilment",
   ISSUE: "transactions/material-issues",
   DISPATCH: "transactions/dispatch",
-  RETURN: "transactions/purchase-returns",
 };
 
 export default function WarehouseDashboard() {

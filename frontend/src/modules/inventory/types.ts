@@ -39,6 +39,10 @@ export interface StockBalanceItem {
   warehouse_id: number;
   warehouse_name: string;
   uom_code: string;
+  /** Readable UOM name. The code is the stored identity and cannot be renamed, and the
+   *  six oldest masters carry the prefix inside it ("UOM-GMS"), so the name is what is
+   *  printed. Falls back to the code when a lot's UOM has no master row. */
+  uom_name?: string | null;
   physical_qty: number;
   reserved_qty: number;
   in_transit_qty?: number;
@@ -94,6 +98,10 @@ export interface StockSummary {
   total_value: number;
   expiring_30_days: number;
   below_reorder: number;
+  /** False when no item has a reorder level set, which makes `below_reorder` an
+   *  artefact rather than an answer — the tile and the filter hide themselves instead
+   *  of reporting a reassuring 0. Absent on an older backend, hence the optional. */
+  reorder_configured?: boolean;
 }
 
 /** GET /api/warehouse/serials/summary — per item + stocking point + bin + batch. */
@@ -309,6 +317,9 @@ export interface StockRow {
   category_name?: string | null;
   reorder_level?: number;
   barcode_value?: string | null;
+  /** Resolved from mst_uom against `uom_code`, which is a stored snapshot and is never
+   *  renamed. The name is what the screens print. */
+  uom_name?: string | null;
 }
 
 /** Exactly what GET /api/stock/movements returns -- the live stk_ledger columns. */

@@ -328,7 +328,7 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
-        indent_no=await next_number(db, "indent"),
+        indent_no=await next_number(db, "indent", project=context["project_name"]),
         indent_type=indent_type,
         indent_date=utcnow().date(),
         required_date=data.required_date,
@@ -1535,11 +1535,23 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
             item.status = IndentItemStatus.ISSUED.value
 
     indent.status = _fulfilment_status(indent.items)
+
+    # Imported here, not at module load: warehouse sits after indents in the import
+    # chain, so a top-level import would run it backwards.
+    from app.modules.warehouse import service as warehouse_service
+
+    # The raiser saying "this reached me" IS the acknowledgement. Asking the warehouse
+    # to sign the same delivery again afterwards recorded nothing new and left indents
+    # open on a forgotten second click, so the issues settle here instead. Same
+    # transaction as the receipt that made them settleable.
+    signed = await warehouse_service.auto_acknowledge_for_indent(db, indent.id, user)
+
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
         action=AuditAction.UPDATE, actor=user,
         before=before,
         after={"status": indent.status,
+               **({"acknowledged_issues": ", ".join(signed)} if signed else {}),
                **{str(i.id): float(_d(i.received_quantity)) for i in indent.items}},
     )
     await db.commit()
@@ -5864,7 +5876,8 @@ async def _join_consolidation(db: AsyncSession, indent: Indent, user) -> None:
     )).scalars().first()
     if row is None:
         row = Consolidation(
-            consolidation_no=await next_number(db, "consolidation"),
+            consolidation_no=await next_number(
+                db, "consolidation", project=indent.project_name),
             cycle=cycle,
             status=ConsolidationStatus.OPEN.value,
             created_by_id=getattr(user, "id", None),

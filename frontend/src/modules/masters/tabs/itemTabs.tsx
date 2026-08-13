@@ -13,7 +13,7 @@ export function ItemsTab() {
 }
 
 export function ItemSubClassesTab() {
-  const classes=useQuery({queryKey:["masters","classes-sub"],queryFn:()=>mastersApi.itemClasses.list({size:300}).then(r=>r.items)});
+  const classes=useQuery({queryKey:["masters", "item-classes", "all"],queryFn:()=>mastersApi.itemClasses.list({size:300}).then(r=>r.items)});
   const classOpts=(classes.data??[]).map(r=>({value:r.id,label:`${r.code} — ${r.name}`}));
   return <MasterCrud<MasterItemSubClass>
     title="Item subclass" queryKey="item-subclasses" searchable managePerm="master.class.manage"
@@ -178,7 +178,7 @@ export function HsnCodesTab() {
  *  a mapping you have to remember to go and make somewhere else does not get made. */
 export function GeneralNamesTab() {
   const brands = useQuery({
-    queryKey: ["masters", "brands-all"],
+    queryKey: ["masters", "brands", "all"],
     queryFn: () => mastersApi.brands.list({ size: 300 }).then((r) => r.items),
   });
   const brandOpts: Option[] = (brands.data ?? [])
@@ -229,7 +229,7 @@ export function GeneralNamesTab() {
 
 export function BrandsTab() {
   const manufacturers = useQuery({
-    queryKey: ["masters", "manufacturers-all"],
+    queryKey: ["masters", "manufacturers", "all"],
     queryFn: () => mastersApi.manufacturers.list({ size: 300 }).then((r) => r.items),
   });
   const manufacturerOpts: Option[] = (manufacturers.data ?? [])

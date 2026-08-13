@@ -38,8 +38,17 @@ const EMPTY: WarehouseWrite = {
   address: "",
   incharge_id: null,
   is_bin_managed: false,
+  requires_inward: null,
   is_active: true,
 };
+
+/** Three states, not a toggle: "nobody has decided for this point" is a real and
+ *  common answer, and it has to stay distinguishable from a deliberate No. */
+const INWARD_CHOICES = [
+  { value: "", label: "Follow the company default" },
+  { value: "true", label: "Yes — inward, GRN and QC first" },
+  { value: "false", label: "No — acknowledging posts the stock" },
+];
 
 export default function WarehouseForm() {
   const label = usePointLabel();
@@ -68,6 +77,7 @@ export default function WarehouseForm() {
         address: existing.address ?? "",
         incharge_id: existing.incharge_id ?? null,
         is_bin_managed: existing.is_bin_managed,
+        requires_inward: existing.requires_inward ?? null,
         is_active: existing.is_active,
       });
     }
@@ -204,6 +214,20 @@ export default function WarehouseForm() {
               </span>
             </span>
           </label>
+
+          <Field label="Goods arriving here">
+            <Select
+              value={form.requires_inward == null ? "" : String(form.requires_inward)}
+              onChange={(v) => set("requires_inward", v === "" ? null : v === "true")}
+              options={INWARD_CHOICES}
+              ariaLabel="Inward policy"
+            />
+            <span className="mt-1 block text-xs text-muted">
+              Yes: a consignment landing here waits for Material Inward, a GRN and QC —
+              the GRN is what posts the stock. No: the receiver acknowledges the
+              delivery and the stock is credited there and then, with no GRN at all.
+            </span>
+          </Field>
 
           <label className="flex items-start gap-3">
             <Switch

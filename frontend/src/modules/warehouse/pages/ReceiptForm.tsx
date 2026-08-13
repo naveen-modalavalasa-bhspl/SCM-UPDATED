@@ -84,6 +84,17 @@ const RECEIPT_TYPES = [
   { value: "DISPATCH", label: "Inward from consignment" },
 ];
 
+/** What an MDP or a LIP is allowed to receive.
+ *
+ * Nothing arrives at the bottom of the chain from outside the company: no purchase
+ * order is raised there, no vendor delivers there, and a transfer between local
+ * points is not something a storekeeper books on a GRN. Leaving all five on the
+ * dropdown invited a receipt type that then asked for a PO nobody has. */
+const LOCAL_RECEIPT_TYPES = new Set(["DISPATCH", "DIRECT"]);
+
+/** The rungs below the main store. Mirrors LocationTier on the backend. */
+const LOCAL_POINT_TYPES = new Set(["MDP", "LIP"]);
+
 const lifeDateLabel = (line?: Pick<ReceiptItemWrite, "is_asset"> | null) =>
   line?.is_asset ? "Warranty" : "Expiry";
 
@@ -319,6 +330,30 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   const locked = !!doc && !["DRAFT", "GATE_ENTRY"].includes(doc.status);
   /** Lines came off a consignment, so the items are fixed by what was sent. */
   const fromConsignment = form.receipt_type === "DISPATCH";
+
+  /* Where this GRN is being raised. The receiving point is already on the form, so
+   * the same list the picker loads answers it — no extra round trip. */
+  const myPoints = useQuery({
+    queryKey: ["wh-my-warehouses"],
+    queryFn: () => myWarehouseOptions(),
+  });
+  const isLocalPoint = LOCAL_POINT_TYPES.has(
+    (myPoints.data ?? []).find((w) => w.id === form.warehouse_id)?.warehouse_type ?? "",
+  );
+  const receiptTypes = isLocalPoint
+    ? RECEIPT_TYPES.filter((t) => LOCAL_RECEIPT_TYPES.has(t.value))
+    : RECEIPT_TYPES;
+
+  /* A new GRN opens as PURCHASE, which is not on offer once the receiving point
+   * turns out to be an MDP or a LIP. Left alone the Select would sit on a value it
+   * no longer lists, and the form would submit a purchase nobody can service. Only
+   * a fresh draft is moved — an existing receipt keeps the type it was saved with. */
+  useEffect(() => {
+    if (editing || !isLocalPoint) return;
+    if (!LOCAL_RECEIPT_TYPES.has(form.receipt_type)) {
+      set("receipt_type", "DISPATCH");
+    }
+  }, [editing, isLocalPoint, form.receipt_type]);
 
   /** Only "not more serials than units" is checked now.
    *
@@ -810,7 +845,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                   set("receipt_type", value || "PURCHASE");
                   if (value !== "PURCHASE") setSourceGateId(null);
                 }}
-                options={RECEIPT_TYPES}
+                options={receiptTypes}
                 ariaLabel="Receipt type"
               />
             </Field>
@@ -887,25 +922,35 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             * off the paperwork the driver hands over. Procurement does not raise orders
             * in this system yet, so a picker would offer a list nobody can fill and the
             * goods arrive regardless. `po_id` stays on the form so a receipt already
-            * linked to an order keeps its link through an edit. */}
-          <Field label="Purchase order" hint="As printed on the delivery paperwork.">
-            <Input
-              value={form.po_no ?? ""}
-              disabled={locked}
-              placeholder="PO number"
-              onChange={(e) => set("po_no", e.target.value)}
-            />
-          </Field>
-          <Field label="Vendor">
-            <Lookup
-              name="vendors"
-              load={vendorOptions}
-              value={form.vendor_id ?? ""}
-              isDisabled={locked}
-              onChange={(v) => set("vendor_id", v === "" ? null : v)}
-              placeholder="Vendor"
-            />
-          </Field>
+            * linked to an order keeps its link through an edit.
+            *
+            * Hidden at an MDP or LIP: nothing is bought there. Every arrival is a
+            * consignment from the point above, so both fields were dead boxes that
+            * only invited a storekeeper to invent a purchase order. The values stay
+            * on `form` untouched, so an existing receipt keeps whatever it was saved
+            * with. */}
+          {!isLocalPoint && (
+            <>
+              <Field label="Purchase order" hint="As printed on the delivery paperwork.">
+                <Input
+                  value={form.po_no ?? ""}
+                  disabled={locked}
+                  placeholder="PO number"
+                  onChange={(e) => set("po_no", e.target.value)}
+                />
+              </Field>
+              <Field label="Vendor">
+                <Lookup
+                  name="vendors"
+                  load={vendorOptions}
+                  value={form.vendor_id ?? ""}
+                  isDisabled={locked}
+                  onChange={(v) => set("vendor_id", v === "" ? null : v)}
+                  placeholder="Vendor"
+                />
+              </Field>
+            </>
+          )}
         </div>
       </Section>
 

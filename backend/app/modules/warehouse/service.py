@@ -43,6 +43,7 @@ from app.modules.warehouse.enums import (
     ReturnStatus, SerialStatus, WarehouseDocType,
 )
 from app.platform.settings import attachments, codeformat
+from app.platform.settings import service as settings_service
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance as WfInstance
@@ -50,10 +51,10 @@ from app.modules.inventory.service import warehouse_ids_for_user
 from app.shared.scope import scope_condition
 from app.shared.enums import (
     AuditAction, DocType, IndentStatus, InstanceStatus, POStatus, ReservationStatus,
-    RefType as InventoryRefType, StockDirection,
+    RefType as InventoryRefType, StockDirection, UomClass,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item, Vendor
+from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
@@ -61,6 +62,11 @@ from app.shared.time import now as ist_now, today as ist_today
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
+
+# The unit classes whose stock is made of separable things. Everything else UomClass
+# names — WEIGHT, VOLUME, LENGTH, AREA, TEMPERATURE, TIME, PRESSURE, ENERGY — measures
+# a continuous quantity, which has no "one unit" to hang an identity on.
+_COUNTABLE_UOM_CLASSES = {UomClass.COUNT.value, UomClass.PACKAGING.value}
 
 
 def _d(value) -> Decimal:
@@ -157,6 +163,31 @@ async def _warehouse(db: AsyncSession, warehouse_id: int) -> Warehouse:
     if not wh.is_active:
         raise ValidationError(f"Warehouse {wh.code} is inactive")
     return wh
+
+
+#: Company-wide answer for stocking points that have not set their own policy.
+#: 'false' — acknowledging a consignment credits its stock — is what this code did
+#: unconditionally before the policy existed, so an unconfigured database is unchanged.
+INWARD_DEFAULT_KEY = "warehouse.requires_inward_default"
+
+
+async def requires_inward(db: AsyncSession, warehouse_id: int | None) -> bool:
+    """Does a consignment landing here have to be inwarded before its stock counts?
+
+    True is the MDP/LIP that runs the full receiving desk: Material Inward -> GRN ->
+    QC, and only the GRN posts stock. False is the point that just signs for the
+    lorry — `acknowledge_dispatch` credits what arrived and there is no GRN at all.
+
+    The column is nullable on purpose: NULL is "nobody has decided for this point",
+    which reads the company default rather than silently picking a side.
+    """
+    if not warehouse_id:
+        return False
+    wh = await db.get(Warehouse, warehouse_id)
+    if wh is not None and wh.requires_inward is not None:
+        return bool(wh.requires_inward)
+    default = await settings_service.get_setting(db, INWARD_DEFAULT_KEY, "false")
+    return str(default).strip().lower() == "true"
 
 
 async def _bin_code(db: AsyncSession, bin_id: int | None) -> str | None:
@@ -624,6 +655,14 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
 
     seen_serials_by_item: dict[int, set[str]] = {}
     seen_imeis_by_item: dict[int, set[str]] = {}
+    # (item, batch) already claimed by an earlier line of THIS receipt. Serials and
+    # IMEIs are deduplicated below and this was not, so one GRN could carry the same
+    # item and batch on ten lines — REC/2026-27/00095 did — and each line posted its
+    # own IN movement. Ten receipts of one batch, while `_ensure_batch` recorded the
+    # first line's quantity as the batch's `initial_qty` and returned early for the
+    # rest. Refused rather than merged: a repeated line is a typo, and silently adding
+    # the quantities would hide the one case where it is not.
+    seen_batch_by_item: dict[int, dict[str, int]] = {}
 
     # A consignment inward re-receives units that ALREADY EXIST: the very serials a
     # warehouse or MDP issued are the ones arriving here, so "this serial is already
@@ -639,6 +678,19 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         received = _d(line.received_qty)
         if received < ZERO:
             raise ValidationError(f"Line {index}: received quantity cannot be negative")
+        # One line per item per batch. A second line for the same pair is the same
+        # goods entered twice, and each one would post its own stock movement.
+        batch_key = (line.batch_no or "").strip().lower()
+        claimed = seen_batch_by_item.setdefault(item.id, {})
+        if batch_key in claimed:
+            where = (f"batch {line.batch_no}" if line.batch_no else "no batch")
+            raise ValidationError(
+                f"Line {index}: {item.code} with {where} is already on line "
+                f"{claimed[batch_key]} of this GRN. Record it once, with the total "
+                f"quantity."
+            )
+        claimed[batch_key] = index
+
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         normalized_serials = [value.lower() for value in serials]
         if len(normalized_serials) != len(set(normalized_serials)):
@@ -983,9 +1035,12 @@ async def _dispatch_for_receipt(
         )
     # A transfer that was acknowledged before anybody inwarded it has already been
     # credited to the destination by `acknowledge_dispatch`. Inwarding it now would
-    # book the same goods twice.
+    # book the same goods twice. Unless this destination runs a receiving desk, in
+    # which case acknowledgement deliberately credited nothing and the GRN below is
+    # the stock event it was waiting for.
     if (dispatch.dispatch_type == DispatchType.TRANSFER.value
-            and dispatch.status == DispatchStatus.ACKNOWLEDGED.value):
+            and dispatch.status == DispatchStatus.ACKNOWLEDGED.value
+            and not await requires_inward(db, dispatch.to_warehouse_id)):
         raise ValidationError(
             f"{dispatch.dispatch_no} was acknowledged as a transfer, so its stock is "
             "already at the destination. Inward it before acknowledging next time."
@@ -1615,7 +1670,7 @@ async def _prepare_receipt_line(
         item_id=line.item_id,
         qty=_d(line.accepted_qty),
         direction=StockDirection.IN.value,
-        ref_type=WarehouseDocType.RECEIPT.value,
+        ref_type=InventoryRefType.RECEIPT.value,
         ref_id=receipt.id,
         ref_no=receipt.grn_no,
         user=user,
@@ -1630,7 +1685,29 @@ async def _prepare_receipt_line(
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
-    await _register_serials(db, receipt, line)
+    units = await _register_serials(db, receipt, line)
+
+    # A unit's identity is minted HERE too, not only at putaway. The asset/consumable
+    # code used to be stamped exclusively in `confirm_putaway`, so on a site with no
+    # bins — which is every stocking point but two — goods were banked into stock
+    # carrying no code at all and nothing downstream could quote them. There is no
+    # bin and no lot on this path; the code does not depend on either.
+    item = await _item_snapshot(db, line.item_id)
+    if units:
+        await _code_serial_rows(db, units, item=item,
+                                warehouse_id=receipt.warehouse_id)
+    elif await _is_countable(db, item):
+        await _place_unit_codes(
+            db,
+            item_id=line.item_id,
+            warehouse_id=receipt.warehouse_id,
+            batch_id=line.batch_id or None,
+            bin_id=None,
+            lot_no=None,
+            qty=_d(line.accepted_qty),
+        )
+    else:
+        await _code_lot(db, stock, item=item, warehouse_id=receipt.warehouse_id)
 
 
 async def _raise_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.ReceiptItem,
@@ -2470,7 +2547,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             )
     batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
     stock = await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
-                             ref_type=WarehouseDocType.RECEIPT.value,
+                             ref_type=InventoryRefType.RECEIPT.value,
                              ref_id=receipt.id if receipt else task.id,
                              ref_no=receipt.grn_no if receipt else ref_no,
                              user=user, warehouse_id=task.warehouse_id,
@@ -2490,6 +2567,12 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     task.lot_no = await _next_lot_no(db, await db.get(Warehouse, task.warehouse_id), target)
 
     await _place_serials(db, task, target, serials, receipt, receipt_item, qty=qty)
+    # A continuous item has no unit to name, so its identity goes on the LOT — the same
+    # rule the bulk-receipt path applies. Without this a bin-managed putaway of grams or
+    # litres produced no unit rows AND no lot code, and the stock screens, which read
+    # the code off `stk_balance`, showed a dash for goods that had been put away.
+    if not serials and not await _is_countable(db, item):
+        await _code_lot(db, stock, item=item, warehouse_id=task.warehouse_id)
 
     task.actual_bin_id = target.id
     task.scanned_by = getattr(user, "id", None)
@@ -2564,7 +2647,15 @@ async def _place_serials(
     new/old flag plus an 8-digit serial the next — and each change was a code change.
     """
     if not serial_numbers:
-        await _place_unit_codes(db, task, target, qty)
+        await _place_unit_codes(
+            db,
+            item_id=task.item_id,
+            warehouse_id=task.warehouse_id,
+            batch_id=task.batch_id,
+            bin_id=target.id,
+            lot_no=task.lot_no,
+            qty=qty if qty is not None else task.qty,
+        )
         return
     if receipt is None or receipt_item is None:
         raise ValidationError("Serialized putaway is missing its GRN line")
@@ -2578,28 +2669,112 @@ async def _place_serials(
     )
 
     item = await db.get(Item, task.item_id)
-    is_asset = bool(getattr(item, "is_asset", False)) if item else False
-    warehouse = await db.get(Warehouse, task.warehouse_id) if task.warehouse_id else None
-    config = await codeformat.code_settings(db)
-    # The item master's asset/consumable-code toggle. Off means the unit keeps its
-    # serial / IMEI as its only identity — no code is minted for it.
-    wants_code = codeformat.is_code_tracked(item, config)
-
     for serial in serials:
         serial.batch_id = task.batch_id or receipt_item.batch_id or serial.batch_id
         serial.warehouse_id = task.warehouse_id
         serial.bin_id = target.id
         serial.status = SerialStatus.AVAILABLE.value
         serial.lot_no = task.lot_no
-        if not wants_code:
-            continue
+    await _code_serial_rows(db, serials, item=item, warehouse_id=task.warehouse_id)
+
+
+async def _is_countable(db: AsyncSession, item) -> bool:
+    """Whether this item's stock is made of units that can each carry a code.
+
+    Grams of cotton and litres of spirit cannot: a code names ONE physical thing and
+    there is no "one" in a continuous measure. 30 grams is a single lot, not 30 things
+    to label. Those get one code on the LOT instead — see `_code_lot`.
+
+    This is the same rule `scripts/inventory_reconcile.py` applies when it strips
+    `is_serial_tracked` off measured items and deactivates the per-unit rows that flag
+    produced. Enforcing it here is what stops those rows being minted again.
+
+    An item with no unit reads as countable, which is what this did before the check
+    existed — an unset field must not silently stop goods being coded.
+    """
+    uom_id = getattr(item, "uom_id", None)
+    if not uom_id:
+        return True
+    uom = await db.get(Uom, uom_id)
+    return (getattr(uom, "uom_class", None) or "").upper() in _COUNTABLE_UOM_CLASSES
+
+
+async def _code_lot(
+    db: AsyncSession,
+    stock,
+    *,
+    item,
+    warehouse_id: int | None,
+    config: dict | None = None,
+) -> None:
+    """One asset / consumable code for a lot whose units cannot each carry one.
+
+    A continuous item is one `stk_balance` row and no unit rows, so its identity has
+    to live on the lot. Same formula, rendered against the balance row id — which is
+    what `scripts/backfill_codes_and_prices.code_unserialised_lots` did for the stock
+    that predates this, so old and new lots read the same.
+
+    Never re-stamped, and never below the top rung, for the reasons in
+    `_place_unit_codes`.
+    """
+    if stock is None or item is None:
+        return
+    if stock.asset_code or stock.consumable_code:
+        return
+    warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
+    if stock_locations.tier_of(getattr(warehouse, "warehouse_type", None)) \
+            is not stock_locations.LocationTier.WAREHOUSE:
+        return
+    config = config or await codeformat.code_settings(db)
+    if not codeformat.is_code_tracked(item, config):
+        return
+    # The formula runs off the row id, so the lot must exist before it can be named.
+    if stock.id is None:
+        await db.flush()
+    is_asset = bool(getattr(item, "is_asset", False))
+    code = await codeformat.unit_code(
+        db, item=item, is_asset=is_asset, seq=stock.id,
+        warehouse_code=getattr(warehouse, "code", None), config=config,
+    )
+    if is_asset:
+        stock.asset_code, stock.consumable_code = code, None
+    else:
+        stock.consumable_code, stock.asset_code = code, None
+    await db.flush()
+
+
+async def _code_serial_rows(
+    db: AsyncSession,
+    serials: list[m.SerialNumber],
+    *,
+    item,
+    warehouse_id: int | None,
+    config: dict | None = None,
+) -> None:
+    """Stamp the asset / consumable code onto units that already have their rows.
+
+    Split out of `_place_serials` so the bulk-receipt path can call it: a stocking
+    point with no bins never reaches a putaway, and its units were left uncoded.
+    """
+    if not serials:
+        return
+    is_asset = bool(getattr(item, "is_asset", False)) if item else False
+    warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
+    config = config or await codeformat.code_settings(db)
+    # The item master's asset/consumable-code toggle. Off means the unit keeps its
+    # serial / IMEI as its only identity — no code is minted for it.
+    if not codeformat.is_code_tracked(item, config):
+        await db.flush()
+        return
+
+    for serial in serials:
         code = await codeformat.unit_code(
             db, item=item, is_asset=is_asset,
             serial=serial.serial_number, seq=serial.id,
             warehouse_code=getattr(warehouse, "code", None), config=config,
         )
         # Never re-stamped: a unit's code is on its label and in every document that
-        # has already quoted it, so changing the formula only affects units put away
+        # has already quoted it, so changing the formula only affects units received
         # from now on.
         if is_asset:
             serial.asset_code = serial.asset_code or code
@@ -2610,11 +2785,15 @@ async def _place_serials(
 
 async def _place_unit_codes(
     db: AsyncSession,
-    task: m.PutawayTask,
-    target: Bin,
+    *,
+    item_id: int,
+    warehouse_id: int | None,
+    batch_id: int | None,
+    bin_id: int | None,
+    lot_no: str | None,
     qty,
 ) -> None:
-    """Gives every UNIT of an unserialised putaway its own asset/consumable code.
+    """Gives every UNIT of an unserialised receipt its own asset/consumable code.
 
     A code names one physical thing. Before this, a line of 30 produced one row in
     `whs_serial_numbers` at best and usually none, so the issue screen offered a
@@ -2635,16 +2814,21 @@ async def _place_unit_codes(
 
     Serial-tracked items are left alone: their units are named by `_place_serials`
     and re-coding them here would create a second row for the same physical thing.
-    Fractional quantities are skipped — half a litre of oil is not a unit.
+    Continuous units (`_is_countable`) and fractional quantities are skipped — half a
+    litre of oil is not a unit; that stock is named one lot at a time by `_code_lot`.
     """
-    item = await db.get(Item, task.item_id)
+    item = await db.get(Item, item_id)
     if item is None or bool(getattr(item, "is_serial_tracked", False)):
         return
-    units = _d(qty) if qty is not None else _d(task.qty)
+    # Grams and litres have no unit to name. Guarded here as well as at the caller so
+    # the putaway route cannot mint 30 rows for 30 grams of cotton either.
+    if not await _is_countable(db, item):
+        return
+    units = _d(qty)
     if units <= ZERO or units != units.to_integral_value():
         return
 
-    warehouse = await db.get(Warehouse, task.warehouse_id) if task.warehouse_id else None
+    warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
     tier = stock_locations.tier_of(getattr(warehouse, "warehouse_type", None))
     if tier is not stock_locations.LocationTier.WAREHOUSE:
         return
@@ -2667,9 +2851,9 @@ async def _place_unit_codes(
             # ran — the 500 storekeepers hit confirming an inward. The placeholder only
             # has to survive one flush before the real code replaces it below, so it is
             # made unique per row and marked so a stray one is recognisable.
-            item_id=task.item_id, serial_number=f"~PENDING-{uuid4().hex}",
-            batch_id=task.batch_id or None, warehouse_id=task.warehouse_id,
-            bin_id=target.id, lot_no=task.lot_no,
+            item_id=item_id, serial_number=f"~PENDING-{uuid4().hex}",
+            batch_id=batch_id or None, warehouse_id=warehouse_id,
+            bin_id=bin_id, lot_no=lot_no,
             status=SerialStatus.AVAILABLE.value, is_active=True,
         )
         db.add(row)
@@ -2686,7 +2870,7 @@ async def _place_unit_codes(
         code.strip().lower()
         for code in (await db.execute(
             select(m.SerialNumber.serial_number)
-            .where(m.SerialNumber.item_id == task.item_id,
+            .where(m.SerialNumber.item_id == item_id,
                    m.SerialNumber.id.notin_([row.id for row in rows]))
         )).scalars()
         if code
@@ -2878,7 +3062,7 @@ async def create_stock_movement(
         item_id=item.id,
         qty=data.quantity,
         direction=StockDirection.OUT.value,
-        ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
+        ref_type=InventoryRefType.STOCK_MOVEMENT.value,
         ref_id=0,
         ref_no=movement_no,
         user=user,
@@ -2892,7 +3076,7 @@ async def create_stock_movement(
         item_id=item.id,
         qty=data.quantity,
         direction=StockDirection.IN.value,
-        ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
+        ref_type=InventoryRefType.STOCK_MOVEMENT.value,
         ref_id=0,
         ref_no=movement_no,
         user=user,
@@ -2950,16 +3134,56 @@ async def create_stock_movement(
 
 async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
                                      search: str | None = None) -> dict:
-    from app.modules.warehouse.models import StockMovementOrder
+    """Multi-line bin-to-bin movements, rebuilt from the ledger.
 
-    stmt = select(StockMovementOrder)
+    There is no header table. `whs_stock_movement_orders` and its items table were
+    mapped and queried but have never existed on this database, so both endpoints
+    answered 1054. They are not needed: every line of a movement already writes its
+    OUT and IN through `move_stock` under one `ref_no` drawn from `sys_doc_series`,
+    which is what makes it one document — the same way `list_stock_movements` reads
+    the single-line version back. A second copy of the same fact could only drift
+    from `stk_ledger`, and the ledger is the append-only record (rule 7).
+    """
+    from app.modules.inventory.models import StockMovement
+
+    grouped = (
+        select(
+            StockMovement.ref_no.label("order_no"),
+            func.max(StockMovement.id).label("last_id"),
+            func.max(StockMovement.warehouse_id).label("warehouse_id"),
+            func.max(StockMovement.warehouse_name).label("warehouse_name"),
+            func.count().label("total_lines"),
+            func.max(StockMovement.created_at).label("created_at"),
+            func.max(StockMovement.created_by_name).label("created_by_name"),
+            func.max(StockMovement.remarks).label("reason"),
+        )
+        .where(StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
+               StockMovement.direction == StockDirection.OUT.value)
+        .group_by(StockMovement.ref_no)
+    )
     if search:
         like = f"%{search}%"
-        stmt = stmt.where(or_(
-            StockMovementOrder.order_no.ilike(like),
-            StockMovementOrder.warehouse_name.ilike(like)))
-    stmt = stmt.order_by(StockMovementOrder.id.desc())
-    return await _page_or_empty(db, stmt, params, "whs_stock_movement_orders")
+        grouped = grouped.having(or_(
+            StockMovement.ref_no.ilike(like),
+            func.max(StockMovement.warehouse_name).ilike(like)))
+    grouped = grouped.order_by(func.max(StockMovement.id).desc())
+
+    total = await db.scalar(select(func.count()).select_from(grouped.subquery()))
+    rows = (await db.execute(
+        grouped.offset(params.offset).limit(params.size))).all()
+    return {
+        "items": [{
+            "order_no": r.order_no,
+            "warehouse_id": r.warehouse_id,
+            "warehouse_name": r.warehouse_name,
+            "total_lines": r.total_lines,
+            "status": "COMPLETED",
+            "reason": r.reason,
+            "created_by_name": r.created_by_name,
+            "created_at": r.created_at,
+        } for r in rows],
+        "total": total or 0, "page": params.page, "size": params.size,
+    }
 
 
 async def create_stock_movement_order(
@@ -2967,23 +3191,18 @@ async def create_stock_movement_order(
     data: s.StockMovementOrderWrite,
     user,
 ) -> dict:
+    """Move several items between bins as one numbered document.
+
+    The document IS its `ref_no`: one number from `sys_doc_series`, carried onto every
+    ledger row the lines write. No header row is stored — see
+    `list_stock_movement_orders` for why — so `ref_id` is 0 rather than a foreign key
+    to a table that does not exist.
+    """
     from app.modules.inventory.models import Stock
-    from app.modules.warehouse.models import StockMovementOrder, StockMovementOrderItem
 
     wh = await _warehouse(db, data.warehouse_id)
     order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT.value)
-
-    order = StockMovementOrder(
-        order_no=order_no,
-        warehouse_id=wh.id,
-        warehouse_name=wh.name,
-        status="COMPLETED",
-        reason=data.reason,
-        created_by_id=getattr(user, "id", None),
-        created_by_name=_name(user)
-    )
-    db.add(order)
-    await db.flush()
+    moved: list[dict] = []
 
     for line in data.items:
         source = await _get(db, Bin, line.source_bin_id, "Source bin")
@@ -3047,28 +3266,13 @@ async def create_stock_movement_order(
         elif serial_numbers:
             raise ValidationError(f"{item.code} is not serial tracked")
 
-        # Create movement order item
-        order_item = StockMovementOrderItem(
-            order_id=order.id,
-            item_id=item.id,
-            item_code=item.code,
-            item_name=item.name,
-            uom_code=item.uom_code,
-            batch_id=batch_id,
-            source_bin_id=source.id,
-            destination_bin_id=destination.id,
-            quantity=line.quantity,
-            serial_numbers=",".join(serial_numbers) if serial_numbers else None
-        )
-        db.add(order_item)
-
         await move_stock(
             db,
             item_id=item.id,
             qty=line.quantity,
             direction=StockDirection.OUT.value,
-            ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
-            ref_id=order.id,
+            ref_type=InventoryRefType.STOCK_MOVEMENT.value,
+            ref_id=0,
             ref_no=order_no,
             user=user,
             warehouse_id=wh.id,
@@ -3081,8 +3285,8 @@ async def create_stock_movement_order(
             item_id=item.id,
             qty=line.quantity,
             direction=StockDirection.IN.value,
-            ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
-            ref_id=order.id,
+            ref_type=InventoryRefType.STOCK_MOVEMENT.value,
+            ref_id=0,
             ref_no=order_no,
             user=user,
             warehouse_id=wh.id,
@@ -3093,6 +3297,19 @@ async def create_stock_movement_order(
         for row in serial_rows:
             row.bin_id = destination.id
             row.remarks = f"Moved by {order_no}"
+        moved.append({
+            "item_id": item.id,
+            "item_code": item.code,
+            "item_name": item.name,
+            "uom_code": item.uom_code,
+            "batch_id": line.batch_id or None,
+            "source_bin_id": source.id,
+            "source_bin_code": source.code,
+            "destination_bin_id": destination.id,
+            "destination_bin_code": destination.code,
+            "quantity": line.quantity,
+            "serial_numbers": serial_numbers,
+        })
 
     await write_audit(
         db,
@@ -3108,23 +3325,32 @@ async def create_stock_movement_order(
         },
     )
     await db.commit()
-    
-    # Reload with items
-    return await _load(db, StockMovementOrder, order.id, "Stock Movement Order", StockMovementOrder.items)
+
+    return {
+        "order_no": order_no,
+        "warehouse_id": wh.id,
+        "warehouse_name": wh.name,
+        "status": "COMPLETED",
+        "reason": data.reason,
+        "total_lines": len(moved),
+        "items": moved,
+        "created_by_name": _name(user),
+        "created_at": utcnow(),
+    }
 
 
 async def list_stock_movements(db: AsyncSession, params: PageParams) -> dict:
     from app.modules.inventory.models import StockMovement
 
     stmt = select(StockMovement).where(
-        StockMovement.ref_type == WarehouseDocType.STOCK_MOVEMENT.value,
+        StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
         StockMovement.direction == StockDirection.OUT.value,
     )
     page = await paginate(db, stmt.order_by(StockMovement.id.desc()), params)
     rows: list[dict] = []
     for outward in page["items"]:
         inward = await db.scalar(select(StockMovement).where(
-            StockMovement.ref_type == WarehouseDocType.STOCK_MOVEMENT.value,
+            StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
             StockMovement.ref_no == outward.ref_no,
             StockMovement.direction == StockDirection.IN.value,
         ).limit(1))
@@ -4450,6 +4676,20 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
                 await _live_issue_labels(db, served.id, wh.id),
             )
 
+        # A LIP is the bottom of the chain: everything it holds arrived against a
+        # request and everything it gives out answers one. Issuing with no indent
+        # anywhere — not on the header, not on a line — was letting stock leave a
+        # local point with nothing recording who asked for it, and the quantity cap
+        # above has nothing to measure against either. Upstream points are
+        # deliberately not held to this: a main store issues to departments, writes
+        # off scrap and moves stock for reasons no indent covers.
+        if not wanted and stock_locations.tier_of(
+            wh.warehouse_type
+        ) is stock_locations.LocationTier.LIP:
+            raise ValidationError(
+                f"{wh.name} can only issue against an indent. Pick the indent this "
+                "material is being given out for.")
+
     if not data.items:
         raise ValidationError("An issue with no lines has nothing to issue")
 
@@ -5246,7 +5486,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     await move_stock(
                         db, item_id=line.item_id, qty=stock.quantity,
                         direction=StockDirection.OUT.value,
-                        ref_type=WarehouseDocType.WH_ISSUE.value,
+                        ref_type=InventoryRefType.WH_ISSUE.value,
                         ref_id=issue.id, ref_no=issue.issue_no, user=user,
                         warehouse_id=stock.warehouse_id,
                         bin_id=stock.bin_id, batch_id=stock.batch_id,
@@ -5266,7 +5506,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     await _issue_slices(db, issue, line, qty)):
                 await move_stock_out(
                     db, item_id=line.item_id, qty=slice_qty,
-                    ref_type=WarehouseDocType.WH_ISSUE.value,
+                    ref_type=InventoryRefType.WH_ISSUE.value,
                     ref_id=issue.id, ref_no=issue.issue_no, user=user,
                     warehouse_id=issue.warehouse_id,
                     bin_id=source_bin, batch_id=source_batch,
@@ -5275,7 +5515,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
         else:
             await move_stock(
                 db, item_id=line.item_id, qty=qty, direction=direction,
-                ref_type=WarehouseDocType.WH_ISSUE.value,
+                ref_type=InventoryRefType.WH_ISSUE.value,
                 ref_id=issue.id, ref_no=issue.issue_no,
                 user=user, warehouse_id=issue.warehouse_id,
                 bin_id=line.bin_id or m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
@@ -5506,21 +5746,16 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
                       after={"status": indent.status})
 
 
-async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None,
-                            user) -> m.MaterialIssue:
-    issue = await get_issue(db, issue_id)
-    # DISPATCHED is the same open state as ISSUED — gate-out only records that the
-    # goods left the gate, the receiver still has to acknowledge them.
-    _guard(issue.status, {IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value},
-           "acknowledge", "issue")
-    # Hiding the button is not the control (rule 6) — the raiser's confirmation is.
-    if not await _receiver_confirmed(db, issue):
-        raise ValidationError(
-            f"{issue.issue_no} has not been confirmed by the requester yet. They "
-            "record what reached them in My Deliveries; this signs off on that.")
-    before_status = issue.status
+async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
+                                       by_name: str | None, remarks: str | None,
+                                       user) -> None:
+    """Sign the issue off and carry the signature onto what it was attached to.
+
+    Does not commit and writes no audit row: both callers are mid-transaction and own
+    their own audit trail.
+    """
     issue.status = IssueStatus.ACKNOWLEDGED.value
-    issue.acknowledged_by_name = _name(user)
+    issue.acknowledged_by_name = by_name
     issue.acknowledged_at = utcnow()
     if remarks:
         issue.remarks = f"{issue.remarks or ''}\nReceiver: {remarks}".strip()
@@ -5538,14 +5773,75 @@ async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None
         dispatch.acknowledged_at = issue.acknowledged_at
         dispatch.delivered_at = dispatch.delivered_at or issue.acknowledged_at
         # The requester has already confirmed every quantity carried by this issue
-        # (_receiver_confirmed is the guard above). Keep the linked consignment's line
-        # evidence in sync when the warehouse signs off through the issue page —
+        # (_receiver_confirmed is the caller's guard). Keep the linked consignment's
+        # line evidence in sync when the warehouse signs off through the issue page —
         # without it `out_dispatch_items.delivered_qty` stays 0 forever, and the
         # Journey's Delivery phase sits PENDING on an indent that is already closed.
         for line in dispatch.items:
             line.delivered_qty = _d(line.quantity)
 
     await _close_indents_on_issue(db, issue, user)
+
+
+async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
+                                      user) -> list[str]:
+    """Sign off every open issue serving this indent that the raiser has now confirmed.
+
+    The warehouse used to click Acknowledge a second time after the requester had
+    already recorded what reached them in My Deliveries — the same fact, entered
+    twice, with the indent sitting open until somebody remembered the second click.
+    `_receiver_confirmed` was always the real test, so the moment it passes the issue
+    signs itself off in the requester's name.
+
+    Called from `indents.acknowledge_receipt` inside its transaction, so this neither
+    commits nor audits: the receipt that made the confirmation true and the
+    acknowledgement it triggers have to land together or not at all. Returns the issue
+    numbers it closed, for the caller's audit row.
+    """
+    from app.modules.indents.models import IndentItem
+
+    line_issues = select(m.MaterialIssueLine.issue_id).join(
+        IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id
+    ).where(IndentItem.indent_id == indent_id)
+
+    # Eager-loaded: `_receiver_confirmed` walks `issue.items`, and a lazy load on an
+    # async session raises MissingGreenlet.
+    issues = (await db.execute(
+        select(m.MaterialIssue)
+        .options(selectinload(m.MaterialIssue.items))
+        .where(
+            m.MaterialIssue.status.in_(
+                (IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value)),
+            or_(m.MaterialIssue.indent_id == indent_id,
+                m.MaterialIssue.id.in_(line_issues)),
+        )
+    )).scalars().all()
+
+    signed: list[str] = []
+    for issue in issues:
+        # A consolidated issue serves several indents. Only the one whose raiser has
+        # confirmed everything it carried is settled — the rest keep it open.
+        if not await _receiver_confirmed(db, issue):
+            continue
+        await _apply_issue_acknowledgement(db, issue, _name(user), None, user)
+        signed.append(issue.issue_no)
+    return signed
+
+
+async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None,
+                            user) -> m.MaterialIssue:
+    issue = await get_issue(db, issue_id)
+    # DISPATCHED is the same open state as ISSUED — gate-out only records that the
+    # goods left the gate, the receiver still has to acknowledge them.
+    _guard(issue.status, {IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value},
+           "acknowledge", "issue")
+    # Hiding the button is not the control (rule 6) — the raiser's confirmation is.
+    if not await _receiver_confirmed(db, issue):
+        raise ValidationError(
+            f"{issue.issue_no} has not been confirmed by the requester yet. They "
+            "record what reached them in My Deliveries; this signs off on that.")
+    before_status = issue.status
+    await _apply_issue_acknowledgement(db, issue, _name(user), remarks, user)
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -6008,7 +6304,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         delivery_address=data.delivery_address or destination_office_name,
         contact_person=data.contact_person,
         contact_phone=data.contact_phone,
-        ref_type=WarehouseDocType.WH_ISSUE.value,
+        ref_type=InventoryRefType.WH_ISSUE.value,
         ref_id=issue.id,
         ref_no=issue.issue_no,
         transport_mode=data.transport_mode,
@@ -6450,7 +6746,7 @@ async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
                 continue
             await move_stock_out(
                 db, item_id=line.item_id, qty=qty,
-                ref_type=WarehouseDocType.DISPATCH.value, ref_id=dispatch.id,
+                ref_type=InventoryRefType.DISPATCH.value, ref_id=dispatch.id,
                 ref_no=dispatch.dispatch_no, user=user,
                 warehouse_id=dispatch.warehouse_id,
                 batch_id=line.batch_id,
@@ -6589,9 +6885,14 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
     # Unless the destination inwarded it itself. A point that ran the consignment
     # through GRN and QC has already posted exactly what it kept; crediting the
     # dispatch again here would double the stock.
+    # Or unless the destination is a point that RUNS a receiving desk. There the
+    # signature on the lorry is not the stock event — the GRN is — so crediting here
+    # would put the goods on the shelf before anyone inspected them.
     inwarded = await _inward_receipt_for_dispatch(db, dispatch.id) is not None
+    inward_first = await requires_inward(db, dispatch.to_warehouse_id)
 
-    if dispatch.dispatch_type == DispatchType.TRANSFER.value and not inwarded:
+    if (dispatch.dispatch_type == DispatchType.TRANSFER.value
+            and not inwarded and not inward_first):
         if not dispatch.to_warehouse_id:
             raise ValidationError("A transfer dispatch has no destination warehouse")
         for line in dispatch.items:
@@ -6601,7 +6902,7 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
             await move_stock(
                 db, item_id=line.item_id, qty=delivered,
                 direction=StockDirection.IN.value,
-                ref_type=WarehouseDocType.DISPATCH.value, ref_id=dispatch.id,
+                ref_type=InventoryRefType.DISPATCH.value, ref_id=dispatch.id,
                 ref_no=dispatch.dispatch_no, user=user,
                 warehouse_id=dispatch.to_warehouse_id,
                 bin_id=m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
@@ -6911,7 +7212,7 @@ async def complete_return(db: AsyncSession, return_id: int, credit_note_no: str 
             continue
         await move_stock_out(
             db, item_id=line.item_id, qty=qty,
-            ref_type=WarehouseDocType.PURCHASE_RETURN.value, ref_id=doc.id,
+            ref_type=InventoryRefType.PURCHASE_RETURN.value, ref_id=doc.id,
             ref_no=doc.return_no, user=user,
             warehouse_id=doc.warehouse_id,
             batch_id=line.batch_id,
@@ -7026,6 +7327,17 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
             warehouse_ids=await warehouse_ids_for_user(db, user),
         ))
 
+    # Which of these items the master says actually carry a per-unit identity. A unit
+    # row for a MEASURED item (cotton in grams, spirit in litres) still holds a real
+    # putaway code — the label on the package a storekeeper shelved — but its serial
+    # number is an artefact: you cannot serialise a gram. `serial_number` is UNIQUE and
+    # NOT NULL on the table, so the artefact cannot be blanked in place; it is
+    # suppressed here instead, which keeps the row's key and its code intact.
+    tracked = {r[0] for r in (await db.execute(
+        select(Item.id).where(Item.id.in_(item_ids),
+                              Item.is_serial_tracked.is_(True))
+    )).all()}
+
     # Keyed down to the BIN and the BATCH, not just the stocking point: "which units
     # are in this bin" is the question the stock screens are actually asked, and one
     # warehouse holds the same item in several bins. The caller indexes the result
@@ -7042,9 +7354,9 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
         })
         bucket["count"] += 1
         # Five is enough to recognise the lot; the rest are behind the detail panel.
-        if serial and len(bucket["serials"]) < 5:
+        if serial and item_id in tracked and len(bucket["serials"]) < 5:
             bucket["serials"].append(serial)
-        if imei and len(bucket["imeis"]) < 5:
+        if imei and item_id in tracked and len(bucket["imeis"]) < 5:
             bucket["imeis"].append(imei)
         code = asset or consumable
         if code and len(bucket["codes"]) < 5:
@@ -7951,7 +8263,12 @@ async def warehouse_options(db: AsyncSession, *, mine_only: bool = False,
         if allowed is not None:
             stmt = stmt.where(Warehouse.id.in_(allowed or {0}))
     rows = (await db.execute(stmt.order_by(Warehouse.code))).scalars().all()
-    return [{"id": r.id, "code": r.code, "name": r.name, "is_bin_managed": r.is_bin_managed} for r in rows]
+    # `warehouse_type` rides along so a form can tell an MDP or LIP from a main store
+    # without a second round trip — the GRN screen hides purchase-order and vendor
+    # fields, and trims its receipt types, at the bottom of the chain.
+    return [{"id": r.id, "code": r.code, "name": r.name,
+             "is_bin_managed": r.is_bin_managed,
+             "warehouse_type": r.warehouse_type} for r in rows]
 
 
 async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = None,
@@ -8123,10 +8440,13 @@ async def incoming_dispatch_options(
     )
     # A transfer that was acknowledged has already been credited to this point by
     # `acknowledge_dispatch`, so offering it here would only lead to a rejection.
-    stmt = stmt.where(or_(
-        m.Dispatch.dispatch_type != DispatchType.TRANSFER.value,
-        m.Dispatch.status != DispatchStatus.ACKNOWLEDGED.value,
-    ))
+    # A point that runs a receiving desk is the exception: acknowledgement there
+    # credited nothing, so the acknowledged lorry is precisely what it came to inward.
+    if not await requires_inward(db, warehouse_id):
+        stmt = stmt.where(or_(
+            m.Dispatch.dispatch_type != DispatchType.TRANSFER.value,
+            m.Dispatch.status != DispatchStatus.ACKNOWLEDGED.value,
+        ))
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(
@@ -8189,13 +8509,63 @@ async def dispatch_receipt_source(
         )).scalars().all()
     } if tracked_item_ids else {}
 
-    items = []
-    for line in dispatch.items:
+    items = _group_dispatch_lines(dispatch.items, serial_batch, batches, tracking)
+
+    return {
+        "dispatch_id": dispatch.id,
+        "dispatch_no": dispatch.dispatch_no,
+        "warehouse_id": wh.id,
+        "warehouse_name": wh.name,
+        "is_bin_managed": wh.is_bin_managed,
+        "from_warehouse_id": dispatch.warehouse_id,
+        "from_warehouse_name": dispatch.warehouse_name,
+        "project_id": dispatch.project_id,
+        "dispatch_date": dispatch.dispatch_date,
+        "lr_no": dispatch.lr_no,
+        "vehicle_number": dispatch.vehicle_number,
+        "indent_id": indent_id,
+        "indent_no": indent_no,
+        "items": items,
+    }
+
+
+def _group_dispatch_lines(lines, serial_batch: dict[str, int], batches: dict,
+                          tracking: dict) -> list[dict]:
+    """The consignment's lines, one row per item rather than one per unit.
+
+    A serialised item leaves the gate as one `out_dispatch_items` row PER UNIT — ten
+    handsets are ten lines of qty 1 — and rendering those straight put ten rows of 1
+    on the receiver's GRN, which he then inwarded as ten separate stock lines. The
+    units are still named individually; they are collected onto the line they belong
+    to instead of each becoming a line of its own.
+
+    Batch is part of the key: two batches of the same item are two things to receive,
+    with their own expiry, and must not be added together. So is the indent, because
+    a consolidated consignment serving two requests owes each of them separately.
+
+    Pure, and separate from the query above, so the grouping can be tested without a
+    database — it is the part that was wrong.
+    """
+    items: list[dict] = []
+    grouped: dict[tuple, dict] = {}
+    for line in lines:
         batch_id = line.batch_id if (
             line.batch_id and line.batch_id != m.NO_BATCH
         ) else serial_batch.get(line.serial_no or "")
         batch = batches.get(batch_id) if batch_id else None
-        items.append({
+        key = (line.item_id, batch_id or 0, line.batch_no or "", line.indent_id or 0)
+        existing = grouped.get(key)
+        if existing is not None:
+            for field in ("ordered_qty", "received_qty", "accepted_qty"):
+                existing[field] = _d(existing[field]) + _d(line.quantity)
+            if line.serial_no:
+                existing["serial_numbers"] = (existing["serial_numbers"] or []) + [
+                    line.serial_no]
+            if line.imei_no:
+                existing["imei_numbers"] = (existing["imei_numbers"] or []) + [
+                    line.imei_no]
+            continue
+        row = {
             "item_id": line.item_id,
             # The snapshot the consignment carries. Without these the inward form had
             # an item id and nothing to show for it, so every line rendered as the
@@ -8227,24 +8597,11 @@ async def dispatch_receipt_source(
                 getattr(tracking.get(line.item_id), "is_serial_tracked", False)),
             "is_imei_tracked": bool(
                 getattr(tracking.get(line.item_id), "is_imei_tracked", False)),
-        })
+        }
+        grouped[key] = row
+        items.append(row)
 
-    return {
-        "dispatch_id": dispatch.id,
-        "dispatch_no": dispatch.dispatch_no,
-        "warehouse_id": wh.id,
-        "warehouse_name": wh.name,
-        "is_bin_managed": wh.is_bin_managed,
-        "from_warehouse_id": dispatch.warehouse_id,
-        "from_warehouse_name": dispatch.warehouse_name,
-        "project_id": dispatch.project_id,
-        "dispatch_date": dispatch.dispatch_date,
-        "lr_no": dispatch.lr_no,
-        "vehicle_number": dispatch.vehicle_number,
-        "indent_id": indent_id,
-        "indent_no": indent_no,
-        "items": items,
-    }
+    return items
 
 
 async def indent_options(
@@ -8760,10 +9117,9 @@ DRAFT_KINDS: dict[str, _Draft] = {
         m.PurchaseReturn, "pro_returns", "return_no",
         {ReturnStatus.DRAFT.value}, "purchase return",
     ),
-    "movement": _Draft(
-        m.StockMovementOrder, "whs_stock_movement_orders", "order_no",
-        {"DRAFT"}, "stock movement order",
-    ),
+    # No "movement" entry: a bin-to-bin movement posts its stock as it is created and
+    # is COMPLETED the moment it exists, so there has never been a draft to discard —
+    # and there is no header row to delete. Undoing one means moving the stock back.
 }
 
 

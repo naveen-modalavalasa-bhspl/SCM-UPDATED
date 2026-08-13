@@ -158,6 +158,15 @@ def map_office(row: dict) -> dict:
     }
 
 
+def office_sac(row: dict | None) -> str | None:
+    """HCM's `sac` on an office — the service area code the place serves (`RO-104`,
+    `AP-104-DO-012`). Read from `hcm_offices.raw` on display, never snapshotted: no
+    column holds it, and an office that is re-coded should show its current code.
+    None for offices HCM holds no SAC for."""
+    value = (row or {}).get("sac")
+    return str(value).strip() or None if value else None
+
+
 def map_facility_type(row: dict) -> dict:
     return {
         "id": row.get("id"),

@@ -69,6 +69,10 @@ const toBalance = (r: StockRow): StockBalanceItem => ({
   warehouse_id: r.warehouse_id,
   warehouse_name: r.warehouse_name ?? "",
   uom_code: r.uom_code ?? "",
+  // Both, and for different jobs: the CODE is the stored identity every document and
+  // export is keyed on, the NAME is what the grid prints. The six oldest UOM masters
+  // carry their prefix inside the code, so printing the code read as "12 UOM-GMS".
+  uom_name: r.uom_name ?? undefined,
   physical_qty: num(r.total_qty),
   reserved_qty: num(r.reserved_qty),
   transit_qty: num(r.transit_qty),
@@ -158,10 +162,19 @@ export const getSerialSummary = (itemIds: number[], warehouseIds: number[]) =>
         })
         .then((r) => r.data.items);
 
-/** Index a summary under every key a caller might hold, most specific first:
- * item+warehouse+bin+batch, then item+warehouse+bin, then item+warehouse. A serial
- * row that has no bin yet (most of the live data) still answers for its lot, and a
- * binned one answers the narrower question "what is standing in THIS bin". */
+/** "Not placed", written the same way on both sides of the join. `stk_balance` says 0
+ * for bulk (NO_BIN / NO_BATCH); `whs_serial_numbers` says NULL. Keyed literally, a bulk
+ * lot asks for `:0:0` while its own units are filed under `::` and never finds them. */
+export const unplaced = (v?: number | null) => (v ? String(v) : "");
+
+/** Index a summary under the keys that HONESTLY describe it, most specific first:
+ * item+warehouse+bin+batch, then item+warehouse+bin, then item+warehouse.
+ *
+ * A row only rolls up into a coarser bucket when it genuinely lacks that dimension.
+ * Rolling every row up unconditionally is what let a lot with no units of its own
+ * display another lot's: 20 unplaced units at a point were offered to a 10 gram lot
+ * standing in BINA1, which reported "20 units in lot" over a quantity of 10. A unit
+ * that is in a bin belongs to that bin's lot and to no other. */
 export const indexSerials = (rows: SerialSummaryRow[]) => {
   const byKey = new Map<string, SerialSummaryRow>();
   const merge = (key: string, row: SerialSummaryRow) => {
@@ -173,9 +186,10 @@ export const indexSerials = (rows: SerialSummaryRow[]) => {
     seen.codes = seen.codes.concat(row.codes).slice(0, 5);
   };
   for (const r of rows) {
-    merge(`${r.item_id}:${r.warehouse_id}:${r.bin_id ?? ""}:${r.batch_id ?? ""}`, r);
-    merge(`${r.item_id}:${r.warehouse_id}:${r.bin_id ?? ""}`, r);
-    merge(`${r.item_id}:${r.warehouse_id}`, r);
+    const bin = unplaced(r.bin_id), batch = unplaced(r.batch_id);
+    merge(`${r.item_id}:${r.warehouse_id}:${bin}:${batch}`, r);
+    if (!batch) merge(`${r.item_id}:${r.warehouse_id}:${bin}`, r);
+    if (!bin && !batch) merge(`${r.item_id}:${r.warehouse_id}`, r);
   }
   return byKey;
 };

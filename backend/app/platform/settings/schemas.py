@@ -66,6 +66,17 @@ class FallbackSettings(BaseModel):
     allow_auto_admin_fallback: bool = True
 
 
+class WarehouseSettings(BaseModel):
+    """What a stocking point does when a consignment arrives, company-wide.
+
+    Only the fallback lives here: a point that has answered for itself (the
+    `requires_inward` flag on the warehouse master) always wins. False — the
+    receiver signs for the lorry and the stock is credited there and then — is what
+    the code did before the policy existed, so it stays the default.
+    """
+    requires_inward_default: bool = False
+
+
 class CodeFormatSettings(BaseModel):
     """How an asset / consumable code is built at putaway.
 
@@ -117,6 +128,7 @@ class SettingsOut(BaseModel):
     numbering: NumberingSettings = Field(default_factory=NumberingSettings)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     fallback: FallbackSettings = Field(default_factory=FallbackSettings)
+    warehouse: WarehouseSettings = Field(default_factory=WarehouseSettings)
     # `codes` is deliberately NOT here. It has its own endpoints and its own
     # permission, so editing the company address cannot re-shape every asset code.
 
