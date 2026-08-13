@@ -43,8 +43,8 @@ PAGES = [
     ("wh_consignments", "/warehouse/dispatch/consignments", "Consignments", "boxes",
      P.DISPATCH_VIEW, 48),
     ("wh_dispatch", "/warehouse/dispatch", "Dispatch", "truck", P.DISPATCH_VIEW, 49),
-    ("wh_returns", "/warehouse/purchase-returns", "Purchase Returns", "rotate-ccw",
-     P.RETURN_VIEW, 50),
+    # Purchase Returns was dropped from the module on 2026-08-13 — the screen is gone
+    # and nothing routes to /warehouse/purchase-returns.
     ("wh_notifications", "/warehouse/notifications", "Notifications", "bell",
      P.STOCK_VIEW, 51),
     ("wh_reports", "/warehouse/reports", "Reports", "bar-chart",

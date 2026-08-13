@@ -625,8 +625,11 @@ def vendor_item_out(row: VendorItem) -> dict:
             "vendor_code": row.vendor.code if row.vendor else None,
             "item_code": row.item_code, "item_name": row.item_name,
             "vendor_item_code": row.vendor_item_code,
-            "last_rate": row.last_rate, "lead_time_days": row.lead_time_days,
-            "min_order_qty": row.min_order_qty,
+            # _num, not the raw Decimal: this dict is written into the audit row's
+            # JSON column, and json.dumps has no encoder for Decimal — importing
+            # vendor items died on the first row that carried a rate or an MOQ.
+            "last_rate": _num(row.last_rate), "lead_time_days": row.lead_time_days,
+            "min_order_qty": _num(row.min_order_qty),
             "is_preferred": row.is_preferred}
 
 

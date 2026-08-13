@@ -174,10 +174,38 @@ class ConditionLogic(str, Enum):
 
 
 class RefType(str, Enum):
-    GRN = "GRN"
+    """What kind of document a `stk_ledger` row (or an `inv_reservations` hold) was
+    written for. The complete vocabulary of that column, in one place.
+
+    It was partial, so three modules each wrote their own spelling: warehouse passed
+    `WarehouseDocType.RECEIPT/WH_ISSUE/...` and inventory passed the bare literals
+    "STO" and "CYCLE_COUNT". Every value below is the string ALREADY STORED for that
+    document type — naming them changes no row and no filter, it only stops the next
+    caller inventing a twelfth spelling that no screen reads.
+
+    GRN and RECEIPT are BOTH here and both mean goods received. `logistics` wrote GRN
+    (2,487 rows, almost all the opening-stock load) and `warehouse`, which superseded
+    it, writes RECEIPT (94). Converging them is a data migration over stored history,
+    not an enum edit, so both stay valid until that is deliberately run.
+
+    Not to be confused with `warehouse.enums.RefType`, which is a different column —
+    what a PICKLIST or DISPATCH was raised against (INDENT/ISSUE/DISPATCH/PO).
+    """
+    # Inward
+    GRN = "GRN"                          # legacy spelling, written by logistics
+    RECEIPT = "RECEIPT"                  # current spelling, written by warehouse
+    # Outward
     ISSUE = "ISSUE"
+    WH_ISSUE = "WH_ISSUE"
+    DISPATCH = "DISPATCH"
+    PURCHASE_RETURN = "PURCHASE_RETURN"
+    # Internal — no goods enter or leave the company
+    TRANSFER = "TRANSFER"                # point to point
+    STO = "STO"                          # stock transfer order
+    STOCK_MOVEMENT = "STOCK_MOVEMENT"    # bin to bin inside one warehouse
     ADJUSTMENT = "ADJUSTMENT"
-    TRANSFER = "TRANSFER"
+    CYCLE_COUNT = "CYCLE_COUNT"
+    # Not a movement: the hold recorded on inv_reservations.
     RESERVATION = "RESERVATION"
 
 

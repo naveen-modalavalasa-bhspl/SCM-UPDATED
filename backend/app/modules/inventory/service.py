@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation, availability, locations
-from app.modules.inventory.enums import AdjustmentStatus, STOStatus
+from app.modules.inventory.enums import AdjustmentStatus, CycleCountStatus, STOStatus
 from app.modules.inventory.models import (
     NO_BATCH, NO_BIN, NO_PROJECT, MaterialRequest, MaterialRequestItem, Stock,
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
@@ -333,8 +333,14 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     if new_balance < 0:
         raise ValidationError("Insufficient stock for this movement")
     stock.available_qty = new_balance
-    # total = what is on hand, including what is spoken for but not yet issued.
-    stock.total_qty = new_balance + (stock.reserved_qty or Decimal("0"))
+    # total = what is on hand: free, spoken for but not yet issued, and in flight.
+    # `transit_qty` was left out of this sum, so anything that ever set it would have
+    # watched the quantity vanish from `total_qty` on the very next movement — while
+    # `get_item_availability` went on reporting it. Nothing writes transit today, so
+    # this is the latent case being closed, not a live correction.
+    stock.total_qty = (new_balance
+                       + (stock.reserved_qty or Decimal("0"))
+                       + (stock.transit_qty or Decimal("0")))
     stock.last_movement_at = utcnow()
 
     unit_cost = _d(rate) if rate is not None else Decimal("0")
@@ -1559,19 +1565,9 @@ async def list_reservations(db: AsyncSession, params: PageParams, item_id: int |
 
 
 async def release_reservation_by_id(db: AsyncSession, reservation_id: int) -> dict:
-    res = await db.get(Reservation, reservation_id, with_for_update=True)
-    if not res:
-        raise NotFoundError(f"Reservation {reservation_id} not found")
-    if res.status != "ACTIVE":
-        raise ValidationError(f"Reservation is in status {res.status}, cannot release")
-
-    stock = await db.get(Stock, res.stock_id, with_for_update=True)
-    if stock:
-        stock.reserved_qty = (stock.reserved_qty or Decimal("0")) - res.quantity
-        stock.available_qty = (stock.available_qty or Decimal("0")) + res.quantity
-
-    res.status = "RELEASED"
-    res.released_at = utcnow()
+    """Hand one reservation back. The columns are moved by `allocation`, which owns
+    them (rule 7); this only decides that it should happen and reports the result."""
+    res = await allocation.release_one(db, reservation_id)
     await db.commit()
 
     return {
@@ -1917,7 +1913,7 @@ async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrde
         sto_item.dispatched_qty = sto_item.requested_qty
         await move_stock_out(
             db, item_id=sto_item.item_id, qty=sto_item.dispatched_qty,
-            ref_type="STO", ref_id=sto.id, ref_no=sto.sto_no, user=user,
+            ref_type=RefType.STO.value, ref_id=sto.id, ref_no=sto.sto_no, user=user,
             warehouse_id=sto.from_warehouse_id, project_id=sto.from_project_id,
         )
 
@@ -1939,7 +1935,7 @@ async def receive_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder
         sto_item.received_qty = qty
         await move_stock(
             db, item_id=sto_item.item_id, qty=qty, direction=StockDirection.IN.value,
-            ref_type="STO", ref_id=sto.id, ref_no=sto.sto_no, user=user,
+            ref_type=RefType.STO.value, ref_id=sto.id, ref_no=sto.sto_no, user=user,
             warehouse_id=sto.to_warehouse_id, project_id=sto.to_project_id,
         )
 
@@ -1963,7 +1959,7 @@ async def create_cycle_count(db: AsyncSession, data, user) -> CycleCount:
         warehouse_id=data.warehouse_id,
         warehouse_name=wh.name,
         count_date=data.count_date,
-        status="PLANNED",
+        status=CycleCountStatus.PLANNED.value,
         planned_by_name=getattr(user, "full_name", None),
         remarks=data.remarks,
     )
@@ -2029,10 +2025,11 @@ async def list_cycle_counts(db: AsyncSession, params: PageParams, warehouse_id: 
 
 async def update_cycle_count(db: AsyncSession, cc_id: int, data, user) -> CycleCount:
     cc = await get_cycle_count(db, cc_id)
-    if cc.status not in ("PLANNED", "IN_PROGRESS"):
+    if cc.status not in (CycleCountStatus.PLANNED.value,
+                         CycleCountStatus.IN_PROGRESS.value):
         raise ValidationError(f"Cycle count is in status {cc.status}, cannot update")
 
-    cc.status = "IN_PROGRESS"
+    cc.status = CycleCountStatus.IN_PROGRESS.value
     if data.remarks:
         cc.remarks = data.remarks
 
@@ -2053,7 +2050,7 @@ async def update_cycle_count(db: AsyncSession, cc_id: int, data, user) -> CycleC
 async def post_cycle_count(db: AsyncSession, cc_id: int, user) -> CycleCount:
     """Post cycle count variances as stock adjustments via move_stock()."""
     cc = await get_cycle_count(db, cc_id)
-    if cc.status != "IN_PROGRESS":
+    if cc.status != CycleCountStatus.IN_PROGRESS.value:
         raise ValidationError(f"Cycle count is in status {cc.status}, must be IN_PROGRESS to post")
 
     for item in cc.items:
@@ -2068,11 +2065,11 @@ async def post_cycle_count(db: AsyncSession, cc_id: int, user) -> CycleCount:
 
         await move_stock(
             db, item_id=item.item_id, qty=qty, direction=direction,
-            ref_type="CYCLE_COUNT", ref_id=cc.id, ref_no=cc.count_no, user=user,
+            ref_type=RefType.CYCLE_COUNT.value, ref_id=cc.id, ref_no=cc.count_no, user=user,
             warehouse_id=cc.warehouse_id, bin_id=item.bin_id, batch_id=item.batch_id,
         )
 
-    cc.status = "COMPLETED"
+    cc.status = CycleCountStatus.COMPLETED.value
     cc.posted_by_name = getattr(user, "full_name", None)
     cc.posted_at = utcnow()
     await db.commit()

@@ -14,6 +14,19 @@ class AdjustmentStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
+class CycleCountStatus(str, Enum):
+    """inv_cycle_counts.status.
+
+    Module-owned for the same reason as `AdjustmentStatus`: nothing outside inventory
+    reads it. The values are the strings the service was already writing inline, so
+    naming them changes no stored row — it only stops the next typo from inventing a
+    fourth status that no screen filters on.
+    """
+    PLANNED = "PLANNED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+
+
 class LocationTier(int, Enum):
     """How far down the distribution chain a stocking point sits.
 

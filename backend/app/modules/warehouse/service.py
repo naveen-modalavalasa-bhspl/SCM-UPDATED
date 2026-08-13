@@ -655,6 +655,14 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
 
     seen_serials_by_item: dict[int, set[str]] = {}
     seen_imeis_by_item: dict[int, set[str]] = {}
+    # (item, batch) already claimed by an earlier line of THIS receipt. Serials and
+    # IMEIs are deduplicated below and this was not, so one GRN could carry the same
+    # item and batch on ten lines — REC/2026-27/00095 did — and each line posted its
+    # own IN movement. Ten receipts of one batch, while `_ensure_batch` recorded the
+    # first line's quantity as the batch's `initial_qty` and returned early for the
+    # rest. Refused rather than merged: a repeated line is a typo, and silently adding
+    # the quantities would hide the one case where it is not.
+    seen_batch_by_item: dict[int, dict[str, int]] = {}
 
     # A consignment inward re-receives units that ALREADY EXIST: the very serials a
     # warehouse or MDP issued are the ones arriving here, so "this serial is already
@@ -670,6 +678,19 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         received = _d(line.received_qty)
         if received < ZERO:
             raise ValidationError(f"Line {index}: received quantity cannot be negative")
+        # One line per item per batch. A second line for the same pair is the same
+        # goods entered twice, and each one would post its own stock movement.
+        batch_key = (line.batch_no or "").strip().lower()
+        claimed = seen_batch_by_item.setdefault(item.id, {})
+        if batch_key in claimed:
+            where = (f"batch {line.batch_no}" if line.batch_no else "no batch")
+            raise ValidationError(
+                f"Line {index}: {item.code} with {where} is already on line "
+                f"{claimed[batch_key]} of this GRN. Record it once, with the total "
+                f"quantity."
+            )
+        claimed[batch_key] = index
+
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         normalized_serials = [value.lower() for value in serials]
         if len(normalized_serials) != len(set(normalized_serials)):
@@ -1649,7 +1670,7 @@ async def _prepare_receipt_line(
         item_id=line.item_id,
         qty=_d(line.accepted_qty),
         direction=StockDirection.IN.value,
-        ref_type=WarehouseDocType.RECEIPT.value,
+        ref_type=InventoryRefType.RECEIPT.value,
         ref_id=receipt.id,
         ref_no=receipt.grn_no,
         user=user,
@@ -2526,7 +2547,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             )
     batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
     stock = await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
-                             ref_type=WarehouseDocType.RECEIPT.value,
+                             ref_type=InventoryRefType.RECEIPT.value,
                              ref_id=receipt.id if receipt else task.id,
                              ref_no=receipt.grn_no if receipt else ref_no,
                              user=user, warehouse_id=task.warehouse_id,
@@ -3041,7 +3062,7 @@ async def create_stock_movement(
         item_id=item.id,
         qty=data.quantity,
         direction=StockDirection.OUT.value,
-        ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
+        ref_type=InventoryRefType.STOCK_MOVEMENT.value,
         ref_id=0,
         ref_no=movement_no,
         user=user,
@@ -3055,7 +3076,7 @@ async def create_stock_movement(
         item_id=item.id,
         qty=data.quantity,
         direction=StockDirection.IN.value,
-        ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
+        ref_type=InventoryRefType.STOCK_MOVEMENT.value,
         ref_id=0,
         ref_no=movement_no,
         user=user,
@@ -3113,16 +3134,56 @@ async def create_stock_movement(
 
 async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
                                      search: str | None = None) -> dict:
-    from app.modules.warehouse.models import StockMovementOrder
+    """Multi-line bin-to-bin movements, rebuilt from the ledger.
 
-    stmt = select(StockMovementOrder)
+    There is no header table. `whs_stock_movement_orders` and its items table were
+    mapped and queried but have never existed on this database, so both endpoints
+    answered 1054. They are not needed: every line of a movement already writes its
+    OUT and IN through `move_stock` under one `ref_no` drawn from `sys_doc_series`,
+    which is what makes it one document — the same way `list_stock_movements` reads
+    the single-line version back. A second copy of the same fact could only drift
+    from `stk_ledger`, and the ledger is the append-only record (rule 7).
+    """
+    from app.modules.inventory.models import StockMovement
+
+    grouped = (
+        select(
+            StockMovement.ref_no.label("order_no"),
+            func.max(StockMovement.id).label("last_id"),
+            func.max(StockMovement.warehouse_id).label("warehouse_id"),
+            func.max(StockMovement.warehouse_name).label("warehouse_name"),
+            func.count().label("total_lines"),
+            func.max(StockMovement.created_at).label("created_at"),
+            func.max(StockMovement.created_by_name).label("created_by_name"),
+            func.max(StockMovement.remarks).label("reason"),
+        )
+        .where(StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
+               StockMovement.direction == StockDirection.OUT.value)
+        .group_by(StockMovement.ref_no)
+    )
     if search:
         like = f"%{search}%"
-        stmt = stmt.where(or_(
-            StockMovementOrder.order_no.ilike(like),
-            StockMovementOrder.warehouse_name.ilike(like)))
-    stmt = stmt.order_by(StockMovementOrder.id.desc())
-    return await _page_or_empty(db, stmt, params, "whs_stock_movement_orders")
+        grouped = grouped.having(or_(
+            StockMovement.ref_no.ilike(like),
+            func.max(StockMovement.warehouse_name).ilike(like)))
+    grouped = grouped.order_by(func.max(StockMovement.id).desc())
+
+    total = await db.scalar(select(func.count()).select_from(grouped.subquery()))
+    rows = (await db.execute(
+        grouped.offset(params.offset).limit(params.size))).all()
+    return {
+        "items": [{
+            "order_no": r.order_no,
+            "warehouse_id": r.warehouse_id,
+            "warehouse_name": r.warehouse_name,
+            "total_lines": r.total_lines,
+            "status": "COMPLETED",
+            "reason": r.reason,
+            "created_by_name": r.created_by_name,
+            "created_at": r.created_at,
+        } for r in rows],
+        "total": total or 0, "page": params.page, "size": params.size,
+    }
 
 
 async def create_stock_movement_order(
@@ -3130,23 +3191,18 @@ async def create_stock_movement_order(
     data: s.StockMovementOrderWrite,
     user,
 ) -> dict:
+    """Move several items between bins as one numbered document.
+
+    The document IS its `ref_no`: one number from `sys_doc_series`, carried onto every
+    ledger row the lines write. No header row is stored — see
+    `list_stock_movement_orders` for why — so `ref_id` is 0 rather than a foreign key
+    to a table that does not exist.
+    """
     from app.modules.inventory.models import Stock
-    from app.modules.warehouse.models import StockMovementOrder, StockMovementOrderItem
 
     wh = await _warehouse(db, data.warehouse_id)
     order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT.value)
-
-    order = StockMovementOrder(
-        order_no=order_no,
-        warehouse_id=wh.id,
-        warehouse_name=wh.name,
-        status="COMPLETED",
-        reason=data.reason,
-        created_by_id=getattr(user, "id", None),
-        created_by_name=_name(user)
-    )
-    db.add(order)
-    await db.flush()
+    moved: list[dict] = []
 
     for line in data.items:
         source = await _get(db, Bin, line.source_bin_id, "Source bin")
@@ -3210,28 +3266,13 @@ async def create_stock_movement_order(
         elif serial_numbers:
             raise ValidationError(f"{item.code} is not serial tracked")
 
-        # Create movement order item
-        order_item = StockMovementOrderItem(
-            order_id=order.id,
-            item_id=item.id,
-            item_code=item.code,
-            item_name=item.name,
-            uom_code=item.uom_code,
-            batch_id=batch_id,
-            source_bin_id=source.id,
-            destination_bin_id=destination.id,
-            quantity=line.quantity,
-            serial_numbers=",".join(serial_numbers) if serial_numbers else None
-        )
-        db.add(order_item)
-
         await move_stock(
             db,
             item_id=item.id,
             qty=line.quantity,
             direction=StockDirection.OUT.value,
-            ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
-            ref_id=order.id,
+            ref_type=InventoryRefType.STOCK_MOVEMENT.value,
+            ref_id=0,
             ref_no=order_no,
             user=user,
             warehouse_id=wh.id,
@@ -3244,8 +3285,8 @@ async def create_stock_movement_order(
             item_id=item.id,
             qty=line.quantity,
             direction=StockDirection.IN.value,
-            ref_type=WarehouseDocType.STOCK_MOVEMENT.value,
-            ref_id=order.id,
+            ref_type=InventoryRefType.STOCK_MOVEMENT.value,
+            ref_id=0,
             ref_no=order_no,
             user=user,
             warehouse_id=wh.id,
@@ -3256,6 +3297,19 @@ async def create_stock_movement_order(
         for row in serial_rows:
             row.bin_id = destination.id
             row.remarks = f"Moved by {order_no}"
+        moved.append({
+            "item_id": item.id,
+            "item_code": item.code,
+            "item_name": item.name,
+            "uom_code": item.uom_code,
+            "batch_id": line.batch_id or None,
+            "source_bin_id": source.id,
+            "source_bin_code": source.code,
+            "destination_bin_id": destination.id,
+            "destination_bin_code": destination.code,
+            "quantity": line.quantity,
+            "serial_numbers": serial_numbers,
+        })
 
     await write_audit(
         db,
@@ -3271,23 +3325,32 @@ async def create_stock_movement_order(
         },
     )
     await db.commit()
-    
-    # Reload with items
-    return await _load(db, StockMovementOrder, order.id, "Stock Movement Order", StockMovementOrder.items)
+
+    return {
+        "order_no": order_no,
+        "warehouse_id": wh.id,
+        "warehouse_name": wh.name,
+        "status": "COMPLETED",
+        "reason": data.reason,
+        "total_lines": len(moved),
+        "items": moved,
+        "created_by_name": _name(user),
+        "created_at": utcnow(),
+    }
 
 
 async def list_stock_movements(db: AsyncSession, params: PageParams) -> dict:
     from app.modules.inventory.models import StockMovement
 
     stmt = select(StockMovement).where(
-        StockMovement.ref_type == WarehouseDocType.STOCK_MOVEMENT.value,
+        StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
         StockMovement.direction == StockDirection.OUT.value,
     )
     page = await paginate(db, stmt.order_by(StockMovement.id.desc()), params)
     rows: list[dict] = []
     for outward in page["items"]:
         inward = await db.scalar(select(StockMovement).where(
-            StockMovement.ref_type == WarehouseDocType.STOCK_MOVEMENT.value,
+            StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
             StockMovement.ref_no == outward.ref_no,
             StockMovement.direction == StockDirection.IN.value,
         ).limit(1))
@@ -5423,7 +5486,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     await move_stock(
                         db, item_id=line.item_id, qty=stock.quantity,
                         direction=StockDirection.OUT.value,
-                        ref_type=WarehouseDocType.WH_ISSUE.value,
+                        ref_type=InventoryRefType.WH_ISSUE.value,
                         ref_id=issue.id, ref_no=issue.issue_no, user=user,
                         warehouse_id=stock.warehouse_id,
                         bin_id=stock.bin_id, batch_id=stock.batch_id,
@@ -5443,7 +5506,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     await _issue_slices(db, issue, line, qty)):
                 await move_stock_out(
                     db, item_id=line.item_id, qty=slice_qty,
-                    ref_type=WarehouseDocType.WH_ISSUE.value,
+                    ref_type=InventoryRefType.WH_ISSUE.value,
                     ref_id=issue.id, ref_no=issue.issue_no, user=user,
                     warehouse_id=issue.warehouse_id,
                     bin_id=source_bin, batch_id=source_batch,
@@ -5452,7 +5515,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
         else:
             await move_stock(
                 db, item_id=line.item_id, qty=qty, direction=direction,
-                ref_type=WarehouseDocType.WH_ISSUE.value,
+                ref_type=InventoryRefType.WH_ISSUE.value,
                 ref_id=issue.id, ref_no=issue.issue_no,
                 user=user, warehouse_id=issue.warehouse_id,
                 bin_id=line.bin_id or m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
@@ -6241,7 +6304,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         delivery_address=data.delivery_address or destination_office_name,
         contact_person=data.contact_person,
         contact_phone=data.contact_phone,
-        ref_type=WarehouseDocType.WH_ISSUE.value,
+        ref_type=InventoryRefType.WH_ISSUE.value,
         ref_id=issue.id,
         ref_no=issue.issue_no,
         transport_mode=data.transport_mode,
@@ -6683,7 +6746,7 @@ async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
                 continue
             await move_stock_out(
                 db, item_id=line.item_id, qty=qty,
-                ref_type=WarehouseDocType.DISPATCH.value, ref_id=dispatch.id,
+                ref_type=InventoryRefType.DISPATCH.value, ref_id=dispatch.id,
                 ref_no=dispatch.dispatch_no, user=user,
                 warehouse_id=dispatch.warehouse_id,
                 batch_id=line.batch_id,
@@ -6839,7 +6902,7 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
             await move_stock(
                 db, item_id=line.item_id, qty=delivered,
                 direction=StockDirection.IN.value,
-                ref_type=WarehouseDocType.DISPATCH.value, ref_id=dispatch.id,
+                ref_type=InventoryRefType.DISPATCH.value, ref_id=dispatch.id,
                 ref_no=dispatch.dispatch_no, user=user,
                 warehouse_id=dispatch.to_warehouse_id,
                 bin_id=m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
@@ -7149,7 +7212,7 @@ async def complete_return(db: AsyncSession, return_id: int, credit_note_no: str 
             continue
         await move_stock_out(
             db, item_id=line.item_id, qty=qty,
-            ref_type=WarehouseDocType.PURCHASE_RETURN.value, ref_id=doc.id,
+            ref_type=InventoryRefType.PURCHASE_RETURN.value, ref_id=doc.id,
             ref_no=doc.return_no, user=user,
             warehouse_id=doc.warehouse_id,
             batch_id=line.batch_id,
@@ -8446,17 +8509,46 @@ async def dispatch_receipt_source(
         )).scalars().all()
     } if tracked_item_ids else {}
 
-    # One row per item, not per dispatch line. A serialised item leaves the gate as
-    # one `out_dispatch_items` row PER UNIT — ten handsets are ten lines of qty 1 —
-    # and rendering them straight put ten rows of 1 on the receiver's GRN, which he
-    # then inwarded as ten separate stock lines. The units are still named
-    # individually; they are collected onto the line they belong to.
-    #
-    # Batch is part of the key: two batches of the same item are two things to
-    # receive, with their own expiry, and must not be added together.
+    items = _group_dispatch_lines(dispatch.items, serial_batch, batches, tracking)
+
+    return {
+        "dispatch_id": dispatch.id,
+        "dispatch_no": dispatch.dispatch_no,
+        "warehouse_id": wh.id,
+        "warehouse_name": wh.name,
+        "is_bin_managed": wh.is_bin_managed,
+        "from_warehouse_id": dispatch.warehouse_id,
+        "from_warehouse_name": dispatch.warehouse_name,
+        "project_id": dispatch.project_id,
+        "dispatch_date": dispatch.dispatch_date,
+        "lr_no": dispatch.lr_no,
+        "vehicle_number": dispatch.vehicle_number,
+        "indent_id": indent_id,
+        "indent_no": indent_no,
+        "items": items,
+    }
+
+
+def _group_dispatch_lines(lines, serial_batch: dict[str, int], batches: dict,
+                          tracking: dict) -> list[dict]:
+    """The consignment's lines, one row per item rather than one per unit.
+
+    A serialised item leaves the gate as one `out_dispatch_items` row PER UNIT — ten
+    handsets are ten lines of qty 1 — and rendering those straight put ten rows of 1
+    on the receiver's GRN, which he then inwarded as ten separate stock lines. The
+    units are still named individually; they are collected onto the line they belong
+    to instead of each becoming a line of its own.
+
+    Batch is part of the key: two batches of the same item are two things to receive,
+    with their own expiry, and must not be added together. So is the indent, because
+    a consolidated consignment serving two requests owes each of them separately.
+
+    Pure, and separate from the query above, so the grouping can be tested without a
+    database — it is the part that was wrong.
+    """
     items: list[dict] = []
     grouped: dict[tuple, dict] = {}
-    for line in dispatch.items:
+    for line in lines:
         batch_id = line.batch_id if (
             line.batch_id and line.batch_id != m.NO_BATCH
         ) else serial_batch.get(line.serial_no or "")
@@ -8509,22 +8601,7 @@ async def dispatch_receipt_source(
         grouped[key] = row
         items.append(row)
 
-    return {
-        "dispatch_id": dispatch.id,
-        "dispatch_no": dispatch.dispatch_no,
-        "warehouse_id": wh.id,
-        "warehouse_name": wh.name,
-        "is_bin_managed": wh.is_bin_managed,
-        "from_warehouse_id": dispatch.warehouse_id,
-        "from_warehouse_name": dispatch.warehouse_name,
-        "project_id": dispatch.project_id,
-        "dispatch_date": dispatch.dispatch_date,
-        "lr_no": dispatch.lr_no,
-        "vehicle_number": dispatch.vehicle_number,
-        "indent_id": indent_id,
-        "indent_no": indent_no,
-        "items": items,
-    }
+    return items
 
 
 async def indent_options(
@@ -9040,10 +9117,9 @@ DRAFT_KINDS: dict[str, _Draft] = {
         m.PurchaseReturn, "pro_returns", "return_no",
         {ReturnStatus.DRAFT.value}, "purchase return",
     ),
-    "movement": _Draft(
-        m.StockMovementOrder, "whs_stock_movement_orders", "order_no",
-        {"DRAFT"}, "stock movement order",
-    ),
+    # No "movement" entry: a bin-to-bin movement posts its stock as it is created and
+    # is COMPLETED the moment it exists, so there has never been a draft to discard —
+    # and there is no header row to delete. Undoing one means moving the stock back.
 }
 
 

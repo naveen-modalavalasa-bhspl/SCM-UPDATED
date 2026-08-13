@@ -472,5 +472,11 @@ async def run_background(entities: list[str] | None = None) -> None:
                 from app.platform.rbac.service import sync_hcm_roles
                 await sync_hcm_roles(db)
                 await db.commit()
+            # The same follow-up work sync_needed() does. "Sync now" in the UI comes
+            # through here, so without it a synced database ends with no stocking
+            # points rebuilt and joiners with no login — the sync reports all green
+            # and the only symptom is an OE who cannot see their own store.
+            await _issue_missing_logins(db)
+        await _run_post_sync_hooks()
     finally:
         _running = False

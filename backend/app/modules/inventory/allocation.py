@@ -13,7 +13,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ValidationError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.modules.inventory import availability
 from app.modules.inventory.models import NO_PROJECT, Reservation, Stock
 from app.shared.enums import PickStrategy, ReservationStatus
@@ -110,6 +110,34 @@ async def release(db: AsyncSession, ref_type: str, ref_id: int,
         returned += res.quantity
     await db.flush()
     return returned
+
+
+async def release_one(db: AsyncSession, reservation_id: int) -> Reservation:
+    """Release a single reservation by its own id.
+
+    The admin screen releases one row rather than a whole document, which `release`
+    above cannot express. It lived in `service.py` and assigned `reserved_qty` and
+    `available_qty` itself — the one thing CLAUDE.md rule 7 says only this module may
+    do, and it took the two row locks in the opposite order to everything here, which
+    is how a deadlock gets in. Same work, same order, one owner.
+
+    Does not commit: the caller's unit of work owns the transaction.
+    """
+    res = await db.get(Reservation, reservation_id, with_for_update=True)
+    if res is None:
+        raise NotFoundError(f"Reservation {reservation_id} not found")
+    if res.status != ReservationStatus.ACTIVE.value:
+        raise ValidationError(
+            f"Reservation is in status {res.status}, cannot release")
+
+    stock = await db.get(Stock, res.stock_id, with_for_update=True)
+    if stock is not None:
+        stock.reserved_qty = (stock.reserved_qty or ZERO) - res.quantity
+        stock.available_qty = (stock.available_qty or ZERO) + res.quantity
+    res.status = ReservationStatus.RELEASED.value
+    res.released_at = utcnow()
+    await db.flush()
+    return res
 
 
 async def consume(db: AsyncSession, ref_type: str, ref_id: int,

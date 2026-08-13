@@ -178,24 +178,29 @@ def upgrade() -> None:
     # ------------------------------------------------------------------ #
     #  Audit log and notification rules
     # ------------------------------------------------------------------ #
-    op.create_table(
-        "sys_audit_log",
-        sa.Column("id", BigInt, autoincrement=True, nullable=False),
-        sa.Column("entity", sa.String(50), nullable=False),
-        sa.Column("entity_id", BigInt, nullable=True),
-        sa.Column("action", sa.String(20), nullable=False),
-        sa.Column("actor_id", BigInt, nullable=True),
-        sa.Column("actor_name", sa.String(200), nullable=True),
-        sa.Column("summary", sa.String(300), nullable=True),
-        sa.Column("before", sa.JSON(), nullable=True),
-        sa.Column("after", sa.JSON(), nullable=True),
-        sa.Column("ip_address", sa.String(45), nullable=True),
-        sa.Column("at", sa.DateTime(), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_sys_audit_log_entity", "sys_audit_log", ["entity", "entity_id"])
-    op.create_index("ix_sys_audit_log_actor_id", "sys_audit_log", ["actor_id"])
-    op.create_index("ix_sys_audit_log_at", "sys_audit_log", ["at"])
+    # edfd2d748191 creates sys_audit_log too. On the live databases this migration was
+    # applied to, the table came from an unmanaged create and this ran fine; from an
+    # empty database it is a duplicate and stops the whole chain here.
+    if not sa.inspect(op.get_bind()).has_table("sys_audit_log"):
+        op.create_table(
+            "sys_audit_log",
+            sa.Column("id", BigInt, autoincrement=True, nullable=False),
+            sa.Column("entity", sa.String(50), nullable=False),
+            sa.Column("entity_id", BigInt, nullable=True),
+            sa.Column("action", sa.String(20), nullable=False),
+            sa.Column("actor_id", BigInt, nullable=True),
+            sa.Column("actor_name", sa.String(200), nullable=True),
+            sa.Column("summary", sa.String(300), nullable=True),
+            sa.Column("before", sa.JSON(), nullable=True),
+            sa.Column("after", sa.JSON(), nullable=True),
+            sa.Column("ip_address", sa.String(45), nullable=True),
+            sa.Column("at", sa.DateTime(), nullable=False),
+            sa.PrimaryKeyConstraint("id"),
+        )
+        op.create_index("ix_sys_audit_log_entity", "sys_audit_log",
+                        ["entity", "entity_id"])
+        op.create_index("ix_sys_audit_log_actor_id", "sys_audit_log", ["actor_id"])
+        op.create_index("ix_sys_audit_log_at", "sys_audit_log", ["at"])
 
     op.create_table(
         "sys_notification_rules",

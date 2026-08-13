@@ -18,6 +18,15 @@ py -3.11 -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt
 copy .env.example .env          # set DATABASE_URL=mysql+aiomysql://root:<pw>@127.0.0.1:3306/scm_erp
 # create the schema once (MySQL must be running):  CREATE DATABASE scm_erp;
+# A NEW database is built by bootstrap, not by Alembic: 46 tables (stock, the warehouse
+# inbound/outbound documents, the masters chain, sys_doc_series, sys_local_credentials)
+# were created by create_all or by hand and no migration creates them, and twelve later
+# migrations then ALTER them — replaying that history from empty stops on the first one.
+# bootstrap creates the tables from the models, stamps Alembic at head, seeds
+# permissions/roles/menu, provisions each module and mints the `admin` login. No demo
+# rows, no masters: log in, run the HCM sync, then load the masters. Idempotent.
+.venv/Scripts/python -m scripts.bootstrap
+# An EXISTING database is brought forward by Alembic, as before:
 .venv/Scripts/python -m alembic upgrade head
 $env:ALLOW_DEMO_DATA="true"       # development only; demo seeds are blocked otherwise
 .venv/Scripts/python -m scripts.seed
@@ -193,9 +202,11 @@ Both are idempotent — re-running the cutover retires 0 and reports 0 moves. No
 pointing `DATABASE_URL` somewhere else does **not** carry data with it: each database
 is brought up to date by running these two commands against it.
 
-Still sample-sized: `whs_warehouses` holds ~20 rows while the feed describes 948 LIP
-and 33 MDP stocking points. Creating them (and their `inv_position_locations`) is a
-separate backfill and has not been run.
+Stocking points are no longer a backfill: `inventory.locations.rebuild_stocking_points`
+is registered in `hcm.sync.POST_SYNC_HOOKS`, so every sync derives the warehouses from
+the sections and links the positions to them. On a database synced from empty that is
+948 LIP + 33 MDP + 2 MAIN warehouses and 4004 `inv_position_locations` rows, built
+without anyone asking for it.
 
 ---
 

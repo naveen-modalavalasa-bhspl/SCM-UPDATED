@@ -474,6 +474,14 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
                         setattr(row, key, value)
                 db.add(row)
                 await write(db, defn)
+                # The same reload the single-row POST does, for the same reason: a row
+                # that has only ever been written holds nothing the database filled in,
+                # so a serializer that reads a server default, an eager relationship
+                # (vendor_item_out reads row.vendor.name) or a column_property
+                # (bom_out reads Bom.line_count) fires a lazy SELECT from async code
+                # and raises MissingGreenlet. Importing vendor items or BOMs was a 500
+                # every time until this was here.
+                await db.refresh(row)
                 await audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                             action=AuditAction.CREATE, actor=user,
                             after=defn.serialize(row))

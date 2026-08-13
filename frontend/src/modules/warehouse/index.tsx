@@ -16,9 +16,6 @@ import Consignments from "./pages/Consignments";
 import ConsignmentForm from "./pages/ConsignmentForm";
 import Dispatch from "./pages/Dispatch";
 import DispatchForm from "./pages/DispatchForm";
-import PurchaseReturns from "./pages/PurchaseReturns";
-import PurchaseReturnForm from "./pages/PurchaseReturnForm";
-import OutwardLabelling from "./pages/OutwardLabelling";
 import AcknowledgeDelivery from "./pages/AcknowledgeDelivery";
 import StockSegregation from "./pages/StockSegregation";
 import WarehouseNotifications from "./pages/WarehouseNotifications";
@@ -40,9 +37,13 @@ import StockMovementForm from "./pages/StockMovementForm";
  * app-level router knowing any of them exist — adding a screen is a change to this
  * file plus a row in `PAGE_TREE`, and nothing shared moves.
  *
- * Gate entry and GRN are one form with a different `receipt_type`, and outward QC is
- * the inspection screen with a different `inspection_type`. Passing the discriminator
- * as a prop keeps one implementation of each rather than a near-copy that drifts.
+ * Gate entry and GRN are one form with a different `receipt_type`, and material issues
+ * and returns are one screen with a different direction. Passing the discriminator as
+ * a prop keeps one implementation of each rather than a near-copy that drifts.
+ *
+ * Outward QC, Outward Labelling and Purchase Returns were removed on 2026-08-13 — not
+ * part of the flow this business runs. Their endpoints and tables are untouched and
+ * now unreachable; nothing in the app routes to them.
  */
 export function WarehouseModule() {
   return (
@@ -96,9 +97,6 @@ export function WarehouseModule() {
         <Route path="dispatch/new" element={<DispatchForm />} />
         <Route path="dispatch/:id" element={<DispatchForm />} />
 
-        <Route path="purchase-returns" element={<PurchaseReturns />} />
-        <Route path="purchase-returns/new" element={<PurchaseReturnForm />} />
-        <Route path="purchase-returns/:id" element={<PurchaseReturnForm />} />
       </Route>
 
       {/* Standalone screens — not part of the document chain. */}
@@ -130,10 +128,6 @@ export function WarehouseModule() {
       <Route path="picklist/new" element={<PicklistForm />} />
       <Route path="picklist/:id" element={<PicklistForm />} />
 
-      <Route path="purchase-returns" element={<PurchaseReturns />} />
-      <Route path="purchase-returns/new" element={<PurchaseReturnForm />} />
-      <Route path="purchase-returns/:id" element={<PurchaseReturnForm />} />
-
       <Route path="material-issues" element={<MaterialIssues />} />
       <Route path="material-issues/new" element={<MaterialIssueForm />} />
       <Route path="material-issues/:id" element={<MaterialIssueForm />} />
@@ -152,16 +146,10 @@ export function WarehouseModule() {
       <Route path="dispatch/new" element={<DispatchForm />} />
       <Route path="dispatch/:id" element={<DispatchForm />} />
 
-      <Route path="outward-labelling" element={<OutwardLabelling />} />
       <Route path="acknowledge-delivery" element={<AcknowledgeDelivery />} />
       <Route path="stock-segregation" element={<StockSegregation />} />
       <Route path="notifications" element={<WarehouseNotifications />} />
       <Route path="reports" element={<WarehouseReports />} />
-
-      {/* Outward QC — the same screen, inspecting before a consignment leaves. */}
-      <Route path="qc-outward" element={<QualityInspection type="OUTGOING" title="Outward QC" />} />
-      <Route path="qc-outward/new" element={<QualityInspectionForm type="OUTGOING" />} />
-      <Route path="qc-outward/:id" element={<QualityInspectionForm type="OUTGOING" />} />
 
       <Route path="masters" element={<MastersLayout />}>
         <Route index element={<Navigate to="warehouses" replace />} />

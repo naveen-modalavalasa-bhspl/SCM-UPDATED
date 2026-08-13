@@ -9,7 +9,7 @@ import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { UnitCell, UnitsPanel } from "./UnitsPanel";
 import {
   getSerialSummary, getStockBalances, getStockDetail, getStockSummary, getWarehouses,
-  indexSerials, lookupUnit,
+  indexSerials, lookupUnit, unplaced,
 } from "../api";
 import type { StockBalanceItem, StockDetail, StockLot } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -201,12 +201,16 @@ export function StockBalanceView() {
     enabled: rows.length > 0,
   });
   const serialsByRow = indexSerials(serialRows);
-  // Narrowest key first: the units in THIS bin and THIS batch if the goods-in recorded
-  // them, else the ones at this point. See indexSerials.
-  const unitsOf = (r: StockBalanceItem) =>
-    serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${r.bin_id ?? ""}:${r.batch_id ?? ""}`)
-    ?? serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${r.bin_id ?? ""}`)
-    ?? serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
+  // Narrowest key first: the units in THIS bin and THIS batch. A lot only widens the
+  // question to the whole bin, or the whole point, when it does not itself name one —
+  // a lot standing in BINA1 that has no units of its own has none, and must not be
+  // handed the unplaced ones sitting in bulk. See indexSerials.
+  const unitsOf = (r: StockBalanceItem) => {
+    const bin = unplaced(r.bin_id), batch = unplaced(r.batch_id);
+    return serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${bin}:${batch}`)
+      ?? (batch ? undefined : serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${bin}`))
+      ?? (bin || batch ? undefined : serialsByRow.get(`${r.item_id}:${r.warehouse_id}`));
+  };
 
   /** Which lot a cell's popover should list the units of. */
   const lotOf = (r: StockBalanceItem) => ({

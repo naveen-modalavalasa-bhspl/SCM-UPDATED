@@ -270,7 +270,16 @@ async def refresh_stock_snapshots(db, *, commit: bool) -> dict:
 # --------------------------------------------------------------------- duplicates
 
 async def merge_duplicate_lots(db, *, commit: bool, actor) -> dict:
-    """Collapse `stk_balance` rows that share a (warehouse, item, bin, batch) key.
+    """Collapse `stk_balance` rows that share a (warehouse, item, bin, batch, PROJECT)
+    key — the same five columns as `uq_stk_balance_item_wh_bin_batch_proj`.
+
+    `project_id` is part of that key and was missing from this grouping, so two rows
+    that differed ONLY by project read as duplicates of each other. Merging them would
+    have poured one project's stock into another project's row and zeroed the first —
+    the live data has two such pairs (item 59 and item 99 at warehouse 3901, project 0
+    beside project 22), and they were spared only because the project-22 rows happen to
+    stand at zero. Stock is held per project; two projects holding the same item in the
+    same bin is normal, not a fault to repair.
 
     The quantities are SUMMED into the surviving row and the duplicate is zeroed, not
     deleted: the total is unchanged, so the ledger still reconciles to the balance
@@ -280,20 +289,25 @@ async def merge_duplicate_lots(db, *, commit: bool, actor) -> dict:
 
     This is the one place that assigns to `stk_balance` outside `move_stock()`. It is a
     repair of a duplicated KEY rather than a change of quantity — no stock moved, so no
-    movement is written — and it leaves an audit row saying so.
+    movement is written — and it leaves an audit row saying so. Reconciliation still
+    holds because the ledger is keyed on the lot, not on the row id: summed per key,
+    balance and ledger agree before and after.
     """
     dupes = (await db.execute(
-        select(Stock.warehouse_id, Stock.item_id, Stock.bin_id, Stock.batch_id)
-        .group_by(Stock.warehouse_id, Stock.item_id, Stock.bin_id, Stock.batch_id)
+        select(Stock.warehouse_id, Stock.item_id, Stock.bin_id, Stock.batch_id,
+               Stock.project_id)
+        .group_by(Stock.warehouse_id, Stock.item_id, Stock.bin_id, Stock.batch_id,
+                  Stock.project_id)
         .having(func.count() > 1)
     )).all()
 
     merged = 0
-    for warehouse_id, item_id, bin_id, batch_id in dupes:
+    for warehouse_id, item_id, bin_id, batch_id, project_id in dupes:
         rows = (await db.execute(
             select(Stock)
             .where(Stock.warehouse_id == warehouse_id, Stock.item_id == item_id,
-                   Stock.bin_id == bin_id, Stock.batch_id == batch_id)
+                   Stock.bin_id == bin_id, Stock.batch_id == batch_id,
+                   Stock.project_id == project_id)
             .order_by(Stock.id)
         )).scalars().all()
         keeper, extras = rows[0], rows[1:]
