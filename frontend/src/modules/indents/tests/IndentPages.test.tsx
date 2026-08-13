@@ -15,7 +15,6 @@ import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterC
 import { IndentDashboardPage } from "../pages/DashboardPage";
 import { IndentListPage } from "../pages/ListPage";
 import { IndentBoardPage } from "../pages/BoardPage";
-import { IndentAcknowledgmentsPage } from "../pages/AcknowledgmentsPage";
 import { IndentReportsPage } from "../pages/ReportsPage";
 import { IndentNotificationsPage } from "../pages/NotificationsPage";
 import { IndentDetailPage } from "../pages/DetailPage";
@@ -100,7 +99,6 @@ vi.mock("../api", async () => {
     recent: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "recent", filters] as const,
     stats: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "stats", filters] as const,
     activity: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "activity", filters] as const,
-    acknowledgments: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown) => [...scoped(scope), "acknowledgments", filters] as const,
     notifications: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown = {}) => [...scoped(scope), "notifications", filters] as const,
     detail: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "detail", id] as const,
     journey: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "journey", 4, id] as const,
@@ -158,21 +156,6 @@ vi.mock("../api", async () => {
       by_region: [],
     })),
     list: vi.fn(() => Promise.resolve({ items: [], total: 0, page: 1, size: 20 })),
-    acknowledgments: vi.fn(() => Promise.resolve({
-      items: [{
-        id: 7,
-        indent_id: 42,
-        indent_no: "IND/2026/0007",
-        action: "FULFILLED",
-        stage_name: null,
-        actor_name: "Anita Appr",
-        comments: null,
-        acted_at: "2026-07-27T10:30:00Z",
-      }],
-      total: 1,
-      page: 1,
-      size: 20,
-    })),
     activity: vi.fn(() => Promise.resolve({ items: [], total: 0, page: 1, size: 20 })),
     regions: vi.fn(() => Promise.resolve([
       { id: 654, name: "104-MMU-AP-Hanumanthunipadu" },
@@ -551,13 +534,13 @@ describe("indent UI shell", () => {
     );
 
     expect(screen.getAllByRole("navigation", { name: "Indent" })).toHaveLength(1);
-    // Six tabs: Board is parked, while My deliveries remains in the navigation.
-    expect(screen.getAllByRole("link")).toHaveLength(6);
+    // Five tabs: Board is parked, while Acknowledgements remains in the navigation.
+    expect(screen.getAllByRole("link")).toHaveLength(5);
   });
 
   it("marks the current indent tab active", () => {
-    renderWithProviders(<IndentsNav />, "/indents/acknowledgments");
-    expect(screen.getByRole("link", { name: "Acknowledgments" })).toHaveAttribute("aria-current", "page");
+    renderWithProviders(<IndentsNav />, "/indents/reports");
+    expect(screen.getByRole("link", { name: "Activity ledger" })).toHaveAttribute("aria-current", "page");
   });
 
   it("keeps renamed navigation labels on existing routes", () => {
@@ -572,7 +555,6 @@ describe("indent UI shell", () => {
     ["Overview", <IndentDashboardPage />, "/indents/dashboard", "Search by indent no., requester, department or status...", true],
     ["All requests", <IndentListPage />, "/indents", "Search by indent no., requester, department or status...", true],
     ["Board", <IndentBoardPage />, "/indents/board", "Search indents...", false],
-    ["Acknowledgments", <IndentAcknowledgmentsPage />, "/indents/acknowledgments", "Search indents...", false],
   ])("shows the common Indent toolbar on %s", async (_name, Page, route, placeholder, separateDates) => {
     renderWithProviders(Page, route);
     expect(await screen.findByRole("searchbox", { name: "Search indents" })).toHaveAttribute("placeholder", placeholder);
@@ -611,12 +593,6 @@ describe("indent UI shell", () => {
         expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", is_bookmarked: "YES" }));
         expect(indentApi.stats).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", is_bookmarked: "YES" }));
       },
-    ],
-    [
-      "Acknowledgments",
-      <IndentAcknowledgmentsPage />,
-      "/indents/acknowledgments",
-      () => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", page: 1, size: 20 })),
     ],
     [
       "Activity ledger",
@@ -1323,314 +1299,6 @@ describe("indent UI shell", () => {
       search: "Bolt",
     }), expect.anything()));
     expect(screen.getByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
-  });
-
-  it("renders Acknowledgments with the common toolbar but without extra actions", async () => {
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("IND/2026/0007")).toBeInTheDocument();
-    expect(screen.getByRole("searchbox", { name: "Search indents" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /New indent/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Export/i })).not.toBeInTheDocument();
-  });
-
-  it("offers only fulfillment statuses and returns only the selected fulfillment rows", async () => {
-    const rows = [
-      {
-        id: 71,
-        indent_id: 421,
-        indent_no: "IND/2026/FULL",
-        action: "FULFILLED",
-        stage_name: null,
-        actor_name: "Warehouse Issuer",
-        comments: null,
-        acted_at: "2026-07-27T10:30:00Z",
-      },
-      {
-        id: 72,
-        indent_id: 422,
-        indent_no: "IND/2026/PART",
-        action: "PARTIALLY_FULFILLED",
-        stage_name: null,
-        actor_name: "Warehouse Issuer",
-        comments: null,
-        acted_at: "2026-07-27T10:31:00Z",
-      },
-    ];
-    vi.mocked(indentApi.acknowledgments).mockImplementation((params = {}) => {
-      const selected = typeof params.status === "string"
-        ? [params.status]
-        : params.status ?? [];
-      const items = !selected.length
-        ? rows
-        : rows.filter((row) => (
-          selected.includes(row.action)
-        ));
-      return Promise.resolve({
-        items,
-        total: items.length,
-        page: params.page ?? 1,
-        size: params.size ?? 20,
-      });
-    });
-
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-    expect(await screen.findByText("IND/2026/FULL")).toBeInTheDocument();
-    expect(screen.getByText("IND/2026/PART")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
-    const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
-      "Fulfilled",
-      "Partially Fulfilled",
-    ]);
-    for (const excluded of [
-      "Draft",
-      "Pending Approval",
-      "Approved",
-      "Rejected",
-      "Awaiting Allocation",
-    ]) {
-      expect(within(menu).queryByText(excluded)).not.toBeInTheDocument();
-    }
-
-    fireEvent.click(within(menu).getByText("Fulfilled"));
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(
-      expect.objectContaining({ status: ["FULFILLED"], page: 1 }),
-    ));
-    expect(vi.mocked(indentApi.acknowledgments).mock.lastCall?.[0]?.status).not.toContain("ALLOCATED");
-    expect(screen.getByText("Status: Fulfilled")).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByText("IND/2026/PART")).not.toBeInTheDocument());
-    expect(screen.getByText("IND/2026/FULL")).toBeInTheDocument();
-
-    fireEvent.click(within(menu).getByText("Fulfilled"));
-    fireEvent.click(within(menu).getByText("Partially Fulfilled"));
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(
-      expect.objectContaining({ status: ["PARTIALLY_FULFILLED"], page: 1 }),
-    ));
-    await waitFor(() => expect(screen.queryByText("IND/2026/FULL")).not.toBeInTheDocument());
-    expect(screen.getByText("IND/2026/PART")).toBeInTheDocument();
-
-    vi.mocked(indentApi.acknowledgments).mockReset();
-    vi.mocked(indentApi.acknowledgments).mockResolvedValue({
-      items: [{
-        id: 7,
-        indent_id: 42,
-        indent_no: "IND/2026/0007",
-        action: "FULFILLED",
-        stage_name: null,
-        actor_name: "Anita Appr",
-        comments: null,
-        acted_at: "2026-07-27T10:30:00Z",
-      }],
-      total: 1,
-      page: 1,
-      size: 20,
-    });
-  });
-
-  it("keeps the acknowledgment row design while showing fulfillment wording", async () => {
-    const { container } = renderWithProviders(
-      <IndentAcknowledgmentsPage />,
-      "/indents/acknowledgments",
-    );
-
-    const indentNumber = await screen.findByText("IND/2026/0007");
-    const row = indentNumber.closest("button");
-    expect(screen.getByText(/Anita Appr\s+·\s+fulfilled/i)).toBeInTheDocument();
-    expect(screen.getByText(/27 Jul/i)).toBeInTheDocument();
-    expect(row).toHaveClass(
-      "flex",
-      "w-full",
-      "items-center",
-      "gap-4",
-      "border-b",
-      "px-5",
-      "py-4",
-      "text-left",
-    );
-    expect(row?.querySelector(".bg-ok-bg.text-ok")).toBeTruthy();
-    expect(container.querySelector(".overflow-hidden.rounded-2xl.bg-white")).toBeTruthy();
-  });
-
-  it("shows the interim empty state without allocation actor or timestamp content", async () => {
-    vi.mocked(indentApi.acknowledgments).mockResolvedValueOnce({
-      items: [],
-      total: 0,
-      page: 1,
-      size: 20,
-    });
-
-    const { container } = renderWithProviders(
-      <IndentAcknowledgmentsPage />,
-      "/indents/acknowledgments",
-    );
-
-    expect(await screen.findByText("No fulfilment acknowledgments found")).toBeInTheDocument();
-    expect(screen.queryByText("Store Allocator")).not.toBeInTheDocument();
-    expect(screen.queryByText(/27 Jul/i)).not.toBeInTheDocument();
-    expect(container.querySelector(".overflow-hidden.rounded-2xl.bg-white")).toBeTruthy();
-  });
-
-  it("shows fulfillment rows and suppresses submitted, approval, rejection and fallback rows", async () => {
-    vi.mocked(indentApi.acknowledgments).mockResolvedValueOnce({
-      items: [
-        {
-          id: 71,
-          indent_id: 421,
-          indent_no: "IND/2026/FULL",
-          action: "FULFILLED",
-          stage_name: null,
-          actor_name: "V Suresh Kumar",
-          comments: null,
-          acted_at: "2026-07-27T10:30:00Z",
-        },
-        {
-          id: 72,
-          indent_id: 422,
-          indent_no: "IND/2026/PART",
-          action: "PARTIALLY_FULFILLED",
-          stage_name: null,
-          actor_name: null,
-          comments: null,
-          acted_at: "2026-07-27T10:31:00Z",
-        },
-        {
-          id: 73,
-          indent_id: 423,
-          indent_no: "IND/2026/SUBMITTED",
-          action: "SUBMITTED",
-          stage_name: "Submitted",
-          actor_name: "Workflow User",
-          comments: "Submitted",
-          acted_at: "2026-07-27T10:32:00Z",
-        },
-        {
-          id: 74,
-          indent_id: 424,
-          indent_no: "IND/2026/APPROVED",
-          action: "APPROVED",
-          stage_name: "Reporting Manager",
-          actor_name: "Anita Appr",
-          comments: "Approved",
-          acted_at: "2026-07-27T10:32:00Z",
-        },
-        {
-          id: 75,
-          indent_id: 425,
-          indent_no: "IND/2026/REJECTED",
-          action: "REJECTED",
-          stage_name: "Final Approval",
-          actor_name: "Final Approver",
-          comments: "Rejected",
-          acted_at: "2026-07-27T10:33:00Z",
-        },
-        {
-          id: 76,
-          indent_id: 426,
-          indent_no: "IND/2026/FALLBACK",
-          action: "FALLBACK",
-          stage_name: "Workflow Fallback",
-          actor_name: null,
-          comments: null,
-          acted_at: "2026-07-27T10:34:00Z",
-        },
-      ],
-      total: 2,
-      page: 1,
-      size: 20,
-    });
-
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("IND/2026/FULL")).toBeInTheDocument();
-    expect(screen.getByText(/V Suresh Kumar\s+·\s+fulfilled/i)).toBeInTheDocument();
-    expect(screen.getByText("IND/2026/PART")).toBeInTheDocument();
-    expect(screen.getByText(/System\s+·\s+partially fulfilled/i)).toBeInTheDocument();
-    for (const indentNo of [
-      "IND/2026/SUBMITTED",
-      "IND/2026/APPROVED",
-      "IND/2026/REJECTED",
-      "IND/2026/FALLBACK",
-    ]) {
-      expect(screen.queryByText(indentNo)).not.toBeInTheDocument();
-    }
-    expect(screen.queryByText(/Reporting Manager|Final Approval|Workflow Fallback/)).not.toBeInTheDocument();
-  });
-
-  it("debounces and trims acknowledgment search by indent number", async () => {
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("IND/2026/0007")).toBeInTheDocument();
-    vi.useFakeTimers();
-    fireEvent.change(screen.getByRole("searchbox", { name: "Search indents" }), {
-      target: { value: "  IND/2026/0007  " },
-    });
-    expect(indentApi.acknowledgments).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      vi.advanceTimersByTime(299);
-    });
-    expect(indentApi.acknowledgments).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      vi.advanceTimersByTime(1);
-      await Promise.resolve();
-    });
-    vi.useRealTimers();
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      page: 1,
-      size: 20,
-      search: "IND/2026/0007",
-    })));
-    expect(indentApi.acknowledgments).toHaveBeenCalledTimes(2);
-  });
-
-  it("passes acknowledgment actor and fulfillment status search to the backend", async () => {
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("IND/2026/0007")).toBeInTheDocument();
-    const search = screen.getByRole("searchbox", { name: "Search indents" });
-    fireEvent.change(search, { target: { value: "Anita Appr" } });
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      search: "Anita Appr",
-    })));
-
-    fireEvent.change(search, { target: { value: "PARTIALLY FULFILLED" } });
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      search: "PARTIALLY FULFILLED",
-    })));
-
-    fireEvent.change(search, { target: { value: "System" } });
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      search: "System",
-    })));
-  });
-
-  it("passes Date, Status and Priority filters to acknowledgments API", async () => {
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("IND/2026/0007")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
-    fireEvent.click(await screen.findByText("Today"));
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      date_from: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
-      date_to: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
-      page: 1,
-    })));
-
-    fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
-    fireEvent.click(await screen.findByText("Fulfilled"));
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      status: ["FULFILLED"],
-    })));
-    expect(vi.mocked(indentApi.acknowledgments).mock.lastCall?.[0]?.status).not.toContain("ALLOCATED");
-
-    fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
-    fireEvent.click(await screen.findByText("Urgent"));
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      priority: ["URGENT"],
-    })));
   });
 
   it("shows exactly the four Activity ledger event options and maps each label", async () => {
@@ -2448,7 +2116,6 @@ describe("indent UI shell", () => {
     ["Overview", <IndentDashboardPage />, "/indents/dashboard", true],
     ["All requests", <IndentListPage />, "/indents", true],
     ["Board", <IndentBoardPage />, "/indents/board", false],
-    ["Acknowledgments", <IndentAcknowledgmentsPage />, "/indents/acknowledgments", false],
   ])("shows required-by control on %s", async (_name, Page, route, separateDates) => {
     const view = renderWithProviders(Page, route);
 
@@ -2742,134 +2409,6 @@ describe("indent UI shell", () => {
     }));
     expect(listParams).toEqual(expect.objectContaining({ ...statsParams, size: 6 }));
     expect(screen.getByText("Required by: Next 7 days")).toBeInTheDocument();
-  });
-
-  it("required-by expands, applies, clears and collapses on acknowledgments", async () => {
-    vi.mocked(indentApi.acknowledgments).mockResolvedValue({
-      items: [{
-        id: 7,
-        indent_id: 42,
-        indent_no: "IND/2026/0007",
-        action: "FULFILLED",
-        stage_name: null,
-        actor_name: "Anita Appr",
-        comments: null,
-        acted_at: "2026-07-27T10:30:00Z",
-      }],
-      total: 25,
-      page: 1,
-      size: 20,
-    });
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("Page 1 of 2 (25 total)")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      page: 2,
-    })));
-
-    fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Add required-by filter" }));
-    fireEvent.change(screen.getByLabelText("Required by from"), { target: { value: "2026-08-01" } });
-    fireEvent.change(screen.getByLabelText("Required by to"), { target: { value: "2026-08-15" } });
-
-    expect(screen.getByRole("button", { name: "Add required-by filter" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTitle("Required-by filter active")).toBeInTheDocument();
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      page: 1,
-      required_from: "2026-08-01",
-      required_to: "2026-08-15",
-    })));
-
-    fireEvent.click(screen.getByRole("button", { name: "Add required-by filter" }));
-    expect(screen.queryByText("Required-by date")).not.toBeInTheDocument();
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      page: 1,
-      required_from: undefined,
-      required_to: undefined,
-    })));
-
-    fireEvent.click(screen.getByRole("button", { name: "Add required-by filter" }));
-    expect(screen.getByLabelText("Required by from")).toHaveValue("");
-    expect(screen.getByLabelText("Required by to")).toHaveValue("");
-  });
-
-  it("does not duplicate API requests when a date preset is selected", async () => {
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("IND/2026/0007")).toBeInTheDocument();
-    const initialCalls = vi.mocked(indentApi.acknowledgments).mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: /^Date/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Today" }));
-
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenCalledTimes(initialCalls + 1));
-  });
-
-  it("clears acknowledgment search and resets pagination", async () => {
-    vi.mocked(indentApi.acknowledgments).mockResolvedValue({
-      items: [{
-        id: 7,
-        indent_id: 42,
-        indent_no: "IND/2026/0007",
-        action: "FULFILLED",
-        stage_name: null,
-        actor_name: "Anita Appr",
-        comments: null,
-        acted_at: "2026-07-27T10:30:00Z",
-      }],
-      total: 25,
-      page: 1,
-      size: 20,
-    });
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("Page 1 of 2 (25 total)")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      page: 2,
-      size: 20,
-    })));
-
-    const search = screen.getByRole("searchbox", { name: "Search indents" });
-    fireEvent.change(search, { target: { value: " Anita " } });
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      page: 1,
-      search: "Anita",
-    })));
-
-    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
-    expect(search).toHaveValue("");
-    await waitFor(() => expect(indentApi.acknowledgments).toHaveBeenLastCalledWith(expect.objectContaining({
-      page: 1,
-      size: 20,
-      search: undefined,
-    })));
-  });
-
-  it("shows an empty acknowledgment search result message", async () => {
-    vi.mocked(indentApi.acknowledgments).mockImplementation((params = {}) => Promise.resolve({
-      items: params.search ? [] : [{
-        id: 7,
-        indent_id: 42,
-        indent_no: "IND/2026/0007",
-        action: "FULFILLED",
-        stage_name: null,
-        actor_name: "Anita Appr",
-        comments: null,
-        acted_at: "2026-07-27T10:30:00Z",
-      }],
-      total: params.search ? 0 : 1,
-      page: 1,
-      size: 20,
-    }));
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    expect(await screen.findByText("IND/2026/0007")).toBeInTheDocument();
-    fireEvent.change(screen.getByRole("searchbox", { name: "Search indents" }), {
-      target: { value: "missing actor" },
-    });
-
-    expect(await screen.findByText("No fulfilment acknowledgments found")).toBeInTheDocument();
   });
 
   it("shows the approved notification filter bar without advanced filters", async () => {
@@ -3231,30 +2770,6 @@ describe("indent UI shell", () => {
     expect(await screen.findByText("Could not update board bookmark. Please try again.")).toBeInTheDocument();
     expect(screen.getByText("IND/2026/0042")).toBeInTheDocument();
     expect(screen.getByText("IND/2026/0042").closest("[role='button']")).toHaveAttribute("data-removing", "false");
-  });
-
-  it("keeps partially fulfilled acknowledgments on the existing green icon treatment", async () => {
-    vi.mocked(indentApi.acknowledgments).mockResolvedValueOnce({
-      items: [{
-        id: 8,
-        indent_id: 42,
-        indent_no: "IND/2026/0008",
-        action: "PARTIALLY_FULFILLED",
-        stage_name: null,
-        actor_name: "A Raveendra Prasad",
-        comments: null,
-        acted_at: "2026-07-27T10:30:00Z",
-      }],
-      total: 1,
-      page: 1,
-      size: 20,
-    });
-
-    renderWithProviders(<IndentAcknowledgmentsPage />, "/indents/acknowledgments");
-
-    const row = await screen.findByText("IND/2026/0008");
-    expect(row.closest("button")?.querySelector(".text-ok")).toBeTruthy();
-    expect(row.closest("button")?.querySelector(".text-bad")).toBeFalsy();
   });
 
   it("debounces trimmed search and resets pagination", () => {

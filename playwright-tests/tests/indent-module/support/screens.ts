@@ -26,7 +26,7 @@ import { expect, type Locator, type Page } from "@playwright/test";
 export const INDENT_TABS = [
   { label: "Overview", path: "/indents/dashboard", title: "Overview" },
   { label: "All requests", path: "/indents", title: "All requests" },
-  { label: "My deliveries", path: "/indents/deliveries", title: "My deliveries" },
+  { label: "Acknowledgements", path: "/indents/acknowledgements", title: "Acknowledgements" },
   { label: "Activity ledger", path: "/indents/reports", title: "Activity ledger" },
   { label: "Alert & Notification", path: "/indents/notifications", title: "Alert & Notification" },
 ] as const;
@@ -404,7 +404,7 @@ export class FilterBar {
 export class ListGrid {
   /**
    * `emptyMessage` is what the screen puts in the cell when there is nothing to
-   * show. It is a `RegExp` on My deliveries, where the empty content is a whole
+   * show. It is a `RegExp` on Acknowledgements, where the empty content is a whole
    * `EmptyState` block rather than a single sentence.
    */
   constructor(readonly page: Page, private readonly emptyMessage: string | RegExp) {}
@@ -766,9 +766,9 @@ export class JourneyScreen {
   }
 }
 
-/* --------------------------------------------------------------- my deliveries */
+/* ------------------------------------------------------------- acknowledgements */
 
-export class Deliveries {
+export class Acknowledgements {
   static readonly INDENT_COLUMN = 0;
 
   readonly list: ListGrid;
@@ -779,7 +779,7 @@ export class Deliveries {
     this.list = new ListGrid(page, /Nothing on its way|Nothing matches/);
   }
 
-  get search() { return this.page.getByRole("textbox", { name: "Search deliveries" }); }
+  get search() { return this.page.getByRole("textbox", { name: "Search acknowledgements" }); }
 
   /**
    * The status filter.
@@ -834,7 +834,7 @@ export class Deliveries {
 
   /** The indent numbers on screen. The Indent cell stacks a date beneath each one. */
   async indentNos(): Promise<string[]> {
-    const cells = await this.list.column(Deliveries.INDENT_COLUMN);
+    const cells = await this.list.column(Acknowledgements.INDENT_COLUMN);
     return cells.map((cell) => cell.split("\n")[0].trim()).filter(Boolean);
   }
 

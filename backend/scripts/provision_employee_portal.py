@@ -24,7 +24,6 @@ PAGE_NAMES = {
     "ind_dashboard": "Overview",
     "ind_list": "All Requests",
     "ind_board": "Status Board",
-    "ind_ack": "Acknowledgments",
     "ind_reports": "Activity Ledger",
     "ind_notifications": "Notifications",
 }

@@ -4460,7 +4460,7 @@ async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
     )).all())
 
     # Everything the same line already had on the road before this document. Relay legs
-    # are excluded exactly as My Deliveries excludes them (_relayed_onward): the raiser
+    # are excluded exactly as Acknowledgements excludes them (_relayed_onward): the raiser
     # never sees the WH -> MDP hop, so counting it would demand a confirmation nobody
     # can give.
     delivered = dict((await db.execute(
@@ -5788,7 +5788,7 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
     """Sign off every open issue serving this indent that the raiser has now confirmed.
 
     The warehouse used to click Acknowledge a second time after the requester had
-    already recorded what reached them in My Deliveries — the same fact, entered
+    already recorded what reached them in Acknowledgements — the same fact, entered
     twice, with the indent sitting open until somebody remembered the second click.
     `_receiver_confirmed` was always the real test, so the moment it passes the issue
     signs itself off in the requester's name.
@@ -5839,7 +5839,7 @@ async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None
     if not await _receiver_confirmed(db, issue):
         raise ValidationError(
             f"{issue.issue_no} has not been confirmed by the requester yet. They "
-            "record what reached them in My Deliveries; this signs off on that.")
+            "record what reached them in Acknowledgements; this signs off on that.")
     before_status = issue.status
     await _apply_issue_acknowledgement(db, issue, _name(user), remarks, user)
 
@@ -6814,6 +6814,15 @@ async def add_dispatch_event(db: AsyncSession, dispatch_id: int, data: s.Dispatc
     if data.event_type == DispatchEventType.DELIVERED:
         dispatch.status = DispatchStatus.DELIVERED.value
         dispatch.delivered_at = utcnow()
+        # Recording the consignment as delivered is the claim that all of it arrived —
+        # the same claim `acknowledge_dispatch` records when no per-line detail is
+        # given. Without it `out_dispatch_items.delivered_qty` stays 0, and the
+        # indent's Delivery phase sits PENDING on goods the warehouse has already
+        # handed over. A later acknowledgement overwrites these with what the
+        # receiver actually counted, so a shortage still ends up on the record.
+        for line in dispatch.items:
+            if _d(line.delivered_qty) <= ZERO:
+                line.delivered_qty = _d(line.quantity)
 
     await write_audit(db, entity="out_dispatch_events", entity_id=dispatch.id,
                       entity_no=dispatch.dispatch_no, action=AuditAction.CREATE, actor=user,
@@ -7543,7 +7552,7 @@ async def mark_all_notifications_read(db: AsyncSession, user) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Deliveries owed to a requester
+# Acknowledgements owed by a requester
 # ---------------------------------------------------------------------------
 
 # Statuses at which a consignment has physically left the warehouse. Before these it is
@@ -7697,9 +7706,9 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     return out
 
 
-async def deliveries_for_requester(db: AsyncSession, user, *, search: str | None = None,
-                                   status: str | None = None,
-                                   only_actionable: bool = False) -> list[dict]:
+async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str | None = None,
+                                         status: str | None = None,
+                                         only_actionable: bool = False) -> list[dict]:
     """Every indent this person raised that has reached the delivery stage.
 
     Served from the warehouse module because the evidence — what was issued, what was

@@ -346,7 +346,10 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("grp_indents", "indents", "Indents"),
     ("ind_dashboard", "indents", "Indents · Overview"),
     ("ind_list", "indents", "Indents · All Requests"),
-    ("ind_deliveries", "indents", "Indents · My Deliveries"),
+    # Code kept as `ind_deliveries` on purpose: it is the identity every existing
+    # rbac_page_permissions grant hangs off. Only the screen's name and path moved
+    # to Acknowledgements (see scripts/seed.py PAGE_TREE and the Alembic rename).
+    ("ind_deliveries", "indents", "Indents · Acknowledgements"),
     ("ind_ack", "indents", "Indents · Acknowledgments"),
     ("ind_reports", "indents", "Indents · Activity Ledger"),
     ("ind_notifications", "indents", "Indents · Notifications"),

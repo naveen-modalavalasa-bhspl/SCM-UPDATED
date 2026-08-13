@@ -1,6 +1,6 @@
 import { LayoutGroup, motion, useReducedMotion } from "framer-motion";
 import {
-  Bell, ClipboardCheck, Gauge, List, PackageCheck, ScrollText,
+  Bell, Gauge, List, PackageCheck, ScrollText, type LucideIcon,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
@@ -9,13 +9,26 @@ import { useAuth } from "@/shared/auth/AuthContext";
 /**
  * Sub-navigation for Indent.
  */
-const destinations = [
+interface Destination {
+  key: string;
+  label: string;
+  icon: LucideIcon;
+  end?: boolean;
+  /** Paths this screen was routed at before, still honoured when matching grants. */
+  was?: string[];
+}
+
+const destinations: Destination[] = [
   { key: "/indents/dashboard", label: "Overview", icon: Gauge },
   { key: "/indents", label: "All requests", icon: List, end: true },
   // Board is parked: the route and BoardPage are still here, just off the tab bar.
   // { key: "/indents/board", label: "Board", icon: Columns3 },
-  { key: "/indents/deliveries", label: "My deliveries", icon: PackageCheck },
-  { key: "/indents/acknowledgments", label: "Acknowledgments", icon: ClipboardCheck },
+  // `was` lists the paths this screen used to be routed at. On a database the rename
+  // migration has not reached, rbac_pages still says "/indents/deliveries" (and may
+  // still carry the deleted duplicate at "/indents/acknowledgments"), so matching only
+  // the new path would hide the tab there.
+  { key: "/indents/acknowledgements", label: "Acknowledgements", icon: PackageCheck,
+    was: ["/indents/deliveries", "/indents/acknowledgments"] },
   { key: "/indents/reports", label: "Activity ledger", icon: ScrollText },
   { key: "/indents/notifications", label: "Alert & Notification", icon: Bell },
 ];
@@ -31,7 +44,9 @@ export function IndentsNav({ embedded = false }: { embedded?: boolean }) {
       .filter((root) => root.code === "grp_indents")
       .flatMap((root) => [root.path, ...(root.children ?? []).map((c) => c.path)]),
   );
-  const visible = destinations.filter((d) => granted.has(d.key));
+  const visible = destinations.filter(
+    (d) => granted.has(d.key) || (d.was ?? []).some((path) => granted.has(path)),
+  );
   if (!visible.length) return null;
 
   return (

@@ -112,7 +112,6 @@ describe("confirmed Indent approval/rejection cache projection", () => {
     for (const key of ["detail", "journey", "list", "recent", "stats", "activity", "notifications"]) {
       expect(isDecisionAffectedQuery({ queryKey: ["indents-module", 7, 11, key] } as never, scope)).toBe(true);
     }
-    expect(isDecisionAffectedQuery({ queryKey: ["indents-module", 7, 11, "acknowledgments"] } as never, scope)).toBe(false);
     expect(isDecisionAffectedQuery({ queryKey: ["indents-module", 99, 11, "detail"] } as never, scope)).toBe(false);
   });
 

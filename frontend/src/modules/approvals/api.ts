@@ -43,6 +43,83 @@ function normaliseConsolidation(data: Partial<ConsolidationWorkspace>): Consolid
   };
 }
 
+/** Make a monthly approval represent only what is still owed after earlier rungs
+ * served stock. The consolidation endpoint retains the original asks; availability
+ * is the frontend's existing source for the live remainder (including allocations
+ * already committed but not yet posted). Applying it to allocations first keeps the
+ * displayed totals, proportional split and submitted quantities on the same number.
+ */
+async function applyOutstandingConsolidation(
+  workspace: ConsolidationWorkspace,
+): Promise<ConsolidationWorkspace> {
+  const indentIds = [...new Set(
+    workspace.items.flatMap((batch) => batch.indents.map((indent) => indent.id)),
+  )];
+  if (indentIds.length === 0) return workspace;
+
+  const responses = await Promise.allSettled(indentIds.map(async (indentId) => {
+    const response = await api.get<IndentAvailability>(
+      `/api/approvals/indents/${indentId}/availability`,
+    );
+    return response.data;
+  }));
+  const remainderByLine = new Map<number, number>();
+  for (const response of responses) {
+    if (response.status !== "fulfilled") continue;
+    for (const line of response.value.items) {
+      remainderByLine.set(line.line_id, Math.max(0, Number(line.remainder)));
+    }
+  }
+
+  return {
+    ...workspace,
+    items: workspace.items.map((batch) => {
+      const consolidatedItems = batch.consolidated_items.map((item) => {
+        const allocations = item.allocations.map((allocation) => {
+          const remainder = remainderByLine.get(allocation.line_id);
+          if (remainder === undefined) return allocation;
+          return {
+            ...allocation,
+            requested_quantity: remainder,
+            ceiling_quantity: Math.min(allocation.ceiling_quantity, remainder),
+          };
+        });
+        return {
+          ...item,
+          allocations,
+          total_requested_quantity: allocations.reduce(
+            (sum, allocation) => sum + allocation.requested_quantity, 0,
+          ),
+          total_ceiling_quantity: allocations.reduce(
+            (sum, allocation) => sum + allocation.ceiling_quantity, 0,
+          ),
+        };
+      });
+      const totalsByIndent = new Map<number, { requested: number; ceiling: number }>();
+      for (const item of consolidatedItems) {
+        for (const allocation of item.allocations) {
+          const total = totalsByIndent.get(allocation.indent_id) ?? { requested: 0, ceiling: 0 };
+          total.requested += allocation.requested_quantity;
+          total.ceiling += allocation.ceiling_quantity;
+          totalsByIndent.set(allocation.indent_id, total);
+        }
+      }
+      return {
+        ...batch,
+        consolidated_items: consolidatedItems,
+        indents: batch.indents.map((indent) => {
+          const totals = totalsByIndent.get(indent.id);
+          return totals ? {
+            ...indent,
+            total_requested_quantity: totals.requested,
+            current_ceiling_quantity: totals.ceiling,
+          } : indent;
+        }),
+      };
+    }),
+  };
+}
+
 export interface PendingApprovalQuery {
   search?: string;
   doc_type?: string;
@@ -61,15 +138,13 @@ export const approvalsApi = {
   decisionsAll: () => allPages<ApprovalDecisionRow>("/api/approvals/my-decisions"),
   teamQueue: () =>
     api.get<{ items: TeamQueueRow[] }>("/api/approvals/team-queue").then((r) => r.data.items),
-  // One request for the whole screen: filtered batches AND the dropdown contents come
-  // back together, so changing a filter never fans out into a call per dimension.
-  //
   // Normalised on arrival: an older API build answers with `{items}` alone, and the
   // screen must degrade to "no filters offered" rather than blank out reading
-  // `filter_options` off undefined.
+  // `filter_options` off undefined. The live outstanding quantities are then applied
+  // so every downstream monthly rung sees only what earlier rungs left unserved.
   consolidation: (filters: ConsolidationQuery = {}) =>
     api.get<Partial<ConsolidationWorkspace>>("/api/approvals/consolidation", { params: filters })
-      .then((r) => normaliseConsolidation(r.data)),
+      .then((r) => applyOutstandingConsolidation(normaliseConsolidation(r.data))),
   // Approve the whole filtered batch in one call. `lines` carries only the
   // quantities the split produced; anything absent keeps this approver's ceiling.
   approveConsolidation: (body: ConsolidationApprovalInput) =>

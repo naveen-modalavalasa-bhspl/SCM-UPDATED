@@ -2391,6 +2391,7 @@ async def test_complete_journey_and_seven_phases_use_operational_evidence(monkey
             "delivery_complete": True,
             "has_receipt": True,
             "receipt_complete": True,
+            "has_warehouse_acknowledgement": True,
             "is_complete": True,
         }),
     )
@@ -2473,7 +2474,8 @@ async def test_journey_projects_chronological_batches_without_future_cards(monke
             "has_material_request": False, "has_issue": True, "issue_complete": True,
             "has_dispatch": True, "has_delivery": True, "delivery_complete": True,
             "has_acknowledgement": True, "has_receipt": True,
-            "receipt_complete": False, "is_complete": False,
+            "receipt_complete": False, "has_warehouse_acknowledgement": False,
+            "is_complete": False,
         }),
     )
     db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
@@ -2547,6 +2549,42 @@ async def test_journey_projects_chronological_batches_without_future_cards(monke
                 "Delivery",
             },
         ),
+        # The requester's own acknowledgement closes the last phase: the warehouse
+        # sign-off on the issue is a second route to the same fact, not a condition.
+        (
+            {
+                "has_allocation": True,
+                "has_issue": True,
+                "issue_complete": True,
+                "has_dispatch": True,
+                "has_delivery": True,
+                "delivery_complete": True,
+                "has_receipt": True,
+                "receipt_complete": True,
+            },
+            None,
+            "Completed",
+            {
+                "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+                "Delivery", "Acknowledgement",
+            },
+        ),
+        # Handed over at the store, with no dispatch document behind it.
+        (
+            {
+                "has_allocation": True,
+                "has_issue": True,
+                "issue_complete": True,
+                "has_receipt": True,
+                "receipt_complete": True,
+            },
+            None,
+            "Completed",
+            {
+                "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
+                "Delivery", "Acknowledgement",
+            },
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -2612,6 +2650,7 @@ async def test_seven_phase_precedence_uses_only_operational_evidence(
         "delivery_complete": False,
         "has_receipt": False,
         "receipt_complete": False,
+        "has_warehouse_acknowledgement": False,
         "is_complete": False,
         **evidence,
     }
@@ -2635,9 +2674,9 @@ async def test_seven_phase_precedence_uses_only_operational_evidence(
         "Draft", "Submitted", "Approvals", "Allocation", "Warehouse",
         "Delivery", "Acknowledgement",
     ]
-    assert [row["title"] for row in journey["phases"] if row["is_current"]] == [
-        current_title,
-    ]
+    assert [row["title"] for row in journey["phases"] if row["is_current"]] == (
+        [current_title] if current_title else []
+    )
     assert {
         title for title, row in phases.items() if row["status"] == "APPROVED"
     } == completed_titles

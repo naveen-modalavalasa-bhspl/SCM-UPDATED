@@ -42,6 +42,14 @@ def _active(status: Any) -> bool:
     return str(status).strip().lower() == "active"
 
 
+def office_sac(raw: Any) -> str | None:
+    """Return an office's service area code from its stored HCM payload."""
+    if not isinstance(raw, dict):
+        return None
+    value = str(raw.get("sac") or "").strip()
+    return value if value and value.lower() != "null" else None
+
+
 def primary_position_of(row: dict) -> dict:
     """The entry in `positions_details` the employee actually sits on.
 

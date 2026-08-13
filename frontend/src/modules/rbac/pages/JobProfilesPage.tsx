@@ -149,10 +149,200 @@ export function sectionSummary(granted: string[], actionsOn: number): string {
   return "No access";
 }
 
-/** What ticking a page actually does, said plainly. Shown on hover, because "Put-away"
- *  tells an admin nothing about what the holder will be able to reach. */
-const pageHint = (page: MatrixPage) =>
-  page.always_on
+/** Plain-language help for the screen options shown in Job Profiles. Keep this
+ *  local to the matrix: these are explanatory labels, not permission identities. */
+const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
+  grp_indents: {
+    hint: "Open the Indents module and use the screens selected below.",
+  },
+  ind_dashboard: {
+    hint: "See a quick summary of indent activity and recent requests.",
+  },
+  ind_list: {
+    hint: "View all indent requests and check their current status.",
+  },
+  ind_deliveries: {
+    hint: "Track approved requests and confirm the items that were received.",
+  },
+  ind_ack: {
+    hint: "Confirm which requested items have been received.",
+  },
+  ind_reports: {
+    hint: "Review the history of indent activity and status changes.",
+  },
+  ind_notifications: {
+    label: "Alerts and Notifications",
+    hint: "View alerts and updates about indent requests.",
+  },
+  approvals: {
+    hint: "Open the Approvals module and use the approval screens selected below.",
+  },
+  approval_waiting: {
+    hint: "See requests that are currently waiting for your approval.",
+  },
+  approval_decisions: {
+    hint: "Review requests that you have already approved or rejected.",
+  },
+  approval_team: {
+    hint: "See requests that are waiting with other approvers in your team.",
+  },
+  grp_purchasing: {
+    hint: "Open the Purchasing module and manage purchase orders.",
+  },
+  po_list: {
+    hint: "View purchase orders and check their current status.",
+  },
+  grp_warehouse: {
+    hint: "Open the Warehouse module and use the warehouse screens selected below.",
+  },
+  wh_dashboard: {
+    hint: "See a quick summary of warehouse activity and pending work.",
+  },
+  wh_inward: {
+    hint: "Record and track materials arriving at the warehouse.",
+  },
+  wh_grn: {
+    hint: "Record goods received from a vendor against an order.",
+  },
+  wh_qc: {
+    hint: "Check received goods and record whether they pass inspection.",
+  },
+  wh_putaway: {
+    hint: "See and complete tasks for placing received stock into storage bins.",
+  },
+  wh_picklist: {
+    hint: "See which items must be picked from storage for fulfilment.",
+  },
+  wh_issues: {
+    hint: "Record stock issued from the warehouse to a department.",
+  },
+  wh_consignments: {
+    hint: "Group and track goods that are being prepared for delivery.",
+  },
+  wh_dispatch: {
+    hint: "Prepare and track goods leaving the warehouse.",
+  },
+  wh_returns: {
+    hint: "Record and track goods being returned to a vendor.",
+  },
+  wh_notifications: {
+    hint: "View alerts and updates about warehouse work.",
+  },
+  wh_reports: {
+    hint: "View reports about warehouse receipts, issues, and dispatches.",
+  },
+  wh_masters: {
+    hint: "Set up warehouse locations, storage areas, and related details.",
+  },
+  grp_inventory: {
+    hint: "Open the Inventory module and use the inventory screens selected below.",
+  },
+  inv_overview: {
+    hint: "See a quick summary of stock levels and inventory activity.",
+  },
+  inv_balance: {
+    hint: "Check how much stock is currently available at each location.",
+  },
+  inv_ledger: {
+    hint: "Review the history of stock received, moved, adjusted, or issued.",
+  },
+  inv_replenishment: {
+    hint: "See items that may need more stock and plan replenishment.",
+  },
+  inv_transfers: {
+    hint: "Create and track stock transfers between warehouses.",
+  },
+  inv_fulfillment: {
+    hint: "See approved indents waiting for stock to be allocated and issued.",
+  },
+  inv_allocation_approvals: {
+    hint: "Review and decide on stock allocations waiting for approval.",
+  },
+  inv_stocking_points: {
+    hint: "Set up which positions are responsible for each stocking point.",
+  },
+  inv_mr: {
+    hint: "Create and track requests for materials needed by inventory.",
+  },
+  inv_labels: {
+    hint: "Create and print labels for stock items.",
+  },
+  masters: {
+    hint: "Set up the shared item, vendor, category, and other master records.",
+  },
+  grp_reports: {
+    hint: "Open the Reports module and view records from across the system.",
+  },
+  rep_indents: {
+    hint: "Review a report of indent requests and their current status.",
+  },
+  rep_approvals: {
+    hint: "Review a report of approval steps and decisions.",
+  },
+  rep_inventory: {
+    hint: "Review a report of stock quantities and stock movements.",
+  },
+  rep_warehouse: {
+    hint: "Review a report of warehouse receipts, issues, and dispatches.",
+  },
+  grp_rbac: {
+    hint: "Open access-control screens for roles, permissions, and user groups.",
+  },
+  rbac_access: {
+    hint: "Choose which screens and actions each role or job profile can use.",
+  },
+  rbac_groups: {
+    hint: "Create user groups and manage who belongs to each group.",
+  },
+  grp_settings: {
+    hint: "Open system administration and configuration screens.",
+  },
+  admin: {
+    hint: "Manage HCM synchronization and important system configuration.",
+  },
+  admin_settings: {
+    hint: "Update company details and general application settings.",
+  },
+  admin_rules: {
+    hint: "Set up rules that control automatic system decisions.",
+  },
+  admin_workflows: {
+    hint: "Set up the approval steps used for different types of documents.",
+  },
+  admin_approvals_config: {
+    hint: "Choose which positions approve each document for each project.",
+  },
+  admin_policies: {
+    hint: "Configure approval policies and automatic processing rules.",
+  },
+  admin_numbering: {
+    hint: "Set the numbering format used for business documents.",
+  },
+  admin_notifications: {
+    hint: "Configure which system events create notifications.",
+  },
+  admin_audit: {
+    hint: "Review a history of important actions performed in the system.",
+  },
+  admin_fallback: {
+    hint: "Review cases where the system had to use a fallback process.",
+  },
+  admin_app_logs: {
+    hint: "Review application messages used to investigate system problems.",
+  },
+  admin_code_formats: {
+    hint: "Set the code format used for assets and consumable items.",
+  },
+};
+
+export const pageDisplayName = (page: MatrixPage) =>
+  PLAIN_PAGE_HELP[page.code]?.label ?? page.name;
+
+/** What ticking a page actually does, said plainly. */
+export const pageHint = (page: MatrixPage) => {
+  const plainHint = PLAIN_PAGE_HELP[page.code]?.hint;
+  if (plainHint) return plainHint;
+  return page.always_on
     ? `${page.name} is always visible — every login can open it, and it cannot be `
       + "taken away here."
     : `Lets the holder open ${page.name} and see what is on it.`
@@ -160,11 +350,207 @@ const pageHint = (page: MatrixPage) =>
          ? ` Grants "${page.required_permission}".`
          : " This screen has no permission of its own, so it is visible to anyone "
            + "who can reach the module.");
+};
+
+/** Plain-language hover help for the actions shown in this matrix. */
+const PLAIN_FEATURE_HELP: Record<string, string> = {
+  "indent.acknowledge":
+    "Confirm that the goods requested in an indent have been received.",
+  "indent.approve":
+    "Review an indent and approve it so it can move to fulfilment.",
+  "indent.create":
+    "Create a new indent request for required goods or materials.",
+  "indent.delete":
+    "Delete an indent request that is no longer needed.",
+  "indent.edit":
+    "Change the details of an existing indent before it is processed.",
+  "indent.reject":
+    "Reject an indent and stop it from moving forward.",
+  "indent.submit":
+    "Send a created indent to the approver for review.",
+  "indent.view":
+    "Open and view indent requests and their details.",
+  "indent.view.fulfilment":
+    "See approved indents from any user that are waiting for goods to be issued.",
+  "po.view":
+    "Open and review purchase orders and their current status.",
+  "po.create":
+    "Create a new purchase order for goods or services.",
+  "po.edit":
+    "Change the details of an existing purchase order before it is completed.",
+  "po.submit":
+    "Send a purchase order to the approver for review.",
+  "po.approve":
+    "Review a purchase order and approve it to move forward.",
+  "po.reject":
+    "Reject a purchase order and stop it from moving forward.",
+  "po.send_vendor":
+    "Send an approved purchase order to the selected vendor.",
+  "grn.view":
+    "Open and review goods receipt notes.",
+  "grn.create":
+    "Create a goods receipt note for items received from a vendor.",
+  "grn.qc":
+    "Record whether received goods pass or fail the quality check.",
+  "stock.view":
+    "See current stock quantities and item availability.",
+  "stock.view.all":
+    "See stock in every warehouse, not only the user's own office.",
+  "stock.adjust":
+    "Correct a stock quantity when the recorded balance is wrong.",
+  "stock.reserve":
+    "Set stock aside so it can be used for a specific request or document.",
+  "stock.valuation.view":
+    "See the quantity, cost, and total value of stock.",
+  "stock.transfer":
+    "Move stock from one warehouse to another.",
+  "stock.view.subtree":
+    "See stock at locations that report under the user's position.",
+  "stock.points.manage":
+    "Choose which positions are responsible for each stocking point.",
+  "stock.transfer.approve":
+    "Approve stock transfers that move goods between different projects.",
+  "allocation.view":
+    "Open and review how stock has been allocated to indents.",
+  "allocation.create":
+    "Decide how much available stock should be given to each indent.",
+  "allocation.approve":
+    "Review and approve a proposed stock allocation.",
+  "allocation.reject":
+    "Reject a proposed stock allocation so it can be corrected.",
+  "allocation.submit":
+    "Send a stock allocation from the Fulfilment Queue for approval.",
+  "allocation.approve_reserve":
+    "Approve a stock allocation and reserve the approved quantity.",
+  "mr.view":
+    "Open and review material requests and their current status.",
+  "mr.create":
+    "Create a request for materials needed by inventory.",
+  "mr.approve":
+    "Review and approve a material request.",
+  "mr.reject":
+    "Reject a material request and stop it from moving forward.",
+  "issue.view":
+    "Open and review records of stock issued from the warehouse.",
+  "issue.create":
+    "Create a new record for stock that will be issued.",
+  "issue.issue":
+    "Confirm that stock has been issued to a department.",
+  "issue.forward":
+    "Forward an arrived consignment to a stocking point below the current one.",
+  "receipt.view":
+    "Open and review records of goods received at the warehouse.",
+  "receipt.create":
+    "Record goods that have arrived at the warehouse.",
+  "receipt.post":
+    "Finalize a goods receipt and add the received quantity to stock.",
+  "inspection.view":
+    "Open and review quality inspections for received goods.",
+  "inspection.execute":
+    "Record the quality inspection result for received goods.",
+  "putaway.view":
+    "See tasks for placing received stock into storage bins.",
+  "putaway.execute":
+    "Confirm that received stock has been placed into its storage bin.",
+  "picking.view":
+    "See fulfilments that require items to be picked from storage.",
+  "picking.pick":
+    "Record the items picked from storage for a fulfilment.",
+  "dispatch.view":
+    "Open and review goods being dispatched from the warehouse.",
+  "dispatch.create":
+    "Create a dispatch for goods that are ready to leave the warehouse.",
+  "dispatch.approve":
+    "Review and approve a dispatch before it leaves the warehouse.",
+  "dispatch.gate_out":
+    "Confirm that a dispatch has left the plant gate.",
+  "dispatch.acknowledge":
+    "Confirm that the dispatched goods reached their destination.",
+  "return.view":
+    "Open and review goods being returned to vendors.",
+  "return.create":
+    "Create a return for goods that must be sent back to a vendor.",
+  "return.approve":
+    "Review and approve goods before they are returned to a vendor.",
+  "warehouse.report.view":
+    "View reports about warehouse receipts, issues, and dispatches.",
+  "receipt.delete":
+    "Delete an unfinished goods receipt that is still a draft.",
+  "inspection.delete":
+    "Delete an unfinished quality inspection that is still a draft.",
+  "putaway.delete":
+    "Delete an unfinished put-away task that is still a draft.",
+  "picking.delete":
+    "Delete an unfinished picklist that is still a draft.",
+  "issue.delete":
+    "Delete an unfinished stock issue that is still a draft.",
+  "dispatch.delete":
+    "Delete an unfinished dispatch that is still a draft.",
+  "return.delete":
+    "Delete an unfinished purchase return that is still a draft.",
+  "movement.delete":
+    "Delete an unfinished stock movement that is still a draft.",
+  "master.item.manage":
+    "Create and update the items used across purchasing, stock, and warehouse work.",
+  "master.vendor.manage":
+    "Create and update vendor records and their details.",
+  "master.category.manage":
+    "Create and update categories used to organize items.",
+  "master.uom.manage":
+    "Create and update units such as pieces, kilograms, and litres.",
+  "master.location.manage":
+    "Create and update warehouses, storage areas, and bins.",
+  "master.project.manage":
+    "Create and update the projects used to organize business records.",
+  "master.brand.manage":
+    "Create and update the brands assigned to items.",
+  "master.class.manage":
+    "Create and update the classes used to group similar items.",
+  "master.packaging.manage":
+    "Create and update packaging types and pack sizes for items.",
+  "master.feature.manage":
+    "Create and update reusable features that describe items.",
+  "master.attribute.manage":
+    "Create item attributes and choose which items or categories use them.",
+  "master.price.manage":
+    "Create and update price lists used for items and vendors.",
+  "master.bom.manage":
+    "Create and update bills of material that list the items needed for a kit or job.",
+  "master.spec.manage":
+    "Create and update detailed specifications for items.",
+  "master.hsn.manage":
+    "Create and update HSN codes and the tax rates linked to them.",
+  "report.view":
+    "Open and review report ledgers from across the system.",
+  "report.export":
+    "Download a report ledger as an Excel or CSV file.",
+  "admin.roles.manage":
+    "Create roles and choose which screens and actions they can use.",
+  "admin.workflow.manage":
+    "Create and update the approval steps used for business documents.",
+  "admin.users.manage":
+    "Manage application users and synchronize user details from HCM.",
+  "admin.groups.manage":
+    "Create user groups and manage who belongs to each group.",
+  "admin.rules.manage":
+    "Create and update rules that control automatic system decisions.",
+  "admin.numbering.manage":
+    "Set the numbering formats used for business documents.",
+  "admin.audit.view":
+    "Review the history of important actions performed in the system.",
+  "admin.notifications.manage":
+    "Choose which system events create notifications and how they are handled.",
+  "admin.settings.manage":
+    "Update company details and general application settings.",
+  "admin.code_formats.manage":
+    "Set how codes are created for assets and consumable items.",
+};
 
 /** An action is a verb, not a screen: it decides whether the button works. */
-const featureHint = (feature: MatrixFeature) =>
-  `${feature.description}. Grants "${feature.code}" — the backend checks this on every `
-  + "request, so it is the real permission, not just a visible button.";
+export const featureHint = (feature: MatrixFeature) =>
+  PLAIN_FEATURE_HELP[feature.code]
+  ?? `${feature.description}. Grants "${feature.code}" — the backend checks this on every `
+    + "request, so it is the real permission, not just a visible button.";
 
 /* --------------------------------------------------------------------------- *
  *  Small local controls. Nothing here restyles a shared primitive — they are
@@ -345,7 +731,7 @@ export function JobProfilesPage() {
         ...section,
         pages: hit(section.name)
           ? section.pages
-          : section.pages.filter((p) => hit(p.name) || hit(p.code)),
+          : section.pages.filter((p) => hit(pageDisplayName(p)) || hit(p.code)),
         features: hit(section.name)
           ? section.features
           : section.features.filter((f) => hit(f.description) || hit(f.code)),
@@ -722,7 +1108,7 @@ export function JobProfilesPage() {
                     const state = sectionState(full);
                     const granted = full.pages
                       .filter((p) => p.always_on || pageCodes.has(p.code))
-                      .map((p) => p.name);
+                      .map(pageDisplayName);
                     const Icon = ICONS[moduleKey(section.name)] ?? Boxes;
                     return (
                       <div
@@ -812,7 +1198,7 @@ export function JobProfilesPage() {
                                     toggle(pageCodes, page.code, setPageCodes)}
                                   label={
                                     <>
-                                      {page.name}
+                                      {pageDisplayName(page)}
                                       {page.always_on && (
                                         <span className="ml-1.5 text-[11px] text-muted">
                                           (always on)

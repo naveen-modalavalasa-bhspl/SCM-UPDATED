@@ -48,6 +48,20 @@ def preview(s: DocSeries) -> str:
 
     Goes through the same `render()` the documents use — a preview built by a second
     formatter is a preview that can disagree with reality."""
+    # `render` deliberately falls back to the default pattern when a stored pattern
+    # is invalid so document creation is never blocked. The admin preview must still
+    # expose that configuration error rather than making the fallback look like the
+    # saved pattern worked.
+    try:
+        known = {t: t.upper() for t in (
+            "company", "project", "yyyy", "yy", "mm", "mon", "dd",
+        )}
+        normalise_pattern(s.pattern or DEFAULT_PATTERN).format(
+            prefix=s.prefix, fy=s.fiscal_year, num=(s.last_number or 0) + 1,
+            **{**known, **SAMPLE},
+        )
+    except (KeyError, ValueError, IndexError):
+        return "invalid pattern"
     return render(s.pattern or DEFAULT_PATTERN, s.prefix, s.fiscal_year,
                   (s.last_number or 0) + 1, **SAMPLE)
 
@@ -83,15 +97,16 @@ def _validate(data) -> None:
             f"reset_policy must be one of {', '.join(p.value for p in ResetPolicy)}")
     if "num" not in tokens_in(data.pattern):
         raise ValidationError(
-            "pattern must contain the running number, {SEQ:5} or {num:04d} — without "
-            "it every document would get the same number")
+            "pattern must contain a running number placeholder, {SEQ:5} or "
+            "{num:04d} — without it every document would get the same number")
     try:
         known = {t: t for t in ("company", "project", "yyyy", "yy", "mm", "mon", "dd")}
         normalise_pattern(data.pattern).format(
             prefix=data.prefix, fy=data.fiscal_year, num=1, **{**known, **SAMPLE})
     except (KeyError, ValueError, IndexError) as exc:
         raise ValidationError(
-            f"pattern uses something that is not a known token: {exc}. Known tokens: "
+            f"pattern is not a valid format string; it uses an unknown token: {exc}. "
+            "Known tokens: "
             + ", ".join(name for name, _ in TOKENS)) from exc
 
 

@@ -12,7 +12,7 @@ describe("IndentsNav", () => {
     );
     expect(screen.getByRole("navigation", { name: "Indent" })).toBeInTheDocument();
     for (const label of [
-      "Overview", "All requests", "Acknowledgments",
+      "Overview", "All requests", "Acknowledgements",
       "Activity ledger", "Alert & Notification",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
