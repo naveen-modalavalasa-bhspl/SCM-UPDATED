@@ -118,8 +118,12 @@ export function UnitCell({ text, extra, lot, title }: {
   const body = (
     <div className="min-w-0 text-left">
       <div className="truncate font-mono text-xs text-body">{text}</div>
+      {/* The WHOLE count, not "+18 more". A lot of 19 units sat beside an Available of
+          12 and a Reserved of 7, and "+18 more" left the reader to work out that the
+          three numbers agree. "19 units in lot" reconciles on sight: 12 free, 7 spoken
+          for, 19 things on the shelf. */}
       {!!extra && extra > 0 && (
-        <div className="text-[11px] text-brand">+{extra} more units</div>
+        <div className="text-[11px] text-brand">{extra + 1} units in lot</div>
       )}
     </div>
   );

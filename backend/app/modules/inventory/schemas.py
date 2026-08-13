@@ -47,6 +47,12 @@ class StockRow(BaseModel):
     category_name: str | None = None
     reorder_level: float = 0
     barcode_value: str | None = None
+    # The UOM's readable name. `uom_code` is the snapshot taken at the movement and is
+    # what every document, ledger row and export is keyed on, so it cannot be renamed —
+    # but the earliest six masters carry the prefix INSIDE the code (`UOM-GMS`,
+    # `UOM-L`), which printed as "12 UOM-GMS" on the grid. The name is what a reader
+    # wants ("GMS"); the code stays untouched everywhere it is stored.
+    uom_name: str | None = None
 
 
 class MovementRow(BaseModel):
@@ -90,6 +96,10 @@ class StockSummaryOut(BaseModel):
     total_value: float
     expiring_30_days: int
     below_reorder: int
+    # False when no item in the master carries a reorder level, which makes
+    # `below_reorder` an artefact rather than an answer. Defaults True so an older
+    # client that never reads it behaves exactly as before.
+    reorder_configured: bool = True
 
 
 class MovementSummaryOut(BaseModel):

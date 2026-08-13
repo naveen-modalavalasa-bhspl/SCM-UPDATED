@@ -50,10 +50,10 @@ from app.modules.inventory.service import warehouse_ids_for_user
 from app.shared.scope import scope_condition
 from app.shared.enums import (
     AuditAction, DocType, IndentStatus, InstanceStatus, POStatus, ReservationStatus,
-    RefType as InventoryRefType, StockDirection,
+    RefType as InventoryRefType, StockDirection, UomClass,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item, Vendor
+from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
@@ -61,6 +61,11 @@ from app.shared.time import now as ist_now, today as ist_today
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
+
+# The unit classes whose stock is made of separable things. Everything else UomClass
+# names — WEIGHT, VOLUME, LENGTH, AREA, TEMPERATURE, TIME, PRESSURE, ENERGY — measures
+# a continuous quantity, which has no "one unit" to hang an identity on.
+_COUNTABLE_UOM_CLASSES = {UomClass.COUNT.value, UomClass.PACKAGING.value}
 
 
 def _d(value) -> Decimal:
@@ -1630,7 +1635,29 @@ async def _prepare_receipt_line(
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
-    await _register_serials(db, receipt, line)
+    units = await _register_serials(db, receipt, line)
+
+    # A unit's identity is minted HERE too, not only at putaway. The asset/consumable
+    # code used to be stamped exclusively in `confirm_putaway`, so on a site with no
+    # bins — which is every stocking point but two — goods were banked into stock
+    # carrying no code at all and nothing downstream could quote them. There is no
+    # bin and no lot on this path; the code does not depend on either.
+    item = await _item_snapshot(db, line.item_id)
+    if units:
+        await _code_serial_rows(db, units, item=item,
+                                warehouse_id=receipt.warehouse_id)
+    elif await _is_countable(db, item):
+        await _place_unit_codes(
+            db,
+            item_id=line.item_id,
+            warehouse_id=receipt.warehouse_id,
+            batch_id=line.batch_id or None,
+            bin_id=None,
+            lot_no=None,
+            qty=_d(line.accepted_qty),
+        )
+    else:
+        await _code_lot(db, stock, item=item, warehouse_id=receipt.warehouse_id)
 
 
 async def _raise_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.ReceiptItem,
@@ -2490,6 +2517,12 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     task.lot_no = await _next_lot_no(db, await db.get(Warehouse, task.warehouse_id), target)
 
     await _place_serials(db, task, target, serials, receipt, receipt_item, qty=qty)
+    # A continuous item has no unit to name, so its identity goes on the LOT — the same
+    # rule the bulk-receipt path applies. Without this a bin-managed putaway of grams or
+    # litres produced no unit rows AND no lot code, and the stock screens, which read
+    # the code off `stk_balance`, showed a dash for goods that had been put away.
+    if not serials and not await _is_countable(db, item):
+        await _code_lot(db, stock, item=item, warehouse_id=task.warehouse_id)
 
     task.actual_bin_id = target.id
     task.scanned_by = getattr(user, "id", None)
@@ -2564,7 +2597,15 @@ async def _place_serials(
     new/old flag plus an 8-digit serial the next — and each change was a code change.
     """
     if not serial_numbers:
-        await _place_unit_codes(db, task, target, qty)
+        await _place_unit_codes(
+            db,
+            item_id=task.item_id,
+            warehouse_id=task.warehouse_id,
+            batch_id=task.batch_id,
+            bin_id=target.id,
+            lot_no=task.lot_no,
+            qty=qty if qty is not None else task.qty,
+        )
         return
     if receipt is None or receipt_item is None:
         raise ValidationError("Serialized putaway is missing its GRN line")
@@ -2578,28 +2619,112 @@ async def _place_serials(
     )
 
     item = await db.get(Item, task.item_id)
-    is_asset = bool(getattr(item, "is_asset", False)) if item else False
-    warehouse = await db.get(Warehouse, task.warehouse_id) if task.warehouse_id else None
-    config = await codeformat.code_settings(db)
-    # The item master's asset/consumable-code toggle. Off means the unit keeps its
-    # serial / IMEI as its only identity — no code is minted for it.
-    wants_code = codeformat.is_code_tracked(item, config)
-
     for serial in serials:
         serial.batch_id = task.batch_id or receipt_item.batch_id or serial.batch_id
         serial.warehouse_id = task.warehouse_id
         serial.bin_id = target.id
         serial.status = SerialStatus.AVAILABLE.value
         serial.lot_no = task.lot_no
-        if not wants_code:
-            continue
+    await _code_serial_rows(db, serials, item=item, warehouse_id=task.warehouse_id)
+
+
+async def _is_countable(db: AsyncSession, item) -> bool:
+    """Whether this item's stock is made of units that can each carry a code.
+
+    Grams of cotton and litres of spirit cannot: a code names ONE physical thing and
+    there is no "one" in a continuous measure. 30 grams is a single lot, not 30 things
+    to label. Those get one code on the LOT instead — see `_code_lot`.
+
+    This is the same rule `scripts/inventory_reconcile.py` applies when it strips
+    `is_serial_tracked` off measured items and deactivates the per-unit rows that flag
+    produced. Enforcing it here is what stops those rows being minted again.
+
+    An item with no unit reads as countable, which is what this did before the check
+    existed — an unset field must not silently stop goods being coded.
+    """
+    uom_id = getattr(item, "uom_id", None)
+    if not uom_id:
+        return True
+    uom = await db.get(Uom, uom_id)
+    return (getattr(uom, "uom_class", None) or "").upper() in _COUNTABLE_UOM_CLASSES
+
+
+async def _code_lot(
+    db: AsyncSession,
+    stock,
+    *,
+    item,
+    warehouse_id: int | None,
+    config: dict | None = None,
+) -> None:
+    """One asset / consumable code for a lot whose units cannot each carry one.
+
+    A continuous item is one `stk_balance` row and no unit rows, so its identity has
+    to live on the lot. Same formula, rendered against the balance row id — which is
+    what `scripts/backfill_codes_and_prices.code_unserialised_lots` did for the stock
+    that predates this, so old and new lots read the same.
+
+    Never re-stamped, and never below the top rung, for the reasons in
+    `_place_unit_codes`.
+    """
+    if stock is None or item is None:
+        return
+    if stock.asset_code or stock.consumable_code:
+        return
+    warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
+    if stock_locations.tier_of(getattr(warehouse, "warehouse_type", None)) \
+            is not stock_locations.LocationTier.WAREHOUSE:
+        return
+    config = config or await codeformat.code_settings(db)
+    if not codeformat.is_code_tracked(item, config):
+        return
+    # The formula runs off the row id, so the lot must exist before it can be named.
+    if stock.id is None:
+        await db.flush()
+    is_asset = bool(getattr(item, "is_asset", False))
+    code = await codeformat.unit_code(
+        db, item=item, is_asset=is_asset, seq=stock.id,
+        warehouse_code=getattr(warehouse, "code", None), config=config,
+    )
+    if is_asset:
+        stock.asset_code, stock.consumable_code = code, None
+    else:
+        stock.consumable_code, stock.asset_code = code, None
+    await db.flush()
+
+
+async def _code_serial_rows(
+    db: AsyncSession,
+    serials: list[m.SerialNumber],
+    *,
+    item,
+    warehouse_id: int | None,
+    config: dict | None = None,
+) -> None:
+    """Stamp the asset / consumable code onto units that already have their rows.
+
+    Split out of `_place_serials` so the bulk-receipt path can call it: a stocking
+    point with no bins never reaches a putaway, and its units were left uncoded.
+    """
+    if not serials:
+        return
+    is_asset = bool(getattr(item, "is_asset", False)) if item else False
+    warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
+    config = config or await codeformat.code_settings(db)
+    # The item master's asset/consumable-code toggle. Off means the unit keeps its
+    # serial / IMEI as its only identity — no code is minted for it.
+    if not codeformat.is_code_tracked(item, config):
+        await db.flush()
+        return
+
+    for serial in serials:
         code = await codeformat.unit_code(
             db, item=item, is_asset=is_asset,
             serial=serial.serial_number, seq=serial.id,
             warehouse_code=getattr(warehouse, "code", None), config=config,
         )
         # Never re-stamped: a unit's code is on its label and in every document that
-        # has already quoted it, so changing the formula only affects units put away
+        # has already quoted it, so changing the formula only affects units received
         # from now on.
         if is_asset:
             serial.asset_code = serial.asset_code or code
@@ -2610,11 +2735,15 @@ async def _place_serials(
 
 async def _place_unit_codes(
     db: AsyncSession,
-    task: m.PutawayTask,
-    target: Bin,
+    *,
+    item_id: int,
+    warehouse_id: int | None,
+    batch_id: int | None,
+    bin_id: int | None,
+    lot_no: str | None,
     qty,
 ) -> None:
-    """Gives every UNIT of an unserialised putaway its own asset/consumable code.
+    """Gives every UNIT of an unserialised receipt its own asset/consumable code.
 
     A code names one physical thing. Before this, a line of 30 produced one row in
     `whs_serial_numbers` at best and usually none, so the issue screen offered a
@@ -2635,16 +2764,21 @@ async def _place_unit_codes(
 
     Serial-tracked items are left alone: their units are named by `_place_serials`
     and re-coding them here would create a second row for the same physical thing.
-    Fractional quantities are skipped — half a litre of oil is not a unit.
+    Continuous units (`_is_countable`) and fractional quantities are skipped — half a
+    litre of oil is not a unit; that stock is named one lot at a time by `_code_lot`.
     """
-    item = await db.get(Item, task.item_id)
+    item = await db.get(Item, item_id)
     if item is None or bool(getattr(item, "is_serial_tracked", False)):
         return
-    units = _d(qty) if qty is not None else _d(task.qty)
+    # Grams and litres have no unit to name. Guarded here as well as at the caller so
+    # the putaway route cannot mint 30 rows for 30 grams of cotton either.
+    if not await _is_countable(db, item):
+        return
+    units = _d(qty)
     if units <= ZERO or units != units.to_integral_value():
         return
 
-    warehouse = await db.get(Warehouse, task.warehouse_id) if task.warehouse_id else None
+    warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
     tier = stock_locations.tier_of(getattr(warehouse, "warehouse_type", None))
     if tier is not stock_locations.LocationTier.WAREHOUSE:
         return
@@ -2667,9 +2801,9 @@ async def _place_unit_codes(
             # ran — the 500 storekeepers hit confirming an inward. The placeholder only
             # has to survive one flush before the real code replaces it below, so it is
             # made unique per row and marked so a stray one is recognisable.
-            item_id=task.item_id, serial_number=f"~PENDING-{uuid4().hex}",
-            batch_id=task.batch_id or None, warehouse_id=task.warehouse_id,
-            bin_id=target.id, lot_no=task.lot_no,
+            item_id=item_id, serial_number=f"~PENDING-{uuid4().hex}",
+            batch_id=batch_id or None, warehouse_id=warehouse_id,
+            bin_id=bin_id, lot_no=lot_no,
             status=SerialStatus.AVAILABLE.value, is_active=True,
         )
         db.add(row)
@@ -2686,7 +2820,7 @@ async def _place_unit_codes(
         code.strip().lower()
         for code in (await db.execute(
             select(m.SerialNumber.serial_number)
-            .where(m.SerialNumber.item_id == task.item_id,
+            .where(m.SerialNumber.item_id == item_id,
                    m.SerialNumber.id.notin_([row.id for row in rows]))
         )).scalars()
         if code
@@ -7026,6 +7160,17 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
             warehouse_ids=await warehouse_ids_for_user(db, user),
         ))
 
+    # Which of these items the master says actually carry a per-unit identity. A unit
+    # row for a MEASURED item (cotton in grams, spirit in litres) still holds a real
+    # putaway code — the label on the package a storekeeper shelved — but its serial
+    # number is an artefact: you cannot serialise a gram. `serial_number` is UNIQUE and
+    # NOT NULL on the table, so the artefact cannot be blanked in place; it is
+    # suppressed here instead, which keeps the row's key and its code intact.
+    tracked = {r[0] for r in (await db.execute(
+        select(Item.id).where(Item.id.in_(item_ids),
+                              Item.is_serial_tracked.is_(True))
+    )).all()}
+
     # Keyed down to the BIN and the BATCH, not just the stocking point: "which units
     # are in this bin" is the question the stock screens are actually asked, and one
     # warehouse holds the same item in several bins. The caller indexes the result
@@ -7042,9 +7187,9 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
         })
         bucket["count"] += 1
         # Five is enough to recognise the lot; the rest are behind the detail panel.
-        if serial and len(bucket["serials"]) < 5:
+        if serial and item_id in tracked and len(bucket["serials"]) < 5:
             bucket["serials"].append(serial)
-        if imei and len(bucket["imeis"]) < 5:
+        if imei and item_id in tracked and len(bucket["imeis"]) < 5:
             bucket["imeis"].append(imei)
         code = asset or consumable
         if code and len(bucket["codes"]) < 5:

@@ -21,6 +21,11 @@ const money = (n?: number) =>
 
 const qty = (n: number, uom?: string) => `${n.toLocaleString("en-IN")}${uom ? ` ${uom}` : ""}`;
 
+/** What to print for a lot's unit of measure. `uom_code` is the identity every stored
+ *  document is keyed on, so it is never renamed; the six oldest masters just happen to
+ *  carry their prefix inside it, which read as "12 UOM-GMS". The name says "GMS". */
+const uomOf = (r: { uom_name?: string | null; uom_code?: string }) => r.uom_name || r.uom_code;
+
 const daysTo = (d?: string) =>
   d ? Math.ceil((new Date(d).getTime() - Date.now()) / 86_400_000) : null;
 
@@ -298,7 +303,7 @@ export function StockBalanceView() {
       key: "available",
       header: "Available",
       className: "text-right",
-      render: (r) => <span className="font-semibold text-ink">{qty(r.available_qty, r.uom_code)}</span>,
+      render: (r) => <span className="font-semibold text-ink">{qty(r.available_qty, uomOf(r))}</span>,
     },
     {
       key: "reserved",
@@ -409,12 +414,18 @@ export function StockBalanceView() {
         />
         <StatCard label="Stock Lines" value={stat(summary?.stock_lines)} icon={<Layers size={16} />} />
         <StatCard label="Distinct Items" value={stat(summary?.distinct_items)} icon={<Boxes size={16} />} />
-        <StatCard
-          label="Below Reorder"
-          value={stat(summary?.below_reorder)}
-          icon={<TriangleAlert size={16} />}
-          tone={summary?.below_reorder ? "text-danger" : "text-muted"}
-        />
+        {/* Hidden, not zeroed, when no item in the master carries a reorder level: a
+            "Below Reorder 0" tile reads as "nothing needs ordering" when the truth is
+            that nobody has said what low means yet. Comes back on its own the moment a
+            reorder level is set on any item. */}
+        {summary?.reorder_configured !== false && (
+          <StatCard
+            label="Below Reorder"
+            value={stat(summary?.below_reorder)}
+            icon={<TriangleAlert size={16} />}
+            tone={summary?.below_reorder ? "text-danger" : "text-muted"}
+          />
+        )}
         <StatCard
           label="Expiring ≤30d"
           value={stat(summary?.expiring_30_days)}
@@ -529,7 +540,11 @@ export function StockBalanceView() {
             { value: "100", label: "100 per page" },
           ]}
         />
-        <FilterToggle active={belowReorder} onChange={setBelowReorder}>Below reorder</FilterToggle>
+        {/* Same reason as the tile: with no reorder level anywhere the filter can only
+            ever return an empty grid, which reads as "no stock is low". */}
+        {summary?.reorder_configured !== false && (
+          <FilterToggle active={belowReorder} onChange={setBelowReorder}>Below reorder</FilterToggle>
+        )}
         <FilterToggle active={includeZero} onChange={setIncludeZero}>Include zero stock</FilterToggle>
       </FilterBar>
 
@@ -565,7 +580,7 @@ export function StockBalanceView() {
                   Batch {r.batch_number || "—"} · {r.expiry_date ? `Expires ${r.expiry_date}` : "No expiry"}
                 </div>
                 <div className="flex gap-4 text-sm">
-                  <span>Available <strong>{qty(r.available_qty, r.uom_code)}</strong></span>
+                  <span>Available <strong>{qty(r.available_qty, uomOf(r))}</strong></span>
                   <span className="text-muted">Reserved {r.reserved_qty}</span>
                 </div>
               </div>
@@ -610,13 +625,13 @@ export function StockBalanceView() {
                   <div key={label} className="rounded-lg border border-line/70 p-3">
                     <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</div>
                     <div className={`text-xl font-bold ${tone}`}>{v.toLocaleString("en-IN")}</div>
-                    <div className="text-[10px] text-muted">{selected.uom_code}</div>
+                    <div className="text-[10px] text-muted">{uomOf(selected)}</div>
                   </div>
                 ))}
               </ResponsiveGrid>
               {(selected.transit_qty ?? 0) > 0 && (
                 <p className="mt-2 text-xs text-muted">
-                  In transit: {selected.transit_qty} {selected.uom_code}
+                  In transit: {selected.transit_qty} {uomOf(selected)}
                 </p>
               )}
             </SheetSection>
@@ -659,7 +674,7 @@ export function StockBalanceView() {
                 <p className="text-sm text-muted">No lot rows for this item here.</p>
               )}
               <div className="space-y-2">
-                {detail?.lots.map((lot) => <LotCard key={lot.id} lot={lot} uom={selected.uom_code} />)}
+                {detail?.lots.map((lot) => <LotCard key={lot.id} lot={lot} uom={uomOf(selected)} />)}
               </div>
             </SheetSection>
 

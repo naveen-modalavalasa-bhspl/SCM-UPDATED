@@ -8,7 +8,7 @@ import loginHero from "@/assets/login-hero.png";
 export function LoginPage() {
   const { login } = useAuth();
   const nav = useNavigate();
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState("HR-EMP-");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

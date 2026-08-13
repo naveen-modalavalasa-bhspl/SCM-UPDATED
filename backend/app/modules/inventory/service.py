@@ -37,7 +37,7 @@ from app.shared.enums import (
     Priority, RefType, ScopeRung, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item
+from app.shared.models.master import Item, Uom
 from app.shared.models.warehouse import Warehouse, WarehouseLocation
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
@@ -590,7 +590,29 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
             row.category_name = item.category_name if item else None
             row.reorder_level = float(item.reorder_level or 0) if item else 0.0
             row.barcode_value = item.barcode_value if item else None
+        await _fill_uom_names(db, page["items"])
     return page
+
+
+async def _fill_uom_names(db: AsyncSession, rows) -> None:
+    """Attach the readable UOM name to rows that carry a snapshot `uom_code`.
+
+    The code is the identity the whole system is keyed on — stk_balance, stk_ledger,
+    every PO/GRN line and every export snapshot it — so it can never be renamed to
+    tidy up a display. The six oldest masters happen to carry their prefix inside the
+    code (`UOM-GMS`, `UOM-L`, `UOM-NOS`) while everything created since is clean
+    (`PCS`, `MTR`), which is why one grid printed "12 UOM-GMS" and the next "12 PCS".
+    One lookup per page resolves the name; the code goes out unchanged beside it, and
+    a code with no master row simply has no name and the screen falls back to it.
+    """
+    codes = {r.uom_code for r in rows if getattr(r, "uom_code", None)}
+    if not codes:
+        return
+    names = dict((await db.execute(
+        select(Uom.code, Uom.name).where(Uom.code.in_(codes))
+    )).all())
+    for r in rows:
+        r.uom_name = names.get(r.uom_code)
 
 
 async def stock_summary(db: AsyncSession, item_id: int | None = None,
@@ -648,6 +670,15 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
         .where(Item.reorder_level > 0, rows.c.available_qty < Item.reorder_level)
     ) or 0)
 
+    # Is the answer above meaningful at all? "Below reorder: 0" is indistinguishable
+    # from "no item in the master has a reorder level", and today every one of them is
+    # 0 — so the tile reported healthy stock over a question nobody had answered. The
+    # screen hides the tile and the filter when this is false rather than printing a
+    # reassuring zero.
+    reorder_configured = bool(await db.scalar(
+        select(func.count()).select_from(Item).where(Item.reorder_level > 0).limit(1)
+    ))
+
     return {
         "stock_lines": int(totals[0] or 0),
         "distinct_items": int(totals[1] or 0),
@@ -655,6 +686,7 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
         "total_value": float(totals[3] or 0),
         "expiring_30_days": int(totals[4] or 0),
         "below_reorder": below,
+        "reorder_configured": reorder_configured,
     }
 
 

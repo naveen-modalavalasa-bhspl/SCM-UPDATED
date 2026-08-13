@@ -69,6 +69,10 @@ const toBalance = (r: StockRow): StockBalanceItem => ({
   warehouse_id: r.warehouse_id,
   warehouse_name: r.warehouse_name ?? "",
   uom_code: r.uom_code ?? "",
+  // Both, and for different jobs: the CODE is the stored identity every document and
+  // export is keyed on, the NAME is what the grid prints. The six oldest UOM masters
+  // carry their prefix inside the code, so printing the code read as "12 UOM-GMS".
+  uom_name: r.uom_name ?? undefined,
   physical_qty: num(r.total_qty),
   reserved_qty: num(r.reserved_qty),
   transit_qty: num(r.transit_qty),
