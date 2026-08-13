@@ -32,6 +32,13 @@ class Warehouse(Base):
     incharge_name = Column(String(200), nullable=True)   # snapshot
     # When false the warehouse stocks in bulk and stk_balance.bin_id stays 0.
     is_bin_managed = Column(Boolean, nullable=False, default=False)
+    # Does a consignment landing here have to go through Material Inward -> GRN -> QC
+    # before its stock counts? NULL means "whatever the company default says"
+    # (settings key warehouse.requires_inward_default), so a point that was never
+    # configured keeps behaving exactly as it did before the column existed. True
+    # holds the goods until the GRN posts them; false credits them the moment the
+    # receiver acknowledges the consignment.
+    requires_inward = Column(Boolean, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = created_at_col()
 

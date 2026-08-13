@@ -74,6 +74,9 @@ export interface Warehouse {
   incharge_name?: string | null;
   /** When false the warehouse stocks in bulk and every `bin_id` stays 0. */
   is_bin_managed: boolean;
+  /** Does an arriving consignment go through Material Inward, GRN and QC before its
+   *  stock counts? `null` follows the company default in Settings. */
+  requires_inward?: boolean | null;
   is_active: boolean;
   created_at?: string;
 }
@@ -87,6 +90,7 @@ export interface WarehouseWrite {
   address?: string | null;
   incharge_id?: number | null;
   is_bin_managed: boolean;
+  requires_inward?: boolean | null;
   is_active: boolean;
 }
 
@@ -1200,6 +1204,9 @@ export interface Option {
  *  where the goods were put — an MDP or LIP with no bins configured is not. */
 export interface WarehouseOption extends Option {
   is_bin_managed?: boolean;
+  /** MAIN / CENTRAL / TRANSIT ... versus MDP or LIP. Decides how much of the GRN
+   *  form is on show — the bottom of the chain receives consignments, not purchases. */
+  warehouse_type?: string | null;
 }
 
 /** An incoming consignment, expanded so the inward form fills itself from it. */

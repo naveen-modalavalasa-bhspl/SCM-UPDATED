@@ -448,6 +448,9 @@ class WarehouseIn(BaseModel):
     address: str | None = None
     incharge_id: int | None = None
     is_bin_managed: bool = False
+    # Blank = follow the company default (warehouse.requires_inward_default). True
+    # means arrivals here go through Material Inward -> GRN -> QC before they count.
+    requires_inward: bool | None = None
     is_active: bool = True
 
 
@@ -457,7 +460,7 @@ def warehouse_out(w: Warehouse) -> dict:
             "office_name": w.office_name, "warehouse_type": w.warehouse_type,
             "address": w.address, "incharge_id": w.incharge_id,
             "incharge_name": w.incharge_name, "is_bin_managed": w.is_bin_managed,
-            "is_active": w.is_active}
+            "requires_inward": w.requires_inward, "is_active": w.is_active}
 
 
 async def apply_warehouse(db: AsyncSession, w: Warehouse, data: WarehouseIn) -> None:

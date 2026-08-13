@@ -171,6 +171,21 @@ export function SettingsPage() {
                   onChange={(value) => set("notifications", "email_enabled", value)} />
         </Section>
 
+        <Section title="Receiving">
+          <Toggle
+            label="Stocking points need an inward process by default"
+            checked={form.warehouse.requires_inward_default}
+            onChange={(value) => set("warehouse", "requires_inward_default", value)}
+          />
+          <p className="text-xs text-muted md:col-span-2">
+            On: a consignment arriving at an MDP or LIP waits for Material Inward, a GRN
+            and QC, and the GRN is what posts the stock. Off: the receiver acknowledges
+            the delivery and the stock is credited immediately. This is only the default
+            — a stocking point that has answered for itself on the warehouse master
+            overrides it.
+          </p>
+        </Section>
+
         <Section title="Fallback">
           <Toggle label="Workflow fallback" checked={form.fallback.workflow_fallback_enabled}
                   onChange={(value) => set("fallback", "workflow_fallback_enabled", value)} />

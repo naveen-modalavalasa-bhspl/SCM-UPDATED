@@ -33,6 +33,11 @@ export interface AppSettings {
     notify_admin_on_fallback: boolean;
     allow_auto_admin_fallback: boolean;
   };
+  warehouse: {
+    /** What a stocking point does with an arriving consignment when it has not
+     *  answered for itself. The per-point flag on the warehouse master wins. */
+    requires_inward_default: boolean;
+  };
 }
 
 /** GET/PUT /api/settings/code-formats — the asset & consumable code formula.

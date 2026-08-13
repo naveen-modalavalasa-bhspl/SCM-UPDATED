@@ -43,6 +43,7 @@ from app.modules.warehouse.enums import (
     ReturnStatus, SerialStatus, WarehouseDocType,
 )
 from app.platform.settings import attachments, codeformat
+from app.platform.settings import service as settings_service
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance as WfInstance
@@ -162,6 +163,31 @@ async def _warehouse(db: AsyncSession, warehouse_id: int) -> Warehouse:
     if not wh.is_active:
         raise ValidationError(f"Warehouse {wh.code} is inactive")
     return wh
+
+
+#: Company-wide answer for stocking points that have not set their own policy.
+#: 'false' — acknowledging a consignment credits its stock — is what this code did
+#: unconditionally before the policy existed, so an unconfigured database is unchanged.
+INWARD_DEFAULT_KEY = "warehouse.requires_inward_default"
+
+
+async def requires_inward(db: AsyncSession, warehouse_id: int | None) -> bool:
+    """Does a consignment landing here have to be inwarded before its stock counts?
+
+    True is the MDP/LIP that runs the full receiving desk: Material Inward -> GRN ->
+    QC, and only the GRN posts stock. False is the point that just signs for the
+    lorry — `acknowledge_dispatch` credits what arrived and there is no GRN at all.
+
+    The column is nullable on purpose: NULL is "nobody has decided for this point",
+    which reads the company default rather than silently picking a side.
+    """
+    if not warehouse_id:
+        return False
+    wh = await db.get(Warehouse, warehouse_id)
+    if wh is not None and wh.requires_inward is not None:
+        return bool(wh.requires_inward)
+    default = await settings_service.get_setting(db, INWARD_DEFAULT_KEY, "false")
+    return str(default).strip().lower() == "true"
 
 
 async def _bin_code(db: AsyncSession, bin_id: int | None) -> str | None:
@@ -988,9 +1014,12 @@ async def _dispatch_for_receipt(
         )
     # A transfer that was acknowledged before anybody inwarded it has already been
     # credited to the destination by `acknowledge_dispatch`. Inwarding it now would
-    # book the same goods twice.
+    # book the same goods twice. Unless this destination runs a receiving desk, in
+    # which case acknowledgement deliberately credited nothing and the GRN below is
+    # the stock event it was waiting for.
     if (dispatch.dispatch_type == DispatchType.TRANSFER.value
-            and dispatch.status == DispatchStatus.ACKNOWLEDGED.value):
+            and dispatch.status == DispatchStatus.ACKNOWLEDGED.value
+            and not await requires_inward(db, dispatch.to_warehouse_id)):
         raise ValidationError(
             f"{dispatch.dispatch_no} was acknowledged as a transfer, so its stock is "
             "already at the destination. Inward it before acknowledging next time."
@@ -4584,6 +4613,20 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
                 await _live_issue_labels(db, served.id, wh.id),
             )
 
+        # A LIP is the bottom of the chain: everything it holds arrived against a
+        # request and everything it gives out answers one. Issuing with no indent
+        # anywhere — not on the header, not on a line — was letting stock leave a
+        # local point with nothing recording who asked for it, and the quantity cap
+        # above has nothing to measure against either. Upstream points are
+        # deliberately not held to this: a main store issues to departments, writes
+        # off scrap and moves stock for reasons no indent covers.
+        if not wanted and stock_locations.tier_of(
+            wh.warehouse_type
+        ) is stock_locations.LocationTier.LIP:
+            raise ValidationError(
+                f"{wh.name} can only issue against an indent. Pick the indent this "
+                "material is being given out for.")
+
     if not data.items:
         raise ValidationError("An issue with no lines has nothing to issue")
 
@@ -5640,21 +5683,16 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
                       after={"status": indent.status})
 
 
-async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None,
-                            user) -> m.MaterialIssue:
-    issue = await get_issue(db, issue_id)
-    # DISPATCHED is the same open state as ISSUED — gate-out only records that the
-    # goods left the gate, the receiver still has to acknowledge them.
-    _guard(issue.status, {IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value},
-           "acknowledge", "issue")
-    # Hiding the button is not the control (rule 6) — the raiser's confirmation is.
-    if not await _receiver_confirmed(db, issue):
-        raise ValidationError(
-            f"{issue.issue_no} has not been confirmed by the requester yet. They "
-            "record what reached them in My Deliveries; this signs off on that.")
-    before_status = issue.status
+async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
+                                       by_name: str | None, remarks: str | None,
+                                       user) -> None:
+    """Sign the issue off and carry the signature onto what it was attached to.
+
+    Does not commit and writes no audit row: both callers are mid-transaction and own
+    their own audit trail.
+    """
     issue.status = IssueStatus.ACKNOWLEDGED.value
-    issue.acknowledged_by_name = _name(user)
+    issue.acknowledged_by_name = by_name
     issue.acknowledged_at = utcnow()
     if remarks:
         issue.remarks = f"{issue.remarks or ''}\nReceiver: {remarks}".strip()
@@ -5672,14 +5710,75 @@ async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None
         dispatch.acknowledged_at = issue.acknowledged_at
         dispatch.delivered_at = dispatch.delivered_at or issue.acknowledged_at
         # The requester has already confirmed every quantity carried by this issue
-        # (_receiver_confirmed is the guard above). Keep the linked consignment's line
-        # evidence in sync when the warehouse signs off through the issue page —
+        # (_receiver_confirmed is the caller's guard). Keep the linked consignment's
+        # line evidence in sync when the warehouse signs off through the issue page —
         # without it `out_dispatch_items.delivered_qty` stays 0 forever, and the
         # Journey's Delivery phase sits PENDING on an indent that is already closed.
         for line in dispatch.items:
             line.delivered_qty = _d(line.quantity)
 
     await _close_indents_on_issue(db, issue, user)
+
+
+async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
+                                      user) -> list[str]:
+    """Sign off every open issue serving this indent that the raiser has now confirmed.
+
+    The warehouse used to click Acknowledge a second time after the requester had
+    already recorded what reached them in My Deliveries — the same fact, entered
+    twice, with the indent sitting open until somebody remembered the second click.
+    `_receiver_confirmed` was always the real test, so the moment it passes the issue
+    signs itself off in the requester's name.
+
+    Called from `indents.acknowledge_receipt` inside its transaction, so this neither
+    commits nor audits: the receipt that made the confirmation true and the
+    acknowledgement it triggers have to land together or not at all. Returns the issue
+    numbers it closed, for the caller's audit row.
+    """
+    from app.modules.indents.models import IndentItem
+
+    line_issues = select(m.MaterialIssueLine.issue_id).join(
+        IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id
+    ).where(IndentItem.indent_id == indent_id)
+
+    # Eager-loaded: `_receiver_confirmed` walks `issue.items`, and a lazy load on an
+    # async session raises MissingGreenlet.
+    issues = (await db.execute(
+        select(m.MaterialIssue)
+        .options(selectinload(m.MaterialIssue.items))
+        .where(
+            m.MaterialIssue.status.in_(
+                (IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value)),
+            or_(m.MaterialIssue.indent_id == indent_id,
+                m.MaterialIssue.id.in_(line_issues)),
+        )
+    )).scalars().all()
+
+    signed: list[str] = []
+    for issue in issues:
+        # A consolidated issue serves several indents. Only the one whose raiser has
+        # confirmed everything it carried is settled — the rest keep it open.
+        if not await _receiver_confirmed(db, issue):
+            continue
+        await _apply_issue_acknowledgement(db, issue, _name(user), None, user)
+        signed.append(issue.issue_no)
+    return signed
+
+
+async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None,
+                            user) -> m.MaterialIssue:
+    issue = await get_issue(db, issue_id)
+    # DISPATCHED is the same open state as ISSUED — gate-out only records that the
+    # goods left the gate, the receiver still has to acknowledge them.
+    _guard(issue.status, {IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value},
+           "acknowledge", "issue")
+    # Hiding the button is not the control (rule 6) — the raiser's confirmation is.
+    if not await _receiver_confirmed(db, issue):
+        raise ValidationError(
+            f"{issue.issue_no} has not been confirmed by the requester yet. They "
+            "record what reached them in My Deliveries; this signs off on that.")
+    before_status = issue.status
+    await _apply_issue_acknowledgement(db, issue, _name(user), remarks, user)
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -6723,9 +6822,14 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
     # Unless the destination inwarded it itself. A point that ran the consignment
     # through GRN and QC has already posted exactly what it kept; crediting the
     # dispatch again here would double the stock.
+    # Or unless the destination is a point that RUNS a receiving desk. There the
+    # signature on the lorry is not the stock event — the GRN is — so crediting here
+    # would put the goods on the shelf before anyone inspected them.
     inwarded = await _inward_receipt_for_dispatch(db, dispatch.id) is not None
+    inward_first = await requires_inward(db, dispatch.to_warehouse_id)
 
-    if dispatch.dispatch_type == DispatchType.TRANSFER.value and not inwarded:
+    if (dispatch.dispatch_type == DispatchType.TRANSFER.value
+            and not inwarded and not inward_first):
         if not dispatch.to_warehouse_id:
             raise ValidationError("A transfer dispatch has no destination warehouse")
         for line in dispatch.items:
@@ -8096,7 +8200,12 @@ async def warehouse_options(db: AsyncSession, *, mine_only: bool = False,
         if allowed is not None:
             stmt = stmt.where(Warehouse.id.in_(allowed or {0}))
     rows = (await db.execute(stmt.order_by(Warehouse.code))).scalars().all()
-    return [{"id": r.id, "code": r.code, "name": r.name, "is_bin_managed": r.is_bin_managed} for r in rows]
+    # `warehouse_type` rides along so a form can tell an MDP or LIP from a main store
+    # without a second round trip — the GRN screen hides purchase-order and vendor
+    # fields, and trims its receipt types, at the bottom of the chain.
+    return [{"id": r.id, "code": r.code, "name": r.name,
+             "is_bin_managed": r.is_bin_managed,
+             "warehouse_type": r.warehouse_type} for r in rows]
 
 
 async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = None,
@@ -8268,10 +8377,13 @@ async def incoming_dispatch_options(
     )
     # A transfer that was acknowledged has already been credited to this point by
     # `acknowledge_dispatch`, so offering it here would only lead to a rejection.
-    stmt = stmt.where(or_(
-        m.Dispatch.dispatch_type != DispatchType.TRANSFER.value,
-        m.Dispatch.status != DispatchStatus.ACKNOWLEDGED.value,
-    ))
+    # A point that runs a receiving desk is the exception: acknowledgement there
+    # credited nothing, so the acknowledged lorry is precisely what it came to inward.
+    if not await requires_inward(db, warehouse_id):
+        stmt = stmt.where(or_(
+            m.Dispatch.dispatch_type != DispatchType.TRANSFER.value,
+            m.Dispatch.status != DispatchStatus.ACKNOWLEDGED.value,
+        ))
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(
@@ -8334,13 +8446,34 @@ async def dispatch_receipt_source(
         )).scalars().all()
     } if tracked_item_ids else {}
 
-    items = []
+    # One row per item, not per dispatch line. A serialised item leaves the gate as
+    # one `out_dispatch_items` row PER UNIT — ten handsets are ten lines of qty 1 —
+    # and rendering them straight put ten rows of 1 on the receiver's GRN, which he
+    # then inwarded as ten separate stock lines. The units are still named
+    # individually; they are collected onto the line they belong to.
+    #
+    # Batch is part of the key: two batches of the same item are two things to
+    # receive, with their own expiry, and must not be added together.
+    items: list[dict] = []
+    grouped: dict[tuple, dict] = {}
     for line in dispatch.items:
         batch_id = line.batch_id if (
             line.batch_id and line.batch_id != m.NO_BATCH
         ) else serial_batch.get(line.serial_no or "")
         batch = batches.get(batch_id) if batch_id else None
-        items.append({
+        key = (line.item_id, batch_id or 0, line.batch_no or "", line.indent_id or 0)
+        existing = grouped.get(key)
+        if existing is not None:
+            for field in ("ordered_qty", "received_qty", "accepted_qty"):
+                existing[field] = _d(existing[field]) + _d(line.quantity)
+            if line.serial_no:
+                existing["serial_numbers"] = (existing["serial_numbers"] or []) + [
+                    line.serial_no]
+            if line.imei_no:
+                existing["imei_numbers"] = (existing["imei_numbers"] or []) + [
+                    line.imei_no]
+            continue
+        row = {
             "item_id": line.item_id,
             # The snapshot the consignment carries. Without these the inward form had
             # an item id and nothing to show for it, so every line rendered as the
@@ -8372,7 +8505,9 @@ async def dispatch_receipt_source(
                 getattr(tracking.get(line.item_id), "is_serial_tracked", False)),
             "is_imei_tracked": bool(
                 getattr(tracking.get(line.item_id), "is_imei_tracked", False)),
-        })
+        }
+        grouped[key] = row
+        items.append(row)
 
     return {
         "dispatch_id": dispatch.id,

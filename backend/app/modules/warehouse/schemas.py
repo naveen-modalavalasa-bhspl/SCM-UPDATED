@@ -54,6 +54,8 @@ class WarehouseRead(_Read):
     incharge_id: int | None = None
     incharge_name: str | None = None
     is_bin_managed: bool
+    # None = follow the company default. See service.requires_inward.
+    requires_inward: bool | None = None
     is_active: bool
     created_at: datetime | None = None
 
@@ -67,6 +69,7 @@ class WarehouseWrite(BaseModel):
     address: str | None = None
     incharge_id: int | None = None
     is_bin_managed: bool = False
+    requires_inward: bool | None = None
     is_active: bool = True
 
 
@@ -1266,6 +1269,9 @@ class Option(BaseModel):
     code: str | None = None
     name: str
     is_bin_managed: bool | None = None
+    # Only warehouse options carry this. It tells a form whether it is standing at a
+    # main store or at an MDP / LIP, which is what decides the shape of the GRN.
+    warehouse_type: str | None = None
 
 
 class ItemOption(Option):
