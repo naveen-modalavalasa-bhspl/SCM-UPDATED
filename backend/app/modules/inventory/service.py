@@ -845,7 +845,7 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
             return existing
 
     mr = MaterialRequest(
-        mr_no=await next_number(db, "mr"),
+        mr_no=await next_number(db, "mr", project=ctx.get("project_name")),
         mr_date=utcnow().date(),
         indent_id=indent_id, indent_no=indent_no,
         requested_by_id=getattr(user, "id", None),

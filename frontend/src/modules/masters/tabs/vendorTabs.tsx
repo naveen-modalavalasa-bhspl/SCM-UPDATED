@@ -15,7 +15,7 @@ import { VENDOR_TYPES } from "./constants";
  *  live table with no screen to show them; procurement prices a PO off this. */
 export function VendorItemsTab({ items }: { items: Option[] }) {
   const vendors = useQuery({
-    queryKey: ["masters", "vendors-all"],
+    queryKey: ["masters", "vendors", "all"],
     queryFn: () => mastersApi.vendors.list({ size: 300 }).then((r) => r.items),
   });
   const vendorOpts: Option[] = (vendors.data ?? [])

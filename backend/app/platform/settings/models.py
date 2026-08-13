@@ -26,7 +26,8 @@ class DocSeries(Base):
     doc_type = Column(String(30), nullable=False, index=True)
     fiscal_year = Column(String(10), nullable=False)
     prefix = Column(String(20), nullable=False)
-    pattern = Column(String(50), nullable=False)   # e.g. {prefix}/{fy}/{num:04d}
+    # 100, not 50: a pattern naming company, project and a date runs past 50 characters.
+    pattern = Column(String(100), nullable=False)  # e.g. {prefix}/{fy}/{num:04d}
     last_number = Column(BigInteger, nullable=False, default=0)
     is_active = Column(Boolean, nullable=False, default=True)
     # Added by the Admin build. NULL is read as NEVER, so a live row written before the
@@ -34,6 +35,12 @@ class DocSeries(Base):
     # every SELECT on this model raises 1054 — see docs/sql/2026-07-25_admin_masters.sql.
     reset_policy = Column(String(10), nullable=True)          # ResetPolicy
     last_reset_period = Column(String(10), nullable=True)     # "2026" or "2026-07"
+    # NULL = the series an admin configures (one per doc_type/fiscal year). A non-NULL
+    # value is a COUNTER auto-created per company/project when the pattern names those
+    # tokens — "COMPANY:TIRUMALA|PROJECT:MEDAK" — so each project runs its own
+    # sequence. Counters carry no prefix/pattern of their own: they are rendered with
+    # the parent series' pattern, so editing the pattern once still moves every project.
+    scope_key = Column(String(60), nullable=True, index=True)
 
 
 class AuditLog(Base):

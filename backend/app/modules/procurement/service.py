@@ -69,7 +69,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     )).scalars().all()}
 
     po = PurchaseOrder(
-        po_no=await next_number(db, "po"),
+        po_no=await next_number(db, "po", project=getattr(indent, "project_name", None)),
         po_date=utcnow().date(),
         expected_date=data.expected_date,
         indent_id=indent.id,

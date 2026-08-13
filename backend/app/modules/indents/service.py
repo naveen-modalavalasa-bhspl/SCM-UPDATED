@@ -328,7 +328,7 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
-        indent_no=await next_number(db, "indent"),
+        indent_no=await next_number(db, "indent", project=context["project_name"]),
         indent_type=indent_type,
         indent_date=utcnow().date(),
         required_date=data.required_date,
@@ -5864,7 +5864,8 @@ async def _join_consolidation(db: AsyncSession, indent: Indent, user) -> None:
     )).scalars().first()
     if row is None:
         row = Consolidation(
-            consolidation_no=await next_number(db, "consolidation"),
+            consolidation_no=await next_number(
+                db, "consolidation", project=indent.project_name),
             cycle=cycle,
             status=ConsolidationStatus.OPEN.value,
             created_by_id=getattr(user, "id", None),

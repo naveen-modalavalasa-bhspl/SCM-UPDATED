@@ -88,6 +88,21 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 
+async def data_error_handler(request: Request, exc: Exception):
+    """MySQL rejecting a value for its column — too long (1406), out of range (1264).
+
+    That is bad input, not a server fault, so it answers 422 in the same shape every
+    other validation error uses. Screens were showing "Internal server error" for a
+    field one character over its limit, which reads as a bug in the app rather than
+    something the person typing can fix. The driver's own text is passed through: it
+    names the column, which is the only useful part of it.
+    """
+    detail = str(getattr(exc, "orig", exc)).strip() or "Value rejected by the database"
+    message = f"A value does not fit its column: {detail}"
+    await _report(request, exc, 422, message)
+    return JSONResponse(status_code=422, content={"success": False, "error": message})
+
+
 async def unhandled_exception_handler(request: Request, exc: Exception):
     await _report(request, exc, 500, "Internal server error")
     return JSONResponse(

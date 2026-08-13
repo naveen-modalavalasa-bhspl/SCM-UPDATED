@@ -200,12 +200,12 @@ export function BomsTab({ projects }: { projects: Option[] }) {
           ...validityForm(r), is_active: r.is_active })}
         onCreate={async (v) => {
           const saved = await mastersApi.boms.create(v as Partial<MasterBom>);
-          qc.invalidateQueries({ queryKey: ["masters", "boms-all"] });
+          qc.invalidateQueries({ queryKey: ["masters", "boms", "all"] });
           return saved;
         }}
         onUpdate={async (id, v) => {
           const saved = await mastersApi.boms.update(id, v as Partial<MasterBom>);
-          qc.invalidateQueries({ queryKey: ["masters", "boms-all"] });
+          qc.invalidateQueries({ queryKey: ["masters", "boms", "all"] });
           return saved;
         }}
         onDeactivate={mastersApi.boms.deactivate}
@@ -228,7 +228,7 @@ export function BomGroupsTab() {
   // would 403 — and someone who is only reading the list has nothing to pick anyway.
   const mayManage = can("master.bom.manage");
   const boms = useQuery({
-    queryKey: ["masters", "boms-all"],
+    queryKey: ["masters", "boms", "all"],
     queryFn: () => mastersApi.boms.list({ size: 300 }).then((p) => p.items),
     enabled: mayManage,
   });
@@ -348,11 +348,11 @@ export function BomLines() {
   ]);
   const [error, setError] = useState<string | null>(null);
   const boms = useQuery({
-    queryKey: ["masters", "boms-all"],
+    queryKey: ["masters", "boms", "all"],
     queryFn: () => mastersApi.boms.list({ size: 300 }).then((p) => p.items),
   });
   const items = useQuery({
-    queryKey: ["masters", "items-all"],
+    queryKey: ["masters", "items", "all"],
     queryFn: () => mastersApi.items.list({ size: 300 }).then((p) => p.items),
   });
   const existingItems = useQuery({
@@ -410,7 +410,7 @@ export function BomLines() {
       setError(null);
       qc.invalidateQueries({ queryKey: ["masters", "bom-items-" + bomId] });
       qc.invalidateQueries({ queryKey: ["masters", "boms"] });
-      qc.invalidateQueries({ queryKey: ["masters", "boms-all"] });
+      qc.invalidateQueries({ queryKey: ["masters", "boms", "all"] });
     },
     onError: (reason: Error) => {
       setError(reason.message);
