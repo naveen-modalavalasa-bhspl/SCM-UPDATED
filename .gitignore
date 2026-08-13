@@ -111,3 +111,8 @@ playwright-tests/users.json
 # Default store for sys_attachments files; override with UPLOAD_DIR in backend/.env.
 var/
 backend/var/
+
+# ---- Generated master-data workbooks ----
+# docs/masters/*/generator/ rebuilds these from the source lists in one command, so
+# the .xlsx are output, not source, and binary diffs say nothing in review.
+docs/masters/**/*.xlsx
