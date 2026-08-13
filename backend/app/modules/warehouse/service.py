@@ -20,6 +20,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
+from uuid import uuid4
 
 from sqlalchemy import String, and_, false, func, or_, select
 from sqlalchemy.exc import DBAPIError
@@ -163,6 +164,46 @@ async def _bin_code(db: AsyncSession, bin_id: int | None) -> str | None:
         return None
     row = await db.get(Bin, bin_id)
     return row.code if row else None
+
+
+async def _warehouse_code(db: AsyncSession, warehouse_id: int | None) -> str | None:
+    """For the {warehouse} token in a generated serial or unit code."""
+    if not warehouse_id:
+        return None
+    row = await db.get(Warehouse, warehouse_id)
+    return getattr(row, "code", None)
+
+
+async def _serials_in_use(db: AsyncSession, item_id: int) -> set[str]:
+    """Every serial this item must not be given again, lower-cased.
+
+    Two sources, because a serial exists in two states. The registered units are rows
+    in `whs_serial_numbers`. The ones on receipts that have been submitted but not yet
+    put away have NO row yet — they are still a JSON list on the line — and minting
+    without them handed a second open GRN the same numbers, which then collided at
+    registration with "serial is already recorded against this item".
+    """
+    registered = (await db.execute(
+        select(m.SerialNumber.serial_number)
+        .where(m.SerialNumber.item_id == item_id)
+    )).scalars().all()
+    on_open_lines = (await db.execute(
+        select(m.ReceiptItem.serial_numbers)
+        .where(m.ReceiptItem.item_id == item_id,
+               m.ReceiptItem.serial_numbers.is_not(None))
+    )).scalars().all()
+    used = {value.strip().lower() for value in registered if value}
+    for values in on_open_lines:
+        used |= {str(v).strip().lower() for v in (values or []) if str(v).strip()}
+    return used
+
+
+# "Who named this unit, us or the vendor" is answerable without a column: every minted
+# serial carries the literal part of the configured Serial format (Settings > Code
+# Formats), and the GRN's audit row records the list as submitted. A per-row remark was
+# tried and removed — the rows are written by a LATER request than the one that mints,
+# so anything held on the line in memory is gone by then, and `whs_serial_numbers` is
+# not ours to extend.
 
 
 async def _ancestry(db: AsyncSession, bin_id: int | None) -> list[Bin]:
@@ -610,14 +651,14 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             raise ValidationError(
                 f"Line {index}: serialized quantity must be a whole number"
             )
-        if item.is_serial_tracked and at_gate and len(serials) > int(received):
+        # More serials than units is always wrong. FEWER is not: goods arrive
+        # unlabelled, and the units nobody could read a number off are given one from
+        # the Serial format (Settings > Code Formats) when the receipt is submitted.
+        # Demanding the full set here is what stopped those lorries at the gate.
+        if item.is_serial_tracked and len(serials) > int(received):
             raise ValidationError(
                 f"Line {index}: {len(serials)} serial numbers for {int(received)} "
                 f"received units of {item.code}"
-            )
-        if item.is_serial_tracked and not at_gate and len(serials) != int(received):
-            raise ValidationError(
-                f"Line {index}: enter exactly {int(received)} serial numbers for {item.code}"
             )
         if serials:
             seen_for_item = seen_serials_by_item.setdefault(item.id, set())
@@ -1109,23 +1150,38 @@ async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
 
     qc_lines: list[m.ReceiptItem] = []
     direct_lines: list[m.ReceiptItem] = []
+    # Read once for the whole GRN: the formula cannot change between two lines of one
+    # lorry, and it is five queries every time it is read.
+    code_config = await codeformat.code_settings(db)
     for line in receipt.items:
         item = await _item_snapshot(db, line.item_id)
         # The last gate: the partial list a gate entry is allowed to carry must be
         # finished before the document moves on, because QC selects the units it is
         # keeping from this list and putaway names each one from what QC passed.
         if item.is_serial_tracked:
-            captured = len(line.serial_numbers or [])
+            captured = [str(v).strip() for v in (line.serial_numbers or []) if str(v).strip()]
             received = _d(line.received_qty)
             if received != received.to_integral_value():
                 raise ValidationError(
                     f"{item.code}: serialized quantity must be a whole number"
                 )
-            if captured != int(received):
+            if len(captured) > int(received):
                 raise ValidationError(
-                    f"{item.code}: {captured} of {int(received)} serial numbers captured; "
-                    "a serialized line needs one serial per unit before submitting"
+                    f"{item.code}: {len(captured)} serial numbers for "
+                    f"{int(received)} received units"
                 )
+            # Goods that arrive unlabelled used to stop the GRN here. The units that
+            # have no vendor serial are given one from the Serial format in
+            # Settings > Code Formats — a typed serial is never replaced, so a part-
+            # scanned lorry keeps every serial the storekeeper actually read.
+            if len(captured) < int(received):
+                minted = await codeformat.mint_serials(
+                    db, item=item, count=int(received) - len(captured),
+                    warehouse_code=await _warehouse_code(db, receipt.warehouse_id),
+                    config=code_config,
+                    taken=await _serials_in_use(db, item.id) | set(captured),
+                )
+                line.serial_numbers = captured + minted
         if item.requires_qi:
             line.qc_status = QcStatus.PENDING.value
             qc_lines.append(line)
@@ -2524,6 +2580,10 @@ async def _place_serials(
     item = await db.get(Item, task.item_id)
     is_asset = bool(getattr(item, "is_asset", False)) if item else False
     warehouse = await db.get(Warehouse, task.warehouse_id) if task.warehouse_id else None
+    config = await codeformat.code_settings(db)
+    # The item master's asset/consumable-code toggle. Off means the unit keeps its
+    # serial / IMEI as its only identity — no code is minted for it.
+    wants_code = codeformat.is_code_tracked(item, config)
 
     for serial in serials:
         serial.batch_id = task.batch_id or receipt_item.batch_id or serial.batch_id
@@ -2531,10 +2591,12 @@ async def _place_serials(
         serial.bin_id = target.id
         serial.status = SerialStatus.AVAILABLE.value
         serial.lot_no = task.lot_no
+        if not wants_code:
+            continue
         code = await codeformat.unit_code(
             db, item=item, is_asset=is_asset,
             serial=serial.serial_number, seq=serial.id,
-            warehouse_code=getattr(warehouse, "code", None),
+            warehouse_code=getattr(warehouse, "code", None), config=config,
         )
         # Never re-stamped: a unit's code is on its label and in every document that
         # has already quoted it, so changing the formula only affects units put away
@@ -2590,10 +2652,22 @@ async def _place_unit_codes(
     # Read once for the whole putaway: the formula cannot change between two units of
     # the same lorry, and it costs five queries every time it is read.
     config = await codeformat.code_settings(db)
+    # The item master's asset/consumable-code toggle. Off means no unit rows are
+    # minted for this item at all — an unserialised unit exists here ONLY to carry a
+    # code, so with no code there is nothing to record.
+    if not codeformat.is_code_tracked(item, config):
+        return
     rows: list[m.SerialNumber] = []
     for _ in range(int(units)):
         row = m.SerialNumber(
-            item_id=task.item_id, serial_number="",
+            # `whs_serial_numbers.serial_number` is UNIQUE in the live database (the
+            # ORM does not declare it, so nothing here warned about it). Every unit of
+            # a line used to be inserted holding "", which meant any putaway of two or
+            # more units died on a duplicate-key IntegrityError the moment this flush
+            # ran — the 500 storekeepers hit confirming an inward. The placeholder only
+            # has to survive one flush before the real code replaces it below, so it is
+            # made unique per row and marked so a stray one is recognisable.
+            item_id=task.item_id, serial_number=f"~PENDING-{uuid4().hex}",
             batch_id=task.batch_id or None, warehouse_id=task.warehouse_id,
             bin_id=target.id, lot_no=task.lot_no,
             status=SerialStatus.AVAILABLE.value, is_active=True,
@@ -2604,11 +2678,30 @@ async def _place_unit_codes(
     # build on, so the rows must exist before they can be named.
     await db.flush()
 
+    # Every code already spoken for, so a formula that does not vary per unit cannot
+    # collide either. Read once, and only for this item: `{seq}` makes the default
+    # shape unique on its own, but the format is a SETTING and a shape without it
+    # renders the same string for all 30 units of a line.
+    taken = {
+        code.strip().lower()
+        for code in (await db.execute(
+            select(m.SerialNumber.serial_number)
+            .where(m.SerialNumber.item_id == task.item_id,
+                   m.SerialNumber.id.notin_([row.id for row in rows]))
+        )).scalars()
+        if code
+    }
     for row in rows:
         code = await codeformat.unit_code(
             db, item=item, is_asset=is_asset, seq=row.id,
             warehouse_code=getattr(warehouse, "code", None), config=config,
         )
+        if code.lower() in taken:
+            # The row id is the one thing that cannot repeat, so it is what settles a
+            # tie. Suffixed rather than replaced: the configured shape is still legible
+            # on the label, and it is only reached when the format itself is ambiguous.
+            code = f"{code}-{row.id}"
+        taken.add(code.lower())
         row.serial_number = code
         if is_asset:
             row.asset_code = code
@@ -4164,6 +4257,28 @@ async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
     )
 
 
+async def _office_sac(db: AsyncSession, office_id: int | None) -> str | None:
+    """The service area code of one office, read live from the HCM mirror.
+
+    Not snapshotted onto the document, for the same reason the indent does not
+    snapshot it (`indents.service._attach_office_sac`): no column holds it, and
+    reading it at serve time means every issue and consignment already in the table
+    shows one instead of only those raised from now on. It is a label on the office,
+    so the current value is the right one. `mappers.office_sac` owns the HCM field
+    name (rule 10) — nothing here knows what key it sits under.
+
+    `db.get` goes through the session identity map, so a page of documents heading to
+    the same office costs one query, not one per row.
+    """
+    from app.platform.hcm import mappers
+    from app.platform.hcm.models import HcmOffice
+
+    if not office_id:
+        return None
+    office = await db.get(HcmOffice, office_id)
+    return mappers.office_sac(office.raw) if office else None
+
+
 async def _decorate_issue_destination(
     db: AsyncSession,
     issue: m.MaterialIssue,
@@ -4171,6 +4286,7 @@ async def _decorate_issue_destination(
     office_id, office_name = await _issue_destination(db, issue)
     setattr(issue, "destination_office_id", office_id)
     setattr(issue, "destination_office_name", office_name)
+    setattr(issue, "destination_office_sac", await _office_sac(db, office_id))
     return issue
 
 
@@ -4283,6 +4399,7 @@ async def _decorate_dispatch_destination(
     office_id, office_name = await _issue_destination(db, issue)
     setattr(dispatch, "destination_office_id", office_id)
     setattr(dispatch, "destination_office_name", office_name)
+    setattr(dispatch, "destination_office_sac", await _office_sac(db, office_id))
     return dispatch
 
 
@@ -6893,6 +7010,7 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
         return []
     stmt = (
         select(m.SerialNumber.item_id, m.SerialNumber.warehouse_id,
+               m.SerialNumber.bin_id, m.SerialNumber.batch_id,
                m.SerialNumber.serial_number, m.SerialNumber.imei,
                m.SerialNumber.asset_code, m.SerialNumber.consumable_code)
         .where(m.SerialNumber.item_id.in_(item_ids),
@@ -6908,22 +7026,69 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
             warehouse_ids=await warehouse_ids_for_user(db, user),
         ))
 
-    grouped: dict[tuple[int, int], dict] = {}
-    for item_id, warehouse_id, serial, imei, asset, consumable in (
-            await db.execute(stmt)).all():
-        key = (item_id, warehouse_id)
+    # Keyed down to the BIN and the BATCH, not just the stocking point: "which units
+    # are in this bin" is the question the stock screens are actually asked, and one
+    # warehouse holds the same item in several bins. The caller indexes the result
+    # from the most specific key it has down to item+warehouse, so a serial row that
+    # has not been given a bin yet (most of the live data) still finds its lot.
+    grouped: dict[tuple, dict] = {}
+    for (item_id, warehouse_id, bin_id, batch_id,
+         serial, imei, asset, consumable) in (await db.execute(stmt)).all():
+        key = (item_id, warehouse_id, bin_id, batch_id)
         bucket = grouped.setdefault(key, {
             "item_id": item_id, "warehouse_id": warehouse_id,
-            "count": 0, "serials": [], "codes": [],
+            "bin_id": bin_id, "batch_id": batch_id,
+            "count": 0, "serials": [], "imeis": [], "codes": [],
         })
         bucket["count"] += 1
         # Five is enough to recognise the lot; the rest are behind the detail panel.
-        if len(bucket["serials"]) < 5 and (serial or imei):
-            bucket["serials"].append(imei or serial)
+        if serial and len(bucket["serials"]) < 5:
+            bucket["serials"].append(serial)
+        if imei and len(bucket["imeis"]) < 5:
+            bucket["imeis"].append(imei)
         code = asset or consumable
         if code and len(bucket["codes"]) < 5:
             bucket["codes"].append(code)
     return list(grouped.values())
+
+
+async def unit_lookup(db: AsyncSession, code: str, user=None) -> dict:
+    """Everything known about ONE physical unit, found by any identity it carries.
+
+    Serial, IMEI, asset code or consumable code — a store user has whichever one is
+    printed on the label in front of them, and should not have to know which kind it
+    is. Exact match first so a full code never loses to a partial one, then a prefix
+    match so a half-typed code still finds its unit.
+    """
+    value = (code or "").strip()
+    if not value:
+        raise ValidationError("Enter a serial, IMEI, asset code or consumable code")
+
+    cols = (m.SerialNumber.serial_number, m.SerialNumber.imei,
+            m.SerialNumber.asset_code, m.SerialNumber.consumable_code)
+    base = select(m.SerialNumber).where(m.SerialNumber.is_active.is_(True))
+    if user is not None:
+        base = base.where(await scope_condition(
+            db, user,
+            warehouse_col=m.SerialNumber.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        ))
+
+    row = await db.scalar(base.where(or_(*(c == value for c in cols))))
+    if row is None:
+        row = await db.scalar(
+            base.where(or_(*(c.ilike(f"{value}%") for c in cols)))
+            .order_by(m.SerialNumber.id))
+    # "Nothing carries this" is an ordinary answer to a search box, not a fault: the
+    # stock screens ask on every keystroke, and raising here would file a 404 in
+    # sys_app_logs for every word anyone typed while looking for an item by name.
+    if row is None:
+        return {"found": False, "matched": value}
+
+    unit = await _decorate_serial(db, row)
+    unit["found"] = True
+    unit["matched"] = value
+    return unit
 
 
 async def _decorate_serial(db: AsyncSession, row: m.SerialNumber) -> dict:
@@ -8179,6 +8344,11 @@ async def indent_issue_source(
         ),
         "destination_office_id": requested_by.office_id if requested_by else None,
         "destination_office_name": requested_by.office_name if requested_by else None,
+        # Travels with the office the goods are headed to, so picking the indent
+        # fills the SAC the same way it fills the destination — the raiser's office
+        # code, never the storekeeper's own.
+        "destination_office_sac": await _office_sac(
+            db, requested_by.office_id if requested_by else None),
         "items": [
             {
                 "indent_item_id": row.ref_line_id,
@@ -8407,6 +8577,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         "project_id": issue.project_id,
         "destination_office_id": getattr(issue, "destination_office_id", None),
         "destination_office_name": getattr(issue, "destination_office_name", None),
+        "destination_office_sac": getattr(issue, "destination_office_sac", None),
         "destination_warehouse_id": (
             requesting.id if requesting and requesting.id != issue.warehouse_id else None
         ),

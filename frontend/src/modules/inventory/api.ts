@@ -27,6 +27,7 @@ import type {
   StockLedgerItem,
   StockSummary,
   SerialSummaryRow,
+  UnitRow,
   LedgerSummary,
   StockRow,
   StockTransferCreate,
@@ -79,6 +80,9 @@ const toBalance = (r: StockRow): StockBalanceItem => ({
   batch_id: r.batch_id,
   expiry_date: r.expiry_date ?? undefined,
   storage_location: r.bin_code ?? undefined,
+  // Carried, not only its label: the per-unit lookup narrows to a bin, and a bin CODE
+  // is not unique across warehouses.
+  bin_id: r.bin_id,
   bin_code: r.bin_code ?? undefined,
   project_name: r.project_name ?? undefined,
   // Flattened for display: the list column shows the first and counts the rest.
@@ -153,6 +157,57 @@ export const getSerialSummary = (itemIds: number[], warehouseIds: number[]) =>
           },
         })
         .then((r) => r.data.items);
+
+/** Index a summary under every key a caller might hold, most specific first:
+ * item+warehouse+bin+batch, then item+warehouse+bin, then item+warehouse. A serial
+ * row that has no bin yet (most of the live data) still answers for its lot, and a
+ * binned one answers the narrower question "what is standing in THIS bin". */
+export const indexSerials = (rows: SerialSummaryRow[]) => {
+  const byKey = new Map<string, SerialSummaryRow>();
+  const merge = (key: string, row: SerialSummaryRow) => {
+    const seen = byKey.get(key);
+    if (!seen) { byKey.set(key, { ...row }); return; }
+    seen.count += row.count;
+    seen.serials = seen.serials.concat(row.serials).slice(0, 5);
+    seen.imeis = seen.imeis.concat(row.imeis).slice(0, 5);
+    seen.codes = seen.codes.concat(row.codes).slice(0, 5);
+  };
+  for (const r of rows) {
+    merge(`${r.item_id}:${r.warehouse_id}:${r.bin_id ?? ""}:${r.batch_id ?? ""}`, r);
+    merge(`${r.item_id}:${r.warehouse_id}:${r.bin_id ?? ""}`, r);
+    merge(`${r.item_id}:${r.warehouse_id}`, r);
+  }
+  return byKey;
+};
+
+/** The units standing at one item + point (+ bin + batch when known). Paged at 500:
+ * the panel that shows them offers Copy-all and Download, so it must hold the whole
+ * lot, and the largest lot in the live data is 108 units. */
+export const getUnits = (params: {
+  item_id: number; warehouse_id?: number | null;
+  bin_id?: number | null; batch_id?: number | null;
+}) =>
+  api
+    .get<Page<UnitRow>>("/api/warehouse/serials", {
+      params: {
+        item_id: params.item_id,
+        warehouse_id: params.warehouse_id || undefined,
+        bin_id: params.bin_id || undefined,
+        batch_id: params.batch_id || undefined,
+        size: 500,
+      },
+    })
+    .then((r) => r.data.items);
+
+/** Find ONE unit by whatever identity is printed on its label — serial, IMEI, asset
+ * code or consumable code. Resolves to null when nothing matches: "no unit carries
+ * this" is an ordinary answer to a search box, not an error to shout about, so the
+ * endpoint answers 200 with `found:false` rather than a 404 the logger would file. */
+export const lookupUnit = (code: string) =>
+  api
+    .get<UnitRow & { found: boolean }>("/api/warehouse/serials/lookup", { params: { code } })
+    .then((r) => (r.data?.found ? r.data : null))
+    .catch(() => null);
 
 export const getCatalogItems = () =>
   api
@@ -330,12 +385,18 @@ export const getFulfilmentBatches = (includeDone = false) =>
 
 /** The fulfilment queue's indents. `owedOnly` keeps the default reading — a line
  *  still owed — while false returns fulfilled and rejected indents too, so what was
- *  allocated can be looked up rather than only what is outstanding. */
+ *  allocated can be looked up rather than only what is outstanding.
+ *
+ *  `to_serve` is what makes this a QUEUE and not a list: an indent still climbing
+ *  belongs to the rung it is parked on, who serves it from his own stock at the moment
+ *  he approves. An approver who has already signed and passed it up keeps seeing it on
+ *  /indents and in its journey — it is simply no longer work waiting on him. */
 export const getFulfillmentQueue = (status?: string, owedOnly = true) =>
   api
     .get<Page<Record<string, unknown>>>("/api/indents", {
       params: {
         size: 100,
+        to_serve: true,
         ...(owedOnly ? { has_remainder: true } : {}),
         ...(status ? { status } : {}),
       },

@@ -25,13 +25,22 @@ interface Props<T> {
   page?: number;
   totalPages?: number;
   onPageChange?: (page: number) => void;
+  /** Bump this when the CELLS must be rebuilt although `data` has not changed.
+   *
+   * HeroUI's Table is a react-stately collection: it caches the built rows against
+   * the identity of `items`, so a column whose `render` closes over something that
+   * arrived LATER — a serial/asset-code lookup fetched for the page after the list
+   * itself — kept painting the first render's cells forever. TanStack Query's
+   * structural sharing keeps `data` identity stable, so nothing told the collection
+   * to rebuild. Changing this value remounts the table, which does. */
+  revision?: string | number;
 }
 
 /** HeroUI Table on desktop, stacked HeroUI cards under 768px. Every list screen uses
  * this — we never horizontal-scroll a table on a phone. */
 export function ResponsiveList<T>({
   data, columns, renderCard, onRowClick, keyOf, loading, empty,
-  page, totalPages, onPageChange,
+  page, totalPages, onPageChange, revision,
 }: Props<T>) {
   const colByKey = Object.fromEntries(columns.map((c) => [c.key, c])) as Record<string, Column<T>>;
   const rowByKey = new Map(data.map((r) => [String(keyOf(r)), r]));
@@ -58,6 +67,7 @@ export function ResponsiveList<T>({
        * scrolls inside its own box; the page itself never scrolls sideways. */}
       <div className="hidden overflow-x-auto md:block">
         <Table
+          key={revision ?? "static"}
           aria-label="List"
           removeWrapper
           selectionMode="none"

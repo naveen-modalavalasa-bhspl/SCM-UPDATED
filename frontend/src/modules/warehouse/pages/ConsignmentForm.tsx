@@ -95,6 +95,13 @@ const destinationOf = (doc?: Dispatch | null, source?: IssueDispatchSource | nul
   ?? doc?.vendor_name
   ?? "";
 
+/** The destination office's service area code. Only the office has one — the fallbacks
+ *  `destinationOf` walks (delivery address, transfer target, customer, vendor) are not
+ *  offices, so there is nothing to read a SAC off and it stays blank rather than
+ *  showing a code that belongs to somewhere else. */
+const destinationSacOf = (doc?: Dispatch | null, source?: IssueDispatchSource | null) =>
+  source?.destination_office_sac ?? doc?.destination_office_sac ?? null;
+
 type ScanCardSpec = {
   code: string;
   title: string;
@@ -292,6 +299,7 @@ export default function ConsignmentForm() {
       project_id: doc.project_id,
       destination_office_id: doc.destination_office_id ?? null,
       destination_office_name: doc.destination_office_name ?? doc.delivery_address ?? null,
+      destination_office_sac: doc.destination_office_sac ?? null,
       items: Array.from(byLine.values()),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -343,6 +351,7 @@ export default function ConsignmentForm() {
 
   const locked = !!doc && !["DRAFT", "PACKED"].includes(doc.status);
   const destination = destinationOf(doc, source);
+  const destinationSac = destinationSacOf(doc, source);
 
   // Origin: the material issue's warehouse on a new consignment, the saved one on an
   // existing doc. The server derives the same value, so this is a display of its
@@ -619,6 +628,7 @@ export default function ConsignmentForm() {
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
           <MetaRow label="Material issue" value={<span className="font-mono">{doc.ref_no ?? "—"}</span>} />
           <MetaRow label="Destination" value={destination || "—"} />
+          <MetaRow label="Service area code (SAC)" value={destinationSac || "—"} />
           <MetaRow label="Packages" value={doc.total_packages} />
           <MetaRow label="Quantity" value={fmtQty(doc.total_qty)} />
         </MetaCard>
@@ -672,6 +682,15 @@ export default function ConsignmentForm() {
           </Field>
           <Field label="Destination">
             <Input value={destination || "—"} disabled />
+          </Field>
+          {/* Comes with the material issue, like the destination beside it: the code
+              belongs to the office the consignment is addressed to, so picking the
+              issue fills it and nothing on this screen sets it. */}
+          <Field label="Service area code (SAC)">
+            <Input
+              value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
+              disabled
+            />
           </Field>
           <Field label="Vendor">
             <Lookup name="vendors" load={vendorOptions} value={form.vendor_id ?? ""} isDisabled={locked}

@@ -6,10 +6,11 @@ import { ArrowDownLeft, ArrowUpRight, FileSpreadsheet } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
+import { UnitCell } from "./UnitsPanel";
 import {
-  getSerialSummary, getStockLedger, getStockLedgerSummary, getWarehouses,
+  getSerialSummary, getStockLedger, getStockLedgerSummary, getWarehouses, indexSerials,
 } from "../api";
-import type { SerialSummaryRow, StockLedgerItem } from "../types";
+import type { StockLedgerItem } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { fmtDate, fmtTime } from "@/shared/datetime";
 
@@ -65,11 +66,6 @@ const money = (n?: number | null) =>
     ? <span className="text-muted">—</span>
     : `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
 
-/** Serial / IMEI first, then whichever code the unit carries. One column, because a
- *  unit is either an asset or a consumable and never both. */
-const ownTag = (r: StockLedgerItem) =>
-  r.serial_number || r.asset_code || r.consumable_code || "";
-
 export function StockLedgerView() {
   const [params] = useSearchParams();
   const [search, setSearch] = useState("");
@@ -116,6 +112,12 @@ export function StockLedgerView() {
   });
   const num = (n?: number) =>
     totalsLoading || n === undefined ? "—" : n.toLocaleString("en-IN");
+  /** A signed total, but nothing moved is just 0: "+0" and "−0" read as a direction
+   *  that was never taken. The sign belongs to a quantity, not to an empty filter. */
+  const signed = (n: number | undefined, sign: string) =>
+    totalsLoading || n === undefined ? "—"
+      : n === 0 ? "0"
+        : `${sign}${n.toLocaleString("en-IN")}`;
 
   // stk_ledger stores at most one serial per row, and older rows store none at all.
   // The units standing at that item + point are fetched for the page and merged, the
@@ -126,20 +128,19 @@ export function StockLedgerView() {
                                     rows.map((r) => r.warehouse_id)),
     enabled: rows.length > 0,
   });
-  const serialsByRow = new Map<string, SerialSummaryRow>(
-    serialRows.map((s) => [`${s.item_id}:${s.warehouse_id}`, s]),
-  );
+  const serialsByRow = indexSerials(serialRows);
   const unitsOf = (r: StockLedgerItem) =>
     serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
 
-  /** The code on the row itself, or the first code of the units at that point. */
-  const unitTag = (r: StockLedgerItem) => {
-    const own = ownTag(r);
-    if (own) return { text: own, extra: 0 };
-    const units = unitsOf(r);
-    const first = units?.codes[0] ?? units?.serials[0];
-    return first ? { text: first, extra: (units?.count ?? 1) - 1 } : null;
-  };
+  /** Which lot a cell's popover should list the units of. A ledger row names an item
+   *  at a point, not a bin, so the popover shows everything standing there. */
+  const lotOf = (r: StockLedgerItem) => ({
+    itemId: r.item_id,
+    warehouseId: r.warehouse_id,
+    itemCode: r.item_code,
+    expected: unitsOf(r)?.count,
+    label: r.warehouse_name,
+  });
 
   const activeFilters = [search, itemId, warehouseId, refType, direction, dateFrom, dateTo].filter(Boolean).length;
 
@@ -151,12 +152,14 @@ export function StockLedgerView() {
 
   const exportCsv = () => {
     const header = ["Date", "Reference", "Type", "Item Code", "Item", "Warehouse", "Batch",
-                    "Serial / Asset code", "In", "Out", "Balance", "Rate", "Value", "By"];
+                    "Serial / IMEI", "Asset / Consumable code",
+                    "In", "Out", "Balance", "Rate", "Value", "By"];
     const body = rows.map((r) => [
       r.transaction_date, r.transaction_no, r.transaction_type, r.item_code, r.item_name,
-      // Every code in the export, not the one the cell has room for.
+      // A column each, and every value in it — not the one the cell has room for.
       r.warehouse_name, r.batch_number,
-      ownTag(r) || unitsOf(r)?.codes.join(" | "),
+      r.serial_number || unitsOf(r)?.serials.join(" | ") || unitsOf(r)?.imeis.join(" | "),
+      r.asset_code || r.consumable_code || unitsOf(r)?.codes.join(" | "),
       r.in_qty, r.out_qty, r.balance_qty, r.unit_rate, r.total_value, r.performed_by,
     ]);
     const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
@@ -215,18 +218,34 @@ export function StockLedgerView() {
       // moved. Asked for on this screen because tracing one physical device through
       // its receipts and issues is the reason the ledger gets opened.
       key: "unit",
-      header: "Serial / Asset code",
+      header: "Serial / IMEI",
       hideOnNarrow: true,
       render: (r) => {
-        const tag = unitTag(r);
-        if (!tag) return <span className="text-xs text-muted">—</span>;
+        const units = unitsOf(r);
         return (
-          <div className="min-w-0">
-            <div className="truncate font-mono text-xs text-body">{tag.text}</div>
-            {tag.extra > 0 && (
-              <div className="text-[11px] text-muted">+{tag.extra} more units</div>
-            )}
-          </div>
+          <UnitCell
+            text={r.serial_number || units?.serials[0] || units?.imeis[0]}
+            extra={r.serial_number ? 0 : (units ? units.count - 1 : 0)}
+            lot={units && !r.serial_number ? lotOf(r) : undefined}
+            title={r.item_name}
+          />
+        );
+      },
+    },
+    {
+      key: "unit_code",
+      header: "Asset / Consumable code",
+      hideOnNarrow: true,
+      render: (r) => {
+        const units = unitsOf(r);
+        const own = r.asset_code || r.consumable_code;
+        return (
+          <UnitCell
+            text={own || units?.codes[0]}
+            extra={own || !units?.codes.length ? 0 : units.count - 1}
+            lot={!own && units?.codes.length ? lotOf(r) : undefined}
+            title={r.item_name}
+          />
         );
       },
     },
@@ -284,8 +303,8 @@ export function StockLedgerView() {
 
       <ResponsiveGrid cols={3} className="mb-4">
         <StatCard label="Movements" value={num(totals?.movements)} />
-        <StatCard label="Total In" value={totalsLoading ? "—" : `+${num(totals?.total_in)}`} icon={<ArrowDownLeft size={16} />} tone="text-success" />
-        <StatCard label="Total Out" value={totalsLoading ? "—" : `−${num(totals?.total_out)}`} icon={<ArrowUpRight size={16} />} tone="text-danger" />
+        <StatCard label="Total In" value={signed(totals?.total_in, "+")} icon={<ArrowDownLeft size={16} />} tone="text-success" />
+        <StatCard label="Total Out" value={signed(totals?.total_out, "−")} icon={<ArrowUpRight size={16} />} tone="text-danger" />
       </ResponsiveGrid>
 
       <FilterBar
@@ -342,6 +361,8 @@ export function StockLedgerView() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          // The serial/code lookup lands after the list — see ResponsiveList.revision.
+          revision={`${serialRows.length}:${rows.length}`}
           empty={activeFilters ? "No movements match these filters." : "No stock movements recorded yet."}
           renderCard={(r) => (
             <div className="space-y-1.5">

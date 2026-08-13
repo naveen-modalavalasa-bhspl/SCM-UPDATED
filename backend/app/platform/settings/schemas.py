@@ -76,6 +76,9 @@ class CodeFormatSettings(BaseModel):
     """
     asset_format: str = "{item_code}-{new_flag}-{serial:8}"
     consumable_format: str = "{item_code}-{new_flag}-{serial:8}"
+    # The serial minted for a unit that arrives without one. Cannot quote {serial} —
+    # it IS the serial — so it is validated by its own rule, below.
+    serial_format: str = "{item_code}-{seq:5}"
     # What {new_flag} renders as. Two strings rather than a hardcoded 1/0 so the next
     # request ("make it N and O") is a setting change, not another code change.
     new_flag: str = "1"
@@ -93,6 +96,16 @@ class CodeFormatSettings(BaseModel):
         from app.core.exceptions import ValidationError
         try:
             return validate_format(value)
+        except ValidationError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("serial_format")
+    @classmethod
+    def _check_serial(cls, value: str) -> str:
+        from app.platform.settings.codeformat import validate_serial_format
+        from app.core.exceptions import ValidationError
+        try:
+            return validate_serial_format(value)
         except ValidationError as exc:
             raise ValueError(str(exc)) from exc
 

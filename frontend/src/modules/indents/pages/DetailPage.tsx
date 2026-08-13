@@ -350,6 +350,9 @@ export function IndentDetailPage() {
               <Detail label="Department" value={indent.department_name} />
               <Detail label="Deliver to" value={delivery.officeName} />
               <Detail label="Vehicle" value={delivery.vehicleNumber} />
+              {/* The delivery office's code, not the viewer's: an approver reading
+                  someone else's indent sees the SAC it will be delivered against. */}
+              <Detail label="Service area code (SAC)" value={indent.office_sac} />
               <Detail label="Priority" value={indent.priority} />
               {indent.current_approver_name && (
                 <Detail label="With" value={indent.current_approver_name} />

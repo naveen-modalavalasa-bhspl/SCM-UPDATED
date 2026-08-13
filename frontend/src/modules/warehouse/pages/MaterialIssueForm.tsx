@@ -93,6 +93,10 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const [reason, setReason] = useState("");
   const [serialLine, setSerialLine] = useState<number | null>(null);
   const [destination, setDestination] = useState("");
+  // The destination office's service area code. Held beside the destination name and
+  // filled from the same answer, because it belongs to the office the goods are going
+  // to — never to whoever happens to be raising the issue.
+  const [destinationSac, setDestinationSac] = useState<string | null>(null);
   // The employee dropdown loads one page of names, so the indent raiser this form
   // defaults to is usually not in it. Hold the name that came with the id, or the
   // field shows its placeholder over a person who IS selected.
@@ -124,6 +128,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   useEffect(() => {
     if (!doc) return;
     setDestination(doc.destination_office_name ?? "");
+    setDestinationSac(doc.destination_office_sac ?? null);
     setIssuedToName(doc.issued_to_name ?? null);
     if (doc.warehouse_id) {
       warehouseOptions().then((opts) => {
@@ -303,6 +308,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     mutationFn: (indentId: number) => getIndentIssueSource(indentId, form.warehouse_id),
     onSuccess: (source) => {
       setDestination(source.destination_office_name ?? "");
+      setDestinationSac(source.destination_office_sac ?? null);
       setMixedProjects(!!source.mixed_projects);
       if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
       setForm((current) => ({
@@ -736,7 +742,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                     onChange={(v) => {
                 const indentId = v === "" ? null : v;
                 set("indent_id", indentId);
-                if (!indentId) setDestination("");
+                if (!indentId) { setDestination(""); setDestinationSac(null); }
                 if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
               }} placeholder={form.warehouse_id ? "Indent" : "Pick warehouse first"} />
           </Field>
@@ -768,6 +774,15 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           </Field>
           <Field label="Destination" hint="Office of the issued-to employee from the selected indent.">
             <Input value={destination || "—"} disabled />
+          </Field>
+          {/* Read-only like Destination above it, and filled from the same answer: the
+              SAC belongs to the office receiving the goods, so it follows the indent
+              rather than being chosen. */}
+          <Field label="Service area code (SAC)" hint="Of the destination office, from the selected indent.">
+            <Input
+              value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
+              disabled
+            />
           </Field>
         </div>
       </Section>

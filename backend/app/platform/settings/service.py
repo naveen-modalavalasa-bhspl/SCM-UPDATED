@@ -60,6 +60,7 @@ SETTINGS_SPEC = {
 CODE_FORMAT_FIELDS = {
     "asset_format": "codes.asset_format",
     "consumable_format": "codes.consumable_format",
+    "serial_format": "codes.serial_format",
     "new_flag": "codes.new_flag",
     "legacy_flag": "codes.legacy_flag",
     "legacy_before": "codes.legacy_before",

@@ -31,6 +31,13 @@ DEFAULT_ASSET_FORMAT = "{item_code}-{new_flag}-{serial:8}"
 DEFAULT_CONSUMABLE_FORMAT = "{item_code}-{new_flag}-{serial:8}"
 LEGACY_FORMAT = "{item_code}-{seq:6}"
 
+# The serial MINTED for a unit that arrived without one. A vendor serial always wins;
+# this is only for goods that come in unlabelled, which used to block the GRN outright
+# ("N of M serial numbers captured"). {serial} is not available here — it is the thing
+# being generated — so the running number is the identity, and validate_serial_format
+# insists on it.
+DEFAULT_SERIAL_FORMAT = "{item_code}-{seq:5}"
+
 # Every token a format may use, and what it means on screen. The screen renders this
 # table, so a token added here is documented for the user by construction.
 TOKENS: dict[str, str] = {
@@ -75,6 +82,29 @@ def validate_format(template: str, *, label: str = "Format") -> str:
         raise ValidationError(
             f"{label} must include {'{serial}'} or {'{seq}'}, or two units of the same "
             f"item would receive the same code."
+        )
+    return template
+
+
+def validate_serial_format(template: str, *, label: str = "Serial format") -> str:
+    """Same rules, minus {serial}: this template IS the serial, so it cannot quote one.
+
+    A template that leaned on {serial} would render blank and hand every unlabelled
+    unit the same string, which the receipt would then reject as a duplicate.
+    """
+    template = validate_format(template, label=label)
+    if not template:
+        return ""
+    names = {name for name, _ in _PLACEHOLDER.findall(template)}
+    if "serial" in names:
+        raise ValidationError(
+            f"{label} cannot use {'{serial}'} — it is what this template generates. "
+            f"Use {'{seq}'} for the running number."
+        )
+    if "seq" not in names:
+        raise ValidationError(
+            f"{label} must include {'{seq}'}, or every unit of an item would be given "
+            f"the same serial."
         )
     return template
 
@@ -152,6 +182,66 @@ def is_new_item(item, cutoff: str | None) -> bool:
     return created_date >= boundary
 
 
+# Which items get an asset / consumable code minted at putaway — the item master's
+# fifth tracking toggle, beside batch / serial / IMEI / expiry. It is a LIST OF ITEM
+# CODES in one setting rather than a column on mst_items, because the live schema is
+# frozen; item codes are unique and are never regenerated on an edit (masters overhaul,
+# 2026-07-28), so they key this as safely as an id would.
+#
+# Absent (None) means "never configured" and reads as ALL items tracked — that is what
+# the dock did before the toggle existed, and an unset field must not silently stop
+# goods being coded. An EMPTY string is a configured "none".
+TRACKED_ITEMS_KEY = "codes.tracked_items"
+
+
+def _split(raw: str | None) -> set[str]:
+    return {part.strip() for part in (raw or "").split(",") if part.strip()}
+
+
+def is_code_tracked(item, config: dict | None) -> bool:
+    """Does this item's unit get an asset / consumable code at putaway?"""
+    if not config:
+        return True
+    tracked = config.get("tracked_items")
+    if tracked is None:      # never configured — legacy behaviour, code everything
+        return True
+    return (getattr(item, "code", None) or "") in tracked
+
+
+async def set_item_tracked(db: AsyncSession, item_code: str, on: bool) -> None:
+    """Turn the toggle on or off for one item. Does NOT commit — the caller's unit of
+    work owns the transaction (this runs inside the item master's save).
+
+    The first write seeds the list from every existing item, so switching one item on
+    cannot silently switch every other item off.
+    """
+    from sqlalchemy import select as _select
+
+    from app.platform.settings.models import Setting
+    from app.shared.models.master import Item
+
+    row = (await db.execute(
+        _select(Setting).where(Setting.setting_key == TRACKED_ITEMS_KEY)
+    )).scalar_one_or_none()
+    if row is None:
+        seeded = {c for (c,) in (await db.execute(
+            _select(Item.code).where(Item.code.is_not(None)))).all()}
+        row = Setting(setting_key=TRACKED_ITEMS_KEY, setting_value=",".join(sorted(seeded)),
+                      value_type="string", category="codes",
+                      description="Item codes whose units are given an asset/consumable code")
+        db.add(row)
+    tracked = _split(row.setting_value)
+    tracked.add(item_code) if on else tracked.discard(item_code)
+    row.setting_value = ",".join(sorted(tracked))
+    await db.flush()
+
+
+async def tracked_items(db: AsyncSession) -> set[str] | None:
+    from app.platform.settings.service import get_setting
+    raw = await get_setting(db, TRACKED_ITEMS_KEY)
+    return None if raw is None else _split(raw)
+
+
 async def code_settings(db: AsyncSession) -> dict:
     """The configured formula, with today's behaviour as the default."""
     from app.platform.settings.service import get_setting
@@ -164,9 +254,11 @@ async def code_settings(db: AsyncSession) -> dict:
         "asset_format": await value("codes.asset_format", DEFAULT_ASSET_FORMAT),
         "consumable_format": await value("codes.consumable_format",
                                          DEFAULT_CONSUMABLE_FORMAT),
+        "serial_format": await value("codes.serial_format", DEFAULT_SERIAL_FORMAT),
         "new_flag": await value("codes.new_flag", "1"),
         "legacy_flag": await value("codes.legacy_flag", "0"),
         "legacy_before": await value("codes.legacy_before", ""),
+        "tracked_items": await tracked_items(db),
     }
 
 
@@ -200,6 +292,63 @@ async def unit_code(db: AsyncSession, *, item, is_asset: bool,
     # An empty render (every token blank) is not a code. The legacy shape always
     # produces something, because seq is always known.
     return code or render(LEGACY_FORMAT, values)
+
+
+async def mint_serials(db: AsyncSession, *, item, count: int,
+                       warehouse_code: str | None = None,
+                       config: dict | None = None,
+                       taken: set[str] | None = None) -> list[str]:
+    """`count` serials for units that arrived without one, per the configured format.
+
+    Goods that come in unlabelled used to stop the GRN dead: a serial-tracked line
+    demanded one serial per unit and there was nowhere to get them. This mints them
+    from the same token engine the asset and consumable codes use, so the shape is a
+    setting rather than a code change.
+
+    `taken` is every serial this item must not collide with — the caller owns those
+    tables (platform may not read a module's, rule 5) and knows that "already used"
+    means both the registered units AND the ones sitting on other open receipts, which
+    have no rows yet. The running number starts past that set and skips anything in it.
+
+    Falls back rather than raising, for the reason in the module docstring: a broken
+    setting must not stop goods being received.
+    """
+    if count <= 0:
+        return []
+    config = config or await code_settings(db)
+    template = config.get("serial_format") or DEFAULT_SERIAL_FORMAT
+    try:
+        validate_serial_format(template)
+    except (ValidationError, ValueError) as exc:
+        logger.error("serial format %r is unusable (%s) — falling back to %r",
+                     template, exc, DEFAULT_SERIAL_FORMAT)
+        template = DEFAULT_SERIAL_FORMAT
+
+    used = {value.strip().lower() for value in (taken or set()) if value}
+
+    minted: list[str] = []
+    seq = len(used) + 1
+    # Bounded so a template that renders the same string forever cannot spin: at that
+    # point the shape is wrong and the default, which always varies, takes over.
+    limit = seq + count * 100
+    while len(minted) < count and seq < limit:
+        values = build_values(
+            item=item, serial=None, seq=seq, warehouse_code=warehouse_code,
+            is_new=is_new_item(item, config["legacy_before"]),
+            new_flag=config["new_flag"], legacy_flag=config["legacy_flag"],
+        )
+        candidate = render(template, values) or render(DEFAULT_SERIAL_FORMAT, values)
+        seq += 1
+        if candidate.lower() in used:
+            continue
+        used.add(candidate.lower())
+        minted.append(candidate)
+    if len(minted) < count:
+        raise ValidationError(
+            f"Could not generate {count} unique serials for {item.code} from the "
+            f"configured Serial format. Check Settings > Code Formats."
+        )
+    return minted
 
 
 def preview(template: str, *, is_asset: bool = True) -> str:

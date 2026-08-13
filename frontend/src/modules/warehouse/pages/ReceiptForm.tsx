@@ -320,8 +320,13 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   /** Lines came off a consignment, so the items are fixed by what was sent. */
   const fromConsignment = form.receipt_type === "DISPATCH";
 
-  /** A full set is a GRN rule. The gate only checks you have not typed more serials
-   *  than units — capturing some of a load is the normal case out there. */
+  /** Only "not more serials than units" is checked now.
+   *
+   *  A GRN used to demand the full set, which stopped a lorry of unlabelled goods
+   *  dead — there was no serial to type. The units left without one are given a
+   *  serial on submit, from the Serial format in Settings > Code Formats, and a
+   *  serial the storekeeper actually read is never replaced. So a partial list is a
+   *  legitimate save on both documents. */
   const validateSerialLines = () => {
     for (const [index, line] of form.items.entries()) {
       if (!line.is_serial_tracked) continue;
@@ -330,10 +335,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         throw new Error(`Line ${index + 1}: serialized received quantity must be a whole number.`);
       }
       const actual = line.serial_numbers?.length ?? 0;
-      if (isGrn && actual !== required) {
-        throw new Error(`Line ${index + 1}: enter exactly ${required} serial numbers before saving.`);
-      }
-      if (!isGrn && actual > required) {
+      if (actual > required) {
         throw new Error(`Line ${index + 1}: ${actual} serial numbers for ${required} received units.`);
       }
     }
@@ -1022,7 +1024,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               ?? `Line ${serialLine + 1}`
         }
         readOnly={locked}
-        partial={!isGrn}
+        // Partial on a GRN too: the units nobody could read a serial off are given
+        // one on submit, from Settings > Code Formats. Demanding the full set here
+        // was the same wall as the old backend rule, one screen earlier.
+        partial
         onSave={(serials) => serialLine !== null && patchLine(serialLine, { serial_numbers: serials })}
       />
 

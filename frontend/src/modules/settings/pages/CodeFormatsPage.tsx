@@ -6,8 +6,10 @@ import { alerts } from "@/modules/alerts";
 import { codeFormatsApi } from "../api";
 import type { CodeFormats } from "../types";
 
-/** What the two templates are for, in the words the store uses. */
-const FORMATS: { key: "asset_format" | "consumable_format"; label: string; hint: string }[] = [
+type FormatKey = "asset_format" | "consumable_format" | "serial_format";
+
+/** What the three templates are for, in the words the store uses. */
+const FORMATS: { key: FormatKey; label: string; hint: string }[] = [
   {
     key: "asset_format",
     label: "Asset code",
@@ -17,6 +19,13 @@ const FORMATS: { key: "asset_format" | "consumable_format"; label: string; hint:
     key: "consumable_format",
     label: "Consumable code",
     hint: "The same, for items that are not assets.",
+  },
+  {
+    key: "serial_format",
+    label: "Serial number",
+    hint: "Minted at material inward for a unit that arrives without a serial on it. "
+      + "A serial typed or scanned from the vendor's label is never replaced. Cannot "
+      + "use {serial} — this is what generates it — and must include {seq}.",
   },
 ];
 
@@ -90,7 +99,7 @@ export function CodeFormatsPage() {
   const set = <K extends keyof CodeFormats>(key: K, value: CodeFormats[K]) =>
     setForm({ ...form, [key]: value });
 
-  const insert = (key: "asset_format" | "consumable_format", token: string) =>
+  const insert = (key: FormatKey, token: string) =>
     set(key, `${form[key]}${token}` as CodeFormats[typeof key]);
 
   return (
@@ -106,9 +115,11 @@ export function CodeFormatsPage() {
       />
 
       <p className="mb-4 text-sm text-body">
-        The shape of the asset and consumable codes generated at putaway. Changing a
-        format only affects units put away <strong>after</strong> the change — a code
-        already printed on a label and quoted on documents is never re-stamped.
+        The shape of the codes this system generates: the asset and consumable codes
+        stamped at putaway, and the serial minted at material inward for a unit that
+        arrives without one. Changing a format only affects units handled{" "}
+        <strong>after</strong> the change — a code already printed on a label and
+        quoted on documents is never re-stamped.
       </p>
 
       <div className="space-y-4">
@@ -130,7 +141,13 @@ export function CodeFormatsPage() {
             </div>
             {/* Click to append, so the tokens do not have to be typed exactly. */}
             <div className="mt-3 flex flex-wrap gap-2">
-              {(tokens.data?.tokens ?? []).map((t) => (
+              {/* {serial} is not offered on the serial template: it is the thing being
+                  generated, so it would render blank and hand every unlabelled unit
+                  the same string. The backend rejects it too — this only keeps the
+                  screen from suggesting it. */}
+              {(tokens.data?.tokens ?? [])
+                .filter((t) => !(key === "serial_format" && t.token === "{serial}"))
+                .map((t) => (
                 <button
                   key={t.token}
                   type="button"

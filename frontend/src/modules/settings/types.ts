@@ -40,6 +40,9 @@ export interface AppSettings {
 export interface CodeFormats {
   asset_format: string;
   consumable_format: string;
+  /** The serial minted at goods-in for a unit that arrived without one. Cannot use
+   *  {serial} — it IS the serial — and must include {seq}. */
+  serial_format: string;
   new_flag: string;
   legacy_flag: string;
   /** ISO date. Items created before it render `legacy_flag` for {new_flag}. */

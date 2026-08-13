@@ -56,11 +56,17 @@ async def list_indents(params: PageParams = Depends(), search: str | None = None
                        # the only honest way to ask it now that an approver can serve
                        # part of an indent from their own point.
                        has_remainder: bool = False,
+                       # The fulfilment queue's own narrowing: work that is MINE to
+                       # serve. Drops an indent still in approval unless it is parked on
+                       # this login — a rung that has already approved and passed it on
+                       # keeps reading it everywhere else, but it is not their job any
+                       # more. Off by default, so /indents itself is unchanged.
+                       to_serve: bool = False,
                        sort_by: str = "created_at", sort_dir: str = "desc",
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.INDENT_VIEW))):
     return await service.list_indents(
-        db, params, search=search, has_remainder=has_remainder,
+        db, params, search=search, has_remainder=has_remainder, to_serve=to_serve,
         date_from=created_date_from or start_date,
         date_to=created_date_to or end_date,
         required_by_from=required_by_from, required_by_to=required_by_to,

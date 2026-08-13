@@ -27,6 +27,7 @@ from app.modules.inventory import service as inventory_service
 from app.modules.inventory.models import (
     Allocation, AllocationItem, MaterialRequest, MaterialRequestItem, Stock,
 )
+from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
@@ -969,11 +970,32 @@ async def _attach_capabilities(db: AsyncSession, indent: Indent, user) -> Indent
     indent.correction_comment = (
         correction_state or {}
     ).get("correction_comment")
+    return await _attach_office_sac(db, indent)
+
+
+async def _attach_office_sac(db: AsyncSession, indent: Indent) -> Indent:
+    """Stamp the delivery office's service area code onto the indent for display.
+
+    Resolved from `indent.office_id`, never from the viewer: a detail screen is read
+    by approvers and store keepers who sit at other offices, and the SAC has to be
+    the delivering office's own. An office HCM holds no SAC for stays None.
+
+    Attached here rather than only in `get_indent` so the same indent carries a SAC
+    whichever single-document call returned it — submit, approve, return and resubmit
+    all hand the caller an `IndentOut`, and the field would otherwise blank out on
+    the detail screen the moment an action refreshed it. Single-document only: no
+    list path calls `_attach_capabilities`, so this costs no per-row lookups.
+    """
+    office = await db.get(HcmOffice, indent.office_id) if indent.office_id else None
+    indent.office_sac = mappers.office_sac(office.raw) if office else None
     return indent
 
 
 async def get_indent(db: AsyncSession, indent_id: int, user=None) -> Indent:
     if user is not None:
+        # RBAC-scoped: `_assert_can_view_indent` decides whether this user may see the
+        # indent at all, and the SAC rides on the indent it returns — an indent nobody
+        # is allowed to read never reaches `_attach_office_sac`.
         indent = await _assert_can_view_indent(db, indent_id, user)
         return await _attach_capabilities(db, indent, user)
     indent = (await db.execute(
@@ -981,7 +1003,7 @@ async def get_indent(db: AsyncSession, indent_id: int, user=None) -> Indent:
     )).scalar_one_or_none()
     if not indent:
         raise NotFoundError(f"Indent {indent_id} not found")
-    return indent
+    return await _attach_office_sac(db, indent)
 
 
 async def _get_indent_for_journey(db: AsyncSession, indent_id: int, user) -> Indent:
@@ -1098,6 +1120,7 @@ async def list_indents(
     include_unassigned_region: bool = False,
     is_bookmarked: str | None = None,
     has_remainder: bool = False,
+    to_serve: bool = False,
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ) -> dict:
@@ -1115,6 +1138,30 @@ async def list_indents(
         include_unassigned_region=include_unassigned_region,
         is_bookmarked=is_bookmarked,
     )
+    if to_serve and user is not None:
+        # The fulfilment queue asks a narrower question than /indents does: not "may I
+        # read this" but "is there fulfilment work in it FOR ME".
+        #
+        # An indent still climbing is only the current rung's to serve — he issues what
+        # he holds from the approval screen, the remainder travels on. Everyone else it
+        # has passed keeps READING it (they approved it; `indent_access_condition` keeps
+        # them as participants, which is right for /indents and the journey), but it is
+        # no longer work sitting in front of them. Without this, an OE who approved and
+        # forwarded IND/2026-27/00661 still found it in his queue with the document
+        # parked two rungs up on the District Manager.
+        #
+        # Only PENDING_APPROVAL is touched. Everything past approval is the inventory
+        # desk's own queue and is left exactly as it was — who gets those rows is a
+        # question of which login holds `allocation.view`, decided in RBAC, not here.
+        stmt = stmt.where(or_(
+            Indent.status != IndentStatus.PENDING_APPROVAL.value,
+            Indent.id.in_(
+                select(Pending.doc_id).where(
+                    Pending.doc_type == DocType.INDENT.value,
+                    Pending.approver_id == user.id,
+                )
+            ),
+        ))
     if has_remainder:
         # At least one line still owes something. EXISTS rather than a join, so an
         # indent with three unfulfilled lines is still one row in the queue.
@@ -2133,7 +2180,42 @@ def _journey_history(
         changed = audit.changed_fields if isinstance(audit.changed_fields, dict) else {}
         status_change = changed.get("status")
         new_status = status_change.get("to") if isinstance(status_change, dict) else None
-        if new_status == IndentStatus.AWAITING_ALLOCATION.value:
+        old_status = status_change.get("from") if isinstance(status_change, dict) else None
+        if (
+            old_status == IndentStatus.RETURNED_FOR_CORRECTION.value
+            and new_status == IndentStatus.PENDING_APPROVAL.value
+        ):
+            # A correction resubmit reopens the rung it was returned from instead of
+            # writing a new wf_actions row, so this audit entry is the only evidence
+            # the request ever went back up the ladder.  Without it the journey stops
+            # at the return and never shows what happened next.  The rung itself is
+            # still the ladder's: this only reports that the document went back to it,
+            # and the approver on it comes from `wf_instances.resolved_chain` as before.
+            add({
+                "id": f"resubmitted:{audit.id}",
+                "event_type": "RESUBMITTED",
+                "title": "Resubmitted after correction",
+                "description": (
+                    f"Resubmitted by {audit.actor_name}"
+                    if audit.actor_name else f"{indent.indent_no} resubmitted"
+                ),
+                "actor_name": audit.actor_name,
+                "position_name": (
+                    indent.position_name
+                    if audit.actor_name and audit.actor_name == indent.requested_by_name
+                    else None
+                ),
+                "timestamp": audit.created_at,
+                "comments": None,
+                "reference_no": None,
+                "quantity_summary": None,
+                # The approval leg, not a leg of its own: the ladder picks up exactly
+                # where the return left it.
+                "stage_type": "approval",
+                "approval_mode": None,
+                "_sort_order": 25,
+            })
+        elif new_status == IndentStatus.AWAITING_ALLOCATION.value:
             add({
                 "id": f"ready-for-allocation:{audit.id}",
                 "event_type": "READY_FOR_ALLOCATION",
@@ -4847,6 +4929,55 @@ def _ensure_allocation_eligible(indent: Indent) -> None:
         )
 
 
+async def _in_approval_block_reason(db: AsyncSession, indent: Indent, user) -> str | None:
+    """Why this login may NOT allocate an indent that is still climbing — or None.
+
+    PENDING_APPROVAL sits in `_ALLOCATION_ELIGIBLE_STATUSES` for ONE reason: the
+    approver the document is currently with serving it out of his own stocking point,
+    which is the cascade. It was never meant to open the allocate screen to everybody
+    else holding ALLOCATION_CREATE — and it did. An approver who has already signed and
+    passed the indent on stays visible to himself in the fulfilment queue (he is a
+    participant in `indent_access_condition`), so he could raise a further allocation
+    against it, sign it himself as the OWN_STOCK_ALLOCATION ladder's own rung, and —
+    once it covered every line — reach `_settle_indent_approval` -> `engine.settle`,
+    which cleared the pending task of the approver it was actually waiting on. The rung
+    above never saw the request.
+
+    Exactly the two questions `approvals.fulfilment._may_settle` and
+    `_wrong_hat_message` ask, so the allocate screen and "issue from my stock" answer
+    identically: am I the rung this document is parked on, and am I wearing the post
+    the ladder named. Both read `wf_pending` and the resolved chain, which leaves
+    Approvals Config the only authority — no role, rank or permission code appears
+    here, so reconfiguring a ladder moves this gate with it.
+
+    Every other eligible status is untouched: the inventory desk allocating an
+    AWAITING_ALLOCATION indent, a monthly cycle allocated in batch, a part-short
+    request going round again — none of them are PENDING_APPROVAL and none reach here.
+    """
+    if indent.status != IndentStatus.PENDING_APPROVAL.value:
+        return None
+    instance = await _pending_indent_return_instance(db, indent.id, getattr(user, "id", None))
+    if instance is None:
+        return (
+            f"{indent.indent_no} is still in approval and is not waiting on you. Only "
+            "the approver it is currently with can serve it from their own stock; "
+            "anyone else has to wait for it to reach inventory."
+        )
+    # Only asked of a login wearing more than one hat — the engine's own set, so a
+    # person with one post (or none) is never in it and reaches the screen unchanged.
+    if instance.id in await engine.instances_for_other_hats(
+            db, user, [DocType.INDENT.value]):
+        link = _current_workflow_link(instance) or {}
+        return (
+            f"{indent.indent_no} is waiting on "
+            + (link.get("position_name") or "another of your positions")
+            + ". Switch to that position before allocating against it — allocating "
+              "under this one would raise the allocation and then be unable to pass "
+              "the remainder on."
+        )
+    return None
+
+
 def _quantities_recorded(indent: Indent) -> bool:
     """Did this indent's approval chain actually write quantities.
 
@@ -4928,6 +5059,12 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
             f"This indent is {indent.status.replace('_', ' ').lower()} — "
             f"there is nothing to allocate."
         )
+    # Still climbing, and parked on somebody else: readable, not decidable. Asked here
+    # as well as in `decide_allocation` so the screen withholds the Submit and says why
+    # in words, rather than offering a button that comes back red.
+    elif user is not None and (
+            reason := await _in_approval_block_reason(db, indent, user)):
+        blocked_reason = reason
     elif indent.items and not any(
         _owed_quantity(line, recorded)
         - Decimal(str(line.allocated_quantity or 0))
@@ -5020,6 +5157,13 @@ async def decide_allocation(db: AsyncSession, body, user):
     if indent is None:
         raise NotFoundError(f"Indent {body.indent_id} not found")
     _ensure_allocation_eligible(indent)
+    # The status gate says WHAT may be allocated; this says WHO. See
+    # `_in_approval_block_reason` — an indent still climbing is only the current rung's
+    # to serve, and `create_allocation_for_indent` deliberately leaves that to its
+    # callers (the own-stock path in approvals has its own, identical, gate).
+    blocked = await _in_approval_block_reason(db, indent, user)
+    if blocked:
+        raise ValidationError(blocked)
     return await create_allocation_for_indent(
         db, indent, [d.model_dump() for d in body.decisions], user, body.remarks)
 

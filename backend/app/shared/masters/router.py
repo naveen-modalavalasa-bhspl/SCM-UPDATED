@@ -258,3 +258,32 @@ async def save_item_spec(item_id: int, data: ItemSpecIn,
 
 
 router.include_router(_specs)
+
+
+# --------------------------------------------------------------------------- #
+#  Unit-code tracking — the item form's fifth tracking toggle
+# --------------------------------------------------------------------------- #
+# It is NOT a column on mst_items (the live schema is frozen), so it cannot ride on
+# the item read the way is_batch_tracked does — `MasterDef.serialize` is synchronous
+# and has no session. The form asks for it here instead, and writes it back through
+# `ItemIn.generate_unit_code` on save.
+_tracking = APIRouter(tags=["masters"])
+
+
+@_tracking.get("/api/items/{item_id}/unit-code-tracking")
+async def get_unit_code_tracking(item_id: int, db: AsyncSession = Depends(get_db),
+                                 user=Depends(get_current_user)):
+    from app.platform.settings import codeformat
+
+    item = await db.get(Item, item_id)
+    if item is None:
+        raise NotFoundError("Item not found")
+    tracked = await codeformat.tracked_items(db)
+    return {"item_id": item_id,
+            # Unconfigured reads as ON: that is what the dock did before the toggle
+            # existed, and every unit put away so far was coded.
+            "generate_unit_code": True if tracked is None else (item.code or "") in tracked,
+            "kind": "asset" if item.is_asset else "consumable"}
+
+
+router.include_router(_tracking)

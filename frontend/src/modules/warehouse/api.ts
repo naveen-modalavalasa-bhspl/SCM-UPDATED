@@ -535,6 +535,7 @@ export const getIndentIssueSource = (indent_id: number, warehouse_id: number) =>
     vehicle_number?: string | null;
     destination_office_id?: number | null;
     destination_office_name?: string | null;
+    destination_office_sac?: string | null;
     items: IssueWrite["items"];
   }>(`${BASE}/options/indent-issue-source`, { indent_id, warehouse_id });
 

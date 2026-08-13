@@ -39,6 +39,9 @@ export interface Indent {
   department_name?: string | null;
   office_id?: number | null;
   office_name?: string | null;
+  /** Service area code of the delivery office, resolved from HCM when the indent is
+   *  served. Null for offices HCM holds no SAC for. */
+  office_sac?: string | null;
   /**
    * Region/Location: the HCM location the requester is tagged to, snapshotted when the
    * indent was raised. Read-only everywhere — there is no field for it on

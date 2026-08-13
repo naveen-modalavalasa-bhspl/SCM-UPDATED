@@ -98,6 +98,9 @@ const HISTORY_STAGE_TYPES: Record<string, string> = {
   APPROVED: "approval",
   REJECTED: "approval",
   RETURNED: "approval",
+  // The resubmit belongs to the approval leg, so the ladder reads as one chain that
+  // carries on from the return rather than restarting at "Request raised".
+  RESUBMITTED: "approval",
   READY_FOR_ALLOCATION: "allocation",
   ALLOCATION_CREATED: "allocation",
   ALLOCATION_COMPLETED: "allocation",
@@ -121,11 +124,20 @@ const HISTORY_STATUSES: Record<string, string> = {
   APPROVED: "APPROVED",
   REJECTED: "REJECTED",
   RETURNED: "RETURNED",
+  RESUBMITTED: "SUBMITTED",
   ACKNOWLEDGEMENT_SUBMITTED: "ACKNOWLEDGED",
 };
 
+export const RESUBMISSION_STAGE_TITLE = "Resubmitted after correction";
+
 export function stageStatus(stage: { status?: string | null }) {
   return String(stage.status ?? "").trim().toUpperCase();
+}
+
+/** The step that closes a return: the correction went back up the same ladder. */
+export function isResubmissionStage(stage: IndentJourneyStage) {
+  return stageStatus(stage) === "SUBMITTED"
+    && String(stage.title ?? "").trim().toLowerCase() === RESUBMISSION_STAGE_TITLE.toLowerCase();
 }
 
 /**
@@ -242,7 +254,11 @@ export function derivedJourneyStages(journey: IndentJourney): IndentJourneyStage
     // The indent's own submit/approve cycle, as opposed to a downstream document.
     const ownCycle = track === "request" || track === "approvals";
     const correction = ownCycle && status === "RETURNED";
-    const resubmission = ownCycle && status === "SUBMITTED" && returnedEarlier;
+    // A resubmit reopens the returned rung rather than writing a new submission, so
+    // the backend names the event outright; the positional read stays as the fallback
+    // for a backend that emits a second plain SUBMITTED instead.
+    const named = String(event.event_type ?? "").trim().toUpperCase() === "RESUBMITTED";
+    const resubmission = ownCycle && status === "SUBMITTED" && (returnedEarlier || named);
     if (correction) returnedEarlier = true;
     if (!DOWNSTREAM_TRACKS.has(track) && !correction && !resubmission) return;
 
@@ -259,7 +275,7 @@ export function derivedJourneyStages(journey: IndentJourney): IndentJourneyStage
       // Sorted chronologically for display; kept after contract stages so a tie
       // on the timestamp never pushes a derived step above its own document.
       sequence: 1000 + index,
-      title: resubmission ? "Resubmitted after correction" : event.title,
+      title: resubmission ? RESUBMISSION_STAGE_TITLE : event.title,
       status,
       is_current: false,
       approver_name: event.actor_name ?? null,
@@ -307,16 +323,30 @@ function phaseByTrack(journey: IndentJourney) {
   return byTrack;
 }
 
+/**
+ * The setback the leg is still sitting on, if any. A return that was corrected and
+ * resubmitted is history — the leg moved on — so only an unanswered one counts.
+ * `occurred` is chronological, so a single pass settles it.
+ */
+function outstandingSetback(occurred: IndentJourneyStage[]): JourneyTrackState | null {
+  let setback: JourneyTrackState | null = null;
+  for (const stage of occurred) {
+    const status = stageStatus(stage);
+    if (status === "REJECTED") setback = "REJECTED";
+    else if (status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) {
+      setback = "RETURNED";
+    } else if (setback === "RETURNED" && isResubmissionStage(stage)) setback = null;
+  }
+  return setback;
+}
+
 function trackState(
   occurred: IndentJourneyStage[],
   upcoming: IndentJourneyStage[],
   phase?: IndentJourneyStage,
 ): JourneyTrackState {
-  const statuses = occurred.map(stageStatus);
-  if (statuses.includes("REJECTED")) return "REJECTED";
-  if (statuses.includes("RETURNED") || statuses.includes(INDENT_STATUS.RETURNED_FOR_CORRECTION)) {
-    return "RETURNED";
-  }
+  const setback = outstandingSetback(occurred);
+  if (setback) return setback;
   if (upcoming.some((stage) => stage.is_current)) return "CURRENT";
   if (phase) {
     const status = stageStatus(phase);

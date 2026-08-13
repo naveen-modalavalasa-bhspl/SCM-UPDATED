@@ -162,6 +162,15 @@ export const mastersApi = {
   departments: () => all<RefRow>("/api/departments"),
   facilities: () => all<RefRow>("/api/facilities"),
 
+  /** Whether the dock mints an asset / consumable code for this item's units.
+   *
+   * It is not a column on mst_items — the live schema is frozen — so it cannot ride
+   * on the item read the way Has Batch and Has Serial do. It is written back through
+   * the ordinary item save, as `generate_unit_code`. */
+  unitCodeTracking: (itemId: number) =>
+    api.get<{ generate_unit_code: boolean }>(`/api/items/${itemId}/unit-code-tracking`)
+      .then((r) => r.data.generate_unit_code),
+
   /** Read-only lookup of rbac_user_groups, so the item-group screen can name the
    *  group it is tagging to. Groups are created and edited in the RBAC module;
    *  reaching into that module's client would couple the two, so this is a plain

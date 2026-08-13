@@ -567,6 +567,9 @@ export interface Issue {
   issued_to_name?: string | null;
   destination_office_id?: number | null;
   destination_office_name?: string | null;
+  /** Service area code of the destination office, resolved from HCM when the issue is
+   *  served. Null for offices HCM holds no SAC for. */
+  destination_office_sac?: string | null;
   direction: "OUT" | "IN";
   original_issue_id?: number | null;
   original_issue_no?: string | null;
@@ -757,6 +760,8 @@ export interface Dispatch {
   project_name?: string | null;
   destination_office_id?: number | null;
   destination_office_name?: string | null;
+  /** Service area code of the destination office. Same value the source issue shows. */
+  destination_office_sac?: string | null;
   delivery_address?: string | null;
   contact_person?: string | null;
   contact_phone?: string | null;
@@ -996,6 +1001,7 @@ export interface IssueDispatchSource {
   project_id?: number | null;
   destination_office_id?: number | null;
   destination_office_name?: string | null;
+  destination_office_sac?: string | null;
   /** The stocking point serving the requesting office — what "To warehouse"
    *  defaults to. Null when that point is the origin (`destination_is_origin`). */
   destination_warehouse_id?: number | null;

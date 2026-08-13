@@ -299,6 +299,19 @@ export function IndentFormPage() {
     ?? vehicles.find((vehicle) => vehicle.id === resolvedVehicleId)?.name
     ?? delivery.vehicleNumber
     ?? "No vehicle assigned to your delivery location";
+  /** The delivery office's service area code, matched by office id rather than taken
+   *  from the active position.
+   *
+   *  An indent being edited can name an office the raiser does not sit at, and the
+   *  SAC of the office they happen to be posted to now would be the wrong code
+   *  against that indent. Matching on the id means an office we hold no SAC for
+   *  reads as absent instead of borrowing someone else's. */
+  const officeSac = deliveryOfficeId === ""
+    ? null
+    : (me?.employee.office_id === deliveryOfficeId
+        ? me?.employee.office_sac
+        : me?.positions.find((position) => position.office_id === deliveryOfficeId)
+          ?.office_sac) ?? null;
 
   if (isEditing && isDraftLoading) return <Skeleton className="h-40 rounded-2xl" />;
 
@@ -504,6 +517,14 @@ export function IndentFormPage() {
             </Field>
             <Field label="Vehicle">
               <Input value={vehicleNumber} disabled />
+            </Field>
+            {/* Read-only like the two above it: the SAC belongs to the delivery
+                office, so it follows that office rather than being chosen. */}
+            <Field label="Service area code (SAC)">
+              <Input
+                value={officeSac ?? "No service area code for this location"}
+                disabled
+              />
             </Field>
             <Field label="Remarks">
               <Input value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Optional" />

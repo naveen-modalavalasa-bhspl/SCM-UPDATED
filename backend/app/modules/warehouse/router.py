@@ -705,6 +705,14 @@ async def list_serials(params: PageParams = Depends(), status: str | None = None
                                       bin_id=bin_id, search=search, user=user)
 
 
+@router.get("/serials/lookup")
+async def serial_lookup(code: str, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(STOCK_VIEW))):
+    """One unit, found by serial / IMEI / asset code / consumable code — whichever is
+    printed on the label the user is holding."""
+    return await service.unit_lookup(db, code, user=user)
+
+
 @router.get("/serials/summary")
 async def serial_summary(item_ids: str, warehouse_ids: str | None = None,
                          db: AsyncSession = Depends(get_db),

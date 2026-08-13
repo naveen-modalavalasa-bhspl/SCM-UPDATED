@@ -2,14 +2,16 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpreadsheet } from "lucide-react";
+import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpreadsheet, ScanLine, X } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect, FilterToggle } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
+import { UnitCell, UnitsPanel } from "./UnitsPanel";
 import {
   getSerialSummary, getStockBalances, getStockDetail, getStockSummary, getWarehouses,
+  indexSerials, lookupUnit,
 } from "../api";
-import type { SerialSummaryRow, StockBalanceItem, StockDetail, StockLot } from "../types";
+import type { StockBalanceItem, StockDetail, StockLot } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
 /** Value columns read off stk_balance.valuation_rate / stock_value. Both are 0 across
@@ -116,6 +118,10 @@ export function StockBalanceView() {
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
 
+  // Dismissed by hand: after "found it, that one is in BIN-A2" the banner has done its
+  // job, and it should not need the search cleared to go away.
+  const [hitDismissed, setHitDismissed] = useState(false);
+
   // Opened only when a row is clicked: the lots and the walk down the location tree
   // are a second query, so the list itself stays one cheap page of stk_balance.
   const { data: detail, isLoading: detailLoading } = useQuery<StockDetail>({
@@ -126,7 +132,19 @@ export function StockBalanceView() {
 
   const debouncedSearch = useDebouncedValue(search);
 
-  const filters = {
+  // Is the text in the search box the identity of ONE unit? The list search matches
+  // item, batch and bin; a serial, an IMEI or an asset code names a single physical
+  // thing, and the answer to it is "it is in this bin", not a page of lots. Asked in
+  // parallel with the list, so neither waits for the other.
+  const { data: unitHit } = useQuery({
+    queryKey: ["unit-lookup", debouncedSearch],
+    queryFn: () => lookupUnit(debouncedSearch),
+    // Six characters and no spaces: a serial, an IMEI and a code are all single
+    // tokens, so "face mask" is not worth a lookup.
+    enabled: debouncedSearch.trim().length >= 6 && !/\s/.test(debouncedSearch.trim()),
+  });
+
+  const listFilters = {
     search: debouncedSearch,
     warehouse_id: warehouseId,
     expiring_in_days: ["30", "60", "90"].includes(expiringIn) ? Number(expiringIn) : undefined,
@@ -139,6 +157,15 @@ export function StockBalanceView() {
     page,
     size,
   };
+
+  // A serial or an IMEI is not text on any stk_balance column, so searching one left
+  // the grid empty under a banner that had just said where the unit was. When the
+  // lookup resolves, the LIST is asked for that unit's item at that point instead —
+  // "where is this thing" answered by the lot that holds it.
+  const filters = unitHit
+    ? { ...listFilters, search: "", item_id: unitHit.item_id,
+        warehouse_id: unitHit.warehouse_id ?? listFilters.warehouse_id }
+    : listFilters;
 
   const { data, isLoading } = useQuery({
     queryKey: ["stock-balance", filters],
@@ -168,30 +195,34 @@ export function StockBalanceView() {
                                     rows.map((r) => r.warehouse_id)),
     enabled: rows.length > 0,
   });
-  const serialsByRow = new Map<string, SerialSummaryRow>(
-    serialRows.map((s) => [`${s.item_id}:${s.warehouse_id}`, s]),
-  );
+  const serialsByRow = indexSerials(serialRows);
+  // Narrowest key first: the units in THIS bin and THIS batch if the goods-in recorded
+  // them, else the ones at this point. See indexSerials.
   const unitsOf = (r: StockBalanceItem) =>
-    serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
+    serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${r.bin_id ?? ""}:${r.batch_id ?? ""}`)
+    ?? serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${r.bin_id ?? ""}`)
+    ?? serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
 
-  /** What the row's units are called. The lot's own code when stk_balance carries one,
-   *  otherwise the codes of the units standing in it — with a count, because "+84 more"
-   *  is the honest way to show 88 codes in one cell. */
-  const unitTag = (r: StockBalanceItem) => {
-    const own = r.serial_number ?? r.asset_code ?? r.consumable_code;
-    if (own) return { text: own, extra: 0 };
-    const units = unitsOf(r);
-    const first = units?.codes[0] ?? units?.serials[0];
-    if (!first) return null;
-    return { text: first, extra: (units?.count ?? 1) - 1 };
-  };
+  /** Which lot a cell's popover should list the units of. */
+  const lotOf = (r: StockBalanceItem) => ({
+    itemId: r.item_id,
+    warehouseId: r.warehouse_id,
+    binId: r.bin_id,
+    batchId: r.batch_id,
+    itemCode: r.item_code,
+    expected: unitsOf(r)?.count,
+    label: r.bin_code || r.warehouse_name,
+  });
 
   const activeFilters =
     [search, warehouseId, expiringIn, expiryFrom, expiryTo].filter(Boolean).length +
     (includeZero ? 1 : 0) +
     (belowReorder ? 1 : 0);
 
+  const hit = hitDismissed ? null : unitHit;
+
   const clear = () => {
+    setHitDismissed(false);
     setSearch(""); setWarehouseId(""); setExpiringIn("");
     setExpiryFrom(""); setExpiryTo("");
     setIncludeZero(false); setBelowReorder(false);
@@ -200,8 +231,8 @@ export function StockBalanceView() {
 
   const exportCsv = () => {
     const header = ["Item Code", "Item Name", "Category", "Warehouse", "Bin", "Batch",
-                    "Expiry", "Available", "Reserved", "Serial / Asset code",
-                    "Rate", "Value"];
+                    "Expiry", "Available", "Reserved", "Serials", "IMEIs",
+                    "Asset / consumable codes", "Rate", "Value"];
     const cell = (v: any) => {
       if (v == null) return '""';
       const s = String(v).replace(/"/g, '""');
@@ -210,9 +241,12 @@ export function StockBalanceView() {
     const body = rows.map((r) => [
       r.item_code, r.item_name, r.category_name, r.warehouse_name, r.bin_code, r.batch_number, r.expiry_date,
       r.available_qty, r.reserved_qty,
-      // The export gets every code, not the "+N more" the cell has room for.
-      unitsOf(r)?.codes.join(" | ")
-        || (r.serial_number ?? r.asset_code ?? r.consumable_code),
+      // Three columns, because the three identities are not interchangeable. The
+      // summary carries the first five of each — the whole list of a single lot is a
+      // Download away in the row's popover, which is the right place for 88 codes.
+      unitsOf(r)?.serials.join(" | ") || r.serial_number,
+      unitsOf(r)?.imeis.join(" | "),
+      unitsOf(r)?.codes.join(" | ") || (r.asset_code ?? r.consumable_code),
       r.valuation_rate, r.total_value,
     ]);
     const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
@@ -281,18 +315,38 @@ export function StockBalanceView() {
       // are both above; the sum adds nothing but a wrong word. The serial goes here
       // instead, which is what the column is actually wanted for.
       key: "serial",
-      header: "Serial / Asset code",
+      header: "Serial / IMEI",
       hideOnNarrow: true,
       render: (r) => {
-        const tag = unitTag(r);
-        if (!tag) return <span className="text-xs text-muted">—</span>;
+        const units = unitsOf(r);
+        // Serial first, IMEI second: both name the unit, and an item is rarely
+        // tracked by both. The lot's own column is the last resort — it holds one
+        // value for a lot that may contain eighty units.
+        const first = units?.serials[0] ?? units?.imeis[0] ?? r.serial_number;
         return (
-          <div className="min-w-0">
-            <div className="truncate font-mono text-xs text-body">{tag.text}</div>
-            {tag.extra > 0 && (
-              <div className="text-[11px] text-muted">+{tag.extra} more units</div>
-            )}
-          </div>
+          <UnitCell
+            text={first}
+            extra={units ? units.count - 1 : 0}
+            lot={units ? lotOf(r) : undefined}
+            title={r.item_name}
+          />
+        );
+      },
+    },
+    {
+      key: "unit_code",
+      header: "Asset / Consumable code",
+      hideOnNarrow: true,
+      render: (r) => {
+        const units = unitsOf(r);
+        const first = units?.codes[0] ?? r.asset_code ?? r.consumable_code;
+        return (
+          <UnitCell
+            text={first}
+            extra={units?.codes.length ? units.count - 1 : 0}
+            lot={units?.codes.length ? lotOf(r) : undefined}
+            title={r.item_name}
+          />
         );
       },
     },
@@ -369,10 +423,67 @@ export function StockBalanceView() {
         />
       </div>
 
+      {/* One unit, found by whatever identity is printed on it. This is the answer to
+          "where is THIS thing", which a list of lots cannot give. */}
+      {hit && (
+        <div className="mb-4 rounded-2xl border border-brand/40 bg-brand-050/40 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex min-w-0 items-start gap-3">
+              <ScanLine size={18} className="mt-0.5 shrink-0 text-brand" />
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-ink">
+                  {hit.item_name}
+                  <span className="ml-1 font-normal text-muted">{hit.item_code}</span>
+                </div>
+                <div className="mt-0.5 text-xs text-body">
+                  {hit.warehouse_name || "Unknown point"}
+                  {hit.bin_code ? ` › ${hit.bin_code}` : " › no bin recorded"}
+                  {hit.batch_no ? ` · Batch ${hit.batch_no}` : ""}
+                  {hit.expiry_date ? ` · Expires ${hit.expiry_date}` : ""}
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {([
+                    ["Serial", hit.serial_number],
+                    ["IMEI", hit.imei],
+                    [hit.is_asset ? "Asset code" : "Consumable code",
+                     hit.asset_code || hit.consumable_code],
+                  ] as const).filter(([, v]) => v).map(([label, v]) => (
+                    <span key={label} className="rounded bg-content1 px-2 py-0.5 text-[11px] text-body">
+                      <span className="text-muted">{label} </span>
+                      <span className="font-mono">{v}</span>
+                    </span>
+                  ))}
+                  <Chip size="sm" variant="flat">{hit.status}</Chip>
+                </div>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setWarehouseId(String(hit.warehouse_id ?? ""));
+                  setPage(1);
+                }}
+              >
+                Show this point
+              </Button>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                className="rounded-md p-2 text-muted transition-colors hover:bg-content2"
+                onClick={() => setHitDismissed(true)}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <FilterBar
         search={search}
-        onSearch={setSearch}
-        searchPlaceholder="Scan a barcode, or search item / batch / bin…"
+        onSearch={(v) => { setHitDismissed(false); setSearch(v); }}
+        searchPlaceholder="Scan or type a serial, IMEI, asset code, item, batch or bin…"
         onClear={clear}
         active={activeFilters}
       >
@@ -432,6 +543,9 @@ export function StockBalanceView() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
+          // The serial/code lookup lands after the list. Without this the table keeps
+          // the cells it built before that answer arrived — see ResponsiveList.revision.
+          revision={`${serialRows.length}:${rows.length}`}
           empty={
             activeFilters
               ? "No stock matches these filters."
@@ -514,32 +628,29 @@ export function StockBalanceView() {
 
             <SheetSection title="Identity & Tracking">
               <SheetRow label="Category" value={selected.category_name} />
-              <SheetRow label="Asset code" value={selected.asset_code} />
-              <SheetRow label="Barcode" value={selected.barcode_value} />
-              {/* The units themselves. The list row only has space for the first one,
-                  and "which serials are actually here" is the question that follows. */}
-              {(() => {
-                const units = unitsOf(selected);
-                if (!units) return null;
-                return (
-                  <>
-                    <SheetRow label="Units tracked" value={units.count} />
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {units.codes.concat(units.codes.length ? [] : units.serials)
-                        .map((code) => (
-                          <span key={code} className="rounded bg-content2 px-2 py-0.5 font-mono text-[11px] text-body">
-                            {code}
-                          </span>
-                        ))}
-                      {units.count > units.codes.length && (
-                        <span className="px-1 text-[11px] text-muted">
-                          +{units.count - units.codes.length} more
-                        </span>
-                      )}
-                    </div>
-                  </>
-                );
-              })()}
+              {/* The barcode IS the item code. A separate barcode_value was optional,
+                  usually empty, and when it was filled it named a different string
+                  from the one printed on the shelf label — two identities for one
+                  item. The code is what Labels & Printing encodes. */}
+              <SheetRow label="Barcode (item code)" value={selected.item_code} />
+              <SheetRow label="Batch" value={selected.batch_number} />
+              <SheetRow label="Expiry" value={selected.expiry_date} />
+              <SheetRow label="Bin" value={selected.bin_code} />
+            </SheetSection>
+
+            {/* The units themselves — every serial, IMEI and asset/consumable code
+                standing in this lot, copyable and downloadable. The list row has space
+                for one; "which units are actually here" is the question that follows,
+                and the answer has to leave the browser. */}
+            <SheetSection title="Units in this lot">
+              <UnitsPanel
+                itemId={selected.item_id}
+                warehouseId={selected.warehouse_id}
+                binId={selected.bin_id}
+                batchId={selected.batch_id}
+                itemCode={selected.item_code}
+                expected={unitsOf(selected)?.count}
+              />
             </SheetSection>
 
             <SheetSection title={`Lots in ${selected.warehouse_name || "this warehouse"}`}>

@@ -18,17 +18,19 @@ export interface Me {
   employee: {
     id: number; name: string; code?: string | null; email?: string | null;
     office_id?: number | null; office_name?: string | null;
+    /** Service area code of the office. Absent for offices HCM has none for. */
+    office_sac?: string | null;
   };
   roles: string[];
   positions: {
     id: number; name: string; department_id?: number | null;
     department_name?: string | null; office_id?: number | null;
-    office_name?: string | null; is_primary: boolean;
+    office_name?: string | null; office_sac?: string | null; is_primary: boolean;
   }[];
   active_position?: {
     id: number; name: string; department_id?: number | null;
     department_name?: string | null; office_id?: number | null;
-    office_name?: string | null; is_primary: boolean;
+    office_name?: string | null; office_sac?: string | null; is_primary: boolean;
   } | null;
   permissions: string[];
   menu: MenuItem[];

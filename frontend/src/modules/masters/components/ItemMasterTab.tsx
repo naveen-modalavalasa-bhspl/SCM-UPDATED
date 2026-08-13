@@ -38,7 +38,8 @@ const empty = {
   hsn_id: "", is_asset: false,
   description: "", has_components: false, barcode_type: "AUTO",
   barcode_value: "", is_batch_tracked: false, is_serial_tracked: false,
-  is_imei_tracked: false, has_expiry: false, requires_qi: false,
+  is_imei_tracked: false, generate_unit_code: true, has_expiry: false,
+  requires_qi: false,
   dosage_form_id: "", valuation_method: "FIFO", requires_special_storage: false,
   storage_conditions: "", requires_special_transport: false,
   transport_conditions: "", is_active: true,
@@ -49,6 +50,16 @@ const opt = (rows: { id: number; code?: string | null; name: string }[]) =>
   rows.map((row) => ({
     value: row.id, label: `${row.code ? `${row.code} — ` : ""}${row.name}`,
   }));
+
+/** Asset-ness is stored per item (`mst_items.is_asset`) but nobody types it: the
+ *  item class the user picks already says it. Codes are master data, so match the
+ *  asset-ish ones by code or name rather than hardcoding one id. */
+export function isAssetClass(
+  row?: { code?: string | null; name?: string | null },
+): boolean {
+  const text = `${row?.code ?? ""} ${row?.name ?? ""}`.toUpperCase();
+  return /ASSET|CAPITAL/.test(text);
+}
 
 export function manufacturersForBrand(
   manufacturers: NamedMaster[],
@@ -351,6 +362,12 @@ export function ItemMasterTab() {
     setHsnCode(row.hsn_code ?? "");
     setTagValues({}); setDraftComponents([]); setEditing(row); setTab("Basic");
     setError(null);
+    // Not a column on the item, so it does not ride along on `row`: the flag lives in
+    // settings, keyed by item code, and is asked for when the form opens. Failing to
+    // read it leaves the toggle at its default rather than blocking the edit.
+    mastersApi.unitCodeTracking(row.id)
+      .then((on) => setForm((current) => ({ ...current, generate_unit_code: on })))
+      .catch(() => undefined);
   };
 
   // The Save button stays honest about why it is disabled rather than silently
@@ -448,6 +465,11 @@ export function ItemMasterTab() {
               <Field label="Item Class"><Select value={form.item_class_id}
                 options={opt(classes.data ?? [])} onChange={(v) => {
                   set("item_class_id", v); set("item_sub_class_id", "");
+                  // Tracking's unit-code label names asset or consumable; the class
+                  // just picked is what decides it, so carry it over now instead of
+                  // waiting for a save-and-reopen to reveal the wrong word.
+                  set("is_asset", isAssetClass(
+                    (classes.data ?? []).find((row) => String(row.id) === String(v))));
                 }} /></Field>
               <Field label="Item Subclass"><Select value={form.item_sub_class_id}
                 options={opt(subclasses.data ?? [])}
@@ -1069,6 +1091,15 @@ function ToggleGrid({ form, set }: { form: Form; set: (k:keyof Form,v:Form[keyof
     <Toggle label="Has Batch" value={form.is_batch_tracked} onChange={(v)=>set("is_batch_tracked",v)} />
     <Toggle label="Has Serial" value={form.is_serial_tracked} onChange={(v)=>set("is_serial_tracked",v)} />
     <Toggle label="Has IMEI" value={form.is_imei_tracked} onChange={(v)=>set("is_imei_tracked",v)} />
+    {/* The fifth tracking flag. WHICH code is minted is not a choice — an asset gets
+        an asset code, anything else a consumable code — so the toggle only says
+        whether the dock codes this item's units at all. Its label names the one that
+        will actually be generated, so nobody has to remember the rule. */}
+    <Toggle
+      label={`Generate ${form.is_asset ? "Asset" : "Consumable"} Code`}
+      value={form.generate_unit_code}
+      onChange={(v)=>set("generate_unit_code",v)}
+    />
     {/* One flag, two words for it: a consumable expires, an asset's warranty ends.
         The warehouse already labels the same date "Expiry / Warranty" on the GRN
         line, so the master says it the same way. */}

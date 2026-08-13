@@ -62,6 +62,7 @@ export interface StockBalanceItem {
   transit_qty?: number;
   project_name?: string;
   bin_code?: string;
+  bin_id?: number;
   batch_id?: number;
   last_movement_at?: string;
 }
@@ -95,14 +96,43 @@ export interface StockSummary {
   below_reorder: number;
 }
 
-/** GET /api/warehouse/serials/summary — per item + stocking point. */
+/** GET /api/warehouse/serials/summary — per item + stocking point + bin + batch. */
 export interface SerialSummaryRow {
   item_id: number;
   warehouse_id: number;
-  /** How many units are tracked there. `serials`/`codes` hold the first five. */
+  /** Null until goods-in records which bin/batch the units went to. */
+  bin_id: number | null;
+  batch_id: number | null;
+  /** How many units are tracked there. The arrays hold the first five of each. */
   count: number;
   serials: string[];
+  imeis: string[];
   codes: string[];
+}
+
+/** One physical unit: GET /api/warehouse/serials (list) and .../serials/lookup (one). */
+export interface UnitRow {
+  id: number;
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  is_asset: boolean;
+  serial_number: string | null;
+  imei: string | null;
+  batch_id: number | null;
+  batch_no: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+  bin_id: number | null;
+  bin_code: string | null;
+  asset_code: string | null;
+  consumable_code: string | null;
+  status: string | null;
+  remarks?: string | null;
+  /** Only on a lookup: the text that found it. */
+  matched?: string;
 }
 
 /** GET /api/stock/movements/summary. */

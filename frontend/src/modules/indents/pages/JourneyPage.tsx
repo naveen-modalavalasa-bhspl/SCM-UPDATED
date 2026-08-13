@@ -14,8 +14,8 @@ import {
 import { INDENT_STATUS } from "../constants";
 import { formatIndentDate, formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
 import {
-  buildJourneyTracks, isOccurredJourneyStage, isUpcomingJourneyStage, journeySteps,
-  sortOccurredStages, stageStatus,
+  buildJourneyTracks, isOccurredJourneyStage, isResubmissionStage, isUpcomingJourneyStage,
+  journeySteps, sortOccurredStages, stageStatus,
 } from "../journeyModel";
 import type { JourneyTrack, JourneyTrackState } from "../journeyModel";
 import type { IndentJourneyHistoryEvent, IndentJourneyStage } from "../types";
@@ -79,8 +79,7 @@ function correctedReturnStageKeys(stages: IndentJourneyStage[]) {
   stages.forEach((stage) => {
     const status = stageStatus(stage);
     const returned = status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION;
-    const resubmitted = status === "SUBMITTED"
-      && stage.title.trim().toLowerCase() === "resubmitted after correction";
+    const resubmitted = isResubmissionStage(stage);
     if (returned) {
       pendingReturns.push(stageKey(stage));
       return;

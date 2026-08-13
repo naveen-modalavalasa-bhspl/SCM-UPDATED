@@ -305,6 +305,57 @@ describe("journey model", () => {
     ]);
   });
 
+  it("carries the ladder past a return the resubmit reopened", () => {
+    // What the endpoint really serves: a correction resubmit reopens the returned
+    // rung instead of writing a second SUBMITTED action, so the only evidence it
+    // happened is the RESUBMITTED event the audit trail produces.
+    const resubmitted = fulfilledJourney({
+      status: "PENDING_APPROVAL",
+      stages: [
+        {
+          sequence: 1, title: "Draft created", status: "APPROVED", stage_type: "draft",
+          approver_name: "A Anil Kumar", timestamp: "2026-07-27T09:00:00Z",
+        },
+        {
+          sequence: 2, title: "Request submitted", status: "SUBMITTED", stage_type: "submission",
+          approver_name: "A Anil Kumar", timestamp: "2026-07-27T09:05:00Z",
+        },
+        {
+          sequence: 3, title: "Final Approval - OE", status: "PENDING", stage_type: "final",
+          approver_name: "Srinivasu Madicherla", is_current: true,
+        },
+      ],
+      phases: [
+        { sequence: 1, title: "Draft", status: "APPROVED", stage_type: "phase" },
+        { sequence: 2, title: "Submitted", status: "APPROVED", stage_type: "phase" },
+        { sequence: 3, title: "Approvals", status: "PENDING", stage_type: "phase", is_current: true },
+      ],
+      history: [
+        {
+          id: "workflow:2", event_type: "RETURNED", title: "Request returned",
+          actor_name: "Srinivasu Madicherla", position_name: "OE-104-RAJAMAHENDRAVARAM-2",
+          comments: "testing", timestamp: "2026-07-27T10:00:00Z",
+        },
+        {
+          id: "resubmitted:9", event_type: "RESUBMITTED", title: "Resubmitted after correction",
+          actor_name: "A Anil Kumar", position_name: "STORE KEEPER LIP Chagallu-2",
+          timestamp: "2026-07-27T11:00:00Z",
+        },
+      ],
+    });
+
+    expect(journeyEventStageType("RESUBMITTED")).toBe("approval");
+    expect(journeyEventStatus("RESUBMITTED")).toBe("SUBMITTED");
+    expect(journeySteps(resubmitted).occurred.map((stage) => stage.title)).toEqual([
+      "Draft created", "Request submitted", "Request returned",
+      "Resubmitted after correction",
+    ]);
+    // The leg moved on: an answered return is history, not the state of the leg.
+    const approvals = buildJourneyTracks(resubmitted).find((track) => track.key === "approvals");
+    expect(approvals?.state).toBe("CURRENT");
+    expect(approvals?.summary).toBe("Waiting at Final Approval - OE · Srinivasu Madicherla");
+  });
+
   it("names the leg that holds the request now, and the ones not reached yet", () => {
     const inAllocation = fulfilledJourney({
       status: "AWAITING_ALLOCATION",

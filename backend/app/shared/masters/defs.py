@@ -137,6 +137,11 @@ class ItemIn(BaseModel):
     is_batch_tracked: bool = False
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False
+    # The fifth tracking toggle. ON means every unit of this item is given an asset
+    # code (if it is an asset) or a consumable code (if it is not) when it is put away.
+    # Not a column — the live schema is frozen, so the list of tracked item codes lives
+    # in sys_settings; see platform/settings/codeformat.TRACKED_ITEMS_KEY.
+    generate_unit_code: bool = True
     has_expiry: bool = False
     requires_qi: bool = False
     dosage_form_id: int | None = None
@@ -229,7 +234,11 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     if sub_class and sub_class.item_class_id != item_class.id:
         raise ValidationError("The selected subclass does not belong to this item class")
 
-    for key, value in data.model_dump().items():
+    payload = data.model_dump()
+    # Not a column on mst_items — it is stored per item code in sys_settings, applied
+    # after the code is known (a new item has none until the block below runs).
+    generate_unit_code = payload.pop("generate_unit_code", True)
+    for key, value in payload.items():
         setattr(item, key, value)
     # The code is assigned once and never regenerated. Re-deriving it on every edit
     # would renumber an item that already has stock, ledger rows and documents
@@ -252,6 +261,10 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     item.dosage_form_code = dosage.code if dosage else None
     item.dosage_form_name = dosage.name if dosage else None
     item.item_type = item_class.code
+    # Whether the dock mints an asset / consumable code for this item's units. Which
+    # of the two it mints is `is_asset`, decided above; this only says "code it".
+    from app.platform.settings import codeformat
+    await codeformat.set_item_tracked(db, item.code, generate_unit_code)
 
 
 async def restrict_items_to_my_groups(db: AsyncSession, user, stmt):
