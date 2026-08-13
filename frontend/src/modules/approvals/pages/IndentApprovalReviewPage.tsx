@@ -40,27 +40,52 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     queryFn: () => approvalsApi.getIndent(indentId),
     enabled: Number.isFinite(indentId) && indentId > 0,
   });
+  const availability = useQuery({
+    queryKey: ["approvals", "availability", indentId],
+    queryFn: () => approvalsApi.indentAvailability(indentId),
+    enabled: Number.isFinite(indentId) && indentId > 0,
+  });
   const history = useQuery({
     queryKey: ["approvals", "history", "INDENT", indentId],
     queryFn: () => approvalsApi.history("INDENT", indentId),
     enabled: Number.isFinite(indentId) && indentId > 0,
   });
 
+  // Approval lines retain the original request while stock serving tracks what is
+  // still owed. Downstream approvers must decide only that remainder: if OE served 5
+  // of 10, DM (and every rung after DM) sees and approves 5, never the original 10.
+  const reviewItems = useMemo(() => {
+    const remainderByLine = new Map(
+      (availability.data?.items ?? []).map((line) => [line.line_id, line.remainder]),
+    );
+    return (indent.data?.items ?? []).map((line) => {
+      const remainder = remainderByLine.get(line.id);
+      if (remainder === undefined) return line;
+      const outstanding = Math.max(0, Number(remainder));
+      return {
+        ...line,
+        requested_quantity: outstanding,
+        approved_quantity: Math.min(line.approved_quantity, outstanding),
+        max_quantity: Math.min(line.max_quantity, outstanding),
+      };
+    });
+  }, [availability.data, indent.data]);
+
   useEffect(() => {
     if (!indent.data) return;
     // Prefilled with the ceiling, so "approve as asked" is the no-edit path and the
     // approver only touches the lines they mean to cut.
     setQuantities(Object.fromEntries(
-      indent.data.items.map((line) => [line.id, formatQuantity(approvalCeiling(line))]),
+      reviewItems.map((line) => [line.id, formatQuantity(approvalCeiling(line))]),
     ));
-  }, [indent.data]);
+  }, [indent.data, reviewItems]);
 
   const errorByLine = useMemo(() => Object.fromEntries(
-    (indent.data?.items ?? []).map((line) => [line.id, quantityError(line, quantities[line.id])]),
-  ), [indent.data, quantities]);
+    reviewItems.map((line) => [line.id, quantityError(line, quantities[line.id])]),
+  ), [quantities, reviewItems]);
   const invalidCount = Object.values(errorByLine).filter(Boolean).length;
   const invalidQuantity = invalidCount > 0;
-  const anyReducedBelow = (indent.data?.items ?? []).some(wasReducedBelow);
+  const anyReducedBelow = reviewItems.some(wasReducedBelow);
   const checksDone = checks.every(Boolean);
 
   // Every keystroke is kept; the message under the field does the correcting. Refusing
@@ -92,7 +117,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const approve = useMutation({
     mutationFn: () => approvalsApi.approveIndent(
       indentId,
-      (indent.data?.items ?? []).map((line) => ({
+      reviewItems.map((line) => ({
         line_id: line.id,
         approved_quantity: quantityValue(quantities[line.id]),
       })),
@@ -121,7 +146,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     if (confirming === "return") returnForCorrection.mutate();
   };
 
-  if (indent.isLoading) return <p className="p-6 text-sm text-muted">Loading approval details…</p>;
+  if (indent.isLoading || availability.isLoading) return <p className="p-6 text-sm text-muted">Loading approval details…</p>;
   // A document that has left approval is not an error, it is an outcome — somebody
   // signed it, or this approver served it and came back on the browser's back button.
   // Painting it red reads as "your action failed" over an act that succeeded.
@@ -177,7 +202,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
             opposites: a cut ends the request, an issue leaves the rest travelling. Said
             beside the boxes that do it, because that is where the choice is made. */}
         <p className="mb-2 max-w-3xl text-xs leading-relaxed text-warn">Reduce a quantity only to cut the request for good — the difference is not owed to anyone afterwards. If you simply do not hold enough, leave the quantity as it is and enter what you can give under <strong>Serve from own stock</strong>; the remainder stays on this indent and carries on to the fulfilment queue.</p>
-        <div className="overflow-x-auto rounded-xl border border-line"><table className="w-full min-w-[980px] table-fixed text-left text-sm"><colgroup><col className="w-[34%]" /><col className="w-[13%]" /><col className="w-[22%]" /><col className="w-[19%]" /><col className="w-[12%]" /></colgroup><thead className="bg-content2 text-xs text-muted"><tr><th className="px-4 py-3 text-left font-semibold">Item</th><th className="px-4 py-3 text-right font-semibold">Requested</th><th className="px-4 py-3 text-right font-semibold">Most you can approve</th><th className="px-4 py-3 text-right font-semibold">Approved at this level</th><th className="px-4 py-3 text-right font-semibold">Difference</th></tr></thead><tbody className="divide-y divide-line">{indent.data.items.map((line) => {
+        <div className="overflow-x-auto rounded-xl border border-line"><table className="w-full min-w-[980px] table-fixed text-left text-sm"><colgroup><col className="w-[34%]" /><col className="w-[13%]" /><col className="w-[22%]" /><col className="w-[19%]" /><col className="w-[12%]" /></colgroup><thead className="bg-content2 text-xs text-muted"><tr><th className="px-4 py-3 text-left font-semibold">Item</th><th className="px-4 py-3 text-right font-semibold">Requested</th><th className="px-4 py-3 text-right font-semibold">Most you can approve</th><th className="px-4 py-3 text-right font-semibold">Approved at this level</th><th className="px-4 py-3 text-right font-semibold">Difference</th></tr></thead><tbody className="divide-y divide-line">{reviewItems.map((line) => {
           const ceiling = approvalCeiling(line);
           const raw = quantities[line.id] ?? "";
           const lineError = errorByLine[line.id];
