@@ -24,9 +24,9 @@ describe("indents api", () => {
   it("exposes the indent operations", () => {
     expect(Object.keys(indentApi).sort()).toEqual(
       [
-        "acknowledge", "acknowledgments", "activity", "approve", "bookmark", "create",
+        "acknowledge", "activity", "approve", "bookmark", "create",
         "delete", "deleteReceiptAttachment", "fulfilment", "get", "journey", "list",
-        "myDeliveries", "notifications", "offices", "receiptAttachments", "regions",
+        "myAcknowledgements", "notifications", "offices", "receiptAttachments", "regions",
         "reject", "resubmitCorrection", "returnForCorrection", "stats",
         "submit", "unbookmark", "update", "uploadReceiptAttachment", "vehicles",
       ].sort(),

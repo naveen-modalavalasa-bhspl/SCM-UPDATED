@@ -110,11 +110,13 @@ PAGE_TREE = [
     # ("ind_board", "/indents/board", "Status Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
     # Named for what the storekeeper does here — acknowledge what arrived. The separate
     # Acknowledgments tab listed the same documents and was dropped on 2026-08-14.
-    ("ind_deliveries", "/indents/deliveries", "Acknowledgement", "package-check",
+    #
+    # The code stays `ind_deliveries` — it is what every existing grant points at —
+    # while the screen, its route and its endpoint are all Acknowledgements now.
+    ("ind_deliveries", "/indents/acknowledgements", "Acknowledgements", "package-check",
      P.page_view_code("ind_deliveries"), 13, "grp_indents"),
-    # Parked (rbac_pages.is_active = 0); route and the page still exist. Leaving the
-    # row here would put it back on the menu at the next seed.
-    # ("ind_ack", "/indents/acknowledgments", "Acknowledgments", "check-circle", P.INDENT_VIEW, 14, "grp_indents"),
+    # Removed: /indents/acknowledgments duplicated ind_deliveries above. The route,
+    # the page and its rbac_pages row (ind_ack) are gone — do not re-add a row here.
     ("ind_reports", "/indents/reports", "Activity Ledger", "bar-chart",
      P.page_view_code("ind_reports"), 15, "grp_indents"),
     ("ind_notifications", "/indents/notifications", "Notifications", "bell",

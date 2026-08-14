@@ -1,8 +1,8 @@
 import { test, expect } from "./support/fixtures.js";
 import { config } from "../../src/config.js";
-import { Deliveries, isShown, pageTitle, settle } from "./support/screens.js";
-import { deliveriesQuery, expectRowsToMatch } from "./support/oracle.js";
-import type { Delivery } from "./support/api.js";
+import { Acknowledgements, isShown, pageTitle, settle } from "./support/screens.js";
+import { acknowledgementsQuery, expectRowsToMatch } from "./support/oracle.js";
+import type { Acknowledgement } from "./support/api.js";
 
 /**
  * Indent › My deliveries.
@@ -26,9 +26,9 @@ import type { Delivery } from "./support/api.js";
  * `ALLOW_DELIVERY_CONFIRM=true` to let it complete a real receipt.
  */
 
-const DELIVERIES = "/indents/deliveries";
+const ACKNOWLEDGEMENTS = "/indents/acknowledgements";
 
-const receivable = (line: Delivery["lines"][number]) =>
+const receivable = (line: Acknowledgement["lines"][number]) =>
   Math.max(Number(line.dispatched_quantity) - Number(line.received_quantity), 0);
 
 /** A one-pixel PNG, built in memory so the run needs no fixture files on disk. */
@@ -41,11 +41,11 @@ test.describe("Indent › My deliveries", () => {
   test("The deliveries list, its filters, and confirming what arrived", async ({
     page, goto, log, checks, indents, tester,
   }) => {
-    const screen = new Deliveries(page);
+    const screen = new Acknowledgements(page);
 
-    await goto(DELIVERIES, "My deliveries");
+    await goto(ACKNOWLEDGEMENTS, "My deliveries");
 
-    const all = await indents.deliveries("", tester);
+    const all = await indents.acknowledgements("", tester);
 
     await log.runStep("The screen renders with its own filter bar", async () => {
       await checks("The screen is titled 'My deliveries'", async () => {
@@ -71,7 +71,7 @@ test.describe("Indent › My deliveries", () => {
         // after its placeholder.
         await expect(
           page.getByRole("combobox", { name: "Filter by status" }),
-          "The status filter is not reachable by the name the page gives it: DeliveriesPage passes "
+          "The status filter is not reachable by the name the page gives it: AcknowledgementsPage passes "
             + "`aria-label=\"Filter by status\"` to the shared `Select`, whose props are "
             + "`ariaLabel`/`label`/`placeholder` — `aria-label` is never forwarded. The control ends up "
             + "named \"Any status\" after its placeholder, so anyone navigating by name is told what the "
@@ -87,7 +87,7 @@ test.describe("Indent › My deliveries", () => {
         await expectRowsToMatch(
           () => screen.indentNos(),
           all.map((delivery) => delivery.indent_no),
-          "The deliveries list does not match /api/warehouse/deliveries/mine.",
+          "The deliveries list does not match /api/warehouse/acknowledgements/mine.",
         );
       });
     });
@@ -122,7 +122,7 @@ test.describe("Indent › My deliveries", () => {
 
         await checks("The status filter can still be opened and applied", async () => {
           await screen.chooseStatus("Allocated");
-          const expected = await indents.deliveries(deliveriesQuery({ status: "ALLOCATED" }), tester);
+          const expected = await indents.acknowledgements(acknowledgementsQuery({ status: "ALLOCATED" }), tester);
           await expectRowsToMatch(
             () => screen.indentNos(),
             expected.map((delivery) => delivery.indent_no),
@@ -142,7 +142,7 @@ test.describe("Indent › My deliveries", () => {
 
       await checks(`Searching an indent number ("${sample.indent_no}") narrows to that delivery`, async () => {
         await screen.searchFor(sample.indent_no);
-        const expected = await indents.deliveries(deliveriesQuery({ search: sample.indent_no }), tester);
+        const expected = await indents.acknowledgements(acknowledgementsQuery({ search: sample.indent_no }), tester);
         await expectRowsToMatch(
           () => screen.indentNos(),
           expected.map((delivery) => delivery.indent_no),
@@ -184,7 +184,7 @@ test.describe("Indent › My deliveries", () => {
         }
         await checks(`Status '${label}' lists exactly the API's ${status} deliveries`, async () => {
           await screen.chooseStatus(label);
-          const expected = await indents.deliveries(deliveriesQuery({ status }), tester);
+          const expected = await indents.acknowledgements(acknowledgementsQuery({ status }), tester);
           await expectRowsToMatch(
             () => screen.indentNos(),
             expected.map((delivery) => delivery.indent_no),
@@ -226,7 +226,7 @@ test.describe("Indent › My deliveries", () => {
 
       await checks("'Ready to confirm' keeps only the deliveries that can be confirmed", async () => {
         await screen.toggleReadyToConfirm();
-        const expected = await indents.deliveries(deliveriesQuery({ onlyActionable: true }), tester);
+        const expected = await indents.acknowledgements(acknowledgementsQuery({ onlyActionable: true }), tester);
         await expectRowsToMatch(
           () => screen.indentNos(),
           expected.map((delivery) => delivery.indent_no),
@@ -485,7 +485,7 @@ test.describe("Indent › My deliveries", () => {
       });
 
       await checks("Nothing was received as a result of the refused confirm", async () => {
-        const after = await indents.deliveries(deliveriesQuery({ search: confirmable.indent_no }), tester);
+        const after = await indents.acknowledgements(acknowledgementsQuery({ search: confirmable.indent_no }), tester);
         const row = after.find((delivery) => delivery.indent_id === confirmable.indent_id);
         expect(row, "The delivery disappeared after a refused confirm.").toBeDefined();
         for (const [index, line] of (row!.lines ?? []).entries()) {
@@ -538,7 +538,7 @@ test.describe("Indent › My deliveries", () => {
       });
 
       await checks("The received quantity on the server went up by what was confirmed", async () => {
-        const after = await indents.deliveries("", tester);
+        const after = await indents.acknowledgements("", tester);
         const row = after.find((delivery) => delivery.indent_id === confirmable.indent_id);
         if (!row) {
           // A fully received indent leaves the list, which is itself the right outcome.

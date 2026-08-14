@@ -130,8 +130,8 @@ export function notificationsQuery(urlQuery: string, { page }: { page?: number }
   ]);
 }
 
-/** `/warehouse/deliveries/mine` — My deliveries keeps its filters in component state. */
-export function deliveriesQuery(
+/** `/warehouse/acknowledgements/mine` — Acknowledgements keeps its filters in component state. */
+export function acknowledgementsQuery(
   { search, status, onlyActionable }: { search?: string; status?: string; onlyActionable?: boolean },
 ): string {
   return build([

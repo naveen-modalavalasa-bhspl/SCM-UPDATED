@@ -3781,15 +3781,22 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
 
     allocation_done = bool(operational["has_allocation"])
     warehouse_done = bool(operational["issue_complete"])
-    # The two final phases are separate signatures. The requester confirms physical
-    # receipt in My Deliveries; only the later warehouse sign-off completes
-    # Acknowledgement. Dispatch-line delivered_qty remains useful evidence, but it is
-    # not the requester's confirmation and must not swap these two phases around —
-    # keying Delivery off it left the phase PENDING forever on indents acknowledged
-    # through the issue page, which never wrote that column.
-    delivery_done = bool(operational["receipt_complete"])
+    # The two final phases are separate signatures, taken from opposite ends of the
+    # handover. Delivery is the warehouse's: recording the DELIVERED event on the
+    # dispatch closes it (`out_dispatches.delivered_at` plus the line-level
+    # delivered_qty behind `delivery_complete`). A flow that never raised a dispatch
+    # — goods handed over at the store — has no such record, so a full receipt still
+    # counts as arrival rather than leaving the phase PENDING on a closed indent.
+    delivery_done = bool(
+        operational["delivery_complete"] or operational["receipt_complete"]
+    )
+    # Acknowledgement is the requester's: what they confirmed in Indents >
+    # Acknowledgements, written to `ind_indent_items.received_qty`. The warehouse
+    # sign-off on the issue/dispatch is the same confirmation reaching the record
+    # from the other side, for indents acknowledged through the issue page.
     acknowledgement_done = bool(
-        delivery_done and operational["has_warehouse_acknowledgement"]
+        operational["receipt_complete"]
+        or (delivery_done and operational["has_warehouse_acknowledgement"])
     )
     allocation_current = approvals_complete and not allocation_done
     warehouse_current = allocation_done and not warehouse_done
@@ -3831,12 +3838,14 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
         current_stage = "Waiting for warehouse issue"
     elif delivery_current:
         current_stage = (
-            "Partially received"
-            if operational["has_receipt"]
-            else "In delivery" if operational["has_dispatch"] else "Waiting for dispatch"
+            "In delivery" if operational["has_dispatch"] else "Waiting for dispatch"
         )
     elif acknowledgement_current:
-        current_stage = "Waiting for warehouse acknowledgement"
+        current_stage = (
+            "Partially received"
+            if operational["has_receipt"]
+            else "Waiting for acknowledgement"
+        )
     elif acknowledgement_done:
         current_stage = "Completed"
 
@@ -5594,7 +5603,7 @@ async def _settle_indent_approval(db: AsyncSession, indent: Indent, user,
     Nothing owed -> the recalculated status (ALLOCATED / PARTIALLY_FULFILLED) stands
     and the indent's own approval is settled. Both halves matter: pinning it at
     PENDING_APPROVAL kept a fully-served request in the approver's queue AND hid it
-    from the raiser's My Deliveries, because PENDING_APPROVAL is not a receivable
+    from the raiser's Acknowledgements, because PENDING_APPROVAL is not a receivable
     status — so goods that were already dispatched had nowhere to be acknowledged.
     """
     if not was_in_approval:

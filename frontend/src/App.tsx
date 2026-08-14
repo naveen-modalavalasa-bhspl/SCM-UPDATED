@@ -13,7 +13,7 @@ import { IndentFormPage } from "@/modules/indents/pages/FormPage";
 import { IndentDetailPage } from "@/modules/indents/pages/DetailPage";
 import { IndentDashboardPage } from "@/modules/indents/pages/DashboardPage";
 import { IndentBoardPage } from "@/modules/indents/pages/BoardPage";
-import DeliveriesPage from "@/modules/indents/pages/DeliveriesPage";
+import AcknowledgementsPage from "@/modules/indents/pages/AcknowledgementsPage";
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
 // Approvals is its own module now — the inbox, decisions, team queue, reports and the
@@ -97,10 +97,17 @@ function AppRoutes() {
         <Route path="indents" element={<IndentListPage />} />
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
-        {/* Acknowledgments listed the same documents the deliveries screen does,
-         * so it is gone and its URL lands on the one screen that remains. */}
-        <Route path="indents/acknowledgments" element={<Navigate to="/indents/deliveries" replace />} />
-        <Route path="indents/deliveries" element={<DeliveriesPage />} />
+        <Route path="indents/acknowledgements" element={<AcknowledgementsPage />} />
+        {/* The two addresses this screen used to answer on. `/indents/deliveries` was
+            its own route; `/indents/acknowledgments` belonged to a duplicate page that
+            was deleted while its rbac_pages row stayed active, so the rail advertised
+            a link that fell through to "No screen at this address". Both redirect, so
+            bookmarks and any database that has not had the rename migration yet still
+            land on the real screen. */}
+        <Route path="indents/deliveries"
+               element={<Navigate to="/indents/acknowledgements" replace />} />
+        <Route path="indents/acknowledgments"
+               element={<Navigate to="/indents/acknowledgements" replace />} />
         <Route path="indents/reports" element={<IndentReportsPage />} />
         <Route path="indents/notifications" element={<IndentNotificationsPage />} />
         <Route path="indents/new" element={<IndentFormPage />} />

@@ -91,7 +91,7 @@ export interface NotificationRow {
   created_at: string;
 }
 
-export interface DeliveryLine {
+export interface AcknowledgementLine {
   indent_item_id: number;
   item_code?: string | null;
   item_name?: string | null;
@@ -103,7 +103,7 @@ export interface DeliveryLine {
   pending_with?: string | null;
 }
 
-export interface Delivery {
+export interface Acknowledgement {
   indent_id: number;
   indent_no: string;
   indent_date?: string | null;
@@ -111,7 +111,7 @@ export interface Delivery {
   status: string;
   project_name?: string | null;
   can_acknowledge: boolean;
-  lines: DeliveryLine[];
+  lines: AcknowledgementLine[];
 }
 
 export interface ReceiptAttachment {
@@ -270,8 +270,8 @@ export class IndentApi {
     return this.json<PageShape<NotificationRow>>(`/api/indents/notifications${query ? `?${query}` : ""}`, as);
   }
 
-  deliveries(query: string, as: Account) {
-    return this.json<Delivery[]>(`/api/warehouse/deliveries/mine${query ? `?${query}` : ""}`, as);
+  acknowledgements(query: string, as: Account) {
+    return this.json<Acknowledgement[]>(`/api/warehouse/acknowledgements/mine${query ? `?${query}` : ""}`, as);
   }
 
   indent(id: number, as: Account) {

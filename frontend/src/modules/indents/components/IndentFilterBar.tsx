@@ -22,7 +22,7 @@ import {
   INDENT_STATUS_OPTIONS,
 } from "../constants";
 
-type FilterMode = "indents" | "acknowledgments" | "activity" | "notifications";
+type FilterMode = "indents" | "activity" | "notifications";
 
 interface IndentFilterBarProps {
   mode?: FilterMode;
@@ -50,16 +50,6 @@ const MOVEMENT_OPTIONS = [
   { value: "OUTWARD", label: "Outward" },
   { value: "INWARD", label: "Inward" },
 ];
-
-const ACKNOWLEDGMENT_STATUS_OPTIONS = [
-  { value: "FULFILLED", label: "Fulfilled" },
-  { value: "PARTIALLY_FULFILLED", label: "Partially Fulfilled" },
-];
-
-const ACKNOWLEDGMENT_STATUS_GROUPS = [{
-  label: "Fulfilment",
-  options: ACKNOWLEDGMENT_STATUS_OPTIONS,
-}];
 
 const DATE_PRESETS: { key: DatePreset; label: string }[] = [
   { key: "all", label: "All time" },
@@ -371,7 +361,6 @@ function joinLabel(values: string[], options: { value: string; label: string }[]
 }
 
 function primaryDateLabel(mode: FilterMode) {
-  if (mode === "acknowledgments") return "Acknowledgment date";
   if (mode === "activity") return "Activity date";
   if (mode === "notifications") return "Notification date";
   return "Raised date";
@@ -393,8 +382,8 @@ export function IndentFilterBar({
   showDate = true,
   showStatus = true,
   showPriority = true,
-  // Only the screens that filter over indents themselves: acknowledgments and
-  // notifications read from wf_actions, which carries no region.
+  // Only the screens that filter over indents themselves: notifications read
+  // from wf_actions, which carries no region.
   showRegion = mode === "indents" || mode === "activity",
   showTransaction = mode === "activity",
   showMovement = false,
@@ -475,12 +464,8 @@ export function IndentFilterBar({
   const searchAriaLabel = mode === "notifications"
       ? "Search notifications"
       : "Search indents";
-  const statusGroups = mode === "acknowledgments"
-    ? ACKNOWLEDGMENT_STATUS_GROUPS
-    : INDENT_STATUS_GROUPS;
-  const statusOptions = mode === "acknowledgments"
-    ? ACKNOWLEDGMENT_STATUS_OPTIONS
-    : statusFilterOptions ?? INDENT_STATUS_OPTIONS;
+  const statusGroups = INDENT_STATUS_GROUPS;
+  const statusOptions = statusFilterOptions ?? INDENT_STATUS_OPTIONS;
   const applyStatuses = (values: string[]) => {
     if (isSimplePageFilter && localSearch !== search) setSearch(localSearch);
     setSelectedStatuses(values);

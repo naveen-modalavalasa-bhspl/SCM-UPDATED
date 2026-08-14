@@ -12,10 +12,10 @@ import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge
 import { INDENT_STATUS } from "../constants";
 import { indentApi, useIndentAccountScope } from "../api";
 import { cancelIndentReceiptReads, commitConfirmedIndentReceipt } from "../receiptRefresh";
-import type { Delivery, DeliveryLine, ReceiptAttachment } from "../types";
+import type { Acknowledgement, AcknowledgementLine, ReceiptAttachment } from "../types";
 
 /**
- * What the requester is still owed, and confirming it arrived.
+ * What the requester is still owed, and acknowledging it arrived.
  *
  * This is the only screen that closes an indent. The warehouse issuing and dispatching
  * stock records that the goods left; nothing until now recorded that they landed, which
@@ -28,7 +28,7 @@ import type { Delivery, DeliveryLine, ReceiptAttachment } from "../types";
 const PHOTO = "RECEIPT_PHOTO";
 const BILL = "RECEIPT_BILL";
 
-// The three states a requester's delivery is ever in from their side: set aside, part
+// The three states a requester's goods are ever in from their side: set aside, part
 // of it arrived, all of it arrived. The procurement statuses were noise here — nothing
 // on this screen can be done about an indent that is still being bought in.
 const STATUS_OPTIONS = [
@@ -41,10 +41,10 @@ const STATUS_OPTIONS = [
 const qty = (value: number) => Number(value ?? 0).toLocaleString();
 
 /** The most it makes sense to confirm today: what reached you but is unconfirmed. */
-const receivable = (line: DeliveryLine) =>
+const receivable = (line: AcknowledgementLine) =>
   Math.max(line.dispatched_quantity - line.received_quantity, 0);
 
-const outstanding = (line: DeliveryLine) =>
+const outstanding = (line: AcknowledgementLine) =>
   Math.max(line.approved_quantity - line.received_quantity, 0);
 
 /**
@@ -53,22 +53,22 @@ const outstanding = (line: DeliveryLine) =>
  * as PARTIALLY FULFILLED — "closed" is a system word, and a requester who got 8 of 10
  * has not been fulfilled.
  */
-function displayStatus(delivery: Delivery) {
-  if (delivery.status !== INDENT_STATUS.CLOSED) return delivery.status;
-  return delivery.lines.some((line) => outstanding(line) > 0)
+function displayStatus(row: Acknowledgement) {
+  if (row.status !== INDENT_STATUS.CLOSED) return row.status;
+  return row.lines.some((line) => outstanding(line) > 0)
     ? INDENT_STATUS.PARTIALLY_FULFILLED
     : INDENT_STATUS.CLOSED;
 }
 
 /** One line of summary for a whole indent, so the row says something without opening. */
-function summarise(delivery: Delivery) {
-  const waiting = delivery.lines.reduce((sum, line) => sum + receivable(line), 0);
-  const open = delivery.lines.filter((line) => outstanding(line) > 0).length;
-  if (waiting > 0) return `${qty(waiting)} waiting for you to confirm`;
+function summarise(row: Acknowledgement) {
+  const waiting = row.lines.reduce((sum, line) => sum + receivable(line), 0);
+  const open = row.lines.filter((line) => outstanding(line) > 0).length;
+  if (waiting > 0) return `${qty(waiting)} waiting for you to acknowledge`;
   if (open === 0) return "Everything received";
   // Every remaining line is stuck at the same place more often than not; naming the
   // commonest is more use than counting them.
-  const reasons = delivery.lines
+  const reasons = row.lines
     .filter((line) => outstanding(line) > 0)
     .map((line) => line.pending_with)
     .filter(Boolean) as string[];
@@ -113,7 +113,7 @@ function AttachmentRow({ attachment, onDelete, busy }: {
  * which is exactly where someone standing at the delivery confirms it.
  */
 function LineCard({ line, value, onChange }: {
-  line: DeliveryLine;
+  line: AcknowledgementLine;
   value: string;
   onChange: (value: string) => void;
 }) {
@@ -138,7 +138,7 @@ function LineCard({ line, value, onChange }: {
                 : "bg-neutral-bg text-neutral"
           }`}
         >
-          {settled ? "Received" : max > 0 ? `${qty(max)} to confirm` : "On the way"}
+          {settled ? "Received" : max > 0 ? `${qty(max)} to acknowledge` : "On the way"}
         </span>
       </div>
 
@@ -191,7 +191,7 @@ function LineCard({ line, value, onChange }: {
   );
 }
 
-/** One line of the "before you confirm" list — ticked green the moment it is satisfied. */
+/** One line of the "before you acknowledge" list — ticked green the moment it is satisfied. */
 function Requirement({ met, label }: { met: boolean; label: string }) {
   return (
     <li className={`flex items-center gap-2 text-xs ${met ? "text-ok" : "text-muted"}`}>
@@ -205,27 +205,30 @@ function Requirement({ met, label }: { met: boolean; label: string }) {
 /**
  * The whole indent, opened: every line's progress, and the fields to confirm receipt.
  *
- * Viewing and confirming are the same modal on purpose. Someone who opens a delivery to
+ * Viewing and confirming are the same modal on purpose. Someone who opens a row to
  * ask "where is it" is exactly the person who has just been handed the box.
  */
-function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () => void }) {
+function AcknowledgementModal({ row, onClose }: {
+  row: Acknowledgement;
+  onClose: () => void;
+}) {
   const qc = useQueryClient();
   const accountScope = useIndentAccountScope();
   const [received, setReceived] = useState<Record<number, string>>(() =>
     Object.fromEntries(
-      delivery.lines
+      row.lines
         .filter((line) => receivable(line) > 0)
         .map((line) => [line.indent_item_id, String(receivable(line))]),
     ));
 
   const attachments = useQuery({
-    queryKey: ["indent-receipt-attachments", delivery.indent_id],
-    queryFn: () => indentApi.receiptAttachments(delivery.indent_id),
+    queryKey: ["indent-receipt-attachments", row.indent_id],
+    queryFn: () => indentApi.receiptAttachments(row.indent_id),
   });
 
   const upload = useMutation({
     mutationFn: ({ file, category }: { file: File; category: string }) =>
-      indentApi.uploadReceiptAttachment(delivery.indent_id, file, category),
+      indentApi.uploadReceiptAttachment(row.indent_id, file, category),
     onSuccess: () => attachments.refetch(),
   });
 
@@ -237,7 +240,7 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
   const confirm = useMutation({
     mutationFn: () =>
       indentApi.acknowledge(
-        delivery.indent_id,
+        row.indent_id,
         Object.entries(received)
           .map(([id, value]) => ({
             indent_item_id: Number(id),
@@ -245,10 +248,10 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
           }))
           .filter((line) => line.received_quantity > 0),
       ),
-    onMutate: () => cancelIndentReceiptReads(qc, accountScope, delivery.indent_id),
+    onMutate: () => cancelIndentReceiptReads(qc, accountScope, row.indent_id),
     onSuccess: async (updated) => {
       await commitConfirmedIndentReceipt(qc, accountScope, updated);
-      qc.invalidateQueries({ queryKey: ["indent-deliveries"] });
+      qc.invalidateQueries({ queryKey: ["indent-acknowledgements"] });
       qc.invalidateQueries({ queryKey: ["indent-fulfilment"] });
       onClose();
     },
@@ -256,15 +259,15 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
 
   const photos = (attachments.data ?? []).filter((a) => a.doc_category === PHOTO);
   const entered = Object.values(received).some((value) => Number(value) > 0);
-  const anythingToConfirm = delivery.lines.some((line) => receivable(line) > 0);
-  const waiting = delivery.lines.reduce((sum, line) => sum + receivable(line), 0);
+  const anythingToConfirm = row.lines.some((line) => receivable(line) > 0);
+  const waiting = row.lines.reduce((sum, line) => sum + receivable(line), 0);
   const ready = entered && photos.length > 0;
 
   return (
     <ConfirmModal
       isOpen
-      title={delivery.indent_no}
-      confirmLabel={anythingToConfirm ? "I received these" : "Close"}
+      title={row.indent_no}
+      confirmLabel={anythingToConfirm ? "Acknowledge receipt" : "Close"}
       busy={confirm.isPending}
       // The backend rejects a receipt with no photo, so a live button here would only
       // buy a round-trip and an error banner. The checklist below says what is missing.
@@ -289,8 +292,8 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
           <div className="min-w-0 text-sm">
             <div className="font-semibold text-ink">
               {anythingToConfirm
-                ? `${qty(waiting)} waiting for you to confirm`
-                : "Nothing left to confirm"}
+                ? `${qty(waiting)} waiting for you to acknowledge`
+                : "Nothing left to acknowledge"}
             </div>
             <div className="text-xs text-muted">
               {anythingToConfirm
@@ -298,15 +301,15 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
                 : "Everything sent to you has already been acknowledged."}
             </div>
           </div>
-          {delivery.project_name && (
+          {row.project_name && (
             <span className="ml-auto hidden shrink-0 text-xs text-muted sm:block">
-              {delivery.project_name}
+              {row.project_name}
             </span>
           )}
         </div>
 
         <ul className="space-y-2.5">
-          {delivery.lines.map((line) => (
+          {row.lines.map((line) => (
             <LineCard
               key={line.indent_item_id}
               line={line}
@@ -387,8 +390,8 @@ function DeliveryModal({ delivery, onClose }: { delivery: Delivery; onClose: () 
   );
 }
 
-export default function DeliveriesPage() {
-  const [open, setOpen] = useState<Delivery | null>(null);
+export default function AcknowledgementsPage() {
+  const [open, setOpen] = useState<Acknowledgement | null>(null);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [onlyActionable, setOnlyActionable] = useState(false);
@@ -400,14 +403,18 @@ export default function DeliveriesPage() {
     [search, status, onlyActionable],
   );
 
-  const deliveries = useQuery({
-    queryKey: ["indent-deliveries", filters],
-    queryFn: () => indentApi.myDeliveries(filters),
+  const acknowledgements = useQuery({
+    queryKey: ["indent-acknowledgements", filters],
+    queryFn: () => indentApi.myAcknowledgements(filters),
   });
 
-  const rows = deliveries.data ?? [];
+  const rows = acknowledgements.data ?? [];
+  // What the pill would leave on screen. The endpoint returns the whole list rather
+  // than a page, so counting the loaded rows is the true number; with the filter
+  // already on, the server has narrowed it and every row here is one of them.
+  const readyCount = rows.filter((row) => row.can_acknowledge).length;
 
-  const columns: Column<Delivery>[] = [
+  const columns: Column<Acknowledgement>[] = [
     {
       key: "indent",
       header: "Indent",
@@ -449,7 +456,7 @@ export default function DeliveriesPage() {
       render: (row) => (row.can_acknowledge ? (
         <Can do="indent.acknowledge">
           <Button onClick={() => setOpen(row)}>
-            <CheckCircle2 className="h-4 w-4" /> Confirm
+            <CheckCircle2 className="h-4 w-4" /> Acknowledge
           </Button>
         </Can>
       ) : null),
@@ -460,15 +467,15 @@ export default function DeliveriesPage() {
     <div className="space-y-4">
       {/* Same header as the other indent screens, minus the shared filter bar: this list
           has its own, and the shared one filters a different query shape. */}
-      <IndentModuleHeader title="My deliveries" showCreate={false} showFilters={false} />
+      <IndentModuleHeader title="Acknowledgements" showCreate={false} showFilters={false} />
       <p className="-mt-2 text-sm text-muted">
-        What you asked for, how far it has got, and confirming it reached you.
+        What you asked for, how far it has got, and acknowledging it reached you.
       </p>
 
       <Card className="flex flex-col gap-3 p-3 md:flex-row md:items-center">
         <div className="min-w-0 flex-1">
           <Input
-            aria-label="Search deliveries"
+            aria-label="Search acknowledgements"
             placeholder="Search indent no., project or item…"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -484,29 +491,43 @@ export default function DeliveriesPage() {
           />
         </div>
         {/* A filter, not an action — so it is a pill and never wears the solid button or
-            the tick icon the row's Confirm uses. Lit when on, quiet when off, and it
-            says so to a screen reader through aria-pressed. */}
+            the tick icon the row's Acknowledge uses. Lit when on, quiet when off, and it
+            says so to a screen reader through aria-pressed. The count is the point of
+            the pill: it tells you whether pressing it is worth anything before you do. */}
         <button
           type="button"
           aria-pressed={onlyActionable}
+          title={onlyActionable
+            ? "Showing only what you can acknowledge — press to show everything"
+            : "Show only the indents waiting for your acknowledgement"}
           onClick={() => setOnlyActionable((current) => !current)}
-          className={`inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-medium transition ${
+          className={`inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 ${
             onlyActionable
               ? "border-brand bg-brand/10 text-brand"
-              : "border-line bg-content1 text-body hover:bg-content2"
+              : "border-line bg-content1 text-body hover:border-brand/40 hover:bg-content2"
           }`}
         >
-          <ListFilter className="h-4 w-4" /> Ready to confirm
+          <ListFilter className="h-4 w-4" />
+          Ready to acknowledge
+          {readyCount > 0 && (
+            <span
+              className={`min-w-5 rounded-full px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${
+                onlyActionable ? "bg-brand text-white" : "bg-brand-050 text-brand"
+              }`}
+            >
+              {readyCount}
+            </span>
+          )}
         </button>
       </Card>
 
-      <ErrorBanner error={deliveries.error} />
+      <ErrorBanner error={acknowledgements.error} />
 
       <ResponsiveList
         data={rows}
         columns={columns}
         keyOf={(row) => row.indent_id}
-        loading={deliveries.isLoading}
+        loading={acknowledgements.isLoading}
         onRowClick={(row) => setOpen(row)}
         empty={
           <EmptyState
@@ -514,7 +535,7 @@ export default function DeliveriesPage() {
             hint={
               search || status || onlyActionable
                 ? "Try a different search or clear the filters."
-                : "Indents you raise appear here once they are approved, so you can track them and confirm what arrives."
+                : "Indents you raise appear here once they are approved, so you can track them and acknowledge what arrives."
             }
           />
         }
@@ -535,7 +556,7 @@ export default function DeliveriesPage() {
             {row.can_acknowledge && (
               <Can do="indent.acknowledge">
                 <Button onClick={() => setOpen(row)}>
-                  <CheckCircle2 className="h-4 w-4" /> Confirm receipt
+                  <CheckCircle2 className="h-4 w-4" /> Acknowledge receipt
                 </Button>
               </Can>
             )}
@@ -543,7 +564,7 @@ export default function DeliveriesPage() {
         )}
       />
 
-      {open && <DeliveryModal delivery={open} onClose={() => setOpen(null)} />}
+      {open && <AcknowledgementModal row={open} onClose={() => setOpen(null)} />}
     </div>
   );
 }

@@ -4,7 +4,7 @@ import { Plus } from "lucide-react";
 import { PageHeader, Button, Can } from "@/shared/components";
 import { IndentFilterBar } from "./IndentFilterBar";
 
-type FilterMode = "indents" | "acknowledgments" | "activity" | "notifications";
+type FilterMode = "indents" | "activity" | "notifications";
 
 interface IndentModuleHeaderProps {
   title?: string;

@@ -166,17 +166,6 @@ export interface ActivityRow {
   comments?: string | null;
 }
 
-export interface AcknowledgmentRow {
-  id: number;
-  indent_id: number;
-  indent_no: string;
-  action: string;
-  stage_name?: string | null;
-  actor_name?: string | null;
-  comments?: string | null;
-  acted_at: string;
-}
-
 /** One stage of what physically happened to the goods, after the approval stages. */
 export interface FulfilmentStep {
   key: string;
@@ -186,7 +175,7 @@ export interface FulfilmentStep {
 }
 
 /** One line of an indent on the "what am I still owed" screen. */
-export interface DeliveryLine {
+export interface AcknowledgementLine {
   indent_item_id: number;
   item_code?: string | null;
   item_name?: string | null;
@@ -199,7 +188,7 @@ export interface DeliveryLine {
   pending_with?: string | null;
 }
 
-export interface Delivery {
+export interface Acknowledgement {
   indent_id: number;
   indent_no: string;
   indent_date?: string | null;
@@ -208,7 +197,7 @@ export interface Delivery {
   priority?: string | null;
   project_name?: string | null;
   can_acknowledge: boolean;
-  lines: DeliveryLine[];
+  lines: AcknowledgementLine[];
 }
 
 /** What arrived in THIS delivery, not the running total. */

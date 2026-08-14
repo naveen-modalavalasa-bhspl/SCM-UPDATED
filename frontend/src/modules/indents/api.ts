@@ -4,8 +4,8 @@ import { useQueryClient, type Query } from "@tanstack/react-query";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type { Paginated, Option } from "@/shared/types";
 import type {
-  AcknowledgeLine, AcknowledgmentRow, ActivityRow,
-  BomChoice, BomChoiceItem, Delivery, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
+  Acknowledgement, AcknowledgeLine, ActivityRow,
+  BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
   IndentNotification, IndentStats, IndentUpdate, ReceiptAttachment,
 } from "./types";
 
@@ -59,8 +59,6 @@ export const indentKeys = {
     [...indentKeys.all(scope), "stats", filters] as const,
   activity: (scope: IndentAccountScope, filters: unknown) =>
     [...indentKeys.all(scope), "activity", filters] as const,
-  acknowledgments: (scope: IndentAccountScope, filters: unknown) =>
-    [...indentKeys.all(scope), "acknowledgments", filters] as const,
   notifications: (scope: IndentAccountScope, filters: unknown = {}) =>
     [...indentKeys.all(scope), "notifications", filters] as const,
   detail: (scope: IndentAccountScope, id: number) =>
@@ -184,18 +182,6 @@ export const indentApi = {
     params: toSearchParams(params),
     signal,
   }).then((r) => r.data),
-  acknowledgments: (params: {
-    search?: string;
-    date_from?: string;
-    date_to?: string;
-    required_from?: string;
-    required_to?: string;
-    status?: string | string[];
-    priority?: string | string[];
-    page?: number;
-    size?: number;
-  } = {}) =>
-    api.get<Paginated<AcknowledgmentRow>>("/api/indents/acknowledgments", { params: toSearchParams(params) }).then((r) => r.data),
   notifications: (params: {
     search?: string;
     date_from?: string;
@@ -250,8 +236,10 @@ export const indentApi = {
    * Served by the warehouse module because the issue and dispatch evidence lives
    * there; the screen is an indents screen all the same.
    */
-  myDeliveries: (params: { search?: string; status?: string; only_actionable?: boolean } = {}) =>
-    api.get<Delivery[]>("/api/warehouse/deliveries/mine", { params }).then((r) => r.data),
+  myAcknowledgements: (params: { search?: string; status?: string;
+                                 only_actionable?: boolean } = {}) =>
+    api.get<Acknowledgement[]>("/api/warehouse/acknowledgements/mine", { params })
+      .then((r) => r.data),
 
   /** The issued / dispatched / delivered stages for one indent's stepper. */
   fulfilment: (id: number) =>

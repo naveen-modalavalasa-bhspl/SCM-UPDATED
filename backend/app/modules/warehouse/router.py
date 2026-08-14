@@ -19,9 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
-# The delivery rows are an indents-module shape: this endpoint only supplies the
+# The acknowledgement rows are an indents-module shape: this endpoint only supplies the
 # warehouse evidence behind them (rule 5 forbids the join happening the other way).
-from app.modules.indents.schemas import DeliveryRow as IndentDeliveryRow
+from app.modules.indents.schemas import AcknowledgementRow as IndentAcknowledgementRow
 from app.modules.indents.schemas import FulfilmentStep as IndentFulfilmentStep
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
@@ -750,25 +750,25 @@ async def scan(code: str, db: AsyncSession = Depends(get_db),
 
 
 # ---------------------------------------------------------------------------
-# Deliveries owed to a requester
+# Acknowledgements owed by a requester
 # ---------------------------------------------------------------------------
 
-# Feeds the Indents module's "to acknowledge" screen. It lives here because the issue
+# Feeds the Indents module's Acknowledgements screen. It lives here because the issue
 # and dispatch evidence does, and indents may not import this module (rule 5). Gated on
 # indent.view, not a warehouse permission — the caller is a requester, and the service
 # only ever returns their own indents.
-@router.get("/deliveries/mine", response_model=list[IndentDeliveryRow])
-async def my_deliveries(search: str | None = None, status: str | None = None,
-                        only_actionable: bool = False,
-                        db: AsyncSession = Depends(get_db),
-                        user=Depends(require_permission(INDENT_VIEW))):
-    return await service.deliveries_for_requester(
+@router.get("/acknowledgements/mine", response_model=list[IndentAcknowledgementRow])
+async def my_acknowledgements(search: str | None = None, status: str | None = None,
+                              only_actionable: bool = False,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(INDENT_VIEW))):
+    return await service.acknowledgements_for_requester(
         db, user, search=search, status=status, only_actionable=only_actionable)
 
 
 # The delivery half of an indent's journey, for the stepper on its detail page. Any
-# viewer of the indent may see it — unlike /deliveries/mine, this is not the actor's
-# own worklist.
+# viewer of the indent may see it — unlike /acknowledgements/mine, this is not the
+# actor's own worklist.
 @router.get("/indents/{indent_id}/fulfilment", response_model=list[IndentFulfilmentStep])
 async def indent_fulfilment(indent_id: int, db: AsyncSession = Depends(get_db),
                             _=Depends(require_permission(INDENT_VIEW))):

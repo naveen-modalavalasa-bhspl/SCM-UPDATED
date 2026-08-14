@@ -346,8 +346,14 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("grp_indents", "indents", "Indents"),
     ("ind_dashboard", "indents", "Indents · Overview"),
     ("ind_list", "indents", "Indents · All Requests"),
-    ("ind_deliveries", "indents", "Indents · My Deliveries"),
-    ("ind_ack", "indents", "Indents · Acknowledgments"),
+    # Code kept as `ind_deliveries` on purpose: it is the identity every existing
+    # rbac_page_permissions grant hangs off. Only the screen's name and path moved
+    # to Acknowledgements (see scripts/seed.py PAGE_TREE and the Alembic rename).
+    ("ind_deliveries", "indents", "Indents · Acknowledgements"),
+    # `ind_ack` is gone: it duplicated the row above. Dropped from the catalogue only —
+    # `seed_permissions` never prunes, so the existing `page.ind_ack.view` row and every
+    # grant on it stay in the database untouched, and the Alembic rename parks the page
+    # itself with is_active = 0 so it cannot reach a menu.
     ("ind_reports", "indents", "Indents · Activity Ledger"),
     ("ind_notifications", "indents", "Indents · Notifications"),
     ("approvals", "approvals", "Approvals"),

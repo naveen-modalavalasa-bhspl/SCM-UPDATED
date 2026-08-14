@@ -663,7 +663,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 {doc?.can_acknowledge ? (
                   <Button onClick={() => setConfirming("ack")}>Acknowledge</Button>
                 ) : (
-                  <Button disabled title="Waiting for the requester to confirm this delivery in My deliveries">
+                  <Button disabled title="Waiting for the requester to confirm this delivery in Acknowledgements">
                     Acknowledge
                   </Button>
                 )}

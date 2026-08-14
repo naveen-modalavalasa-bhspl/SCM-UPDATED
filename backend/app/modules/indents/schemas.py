@@ -236,7 +236,7 @@ class AcknowledgeIn(BaseModel):
     lines: list[AcknowledgeLineIn] = Field(min_length=1)
 
 
-class DeliveryLineRow(BaseModel):
+class AcknowledgementLineRow(BaseModel):
     """One indent line on the "what is owed to me" screen."""
     indent_item_id: int
     item_code: str | None = None
@@ -251,7 +251,7 @@ class DeliveryLineRow(BaseModel):
     pending_with: str | None = None
 
 
-class DeliveryRow(BaseModel):
+class AcknowledgementRow(BaseModel):
     indent_id: int
     indent_no: str
     indent_date: date | None = None
@@ -260,7 +260,7 @@ class DeliveryRow(BaseModel):
     priority: str | None = None
     project_name: str | None = None
     can_acknowledge: bool = False
-    lines: list[DeliveryLineRow] = []
+    lines: list[AcknowledgementLineRow] = []
 
 
 class IndentNotificationRow(BaseModel):

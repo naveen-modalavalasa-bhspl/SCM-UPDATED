@@ -31,8 +31,10 @@ ADMIN_ID = 900001          # the actor on the audit row; see scripts.create_admi
 # a module by URL rather than by column are named here. Everything else is picked up
 # from Page.module.
 EXTRA_PAGES = {
+    # `ind_ack` dropped: it duplicated `ind_deliveries`, which is the Acknowledgements
+    # screen and the code every existing grant already points at.
     "indents": ["home", "grp_indents", "ind_dashboard", "ind_list", "ind_board",
-                "ind_deliveries", "ind_ack", "ind_reports", "ind_notifications"],
+                "ind_deliveries", "ind_reports", "ind_notifications"],
     "approvals": ["approval_waiting", "approval_consolidation", "approval_decisions",
                   "approval_team"],
     "inventory": ["inv_overview", "inv_allocation_approvals", "inv_stocking_points",
