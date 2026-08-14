@@ -244,7 +244,8 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                      ref_type: str, ref_id: int, ref_no: str, user,
                      warehouse_id: int | None = None, facility_id: int | None = None,
                      bin_id: int = NO_BIN, batch_id: int = NO_BATCH,
-                     project_id: int = NO_PROJECT, rate=None) -> Stock:
+                     project_id: int = NO_PROJECT, rate=None,
+                     serial_numbers: list[str] | None = None) -> Stock:
     """The ONLY function that changes stock. Always writes a stk_ledger row.
 
     Either warehouse_id or facility_id must be given; a facility resolves to its
@@ -255,6 +256,14 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     `stk_balance`, and rule 7 says nothing but this function assigns to that table.
     Without it every balance row kept `valuation_rate = 0` and the warehouse read
     "Stock value on hand ₹ 0" no matter how much had been received.
+
+    `serial_numbers` names the UNITS this movement carried — the codes the warehouse
+    module claimed off `whs_serial_numbers` for this leg. Passed in rather than read
+    here because inventory is the base module and may not touch a `whs_` table
+    (rule 5). Omitted (None) it falls back to the lot's own `stk_balance.serial_number`,
+    which is what every caller did before and is still right for a move that names no
+    units of its own. Without it the ledger's `serial_numbers` column was NULL on
+    every row ever written, because that fallback column is NULL on every balance row.
     """
     qty = _d(qty)
     if qty <= 0:
@@ -407,7 +416,11 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         direction=direction, quantity=qty, balance_after=new_balance,
         rate=posted_rate,
         value=(qty * posted_rate).quantize(Decimal("0.01")),
-        serial_numbers=stock.serial_number,
+        # The units this leg carried, when the caller knows them. `is not None` and
+        # not `or`: an empty list is a caller saying "this move named no units", and
+        # must not silently fall back to the lot's.
+        serial_numbers=(serial_numbers if serial_numbers is not None
+                        else stock.serial_number),
         ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
         created_by_id=user.id, created_by_name=user.full_name,
     ))
@@ -419,6 +432,23 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         await notify_if_below_minimum(db, item_id, warehouse_id,
                                       after + float(qty), after)
     return stock
+
+
+def take_units(codes: list[str] | None, count) -> list[str] | None:
+    """Pop the first `count` unit codes off `codes`, mutating it.
+
+    One document line can be satisfied from several balance rows, and each of those
+    slices writes its OWN ledger row. Handing every slice the line's whole code list
+    would report the same unit as having moved three times, so the list is consumed
+    front-to-back and each slice keeps only its share. `None` in, `None` out: a caller
+    that names no units still gets the old fallback behaviour.
+    """
+    if codes is None:
+        return None
+    wanted = int(_d(count))
+    taken = codes[:wanted]
+    del codes[:wanted]
+    return taken
 
 
 async def move_stock_out(
@@ -434,12 +464,17 @@ async def move_stock_out(
     project_id: int = NO_PROJECT,
     bin_id: int | None = None,
     batch_id: int | None = None,
+    serial_numbers: list[str] | None = None,
 ) -> None:
     """Issue stock across matching balance rows using move_stock() for every slice.
 
     A document that does not specify a bin means "pick from available stock", not
     "bulk bin 0". This matters after put-away, when valid stock no longer sits in the
     bulk balance.
+
+    `serial_numbers` is the units the caller claimed for this whole quantity; it is
+    split across the slices in order. The list is COPIED before it is consumed, so a
+    caller can pass the same line's list twice without it emptying underneath them.
     """
     wanted = _d(qty)
     if wanted <= 0:
@@ -471,6 +506,7 @@ async def move_stock_out(
         )
 
     remaining = wanted
+    pool = list(serial_numbers) if serial_numbers is not None else None
     for row in rows:
         if remaining <= 0:
             break
@@ -488,6 +524,7 @@ async def move_stock_out(
             bin_id=row.bin_id,
             batch_id=row.batch_id,
             project_id=row.project_id,
+            serial_numbers=take_units(pool, take),
         )
         remaining -= take
 

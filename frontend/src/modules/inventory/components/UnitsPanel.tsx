@@ -116,7 +116,10 @@ export function UnitCell({ text, extra, lot, title }: {
 }) {
   if (!text) return <span className="text-xs text-muted">—</span>;
   const body = (
-    <div className="min-w-0 text-left">
+    // max-w: the table lays out auto, so a cell holding every serial in the lot on one
+    // nowrap line widened the column until the page scrolled sideways. Cap it and let
+    // truncate do its job; the whole list is in the popover.
+    <div className="min-w-0 max-w-[12rem] text-left">
       <div className="truncate font-mono text-xs text-body">{text}</div>
       {/* The WHOLE count, not "+18 more". A lot of 19 units sat beside an Available of
           12 and a Reserved of 7, and "+18 more" left the reader to work out that the

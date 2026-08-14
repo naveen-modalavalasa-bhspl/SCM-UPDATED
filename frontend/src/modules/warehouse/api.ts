@@ -399,11 +399,47 @@ export const listSerials = (
 export const listBatches = (params: ListParams & { item_id?: number; expiring_days?: number } = {}) =>
   get<Page<Batch>>(`${BASE}/batches`, params);
 
+export interface ScanLine {
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  quantity: number | string;
+  batch_no?: string | null;
+  serial_no?: string | null;
+  package_no?: string | null;
+}
+
+export interface ScanPackage {
+  id: number;
+  package_no: string;
+  barcode?: string | null;
+  package_type?: string | null;
+  status?: string | null;
+  item_count: number;
+  quantity: number | string;
+  weight_kg?: number | string | null;
+  is_fragile: boolean;
+  is_temp_controlled: boolean;
+}
+
+export interface ScanResult {
+  kind: string;
+  id: number;
+  doc_no?: string | null;
+  deep_link?: string | null;
+  title?: string | null;
+  subtitle?: string | null;
+  status?: string | null;
+  meta?: { label?: string | null; value?: string | null }[];
+  packages?: ScanPackage[];
+  items?: ScanLine[];
+  package_count?: number;
+  item_count?: number;
+  total_qty?: number | string;
+}
+
 /** Finds whatever a scanned barcode is — a package, a bin, a serial or a document. */
-export const scanCode = (code: string) =>
-  get<{ kind: string; id: number; doc_no?: string | null; deep_link?: string | null }>(
-    `${BASE}/scan/${encodeURIComponent(code)}`,
-  );
+export const scanCode = (code: string) => get<ScanResult>(`${BASE}/scan/${encodeURIComponent(code)}`);
 
 /* ------------------------------------------------------------- attachments -- */
 

@@ -7,6 +7,7 @@ import { QRCodeSVG } from "qrcode.react";
 import { AlertCircle, ArrowLeft, CheckCircle2, Package, Lock, PackagePlus, Printer, QrCode, Trash2, Truck, Unlock } from "lucide-react";
 import { Button, Can, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
+import { PrintPortal } from "../components/LabelPrint";
 import { Lookup } from "../components/Lookup";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
@@ -108,7 +109,12 @@ type ScanCardSpec = {
   subtitle?: string;
   accent: "consignment" | "package";
   meta: { label: string; value: string | number | null | undefined }[];
+  /** Printed on the label itself, so a carton can be checked without a scanner. */
+  lines?: { code: string; name: string; qty: string }[];
 };
+
+/** How many content lines fit on a label before it stops being one card. */
+const LABEL_LINES = 6;
 
 function ScanCard({ spec }: { spec: ScanCardSpec }) {
   const accent = spec.accent === "consignment"
@@ -134,6 +140,10 @@ function ScanCard({ spec }: { spec: ScanCardSpec }) {
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-[128px_1fr]">
+        {/* Both codes carry the bare document number, as they always did. A QR holding
+            a URL sent every phone through the login screen before it could show
+            anything; the number is what the yard actually reads out loud. What the
+            code means is answered by the Scan screen, reached from inside the app. */}
         <div className="flex justify-center rounded-lg border border-line bg-white p-3">
           <QRCodeSVG value={spec.code} size={108} level="M" />
         </div>
@@ -151,6 +161,28 @@ function ScanCard({ spec }: { spec: ScanCardSpec }) {
           </dl>
         </div>
       </div>
+
+      {spec.lines && spec.lines.length > 0 && (
+        <div className="mt-3 rounded-lg border border-line bg-white p-3">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+            Contents ({spec.lines.length})
+          </div>
+          <ul className="space-y-0.5 text-[11px] leading-tight">
+            {spec.lines.slice(0, LABEL_LINES).map((line, index) => (
+              <li key={`${line.code}-${index}`} className="flex items-baseline justify-between gap-2">
+                <span className="min-w-0">
+                  <span className="font-mono font-semibold text-ink">{line.code}</span>
+                  <span className="ml-2 text-muted">{line.name}</span>
+                </span>
+                <span className="shrink-0 font-semibold tabular text-ink">{line.qty}</span>
+              </li>
+            ))}
+            {spec.lines.length > LABEL_LINES && (
+              <li className="text-muted">+{spec.lines.length - LABEL_LINES} more line(s) — scan the QR for the full list</li>
+            )}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -548,6 +580,12 @@ export default function ConsignmentForm() {
         { label: "Destination", value: destination },
         { label: "Date", value: doc.dispatch_date },
       ],
+      // The consignment label lists its cartons; a package label lists its items.
+      lines: packages.map((pkg, index) => ({
+        code: pkg.package_no || `P${index + 1}`,
+        name: `${pkg.items.filter((line) => packageQty(line) > 0).length} item line(s)`,
+        qty: fmtQty(pkg.items.reduce((sum, line) => sum + packageQty(line), 0)),
+      })),
     },
     ...packages.map((pkg, index) => ({
       code: pkg.barcode || `${doc.dispatch_no}|${pkg.package_no || `P${index + 1}`}`,
@@ -567,6 +605,13 @@ export default function ConsignmentForm() {
           pkg.is_temp_controlled ? "Temp controlled" : null,
         ].filter(Boolean).join(", ") || "Standard" },
       ],
+      lines: pkg.items
+        .filter((line) => packageQty(line) > 0)
+        .map((line) => ({
+          code: String(line.item_code ?? line.item_id),
+          name: line.item_name ?? "",
+          qty: `${fmtQty(line.quantity)} ${line.uom_code ?? ""}`.trim(),
+        })),
     })),
   ] : [];
 
@@ -974,19 +1019,15 @@ export default function ConsignmentForm() {
               </Button>
             }
           >
-            <style>{`
-              @media print {
-                body * { visibility: hidden !important; }
-                #wh-consignment-scan-labels, #wh-consignment-scan-labels * { visibility: visible !important; }
-                #wh-consignment-scan-labels {
-                  position: absolute; inset: 0; margin: 0; padding: 8mm;
-                  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6mm;
-                  align-content: flex-start;
-                }
-                #wh-consignment-scan-labels > * { break-inside: avoid; page-break-inside: avoid; }
-              }
-            `}</style>
-            <div id="wh-consignment-scan-labels" className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {/* The printed sheet is its own copy of the cards, portalled to <body>.
+                Printing the on-screen node put it inside a clipping card and the paper
+                came out blank; see PrintPortal. */}
+            <PrintPortal id="wh-consignment-scan-labels">
+              {scanCards.map((card) => (
+                <ScanCard key={`print-${card.accent}-${card.code}`} spec={card} />
+              ))}
+            </PrintPortal>
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {scanCards.map((card) => (
                 <ScanCard key={`${card.accent}-${card.code}`} spec={card} />
               ))}

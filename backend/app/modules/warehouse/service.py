@@ -31,7 +31,7 @@ from app.core.exceptions import AppException, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation as stock_allocation
 from app.modules.inventory import locations as stock_locations
-from app.modules.inventory.service import move_stock, move_stock_out
+from app.modules.inventory.service import move_stock, move_stock_out, take_units
 from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse.enums import (
@@ -1011,12 +1011,26 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user) -> None:
     ):
         return
 
+    # Which documents the units in this consignment are travelling under. Both, and
+    # in this order: the goods were claimed against the issue when one was posted, and
+    # against the consignment itself when it was gated out directly.
+    markers = (_shipped_unit_marker("dispatch", dispatch.id),)
+    if dispatch.ref_type == WarehouseDocType.WH_ISSUE.value and dispatch.ref_id:
+        markers += (_shipped_unit_marker("issue", dispatch.ref_id),)
+
     # Credit only what actually arrived; a shortage stays visible on the consignment
     # instead of becoming phantom stock at the destination.
     for line in dispatch.items:
         delivered = _d(line.delivered_qty)
         if delivered <= ZERO:
             continue
+        # The units land BEFORE the quantity does, so the ledger row can name them.
+        # Only as many as were delivered: a short delivery leaves the rest in flight
+        # under the same marker rather than shelving units that never turned up.
+        units = await _land_units(
+            db, markers=markers, item_id=line.item_id, qty=delivered,
+            to_warehouse_id=dispatch.to_warehouse_id, ref_no=dispatch.dispatch_no,
+        )
         await move_stock(
             db, item_id=line.item_id, qty=delivered,
             direction=StockDirection.IN.value,
@@ -1025,6 +1039,7 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user) -> None:
             warehouse_id=dispatch.to_warehouse_id,
             bin_id=m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
             project_id=dispatch.project_id or 0,
+            serial_numbers=units or None,
         )
 
 
@@ -5694,11 +5709,18 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     # 900 LTs' holds under one requester's id and find nothing.
     line_indents = await _line_indent_ids(db, issue)
 
+    # The units this issue is taking off the shelf, claimed BEFORE anything moves so
+    # each ledger row can name the units it carried. Claiming after the moves (where
+    # `_mark_serials` sits) would mean the rows were already written and `stk_ledger`
+    # is append-only — the codes could never be added to them.
+    line_units = await _claim_issue_units(db, issue) if outward else {}
+
     for line in issue.items:
         qty = _d(line.issued_qty)
         if qty <= ZERO:
             continue
         line_indent_id = line_indents.get(line.id) or issue.indent_id
+        units = line_units.get(line.id)
 
         # An approved allocation reserves concrete stock rows. Consume and issue those
         # exact rows so the hold disappears with the goods, including its bin, batch
@@ -5750,6 +5772,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                         warehouse_id=stock.warehouse_id,
                         bin_id=stock.bin_id, batch_id=stock.batch_id,
                         project_id=stock.project_id,
+                        serial_numbers=take_units(units, stock.quantity),
                     )
                 continue
 
@@ -5770,6 +5793,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     warehouse_id=issue.warehouse_id,
                     bin_id=source_bin, batch_id=source_batch,
                     project_id=source_project,
+                    serial_numbers=take_units(units, slice_qty),
                 )
         else:
             await move_stock(
@@ -5868,16 +5892,240 @@ def _apply_issue_return(issue: m.MaterialIssue, original: m.MaterialIssue) -> No
     )
 
 
+def _shipped_unit_marker(doc: str, doc_id: int) -> str:
+    """The remark that ties a unit to the document currently carrying it.
+
+    A unit in flight belongs to exactly one document, and this string is the link.
+    `credit_arrival` reads it back at the far end to know which units to shelve.
+    """
+    return f"Issued by {doc} {doc_id}"
+
+
+#: Remarks that mean "this unit is already spoken for by another document". A unit
+#: carrying one of these must never be auto-picked for a second one.
+_CLAIMED_REMARK_PREFIXES = ("Reserved for issue ", "Issued by ")
+
+
+async def _claim_units(
+    db: AsyncSession,
+    *,
+    item_id: int,
+    warehouse_id: int,
+    qty,
+    marker: str,
+    batch_id: int | None = None,
+    bin_id: int | None = None,
+    top_up: bool = True,
+) -> list[m.SerialNumber]:
+    """Reserve up to `qty` of this item's units at this warehouse under `marker`.
+
+    Rows already carrying `marker` are counted first — those are the ones the
+    storekeeper picked by hand on the issue screen, and his choice always stands. The
+    shortfall is topped up FIFO (oldest row id first) from what is free at that
+    warehouse, skipping anything another document has already claimed.
+
+    BEST EFFORT BY DESIGN. It returns fewer rows than asked rather than raising when
+    the warehouse holds fewer coded units than the quantity being shipped, which is
+    the normal case for stock that predates unit coding and for bulk goods that never
+    had units at all. A missing identity row must never stop real goods from moving —
+    the quantity is the stock record, the unit row is a label on it. Callers that DO
+    require a complete set (serial-tracked items) check the count themselves.
+    """
+    wanted = int(_d(qty))
+    if wanted <= 0:
+        return []
+
+    def _scoped(stmt):
+        stmt = stmt.where(
+            m.SerialNumber.item_id == item_id,
+            m.SerialNumber.warehouse_id == warehouse_id,
+            m.SerialNumber.is_active.is_(True),
+        )
+        # Only narrow by batch/bin when the document actually named one. A line that
+        # names neither means "whatever is on the shelf", exactly as move_stock_out
+        # reads an unspecified bin.
+        if batch_id:
+            stmt = stmt.where(m.SerialNumber.batch_id == batch_id)
+        if bin_id:
+            stmt = stmt.where(m.SerialNumber.bin_id == bin_id)
+        return stmt
+
+    mine = list((await db.execute(
+        _scoped(select(m.SerialNumber)).where(
+            m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+            m.SerialNumber.remarks == marker,
+        ).order_by(m.SerialNumber.id).with_for_update()
+    )).scalars().all())
+    if len(mine) >= wanted or not top_up:
+        # `top_up=False` is how a serialized item says "the scanned set is the set".
+        # Which physical serial left the building is a fact the storekeeper establishes
+        # by reading the label, never something this function may decide for him.
+        return mine[:wanted]
+
+    free = (await db.execute(
+        _scoped(select(m.SerialNumber)).where(
+            m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+            # AND of the negations, not OR: "Reserved for issue 5" does not start with
+            # "Issued by ", so an OR here would have declared every claimed unit free
+            # and handed the same code to two documents.
+            or_(m.SerialNumber.remarks.is_(None),
+                and_(*[~m.SerialNumber.remarks.startswith(prefix)
+                       for prefix in _CLAIMED_REMARK_PREFIXES])),
+        ).order_by(m.SerialNumber.id)
+        .limit(wanted - len(mine))
+        .with_for_update()
+    )).scalars().all()
+    for row in free:
+        row.remarks = marker
+        mine.append(row)
+    return mine
+
+
+async def _land_units(
+    db: AsyncSession,
+    *,
+    markers: tuple[str, ...],
+    item_id: int,
+    qty,
+    to_warehouse_id: int,
+    ref_no: str | None,
+) -> list[str]:
+    """Shelve the units a consignment carried at the point that received it.
+
+    THE missing half of the unit's journey. `_place_unit_codes` mints a unit at the
+    warehouse that first receives the goods and deliberately never mints another one
+    downstream — "what an MDP or a LIP inwards is that same unit arriving, already
+    carrying its code". Nothing ever moved it, so every unit row in the database sat
+    at the warehouse that received it while the quantity it names had long since been
+    shipped on. An MDP showed five units of stock and a dash where their codes belong,
+    and the source warehouse could pick the same code again the next morning.
+
+    The unit is re-homed, not copied: one physical thing, one row, one code, moving
+    from shelf to shelf. `bin_id` is cleared because a stocking point has no bins —
+    that is what makes it a stocking point — and the row must key as bulk to sit
+    beside the `stk_balance` row the same arrival creates.
+
+    Returns the codes it shelved, so the caller can name them on the ledger row.
+    """
+    wanted = int(_d(qty))
+    if wanted <= 0:
+        return []
+    rows = (await db.execute(
+        select(m.SerialNumber).where(
+            m.SerialNumber.item_id == item_id,
+            m.SerialNumber.status == SerialStatus.ISSUED.value,
+            m.SerialNumber.remarks.in_(markers),
+            m.SerialNumber.is_active.is_(True),
+        ).order_by(m.SerialNumber.id).limit(wanted).with_for_update()
+    )).scalars().all()
+
+    item = await db.get(Item, item_id)
+    mode = _unit_mode(item)
+    codes: list[str] = []
+    for row in rows:
+        row.warehouse_id = to_warehouse_id
+        row.bin_id = None
+        row.status = SerialStatus.AVAILABLE.value
+        row.remarks = f"Received by {ref_no}" if ref_no else None
+        keys = _unit_keys(row, mode)
+        if keys:
+            codes.append(keys[0])
+    await db.flush()
+    return codes
+
+
+async def _ship_units(
+    db: AsyncSession,
+    *,
+    item_id: int,
+    warehouse_id: int,
+    qty,
+    marker: str,
+    batch_id: int | None = None,
+) -> list[str]:
+    """Claim units and send them out the gate in one step, returning their codes.
+
+    For the door where there is no issue to hang them on — a consignment raised and
+    gated out directly. `post_issue` keeps the two steps apart instead, because it has
+    to name the units on its ledger rows before `_mark_serials` flips them.
+    """
+    rows = await _claim_units(
+        db, item_id=item_id, warehouse_id=warehouse_id, qty=qty,
+        marker=marker, batch_id=batch_id,
+    )
+    item = await db.get(Item, item_id)
+    mode = _unit_mode(item)
+    codes: list[str] = []
+    for row in rows:
+        row.status = SerialStatus.ISSUED.value
+        row.remarks = marker
+        keys = _unit_keys(row, mode)
+        if keys:
+            codes.append(keys[0])
+    await db.flush()
+    return codes
+
+
+async def _claim_issue_units(
+    db: AsyncSession,
+    issue: m.MaterialIssue,
+) -> dict[int, list[str]]:
+    """Reserve the units each outward line is about to ship, and name them.
+
+    The storekeeper's own picks are already stamped by `_reserve_issue_serials` when
+    he scans them on the issue screen; this tops the line up to its full issued
+    quantity from what is free at the warehouse. Most lines name nothing at all — a
+    consolidated fulfilment draft is created for the storekeeper by inventory, which
+    approves quantities and has no screen on which to say which physical units — and
+    those lines are exactly the ones that used to ship with their codes left behind.
+
+    Returns `{line_id: [code, ...]}` in the currency the item names its units with, for
+    the ledger rows the caller is about to write.
+    """
+    claimed: dict[int, list[str]] = {}
+    for line in issue.items:
+        qty = _d(line.issued_qty)
+        if qty <= ZERO:
+            continue
+        item = await _item_snapshot(db, line.item_id)
+        mode = _unit_mode(item)
+        rows = await _claim_units(
+            db,
+            item_id=line.item_id,
+            warehouse_id=issue.warehouse_id,
+            qty=qty,
+            marker=_issue_serial_marker(issue.id),
+            batch_id=line.batch_id or None,
+            bin_id=line.bin_id or None,
+            # A serialized line ships exactly the serials the storekeeper scanned.
+            # `post_issue` has already refused the issue unless he captured one per
+            # unit, so there is never a shortfall here worth guessing at.
+            top_up=(mode != UNIT_MODE_SERIAL),
+        )
+        codes = [keys[0] for keys in
+                 (_unit_keys(row, mode) for row in rows) if keys]
+        if codes:
+            claimed[line.id] = codes
+    await db.flush()
+    return claimed
+
+
 async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool) -> None:
-    """Flips the status of the serials leaving or coming back with an issue."""
+    """Flips the status of the units leaving or coming back with an issue.
+
+    Runs for EVERY item that names its units, not just serial-tracked ones. It used
+    to skip anything without `is_serial_tracked`, which meant a coded consumable's
+    units stayed `available` at the source warehouse after they had physically left —
+    so the picker offered the same code again on the next issue. The set is still only
+    ENFORCED for serial-tracked items, where the storekeeper is required to capture
+    one serial per unit; a coded item takes what units it has.
+    """
     new_status = (SerialStatus.ISSUED if outward else SerialStatus.RETURNED).value
     from_status = (SerialStatus.AVAILABLE if outward else SerialStatus.ISSUED).value
     marker = _issue_serial_marker(issue.id)
 
     for line in issue.items:
         item = await _item_snapshot(db, line.item_id)
-        if not item.is_serial_tracked:
-            continue
         wanted = int(_d(line.issued_qty))
         if wanted <= 0:
             continue
@@ -5890,15 +6138,15 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
                 m.SerialNumber.is_active.is_(True))
             .with_for_update()
         )).scalars().all()
-        if len(rows) != wanted:
+        if item.is_serial_tracked and len(rows) != wanted:
             raise ValidationError(
                 f"{line.item_code or line.item_id}: {wanted} serials are required, "
                 f"but {len(rows)} are reserved for this issue"
             )
-        for row in rows:
+        for row in rows[:wanted]:
             row.status = new_status
             row.remarks = (
-                f"Issued by issue {issue.id}"
+                _shipped_unit_marker("issue", issue.id)
                 if outward
                 else f"Returned by issue {issue.id}"
             )
@@ -7016,6 +7264,14 @@ async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
             qty = _d(line.quantity)
             if qty <= ZERO:
                 continue
+            # No issue behind this consignment, so the units are claimed against the
+            # consignment itself. Without this a directly-gated dispatch left its
+            # units on the source shelf, free to be picked again tomorrow.
+            units = await _ship_units(
+                db, item_id=line.item_id, warehouse_id=dispatch.warehouse_id,
+                qty=qty, batch_id=line.batch_id,
+                marker=_shipped_unit_marker("dispatch", dispatch.id),
+            )
             await move_stock_out(
                 db, item_id=line.item_id, qty=qty,
                 ref_type=InventoryRefType.DISPATCH.value, ref_id=dispatch.id,
@@ -7023,6 +7279,7 @@ async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
                 warehouse_id=dispatch.warehouse_id,
                 batch_id=line.batch_id,
                 project_id=dispatch.project_id or 0,
+                serial_numbers=units or None,
             )
 
     dispatch.gate_pass_no = gate_pass_no or f"GP/{dispatch.dispatch_no}"
@@ -7712,6 +7969,109 @@ async def list_batches(db: AsyncSession, params: PageParams, *, item_id: int | N
     return page
 
 
+def _dispatch_destination(dispatch: m.Dispatch) -> str | None:
+    return (dispatch.to_warehouse_name or dispatch.customer_name
+            or dispatch.project_name or dispatch.delivery_address)
+
+
+async def _dispatch_lines(db: AsyncSession, dispatch_id: int) -> list[m.DispatchItem]:
+    return list((await db.scalars(
+        select(m.DispatchItem).where(m.DispatchItem.dispatch_id == dispatch_id)
+        .order_by(m.DispatchItem.line_no)
+    )).all())
+
+
+def _scan_line(line: m.DispatchItem, package_no: str | None = None) -> s.ScanLine:
+    return s.ScanLine(
+        item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
+        quantity=line.quantity or Decimal(0), batch_no=line.batch_no,
+        serial_no=line.serial_no, package_no=package_no,
+    )
+
+
+async def _scanned_dispatch(db: AsyncSession, dispatch: m.Dispatch) -> s.ScanResult:
+    """A consignment label answers with the cartons it holds."""
+    lines = await _dispatch_lines(db, dispatch.id)
+    packages = list((await db.scalars(
+        select(m.DispatchPackage).where(m.DispatchPackage.dispatch_id == dispatch.id)
+        .order_by(m.DispatchPackage.id)
+    )).all())
+    by_package: dict[int | None, list[m.DispatchItem]] = defaultdict(list)
+    for line in lines:
+        by_package[line.package_id].append(line)
+
+    return s.ScanResult(
+        kind="DISPATCH", id=dispatch.id, doc_no=dispatch.dispatch_no,
+        deep_link=f"/warehouse/dispatch/consignments/{dispatch.id}",
+        title=f"Consignment {dispatch.dispatch_no}",
+        subtitle=f"Material issue {dispatch.ref_no}" if dispatch.ref_no else None,
+        status=dispatch.status,
+        meta=[
+            {"label": "From", "value": dispatch.warehouse_name},
+            {"label": "Destination", "value": _dispatch_destination(dispatch)},
+            {"label": "Date", "value": str(dispatch.dispatch_date) if dispatch.dispatch_date else None},
+            {"label": "Vehicle", "value": dispatch.vehicle_number},
+        ],
+        packages=[
+            s.ScanPackage(
+                id=pkg.id, package_no=pkg.package_no, barcode=pkg.barcode,
+                package_type=pkg.package_type, status=pkg.status,
+                item_count=len(by_package.get(pkg.id, [])),
+                quantity=sum((line.quantity or Decimal(0) for line in by_package.get(pkg.id, [])),
+                             Decimal(0)),
+                weight_kg=pkg.weight_kg, is_fragile=bool(pkg.is_fragile),
+                is_temp_controlled=bool(pkg.is_temp_controlled),
+            )
+            for pkg in packages
+        ],
+        # Unpacked lines included: a consignment scanned mid-packing must still say
+        # what it is carrying, not report an empty load.
+        items=[_scan_line(line) for line in lines],
+        package_count=len(packages),
+        item_count=len(lines),
+        total_qty=sum((line.quantity or Decimal(0) for line in lines), Decimal(0)),
+    )
+
+
+async def _scanned_package(db: AsyncSession, value: str) -> s.ScanResult | None:
+    """A carton label answers with the item codes, names and counts inside it.
+
+    Matched on the stored barcode first, then on `<DISPATCH_NO>|<PACKAGE_NO>`, because
+    the barcode a label prints is minted from the material issue's number while the
+    fallback the screen renders uses the consignment's.
+    """
+    head, _, tail = value.partition("|")
+    tail = tail.strip()
+    pkg = await db.scalar(select(m.DispatchPackage).where(m.DispatchPackage.barcode == value))
+    if not pkg and tail:
+        pkg = await db.scalar(
+            select(m.DispatchPackage)
+            .join(m.Dispatch, m.Dispatch.id == m.DispatchPackage.dispatch_id)
+            .where(m.Dispatch.dispatch_no == head, m.DispatchPackage.package_no == tail))
+    if not pkg:
+        return None
+
+    dispatch = await db.get(m.Dispatch, pkg.dispatch_id)
+    lines = [line for line in await _dispatch_lines(db, pkg.dispatch_id)
+             if line.package_id == pkg.id]
+    return s.ScanResult(
+        kind="PACKAGE", id=pkg.id, doc_no=pkg.barcode or pkg.package_no,
+        deep_link=f"/warehouse/dispatch/consignments/{pkg.dispatch_id}",
+        title=f"Package {pkg.package_no}",
+        subtitle=f"Consignment {dispatch.dispatch_no}" if dispatch else None,
+        status=pkg.status,
+        meta=[
+            {"label": "Type", "value": pkg.package_type},
+            {"label": "Weight", "value": f"{pkg.weight_kg} kg" if pkg.weight_kg else None},
+            {"label": "Consignment", "value": dispatch.dispatch_no if dispatch else None},
+            {"label": "Destination", "value": _dispatch_destination(dispatch) if dispatch else None},
+        ],
+        items=[_scan_line(line, pkg.package_no) for line in lines],
+        item_count=len(lines),
+        total_qty=sum((line.quantity or Decimal(0) for line in lines), Decimal(0)),
+    )
+
+
 async def scan(db: AsyncSession, code: str) -> s.ScanResult:
     """Works out what a scanned code is.
 
@@ -7719,18 +8079,26 @@ async def scan(db: AsyncSession, code: str) -> s.ScanResult:
     which screen to be on first. Order matters: document numbers are checked before
     bins so a code that could be either resolves to the document someone scanned it
     from.
+
+    A package label carries a pipe (`<ISSUE_OR_DISPATCH_NO>|PKG-01`) and no document
+    number ever does, so the package lookup runs first: the head of a package label is
+    the material issue's number, and without this it resolved to the issue instead of
+    the carton that was actually in someone's hand.
     """
     value = (code or "").strip()
     if not value:
         raise ValidationError("Nothing was scanned")
 
-    # A package label is `DISPATCH_NO|PACKAGE_NO`.
     head = value.split("|")[0]
+
+    if "|" in value:
+        pkg = await _scanned_package(db, value)
+        if pkg:
+            return pkg
 
     dispatch = await db.scalar(select(m.Dispatch).where(m.Dispatch.dispatch_no == head))
     if dispatch:
-        return s.ScanResult(kind="DISPATCH", id=dispatch.id, doc_no=dispatch.dispatch_no,
-                            deep_link=f"/warehouse/transactions/dispatch/{dispatch.id}")
+        return await _scanned_dispatch(db, dispatch)
 
     receipt = await db.scalar(select(m.Receipt).where(
         or_(m.Receipt.grn_no == head, m.Receipt.gate_entry_no == head)))

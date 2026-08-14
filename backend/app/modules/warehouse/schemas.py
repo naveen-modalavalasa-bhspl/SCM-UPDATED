@@ -1271,12 +1271,53 @@ class NotificationRead(_Read):
     created_at: datetime | None = None
 
 
+class ScanLine(BaseModel):
+    """One item inside whatever was scanned."""
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    quantity: Decimal = Decimal(0)
+    batch_no: str | None = None
+    serial_no: str | None = None
+    package_no: str | None = None
+
+
+class ScanPackage(BaseModel):
+    """One carton of a scanned consignment."""
+    id: int
+    package_no: str
+    barcode: str | None = None
+    package_type: str | None = None
+    status: str | None = None
+    item_count: int = 0
+    quantity: Decimal = Decimal(0)
+    weight_kg: Decimal | None = None
+    is_fragile: bool = False
+    is_temp_controlled: bool = False
+
+
 class ScanResult(BaseModel):
-    """What a scanned code turned out to be."""
+    """What a scanned code turned out to be.
+
+    Everything past `deep_link` is what the label is *for*: scan a consignment and
+    the answer is the cartons it holds, scan a carton and the answer is what is
+    inside it. The fields are optional so a bin or a serial scan stays as terse as
+    it was, and so an older client reading only `kind`/`deep_link` is unaffected.
+    """
     kind: str
     id: int
     doc_no: str | None = None
     deep_link: str | None = None
+
+    title: str | None = None
+    subtitle: str | None = None
+    status: str | None = None
+    meta: list[dict[str, str | None]] = []
+    packages: list[ScanPackage] = []
+    items: list[ScanLine] = []
+    package_count: int = 0
+    item_count: int = 0
+    total_qty: Decimal = Decimal(0)
 
 
 class Option(BaseModel):

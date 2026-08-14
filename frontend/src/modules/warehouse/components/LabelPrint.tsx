@@ -1,8 +1,52 @@
-import { useRef } from "react";
+import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
 import { Printer } from "lucide-react";
 import { Button } from "@/shared/components";
+
+/**
+ * The print surface for any sheet of labels.
+ *
+ * Portalled to `document.body` on purpose. The earlier sheets printed blank: they
+ * lived inside a `position: relative; overflow: hidden` card and positioned
+ * themselves `absolute; inset: 0`, so at print time the card had collapsed to ~100px
+ * (its only child was out of flow) and clipped the labels down to a sliver. With the
+ * sheet as a direct child of `body` there is no ancestor left to clip or collapse it,
+ * every other top-level node is simply removed for the print run, and the labels
+ * paginate naturally instead of being pinned to page one.
+ */
+export function PrintPortal({
+  id,
+  columns = 2,
+  children,
+}: {
+  id: string;
+  columns?: number;
+  children: ReactNode;
+}) {
+  return createPortal(
+    <div id={id} data-print-sheet style={{ display: "none" }}>
+      <style>{`
+        @media print {
+          body > *:not(#${id}) { display: none !important; }
+          #${id} {
+            display: grid !important;
+            grid-template-columns: repeat(${columns}, minmax(0, 1fr));
+            gap: 6mm;
+            padding: 8mm;
+            background: #fff;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+          #${id} > * { break-inside: avoid; page-break-inside: avoid; }
+        }
+      `}</style>
+      {children}
+    </div>,
+    document.body,
+  );
+}
 
 /**
  * Barcode and QR labels for bins, packages and serials.
@@ -71,21 +115,13 @@ export function LabelSheet({
   title?: string;
   emptyHint?: string;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-
   return (
     <div>
-      <style>{`
-        @media print {
-          body * { visibility: hidden !important; }
-          #wh-label-sheet, #wh-label-sheet * { visibility: visible !important; }
-          #wh-label-sheet {
-            position: absolute; inset: 0; margin: 0; padding: 8mm;
-            display: flex; flex-wrap: wrap; gap: 6mm; align-content: flex-start;
-          }
-          .wh-label { break-inside: avoid; page-break-inside: avoid; }
-        }
-      `}</style>
+      <PrintPortal id="wh-label-sheet" columns={3}>
+        {labels.map((spec, i) => (
+          <Label key={`print-${spec.code}-${i}`} spec={spec} />
+        ))}
+      </PrintPortal>
 
       <div className="mb-3 flex items-center justify-between gap-3">
         <span className="text-sm text-muted">
@@ -101,7 +137,7 @@ export function LabelSheet({
           {emptyHint}
         </div>
       ) : (
-        <div id="wh-label-sheet" ref={ref} className="flex flex-wrap gap-3">
+        <div className="flex flex-wrap gap-3">
           {labels.map((spec, i) => (
             <Label key={`${spec.code}-${i}`} spec={spec} />
           ))}

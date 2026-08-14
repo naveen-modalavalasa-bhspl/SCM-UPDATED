@@ -26,6 +26,7 @@ import WarehouseForm from "./pages/masters/WarehouseForm";
 import WarehouseDetail from "./pages/masters/WarehouseDetail";
 import FloorPlan from "./pages/masters/FloorPlan";
 import StorageTypes from "./pages/masters/StorageTypes";
+import ScanView from "./pages/ScanView";
 import StockMovements from "./pages/StockMovements";
 import StockMovementForm from "./pages/StockMovementForm";
 
@@ -145,6 +146,10 @@ export function WarehouseModule() {
       <Route path="dispatch" element={<Dispatch />} />
       <Route path="dispatch/new" element={<DispatchForm />} />
       <Route path="dispatch/:id" element={<DispatchForm />} />
+
+      {/* Where a label's QR points. Not in the menu — nobody navigates here, a camera
+       * arrives here. `*` because a document number contains slashes. */}
+      <Route path="scan/*" element={<ScanView />} />
 
       <Route path="acknowledge-delivery" element={<AcknowledgeDelivery />} />
       <Route path="stock-segregation" element={<StockSegregation />} />

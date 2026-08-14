@@ -368,6 +368,11 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("wh_grn", "warehouse", "Warehouse · Goods Receipt"),
     ("wh_qc", "warehouse", "Warehouse · Quality Inspection"),
     ("wh_putaway", "warehouse", "Warehouse · Put-away"),
+    # Added late (migration d2e3f4a5b6c7 put them on the menu after this catalogue
+    # was written), so both fell back to `stock.view` — a code twelve roles hold and
+    # nine other pages share. Unticking them on Job Profiles did nothing.
+    ("wh_segregation", "warehouse", "Warehouse · Stock Segregation"),
+    ("wh_stock_movements", "warehouse", "Warehouse · Stock Movements"),
     ("wh_issues", "warehouse", "Warehouse · Material Issues"),
     ("wh_picklist", "warehouse", "Warehouse · Picklists"),
     ("wh_consignments", "warehouse", "Warehouse · Consignments"),
