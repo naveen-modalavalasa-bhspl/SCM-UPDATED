@@ -352,6 +352,11 @@ export const addDispatchEvent = (dispatchId: number, body: DispatchEventWrite) =
 export const acknowledgeDispatch = (dispatchId: number, body: AcknowledgeWrite) =>
   post<Dispatch>(`${BASE}/dispatches/${dispatchId}/acknowledge`, body);
 
+/** The same handover as `forwardArrival`, for a relay point with no GRN behind the
+ *  consignment — it signed for the lorry and the stock went straight on the shelf. */
+export const forwardDispatch = (dispatchId: number) =>
+  post<Issue[]>(`${BASE}/dispatches/${dispatchId}/forward`);
+
 /* --------------------------------------------------------- purchase returns -- */
 
 export const listReturns = (params: ListParams = {}) =>

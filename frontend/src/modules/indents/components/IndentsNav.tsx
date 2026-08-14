@@ -1,6 +1,6 @@
 import { LayoutGroup, motion, useReducedMotion } from "framer-motion";
 import {
-  Bell, ClipboardCheck, Gauge, List, PackageCheck, ScrollText,
+  Bell, Gauge, List, PackageCheck, ScrollText,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
@@ -14,8 +14,9 @@ const destinations = [
   { key: "/indents", label: "All requests", icon: List, end: true },
   // Board is parked: the route and BoardPage are still here, just off the tab bar.
   // { key: "/indents/board", label: "Board", icon: Columns3 },
-  { key: "/indents/deliveries", label: "My deliveries", icon: PackageCheck },
-  { key: "/indents/acknowledgments", label: "Acknowledgments", icon: ClipboardCheck },
+  // One screen, not two: acknowledging a delivery is what this list is FOR, and the
+  // separate Acknowledgments tab listed the same documents a second time.
+  { key: "/indents/deliveries", label: "Acknowledgement", icon: PackageCheck },
   { key: "/indents/reports", label: "Activity ledger", icon: ScrollText },
   { key: "/indents/notifications", label: "Alert & Notification", icon: Bell },
 ];

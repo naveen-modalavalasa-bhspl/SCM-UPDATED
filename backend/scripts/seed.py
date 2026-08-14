@@ -108,7 +108,9 @@ PAGE_TREE = [
     # Parked (rbac_pages.is_active = 0); route and BoardPage still exist. Leaving the
     # row here would put it back on the menu at the next seed.
     # ("ind_board", "/indents/board", "Status Board", "columns", P.INDENT_VIEW, 13, "grp_indents"),
-    ("ind_deliveries", "/indents/deliveries", "My Deliveries", "package-check",
+    # Named for what the storekeeper does here — acknowledge what arrived. The separate
+    # Acknowledgments tab listed the same documents and was dropped on 2026-08-14.
+    ("ind_deliveries", "/indents/deliveries", "Acknowledgement", "package-check",
      P.page_view_code("ind_deliveries"), 13, "grp_indents"),
     # Parked (rbac_pages.is_active = 0); route and the page still exist. Leaving the
     # row here would put it back on the menu at the next seed.

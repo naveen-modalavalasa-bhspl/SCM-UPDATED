@@ -608,6 +608,14 @@ async def acknowledge_dispatch(dispatch_id: int, data: s.AcknowledgeWrite,
     return await service.acknowledge_dispatch(db, dispatch_id, data, user)
 
 
+@router.post("/dispatches/{dispatch_id}/forward", response_model=list[s.IssueRead],
+             status_code=201)
+async def forward_dispatch(dispatch_id: int, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(ISSUE_FORWARD))):
+    """Pass on a consignment that went straight onto stock here, with no GRN behind it."""
+    return await service.forward_dispatch(db, dispatch_id, user)
+
+
 @router.post("/dispatches/{dispatch_id}/cancel", response_model=s.DispatchDetail)
 async def cancel_dispatch(dispatch_id: int, body: s.ReasonIn,
                           db: AsyncSession = Depends(get_db),

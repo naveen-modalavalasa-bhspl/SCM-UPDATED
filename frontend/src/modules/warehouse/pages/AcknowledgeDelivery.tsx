@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { CheckCircle2, ScanLine } from "lucide-react";
+import { CheckCircle2, Forward, ScanLine } from "lucide-react";
 import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, type LineColumn } from "../components/LinesEditor";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, toTimeline } from "../components/Timeline";
-import { acknowledgeDispatch, getDispatch, listDispatches, scanCode } from "../api";
+import { acknowledgeDispatch, forwardDispatch, getDispatch, listDispatches, scanCode } from "../api";
 import { fmtDate, fmtQty, num } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { DispatchItem } from "../types";
@@ -26,6 +27,7 @@ import { usePointLabel } from "../usePointLabel";
  */
 export default function AcknowledgeDelivery() {
   const pointLabel = usePointLabel();
+  const nav = useNavigate();
   const qc = useQueryClient();
   const [dispatchId, setDispatchId] = useState<number | null>(null);
   const [scan, setScan] = useState("");
@@ -89,6 +91,29 @@ export default function AcknowledgeDelivery() {
       qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
       qc.invalidateQueries({ queryKey: ["wh-dispatches-inbound"] });
       setConfirming(false);
+    },
+  });
+
+  /**
+   * The relay hop. This consignment was addressed to a point on the way to the
+   * requester, not to the requester's own LIP, and this point does not run a receiving
+   * desk — the stock went on the shelf the moment it was acknowledged, so there is no
+   * GRN to forward from. The backend answers `can_forward` for exactly that case.
+   */
+  const forward = useMutation({
+    mutationFn: () => forwardDispatch(dispatchId as number),
+    onSuccess: (drafts) => {
+      const made = drafts ?? [];
+      if (made.length === 0) {
+        void alerts.info("issue.forwarded_none");
+        return;
+      }
+      void alerts.success("issue.forwarded", {
+        number: made.map((d) => d.issue_no).filter(Boolean).join(", "),
+      });
+      qc.invalidateQueries({ queryKey: ["wh-dispatch", String(dispatchId)] });
+      qc.invalidateQueries({ queryKey: ["wh-issues-OUT"] });
+      nav("/warehouse/transactions/material-issues");
     },
   });
 
@@ -194,7 +219,7 @@ export default function AcknowledgeDelivery() {
         )}
       </Card>
 
-      <ErrorBanner error={scanError ?? error ?? acknowledge.error} />
+      <ErrorBanner error={scanError ?? error ?? acknowledge.error ?? forward.error} />
 
       {!dispatchId ? (
         <Card className="px-6 py-14 text-center text-sm text-muted">
@@ -216,9 +241,24 @@ export default function AcknowledgeDelivery() {
           </MetaCard>
 
           {done ? (
-            <Card className="mb-4 flex items-center justify-center gap-2 px-6 py-8 text-ok">
-              <CheckCircle2 className="h-5 w-5" />
-              <span className="font-display text-lg font-bold">Already acknowledged</span>
+            <Card className="mb-4 flex flex-col items-center justify-center gap-3 px-6 py-8">
+              <div className="flex items-center gap-2 text-ok">
+                <CheckCircle2 className="h-5 w-5" />
+                <span className="font-display text-lg font-bold">Already acknowledged</span>
+              </div>
+              {doc.can_forward && (
+                <Can do="issue.forward">
+                  <p className="max-w-md text-center text-sm text-muted">
+                    These goods are on their way further down — the stock is here, and the
+                    request stays open until the point below signs for it.
+                  </p>
+                  <Button variant="soft" onClick={() => forward.mutate()}
+                          disabled={forward.isPending}>
+                    <Forward className="h-4 w-4" />
+                    {forward.isPending ? "Forwarding…" : "Forward to the points below"}
+                  </Button>
+                </Can>
+              )}
             </Card>
           ) : null}
 

@@ -13,7 +13,6 @@ import { IndentFormPage } from "@/modules/indents/pages/FormPage";
 import { IndentDetailPage } from "@/modules/indents/pages/DetailPage";
 import { IndentDashboardPage } from "@/modules/indents/pages/DashboardPage";
 import { IndentBoardPage } from "@/modules/indents/pages/BoardPage";
-import { IndentAcknowledgmentsPage } from "@/modules/indents/pages/AcknowledgmentsPage";
 import DeliveriesPage from "@/modules/indents/pages/DeliveriesPage";
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
@@ -98,7 +97,9 @@ function AppRoutes() {
         <Route path="indents" element={<IndentListPage />} />
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
-        <Route path="indents/acknowledgments" element={<IndentAcknowledgmentsPage />} />
+        {/* Acknowledgments listed the same documents the deliveries screen does,
+         * so it is gone and its URL lands on the one screen that remains. */}
+        <Route path="indents/acknowledgments" element={<Navigate to="/indents/deliveries" replace />} />
         <Route path="indents/deliveries" element={<DeliveriesPage />} />
         <Route path="indents/reports" element={<IndentReportsPage />} />
         <Route path="indents/notifications" element={<IndentNotificationsPage />} />

@@ -1075,6 +1075,9 @@ class DispatchRead(_Read):
     project_name: str | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None
+    # Set on the detail read only: this consignment landed at a relay point that put it
+    # straight on the shelf, so the way on from here is the consignment, not a GRN.
+    can_forward: bool = False
     delivery_address: str | None = None
     contact_person: str | None = None
     contact_phone: str | None = None

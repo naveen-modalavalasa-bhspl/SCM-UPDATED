@@ -766,6 +766,9 @@ export interface Dispatch {
   destination_office_name?: string | null;
   /** Service area code of the destination office. Same value the source issue shows. */
   destination_office_sac?: string | null;
+  /** Detail read only. True when this consignment landed at a relay point that put it
+   *  straight on the shelf — there is no GRN here, so the way on is the consignment. */
+  can_forward?: boolean;
   delivery_address?: string | null;
   contact_person?: string | null;
   contact_phone?: string | null;

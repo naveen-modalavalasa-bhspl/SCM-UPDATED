@@ -283,6 +283,23 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     if warehouse is None:
         raise ValidationError(f"Warehouse {warehouse_id} does not exist")
 
+    # The bin's code, for the same reason the warehouse's and the item's names are
+    # read here: every name on a stock row and on a ledger row is a SNAPSHOT, so the
+    # row still reads correctly after somebody renames the thing. `bin_code` was the
+    # one nobody filled — balance rows got theirs later from the warehouse module and
+    # ledger rows never got one at all, which is why the Bin column on the ledger
+    # screen was empty on every row ever written.
+    #
+    # Raw SQL, not the model: `whs_warehouse_locations` belongs to the warehouse
+    # module, and inventory is the base module that imports no module (rule 5). The
+    # same dodge `rbac/service.py` uses to read `inv_position_locations`.
+    bin_code = None
+    if bin_id and bin_id != NO_BIN:
+        bin_code = await db.scalar(
+            text("SELECT code FROM whs_warehouse_locations WHERE id = :bin_id"),
+            {"bin_id": bin_id},
+        )
+
     stock = (await db.execute(
         select(Stock).where(Stock.item_id == item_id,
                             Stock.warehouse_id == warehouse_id,
@@ -299,7 +316,8 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                       item_code=item.code,
                       item_name=item.name,
                       uom_code=item.uom_code,
-                      bin_id=bin_id, batch_id=batch_id, batch_no=batch_no,
+                      bin_id=bin_id, bin_code=bin_code,
+                      batch_id=batch_id, batch_no=batch_no,
                       expiry_date=expiry_date, project_id=project_id,
                       available_qty=Decimal("0"), total_qty=Decimal("0"))
         try:
@@ -378,7 +396,14 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         warehouse_name=stock.warehouse_name,
         item_id=item_id, item_code=stock.item_code, item_name=stock.item_name,
         uom_code=stock.uom_code,
-        bin_id=bin_id, batch_id=batch_id, batch_no=batch_no, project_id=project_id,
+        # bin_code as well as bin_id: every other name on this row is snapshotted
+        # (warehouse, item, batch) because a ledger row has to still read correctly
+        # after the thing it names is renamed. The bin was the one that was not, so
+        # the Bin column on the ledger screen was blank on every row ever written.
+        # `or stock.bin_code`: a balance row that predates this carries the code the
+        # warehouse module stamped on it later, and that is still the right name.
+        bin_id=bin_id, bin_code=bin_code or stock.bin_code,
+        batch_id=batch_id, batch_no=batch_no, project_id=project_id,
         direction=direction, quantity=qty, balance_after=new_balance,
         rate=posted_rate,
         value=(qty * posted_rate).quantize(Decimal("0.01")),
