@@ -124,8 +124,14 @@ PAGE_TREE = [
 
     ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
     ("approval_waiting", "/approvals", "Waiting for Me", "check-circle", P.INDENT_VIEW, 21, "approvals"),
-    ("approval_decisions", "/approvals/decisions", "My Decisions", "history", P.INDENT_VIEW, 22, "approvals"),
-    ("approval_team", "/approvals/team-queue", "Team Queue", "users", P.INDENT_VIEW, 23, "approvals"),
+    # Built, routed and working since the monthly-cycle work, but no row ever pointed
+    # at it — the only way in was to type the URL. Gated on INDENT_APPROVE because that
+    # is what GET /api/approvals/consolidation already requires; a viewer who cannot
+    # approve would open it to a 403.
+    ("approval_consolidation", "/approvals/consolidation", "Consolidation", "boxes",
+     P.INDENT_APPROVE, 22, "approvals"),
+    ("approval_decisions", "/approvals/decisions", "My Decisions", "history", P.INDENT_VIEW, 23, "approvals"),
+    ("approval_team", "/approvals/team-queue", "Team Queue", "users", P.INDENT_VIEW, 24, "approvals"),
     # Delegations is gone: the approvals module does not expose it, and the route now
     # redirects to the inbox. Existing wf_delegations rows are left as history.
 
@@ -233,6 +239,11 @@ PAGE_TREE = [
      P.ADMIN_ROLES_MANAGE, 81, "grp_rbac"),
     ("rbac_groups", "/rbac/groups", "User Groups", "users",
      P.ADMIN_GROUPS_MANAGE, 82, "grp_rbac"),
+    # Built and routed, but no row ever pointed at it — the screen that grants access
+    # was itself only reachable by typing the URL. Same permission as Roles & Access:
+    # both write the same grants, so anything that can open one can open the other.
+    ("rbac_job_profiles", "/rbac/job-profiles", "Job Profiles", "users",
+     P.ADMIN_ROLES_MANAGE, 83, "grp_rbac"),
 
     ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
     ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),

@@ -372,7 +372,9 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("wh_picklist", "warehouse", "Warehouse · Picklists"),
     ("wh_consignments", "warehouse", "Warehouse · Consignments"),
     ("wh_dispatch", "warehouse", "Warehouse · Dispatch"),
-    ("wh_returns", "warehouse", "Warehouse · Purchase Returns"),
+    # `wh_returns` (Purchase Returns) is gone: the screen was dropped from the module
+    # on 2026-08-13 and `d2e3f4a5b6c7` deletes its rbac_pages row, so a view code for
+    # it could only ever gate a page that no longer exists.
     ("wh_notifications", "warehouse", "Warehouse · Notifications"),
     ("wh_reports", "warehouse", "Warehouse · Reports"),
     ("wh_masters", "warehouse", "Warehouse · Masters"),
