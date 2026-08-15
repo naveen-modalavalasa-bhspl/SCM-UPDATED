@@ -92,6 +92,9 @@ class IndentOut(BaseModel):
     department_name: str | None = None
     office_id: int | None = None
     office_name: str | None = None
+    # Attached by `service._attach_office_sac` from the delivery office's HCM row,
+    # never a column: without this field Pydantic would drop it from the response.
+    office_sac: str | None = None
     # Region/Location, snapshotted from the requester's HCM location at create.
     # Read-only on create and edit: there is no matching field on IndentCreate/Update.
     region_id: int | None = None

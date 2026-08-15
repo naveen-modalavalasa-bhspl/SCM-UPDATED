@@ -45,6 +45,10 @@ class Stage(Base):
     # position row, and the engine finds the holder by walking up the raiser's own
     # reporting line. Stages without it behave exactly as before.
     position_role_id = Column(BigInteger, index=True, nullable=True)
+    # A stage carrying post_id is a LOCAL POST rung — a chair this system owns because
+    # HCM has no position for it (SCM Head, Indent Team, Logistics…). Resolved from
+    # wf_approval_post_members, never from the HCM mirror. See workflow/posts.py.
+    post_id = Column(BigInteger, index=True, nullable=True)
     is_enabled = Column(Boolean, nullable=False, default=True)
     role_id = Column(BigInteger, nullable=True)
     employee_id = Column(BigInteger, nullable=True)
@@ -52,6 +56,44 @@ class Stage(Base):
     is_optional = Column(Boolean, nullable=False, default=False)
     can_edit_document = Column(Boolean, nullable=False, default=False)
     sla_hours = Column(Integer, nullable=True)
+
+
+class ApprovalPost(Base):
+    """A chair this system owns, for the steps HCM has no position for.
+
+    The org chart the approval flow needs (SCM Head, Indent Team, Logistics, Director,
+    Accounts) does not exist in the HCM mirror and cannot be made to: those posts were
+    never created there, and the six warehouse posts that DO exist arrive with no
+    project and no parent, so nothing can be climbed to reach them.
+
+    So a rung may name one of these instead. It is still a POST, not a person — seats
+    are filled by `ApprovalPostMember` and the chair outlives whoever sits in it.
+
+    `hcm_position_id` is the escape hatch: the day HCM finally creates the real
+    position, point the local post at it and every saved ladder keeps working.
+    """
+    __tablename__ = "wf_approval_posts"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    code = Column(String(50), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    # Free text, shown as a grouping header on the config screen (e.g. "SCM",
+    # "Purchase"). Not an FK — HCM's departments are the wrong shape for these.
+    department = Column(String(120), nullable=True)
+    hcm_position_id = Column(BigInteger, index=True, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+
+
+class ApprovalPostMember(Base):
+    """Who currently sits in a local post. Soft FK to hcm_employees (rule 10)."""
+    __tablename__ = "wf_approval_post_members"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    post_id = Column(BigInteger, index=True, nullable=False)
+    employee_id = Column(BigInteger, index=True, nullable=False)
+    # Snapshotted at seating time so a retired employee still reads back (rule 10).
+    employee_name = Column(String(200), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
 
 
 class StageCondition(Base):

@@ -15,6 +15,10 @@ class EmployeeBrief(BaseModel):
     email: str | None = None
     office_id: int | None = None
     office_name: str | None = None
+    # HCM's service area code for that office, read from the mirror on every /me
+    # rather than stored: no column holds it and a re-coded office must show its
+    # current code. None for offices HCM holds no SAC for.
+    office_sac: str | None = None
 
 
 class PositionBrief(BaseModel):
@@ -24,6 +28,7 @@ class PositionBrief(BaseModel):
     department_name: str | None = None
     office_id: int | None = None
     office_name: str | None = None
+    office_sac: str | None = None
     is_primary: bool = False
 
 

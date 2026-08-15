@@ -43,7 +43,14 @@ def _active(status: Any) -> bool:
 
 
 def office_sac(raw: Any) -> str | None:
-    """Return an office's service area code from its stored HCM payload."""
+    """HCM's `sac` on an office — the service area code the place serves (`RO-104`,
+    `550R`). Read from `hcm_offices.raw` on display, never snapshotted: no column
+    holds it, and an office that is re-coded should show its current code.
+
+    Takes whatever the raw column yields, not only a dict, so a payload the driver
+    hands back as a string can never break /api/auth/me. None for offices HCM holds
+    no SAC for — including the ones whose payload carries a JSON null.
+    """
     if not isinstance(raw, dict):
         return None
     value = str(raw.get("sac") or "").strip()
@@ -164,15 +171,6 @@ def map_office(row: dict) -> dict:
         "state": row.get("state_name"),
         "is_active": _active(row.get("status")),
     }
-
-
-def office_sac(row: dict | None) -> str | None:
-    """HCM's `sac` on an office — the service area code the place serves (`RO-104`,
-    `AP-104-DO-012`). Read from `hcm_offices.raw` on display, never snapshotted: no
-    column holds it, and an office that is re-coded should show its current code.
-    None for offices HCM holds no SAC for."""
-    value = (row or {}).get("sac")
-    return str(value).strip() or None if value else None
 
 
 def map_facility_type(row: dict) -> dict:

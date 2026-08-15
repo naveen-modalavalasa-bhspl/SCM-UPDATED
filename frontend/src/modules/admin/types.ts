@@ -398,9 +398,19 @@ export interface LadderPost {
   holders: LadderHolder[];
 }
 
+/** How a step finds its approver.
+ *  - `hcm`   — a post in the HCM mirror.
+ *  - `local` — a chair this system owns, for the steps HCM has no post for.
+ *  - `rank`  — climbed from the raiser's own reporting line, so who signs depends on
+ *              who raised it. */
+export type StepKind = "hcm" | "local" | "rank";
+
 export interface CustomLadderStep {
   sequence: number;
-  position_id: number;
+  position_id?: number | null;
+  post_id?: number | null;
+  position_role_id?: number | null;
+  kind?: StepKind;
   name: string;
   holders: LadderHolder[];
   /** Nobody sits in this chair any more — it is skipped at submit. */
@@ -415,6 +425,98 @@ export interface CustomLadder extends LadderPolicy {
   is_new: boolean;
   steps: CustomLadderStep[];
   in_flight: number;
+  /** Built on one of the older screens. Editable here, but saving rewrites it. */
+  is_legacy?: boolean;
+  label?: string;
+  policies?: PolicyChoice[];
+}
+
+// ---- Settings > Approval Flow: one screen, one row per document type ----
+
+export interface PolicyChoice {
+  value: SelfApprovalPolicy;
+  label: string;
+  help: string;
+}
+
+/** One document type on the overview: its chain in a line, and whether it has one. */
+export interface FlowRow {
+  code: string;
+  label: string;
+  module: string;
+  workflow_id: number | null;
+  is_configured: boolean;
+  is_legacy: boolean;
+  self_approval_policy: SelfApprovalPolicy;
+  /** "Indent Team → SCM Head" — the whole chain, readable, no table needed. */
+  summary: string;
+  step_count: number;
+  in_flight: number;
+}
+
+export interface FlowOverview {
+  items: FlowRow[];
+  policies: PolicyChoice[];
+  modules: string[];
+}
+
+/** A chair the admin can put on a chain. One list, three kinds behind it. */
+export interface FlowRung {
+  id: number;
+  name: string;
+  department?: string | null;
+  role_name?: string;
+  members?: LadderHolder[];
+  position_count?: number;
+  people_count?: number;
+}
+
+export interface FlowRungs {
+  local: FlowRung[];
+  ranks: FlowRung[];
+  hcm: FlowRung[];
+}
+
+/** A document still climbing a version of the chain. */
+export interface FlowDocument {
+  id: number;
+  doc_no: string;
+  stage: string | null;
+  sequence: number;
+  started_by: string | null;
+  started_at: string | null;
+}
+
+/** One saved version. Retired versions keep governing the documents frozen onto them,
+ *  which is why each carries its own document list rather than a shared total. */
+export interface FlowVersion {
+  workflow_id: number;
+  version: number;
+  is_active: boolean;
+  code: string;
+  saved_at: string | null;
+  saved_by: string | null;
+  summary: string;
+  documents: FlowDocument[];
+}
+
+export interface ApprovalPostMember {
+  id: number;
+  name: string;
+  code: string | null;
+  /** HCM has dropped this employee; the chair needs reseating. */
+  is_stale?: boolean;
+}
+
+export interface ApprovalPost {
+  id: number;
+  code: string;
+  name: string;
+  department: string | null;
+  hcm_position_id: number | null;
+  is_active: boolean;
+  members: ApprovalPostMember[];
+  used_in_ladders: number;
 }
 
 export interface LadderPreview {

@@ -31,8 +31,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ValidationError
 from app.platform.hcm.models import HcmDepartment, HcmEmployee, HcmPosition
 from app.platform.settings.service import write_audit
-from app.platform.workflow import ladder
-from app.platform.workflow.models import Instance, Stage, StageCondition, Workflow
+from app.platform.workflow import ladder, posts
+from app.platform.workflow.models import (
+    ApprovalPost, Instance, Stage, StageCondition, Workflow,
+)
 from app.shared.enums import ApprovalMode, ApproverType, AuditAction, InstanceStatus
 from app.shared.models.base import utcnow
 
@@ -119,6 +121,8 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
     )).scalars().all())
     holders_of, _first = await ladder._position_people(
         db, [row.position_id for row in rows if row.position_id], None)
+    local_seats = await posts.members_of(
+        db, [row.post_id for row in rows if row.post_id])
     in_flight = (await db.execute(
         select(func.count(Instance.id)).where(
             Instance.workflow_id == wf.id,
@@ -129,15 +133,30 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
     # One person on several steps is allowed and normal here — each step is a hat, and
     # he signs once per hat, switching between them. Said plainly so an admin building
     # the ladder knows how many signatures they are actually asking that person for.
+    def _seats(row: Stage) -> list[dict]:
+        """Who fills this step, whichever kind of chair it is.
+
+        A rank rung has no fixed answer — which ancestor holds that rank depends on who
+        raises the document — so it reports no seats and is described by its name alone.
+        """
+        if row.post_id is not None:
+            return local_seats.get(row.post_id, [])
+        if row.position_id is not None:
+            return [{"id": h.id, "name": h.full_name, "code": h.emp_code}
+                    for h in holders_of.get(row.position_id, [])]
+        return []
+
     warnings: list[str] = []
     by_employee: dict[int, tuple[str, list[str]]] = {}
     for row in rows:
-        for holder in holders_of.get(row.position_id, []):
-            entry = by_employee.setdefault(holder.id, (holder.full_name, []))
-            entry[1].append(row.name or str(row.position_id))
-    warnings = [f"{name} fills {len(posts)} of these steps ({', '.join(posts)}) — "
+        if row.position_role_id is not None:
+            continue
+        for seat in _seats(row):
+            entry = by_employee.setdefault(seat["id"], (seat["name"], []))
+            entry[1].append(row.name or str(row.position_id or row.post_id))
+    warnings = [f"{name} fills {len(steps)} of these steps ({', '.join(steps)}) — "
                 f"they sign once per step, switching position each time."
-                for name, posts in by_employee.values() if len(posts) > 1]
+                for name, steps in by_employee.values() if len(steps) > 1]
 
     # A hand-built ladder never climbs, so "unreachable" here means one thing only:
     # nobody sits in the chair. resolve_fixed_chain skips such a step rather than
@@ -148,8 +167,11 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
     # came here to see, and a warning that cannot be computed must not be the reason
     # the screen fails to open.
     try:
-        empty = [row.name or str(row.position_id) for row in rows
-                 if not holders_of.get(row.position_id)]
+        # A rank rung is exempt: it is answered by climbing at submit time, so having
+        # nobody attached to it now says nothing about whether it will resolve.
+        fixed_rows = [row for row in rows if row.position_role_id is None]
+        empty = [row.name or str(row.position_id or row.post_id) for row in fixed_rows
+                 if not _seats(row)]
         if empty:
             line = (f"{len(empty)} step{'s' if len(empty) > 1 else ''} "
                     f"({', '.join(empty)}) {'have' if len(empty) > 1 else 'has'} nobody "
@@ -158,6 +180,9 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
             if len(empty) == len(rows):
                 line += (" Every step is empty, so documents will fall through to the "
                          "fallback approver.")
+            elif len(empty) == len(fixed_rows):
+                line += (" Only the climbed steps are left, so who signs depends "
+                         "entirely on the raiser's reporting line.")
             logger.warning("Custom approval ladder for project %s / %s: %s",
                            project_id, doc_type, line)
             warnings.append(line)
@@ -174,12 +199,18 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
         "steps": [{
             "sequence": row.sequence,
             "position_id": row.position_id,
+            "post_id": row.post_id,
+            "position_role_id": row.position_role_id,
+            # What the screen renders as the step's kind: "rank" is answered by
+            # climbing, the other two name a chair outright.
+            "kind": ("rank" if row.position_role_id is not None
+                     else "local" if row.post_id is not None else "hcm"),
             "name": row.name,
-            "holders": [{"id": h.id, "name": h.full_name, "code": h.emp_code}
-                        for h in holders_of.get(row.position_id, [])[:8]],
+            "holders": _seats(row)[:8],
             # Nobody sits in this chair any more — it will be skipped at submit rather
-            # than stranding the document, but the admin should know.
-            "is_dead": not holders_of.get(row.position_id),
+            # than stranding the document, but the admin should know. Never true of a
+            # rank rung, which has no fixed holder to be missing.
+            "is_dead": row.position_role_id is None and not _seats(row),
         } for row in rows],
     }
 
@@ -198,11 +229,57 @@ async def _active_custom(db: AsyncSession, project_id: int | None,
 
 # ---------------- resolution (no climbing) ----------------
 
+async def _local_post_rung(db: AsyncSession, stage: Stage, sequence: int,
+                           exclude_employee_id: int | None) -> dict | None:
+    """A rung naming a post this system owns rather than one from the HCM mirror.
+
+    Same shape as every other rung, with two deliberate differences: `position_id` is
+    None because there is no HCM post behind it, and `allowed_position_ids` is empty.
+    The engine reads an empty allowed-list as "no hat restriction" (engine.py, the
+    `if not allowed: continue` guard) and falls back to gating on `approver_ids`, which
+    is exactly right here — a local post's seat is the person, so the person is the gate.
+    """
+    post = await db.get(ApprovalPost, stage.post_id)
+    if post is None or not post.is_active:
+        logger.info("Rung %r skipped: local post %s is retired", stage.name, stage.post_id)
+        return None
+    holders = await posts.holders(db, post.id, exclude_employee_id)
+    if not holders:
+        logger.info("Rung %r skipped: nobody is seated in local post %r",
+                    stage.name, post.name)
+        return None
+    return {
+        "sequence": sequence,
+        "position_id": None,
+        "position_name": post.name,
+        "role_id": None,
+        "role_name": stage.name or post.name,
+        "approver_ids": [h.id for h in holders],
+        "approver_names": [h.full_name for h in holders],
+        "allowed_position_ids": [],
+        # Tells the history and inbox screens this rung is a locally-owned chair, so a
+        # missing HCM position never reads as a broken mirror.
+        "post_id": post.id,
+    }
+
+
 async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
                               requester_id: int | None,
                               policy: str = ladder.POLICY_INDEPENDENT,
-                              requester_position_id: int | None = None) -> list[dict]:
-    """The ticked posts, in order, skipping the ones nobody fills.
+                              requester_position_id: int | None = None,
+                              context: dict | None = None) -> list[dict]:
+    """The ticked rungs, in order, skipping the ones nobody fills.
+
+    A rung is one of three things, and a single ladder may mix them — which the SCM
+    indent flow requires: it climbs the field reporting line (Store Keeper -> OE ->
+    District Manager -> …) and only then hands to two fixed SCM chairs.
+
+      * `post_id`         — a local post (workflow/posts.py). Seats are people here.
+      * `position_id`     — an HCM post. The original custom-ladder rung.
+      * `position_role_id`— a RANK, resolved by climbing the raiser's own reporting
+                            line, exactly as `ladder.resolve_chain` does. Spliced in at
+                            its position in the order, so a mixed ladder reads top to
+                            bottom the way the admin built it.
 
     Same shape as ladder.resolve_chain so the engine's ladder path needs no other
     change. The difference from a rank ladder is what a rung MEANS here: a rung is a
@@ -224,9 +301,31 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
     ladder is made of. Each rung keeps its own post, so `engine.act` requires the
     matching hat to be active before it will accept a decision.
     """
+    exclude_id = None if policy == ladder.POLICY_CREATOR_ALLOWED else requester_id
     chain: list[dict] = []
     for stage in sorted(stages, key=lambda s: s.sequence):
-        if not stage.is_enabled or stage.position_id is None:
+        if not stage.is_enabled:
+            continue
+
+        # A locally-owned chair: HCM has no position for this step at all.
+        if stage.post_id is not None:
+            rung = await _local_post_rung(db, stage, len(chain) + 1, exclude_id)
+            if rung is not None:
+                chain.append(rung)
+            continue
+
+        # A RANK rung inside a hand-built ladder: climb the raiser's own reporting line
+        # and keep the ancestors holding this rank. Delegated to ladder.resolve_chain
+        # so there is exactly one implementation of climbing, and spliced in here so a
+        # mixed ladder keeps the order the admin built.
+        if stage.position_role_id is not None:
+            climbed = await ladder.resolve_chain(
+                db, [stage], requester_position_id, requester_id, context or {}, policy)
+            for rung in climbed:
+                chain.append({**rung, "sequence": len(chain) + 1})
+            continue
+
+        if stage.position_id is None:
             continue
         # The hat he raised the document under. Under CREATOR_ALLOWED it still has to
         # be signed; under INDEPENDENT signing it would be approving his own work.
@@ -273,14 +372,27 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
     if not data.steps and data.self_approval_policy != ladder.POLICY_NONE:
         raise ValidationError("Pick at least one approver")
 
-    allowed = {row[0] for row in (await db.execute(
-        select(HcmPosition.id).where(
-            HcmPosition.id.in_([step.position_id for step in data.steps]),
-            HcmPosition.is_active.is_(True))
-    )).all()}
-    missing = [step.position_id for step in data.steps if step.position_id not in allowed]
-    if missing:
-        raise ValidationError(f"Unknown or inactive position {missing[0]}")
+    wanted_positions = [s.position_id for s in data.steps if s.position_id is not None]
+    if wanted_positions:
+        allowed = {row[0] for row in (await db.execute(
+            select(HcmPosition.id).where(
+                HcmPosition.id.in_(wanted_positions),
+                HcmPosition.is_active.is_(True))
+        )).all()}
+        missing = [value for value in wanted_positions if value not in allowed]
+        if missing:
+            raise ValidationError(f"Unknown or inactive position {missing[0]}")
+
+    wanted_posts = [s.post_id for s in data.steps if s.post_id is not None]
+    if wanted_posts:
+        allowed = {row[0] for row in (await db.execute(
+            select(ApprovalPost.id).where(
+                ApprovalPost.id.in_(wanted_posts),
+                ApprovalPost.is_active.is_(True))
+        )).all()}
+        missing = [value for value in wanted_posts if value not in allowed]
+        if missing:
+            raise ValidationError(f"Unknown or retired approval post {missing[0]}")
 
     project_name = None
     if data.project_id is not None:
@@ -314,6 +426,8 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
         module=ladder.MODULE_BY_DOC_TYPE.get(data.doc_type, "Other"),
         version=version,
         is_active=True,
+        # So the version list can say who changed the chain, not just when.
+        created_by_id=getattr(user, "id", None),
     )
     db.add(wf)
     await db.flush()
@@ -340,10 +454,14 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
             workflow_id=wf.id,
             sequence=index + 1,
             name=step.name,
-            # A real post, known before any document exists — so unlike a rank rung this
-            # genuinely is a POSITION stage.
-            approver_type=ApproverType.POSITION.value,
+            # POSITION for a chair known before any document exists — an HCM post or a
+            # local one. A rank rung is ROLE: which chair it means depends on who
+            # raised the document, so it can only be answered at submit time.
+            approver_type=(ApproverType.ROLE.value if step.position_role_id is not None
+                           else ApproverType.POSITION.value),
             position_id=step.position_id,
+            post_id=step.post_id,
+            position_role_id=step.position_role_id,
             is_enabled=True,
             approval_mode=ApprovalMode.ANY_ONE.value,
         )

@@ -5,6 +5,7 @@ from sqlalchemy.orm import aliased
 
 from app.core.exceptions import AuthenticationError, PermissionError_
 from app.core.security import create_access_token, verify_password
+from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment,
     HcmEmployee,
@@ -55,10 +56,14 @@ async def build_me(db: AsyncSession, user: HcmEmployee) -> dict:
     warehouse_label = await rbac_service.warehouse_menu_label(db, user, position_id)
     menu = await rbac_service.get_user_menu(db, permissions, warehouse_label)
     active_position = next((p for p in positions if p["id"] == position_id), None)
+    # The employee's own office SAC, read from the mirror. One extra keyed load on a
+    # call that already does five queries; an unknown office simply reads as absent.
+    office = await db.get(HcmOffice, user.office_id) if user.office_id else None
     return {
         "employee": {"id": user.id, "name": user.full_name,
                      "code": user.emp_code, "email": user.email,
-                     "office_id": user.office_id, "office_name": user.office_name},
+                     "office_id": user.office_id, "office_name": user.office_name,
+                     "office_sac": mappers.office_sac(office.raw) if office else None},
         "roles": [r.code for r in roles],
         "positions": positions,
         "active_position": active_position,

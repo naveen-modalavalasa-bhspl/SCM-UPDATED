@@ -202,6 +202,30 @@ async def _upsert(db: AsyncSession, model: type, cols: dict, raw: dict,
     return True
 
 
+def _rescuable(position_id: int, known: dict) -> bool:
+    """May the employee feed's copy of this post be written?
+
+    Yes when the post is new, and yes when the row we already hold was ITSELF rescued —
+    otherwise a post that only the employee feed knows about is frozen at whatever HCM
+    sent the day it first appeared. That is how the six SCM warehouse posts kept
+    `parent_position_id = NULL` long after HCM populated their `reporting_to`: they were
+    inserted once and never looked at again, so the reporting line existed upstream and
+    never arrived here.
+
+    No when the positions feed owns the row. That feed is authoritative wherever it
+    lists a post, and its record is much richer — project, section id, department id —
+    so letting the thinner employee copy overwrite it would blank those columns.
+
+    Told apart by the stored payload: a rescued row's `raw` is the employee record, and
+    only that shape carries an `employee` block.
+    """
+    existing = known.get(position_id)
+    if existing is None:
+        return True
+    raw = getattr(existing, "raw", None)
+    return isinstance(raw, dict) and "employee" in raw
+
+
 async def _issue_missing_logins(db: AsyncSession) -> int:
     """Give every active employee without one a login, on the configured password.
 
@@ -347,7 +371,7 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
                     await _upsert(db, HcmPositionAssignment, derived, row, seats)
             elif entity_key == "employees":
                 orphan = mappers.position_from_employee(row)
-                if orphan and orphan[0]["id"] not in known_positions:
+                if orphan and _rescuable(orphan[0]["id"], known_positions):
                     position_cols, seat = orphan
                     await _upsert(db, HcmPosition, position_cols, row, known_positions)
                     await _upsert(db, HcmPositionAssignment, seat, row, seats)

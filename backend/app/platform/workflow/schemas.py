@@ -1,7 +1,7 @@
 """Workflow action wire shapes."""
 from datetime import date
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class WorkflowActionIn(BaseModel):
@@ -106,15 +106,44 @@ class LadderIn(LadderPolicyMixin):
 
 
 class CustomLadderStepIn(BaseModel):
-    """One step of a hand-built ladder: a POST, not a rank and not a person."""
-    position_id: int
+    """One step of a hand-built ladder — exactly one of three kinds of chair.
+
+    `position_id` is an HCM post, `post_id` a post this system owns (for the steps HCM
+    has no position for), and `position_role_id` a RANK climbed from the raiser's own
+    reporting line. A ladder may mix them: the SCM indent climbs the field line and then
+    hands to two fixed SCM chairs.
+    """
+    position_id: int | None = None
+    post_id: int | None = None
+    position_role_id: int | None = None
     name: str
+
+    @model_validator(mode="after")
+    def _exactly_one_kind(self):
+        kinds = [self.position_id, self.post_id, self.position_role_id]
+        if sum(1 for value in kinds if value is not None) != 1:
+            raise ValueError(
+                "A step names exactly one of position_id, post_id or position_role_id")
+        return self
 
 
 class CustomLadderIn(LadderPolicyMixin):
     project_id: int | None = None
     doc_type: str
     steps: list[CustomLadderStepIn] = Field(default_factory=list)
+
+
+class ApprovalPostIn(BaseModel):
+    """A chair this system owns, and who currently sits in it.
+
+    `employee_ids` is the WHOLE seating, not an addition: saving replaces it, which is
+    what "these are the people in this post" means on a form.
+    """
+    name: str
+    department: str | None = None
+    hcm_position_id: int | None = None
+    employee_ids: list[int] = Field(default_factory=list)
+    is_active: bool | None = None
 
 
 class LadderCopyIn(BaseModel):

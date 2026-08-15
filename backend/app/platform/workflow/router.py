@@ -8,12 +8,13 @@ from app.core.dependencies import get_current_user, require_permission
 from app.core.pagination import PageParams
 from app.platform.rbac import permissions as perms
 from app.platform.workflow import (
-    custom_ladder, engine, ladder, ladder_config, reminders, service,
+    custom_ladder, engine, flow_config, ladder, ladder_config, posts, reminders, service,
 )
 from app.platform.workflow import scheduler as approval_scheduler
 from app.platform.workflow.schemas import (
-    CustomLadderIn, DelegationEndIn, DelegationIn, DelegationOut, LadderCopyIn, LadderIn,
-    ReminderConfigIn, WorkflowActionIn, WorkflowActionOut, WorkflowIn,
+    ApprovalPostIn, CustomLadderIn, DelegationEndIn, DelegationIn, DelegationOut,
+    LadderCopyIn, LadderIn, ReminderConfigIn, WorkflowActionIn, WorkflowActionOut,
+    WorkflowIn,
 )
 
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
@@ -197,6 +198,121 @@ async def save_custom_ladder(
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
     return await custom_ladder.save_custom(db, body, user)
+
+
+# ---------------- Settings > Approval Flow (the one-screen replacement) ----------------
+#
+# One question — who signs what — answered as: document type -> ordered list of chairs.
+# See platform/workflow/flow_config.py for why this exists beside the older screens.
+
+@router.get("/flow")
+async def flow_overview(
+    project_id: int | None = Depends(_project_id),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await flow_config.overview(db, project_id)
+
+
+@router.get("/flow/rungs")
+async def flow_rungs(
+    search: str = "",
+    project_id: int | None = Depends(_project_id),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await flow_config.rungs(db, project_id, search)
+
+
+@router.get("/flow/{doc_type}/versions")
+async def flow_versions(
+    doc_type: str,
+    project_id: int | None = Depends(_project_id),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    """Every version, with the documents still riding each one."""
+    return await flow_config.versions(db, project_id, doc_type)
+
+
+@router.post("/flow/{doc_type}/restore/{workflow_id}")
+async def restore_flow_version(
+    doc_type: str,
+    workflow_id: int,
+    project_id: int | None = Depends(_project_id),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    """Copy an old version's steps forward as a new one. The old row is never revived."""
+    return await flow_config.restore(db, project_id, doc_type, workflow_id, user)
+
+
+@router.get("/flow/{doc_type}")
+async def flow_chain(
+    doc_type: str,
+    project_id: int | None = Depends(_project_id),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await flow_config.chain(db, project_id, doc_type)
+
+
+@router.post("/flow")
+async def save_flow_chain(
+    body: CustomLadderIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    """Saved through the hand-built ladder writer, so there is one way a chain is stored."""
+    return await custom_ladder.save_custom(db, body, user)
+
+
+# ---------------- the chairs this system owns ----------------
+
+@router.get("/posts")
+async def approval_posts(
+    include_inactive: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await posts.list_posts(db, include_inactive)
+
+
+@router.get("/posts/employees")
+async def approval_post_employees(
+    search: str = "",
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await posts.search_employees(db, search)
+
+
+@router.post("/posts")
+async def create_approval_post(
+    body: ApprovalPostIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await posts.save_post(db, body, user)
+
+
+@router.put("/posts/{post_id}")
+async def update_approval_post(
+    post_id: int,
+    body: ApprovalPostIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await posts.save_post(db, body, user, post_id)
+
+
+@router.delete("/posts/{post_id}")
+async def retire_approval_post(
+    post_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    return await posts.deactivate_post(db, post_id, user)
 
 
 @router.get("/definitions")

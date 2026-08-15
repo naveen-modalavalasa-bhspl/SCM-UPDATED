@@ -143,9 +143,15 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
     # the selected one showed him nothing and read as missing stock.
     my_points = await locations.location_ids_for_user(db, user)
     target = await _requester_point(db, indent)
+    # A point cannot serve itself. The raiser's own shelf is inside `my_points`
+    # whenever they report under this approver — an OE holds every LIP below him,
+    # and the LIP storekeeper who raised the indent is one of them — so without this
+    # the screen offered the raiser's own units back to him as a source, and
+    # `issue_from_my_stock` then refused the very row the screen had suggested.
+    source_points = my_points - {target} if target is not None else my_points
     # Names, once, for every point in play. A picker that offers "#12" asks the
     # approver to know warehouse ids by heart.
-    names = await _names_for(db, my_points | ({target} if target else set()))
+    names = await _names_for(db, source_points | ({target} if target else set()))
     committed = await committed_by_line(db, indent_id)
 
     lines = (await db.execute(
@@ -155,7 +161,7 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
 
     out = []
     for line in lines:
-        by_point = await _stock_at(db, line.item_id, my_points, indent_id=indent_id)
+        by_point = await _stock_at(db, line.item_id, source_points, indent_id=indent_id)
         owed = max(remainder_of(line) - committed.get(line.id, Decimal("0")),
                    Decimal("0"))
         on_hand = sum(by_point.values(), Decimal("0"))
@@ -192,7 +198,7 @@ async def availability_for_indent(db: AsyncSession, indent_id: int, user) -> dic
         "indent_no": indent.indent_no,
         "target_warehouse_id": target,
         "target_warehouse_name": names.get(target) if target else None,
-        "my_warehouse_ids": sorted(my_points),
+        "my_warehouse_ids": sorted(source_points),
         "items": out,
     }
 

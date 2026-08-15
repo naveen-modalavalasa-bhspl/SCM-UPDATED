@@ -67,6 +67,11 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.STOCK_TRANSFER.value: "Inventory",
     DocType.WH_ISSUE.value: "Warehouse",
     DocType.GRN.value: "Warehouse",
+    # Both really are submitted to the engine by modules/warehouse/service.py, and both
+    # were missing here — so they never appeared on the config screen and always fell
+    # through to the reporting line, however the admin configured the rest.
+    DocType.DISPATCH.value: "Warehouse",
+    DocType.PURCHASE_RETURN.value: "Warehouse",
     DocType.PO.value: "Procurement",
 }
 
@@ -82,6 +87,10 @@ DOC_TYPE_LABEL: dict[str, str] = {
     DocType.STOCK_TRANSFER.value: "Stock Transfer (cross-project)",
     DocType.WH_ISSUE.value: "Material Issue",
     DocType.GRN.value: "Goods Receipt",
+    # The outward leg: transport is arranged and the consignment leaves the warehouse.
+    # This is where Logistics signs.
+    DocType.DISPATCH.value: "Dispatch",
+    DocType.PURCHASE_RETURN.value: "Purchase Return",
     DocType.PO.value: "Purchase Order",
 }
 

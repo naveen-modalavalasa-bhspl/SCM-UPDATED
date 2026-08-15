@@ -36,6 +36,8 @@ import { RulesPage } from "@/modules/admin/pages/RulesPage";
 import { WorkflowsPage } from "@/modules/admin/pages/WorkflowsPage";
 import { ApprovalConfigPage } from "@/modules/admin/pages/ApprovalConfigPage";
 import { CustomLadderPage } from "@/modules/admin/pages/CustomLadderPage";
+import { ApprovalFlowPage } from "@/modules/admin/pages/ApprovalFlowPage";
+import { ChainEditorPage } from "@/modules/admin/pages/ChainEditorPage";
 import { PoliciesPage } from "@/modules/admin/pages/PoliciesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { AppLogsPage } from "@/modules/admin/pages/AppLogsPage";
@@ -187,6 +189,8 @@ function AppRoutes() {
         {/* Reached from the Approvals Config screen, not from the menu — adding it to
             rbac_pages would mean reseeding, and seed prunes the live tree. */}
         <Route path="admin/approvals-config/custom" element={<CustomLadderPage />} />
+        <Route path="admin/approval-flow" element={<ApprovalFlowPage />} />
+        <Route path="admin/approval-flow/:docType" element={<ChainEditorPage />} />
         <Route path="admin/policies" element={<PoliciesPage />} />
         <Route path="admin/audit" element={<AuditPage />} />
         <Route path="admin/app-logs" element={<AppLogsPage />} />

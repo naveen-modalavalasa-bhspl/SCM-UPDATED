@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
@@ -409,6 +410,10 @@ async def get_user_positions(db: AsyncSession, employee_id: int) -> list[dict]:
                 HcmPositionAssignment.office_id, HcmPosition.office_id,
             ).label("office_id"),
             HcmOffice.name.label("office_name"),
+            # The office's HCM payload, carried only so the service area code can be
+            # read off it — SAC has no column, and the indent form needs the code for
+            # whichever of the caller's offices the indent delivers to.
+            HcmOffice.raw.label("office_raw"),
             HcmPositionAssignment.is_primary,
         )
         .join(HcmPositionAssignment, HcmPositionAssignment.position_id == HcmPosition.id)
@@ -428,7 +433,9 @@ async def get_user_positions(db: AsyncSession, employee_id: int) -> list[dict]:
     return [{
         "id": r.id, "name": r.name, "department_id": r.department_id,
         "department_name": r.department_name, "office_id": r.office_id,
-        "office_name": r.office_name, "is_primary": r.is_primary,
+        "office_name": r.office_name,
+        "office_sac": mappers.office_sac(r.office_raw),
+        "is_primary": r.is_primary,
     } for r in rows]
 
 

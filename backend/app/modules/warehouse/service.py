@@ -6924,12 +6924,6 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         raise ValidationError("A dispatch with no lines has nothing to send")
 
     to_wh = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
-    if to_wh is None:
-        to_wh = await _destination_warehouse(db, issue, wh.id)
-    if data.dispatch_type == DispatchType.TRANSFER and to_wh is None:
-        raise ValidationError("A stock transfer needs a destination warehouse")
-    if to_wh is not None and to_wh.id == wh.id:
-        raise ValidationError("A transfer cannot have the same origin and destination")
     _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
 
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
@@ -6955,6 +6949,19 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
                 f"{ref_issue.issue_no} already has dispatch {existing}"
             )
         _, destination_office_name = await _issue_destination(db, ref_issue)
+
+    # Derive the destination from the issue when nobody typed one. Has to sit here, not
+    # up with the other to_wh handling: it needs the issue, and the issue is only loaded
+    # above. It read an undefined `issue` there and raised NameError on every dispatch
+    # that left the field blank — which is every issue-linked delivery, since the form
+    # labels that field "for transfer only".
+    if to_wh is None and ref_issue is not None:
+        to_wh = await _destination_warehouse(db, ref_issue, wh.id)
+
+    if data.dispatch_type == DispatchType.TRANSFER and to_wh is None:
+        raise ValidationError("A stock transfer needs a destination warehouse")
+    if to_wh is not None and to_wh.id == wh.id:
+        raise ValidationError("A transfer cannot have the same origin and destination")
 
     dispatch = m.Dispatch(
         # See create_issue. All three are delete-orphan collections, so the flush wants

@@ -538,7 +538,7 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
     # real wf_actions row.
     chain = [] if policy == ladder.POLICY_NONE else (
         await custom_ladder.resolve_fixed_chain(
-            db, stages, user.id, policy, requester_position_id)
+            db, stages, user.id, policy, requester_position_id, context)
         if ladder.is_custom_ladder(wf)
         else await ladder.resolve_chain(
             db, stages, requester_position_id, user.id, context, policy)

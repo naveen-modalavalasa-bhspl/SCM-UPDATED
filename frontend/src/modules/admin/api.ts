@@ -1,7 +1,9 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  AppLog, AuditRow, Conflict, CustomLadder, CustomLadderStep, DocSeries, Ladder,
+  ApprovalPost, ApprovalPostMember,
+  AppLog, AuditRow, Conflict, CustomLadder, CustomLadderStep, DocSeries,
+  FlowOverview, FlowRungs, FlowVersion, Ladder,
   LadderDepartment, LadderOptions, LadderPolicy, LadderPosition, LadderPost,
   LadderPreview, LadderRank,
   LadderRung, NotificationRule, ReminderConfig, ReminderRunResult, ReminderStatus,
@@ -17,6 +19,18 @@ const rungPayload = (rungs: LadderRung[]) => rungs.map((rung) => ({
   selected_position_ids: rung.selected_position_ids,
   conditions: rung.conditions,
 }));
+
+/** One step of an approval chain, as the server wants it.
+ *
+ *  Exactly ONE of the three chair kinds is sent. The server rejects any other count,
+ *  so a step that leaked a null `position_id` alongside a `post_id` would come back
+ *  422 and read to the admin as "Save did nothing". Exported for its test. */
+export const stepPayload = (step: CustomLadderStep) => ({
+  name: step.name,
+  ...(step.post_id != null ? { post_id: step.post_id }
+    : step.position_role_id != null ? { position_role_id: step.position_role_id }
+    : { position_id: step.position_id }),
+});
 
 /** The ladder-wide settings, omitted entirely when the caller has none — the server
  *  treats a missing policy as "leave it at the default". */
@@ -181,6 +195,58 @@ export const adminApi = {
         steps: steps.map((step) => ({ position_id: step.position_id, name: step.name })),
         ...policyPayload(policy),
       }).then((r) => r.data),
+  },
+  // ---- Settings > Approval Flow: one screen for "who signs what" ----
+  // Saves through the same writer as customLadders, so a chain built here is the same
+  // row a chain built there is — this is a new front, not a second store.
+  flow: {
+    overview: (projectId: number | null) =>
+      api.get<FlowOverview>("/api/workflow/flow", {
+        params: projectId != null ? { project_id: projectId } : {},
+      }).then((r) => r.data),
+    chain: (projectId: number | null, docType: string) =>
+      api.get<CustomLadder>(`/api/workflow/flow/${docType}`, {
+        params: projectId != null ? { project_id: projectId } : {},
+      }).then((r) => r.data),
+    /** `search` only reaches the HCM posts — local chairs and ranks are short lists and
+     *  come back whole, so the picker has something to show before anyone types. */
+    rungs: (projectId: number | null, search = "") =>
+      api.get<FlowRungs>("/api/workflow/flow/rungs", {
+        params: { search, ...(projectId != null ? { project_id: projectId } : {}) },
+      }).then((r) => r.data),
+    /** Every version, newest first, each with the documents still riding it. */
+    versions: (projectId: number | null, docType: string) =>
+      api.get<{ items: FlowVersion[] }>(`/api/workflow/flow/${docType}/versions`, {
+        params: projectId != null ? { project_id: projectId } : {},
+      }).then((r) => r.data.items),
+    /** Copies an old version's steps forward as a new one — the old row is never
+     *  revived, so documents frozen onto it keep resolving against it. */
+    restore: (projectId: number | null, docType: string, workflowId: number) =>
+      api.post<CustomLadder>(
+        `/api/workflow/flow/${docType}/restore/${workflowId}`, null,
+        { params: projectId != null ? { project_id: projectId } : {} },
+      ).then((r) => r.data),
+    save: (projectId: number | null, docType: string, steps: CustomLadderStep[],
+           policy?: Partial<LadderPolicy>) =>
+      api.post<CustomLadder>("/api/workflow/flow", {
+        project_id: projectId, doc_type: docType,
+        steps: steps.map(stepPayload),
+        ...policyPayload(policy),
+      }).then((r) => r.data),
+  },
+  // ---- the chairs this system owns, for the steps HCM has no post for ----
+  approvalPosts: {
+    list: () => api.get<{ items: ApprovalPost[] }>("/api/workflow/posts")
+      .then((r) => r.data.items),
+    employees: (search: string) =>
+      api.get<{ items: ApprovalPostMember[] }>("/api/workflow/posts/employees",
+        { params: { search } }).then((r) => r.data.items),
+    create: (body: Partial<ApprovalPost> & { employee_ids: number[] }) =>
+      api.post<ApprovalPost>("/api/workflow/posts", body).then((r) => r.data),
+    update: (id: number, body: Partial<ApprovalPost> & { employee_ids: number[] }) =>
+      api.put<ApprovalPost>(`/api/workflow/posts/${id}`, body).then((r) => r.data),
+    retire: (id: number) =>
+      api.delete(`/api/workflow/posts/${id}`).then((r) => r.data),
   },
   docSeries: {
     list: () => all<DocSeries>("/api/admin/doc-series"),
