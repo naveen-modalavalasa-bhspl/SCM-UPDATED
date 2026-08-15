@@ -64,6 +64,12 @@ import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialReq
 import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
 import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
 import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
+import {
+  ReturnsOverviewPage, ReturnsListPage, ReturnFormPage, ReturnDetailPage,
+  ReceivingConfigPage, DecisionQueuePage, PurchaseReturnsPage,
+} from "@/modules/returns";
+// The API console — build an API from the screen over any table in the database.
+import { ApiClientsPage, ApiClientDetailPage } from "@/modules/integrations";
 import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
 import { CodeFormatsPage } from "@/modules/settings/pages/CodeFormatsPage";
 // One screen serves all four report ledgers; the ledger key is a route param.
@@ -143,6 +149,19 @@ function AppRoutes() {
         <Route path="stock/*" element={<WarehouseModule />} />
         <Route path="issues/*" element={<WarehouseModule />} />
         <Route path="warehouse/*" element={<WarehouseModule />} />
+        <Route path="returns" element={<ReturnsListPage />} />
+        <Route path="returns/dashboard" element={<ReturnsOverviewPage />} />
+        <Route path="returns/approvals" element={<ReturnsListPage />} />
+        <Route path="returns/mine" element={<ReturnsListPage />} />
+        {/* The two desks. One component, the queue read off the path. */}
+        <Route path="returns/decisions" element={<DecisionQueuePage />} />
+        <Route path="returns/sign-off" element={<DecisionQueuePage />} />
+        {/* Read only — pro_returns is the warehouse module's table. */}
+        <Route path="returns/purchase" element={<PurchaseReturnsPage />} />
+        <Route path="returns/new" element={<ReturnFormPage />} />
+        <Route path="returns/settings/receiving" element={<ReceivingConfigPage />} />
+        <Route path="returns/:id" element={<ReturnDetailPage />} />
+        <Route path="returns/:id/edit" element={<ReturnFormPage />} />
         <Route path="inventory" element={<InventoryOverviewPage />} />
         <Route path="inventory/stock-balance" element={<StockBalanceView />} />
         <Route path="inventory/ledger" element={<StockLedgerView />} />
@@ -197,6 +216,11 @@ function AppRoutes() {
         <Route path="admin/numbering" element={<NumberingPage />} />
         <Route path="admin/notifications" element={<NotificationsPage />} />
         <Route path="admin/fallback-log" element={<FallbackLogPage />} />
+        {/* /admin/integrations, matching the `admin_integrations` page row — the route
+            follows the menu, not the other way round. */}
+        <Route path="admin/integrations" element={<ApiClientsPage />} />
+        {/* Child screen, reached by opening a row — no menu entry of its own. */}
+        <Route path="admin/integrations/:code" element={<ApiClientDetailPage />} />
         <Route path="masters" element={<MastersPage />} />
         {/* /reports lands on the first ledger so the rail entry always has a screen. */}
         <Route path="reports" element={<Navigate to="/reports/indents" replace />} />

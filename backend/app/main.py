@@ -144,6 +144,12 @@ def _include_routers() -> None:
         "app.modules.inventory.router",
         "app.modules.logistics.router",
         "app.modules.warehouse.router",
+        # After warehouse: a return reuses inv_sto and reads pro_returns, so it sits
+        # at the end of the module chain (rule 5) and nothing imports it back.
+        "app.modules.returns.router",
+        # The API console. Reads every module's tables and is read by none, so it
+        # registers late, beside reports.
+        "app.modules.integrations.router",
         # Last in the chain: approvals presents tasks from every other module, so it
         # imports them all and nothing imports it back.
         "app.modules.approvals.router",

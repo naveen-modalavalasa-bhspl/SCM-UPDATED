@@ -169,6 +169,33 @@ ADMIN_SETTINGS_MANAGE = "admin.settings.manage"
 # rather than riding along with "can edit the company address".
 ADMIN_CODE_FORMATS_MANAGE = "admin.code_formats.manage"
 
+# --- Returns ---
+# A return borrows no permission from stock. It reads like a transfer and it ends in
+# one, but the people are different: a LIP storekeeper raises returns and must never
+# be able to transfer stock sideways, and the decision desk that says where returned
+# material goes is not the desk that approves an outward move.
+RETURN_VIEW = "return.view"
+RETURN_CREATE = "return.create"
+RETURN_APPROVE = "return.approve"
+# Where the material goes — scrap, vendor, restock, disposal. Its own code because it
+# is a commercial call (a scrapped batch is written off), not a movement sign-off.
+RETURN_DECIDE = "return.decide"
+# The floor agreeing the decision is workable, or sending it back for a fresh one.
+RETURN_ENDORSE = "return.endorse"
+# Which posts receive returns. Configuration, so it sits with the other config codes
+# rather than with the document ones.
+RETURN_CONFIG_MANAGE = "return.config.manage"
+
+# --- Integrations (the API console) ---
+# Not admin.settings.manage: that code also unscopes stock lists and covers the
+# company address. Minting a key that lets an outside system read the database is its
+# own decision, and seeing which systems are connected is not the same as issuing one.
+INTEGRATION_VIEW = "integration.view"
+INTEGRATION_MANAGE = "integration.manage"
+# The one that hands out credentials. Separate from MANAGE so composing an endpoint
+# and issuing a key can be held by different people.
+INTEGRATION_KEYS_MANAGE = "integration.keys.manage"
+
 
 ALL_PERMISSIONS: list[Perm] = [
     Perm(INDENT_VIEW, "indents", "indent", "view", "View indents"),
@@ -298,6 +325,23 @@ ALL_PERMISSIONS: list[Perm] = [
          "Manage system settings"),
     Perm(ADMIN_CODE_FORMATS_MANAGE, "admin", "code_formats", "manage",
          "Set the asset & consumable code formula"),
+    Perm(RETURN_VIEW, "returns", "return", "view", "View returns"),
+    Perm(RETURN_CREATE, "returns", "return", "create",
+         "Raise and submit a return"),
+    Perm(RETURN_APPROVE, "returns", "return", "approve",
+         "Approve or reject a return"),
+    Perm(RETURN_DECIDE, "returns", "return", "decide",
+         "Decide where returned material goes"),
+    Perm(RETURN_ENDORSE, "returns", "return", "endorse",
+         "Endorse or object to a return decision"),
+    Perm(RETURN_CONFIG_MANAGE, "returns", "return", "config_manage",
+         "Set which posts receive returns"),
+    Perm(INTEGRATION_VIEW, "integrations", "integration", "view",
+         "See connected applications and their endpoints"),
+    Perm(INTEGRATION_MANAGE, "integrations", "integration", "manage",
+         "Register applications and compose their API endpoints"),
+    Perm(INTEGRATION_KEYS_MANAGE, "integrations", "integration", "keys_manage",
+         "Issue and revoke API keys"),
     Perm(REPORT_VIEW, "reports", "report", "view",
          "View the cross-module report ledgers"),
     Perm(REPORT_EXPORT, "reports", "report", "export",

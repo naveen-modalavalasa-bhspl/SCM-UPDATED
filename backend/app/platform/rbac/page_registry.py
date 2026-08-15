@@ -63,6 +63,34 @@ PAGES: list[PageDef] = [
     # The asset / consumable code formula. Last in Settings for the reason above.
     PageDef("admin_code_formats", "/admin/code-formats", "Code Formats",
             parent="grp_settings", module="admin", icon="hash", sort_order=102),
+    # The API console. Under Settings, last, for the same reason as Code Formats —
+    # a new screen must never become a module's front door.
+    PageDef("admin_integrations", "/admin/integrations", "Integrations",
+            parent="grp_settings", module="integrations", icon="plug",
+            sort_order=103),
+    # Returns — a module of its own, so the group row comes first and the screens
+    # hang off it. sort_order 60 puts it after Warehouse and before Reports.
+    PageDef("grp_returns", "/returns", "Returns", module="returns",
+            icon="corner-up-left", sort_order=60),
+    PageDef("returns_overview", "/returns/dashboard", "Overview",
+            parent="grp_returns", module="returns", sort_order=1),
+    PageDef("returns_register", "/returns", "All Returns",
+            parent="grp_returns", module="returns", sort_order=2),
+    PageDef("returns_mine", "/returns/mine", "My Returns",
+            parent="grp_returns", module="returns", sort_order=3),
+    PageDef("returns_approvals", "/returns/approvals", "Approvals",
+            parent="grp_returns", module="returns", sort_order=4),
+    # The two desks. Separate rows because they are separate backlogs held by
+    # different people, even though one component serves both.
+    PageDef("returns_decisions", "/returns/decisions", "Decision Desk",
+            parent="grp_returns", module="returns", sort_order=5),
+    PageDef("returns_sign_off", "/returns/sign-off", "Sign-off",
+            parent="grp_returns", module="returns", sort_order=6),
+    PageDef("returns_purchase", "/returns/purchase", "Purchase Returns",
+            parent="grp_returns", module="returns", sort_order=7),
+    PageDef("returns_receiving_config", "/returns/settings/receiving",
+            "Receiving Points", parent="grp_returns", module="returns",
+            sort_order=8),
 ]
 
 

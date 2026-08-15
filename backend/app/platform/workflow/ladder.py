@@ -65,6 +65,8 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.FORWARD_ISSUE.value: "Warehouse",
     DocType.MR.value: "Inventory",
     DocType.STOCK_TRANSFER.value: "Inventory",
+    DocType.STOCK_RETURN.value: "Returns",
+    DocType.STOCK_RETURN_RECEIPT.value: "Returns",
     DocType.WH_ISSUE.value: "Warehouse",
     DocType.GRN.value: "Warehouse",
     # Both really are submitted to the engine by modules/warehouse/service.py, and both
@@ -85,6 +87,8 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # Only ever raised for a transfer that crosses a project boundary — a
     # same-project transfer never starts a workflow, so this ladder stays quiet.
     DocType.STOCK_TRANSFER.value: "Stock Transfer (cross-project)",
+    DocType.STOCK_RETURN.value: "Stock Return (sending material back up)",
+    DocType.STOCK_RETURN_RECEIPT.value: "Stock Return (receiving and deciding)",
     DocType.WH_ISSUE.value: "Material Issue",
     DocType.GRN.value: "Goods Receipt",
     # The outward leg: transport is arranged and the consignment leaves the warehouse.
@@ -95,7 +99,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
 }
 
 # The order the modules are listed in on the config screen.
-MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Procurement"]
+MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Returns", "Procurement"]
 
 # Document types whose DEFAULT approver is the raiser's own post, not somebody above
 # it. These are the events where authority comes from holding the thing rather than

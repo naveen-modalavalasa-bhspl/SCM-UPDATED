@@ -133,6 +133,14 @@ class DocType(str, Enum):
     # engine when the two points sit in different projects — a same-project transfer
     # is the holder's own call and never starts a workflow at all.
     STOCK_TRANSFER = "STOCK_TRANSFER"
+    # Material going back UP the chain: a LIP returning expired or damaged stock to
+    # the MDP above it. Its own doc type, not STOCK_TRANSFER — a transfer is the
+    # holder's own call and a return has to be sanctioned by the tier receiving it.
+    STOCK_RETURN = "STOCK_RETURN"
+    # The receiving leg. The point being returned TO decides whether it takes the
+    # material and where it then goes, which is a different ladder from the one that
+    # let the material leave — hence a second doc type rather than a second stage.
+    STOCK_RETURN_RECEIPT = "STOCK_RETURN_RECEIPT"
 
 
 class InstanceStatus(str, Enum):

@@ -116,7 +116,9 @@ Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock
 4. Only the lead edits `core/`, `shared/`, `platform/`.
 5. Imports one way: modules → platform → shared → core. Modules may import
    earlier modules in the chain, never later. The chain is:
-   `inventory → indents → procurement → logistics → warehouse`.
+   `inventory → indents → procurement → logistics → warehouse → returns`.
+   `integrations` sits outside the chain with `reports`: it reads every module
+   and nothing reads it back.
 6. Every endpoint has `Depends(require_permission("<code>"))`. Hiding a button is
    not security — the backend check is. Permission codes live only in
    `platform/rbac/permissions.py`; never invent one inline.
