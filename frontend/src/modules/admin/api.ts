@@ -3,7 +3,7 @@ import type { Paginated } from "@/shared/types";
 import type {
   ApprovalPost, ApprovalPostMember,
   AppLog, AuditRow, Conflict, CustomLadder, CustomLadderStep, DocSeries,
-  FlowOverview, FlowRungs, FlowVersion, Ladder,
+  FlowOverview, FlowRungs, FlowVersion, JobProfileOption, Ladder,
   LadderDepartment, LadderOptions, LadderPolicy, LadderPosition, LadderPost,
   LadderPreview, LadderRank,
   LadderRung, NotificationRule, ReminderConfig, ReminderRunResult, ReminderStatus,
@@ -238,6 +238,11 @@ export const adminApi = {
   approvalPosts: {
     list: () => api.get<{ items: ApprovalPost[] }>("/api/workflow/posts")
       .then((r) => r.data.items),
+    /** Job profiles a post can carry. Seating someone in the post then grants it,
+     *  so access follows the chair instead of being handed out per person. */
+    profiles: () =>
+      api.get<{ items?: JobProfileOption[] } | JobProfileOption[]>("/api/rbac/roles")
+        .then((r) => (Array.isArray(r.data) ? r.data : r.data.items ?? [])),
     employees: (search: string) =>
       api.get<{ items: ApprovalPostMember[] }>("/api/workflow/posts/employees",
         { params: { search } }).then((r) => r.data.items),

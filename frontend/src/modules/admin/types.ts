@@ -508,12 +508,23 @@ export interface ApprovalPostMember {
   is_stale?: boolean;
 }
 
+/** A job profile a post can carry, from /api/rbac/roles. */
+export interface JobProfileOption {
+  id: number;
+  code: string;
+  name: string;
+  is_active: boolean;
+  permissions?: string[];
+}
+
 export interface ApprovalPost {
   id: number;
   code: string;
   name: string;
   department: string | null;
   hcm_position_id: number | null;
+  /** Seating someone in this post grants them this profile. */
+  rbac_role_id: number | null;
   is_active: boolean;
   members: ApprovalPostMember[];
   used_in_ladders: number;

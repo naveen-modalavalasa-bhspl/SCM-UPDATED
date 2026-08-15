@@ -36,7 +36,7 @@ const summary = {
     icon: "shopping-cart", tone: "purple",
   }],
   modules: [{
-    code: "grp_purchasing", name: "Purchasing",
+    code: "grp_purchasing", name: "Procurement",
     description: "Manage purchase orders", href: "/pos", icon: "shopping-cart",
   }],
   needs_attention: [{
@@ -77,7 +77,7 @@ describe("HomePage", () => {
     );
     expect(screen.getByText("PURCHASE ORDERS")).toBeInTheDocument();
     expect(screen.getByText("New Purchase Order")).toBeInTheDocument();
-    expect(screen.getByText("Purchasing")).toBeInTheDocument();
+    expect(screen.getByText("Procurement")).toBeInTheDocument();
     expect(screen.queryByText("Create Indent")).not.toBeInTheDocument();
     expect(screen.queryByText("Inventory")).not.toBeInTheDocument();
   });

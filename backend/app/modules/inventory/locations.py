@@ -17,7 +17,7 @@ from app.platform.hcm.models import (
 )
 from app.platform.hcm import sync as hcm_sync
 from app.shared.enums import DocType, WarehouseType
-from app.shared.models.warehouse import Warehouse
+from app.shared.models.warehouse import Warehouse, WarehouseLocation
 
 from .enums import LocationTier, MovementKind
 from .models import NO_PROJECT, PositionLocation, Stock
@@ -741,6 +741,36 @@ def _letters(value: str | None) -> str:
     return "".join(ch for ch in (value or "").upper() if ch.isalpha())
 
 
+# The `storage_type` a derived floor row carries — the same value the DB team's own
+# floors use, so a derived floor and a hand-built one are the same kind of thing.
+FLOOR_STORAGE_TYPE = "FLOOR"
+# Codes this function owns inside a warehouse. Anything else under that warehouse was
+# built by hand and is never touched.
+DERIVED_FLOOR_PREFIX = "SEC-"
+
+
+def floor_key(section_name: str | None) -> str | None:
+    """The stable key for a floor, derived from the section HCM sent.
+
+    Deliberately NOT parsed. HCM's section names are free text and inconsistent
+    already — "WAREHOUSE OFFICE @1ST", "WAREHOUSE-2ND", "LOGISTICS-01" — and reading a
+    floor NUMBER out of them is the one thing guaranteed to break: the day somebody
+    types "Warehouse 2nd floor" a regex would either miss it or, worse, match the wrong
+    digit and reseat people onto another floor.
+
+    So the section IS the floor, whatever it is called. All this does is fold case and
+    punctuation so that "WAREHOUSE-2ND" and "Warehouse 2nd" are recognised as the same
+    one; the human-readable label is stored separately, verbatim.
+
+    HCM sends `section_id` on every position it serves through /api/positions/, and
+    that would be a better key — but the six SCM warehouse posts reach us through the
+    employees feed, which sends the name only. When that is fixed upstream, key on the
+    id and keep this as the fallback.
+    """
+    key = "".join(ch for ch in (section_name or "").upper() if ch.isalnum())
+    return key or None
+
+
 async def rebuild_stocking_points(db: AsyncSession) -> dict:
     """One warehouse per stocking-point office, and the position links that reach it.
 
@@ -805,6 +835,8 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
         warehouses[office_id] = warehouse
     await db.flush()
 
+    floors = await _rebuild_floors(db, positions, warehouses, kinds)
+
     # Links are rebuilt whole: a position id HCM re-issued would otherwise leave a row
     # pointing at a post nobody holds.
     await db.execute(delete(PositionLocation).where(
@@ -817,14 +849,81 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
         db.add(PositionLocation(
             position_id=row.id, warehouse_id=warehouse.id,
             project_id=row.project_id or NO_PROJECT, project_name=row.project_name,
+            # Which floor of that warehouse, when the building has more than one.
+            # None everywhere else, which is every LIP and MDP.
+            location_id=floors.get((warehouse.id, floor_key(row.section_name))),
+            section_name=row.section_name,
             is_primary=1, is_active=1,
         ))
         links += 1
     await db.commit()
 
-    result = {"warehouses": len(warehouses), "links": links, "removed": len(removed)}
+    result = {"warehouses": len(warehouses), "links": links,
+              "removed": len(removed), "floors": len(floors)}
     logger.info("stocking points rebuilt: %s", result)
     return result
+
+
+async def _rebuild_floors(db: AsyncSession, positions, warehouses: dict,
+                          kinds: dict) -> dict[tuple[int, str], int]:
+    """Match each HCM section onto a floor that already exists in the warehouse.
+
+    Deliberately MATCHES, never creates. HCM's section is the team a post works in
+    ("WAREHOUSE OFFICE @1ST", "LOGISTICS-01"); a warehouse floor is a node in the
+    physical location tree with aisles, racks and bins under it. They share the word
+    "floor" and nothing else, and the live data proves it: every unit in CENTRAL
+    WAREHOUSE-1 sits in a bin under the hand-built `F1 - Ground Floor`, so a floor
+    invented from a section name would hold no stock at all and scoping anyone to it
+    would show them an empty warehouse.
+
+    So a link only gets a `location_id` when the building really has a floor of that
+    name. Where it does not — which is every warehouse today — the link keeps its
+    `section_name` and `location_id` stays NULL, meaning the whole warehouse, exactly
+    as before. Nothing narrows until somebody has said which physical floor a section
+    means.
+
+    Matching is on the folded key, so a floor called "Warehouse 2nd" answers to a
+    section called "WAREHOUSE-2ND" without anyone editing either.
+
+    Returns {(warehouse_id, floor_key): location_id} for the link pass to read.
+    """
+    multi_floor = {office_id: warehouse for office_id, warehouse in warehouses.items()
+                   if kinds.get(office_id, ("", ""))[0] == WarehouseType.MAIN.value}
+    if not multi_floor:
+        return {}
+
+    wanted = {
+        (warehouse.id, floor_key(row.section_name))
+        for row in positions
+        if (warehouse := multi_floor.get(row.office_id)) is not None
+        and floor_key(row.section_name)
+    }
+    if not wanted:
+        return {}
+
+    floors = (await db.execute(
+        select(WarehouseLocation).where(
+            WarehouseLocation.warehouse_id.in_([w.id for w in multi_floor.values()]),
+            WarehouseLocation.bin_type == FLOOR_STORAGE_TYPE)
+    )).scalars().all()
+
+    # A floor answers to its code and to its name — "F2" and "Warehouse 2nd" are both
+    # reasonable things for HCM's section to have been called.
+    by_key: dict[tuple[int, str], int] = {}
+    for floor in floors:
+        for candidate in (floor.code, floor.name):
+            key = floor_key(candidate)
+            if key:
+                by_key.setdefault((floor.warehouse_id, key), floor.id)
+
+    matched = {key: by_key[key] for key in wanted if key in by_key}
+    unmatched = sorted(key for key in wanted if key not in by_key)
+    if unmatched:
+        # Loud, because the alternative is a floor in-charge who quietly has no floor.
+        logger.info(
+            "stocking points: %d HCM section(s) have no matching floor in their "
+            "warehouse and stay warehouse-wide: %s", len(unmatched), unmatched)
+    return matched
 
 
 async def stocking_point_link_status(db: AsyncSession) -> dict:

@@ -199,8 +199,13 @@ export interface JobProfile {
    *  own. Stays visible under a project filter, because it is that project's
    *  fallback. */
   is_company_default: boolean;
-  /** 0 = the profile's positions have no HCM project ("Unassigned"). */
-  project_id: number;
+  /** An approval post — a chair this system owns because HCM has no position for
+   *  it (SCM Head, Indent Team, Logistics). Configured here like any other profile;
+   *  retires when HCM finally sends the real position. */
+  is_approval_post?: boolean;
+  /** 0 = the profile's positions have no HCM project ("Unassigned"). Null for an
+   *  approval post, which belongs to no HCM project. */
+  project_id: number | null;
   project_name: string;
   name: string;
   role_id: number | null;

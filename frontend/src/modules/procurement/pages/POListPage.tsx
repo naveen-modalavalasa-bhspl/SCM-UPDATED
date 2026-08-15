@@ -81,7 +81,7 @@ export function POListPage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Purchasing" title="Purchase Orders" />
+      <PageHeader eyebrow="Procurement" title="Purchase Orders" />
 
       <div className="mb-4 max-w-xs">
         <Select

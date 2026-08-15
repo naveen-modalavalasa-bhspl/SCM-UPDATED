@@ -17,13 +17,15 @@ const page = (
 
 /**
  * A job profile is granted per MODULE, and the module has to be the one the admin
- * sees in the left rail. The two halves of the grant disagree about its name: the
- * menu says "Purchasing" and "Settings", the permission catalogue says
- * "procurement" and "admin". They must still land in one card, or the module tick
- * grants the screens and silently skips every action inside them.
+ * sees in the left rail. The two halves of the grant can disagree about its name —
+ * the menu says "Settings" where the permission catalogue says "admin", and until
+ * the rename it said "Purchasing" against "procurement". They must still land in one
+ * card, or the module tick grants the screens and silently skips every action inside
+ * them. Procurement is here as the case that now agrees on both sides: the grouping
+ * has to keep working with no alias at all, not only through one.
  */
 describe("buildAccessSections", () => {
-  const parent = page("grp_purchasing", "Purchasing", null);
+  const parent = page("grp_purchasing", "Procurement", null);
   const pages = [
     page("home", "Home", null, null),
     parent,
@@ -36,9 +38,9 @@ describe("buildAccessSections", () => {
 
   it("files a module's actions under the name the menu gives it", () => {
     const sections = buildAccessSections(pages, features);
-    const purchasing = sections.find((s) => s.name === "Purchasing");
-    expect(purchasing?.pages.map((p) => p.code)).toEqual(["grp_purchasing", "po_list"]);
-    expect(purchasing?.features.map((f) => f.code)).toEqual(["po.create", "po.approve"]);
+    const procurement = sections.find((s) => s.name === "Procurement");
+    expect(procurement?.pages.map((p) => p.code)).toEqual(["grp_purchasing", "po_list"]);
+    expect(procurement?.features.map((f) => f.code)).toEqual(["po.create", "po.approve"]);
     expect(sections.some((s) => s.name === "procurement")).toBe(false);
   });
 
@@ -63,7 +65,7 @@ describe("buildAccessSections", () => {
      reads top to bottom the way the rail does. */
   it("keeps the order the pages arrived in", () => {
     expect(buildAccessSections(pages, features).map((s) => s.name))
-      .toEqual(["Home", "Purchasing"]);
+      .toEqual(["Home", "Procurement"]);
   });
 
   it("loses no action when its module has no screens at all", () => {

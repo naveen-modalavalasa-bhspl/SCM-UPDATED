@@ -46,6 +46,7 @@ from app.platform.settings import attachments, codeformat
 from app.platform.settings import service as settings_service
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
+from app.platform.workflow import ladder as wf_ladder
 from app.platform.workflow.models import Instance as WfInstance
 from app.modules.inventory.service import warehouse_ids_for_user
 from app.shared.scope import scope_condition
@@ -7063,7 +7064,13 @@ async def update_dispatch(db: AsyncSession, dispatch_id: int, data: s.DispatchWr
 
 async def submit_dispatch(db: AsyncSession, dispatch_id: int, user) -> m.Dispatch:
     dispatch = await get_dispatch(db, dispatch_id)
-    _guard(dispatch.status, {DispatchStatus.DRAFT.value}, "submit", "dispatch")
+    # PACKED as well as DRAFT: a consignment is packed before anyone is asked to
+    # release it, so PACKED is the normal state to submit from — the Consignments
+    # screen saves straight to it. Allowing only DRAFT meant a packed consignment
+    # could never enter its own approval chain.
+    _guard(dispatch.status,
+           {DispatchStatus.DRAFT.value, DispatchStatus.PACKED.value},
+           "submit", "dispatch")
 
     context = {
         "warehouse_id": dispatch.warehouse_id,
@@ -7224,6 +7231,55 @@ async def delete_package(db: AsyncSession, dispatch_id: int, package_id: int,
     return await get_dispatch(db, dispatch_id)
 
 
+async def _dispatch_approval_pending(db: AsyncSession, dispatch: m.Dispatch,
+                                     user) -> bool:
+    """Does this consignment still owe a signature before it may leave?
+
+    Gate-out has always accepted PACKED as well as APPROVED, so Confirm dispatch took
+    goods out of the building without the DISPATCH workflow ever starting. A Logistics
+    ladder configured on Approvals Config would simply never fire, which reads as the
+    screen being ignored.
+
+    Deliberately conditional on a ladder EXISTING for this scope. Where nobody has
+    configured one, nothing changes and a packed consignment still gates straight out —
+    this must not become a new mandatory step for every site that never asked for one.
+    Configuring a Dispatch chain is what turns it on, which is the whole contract of
+    that screen.
+
+    Returns True when the caller should stop and leave the document in approval.
+    """
+    if dispatch.status == DispatchStatus.APPROVED.value:
+        return False
+
+    project_id, _project_name = await wf_ladder.project_for(
+        db, getattr(user, "active_position_id", None), user)
+    if await wf_ladder.find_ladder(
+            db, project_id, WarehouseDocType.DISPATCH.value) is None:
+        return False
+
+    instance = (await db.execute(
+        select(WfInstance)
+        .where(WfInstance.doc_type == WarehouseDocType.DISPATCH.value,
+               WfInstance.doc_id == dispatch.id)
+        .order_by(WfInstance.id.desc()).limit(1)
+    )).scalars().first()
+    if instance is not None and instance.status == InstanceStatus.APPROVED.value:
+        return False
+    if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
+        raise ValidationError(
+            f"{dispatch.dispatch_no} is waiting on "
+            f"{dispatch.current_approver_name or 'approval'} and cannot leave yet"
+        )
+
+    # Never submitted. Send it rather than refusing: to the person at the gate,
+    # "Confirm dispatch" means "send this consignment", and where the project asks for
+    # a signature that means starting the chain, not an error telling them to go and
+    # find another button. If the chain resolves to NO_APPROVAL the engine returns it
+    # approved immediately and gate-out carries straight on below.
+    dispatch = await submit_dispatch(db, dispatch.id, user)
+    return dispatch.status != DispatchStatus.APPROVED.value
+
+
 async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
                    user) -> m.Dispatch:
     """Releases the consignment and takes the stock out of the warehouse.
@@ -7235,6 +7291,9 @@ async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
     dispatch = await get_dispatch(db, dispatch_id)
     _guard(dispatch.status, {DispatchStatus.APPROVED.value, DispatchStatus.PACKED.value},
            "gate out", "dispatch")
+    if await _dispatch_approval_pending(db, dispatch, user):
+        # Now with its approvers. The goods stay on the bench until they sign.
+        return await get_dispatch(db, dispatch_id)
 
     already_issued = False
     linked_issue: m.MaterialIssue | None = None

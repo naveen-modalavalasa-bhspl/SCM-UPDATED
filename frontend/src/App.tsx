@@ -70,6 +70,21 @@ import {
 } from "@/modules/returns";
 // The API console — build an API from the screen over any table in the database.
 import { ApiClientsPage, ApiClientDetailPage } from "@/modules/integrations";
+import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
+import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
+import { RequisitionDetailPage } from "@/modules/procurement/pages/RequisitionDetailPage";
+import { RFQListPage } from "@/modules/procurement/pages/RFQListPage";
+import { RFQFormPage } from "@/modules/procurement/pages/RFQFormPage";
+import { RFQDetailPage } from "@/modules/procurement/pages/RFQDetailPage";
+import { QuotationListPage } from "@/modules/procurement/pages/QuotationListPage";
+import { SupplierAccountsPage } from "@/modules/procurement/pages/SupplierAccountsPage";
+// The supplier portal — a second audience, on its own shell and its own token.
+import { SupplierLayout } from "@/modules/supplier/SupplierLayout";
+import { SupplierLoginPage } from "@/modules/supplier/pages/SupplierLoginPage";
+import { SupplierPasswordPage } from "@/modules/supplier/pages/SupplierPasswordPage";
+import { SupplierRFQListPage } from "@/modules/supplier/pages/SupplierRFQListPage";
+import { SupplierRFQDetailPage } from "@/modules/supplier/pages/SupplierRFQDetailPage";
+import { SupplierProfilePage } from "@/modules/supplier/pages/SupplierProfilePage";
 import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
 import { CodeFormatsPage } from "@/modules/settings/pages/CodeFormatsPage";
 // One screen serves all four report ledgers; the ledger key is a route param.
@@ -97,6 +112,21 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={me ? <Navigate to="/" replace /> : <LoginPage />} />
+
+      {/* The supplier portal. Outside the employee shell entirely — a vendor holds no
+          RBAC role, so there is no menu to build and no <Can> to apply. It is gated on
+          its own token (SUPPLIER_TOKEN_KEY), and `me` here is irrelevant: an employee
+          being signed in must not open a vendor's screens, and a vendor must not need
+          an SCM account to reach theirs. */}
+      <Route path="/supplier/login" element={<SupplierLoginPage />} />
+      <Route path="/supplier/password" element={<SupplierPasswordPage />} />
+      <Route path="/supplier" element={<SupplierLayout />}>
+        <Route index element={<Navigate to="/supplier/rfqs" replace />} />
+        <Route path="rfqs" element={<SupplierRFQListPage />} />
+        <Route path="rfqs/:id" element={<SupplierRFQDetailPage />} />
+        <Route path="profile" element={<SupplierProfilePage />} />
+      </Route>
+
       <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
         <Route index element={<HomePage />} />
         {/* Not in PAGE_TREE on purpose: everyone has a profile, so gating it behind an
@@ -145,6 +175,17 @@ function AppRoutes() {
         <Route path="approvals/delegations" element={<Navigate to="/approvals" replace />} />
         <Route path="pos" element={<POListPage />} />
         <Route path="pos/:id" element={<PODetailPage />} />
+        {/* The buying chain upstream of a PO: requisition -> RFQ -> quotation. */}
+        <Route path="procurement/requisitions" element={<RequisitionListPage />} />
+        <Route path="procurement/requisitions/new" element={<RequisitionFormPage />} />
+        <Route path="procurement/requisitions/:id" element={<RequisitionDetailPage />} />
+        <Route path="procurement/requisitions/:id/edit" element={<RequisitionFormPage />} />
+        <Route path="procurement/rfqs" element={<RFQListPage />} />
+        <Route path="procurement/rfqs/new" element={<RFQFormPage />} />
+        <Route path="procurement/rfqs/:id" element={<RFQDetailPage />} />
+        <Route path="procurement/rfqs/:id/edit" element={<RFQFormPage />} />
+        <Route path="procurement/quotations" element={<QuotationListPage />} />
+        <Route path="admin/supplier-accounts" element={<SupplierAccountsPage />} />
         <Route path="grn/*" element={<WarehouseModule />} />
         <Route path="stock/*" element={<WarehouseModule />} />
         <Route path="issues/*" element={<WarehouseModule />} />

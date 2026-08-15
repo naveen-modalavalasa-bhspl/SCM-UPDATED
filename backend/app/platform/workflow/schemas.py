@@ -142,6 +142,9 @@ class ApprovalPostIn(BaseModel):
     name: str
     department: str | None = None
     hcm_position_id: int | None = None
+    # The job profile this chair carries. Seating someone grants it; None leaves the
+    # post as a ladder rung only, which is what every post is until an admin picks one.
+    rbac_role_id: int | None = None
     employee_ids: list[int] = Field(default_factory=list)
     is_active: bool | None = None
 

@@ -91,6 +91,31 @@ PAGES: list[PageDef] = [
     PageDef("returns_receiving_config", "/returns/settings/receiving",
             "Receiving Points", parent="grp_returns", module="returns",
             sort_order=8),
+    # The module row itself, listed only to rename it: the menu said "Purchasing"
+    # while the permission catalogue, the backend package and the table prefix all
+    # said procurement, and the RBAC screen needed a hard-coded alias to reconcile
+    # them. The CODE stays `grp_purchasing` — a code is an identity and `sync_pages`
+    # can rename a page but never move one. `always_on` keeps `required_permission`
+    # untouched (it is `po.view` on the live row) instead of minting an unused
+    # `page.grp_purchasing.view` beside it.
+    PageDef("grp_purchasing", "/pos", "Procurement", icon="shopping-cart",
+            module="procurement", sort_order=30, always_on=True),
+    # Procurement's buying chain, under the group that already carries the PO screens.
+    # `grp_purchasing`, not `grp_procurement` — the menu row predates the module name
+    # and `sync_pages` can add a page but never move one, so the code follows the row.
+    # Sorted AFTER po_list (31) so Purchase Orders stays the module's front door: the
+    # left rail opens a module on its FIRST child.
+    PageDef("pro_requisitions", "/procurement/requisitions", "Requisitions",
+            parent="grp_purchasing", module="procurement", sort_order=32),
+    PageDef("pro_rfqs", "/procurement/rfqs", "RFQs",
+            parent="grp_purchasing", module="procurement", sort_order=33),
+    PageDef("pro_quotations", "/procurement/quotations", "Quotations",
+            parent="grp_purchasing", module="procurement", sort_order=34),
+    # Who outside the company can sign in. Under Settings, not Procurement: it mints
+    # an identity, which is an administrator's act rather than a buyer's.
+    PageDef("admin_supplier_accounts", "/admin/supplier-accounts",
+            "Supplier Logins", parent="grp_settings", module="procurement",
+            icon="key", sort_order=104),
 ]
 
 

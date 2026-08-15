@@ -330,6 +330,7 @@ async def get_user_roles(
         )
     )
     roles = {row.id: row for row in (await db.execute(stmt)).scalars().all()}
+    seated = await _approval_post_roles(db, employee_id)
 
     if position_id is not None:
         # A job profile REPLACES the position's HCM role rather than adding to it —
@@ -352,7 +353,14 @@ async def get_user_roles(
             # A login with no position, or a position nobody has configured, still
             # falls through to its personal roles — which is what keeps the
             # position-less System Admin able to configure the profiles.
-            return [profile_role]
+            #
+            # Seated posts survive the replacement. A profile answers "what does this
+            # POSITION do"; a post is a separate chair the same person also sits in
+            # ("SCM Head", "Indent Team"), and the ladder is already routing work to
+            # them under it. Dropping it here would hand somebody an approval task and
+            # then refuse them the screen to act on it.
+            return sorted({profile_role.id: profile_role, **seated}.values(),
+                          key=lambda row: row.id)
 
         hcm_role_id = await db.scalar(
             select(HcmPosition.role_id).where(HcmPosition.id == position_id)
@@ -367,7 +375,36 @@ async def get_user_roles(
             if hcm_role is not None:
                 roles[hcm_role.id] = hcm_role
 
+    roles.update(seated)
     return sorted(roles.values(), key=lambda row: row.id)
+
+
+async def _approval_post_roles(db: AsyncSession, employee_id: int) -> dict[int, Role]:
+    """Job profiles this login holds by being SEATED in an approval post.
+
+    A post is a chair this system owns for the steps HCM has no position for — SCM
+    Head, Indent Team, Logistics. Binding a profile to the chair means seating someone
+    grants the access and unseating them takes it back, instead of an administrator
+    granting it per person and remembering to revoke it.
+
+    Additive only. This can never remove a grant somebody already has, so a deployment
+    with no posts — or posts with no profile bound, which is all of them until an admin
+    picks one — resolves exactly as it did before.
+    """
+    # Imported here, not at module scope: platform.workflow imports platform.rbac for
+    # its permission codes, and a top-level import would close the loop.
+    from app.platform.workflow.models import ApprovalPost, ApprovalPostMember
+
+    rows = (await db.execute(
+        select(Role)
+        .join(ApprovalPost, ApprovalPost.rbac_role_id == Role.id)
+        .join(ApprovalPostMember, ApprovalPostMember.post_id == ApprovalPost.id)
+        .where(ApprovalPostMember.employee_id == employee_id,
+               ApprovalPostMember.is_active.is_(True),
+               ApprovalPost.is_active.is_(True),
+               Role.is_active.is_(True))
+    )).scalars().all()
+    return {row.id: row for row in rows}
 
 
 async def get_user_permissions(

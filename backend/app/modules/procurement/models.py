@@ -1,9 +1,19 @@
-"""pro_ tables — Purchase Orders. Owned by modules/procurement.
+"""pro_ tables — the buying chain. Owned by modules/procurement.
 
-Backward pointer only: a PO stores indent_id; an indent never stores its PO id.
+Backward pointer only: a PO stores indent_id; an indent never stores its PO id. The
+same rule runs down the whole chain:
+
+    Requisition  ->  RFQ (`requisition_id`)  ->  Quotation (`rfq_id`)  ->  PO
+
+Table names are the ones the DB team already created in the QA schema
+(`pro_requisitions`, `pro_quotations`, …), not the `pro_material_requests` /
+`pro_supplier_quotations` spelling an earlier draft of this code used. Their columns
+are also the ones kept: they snapshot `item_code`, `item_name`, `vendor_name` and
+`warehouse_name` inline, which is rule 10 — a document must still read correctly after
+a master is renamed.
 """
 from sqlalchemy import (
-    Column, Date, DateTime, ForeignKey, Numeric, String, Text, Index,
+    Column, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, Index,
 )
 from sqlalchemy.orm import relationship
 
@@ -66,3 +76,267 @@ class POItem(Base):
     received_quantity = Column(Numeric(14, 3), nullable=False, default=0)
 
     po = relationship("PurchaseOrder", back_populates="items")
+
+
+# --------------------------------------------------------------------------- #
+#  Requisition — what a buyer wants to buy
+# --------------------------------------------------------------------------- #
+
+class Requisition(Base):
+    """`pro_requisitions`. Procurement's own demand note.
+
+    Not `inv_material_requests`: that one is raised BY the system when an approved
+    indent cannot be filled from stock. This is raised by a buyer, for anything, and
+    it is the head of the RFQ chain.
+    """
+    __tablename__ = "pro_requisitions"
+    id = pk()
+    req_no = Column(String(30), unique=True, nullable=False)
+    req_date = Column(Date, nullable=True)
+
+    warehouse_id = soft_fk()
+    warehouse_name = Column(String(200), nullable=True)   # snapshot
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
+
+    status = Column(String(30), nullable=False, index=True)
+    # Added to the DB team's columns: urgency is on the raising form and it is what
+    # a buyer sorts the queue by. One column beats a convention buried in remarks.
+    priority = Column(String(20), nullable=True)
+
+    total_items = Column(Integer, nullable=False, default=0)
+    estimated_value = Column(Numeric(16, 2), nullable=False, default=0)
+
+    current_approver_name = Column(String(200), nullable=True)
+    approved_by_name = Column(String(200), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    remarks = Column(Text, nullable=True)
+
+    # The material request this came from, when Purchase picked one up rather than
+    # raising a demand of its own. Every document in this chain points BACKWARD at the
+    # one before it; without this the trail broke between inventory and procurement and
+    # somebody had to retype the lines. Soft FK — inventory owns that table.
+    source_mr_id = soft_fk()
+    source_mr_no = Column(String(30), nullable=True)     # snapshot
+
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)  # snapshot
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("RequisitionItem", back_populates="requisition",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+Index("ix_pro_req_status_created", Requisition.status, Requisition.created_at.desc())
+
+
+class RequisitionItem(Base):
+    __tablename__ = "pro_requisition_items"
+    id = pk()
+    requisition_id = Column(ForeignKey("pro_requisitions.id", ondelete="CASCADE"),
+                            index=True, nullable=False)
+    line_no = Column(Integer, nullable=False, default=1)
+
+    # Backward pointers, both optional: a requisition may be raised cold, or it may
+    # come off an indent that stock could not fill.
+    indent_id = soft_fk()
+    indent_no = Column(String(30), nullable=True)         # snapshot
+    indent_item_id = soft_fk()
+
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)         # snapshot
+    item_name = Column(String(300), nullable=True)        # snapshot
+    uom_code = Column(String(20), nullable=True)
+    quantity = Column(Numeric(16, 3), nullable=False)
+    # How much of `quantity` has reached a PO. Lets a requisition be bought in parts.
+    ordered_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    estimated_rate = Column(Numeric(16, 2), nullable=False, default=0)
+    estimated_amount = Column(Numeric(16, 2), nullable=False, default=0)
+    required_date = Column(Date, nullable=True)
+
+    requisition = relationship("Requisition", back_populates="items")
+
+
+# --------------------------------------------------------------------------- #
+#  RFQ — what went out to vendors
+# --------------------------------------------------------------------------- #
+
+class RFQ(Base):
+    __tablename__ = "pro_rfqs"
+    id = pk()
+    rfq_no = Column(String(30), unique=True, nullable=False)
+    rfq_type = Column(String(20), nullable=True)
+    rfq_date = Column(Date, nullable=True)
+    # The submission deadline. A vendor may read after it and may not quote.
+    due_date = Column(Date, nullable=True)
+
+    requisition_id = Column(ForeignKey("pro_requisitions.id"), index=True, nullable=True)
+    requisition_no = Column(String(30), nullable=True)    # snapshot
+
+    warehouse_id = soft_fk()
+    warehouse_name = Column(String(200), nullable=True)   # snapshot
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
+
+    title = Column(String(300), nullable=True)
+    status = Column(String(30), nullable=False, index=True)
+    total_items = Column(Integer, nullable=False, default=0)
+    vendor_count = Column(Integer, nullable=False, default=0)
+    response_count = Column(Integer, nullable=False, default=0)
+
+    awarded_vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=True)
+    awarded_vendor_name = Column(String(200), nullable=True)   # snapshot
+    terms = Column(Text, nullable=True)
+    current_approver_name = Column(String(200), nullable=True)
+
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)  # snapshot
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("RFQItem", back_populates="rfq",
+                         cascade="all, delete-orphan", lazy="selectin")
+    vendors = relationship("RFQVendor", back_populates="rfq",
+                           cascade="all, delete-orphan", lazy="selectin")
+
+
+class RFQItem(Base):
+    __tablename__ = "pro_rfq_items"
+    id = pk()
+    rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
+                    index=True, nullable=False)
+    line_no = Column(Integer, nullable=False, default=1)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)         # snapshot
+    item_name = Column(String(300), nullable=True)        # snapshot
+    description = Column(Text, nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    quantity = Column(Numeric(16, 3), nullable=False)
+    required_date = Column(Date, nullable=True)
+
+    rfq = relationship("RFQ", back_populates="items")
+
+
+class RFQVendor(Base):
+    """Who the RFQ went to, and how they get in."""
+    __tablename__ = "pro_rfq_vendors"
+    id = pk()
+    rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
+                    index=True, nullable=False)
+    vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
+    vendor_name = Column(String(200), nullable=True)      # snapshot
+    vendor_email = Column(String(200), nullable=True)     # snapshot
+    # Added to the DB team's columns. A single-use link is what lets a vendor who has
+    # no portal account still open exactly this RFQ and nothing else — without it the
+    # only way in is a password, and most vendors will never have one.
+    access_token = Column(String(100), unique=True, nullable=True, index=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    responded_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(30), nullable=True)
+
+    rfq = relationship("RFQ", back_populates="vendors")
+
+
+# --------------------------------------------------------------------------- #
+#  Quotation — what a vendor answered
+# --------------------------------------------------------------------------- #
+
+class Quotation(Base):
+    __tablename__ = "pro_quotations"
+    id = pk()
+    quotation_no = Column(String(50), unique=True, nullable=False)
+    quotation_type = Column(String(20), nullable=True)
+
+    rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
+                    index=True, nullable=False)
+    rfq_no = Column(String(30), nullable=True)            # snapshot
+    vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
+    vendor_name = Column(String(200), nullable=True)      # snapshot
+    vendor_ref_no = Column(String(50), nullable=True)
+
+    quotation_date = Column(Date, nullable=True)
+    valid_till = Column(Date, nullable=True)
+    # Added: what the vendor promises on the portal form. `delivery_days` is per line
+    # and this is the header commitment; a buyer compares on this one.
+    expected_delivery_date = Column(Date, nullable=True)
+    currency = Column(String(10), nullable=True)
+
+    sub_total = Column(Numeric(16, 2), nullable=False, default=0)
+    discount_amount = Column(Numeric(16, 2), nullable=False, default=0)
+    tax_amount = Column(Numeric(16, 2), nullable=False, default=0)
+    freight_amount = Column(Numeric(16, 2), nullable=False, default=0)
+    grand_total = Column(Numeric(16, 2), nullable=False, default=0)
+
+    payment_terms = Column(String(200), nullable=True)
+    delivery_days = Column(Integer, nullable=True)
+    status = Column(String(30), nullable=False, index=True)
+    # Where this quote came in the buyer's comparison. 1 is cheapest-by-total.
+    rank_position = Column(Integer, nullable=True)
+    remarks = Column(Text, nullable=True)
+    # Added: a vendor may re-quote until the deadline, and a buyer must be able to
+    # tell a first offer from a fourth one without diffing timestamps.
+    revision_count = Column(Integer, nullable=False, default=0)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_by_id = soft_fk()
+    created_at = created_at_col()
+
+    items = relationship("QuotationItem", back_populates="quotation",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+class QuotationItem(Base):
+    __tablename__ = "pro_quotation_items"
+    id = pk()
+    quotation_id = Column(ForeignKey("pro_quotations.id", ondelete="CASCADE"),
+                          index=True, nullable=False)
+    line_no = Column(Integer, nullable=False, default=1)
+    rfq_item_id = Column(ForeignKey("pro_rfq_items.id"), index=True, nullable=True)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)         # snapshot
+    item_name = Column(String(300), nullable=True)        # snapshot
+    description = Column(Text, nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    quantity = Column(Numeric(16, 3), nullable=False)
+    rate = Column(Numeric(16, 2), nullable=False, default=0)
+    discount_percent = Column(Numeric(5, 2), nullable=False, default=0)
+    tax_percent = Column(Numeric(5, 2), nullable=False, default=0)
+    # Added: the split the vendor actually quoted. Derived from the HSN at read time
+    # would be wrong — a quotation is an offer, and the offer's own numbers are what
+    # a buyer compares and what the PO is raised against.
+    cgst_rate = Column(Numeric(5, 2), nullable=True)
+    sgst_rate = Column(Numeric(5, 2), nullable=True)
+    igst_rate = Column(Numeric(5, 2), nullable=True)
+    amount = Column(Numeric(16, 2), nullable=False, default=0)
+    delivery_days = Column(Integer, nullable=True)
+
+    quotation = relationship("Quotation", back_populates="items")
+
+
+# --------------------------------------------------------------------------- #
+#  Vendor portal identity
+# --------------------------------------------------------------------------- #
+
+class VendorUser(Base):
+    """A login for someone outside the company.
+
+    Identity in SCM is otherwise always `hcm_employees` — a vendor is not an employee
+    and never will be, so it cannot ride on that table or on `sys_local_credentials`
+    (keyed on employee id). One row per vendor, and the token it mints carries
+    `typ: "vendor"` so `get_current_user` refuses it outright: a leaked vendor token
+    must not reach a single internal endpoint, permissions or no permissions.
+    """
+    __tablename__ = "pro_vendor_users"
+    id = pk()
+    vendor_id = Column(ForeignKey("mst_vendors.id", ondelete="CASCADE"),
+                       unique=True, nullable=False)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    # Seeded accounts all share one password. Until it is changed, the portal shows
+    # nothing but the change-password form.
+    must_change_password = Column(Boolean, nullable=False, default=True)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()

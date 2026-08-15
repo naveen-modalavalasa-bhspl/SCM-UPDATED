@@ -432,6 +432,13 @@ class PositionLocation(Base):
                           index=True, nullable=False)
     project_id = Column(BigInteger, nullable=False, default=NO_PROJECT, index=True)
     project_name = Column(String(200), nullable=True)   # snapshot, never re-synced
+    # The FLOOR inside that warehouse, when HCM says which one. NULL means the whole
+    # warehouse, which is what every link outside a multi-floor building means.
+    # Soft FK to whs_warehouse_locations: the warehouse module owns that table.
+    location_id = Column(BigInteger, nullable=True, index=True)
+    # The section HCM sent, verbatim. Kept so a rename upstream shows up as a changed
+    # label rather than silently deriving a second floor.
+    section_name = Column(String(200), nullable=True)
     # The point this position issues from by default when it holds more than one.
     is_primary = Column(Integer, nullable=False, default=0)
     is_active = Column(Integer, nullable=False, default=1)

@@ -80,6 +80,10 @@ class ApprovalPost(Base):
     # "Purchase"). Not an FK — HCM's departments are the wrong shape for these.
     department = Column(String(120), nullable=True)
     hcm_position_id = Column(BigInteger, index=True, nullable=True)
+    # The job profile this chair carries. Seating somebody grants it; unseating them
+    # takes it away again, so access follows the chair rather than being handed to each
+    # person by hand. Optional — a post used only as a ladder rung needs none.
+    rbac_role_id = Column(BigInteger, index=True, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=utcnow)
 

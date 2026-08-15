@@ -74,6 +74,8 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     # through to the reporting line, however the admin configured the rest.
     DocType.DISPATCH.value: "Warehouse",
     DocType.PURCHASE_RETURN.value: "Warehouse",
+    DocType.REQUISITION.value: "Procurement",
+    DocType.RFQ.value: "Procurement",
     DocType.PO.value: "Procurement",
 }
 
@@ -95,6 +97,8 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # This is where Logistics signs.
     DocType.DISPATCH.value: "Dispatch",
     DocType.PURCHASE_RETURN.value: "Purchase Return",
+    DocType.REQUISITION.value: "Purchase Requisition",
+    DocType.RFQ.value: "Request for Quotation",
     DocType.PO.value: "Purchase Order",
 }
 

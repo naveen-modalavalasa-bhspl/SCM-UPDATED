@@ -5128,15 +5128,16 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "project_id": indent.project_id,
     } for line in indent.items]
 
-    # Only points this person actually holds, or that report under them. Inventory and
-    # anyone with a company-wide scope has no subtree, and sees every warehouse as
-    # before — the narrowing exists so an OE is offered their own MDP and LIP rather
-    # than every store in the company.
-    my_points = (await locations.location_ids_for_user(db, user)
-                 if user is not None else set())
+    # The points this person actually holds or that report under them, WIDENED by
+    # their job profile's data scope. The narrowing exists so an OE is offered his own
+    # MDP and LIP rather than every store in the company; reading the tagging alone
+    # meant a login given "All" in Settings > Job Profiles was still shown 0 available
+    # for stock outside his own reporting tree. None means every warehouse.
+    my_points = (await inventory_service.drawable_warehouse_ids(db, user)
+                 if user is not None else None)
 
     proposal = await allocations.propose(
-        db, indent_id, lines, warehouse_ids=sorted(my_points) or None)
+        db, indent_id, lines, warehouse_ids=sorted(my_points) if my_points else None)
     return {
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
@@ -5166,7 +5167,7 @@ async def item_claims(db: AsyncSession, item_id: int, indent_id: int, user=None)
     is not: an allocator has to know a claim exists even when it was raised somewhere
     they cannot see stock.
     """
-    warehouse_ids = (await inventory_service.warehouse_ids_for_user(db, user)
+    warehouse_ids = (await inventory_service.drawable_warehouse_ids(db, user)
                      if user is not None else None)
     return await allocations.competing_claims(
         db, item_id, indent_id, warehouse_ids=warehouse_ids)

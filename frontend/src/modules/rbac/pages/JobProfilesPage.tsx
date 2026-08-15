@@ -57,12 +57,14 @@ const SCOPE_LABEL: Record<ScopeRung, string> = {
  *  says "warehouse". */
 const letters = (value: string) => value.replace(/[^a-z]/gi, "").toLowerCase();
 
-/** The two halves of a grant name three modules differently. The menu name wins —
+/** The two halves of a grant name some modules differently. The menu name wins —
  *  it is the word the admin sees everywhere else in the app — so the permission
  *  catalogue's spelling is translated into it before anything is grouped.
- *  Without this, ticking "Purchasing" granted its screens and none of its actions. */
+ *  Without this, ticking a module granted its screens and none of its actions.
+ *
+ *  `procurement` used to be aliased to "purchasing" and no longer is: the menu row
+ *  was renamed to Procurement, so both halves finally spell it the same way. */
 const MODULE_ALIAS: Record<string, string> = {
-  procurement: "purchasing",   // menu: Purchasing
   admin: "settings",           // menu: Settings
   indent: "indents",
   master: "masters",
@@ -79,7 +81,7 @@ const ICONS: Record<string, typeof Boxes> = {
   home: Home,
   indents: FileText,
   approvals: CheckCircle,
-  purchasing: ShoppingCart,
+  procurement: ShoppingCart,
   warehouse: Truck,
   inventory: Package,
   masters: Database,
@@ -187,7 +189,7 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
     hint: "See requests that are waiting with other approvers in your team.",
   },
   grp_purchasing: {
-    hint: "Open the Purchasing module and manage purchase orders.",
+    hint: "Open the Procurement module: requisitions, RFQs, quotations and POs.",
   },
   po_list: {
     hint: "View purchase orders and check their current status.",
@@ -694,7 +696,10 @@ export function JobProfilesPage() {
       // The company-wide default survives a project filter: it is what the filtered
       // project falls back to when it has no default of its own, so hiding it would
       // hide the rule actually in force.
-      if (project && !p.is_company_default && String(p.project_id) !== project) {
+      // An approval post belongs to no HCM project, so a project filter must not
+      // hide it — it is the one profile that applies everywhere.
+      if (project && !p.is_company_default && !p.is_approval_post
+          && String(p.project_id) !== project) {
         return false;
       }
       if (status === "live" && !p.configured) return false;
@@ -711,7 +716,12 @@ export function JobProfilesPage() {
   // Counted off the unfiltered list so the numbers stay put while you filter.
   const perProject = useMemo(() => {
     const counts = new Map<number, number>();
-    for (const p of profiles) counts.set(p.project_id, (counts.get(p.project_id) ?? 0) + 1);
+    // Approval posts have no HCM project, so they are not counted against one — the
+    // project chips count what each project actually derived.
+    for (const p of profiles) {
+      if (p.project_id == null) continue;
+      counts.set(p.project_id, (counts.get(p.project_id) ?? 0) + 1);
+    }
     return counts;
   }, [profiles]);
 
@@ -895,13 +905,17 @@ export function JobProfilesPage() {
                       <span className="truncate text-sm font-semibold text-ink">
                         {profile.name}
                       </span>
-                      {profile.is_default
-                        ? <Badge tone={profile.configured ? "brand" : "warn"}>
-                            {profile.configured ? "Default" : "Not set"}
+                      {profile.is_approval_post
+                        ? <Badge tone={profile.configured ? "ok" : "warn"}>
+                            {profile.configured ? "Post" : "Post · not set"}
                           </Badge>
-                        : profile.configured
-                          ? <Badge tone="ok">Set up</Badge>
-                          : <Badge tone="muted">HCM role</Badge>}
+                        : profile.is_default
+                          ? <Badge tone={profile.configured ? "brand" : "warn"}>
+                              {profile.configured ? "Default" : "Not set"}
+                            </Badge>
+                          : profile.configured
+                            ? <Badge tone="ok">Set up</Badge>
+                            : <Badge tone="muted">HCM role</Badge>}
                     </div>
                     {/* The project is half the profile's identity, not a detail:
                      *  "4:DEO" and "6:DEO" are two grant units, and the name alone
@@ -909,7 +923,11 @@ export function JobProfilesPage() {
                     <div className="truncate text-[11px] font-medium text-brand">
                       {profile.project_name}
                     </div>
-                    {profile.is_default ? (
+                    {profile.is_approval_post ? (
+                      <div className="mt-0.5 truncate text-xs text-muted">
+                        {profile.holder_count} seated · created here, not from HCM
+                      </div>
+                    ) : profile.is_default ? (
                       <div className="mt-0.5 text-xs text-muted">
                         Used by any job here nobody has configured
                       </div>

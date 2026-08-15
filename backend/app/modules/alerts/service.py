@@ -305,6 +305,13 @@ _DEFINITIONS: list[AlertDef] = [
         "hcm.sync_running", AlertVariant.INFO, "Sync started",
         "Refreshing employee data now.",
     ),
+    # Gate-out doubles as "send for release approval" when the consignment has not
+    # been through its chain yet. Announcing the gate-out copy there told the
+    # storekeeper the goods had left while they were still on the bench.
+    _alert(
+        "dispatch.sent_for_approval", AlertVariant.INFO, "Sent for approval",
+        "{number} is with {approver}. The goods stay on the bench until they sign.",
+    ),
 
     # --------------------------------------------------------------- success
     _alert(
@@ -358,6 +365,13 @@ _DEFINITIONS: list[AlertDef] = [
         "dispatch.gated_out", AlertVariant.SUCCESS, "Dispatch gated out",
         "{number} has left the site.",
         action="Track Dispatch",
+    ),
+    # The Dispatch screen raised this code with no entry behind it, which renders as
+    # an empty green box: `pushAlert` falls back to "" for a title and message it
+    # cannot find.
+    _alert(
+        "dispatch.decided", AlertVariant.SUCCESS, "Decision recorded",
+        "Your decision on {number} is in the shared approval history.",
     ),
     _alert(
         "master.saved", AlertVariant.SUCCESS, "Saved",

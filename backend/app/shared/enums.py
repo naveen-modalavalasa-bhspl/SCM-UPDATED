@@ -123,6 +123,15 @@ class DocType(str, Enum):
     # remove the sign-off from a real decision.
     FORWARD_ISSUE = "FORWARD_ISSUE"
     MR = "MR"          # material request — the indent -> procurement bridge
+    # Procurement's own demand note, raised by a buyer rather than by an indent.
+    REQUISITION = "REQUISITION"
+    # Going out to vendors commits nobody to spend, but it does publish what the
+    # company is about to buy and to whom — so it gets a ladder of its own.
+    RFQ = "RFQ"
+    # Numbering only, deliberately absent from ladder.DOC_TYPE_LABEL: a quotation is
+    # the VENDOR's document. It needs a number; nobody inside the company approves it.
+    # What gets approved is the award, and that rides on the PO.
+    QUOTATION = "QUOTATION"
     PO = "PO"
     GRN = "GRN"
     ISSUE = "ISSUE"
@@ -306,6 +315,50 @@ class MRStatus(str, Enum):
     REJECTED = "REJECTED"
     ORDERED = "ORDERED"
     CANCELLED = "CANCELLED"
+
+
+class RequisitionStatus(str, Enum):
+    """pro_requisitions.status. Procurement's own demand note.
+
+    Distinct from MRStatus: an `inv_material_request` is the bridge an unfillable
+    indent crosses into procurement, raised by the system. A requisition is raised BY
+    a buyer, for anything — a stocked item nobody indented, a one-off, a rate contract
+    top-up. Same shape, different author, so a shared status enum would make the two
+    indistinguishable on the register.
+    """
+    DRAFT = "DRAFT"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    # An RFQ has been raised against it. Not CLOSED: more lines may still go out.
+    RFQ_RAISED = "RFQ_RAISED"
+    ORDERED = "ORDERED"
+    CANCELLED = "CANCELLED"
+
+
+class RFQStatus(str, Enum):
+    """pro_rfqs.status."""
+    DRAFT = "DRAFT"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    # Approved and the vendors can see it. The tokens are live from this point.
+    PUBLISHED = "PUBLISHED"
+    # The deadline passed or a buyer shut it early. Vendors can read, not quote.
+    CLOSED = "CLOSED"
+    # A quotation was picked. Terminal, and the awarded vendor is on the row.
+    AWARDED = "AWARDED"
+    CANCELLED = "CANCELLED"
+
+
+class QuotationStatus(str, Enum):
+    """pro_quotations.status — the vendor's side of an RFQ."""
+    # Created for the vendor when the RFQ publishes, so the portal has a form to open.
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"
+    # Re-submitted before the deadline. revision_count says how many times.
+    REVISED = "REVISED"
+    # Lost, or the RFQ closed without them. Kept for the comparison sheet.
+    REJECTED = "REJECTED"
+    ACCEPTED = "ACCEPTED"
 
 
 class PickStrategy(str, Enum):

@@ -248,6 +248,13 @@ const DEFINITIONS: AlertDef[] = [
     "hcm.sync_running", "info", "Sync started",
     "Refreshing employee data now.",
   ),
+  // Gate-out doubles as "send for release approval" when the consignment has not
+  // been through its chain yet. Announcing the gate-out copy there told the
+  // storekeeper the goods had left while they were still on the bench.
+  alert(
+    "dispatch.sent_for_approval", "info", "Sent for approval",
+    "{number} is with {approver}. The goods stay on the bench until they sign.",
+  ),
 
   // ----------------------------------------------------------------- success
   alert(
@@ -298,6 +305,13 @@ const DEFINITIONS: AlertDef[] = [
     "dispatch.gated_out", "success", "Dispatch gated out",
     "{number} has left the site.",
     "Track Dispatch",
+  ),
+  // The Dispatch screen raised this code with no entry behind it, which renders as
+  // an empty green box: `pushAlert` falls back to "" for a title and message it
+  // cannot find.
+  alert(
+    "dispatch.decided", "success", "Decision recorded",
+    "Your decision on {number} is in the shared approval history.",
   ),
   alert("master.saved", "success", "Saved", "Your changes to {name} have been saved."),
 

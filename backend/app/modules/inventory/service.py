@@ -167,6 +167,34 @@ async def warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     return await _warehouse_ids_for_user(db, user)
 
 
+async def drawable_warehouse_ids(db: AsyncSession, user) -> set[int] | None:
+    """Points this login may DRAW FROM when it decides an allocation. None = every one.
+
+    The UNION of the two rules that were being applied separately, and disagreeing:
+    the stocking points tagged to this person's own posts and their reportees'
+    (`locations.location_ids_for_user`), plus whatever their job profile's data scope
+    opens up (`warehouse_ids_for_user` — admin, `stock.view_all`, and the ALL /
+    PROJECT / OFFICE rungs).
+
+    The allocation screen read the tagging alone, so a login granted "All projects"
+    in Settings > Job Profiles was still shown `available 0` for stock sitting outside
+    their own reporting tree, and the whole line fell through to procurement. Union,
+    never intersection: widening a profile must not be able to take away a point
+    somebody can reach today, and a narrow rung must not take away their own shelf.
+
+    Visibility only. Who may SIGN is untouched — `create_allocation_for_indent` still
+    classifies OWN_STOCK_ALLOCATION vs ALLOCATION off the reporting subtree alone, so
+    drawing from a point outside your own tree still goes up the inventory ladder
+    rather than approving itself.
+    """
+    if user is None:
+        return None
+    allowed = await warehouse_ids_for_user(db, user)
+    if allowed is None:
+        return None
+    return allowed | await locations.location_ids_for_user(db, user)
+
+
 async def _scoped_warehouse_ids(
     db: AsyncSession, user, warehouse_id: int | None = None,
 ) -> set[int] | None:

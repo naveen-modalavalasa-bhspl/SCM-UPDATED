@@ -425,6 +425,166 @@ async def profile_role_for_position(db: AsyncSession, position_id: int) -> Role 
 # --------------------------------------------------------------------------- #
 #  Read
 # --------------------------------------------------------------------------- #
+# ---------------- approval posts, shown here as profiles ----------------
+#
+# A profile is normally DERIVED from the HCM positions that share a job. The SCM roles
+# have no HCM positions at all — that is the whole reason approval posts exist — so
+# they would never appear on this screen, and the one place an admin configures access
+# had nothing to say about SCM Head, Indent Team, Logistics, Director or Accounts.
+#
+# They are listed here as rows of their own, keyed `post:<id>` so nothing can collide
+# with a derived key, and saved straight onto the role the post already carries. When
+# HCM finally sends the real positions the posts retire and these rows go with them.
+POST_KEY_PREFIX = "post:"
+
+
+def is_post_key(key: str) -> bool:
+    return (key or "").startswith(POST_KEY_PREFIX)
+
+
+def post_key(post_id: int) -> str:
+    return f"{POST_KEY_PREFIX}{post_id}"
+
+
+def post_id_of(key: str) -> int:
+    return int(key[len(POST_KEY_PREFIX):])
+
+
+async def _post_profile_rows(db: AsyncSession, pages, held: dict,
+                             defined_page_perms: set[str]) -> list[dict]:
+    """One row per approval post, in the same shape the derived rows use."""
+    from app.platform.workflow import posts as approval_posts
+    from app.platform.workflow.models import ApprovalPost
+
+    rows = (await db.execute(
+        select(ApprovalPost).where(ApprovalPost.is_active.is_(True))
+        .order_by(ApprovalPost.department, ApprovalPost.name)
+    )).scalars().all()
+    if not rows:
+        return []
+    seated = await approval_posts.members_of(db, [row.id for row in rows])
+
+    items = []
+    for post in rows:
+        codes = held.get(post.rbac_role_id, set()) if post.rbac_role_id else set()
+        people = seated.get(post.id, [])
+        items.append({
+            "key": post_key(post.id),
+            "job": post.name,
+            "is_default": False,
+            "is_company_default": False,
+            # Flagged so the screen can say where the row came from: this is a chair we
+            # created, not a job derived from HCM.
+            "is_approval_post": True,
+            "project_id": None,
+            "project_name": post.department or "SCM",
+            "name": post.name,
+            "role_id": post.rbac_role_id,
+            "configured": post.rbac_role_id is not None,
+            "scope": ScopeRung.ALL.value,
+            "suggested_scope": ScopeRung.ALL.value,
+            "position_count": 1,
+            "holder_count": len(people),
+            "hcm_roles": [],
+            "office_levels": [],
+            # The seated people, shaped like the derived rows' `positions` so the
+            # screen's holder list needs no special case.
+            "positions": [{"id": post.id, "name": post.name,
+                           "holders": [p["name"] for p in people]}],
+            "page_codes": sorted(
+                p.code for p in pages if _page_gate(p, defined_page_perms) in codes
+                or _page_gate(p, defined_page_perms) is None
+            ),
+            "permission_codes": sorted(codes - defined_page_perms),
+        })
+    return items
+
+
+async def _set_post_access(db: AsyncSession, key: str, page_codes: list[str],
+                           permission_codes: list[str], name: str | None,
+                           actor) -> dict:
+    """Save ticks for an approval post, onto the role the post carries.
+
+    Creates that role the first time somebody configures the post, and binds it, so an
+    admin never has to know a separate profile exists behind the chair.
+    """
+    from app.platform.workflow.models import ApprovalPost
+
+    post = await db.get(ApprovalPost, post_id_of(key))
+    if post is None or not post.is_active:
+        raise ValidationError(f"Unknown approval post: {key}")
+
+    pages = (await db.execute(
+        select(Page).where(Page.is_active.is_(True)))).scalars().all()
+    all_permissions = (await db.execute(select(Permission))).scalars().all()
+    defined_page_perms = {
+        p.code for p in all_permissions if p.code.startswith(f"{PAGE_RESOURCE}.")
+    }
+    unknown_pages = set(page_codes) - {p.code for p in pages}
+    if unknown_pages:
+        raise ValidationError(f"Unknown page code(s): {', '.join(sorted(unknown_pages))}")
+    unknown_features = set(permission_codes) - {p.code for p in all_permissions}
+    if unknown_features:
+        raise ValidationError(
+            f"Unknown permission(s): {', '.join(sorted(unknown_features))}")
+
+    wanted_codes = {
+        gate for gate in (
+            _page_gate(p, defined_page_perms)
+            for p in pages if p.code in set(page_codes)
+        ) if gate
+    } | set(permission_codes)
+
+    role = await db.get(Role, post.rbac_role_id) if post.rbac_role_id else None
+    if role is None:
+        role = Role(
+            code=await _free_code(db, f"post_{post.code.lower()}"[:40]),
+            name=name or post.name,
+            description=f"Approval post: {post.name}",
+            is_system=True, is_active=True,
+        )
+        db.add(role)
+        await db.flush()
+        post.rbac_role_id = role.id
+    else:
+        role.name = name or role.name
+        role.is_active = True
+
+    permissions = (await db.execute(
+        select(Permission).where(Permission.code.in_(wanted_codes))
+    )).scalars().all() if wanted_codes else []
+    wanted_ids = {p.id for p in permissions}
+    current = (await db.execute(
+        select(RolePermission).where(RolePermission.role_id == role.id)
+    )).scalars().all()
+    before = sorted(
+        code for _rid, code in (await db.execute(
+            select(RolePermission.role_id, Permission.code)
+            .join(Permission, Permission.id == RolePermission.permission_id)
+            .where(RolePermission.role_id == role.id)
+        )).all()
+    )
+    for row in current:
+        if row.permission_id not in wanted_ids:
+            await db.delete(row)
+    have = {row.permission_id for row in current}
+    for permission_id in wanted_ids - have:
+        db.add(RolePermission(role_id=role.id, permission_id=permission_id))
+
+    await write_audit(
+        db, entity="rbac_job_profile", entity_id=role.id,
+        action=AuditAction.UPDATE, actor=actor,
+        before={"permissions": before},
+        after={"permissions": sorted(p.code for p in permissions)},
+        entity_no=key[:50],
+        summary=f"Access updated for approval post {post.name}",
+    )
+    await db.commit()
+    return {"success": True, "key": key, "role_id": role.id,
+            "scope": ScopeRung.ALL.value,
+            "permission_codes": sorted(p.code for p in permissions)}
+
+
 async def list_profiles(db: AsyncSession) -> dict:
     derived = await _derive(db)
     saved = await _profile_roles(db)
@@ -489,6 +649,11 @@ async def list_profiles(db: AsyncSession) -> dict:
             # on its own.
             "permission_codes": sorted(codes - defined_page_perms),
         })
+
+    # The chairs this system owns. Appended rather than merged into the derived
+    # buckets: they come from a different place and the screen says so.
+    items.extend(await _post_profile_rows(db, pages, held, defined_page_perms))
+
     return {
         "items": items,
         # Real jobs only: the header reads "N real jobs derived from M positions",
@@ -573,6 +738,9 @@ async def set_profile_access(
     db: AsyncSession, key: str, page_codes: list[str],
     permission_codes: list[str], scope: str, name: str | None, actor,
 ) -> dict:
+    if is_post_key(key):
+        return await _set_post_access(
+            db, key, page_codes, permission_codes, name, actor)
     derived = await _derive(db)
     if key not in derived:
         raise ValidationError(f"Unknown job profile: {key}")

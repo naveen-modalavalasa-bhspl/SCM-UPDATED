@@ -124,6 +124,7 @@ async def list_posts(db: AsyncSession, include_inactive: bool = False) -> dict:
         "name": row.name,
         "department": row.department,
         "hcm_position_id": row.hcm_position_id,
+        "rbac_role_id": row.rbac_role_id,
         "is_active": row.is_active,
         "members": seated.get(row.id, []),
         # How many saved ladders name this post, so deactivating it is an informed
@@ -151,7 +152,8 @@ async def save_post(db: AsyncSession, data, user, post_id: int | None = None) ->
     if post_id is None:
         post = ApprovalPost(code=await _unique_code(db, name), name=name,
                             department=(data.department or "").strip() or None,
-                            hcm_position_id=data.hcm_position_id, is_active=True)
+                            hcm_position_id=data.hcm_position_id,
+                            rbac_role_id=data.rbac_role_id, is_active=True)
         db.add(post)
         await db.flush()
         action = AuditAction.CREATE
@@ -162,6 +164,7 @@ async def save_post(db: AsyncSession, data, user, post_id: int | None = None) ->
         post.name = name
         post.department = (data.department or "").strip() or None
         post.hcm_position_id = data.hcm_position_id
+        post.rbac_role_id = data.rbac_role_id
         if data.is_active is not None:
             post.is_active = data.is_active
         action = AuditAction.UPDATE
@@ -171,6 +174,7 @@ async def save_post(db: AsyncSession, data, user, post_id: int | None = None) ->
         db, entity="wf_approval_posts", entity_id=post.id, entity_no=post.code[:50],
         action=action, actor=user,
         after={"name": post.name, "department": post.department,
+               "rbac_role_id": post.rbac_role_id,
                "employee_ids": data.employee_ids or []},
         summary=f"Approval post {post.name} saved with "
                 f"{len(data.employee_ids or [])} member(s)",
@@ -225,6 +229,7 @@ async def get_post(db: AsyncSession, post_id: int) -> dict:
     used = await _usage(db, [post.id])
     return {"id": post.id, "code": post.code, "name": post.name,
             "department": post.department, "hcm_position_id": post.hcm_position_id,
+            "rbac_role_id": post.rbac_role_id,
             "is_active": post.is_active, "members": seated.get(post.id, []),
             "used_in_ladders": used.get(post.id, 0)}
 

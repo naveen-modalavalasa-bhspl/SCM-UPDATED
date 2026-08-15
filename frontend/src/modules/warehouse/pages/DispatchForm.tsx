@@ -15,7 +15,10 @@ import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, toTimeline } from "../components/Timeline";
-import { addDispatchEvent, cancelDispatch, dispatchGateOut, getDispatch, listConsignments } from "../api";
+import {
+  addDispatchEvent, approveDispatch, cancelDispatch, dispatchGateOut, getDispatch,
+  listConsignments, rejectDispatch,
+} from "../api";
 import { fmtDate, fmtMoney, fmtQty, humanise, num } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { Dispatch, DispatchItem, DispatchPackage } from "../types";
@@ -77,7 +80,9 @@ export default function DispatchForm() {
   );
   const [gatePass, setGatePass] = useState("");
   const [cancelReason, setCancelReason] = useState("");
-  const [confirming, setConfirming] = useState<"gate" | "cancel" | null>(null);
+  const [confirming, setConfirming] = useState<
+    "gate" | "cancel" | "approve" | "reject" | null>(null);
+  const [decisionNote, setDecisionNote] = useState("");
   const [event, setEvent] = useState({
     event_type: "IN_TRANSIT",
     location_name: "",
@@ -103,12 +108,44 @@ export default function DispatchForm() {
 
   const gateOut = useMutation({
     mutationFn: () => dispatchGateOut(Number(id), gatePass || undefined),
-    onSuccess: () => {
-      void alerts.success("dispatch.gated_out", { number: doc?.dispatch_no ?? "The dispatch" });
+    // One endpoint, two outcomes: a consignment that has not been through its chain
+    // is SENT to the approvers and the goods stay on the bench (see
+    // `warehouse.service.gate_out` -> `_dispatch_approval_pending`). Announcing
+    // "has left the site" for both told the storekeeper the stock was gone when it
+    // was not — so the returned status, not the click, picks the message.
+    onSuccess: (saved) => {
+      if (saved.status === "DISPATCHED") {
+        void alerts.success("dispatch.gated_out", { number: saved.dispatch_no });
+      } else {
+        void alerts.info("dispatch.sent_for_approval", {
+          number: saved.dispatch_no,
+          approver: saved.current_approver_name ?? "its approver",
+        });
+      }
       qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
       qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
       qc.invalidateQueries({ queryKey: ["wh-consignments"] });
+      qc.invalidateQueries({ queryKey: ["approvals"] });
       setConfirming(null);
+    },
+  });
+
+  // The chain's decision on a consignment. `approveDispatch` and `rejectDispatch`
+  // have existed in the api layer since dispatch approval was built; no screen ever
+  // called them, so a consignment waiting on Logistics had no button anywhere and the
+  // only way through was the Approvals inbox.
+  const decide = useMutation({
+    mutationFn: (approve: boolean) =>
+      approve
+        ? approveDispatch(Number(id), decisionNote)
+        : rejectDispatch(Number(id), decisionNote),
+    onSuccess: (saved) => {
+      void alerts.success("dispatch.decided", { number: saved.dispatch_no });
+      qc.invalidateQueries({ queryKey: ["wh-dispatch", id] });
+      qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
+      qc.invalidateQueries({ queryKey: ["approvals"] });
+      setConfirming(null);
+      setDecisionNote("");
     },
   });
 
@@ -135,6 +172,13 @@ export default function DispatchForm() {
       setEvent({ event_type: "IN_TRANSIT", location_name: "", temperature_c: "", notes: "" });
     },
   });
+
+  // PACKED covers two different moments and the button meant something different in
+  // each: a consignment nobody has sent for release yet, and one already signed off
+  // that was re-packed (`add_package` puts an APPROVED dispatch back to PACKED).
+  // `approved_at` is what tells them apart — it is stamped both by a real approval
+  // and by the NO_APPROVAL ladder that approves on submit.
+  const needsRelease = doc?.status === "PACKED" && !doc?.approved_at;
 
   const packageCount = doc?.packages?.length ?? 0;
   const itemCount = doc?.items?.reduce((sum, line) => sum + num(line.quantity), 0) ?? 0;
@@ -212,10 +256,23 @@ export default function DispatchForm() {
             <Button variant="ghost" onClick={() => nav("/warehouse/dispatch")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
+            {/* can_approve, not just the permission: every warehouse login holds
+                `dispatch.approve`, while only the person the chain named may act.
+                Showing it to the rest sends them into "You are not a valid approver"
+                after clicking. Same rule the Material Issue screen uses. */}
+            {doc.status === "PENDING_APPROVAL" && doc.can_approve && (
+              <Can do="dispatch.approve">
+                <Button onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button variant="danger" onClick={() => setConfirming("reject")}>
+                  Reject
+                </Button>
+              </Can>
+            )}
             {["APPROVED", "PACKED"].includes(doc.status) && (
               <Can do="dispatch.gate_out">
                 <Button onClick={() => setConfirming("gate")}>
-                  <Truck className="h-4 w-4" /> Gate out
+                  <Truck className="h-4 w-4" />
+                  {needsRelease ? "Send for release approval" : "Gate out"}
                 </Button>
               </Can>
             )}
@@ -397,17 +454,49 @@ export default function DispatchForm() {
 
       <ConfirmModal
         isOpen={confirming === "gate"}
-        title="Send this consignment out?"
-        message="The consignment is marked dispatched and the linked material issue becomes dispatched."
-        confirmLabel="Gate out"
+        title={needsRelease ? "Send this consignment for approval?" : "Send this consignment out?"}
+        message={needsRelease
+          ? "It goes to whoever the approval config names for a dispatch. Nothing moves and no stock is deducted until they sign — if no approval is configured it goes out straight away."
+          : "The consignment is marked dispatched and the linked material issue becomes dispatched."}
+        confirmLabel={needsRelease ? "Send for approval" : "Gate out"}
         busy={gateOut.isPending}
         error={gateOut.error}
         onConfirm={() => gateOut.mutate()}
         onClose={() => setConfirming(null)}
       >
+        {/* Only when the goods are actually leaving. A gate pass typed at the
+            submit step is thrown away — gate_out is called again after approval. */}
+        {!needsRelease && (
+          <div className="mt-3">
+            <Field label="Gate pass no">
+              <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
+            </Field>
+          </div>
+        )}
+      </ConfirmModal>
+
+      <ConfirmModal
+        isOpen={confirming === "approve" || confirming === "reject"}
+        title={confirming === "reject" ? "Reject this consignment?" : "Approve this consignment?"}
+        message={confirming === "reject"
+          ? "It stops here. Say why, so the warehouse knows what to fix."
+          : "This records your decision in the shared approval history. The consignment can then be gated out."}
+        confirmLabel={confirming === "reject" ? "Reject" : "Approve"}
+        danger={confirming === "reject"}
+        busy={decide.isPending}
+        error={decide.error}
+        confirmDisabled={confirming === "reject" && !decisionNote.trim()}
+        onConfirm={() => decide.mutate(confirming === "approve")}
+        onClose={() => { setConfirming(null); setDecisionNote(""); }}
+      >
         <div className="mt-3">
-          <Field label="Gate pass no">
-            <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
+          <Field label={confirming === "reject" ? "Reason" : "Comments"}>
+            <Input
+              value={decisionNote}
+              onChange={(e) => setDecisionNote(e.target.value)}
+              placeholder={confirming === "reject"
+                ? "Why it cannot go" : "Optional"}
+            />
           </Field>
         </div>
       </ConfirmModal>

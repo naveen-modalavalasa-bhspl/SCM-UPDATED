@@ -9,8 +9,18 @@ import { reportFrontendError } from "@/shared/errorLogging";
 // failure look like "no response", i.e. "Can't reach the server".
 export const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || "" });
 
+// The supplier portal is a second audience with a second token. Kept under its own
+// key so a buyer and a vendor can be signed in in two tabs without evicting each
+// other, and picked by URL rather than by "whichever is present" — sending an
+// employee token to /api/supplier would 401 and log the employee out of SCM.
+export const SUPPLIER_TOKEN_KEY = "supplier_token";
+
+const isSupplierCall = (url?: string) => Boolean(url?.startsWith("/api/supplier"));
+
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token");
+  const token = localStorage.getItem(
+    isSupplierCall(config.url) ? SUPPLIER_TOKEN_KEY : "token",
+  );
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
@@ -43,8 +53,13 @@ api.interceptors.response.use(
       },
     });
     if (status === 401) {
-      localStorage.removeItem("token");
-      if (!location.pathname.startsWith("/login")) location.href = "/login";
+      // Sign out only the audience that failed, and send them to their own door.
+      const supplier = isSupplierCall(error.config?.url)
+        || location.pathname.startsWith("/supplier");
+      const key = supplier ? SUPPLIER_TOKEN_KEY : "token";
+      const door = supplier ? "/supplier/login" : "/login";
+      localStorage.removeItem(key);
+      if (location.pathname !== door) location.href = door;
     }
     if (!error.response) {
       const path = error.config?.url ? ` (${error.config.url})` : "";

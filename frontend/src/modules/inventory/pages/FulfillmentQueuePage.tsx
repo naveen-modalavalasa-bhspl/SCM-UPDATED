@@ -250,10 +250,14 @@ export function FulfillmentQueuePage() {
           variant="ghost"
           // A cycle has no single indent behind it to open, so the button does what
           // the row does rather than pointing at an id that does not exist.
-          onClick={(e) => {
-            e.stopPropagation();
-            nav(r.cycle ? `/inventory/fulfillment/${r.cycle}` : `/indents/${r.id}`);
-          }}
+          //
+          // No stopPropagation: the shared Button hands this to HeroUI's `onPress`,
+          // which passes a PressEvent — calling a DOM method on it threw on every
+          // click, so the button did nothing at all and only the row worked. HeroUI
+          // does not bubble a press to the row, so there is nothing to stop.
+          onClick={() =>
+            nav(r.cycle ? `/inventory/fulfillment/${r.cycle}` : `/indents/${r.id}`)
+          }
         >
           Open
         </Button>

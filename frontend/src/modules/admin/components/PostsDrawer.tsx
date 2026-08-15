@@ -7,7 +7,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, Plus, X } from "lucide-react";
 
-import { Button, ErrorBanner, Field, Input, useToast } from "@/shared/components";
+import { Button, ErrorBanner, Field, Input, Select, useToast } from "@/shared/components";
 import { adminApi } from "../api";
 import type { ApprovalPost, ApprovalPostMember } from "../types";
 
@@ -114,6 +114,11 @@ function PostList({ onEdit }: { onEdit: (post: ApprovalPost | "new") => void }) 
                       ? post.members.map((m) => m.name).join(", ")
                       : <span className="text-warn">Nobody seated</span>}
                   </p>
+                  {post.rbac_role_id == null && (
+                    <p className="truncate text-xs text-warn">
+                      No access — a step on the ladder, but no screens
+                    </p>
+                  )}
                 </button>
                 <button
                   type="button"
@@ -143,6 +148,7 @@ function PostForm({ post, onDone }: { post: ApprovalPost | null; onDone: () => v
   const queryClient = useQueryClient();
   const [name, setName] = useState(post?.name ?? "");
   const [department, setDepartment] = useState(post?.department ?? "");
+  const [profileId, setProfileId] = useState<number | null>(post?.rbac_role_id ?? null);
   const [members, setMembers] = useState<ApprovalPostMember[]>(post?.members ?? []);
   const [search, setSearch] = useState("");
 
@@ -151,11 +157,16 @@ function PostForm({ post, onDone }: { post: ApprovalPost | null; onDone: () => v
     queryFn: () => adminApi.approvalPosts.employees(search),
     enabled: search.trim().length >= 2,
   });
+  const profiles = useQuery({
+    queryKey: ["approval-post-profiles"],
+    queryFn: adminApi.approvalPosts.profiles,
+  });
 
   const save = useMutation({
     mutationFn: () => {
       const body = {
         name, department: department || null,
+        rbac_role_id: profileId,
         employee_ids: members.map((m) => m.id),
       };
       return post
@@ -184,6 +195,26 @@ function PostForm({ post, onDone }: { post: ApprovalPost | null; onDone: () => v
       <Field label="Group">
         <Input value={department} onChange={(e) => setDepartment(e.target.value)}
                placeholder="SCM" />
+      </Field>
+      <Field
+        label="Access"
+        hint="Anyone seated here gets this. Remove them and they lose it again."
+      >
+        <Select
+          ariaLabel="Job profile"
+          value={profileId ?? ""}
+          placeholder="No access — ladder step only"
+          onChange={(value) => setProfileId(value ? Number(value) : null)}
+          options={[
+            { value: "", label: "No access — ladder step only" },
+            ...(profiles.data ?? [])
+              .filter((profile) => profile.is_active)
+              .map((profile) => ({
+                value: String(profile.id),
+                label: profile.name,
+              })),
+          ]}
+        />
       </Field>
 
       <div>

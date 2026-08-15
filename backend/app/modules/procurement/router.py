@@ -1,61 +1,357 @@
-"""Procurement endpoints. No logic — every route calls the service."""
+"""Procurement endpoints. No logic — every route calls the service.
+
+Four routers under one `router` object, because `main.py` includes one attribute per
+module:
+
+  * `/api/pos/**`           — purchase orders, unchanged
+  * `/api/requisitions/**`  — what a buyer wants to buy
+  * `/api/rfqs/**`          — what went out to vendors, and what came back
+  * `/api/supplier/**`      — the vendor portal. NO `require_permission` anywhere on
+                              it: the caller is not an employee and holds no role.
+                              `get_current_vendor` is the whole guard, and every
+                              service call under it filters on the vendor id from the
+                              token — never one from the request.
+"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_permission
+from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.procurement import service
-from app.modules.procurement.schemas import ActionIn, POCreate, POListRow, POOut
+from app.modules.procurement.schemas import (
+    ActionIn, AwardIn, POCreate, POListRow, POOut, QuoteListRow, QuoteOut,
+    QuoteSubmit, ReqCreate, ReqListRow, ReqOut, RFQCreate, RFQListRow, RFQOut,
+    RFQUpdate, VendorAccountIn, VendorAccountOut, VendorLoginIn, VendorPasswordIn,
+    VendorProfileOut, VendorTokenOut,
+)
 from app.platform.rbac import permissions as perms
+from app.shared.enums import ApprovalAction
 
-router = APIRouter(prefix="/api/pos", tags=["procurement"])
+pos = APIRouter(prefix="/api/pos", tags=["procurement"])
+requisitions = APIRouter(prefix="/api/requisitions", tags=["procurement"])
+rfqs = APIRouter(prefix="/api/rfqs", tags=["procurement"])
+supplier = APIRouter(prefix="/api/supplier", tags=["supplier-portal"])
+# Its own prefix, not /api/rfqs/portal/…: `/api/rfqs/{rfq_id}` is int-typed and is
+# declared first, so a literal "portal" segment there would 422 rather than fall
+# through to the account routes.
+accounts = APIRouter(prefix="/api/supplier-accounts", tags=["supplier-portal"])
 
 
-@router.get("", response_model=Page[POListRow])
+@pos.get("", response_model=Page[POListRow])
 async def list_pos(params: PageParams = Depends(), status: str | None = None,
                    vendor_id: int | None = None, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission(perms.PO_VIEW))):
     return await service.list_pos(db, params, status, vendor_id, user=user)
 
 
-@router.get("/open-for-grn", response_model=Page[POListRow])
+@pos.get("/open-for-grn", response_model=Page[POListRow])
 async def open_for_grn(params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.PO_VIEW))):
     return await service.open_for_grn(db, params)
 
 
-@router.post("/from-indent/{indent_id}", response_model=POOut)
+@pos.post("/from-indent/{indent_id}", response_model=POOut)
 async def create_from_indent(indent_id: int, data: POCreate, db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(perms.PO_CREATE))):
     return await service.create_po_from_indent(db, indent_id, data, user)
 
 
-@router.get("/{po_id}", response_model=POOut)
+@pos.get("/{po_id}", response_model=POOut)
 async def get_one(po_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.PO_VIEW))):
     return await service.get_po(db, po_id, user=user)
 
 
-@router.post("/{po_id}/submit", response_model=POOut)
+@pos.post("/{po_id}/submit", response_model=POOut)
 async def submit(po_id: int, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission(perms.PO_SUBMIT))):
     return await service.submit_po(db, po_id, user)
 
 
-@router.post("/{po_id}/approve", response_model=POOut)
+@pos.post("/{po_id}/approve", response_model=POOut)
 async def approve(po_id: int, body: ActionIn = ActionIn(), db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.PO_APPROVE))):
     return await service.act_on_po(db, po_id, "APPROVE", body.comments, user)
 
 
-@router.post("/{po_id}/reject", response_model=POOut)
+@pos.post("/{po_id}/reject", response_model=POOut)
 async def reject(po_id: int, body: ActionIn = ActionIn(), db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission(perms.PO_REJECT))):
     return await service.act_on_po(db, po_id, "REJECT", body.comments, user)
 
 
-@router.post("/{po_id}/send-to-vendor", response_model=POOut)
+@pos.post("/{po_id}/send-to-vendor", response_model=POOut)
 async def send_to_vendor(po_id: int, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.PO_SEND_VENDOR))):
     return await service.send_to_vendor(db, po_id, user)
+
+
+# --------------------------------------------------------------------------- #
+#  Requisitions
+# --------------------------------------------------------------------------- #
+
+@requisitions.get("", response_model=Page[ReqListRow])
+async def list_requisitions(params: PageParams = Depends(), status: str | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    return await service.list_requisitions(db, params, status, user=user)
+
+
+@requisitions.post("", response_model=ReqOut, status_code=201)
+async def create_requisition(body: ReqCreate, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.REQUISITION_CREATE))):
+    return await service.create_requisition(db, body, user)
+
+
+@requisitions.post("/from-material-request/{mr_id}", response_model=ReqOut,
+                   status_code=201)
+async def create_requisition_from_mr(
+    mr_id: int, db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.REQUISITION_CREATE)),
+):
+    """Pick up an approved material request as a requisition, lines and all."""
+    return await service.create_requisition_from_mr(db, mr_id, user)
+
+
+@requisitions.get("/{req_id}", response_model=ReqOut)
+async def get_requisition(req_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    return await service.get_requisition(db, req_id, user=user)
+
+
+@requisitions.put("/{req_id}", response_model=ReqOut)
+async def update_requisition(req_id: int, body: ReqCreate,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.REQUISITION_CREATE))):
+    return await service.update_requisition(db, req_id, body, user)
+
+
+@requisitions.post("/{req_id}/submit", response_model=ReqOut)
+async def submit_requisition(req_id: int, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.REQUISITION_CREATE))):
+    return await service.submit_requisition(db, req_id, user)
+
+
+@requisitions.post("/{req_id}/approve", response_model=ReqOut)
+async def approve_requisition(req_id: int, body: ActionIn = ActionIn(),
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.REQUISITION_APPROVE))):
+    return await service.act_on_requisition(
+        db, req_id, ApprovalAction.APPROVED.value, body.comments, user)
+
+
+@requisitions.post("/{req_id}/reject", response_model=ReqOut)
+async def reject_requisition(req_id: int, body: ActionIn = ActionIn(),
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.REQUISITION_APPROVE))):
+    return await service.act_on_requisition(
+        db, req_id, ApprovalAction.REJECTED.value, body.comments, user)
+
+
+@requisitions.post("/{req_id}/cancel", response_model=ReqOut)
+async def cancel_requisition(req_id: int, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.REQUISITION_CREATE))):
+    return await service.cancel_requisition(db, req_id, user)
+
+
+# --------------------------------------------------------------------------- #
+#  RFQs and quotations
+# --------------------------------------------------------------------------- #
+
+@rfqs.get("", response_model=Page[RFQListRow])
+async def list_rfqs(params: PageParams = Depends(), status: str | None = None,
+                    db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await service.list_rfqs(db, params, status, user=user)
+
+
+@rfqs.post("", response_model=RFQOut, status_code=201)
+async def create_rfq(body: RFQCreate, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.RFQ_CREATE))):
+    return await service.create_rfq(db, body, user)
+
+
+# Declared above `/{rfq_id}`: a literal segment has to be matched before the int-typed
+# catch-all, or "quotations" is parsed as an RFQ id and 422s.
+@rfqs.get("/quotations", response_model=Page[QuoteListRow])
+async def list_quotations(params: PageParams = Depends(), rfq_id: int | None = None,
+                          vendor_id: int | None = None,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.RFQ_COMPARE))):
+    return await service.list_quotations(db, params, rfq_id, vendor_id)
+
+
+@rfqs.get("/quotations/{quote_id}", response_model=QuoteOut)
+async def get_quotation(quote_id: int, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.RFQ_COMPARE))):
+    return await service.get_quotation(db, quote_id)
+
+
+@rfqs.get("/{rfq_id}", response_model=RFQOut)
+async def get_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
+                  user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await service.get_rfq(db, rfq_id, user=user)
+
+
+@rfqs.put("/{rfq_id}", response_model=RFQOut)
+async def update_rfq(rfq_id: int, body: RFQUpdate, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.RFQ_CREATE))):
+    return await service.update_rfq(db, rfq_id, body, user)
+
+
+@rfqs.post("/{rfq_id}/submit", response_model=RFQOut)
+async def submit_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.RFQ_CREATE))):
+    return await service.submit_rfq(db, rfq_id, user)
+
+
+@rfqs.post("/{rfq_id}/approve", response_model=RFQOut)
+async def approve_rfq(rfq_id: int, body: ActionIn = ActionIn(),
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.RFQ_APPROVE))):
+    """Approving publishes it: the vendors can see the RFQ from this moment."""
+    return await service.act_on_rfq(
+        db, rfq_id, ApprovalAction.APPROVED.value, body.comments, user)
+
+
+@rfqs.post("/{rfq_id}/reject", response_model=RFQOut)
+async def reject_rfq(rfq_id: int, body: ActionIn = ActionIn(),
+                     db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.RFQ_APPROVE))):
+    return await service.act_on_rfq(
+        db, rfq_id, ApprovalAction.REJECTED.value, body.comments, user)
+
+
+@rfqs.get("/{rfq_id}/invites")
+async def rfq_invites(rfq_id: int, db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.RFQ_CREATE))):
+    """The per-vendor links, for a buyer to send by hand. Each is a bearer credential
+    for exactly one RFQ and one vendor."""
+    return await service.rfq_invites(db, rfq_id, user)
+
+
+@rfqs.get("/{rfq_id}/comparison")
+async def comparison(rfq_id: int, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.RFQ_COMPARE))):
+    """Every submitted quote, cheapest first. Carries every vendor's price, which is
+    exactly what must never reach a vendor — hence its own permission."""
+    return await service.comparison(db, rfq_id, user)
+
+
+@rfqs.post("/{rfq_id}/award", response_model=RFQOut)
+async def award_rfq(rfq_id: int, body: AwardIn, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.RFQ_AWARD))):
+    return await service.award_rfq(db, rfq_id, body, user)
+
+
+@rfqs.post("/{rfq_id}/close", response_model=RFQOut)
+async def close_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.RFQ_CREATE))):
+    return await service.close_rfq(db, rfq_id, user)
+
+
+@rfqs.post("/{rfq_id}/cancel", response_model=RFQOut)
+async def cancel_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.RFQ_CREATE))):
+    return await service.cancel_rfq(db, rfq_id, user)
+
+
+# --------------------------------------------------------------------------- #
+#  Supplier accounts — the internal side of the portal
+# --------------------------------------------------------------------------- #
+
+@accounts.get("", response_model=Page[VendorAccountOut])
+async def list_vendor_accounts(params: PageParams = Depends(),
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await service.list_vendor_accounts(db, params)
+
+
+@accounts.post("", response_model=VendorAccountOut, status_code=201)
+async def create_vendor_account(body: VendorAccountIn,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    """Idempotent: called twice, the vendor still has exactly one account and the
+    password they may already have changed is left alone."""
+    return await service.ensure_vendor_account(db, body, user)
+
+
+@accounts.post("/{vendor_id}/reset", response_model=VendorAccountOut)
+async def reset_vendor_password(vendor_id: int, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await service.reset_vendor_password(db, vendor_id, user)
+
+
+@accounts.post("/{vendor_id}/disable", response_model=VendorAccountOut)
+async def disable_vendor_account(vendor_id: int, db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await service.set_vendor_account_active(db, vendor_id, False, user)
+
+
+@accounts.post("/{vendor_id}/enable", response_model=VendorAccountOut)
+async def enable_vendor_account(vendor_id: int, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await service.set_vendor_account_active(db, vendor_id, True, user)
+
+
+# --------------------------------------------------------------------------- #
+#  Supplier portal — reached by someone outside the company
+# --------------------------------------------------------------------------- #
+#  No `require_permission` below this line, deliberately. A vendor has no role and no
+#  position; `get_current_vendor` is the guard, and the vendor id comes from the token.
+
+@supplier.post("/login", response_model=VendorTokenOut)
+async def vendor_login(body: VendorLoginIn, db: AsyncSession = Depends(get_db)):
+    return await service.vendor_login(db, body.username, body.password)
+
+
+@supplier.get("/me", response_model=VendorProfileOut)
+async def vendor_me(db: AsyncSession = Depends(get_db),
+                    account=Depends(get_current_vendor)):
+    return await service.vendor_profile(db, account.vendor_id)
+
+
+@supplier.post("/change-password", status_code=204)
+async def vendor_change_password(body: VendorPasswordIn,
+                                 db: AsyncSession = Depends(get_db),
+                                 account=Depends(get_current_vendor)):
+    await service.vendor_change_password(
+        db, account.vendor_id, body.current_password, body.new_password)
+
+
+@supplier.get("/rfqs", response_model=Page[RFQListRow])
+async def vendor_list_rfqs(params: PageParams = Depends(),
+                           db: AsyncSession = Depends(get_db),
+                           account=Depends(get_current_vendor)):
+    return await service.vendor_list_rfqs(db, account.vendor_id, params)
+
+
+@supplier.get("/rfqs/{rfq_id}", response_model=RFQOut)
+async def vendor_get_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
+                         account=Depends(get_current_vendor)):
+    return await service.vendor_get_rfq(db, account.vendor_id, rfq_id)
+
+
+@supplier.get("/rfqs/{rfq_id}/quotation", response_model=QuoteOut)
+async def vendor_get_quotation(rfq_id: int, db: AsyncSession = Depends(get_db),
+                               account=Depends(get_current_vendor)):
+    return await service.vendor_get_quotation(db, account.vendor_id, rfq_id)
+
+
+@supplier.post("/rfqs/{rfq_id}/quotation", response_model=QuoteOut)
+async def vendor_submit_quotation(rfq_id: int, body: QuoteSubmit,
+                                  db: AsyncSession = Depends(get_db),
+                                  account=Depends(get_current_vendor)):
+    return await service.vendor_submit_quotation(
+        db, account.vendor_id, rfq_id, body)
+
+
+# One router for main.py, five underneath. The parent adds no prefix of its own, so
+# every path stays exactly where it was - no existing PO URL moves.
+router = APIRouter()
+router.include_router(pos)
+router.include_router(requisitions)
+router.include_router(rfqs)
+router.include_router(accounts)
+router.include_router(supplier)

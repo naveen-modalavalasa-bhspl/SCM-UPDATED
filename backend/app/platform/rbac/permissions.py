@@ -169,6 +169,25 @@ ADMIN_SETTINGS_MANAGE = "admin.settings.manage"
 # rather than riding along with "can edit the company address".
 ADMIN_CODE_FORMATS_MANAGE = "admin.code_formats.manage"
 
+# --- Procurement: requisitions, RFQs, quotations ---
+# The buying chain, split by decision rather than by screen. Raising a requisition is
+# asking; approving one commits a budget; sending an RFQ publishes what the company
+# is about to buy and to whom; awarding one picks the winner. Four different people in
+# most organisations, so four codes. PO_* above stays exactly as it is.
+REQUISITION_VIEW = "requisition.view"
+REQUISITION_CREATE = "requisition.create"
+REQUISITION_APPROVE = "requisition.approve"
+RFQ_VIEW = "rfq.view"
+RFQ_CREATE = "rfq.create"
+RFQ_APPROVE = "rfq.approve"
+# Reading the comparison sheet is not the same as picking off it — the sheet carries
+# every vendor's price, which is exactly what must not leak back to the vendors.
+RFQ_COMPARE = "rfq.compare"
+RFQ_AWARD = "rfq.award"
+# Issuing a supplier a login, and resetting it. The one code here that creates an
+# identity outside the company, so it is never bundled with the RFQ codes.
+VENDOR_PORTAL_MANAGE = "vendor.portal.manage"
+
 # --- Returns ---
 # A return borrows no permission from stock. It reads like a transfer and it ends in
 # one, but the people are different: a LIP storekeeper raises returns and must never
@@ -325,6 +344,21 @@ ALL_PERMISSIONS: list[Perm] = [
          "Manage system settings"),
     Perm(ADMIN_CODE_FORMATS_MANAGE, "admin", "code_formats", "manage",
          "Set the asset & consumable code formula"),
+    Perm(REQUISITION_VIEW, "procurement", "requisition", "view",
+         "View purchase requisitions"),
+    Perm(REQUISITION_CREATE, "procurement", "requisition", "create",
+         "Raise and submit purchase requisitions"),
+    Perm(REQUISITION_APPROVE, "procurement", "requisition", "approve",
+         "Approve or reject purchase requisitions"),
+    Perm(RFQ_VIEW, "procurement", "rfq", "view", "View RFQs"),
+    Perm(RFQ_CREATE, "procurement", "rfq", "create", "Raise and send out RFQs"),
+    Perm(RFQ_APPROVE, "procurement", "rfq", "approve",
+         "Approve an RFQ so it reaches its vendors"),
+    Perm(RFQ_COMPARE, "procurement", "rfq", "compare",
+         "See the quotation comparison sheet"),
+    Perm(RFQ_AWARD, "procurement", "rfq", "award", "Award an RFQ to a vendor"),
+    Perm(VENDOR_PORTAL_MANAGE, "procurement", "vendor", "portal_manage",
+         "Issue and reset supplier portal logins"),
     Perm(RETURN_VIEW, "returns", "return", "view", "View returns"),
     Perm(RETURN_CREATE, "returns", "return", "create",
          "Raise and submit a return"),

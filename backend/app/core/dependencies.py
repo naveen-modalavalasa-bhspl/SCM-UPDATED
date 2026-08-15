@@ -25,6 +25,13 @@ async def get_current_user(
     from app.platform.hcm.models import HcmEmployee
 
     payload = decode_token(token)
+    # A vendor-portal token is signed with the same key, so it decodes cleanly here.
+    # Without this line its `sub` would be read as an employee id and — where a vendor
+    # id happens to match an employee id — hand an outsider that employee's session.
+    # Refused before the lookup, not after: there is no internal endpoint a vendor
+    # token is ever allowed to reach.
+    if payload.get("typ") == "vendor":
+        raise AuthenticationError("This token is not valid for the internal API")
     result = await db.execute(
         select(HcmEmployee).where(HcmEmployee.id == int(payload["sub"]))
     )
@@ -44,6 +51,30 @@ async def get_current_user(
     request.state.actor_id = user.id
     request.state.actor_name = user.full_name
     return user
+
+
+async def get_current_vendor(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns the authenticated vendor-portal account, or 401.
+
+    The mirror image of `get_current_user`: that one refuses a `typ: "vendor"` token,
+    this one accepts nothing else. A vendor holds no RBAC role and no position, so
+    there is no `require_permission` counterpart — what a vendor may see is decided
+    by filtering every query on the vendor id this returns.
+    """
+    from app.modules.procurement.models import VendorUser
+
+    payload = decode_token(token)
+    if payload.get("typ") != "vendor":
+        raise AuthenticationError("Not a supplier-portal token")
+    account = (await db.execute(
+        select(VendorUser).where(VendorUser.vendor_id == int(payload["sub"]))
+    )).scalars().first()
+    if account is None or not account.is_active:
+        raise AuthenticationError("This supplier account is no longer active")
+    return account
 
 
 def require_permission(code: str):
