@@ -12,6 +12,12 @@ class LedgerKey(str, Enum):
     INDENT_TRACKER = "indent_tracker"
     APPROVAL_SLA = "approval_sla"
     CONSUMPTION = "consumption"
+    # Everything going back: field returns up the chain (`inv_sto` rows carrying the
+    # returns marker) and purchase returns out to vendors (`pro_returns`), on one
+    # ledger because "what went back and what happened to it" is one question.
+    RETURNS = "returns"
+    # The outward transport leg — mode, carrier, freight, where it got to.
+    TRANSPORT = "transport"
 
 
 class AgeBucket(str, Enum):

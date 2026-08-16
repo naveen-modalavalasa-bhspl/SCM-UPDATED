@@ -73,10 +73,17 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     # were missing here — so they never appeared on the config screen and always fell
     # through to the reporting line, however the admin configured the rest.
     DocType.DISPATCH.value: "Warehouse",
-    DocType.PURCHASE_RETURN.value: "Warehouse",
+    # Filed under Returns, not Warehouse. The table is `pro_returns` and the service
+    # that runs it is the warehouse's, but the admin configuring "who signs a return"
+    # looks under Returns and found only the two stock-return rows there — so a
+    # purchase return silently kept whatever the reporting line gave it.
+    DocType.PURCHASE_RETURN.value: "Returns",
     DocType.REQUISITION.value: "Procurement",
+    DocType.CONSOLIDATION.value: "Procurement",
     DocType.RFQ.value: "Procurement",
     DocType.PO.value: "Procurement",
+    DocType.TRANSPORT_REQUEST.value: "Logistics",
+    DocType.CARRIER_AWARD.value: "Logistics",
 }
 
 DOC_TYPE_LABEL: dict[str, str] = {
@@ -96,14 +103,19 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # The outward leg: transport is arranged and the consignment leaves the warehouse.
     # This is where Logistics signs.
     DocType.DISPATCH.value: "Dispatch",
-    DocType.PURCHASE_RETURN.value: "Purchase Return",
+    DocType.PURCHASE_RETURN.value: "Purchase Return (sending material back to a vendor)",
     DocType.REQUISITION.value: "Purchase Requisition",
+    DocType.CONSOLIDATION.value: "Consolidated Purchase Sheet",
     DocType.RFQ.value: "Request for Quotation",
     DocType.PO.value: "Purchase Order",
+    DocType.TRANSPORT_REQUEST.value: "Transport Request",
+    # Only reached on a mode that actually hires somebody — see logistics.enums.
+    DocType.CARRIER_AWARD.value: "Carrier Award (choosing the transport provider)",
 }
 
 # The order the modules are listed in on the config screen.
-MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Returns", "Procurement"]
+MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Returns", "Procurement",
+                "Logistics"]
 
 # Document types whose DEFAULT approver is the raiser's own post, not somebody above
 # it. These are the events where authority comes from holding the thing rather than
@@ -203,6 +215,17 @@ async def list_projects(db: AsyncSession) -> list[dict]:
     projects.append({"id": None, "name": "Company-wide (no project)",
                      "headcount": unassigned})
     return projects
+
+
+def configurable_doc_types() -> list[str]:
+    """The document types the engine actually reads a workflow for.
+
+    `DOC_TYPE_LABEL` is already that list — a type is on it precisely because some
+    module submits it to the engine. Exposing this as a function rather than letting
+    callers iterate `DocType` is what stops a picker offering ISSUE or QUOTATION,
+    against which a workflow can be saved and never read.
+    """
+    return list(DOC_TYPE_LABEL)
 
 
 async def list_doc_types() -> list[dict]:

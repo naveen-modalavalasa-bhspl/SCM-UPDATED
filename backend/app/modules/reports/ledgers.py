@@ -20,8 +20,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import aliased
 
 from app.modules.indents.models import Indent
-from app.modules.inventory.models import Stock, StockMovement
+from app.modules.inventory.models import Stock, StockMovement, StockTransferOrder
+from app.modules.logistics.models import TransportRequest
 from app.modules.reports.enums import AgeBucket, Breach, ExpiryBucket, LedgerKey
+from app.modules.returns.enums import MARKER as RETURNS_MARKER
 from app.modules.warehouse.enums import IssueDirection, IssueStatus
 from app.modules.warehouse.models import (
     Dispatch, Inspection, MaterialIssue, MaterialIssueLine, Picking, PurchaseReturn,
@@ -862,9 +864,169 @@ CONSUMPTION = LedgerSpec(
 )
 
 
+# --------------------------------------------------------------------------- #
+# Returns — both directions on one ledger
+#
+# A field return (`inv_sto` carrying the returns marker in `remarks`) goes UP the
+# chain; a purchase return (`pro_returns`) goes OUT to a vendor. They are different
+# tables with different owners, but "what went back, and what happened to it" is one
+# question and nobody asks it per-table.
+#
+# The marker prefix comes from `returns.enums` — the module's public constant surface,
+# which reports may read — rather than being copied here. Two copies of "what counts
+# as a return" is one copy too many.
+# --------------------------------------------------------------------------- #
+
+def _returns_source() -> Select:
+    field_returns = select(
+        StockTransferOrder.id.label("id"),
+        literal("FIELD").label("return_type"),
+        StockTransferOrder.sto_no.label("doc_no"),
+        cast(StockTransferOrder.created_at, String(10)).label("doc_date"),
+        StockTransferOrder.status.label("status"),
+        StockTransferOrder.from_warehouse_name.label("from_location"),
+        StockTransferOrder.to_warehouse_name.label("to_location"),
+        StockTransferOrder.requested_by_name.label("raised_by"),
+        StockTransferOrder.approved_by_name.label("approved_by"),
+        StockTransferOrder.approved_at.label("approved_at"),
+        null().label("vendor_name"),
+        null().label("total_value"),
+        func.datediff(func.curdate(),
+                      cast(StockTransferOrder.created_at, String(10))
+                      ).label("days_open"),
+        StockTransferOrder.created_at.label("created_at"),
+    ).where(StockTransferOrder.remarks.like(f"{RETURNS_MARKER}%"))
+
+    purchase_returns = select(
+        PurchaseReturn.id.label("id"),
+        literal("PURCHASE").label("return_type"),
+        PurchaseReturn.return_no.label("doc_no"),
+        cast(PurchaseReturn.return_date, String(10)).label("doc_date"),
+        PurchaseReturn.status.label("status"),
+        PurchaseReturn.warehouse_name.label("from_location"),
+        PurchaseReturn.vendor_name.label("to_location"),
+        PurchaseReturn.created_by_name.label("raised_by"),
+        # `pro_returns` carries no approver columns — the sign-off lives entirely on
+        # `wf_actions`. Nulled rather than joined: this ledger is a register of what
+        # went back, and the approval trail already has its own ledger.
+        null().label("approved_by"),
+        null().label("approved_at"),
+        PurchaseReturn.vendor_name.label("vendor_name"),
+        PurchaseReturn.total_value.label("total_value"),
+        func.datediff(func.curdate(), PurchaseReturn.return_date).label("days_open"),
+        PurchaseReturn.created_at.label("created_at"),
+    )
+    return union_all(field_returns, purchase_returns)
+
+
+RETURNS = LedgerSpec(
+    key=LedgerKey.RETURNS.value,
+    label="Returns",
+    subtitle="Material sent back — up the chain from the field, and out to vendors",
+    permission=perms.RETURN_VIEW,
+    source=_returns_source,
+    columns=[
+        Col("doc_no", "Return No"),
+        Col("return_type", "Type", "status", narrow=True),
+        Col("doc_date", "Raised on", "date"),
+        Col("status", "Status", "status"),
+        Col("days_open", "Days open", "number", narrow=True),
+        Col("from_location", "From"),
+        Col("to_location", "To"),
+        Col("vendor_name", "Vendor", narrow=True),
+        Col("total_value", "Value", "number", narrow=True),
+        Col("raised_by", "Raised by"),
+        Col("approved_by", "Approved by"),
+        Col("approved_at", "Approved on", "datetime", narrow=True),
+    ],
+    filters=[
+        Filt("return_type", "Type"),
+        Filt("status", "Status"),
+        Filt("from_location", "From"),
+        Filt("raised_by", "Raised by"),
+    ],
+    search=["doc_no", "from_location", "to_location", "vendor_name", "raised_by"],
+    date_col="doc_date",
+    order_col="doc_date",
+    key_cols=["id", "return_type"],
+    scope_warehouse_name_col="from_location",
+)
+
+
+# --------------------------------------------------------------------------- #
+# Transport — the outward leg
+# --------------------------------------------------------------------------- #
+
+def _transport_source() -> Select:
+    return select(
+        TransportRequest.id.label("id"),
+        TransportRequest.tr_no.label("doc_no"),
+        TransportRequest.tr_date.label("doc_date"),
+        TransportRequest.mode.label("mode"),
+        TransportRequest.status.label("status"),
+        TransportRequest.indent_no.label("indent_no"),
+        TransportRequest.from_warehouse_name.label("warehouse"),
+        TransportRequest.to_location_name.label("destination"),
+        TransportRequest.project_name.label("project"),
+        TransportRequest.carrier_name.label("carrier"),
+        TransportRequest.freight_amount.label("freight"),
+        TransportRequest.total_packages.label("packages"),
+        TransportRequest.total_weight_kg.label("weight_kg"),
+        func.coalesce(TransportRequest.lr_no,
+                      TransportRequest.docket_no).label("tracking_no"),
+        TransportRequest.expected_delivery.label("expected_delivery"),
+        TransportRequest.dispatched_at.label("dispatched_at"),
+        TransportRequest.delivered_at.label("delivered_at"),
+        TransportRequest.requested_by_name.label("raised_by"),
+        TransportRequest.created_at.label("created_at"),
+    )
+
+
+TRANSPORT = LedgerSpec(
+    key=LedgerKey.TRANSPORT.value,
+    label="Transport",
+    subtitle="Every outward consignment — how it travelled, who carried it and "
+             "what it cost",
+    permission=perms.TRANSPORT_VIEW,
+    source=_transport_source,
+    columns=[
+        Col("doc_no", "TR No"),
+        Col("doc_date", "Raised on", "date"),
+        Col("mode", "Mode", "status", narrow=True),
+        Col("status", "Status", "status"),
+        Col("warehouse", "From"),
+        Col("destination", "To"),
+        Col("carrier", "Carrier"),
+        Col("freight", "Freight", "number", narrow=True),
+        Col("packages", "Pkgs", "number", narrow=True),
+        Col("weight_kg", "Weight (kg)", "qty", narrow=True),
+        Col("tracking_no", "LR / Docket", narrow=True),
+        Col("indent_no", "Indent No", narrow=True),
+        Col("project", "Project", narrow=True),
+        Col("expected_delivery", "Due", "date", narrow=True),
+        Col("dispatched_at", "Dispatched", "datetime", narrow=True),
+        Col("delivered_at", "Delivered", "datetime", narrow=True),
+        Col("raised_by", "Raised by"),
+    ],
+    filters=[
+        Filt("mode", "Mode"),
+        Filt("status", "Status"),
+        Filt("carrier", "Carrier"),
+        Filt("warehouse", "From"),
+        Filt("project", "Project"),
+    ],
+    search=["doc_no", "tracking_no", "indent_no", "carrier", "destination"],
+    date_col="doc_date",
+    order_col="doc_date",
+    key_cols=["id"],
+    scope_warehouse_name_col="warehouse",
+)
+
+
 LEDGERS: dict[str, LedgerSpec] = {
     spec.key: spec for spec in (
         INDENTS, APPROVALS, INVENTORY, WAREHOUSE,
         STOCK, ACKNOWLEDGEMENTS, INDENT_TRACKER, APPROVAL_SLA, CONSUMPTION,
+        RETURNS, TRANSPORT,
     )
 }

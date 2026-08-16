@@ -146,7 +146,11 @@ _DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      "dispatch": "DSP", "purchase_return": "PRET",
                      # The lot stamped on stock at putaway; its pattern carries the
                      # storage path, so a lot number reads as where the stock went.
-                     "lot": "LOT"}
+                     "lot": "LOT",
+                     # Logistics and the consolidated buying sheet. Named for the same
+                     # reason the warehouse types are: the three-letter fallback gives
+                     # "TRA" and "CON", neither of which is what anyone calls them.
+                     "transport_request": "TR", "consolidation": "CONS"}
 
 
 # A doc type whose number is more than prefix/year/sequence says so here, or the

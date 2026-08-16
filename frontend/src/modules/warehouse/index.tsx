@@ -179,3 +179,17 @@ function ConsignmentRedirect() {
 }
 
 export default WarehouseModule;
+
+/**
+ * Consignments and Dispatch, re-exported so the Logistics module can mount the SAME
+ * screens under `/logistics/*`.
+ *
+ * Deliberately a re-export rather than a move: the warehouse routes, their rbac_pages
+ * rows and their permissions are all untouched, so both entry points work while the
+ * business decides which one it wants. Retiring the warehouse copies later is then a
+ * matter of switching those page rows off — no component moves and no import changes.
+ */
+export { default as ConsignmentsScreen } from "./pages/Consignments";
+export { default as ConsignmentFormScreen } from "./pages/ConsignmentForm";
+export { default as DispatchScreen } from "./pages/Dispatch";
+export { default as DispatchFormScreen } from "./pages/DispatchForm";

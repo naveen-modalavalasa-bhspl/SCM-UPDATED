@@ -147,10 +147,14 @@ class RFQLineIn(BaseModel):
 class RFQCreate(BaseModel):
     title: str | None = None
     requisition_id: int | None = None
+    consolidation_id: int | None = None
     warehouse_id: int | None = None
     project_id: int | None = None
     due_date: date | None = None
     terms: str | None = None
+    # None means "use the default" — see shared/evaluation.method_of. Validated in the
+    # service against the shared catalogue, never against a list kept here.
+    evaluation_method: str | None = None
     vendor_ids: list[int] = []
     lines: list[RFQLineIn] = Field(min_length=1)
 
@@ -164,6 +168,7 @@ class RFQUpdate(BaseModel):
     terms: str | None = None
     warehouse_id: int | None = None
     project_id: int | None = None
+    evaluation_method: str | None = None
     vendor_ids: list[int] | None = None
     lines: list[RFQLineIn] | None = None
 
@@ -213,15 +218,99 @@ class RFQListRow(BaseModel):
 class RFQOut(RFQListRow):
     requisition_id: int | None = None
     requisition_no: str | None = None
+    consolidation_id: int | None = None
+    consolidation_no: str | None = None
     warehouse_id: int | None = None
     warehouse_name: str | None = None
     project_id: int | None = None
     project_name: str | None = None
     terms: str | None = None
+    evaluation_method: str | None = None
     awarded_vendor_id: int | None = None
     created_by_name: str | None = None
     items: list[RFQItemOut] = []
     vendors: list[RFQVendorOut] = []
+
+
+# --------------------------------------------------------------------------- #
+#  Consolidated buying sheet
+# --------------------------------------------------------------------------- #
+
+class ConsolidationCreate(BaseModel):
+    requisition_ids: list[int] = Field(min_length=1)
+    title: str | None = None
+    period_label: str | None = None
+    cons_date: date | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    remarks: str | None = None
+
+
+class ConsolidationLineEdit(BaseModel):
+    line_id: int
+    approved_qty: float = Field(ge=0)
+    remarks: str | None = None
+
+
+class ConsolidationLinesIn(BaseModel):
+    lines: list[ConsolidationLineEdit] = Field(min_length=1)
+
+
+class ConsolidationItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    line_no: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    quantity: float
+    approved_qty: float
+    estimated_rate: float
+    estimated_amount: float
+    required_date: date | None = None
+    sources: str | None = None
+    source_count: int
+    remarks: str | None = None
+
+
+class ConsolidationSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    requisition_id: int
+    requisition_no: str | None = None
+    project_name: str | None = None
+    item_count: int
+    estimated_value: float
+
+
+class ConsolidationListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    cons_no: str
+    cons_date: date | None = None
+    title: str | None = None
+    period_label: str | None = None
+    project_name: str | None = None
+    status: str
+    total_items: int
+    source_count: int
+    estimated_value: float
+    current_approver_name: str | None = None
+    created_by_name: str | None = None
+    created_at: datetime
+
+
+class ConsolidationOut(ConsolidationListRow):
+    project_id: int | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    approved_by_name: str | None = None
+    approved_at: datetime | None = None
+    remarks: str | None = None
+    items: list[ConsolidationItemOut] = []
 
 
 class VendorInviteOut(BaseModel):

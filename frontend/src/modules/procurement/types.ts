@@ -87,6 +87,82 @@ export interface ReqListRow {
   created_at: string;
 }
 
+// --------------------------------------------------------------------------- //
+//  Consolidated buying sheet
+// --------------------------------------------------------------------------- //
+
+export interface ConsolidationItem {
+  id: number;
+  line_no: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  /** What the requisitions asked for, summed. */
+  quantity: number;
+  /** What the buyer decided to tender. Never more than `quantity`. */
+  approved_qty: number;
+  estimated_rate: number;
+  estimated_amount: number;
+  required_date?: string | null;
+  /** "REQ/2026-27/00012 x 40; REQ/2026-27/00019 x 25" */
+  sources?: string | null;
+  source_count: number;
+  remarks?: string | null;
+}
+
+export interface ConsolidationSource {
+  id: number;
+  requisition_id: number;
+  requisition_no?: string | null;
+  project_name?: string | null;
+  item_count: number;
+  estimated_value: number;
+}
+
+export interface ConsolidationListRow {
+  id: number;
+  cons_no: string;
+  cons_date?: string | null;
+  title?: string | null;
+  period_label?: string | null;
+  project_name?: string | null;
+  status: string;
+  total_items: number;
+  source_count: number;
+  estimated_value: number;
+  current_approver_name?: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+}
+
+export interface Consolidation extends ConsolidationListRow {
+  project_id?: number | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  approved_by_name?: string | null;
+  approved_at?: string | null;
+  remarks?: string | null;
+  items: ConsolidationItem[];
+}
+
+export interface ConsolidationCreate {
+  requisition_ids: number[];
+  title?: string | null;
+  period_label?: string | null;
+  cons_date?: string | null;
+  project_id?: number | null;
+  warehouse_id?: number | null;
+  remarks?: string | null;
+}
+
+export interface EvaluationMethodOption {
+  value: string;
+  label: string;
+  help: string;
+  is_default: boolean;
+}
+
 export interface Requisition extends ReqListRow {
   warehouse_id?: number | null;
   project_id?: number | null;
@@ -155,6 +231,12 @@ export interface RFQListRow {
 export interface RFQ extends RFQListRow {
   requisition_id?: number | null;
   requisition_no?: string | null;
+  /** Set when the RFQ is buying against a consolidated sheet rather than one
+   * requisition. Backward pointer, like every other link in the chain. */
+  consolidation_id?: number | null;
+  consolidation_no?: string | null;
+  /** How the quotes are ranked. Null means the backend default. */
+  evaluation_method?: string | null;
   warehouse_id?: number | null;
   warehouse_name?: string | null;
   project_id?: number | null;
@@ -169,6 +251,8 @@ export interface RFQ extends RFQListRow {
 export interface RFQCreate {
   title?: string | null;
   requisition_id?: number | null;
+  consolidation_id?: number | null;
+  evaluation_method?: string | null;
   warehouse_id?: number | null;
   project_id?: number | null;
   due_date?: string | null;
@@ -226,6 +310,9 @@ export interface QuoteListRow {
   status: string;
   grand_total: number;
   rank_position?: number | null;
+  /** Higher is better under every method, so a reader never has to know which one
+   * produced the ranking. Null on a quote the scorer could not place. */
+  evaluation_score?: number | null;
   revision_count: number;
   submitted_at?: string | null;
   created_at: string;
@@ -270,7 +357,14 @@ export interface QuoteSubmit {
 
 export interface Comparison {
   rfq: RFQ;
+  /** Already ordered by rank under `evaluation_method` — never re-sort in the screen,
+   * or the winner shown stops matching the one the award check accepts. */
   quotations: QuoteListRow[];
+  evaluation_method: string;
+  responded: number;
+  recommended_quotation_id?: number | null;
+  /** Three quotes is the standard (doc B8). False is a warning, not a block. */
+  meets_three_quote_norm: boolean;
 }
 
 /* -------------------------------------------------------------- Supplier portal */

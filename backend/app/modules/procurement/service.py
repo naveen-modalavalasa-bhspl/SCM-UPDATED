@@ -23,19 +23,21 @@ from app.modules.indents import service as indent_service
 from app.modules.indents.models import IndentItem
 from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
-    POItem, PurchaseOrder, Quotation, QuotationItem, Requisition, RequisitionItem,
-    RFQ, RFQItem, RFQVendor, VendorUser,
+    POItem, PurchaseConsolidation, PurchaseOrder, Quotation, QuotationItem,
+    Requisition, RequisitionItem, RFQ, RFQItem, RFQVendor, VendorUser,
 )
 from app.modules.procurement.schemas import (
     AwardIn, POCreate, QuoteSubmit, ReqCreate, RFQCreate, RFQUpdate, VendorAccountIn,
 )
+from app.modules.procurement import consolidation
 from app.platform.workflow import engine
+from app.shared import evaluation
 from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
 from app.shared.enums import (
-    DocType, IndentStatus, InstanceStatus, MRStatus, POStatus, QuotationStatus,
-    RequisitionStatus, RFQStatus,
+    ConsolidationStatus, DocType, IndentStatus, InstanceStatus, MRStatus, POStatus,
+    QuotationStatus, RequisitionStatus, RFQStatus,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Vendor
@@ -485,22 +487,44 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
     requisition = None
     if data.requisition_id:
         requisition = await get_requisition(db, data.requisition_id)
-        if requisition.status != RequisitionStatus.APPROVED.value:
+        # A requisition folded into a consolidated sheet is bought through the sheet,
+        # so it is a legitimate source too — otherwise consolidating a requisition
+        # would make it impossible to tender.
+        if requisition.status not in (RequisitionStatus.APPROVED.value,
+                                      RequisitionStatus.CONSOLIDATED.value):
             raise ValidationError(
                 "Only an approved requisition can go out for quotation "
                 f"(status {requisition.status})")
+
+    sheet = None
+    if data.consolidation_id:
+        sheet = await consolidation.get_consolidation(db, data.consolidation_id)
+        if sheet.status not in (ConsolidationStatus.APPROVED.value,
+                                ConsolidationStatus.RFQ_RAISED.value):
+            raise ValidationError(
+                "Only an approved consolidated sheet can go out for quotation "
+                f"(status {sheet.status})")
+
+    if data.evaluation_method and not evaluation.is_valid(data.evaluation_method):
+        raise ValidationError(
+            f"{data.evaluation_method!r} is not an evaluation method")
+
     rfq = RFQ(
         rfq_no=await next_number(db, DocType.RFQ.value),
         rfq_date=utcnow().date(),
         title=data.title,
         requisition_id=requisition.id if requisition else None,
         requisition_no=requisition.req_no if requisition else None,
+        consolidation_id=sheet.id if sheet else None,
+        consolidation_no=sheet.cons_no if sheet else None,
         warehouse_id=data.warehouse_id or (requisition.warehouse_id if requisition else None),
         warehouse_name=requisition.warehouse_name if requisition else None,
         project_id=data.project_id or (requisition.project_id if requisition else None),
         project_name=requisition.project_name if requisition else None,
         due_date=data.due_date,
         terms=data.terms,
+        evaluation_method=(data.evaluation_method.upper()
+                           if data.evaluation_method else None),
         status=RFQStatus.DRAFT.value,
         created_by_id=user.id,
         created_by_name=user.full_name,
@@ -587,6 +611,11 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
     EDITABLE = (RFQStatus.DRAFT.value, RFQStatus.PENDING_APPROVAL.value)
     if rfq.status not in EDITABLE:
         raise ValidationError(f"Cannot edit an RFQ in {rfq.status} status")
+    if data.evaluation_method is not None:
+        if not evaluation.is_valid(data.evaluation_method):
+            raise ValidationError(
+                f"{data.evaluation_method!r} is not an evaluation method")
+        rfq.evaluation_method = data.evaluation_method.upper()
     for field in ("title", "due_date", "terms", "warehouse_id", "project_id"):
         value = getattr(data, field)
         if value is not None:
@@ -740,23 +769,70 @@ async def list_quotations(db: AsyncSession, params: PageParams,
     return await paginate(db, stmt.order_by(Quotation.created_at.desc()), params)
 
 
-async def comparison(db: AsyncSession, rfq_id: int, user) -> dict:
-    """Every submitted quote for an RFQ, cheapest first, with the rank written back.
+async def comparison(db: AsyncSession, rfq_id: int, user,
+                     method: str | None = None) -> dict:
+    """Every submitted quote for an RFQ, best first, with the rank written back.
 
     Ranking is stored rather than computed on read because the award decision has to
     be auditable: "we took rank 2" must still mean something after a vendor revises.
+
+    `method` overrides what the RFQ carries so a buyer can look at the same quotes
+    under a different lens before committing — looking is not choosing, so the
+    override is NOT written back to the RFQ. What is written back is the rank and
+    score under the method actually applied, because that is what the award reads.
+
+    Ordering falls back to `grand_total` for the quotes the scorer could not place
+    (a zero-value quote), so an unscored row still appears rather than vanishing.
     """
     rfq = await get_rfq(db, rfq_id, user)
+    if method and not evaluation.is_valid(method):
+        raise ValidationError(f"{method!r} is not an evaluation method")
+    chosen = evaluation.method_of(method or rfq.evaluation_method)
+
     quotes = (await db.execute(
         select(Quotation)
         .where(Quotation.rfq_id == rfq.id,
                Quotation.status != QuotationStatus.DRAFT.value)
         .order_by(Quotation.grand_total.asc())
     )).scalars().all()
-    for position, quote in enumerate(quotes, start=1):
-        quote.rank_position = position
+
+    ranked = evaluation.rank([
+        evaluation.Candidate(
+            ref=quote.id,
+            # `sub_total` is the headline the vendor named; `grand_total` is that plus
+            # discount, tax and freight — which is exactly the landed/price split.
+            price=_d(quote.sub_total) or _d(quote.grand_total),
+            landed_cost=_d(quote.grand_total),
+            lead_days=quote.delivery_days,
+        ) for quote in quotes
+    ], chosen)
+
+    by_id = {quote.id: quote for quote in quotes}
+    placed = set()
+    for row in ranked:
+        quote = by_id[row.ref]
+        quote.rank_position = row.rank
+        quote.evaluation_score = row.score
+        placed.add(quote.id)
+    # Anything the scorer could not place keeps a rank, after the placed ones, so the
+    # column is never left holding a stale position from an earlier comparison.
+    for offset, quote in enumerate(
+            (q for q in quotes if q.id not in placed), start=len(ranked) + 1):
+        quote.rank_position = offset
+        quote.evaluation_score = None
+
     await db.commit()
-    return {"rfq": rfq, "quotations": quotes}
+    ordered = sorted(quotes, key=lambda q: q.rank_position or 0)
+    return {
+        "rfq": rfq,
+        "quotations": ordered,
+        "evaluation_method": chosen,
+        "responded": len(ranked),
+        "recommended_quotation_id": ranked[0].ref if ranked else None,
+        # Stated, not enforced: three quotes is the standard (doc B8), but a
+        # single-source item is real and blocking the award would stop the purchase.
+        "meets_three_quote_norm": len(ranked) >= 3,
+    }
 
 
 async def award_rfq(db: AsyncSession, rfq_id: int, data: AwardIn, user) -> RFQ:
@@ -785,6 +861,11 @@ async def award_rfq(db: AsyncSession, rfq_id: int, data: AwardIn, user) -> RFQ:
         requisition = await db.get(Requisition, rfq.requisition_id)
         if requisition and requisition.status == RequisitionStatus.APPROVED.value:
             requisition.status = RequisitionStatus.RFQ_RAISED.value
+    if rfq.consolidation_id:
+        sheet = await db.get(PurchaseConsolidation, rfq.consolidation_id)
+        # Not CLOSED: a sheet is tendered in parts, and more of it may still go out.
+        if sheet and sheet.status == ConsolidationStatus.APPROVED.value:
+            sheet.status = ConsolidationStatus.RFQ_RAISED.value
     await db.commit()
     return await get_rfq(db, rfq_id)
 
@@ -1019,3 +1100,26 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
     await db.commit()
     await db.refresh(quote)
     return quote
+
+
+# --------------------------------------------------------------------------- #
+#  The consolidated buying sheet — re-exported from consolidation.py
+# --------------------------------------------------------------------------- #
+# The module itself is imported at the top (create_rfq validates a sheet against it);
+# these names are lifted so the router has one import site, the same arrangement
+# logistics uses for its transport surface.
+
+evaluation_methods = evaluation.describe
+
+act_on_consolidation = consolidation.act_on_consolidation
+cancel_consolidation = consolidation.cancel_consolidation
+consolidation_candidates = consolidation.candidates
+consolidation_history = consolidation.history
+consolidation_sources = consolidation.sources_of
+create_consolidation = consolidation.create_consolidation
+delete_consolidation = consolidation.delete_consolidation
+get_consolidation = consolidation.get_consolidation
+list_consolidations = consolidation.list_consolidations
+rebuild_consolidation = consolidation.rebuild_consolidation
+set_consolidation_lines = consolidation.set_line_quantities
+submit_consolidation = consolidation.submit_consolidation

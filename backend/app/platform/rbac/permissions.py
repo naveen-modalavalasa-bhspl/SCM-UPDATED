@@ -117,9 +117,10 @@ DISPATCH_CREATE = "dispatch.create"
 DISPATCH_APPROVE = "dispatch.approve"
 DISPATCH_GATE_OUT = "dispatch.gate_out"
 DISPATCH_ACKNOWLEDGE = "dispatch.acknowledge"
-RETURN_VIEW = "return.view"
-RETURN_CREATE = "return.create"
-RETURN_APPROVE = "return.approve"
+# RETURN_VIEW / RETURN_CREATE / RETURN_APPROVE are NOT declared here. A purchase
+# return and a stock return share one set of codes, and they are declared once under
+# `--- Returns ---` below. They used to be declared in both places with the same
+# values, which read as two permissions and was one.
 WAREHOUSE_REPORT_VIEW = "warehouse.report.view"
 # Deleting an abandoned draft. Separate from create/execute on purpose: a storekeeper
 # who raises documents is not automatically someone who may remove them, and the
@@ -185,8 +186,33 @@ RFQ_APPROVE = "rfq.approve"
 RFQ_COMPARE = "rfq.compare"
 RFQ_AWARD = "rfq.award"
 # Issuing a supplier a login, and resetting it. The one code here that creates an
-# identity outside the company, so it is never bundled with the RFQ codes.
+# identity outside the company, so it is never bundled with the RFQ codes. Carriers
+# ride on the same code: a transport provider IS a vendor row (vendor_type TRANSPORT)
+# and signs in through the same portal, so minting one is the same act.
 VENDOR_PORTAL_MANAGE = "vendor.portal.manage"
+# Rolling many requisitions into one buying sheet. Separate from REQUISITION_* because
+# the person who raises a requisition is not the person who decides what the month's
+# consolidated demand looks like — that sheet is what the CPO and SCM Head sign.
+CONSOLIDATION_VIEW = "consolidation.view"
+CONSOLIDATION_CREATE = "consolidation.create"
+CONSOLIDATION_APPROVE = "consolidation.approve"
+
+# --- Logistics (transport) ---
+# The outward transport leg, which until now had no permissions of its own: the
+# logistics package guarded its GRN and issue screens with warehouse codes and there
+# was nothing to grant a Logistics Team login.
+TRANSPORT_VIEW = "transport.view"
+TRANSPORT_CREATE = "transport.create"
+TRANSPORT_APPROVE = "transport.approve"
+# Picking the provider and fixing the freight. Split from CREATE for the same reason
+# RFQ_AWARD is split from RFQ_CREATE — raising the request commits nobody to spend.
+TRANSPORT_AWARD = "transport.award"
+# Recording where the consignment is: LR/docket, in-transit scans, delivery.
+TRANSPORT_TRACK = "transport.track"
+# Raising and closing a damage/shortage against the provider. Its own code because
+# it is a claim against a supplier, not a status update.
+TRANSPORT_EXCEPTION = "transport.exception"
+TRANSPORT_DELETE = "transport.delete"
 
 # --- Returns ---
 # A return borrows no permission from stock. It reads like a transfer and it ends in
@@ -299,9 +325,10 @@ ALL_PERMISSIONS: list[Perm] = [
          "Gate a dispatch out of the plant"),
     Perm(DISPATCH_ACKNOWLEDGE, "warehouse", "dispatch", "acknowledge",
          "Acknowledge delivery of a dispatch"),
-    Perm(RETURN_VIEW, "warehouse", "return", "view", "View purchase returns"),
-    Perm(RETURN_CREATE, "warehouse", "return", "create", "Create purchase returns"),
-    Perm(RETURN_APPROVE, "warehouse", "return", "approve", "Approve a purchase return"),
+    # No RETURN_VIEW / RETURN_CREATE / RETURN_APPROVE row here — see the Returns
+    # block below. Listing them twice meant `sync_permission_labels` built its
+    # catalogue dict with the later entry silently winning, so these three were dead
+    # rows that still had to be read to know they did nothing.
     Perm(WAREHOUSE_REPORT_VIEW, "warehouse", "report", "view", "View warehouse reports"),
     Perm(RECEIPT_DELETE, "warehouse", "receipt", "delete", "Delete a draft receipt"),
     Perm(INSPECTION_DELETE, "warehouse", "inspection", "delete",
@@ -310,7 +337,10 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(PICKING_DELETE, "warehouse", "picking", "delete", "Delete a draft picklist"),
     Perm(ISSUE_DELETE, "warehouse", "issue", "delete", "Delete a draft issue"),
     Perm(DISPATCH_DELETE, "warehouse", "dispatch", "delete", "Delete a draft dispatch"),
-    Perm(RETURN_DELETE, "warehouse", "return", "delete", "Delete a draft return"),
+    # `returns`, not `warehouse`: it is the fourth code of the same resource, and the
+    # other three are filed under Returns. Splitting one resource across two modules
+    # opened two half-groups on the Job Profiles screen. A relabel touches no grant.
+    Perm(RETURN_DELETE, "returns", "return", "delete", "Delete a draft return"),
     Perm(MOVEMENT_DELETE, "warehouse", "movement", "delete",
          "Delete a draft stock movement"),
     Perm(MASTER_ITEM_MANAGE, "masters", "item", "manage", "Manage items"),
@@ -358,7 +388,26 @@ ALL_PERMISSIONS: list[Perm] = [
          "See the quotation comparison sheet"),
     Perm(RFQ_AWARD, "procurement", "rfq", "award", "Award an RFQ to a vendor"),
     Perm(VENDOR_PORTAL_MANAGE, "procurement", "vendor", "portal_manage",
-         "Issue and reset supplier portal logins"),
+         "Issue and reset supplier & carrier portal logins"),
+    Perm(CONSOLIDATION_VIEW, "procurement", "consolidation", "view",
+         "View consolidated purchase sheets"),
+    Perm(CONSOLIDATION_CREATE, "procurement", "consolidation", "create",
+         "Roll requisitions into a consolidated purchase sheet"),
+    Perm(CONSOLIDATION_APPROVE, "procurement", "consolidation", "approve",
+         "Approve or reject a consolidated purchase sheet"),
+    Perm(TRANSPORT_VIEW, "logistics", "transport", "view", "View transport requests"),
+    Perm(TRANSPORT_CREATE, "logistics", "transport", "create",
+         "Raise and submit transport requests"),
+    Perm(TRANSPORT_APPROVE, "logistics", "transport", "approve",
+         "Approve or reject a transport request"),
+    Perm(TRANSPORT_AWARD, "logistics", "transport", "award",
+         "Choose the transport provider and fix the freight"),
+    Perm(TRANSPORT_TRACK, "logistics", "transport", "track",
+         "Record LR/docket, in-transit events and delivery"),
+    Perm(TRANSPORT_EXCEPTION, "logistics", "transport", "exception",
+         "Raise and close damage or shortage claims against a carrier"),
+    Perm(TRANSPORT_DELETE, "logistics", "transport", "delete",
+         "Delete a draft transport request"),
     Perm(RETURN_VIEW, "returns", "return", "view", "View returns"),
     Perm(RETURN_CREATE, "returns", "return", "create",
          "Raise and submit a return"),

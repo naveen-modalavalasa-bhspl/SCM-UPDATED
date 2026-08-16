@@ -1,11 +1,12 @@
 """Procurement endpoints. No logic — every route calls the service.
 
-Four routers under one `router` object, because `main.py` includes one attribute per
-module:
+Several routers under one `router` object, because `main.py` includes one attribute
+per module:
 
-  * `/api/pos/**`           — purchase orders, unchanged
-  * `/api/requisitions/**`  — what a buyer wants to buy
-  * `/api/rfqs/**`          — what went out to vendors, and what came back
+  * `/api/pos/**`             — purchase orders, unchanged
+  * `/api/requisitions/**`    — what a buyer wants to buy
+  * `/api/consolidations/**`  — many requisitions rolled into one buying sheet
+  * `/api/rfqs/**`            — what went out to vendors, and what came back
   * `/api/supplier/**`      — the vendor portal. NO `require_permission` anywhere on
                               it: the caller is not an employee and holds no role.
                               `get_current_vendor` is the whole guard, and every
@@ -20,16 +21,19 @@ from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.procurement import service
 from app.modules.procurement.schemas import (
-    ActionIn, AwardIn, POCreate, POListRow, POOut, QuoteListRow, QuoteOut,
-    QuoteSubmit, ReqCreate, ReqListRow, ReqOut, RFQCreate, RFQListRow, RFQOut,
-    RFQUpdate, VendorAccountIn, VendorAccountOut, VendorLoginIn, VendorPasswordIn,
-    VendorProfileOut, VendorTokenOut,
+    ActionIn, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
+    ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut, POCreate,
+    POListRow, POOut, QuoteListRow, QuoteOut, QuoteSubmit, ReqCreate, ReqListRow,
+    ReqOut, RFQCreate, RFQListRow, RFQOut, RFQUpdate, VendorAccountIn,
+    VendorAccountOut, VendorLoginIn, VendorPasswordIn, VendorProfileOut,
+    VendorTokenOut,
 )
 from app.platform.rbac import permissions as perms
 from app.shared.enums import ApprovalAction
 
 pos = APIRouter(prefix="/api/pos", tags=["procurement"])
 requisitions = APIRouter(prefix="/api/requisitions", tags=["procurement"])
+consolidations = APIRouter(prefix="/api/consolidations", tags=["procurement"])
 rfqs = APIRouter(prefix="/api/rfqs", tags=["procurement"])
 supplier = APIRouter(prefix="/api/supplier", tags=["supplier-portal"])
 # Its own prefix, not /api/rfqs/portal/…: `/api/rfqs/{rfq_id}` is int-typed and is
@@ -188,6 +192,17 @@ async def get_quotation(quote_id: int, db: AsyncSession = Depends(get_db),
     return await service.get_quotation(db, quote_id)
 
 
+# Declared BEFORE `/{rfq_id}`, which is int-typed: a literal segment registered after
+# it never matches, it 422s on the path parameter instead. Same reason the supplier
+# accounts have their own prefix.
+@rfqs.get("/evaluation-methods", response_model=list[dict])
+async def rfq_evaluation_methods(
+        user=Depends(require_permission(perms.RFQ_VIEW))):
+    """The scoring methods the comparison offers. Served rather than hardcoded in the
+    screen so the dropdown and the arithmetic cannot disagree."""
+    return service.evaluation_methods()
+
+
 @rfqs.get("/{rfq_id}", response_model=RFQOut)
 async def get_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.RFQ_VIEW))):
@@ -232,11 +247,13 @@ async def rfq_invites(rfq_id: int, db: AsyncSession = Depends(get_db),
 
 
 @rfqs.get("/{rfq_id}/comparison")
-async def comparison(rfq_id: int, db: AsyncSession = Depends(get_db),
+async def comparison(rfq_id: int, method: str | None = None,
+                     db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.RFQ_COMPARE))):
-    """Every submitted quote, cheapest first. Carries every vendor's price, which is
-    exactly what must never reach a vendor — hence its own permission."""
-    return await service.comparison(db, rfq_id, user)
+    """Every submitted quote, best first under the RFQ's evaluation method. Carries
+    every vendor's price, which is exactly what must never reach a vendor — hence its
+    own permission. `method` previews a different ranking without saving it."""
+    return await service.comparison(db, rfq_id, user, method)
 
 
 @rfqs.post("/{rfq_id}/award", response_model=RFQOut)
@@ -347,11 +364,109 @@ async def vendor_submit_quotation(rfq_id: int, body: QuoteSubmit,
         db, account.vendor_id, rfq_id, body)
 
 
-# One router for main.py, five underneath. The parent adds no prefix of its own, so
+# --------------------------------------------------------------------------- #
+#  Consolidated buying sheets
+# --------------------------------------------------------------------------- #
+
+# `/candidates` before `/{cons_id}`, for the int-typed-path reason above.
+@consolidations.get("/candidates", response_model=Page[ReqListRow])
+async def consolidation_candidates(
+        params: PageParams = Depends(), project_id: int | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
+    """Approved requisitions not already on a sheet — what the buyer picks from."""
+    return await service.consolidation_candidates(db, params, project_id)
+
+
+@consolidations.get("", response_model=Page[ConsolidationListRow])
+async def list_consolidations(params: PageParams = Depends(),
+                              status: str | None = None,
+                              project_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
+    return await service.list_consolidations(db, params, status, project_id)
+
+
+@consolidations.post("", response_model=ConsolidationOut, status_code=201)
+async def create_consolidation(body: ConsolidationCreate,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
+    return await service.create_consolidation(db, body, user)
+
+
+@consolidations.get("/{cons_id}", response_model=ConsolidationOut)
+async def get_consolidation(cons_id: int, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
+    return await service.get_consolidation(db, cons_id)
+
+
+@consolidations.put("/{cons_id}", response_model=ConsolidationOut)
+async def rebuild_consolidation(cons_id: int, body: ConsolidationCreate,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
+    return await service.rebuild_consolidation(db, cons_id, body, user)
+
+
+@consolidations.put("/{cons_id}/lines", response_model=ConsolidationOut)
+async def set_consolidation_lines(cons_id: int, body: ConsolidationLinesIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
+    return await service.set_consolidation_lines(db, cons_id, body, user)
+
+
+@consolidations.delete("/{cons_id}")
+async def delete_consolidation(cons_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
+    return await service.delete_consolidation(db, cons_id, user)
+
+
+@consolidations.get("/{cons_id}/sources", response_model=list[ConsolidationSourceOut])
+async def consolidation_sources(cons_id: int, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
+    return await service.consolidation_sources(db, cons_id)
+
+
+@consolidations.get("/{cons_id}/history", response_model=list)
+async def consolidation_history(cons_id: int, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
+    return await service.consolidation_history(db, cons_id)
+
+
+@consolidations.post("/{cons_id}/submit", response_model=ConsolidationOut)
+async def submit_consolidation(cons_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
+    return await service.submit_consolidation(db, cons_id, user)
+
+
+@consolidations.post("/{cons_id}/approve", response_model=ConsolidationOut)
+async def approve_consolidation(cons_id: int, body: ActionIn = ActionIn(),
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.CONSOLIDATION_APPROVE))):
+    return await service.act_on_consolidation(
+        db, cons_id, ApprovalAction.APPROVED.value, body.comments, user)
+
+
+@consolidations.post("/{cons_id}/reject", response_model=ConsolidationOut)
+async def reject_consolidation(cons_id: int, body: ActionIn = ActionIn(),
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.CONSOLIDATION_APPROVE))):
+    return await service.act_on_consolidation(
+        db, cons_id, ApprovalAction.REJECTED.value, body.comments, user)
+
+
+@consolidations.post("/{cons_id}/cancel", response_model=ConsolidationOut)
+async def cancel_consolidation(cons_id: int, body: ActionIn = ActionIn(),
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
+    return await service.cancel_consolidation(db, cons_id, user, body.comments)
+
+
+# One router for main.py, six underneath. The parent adds no prefix of its own, so
 # every path stays exactly where it was - no existing PO URL moves.
 router = APIRouter()
 router.include_router(pos)
 router.include_router(requisitions)
+router.include_router(consolidations)
 router.include_router(rfqs)
 router.include_router(accounts)
 router.include_router(supplier)

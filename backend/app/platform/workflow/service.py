@@ -11,7 +11,7 @@ from app.platform.rbac import permissions as perms
 from app.platform.rbac.models import Role
 from app.platform.rbac.service import get_user_permissions
 from app.platform.settings.service import write_audit
-from app.platform.workflow import engine
+from app.platform.workflow import engine, ladder
 from app.platform.workflow.models import Action, Delegation, Instance, Pending, Stage, StageCondition, Workflow
 from app.platform.workflow.schemas import DelegationIn, WorkflowIn
 from app.shared.enums import (
@@ -534,7 +534,19 @@ async def workflow_options(db: AsyncSession) -> dict:
         .order_by(HcmEmployee.full_name)
     )).scalars().all())
     return {
-        "doc_types": [value.value for value in DocType],
+        # The types the engine actually READS a workflow for, not every enum value.
+        #
+        # This used to be `[v.value for v in DocType]`, which offered the Workflows
+        # screen two types nothing ever starts an instance with: ISSUE (the legacy
+        # value superseded by WH_ISSUE) and QUOTATION (a vendor's document; nobody
+        # inside the company approves one). A workflow saved against either was
+        # written, never read, and the document silently fell through to the
+        # reporting-line fallback — the exact trap `ladder.MODULE_BY_DOC_TYPE`
+        # already documents for ISSUE.
+        #
+        # `_validate_doc_type` still accepts every enum value, so no existing row and
+        # no API call breaks; only the picker narrows.
+        "doc_types": ladder.configurable_doc_types(),
         "approver_types": [value.value for value in ApproverType],
         "approval_modes": [value.value for value in ApprovalMode],
         "operators": [value.value for value in ConditionOperator],
@@ -552,24 +564,58 @@ def _validate_doc_type(doc_type: str) -> None:
         )
 
 
+# Which permission lets you send a document back for correction — one per document
+# type that the engine can actually be asked to act on.
+#
+# A module-level constant, not a dict literal built inside the function. As a literal
+# it referenced `perms.ISSUE_APPROVE`, which does not exist, so every call raised
+# AttributeError before it could index anything: "Return for correction" 500'd for
+# EVERY document type, not just that one. At module level a bad name fails at import,
+# where it is impossible to miss.
+#
+# Deliberately not exhaustive over DocType: QUOTATION is a vendor's document that
+# nobody inside the company approves, and ISSUE is the legacy value nothing starts a
+# workflow with (see ladder.MODULE_BY_DOC_TYPE). Both fall through to the fail-closed
+# branch below rather than being given a permission that implies they are actionable.
+RETURN_PERMISSION_BY_DOC_TYPE: dict[str, str] = {
+    DocType.INDENT.value: perms.INDENT_APPROVE,
+    DocType.ALLOCATION.value: perms.ALLOCATION_APPROVE,
+    DocType.OWN_STOCK_ALLOCATION.value: perms.ALLOCATION_APPROVE,
+    # The issue family shares `issue.issue`: the same people move stock out of a
+    # point whether they own it, are forwarding it, or are working the ordinary queue.
+    DocType.OWN_STOCK_ISSUE.value: perms.ISSUE_ISSUE,
+    DocType.FORWARD_ISSUE.value: perms.ISSUE_ISSUE,
+    DocType.WH_ISSUE.value: perms.ISSUE_ISSUE,
+    DocType.MR.value: perms.MR_APPROVE,
+    DocType.REQUISITION.value: perms.REQUISITION_APPROVE,
+    DocType.CONSOLIDATION.value: perms.CONSOLIDATION_APPROVE,
+    DocType.RFQ.value: perms.RFQ_APPROVE,
+    DocType.PO.value: perms.PO_APPROVE,
+    DocType.GRN.value: perms.GRN_QC,
+    DocType.DISPATCH.value: perms.DISPATCH_APPROVE,
+    DocType.STOCK_TRANSFER.value: perms.STOCK_TRANSFER_APPROVE,
+    # All three returns share `return.approve` — the code is one resource used by
+    # both the purchase and the stock-return chains.
+    DocType.PURCHASE_RETURN.value: perms.RETURN_APPROVE,
+    DocType.STOCK_RETURN.value: perms.RETURN_APPROVE,
+    DocType.STOCK_RETURN_RECEIPT.value: perms.RETURN_APPROVE,
+    DocType.TRANSPORT_REQUEST.value: perms.TRANSPORT_APPROVE,
+    DocType.CARRIER_AWARD.value: perms.TRANSPORT_APPROVE,
+}
+
+
 async def _require_action_permission(db: AsyncSession, doc_type: str, user) -> None:
-    required = {
-        DocType.INDENT.value: perms.INDENT_APPROVE,
-        DocType.ALLOCATION.value: perms.ALLOCATION_APPROVE,
-        DocType.OWN_STOCK_ALLOCATION.value: perms.ALLOCATION_APPROVE,
-        DocType.OWN_STOCK_ISSUE.value: perms.ISSUE_APPROVE,
-        DocType.MR.value: perms.MR_APPROVE,
-        DocType.PO.value: perms.PO_APPROVE,
-        DocType.GRN.value: perms.GRN_QC,
-        DocType.ISSUE.value: perms.ISSUE_ISSUE,
-        DocType.WH_ISSUE.value: perms.ISSUE_ISSUE,
-        DocType.DISPATCH.value: perms.DISPATCH_APPROVE,
-        DocType.PURCHASE_RETURN.value: perms.RETURN_APPROVE,
-    }[doc_type]
+    from app.core.exceptions import PermissionError_
+
+    required = RETURN_PERMISSION_BY_DOC_TYPE.get(doc_type)
+    if required is None:
+        # Fail closed. A KeyError here was a 500 that read as a broken server rather
+        # than as a refusal, and it is a refusal: nothing sends this type back.
+        raise PermissionError_(
+            f"{doc_type} documents cannot be returned for correction")
+
     permissions = await get_user_permissions(
         db, user, getattr(user, "active_position_id", None),
     )
     if required not in permissions:
-        from app.core.exceptions import PermissionError_
-
         raise PermissionError_(f"Missing permission: {required}")

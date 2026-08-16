@@ -68,7 +68,7 @@ from . import receiving
 from .enums import (
     AWAITING_ACK, BLOCKED_WHEN_HAZARDOUS, DEFAULT_DISPOSITION_BY_REASON,
     DISPOSITION_HINTS, DISPOSITION_LABELS, DISPOSITION_LABELS_SHORT, EDITABLE,
-    HOLDING_STOCK, INTENT_LABELS, KIND_LABELS, LEDGER_REF_BY_DISPOSITION,
+    HOLDING_STOCK, INTENT_LABELS, KIND_LABELS, LEDGER_REF_BY_DISPOSITION, MARKER,
     MOVEMENT_BY_DISPOSITION, NEEDS_AGENCY, NEEDS_DESTINATION, NEEDS_VENDOR,
     NUMBER_SERIES, PHASES, REASON_LABELS, SELECTABLE_DISPOSITIONS, SELECTABLE_REASONS,
     Disposition, Movement, ReturnDocType, ReturnIntent, ReturnKind, ReturnReason,
@@ -79,8 +79,8 @@ logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
 
-# What marks an `inv_sto` row as a return. Leading, so the filter is a prefix match.
-MARKER = "[STOCK_RETURN]"
+# What marks an `inv_sto` row as a return. Defined in `enums.py` and re-exported here,
+# because the reports ledger needs the same prefix and cannot import this module.
 
 # `entity_type` for uploaded photos and bills, and the `ref_type` a reservation is
 # held under. Both are free strings in their tables.

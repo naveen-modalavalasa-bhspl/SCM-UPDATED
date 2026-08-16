@@ -386,3 +386,11 @@ PHASES: tuple[tuple[str, str], ...] = (
     ("movement", "Carried out"),
     ("acknowledged", "Acknowledged"),
 )
+
+#: What marks an `inv_sto` row as a return rather than a plain transfer. Leading, so
+#: the filter is a prefix match.
+#:
+#: Lives here rather than in `service.py` because the reports module has to apply the
+#: same test to build the returns ledger, and reports may not reach into another
+#: module's service internals. One definition, two readers, no drift.
+MARKER = "[STOCK_RETURN]"

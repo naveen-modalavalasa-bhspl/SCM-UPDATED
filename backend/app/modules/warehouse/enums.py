@@ -246,53 +246,53 @@ class RefType(str, Enum):
 # ---------------------------------------------------------------------------
 # Permission codes.
 #
-# These are NOT the source of truth. `app/platform/rbac/permissions.py` is, and it
-# is the lead's file — a code only exists once it has a `Perm(...)` row there, which
-# is what `scripts/seed.py` inserts into `rbac_permissions`.
+# RE-EXPORTED, never re-declared. `app/platform/rbac/permissions.py` is the single
+# source of truth (rule 6), and this module used to keep its own copy of the same 25
+# strings "so routers reference a constant". That worked right up until one of them
+# drifted: `return.view`, `return.create` and `return.approve` ended up declared in
+# three places, and the only reason nothing broke is that all three copies happened
+# to agree.
 #
-# They are named here so routers reference a constant instead of scattering string
-# literals, and so there is one list to hand the lead. Until the matching rows are
-# added and the seed is re-run, `require_permission` denies every user on the
-# endpoints guarded by a code marked NEW below. That is the correct failure: an
-# ungranted permission must close the door, not leave it open.
-#
-# Already in permissions.py, used as-is:
-ISSUE_VIEW = "issue.view"
-ISSUE_CREATE = "issue.create"
-ISSUE_POST = "issue.issue"
-# Passing an arrived consignment on to a point below (WH -> MDP -> LIP).
-ISSUE_FORWARD = "issue.forward"
-STOCK_VIEW = "stock.view"
-STOCK_TRANSFER = "stock.transfer"
-MASTER_LOCATION_MANAGE = "master.location.manage"
+# Importing them means the router keeps its existing `from ...warehouse.enums import
+# RECEIPT_VIEW` lines unchanged, and a code that is renamed in the catalogue is
+# renamed here too — or fails loudly at import, which is the point.
+# ---------------------------------------------------------------------------
+from app.platform.rbac.permissions import (  # noqa: F401  (re-exported)
+    DISPATCH_ACKNOWLEDGE,
+    DISPATCH_APPROVE,
+    DISPATCH_CREATE,
+    DISPATCH_DELETE,
+    DISPATCH_GATE_OUT,
+    DISPATCH_VIEW,
+    INSPECTION_DELETE,
+    INSPECTION_EXECUTE,
+    INSPECTION_VIEW,
+    ISSUE_CREATE,
+    ISSUE_DELETE,
+    ISSUE_FORWARD,
+    ISSUE_VIEW,
+    MASTER_LOCATION_MANAGE,
+    MOVEMENT_DELETE,
+    PICKING_DELETE,
+    PICKING_PICK,
+    PICKING_VIEW,
+    PUTAWAY_DELETE,
+    PUTAWAY_EXECUTE,
+    PUTAWAY_VIEW,
+    RECEIPT_CREATE,
+    RECEIPT_DELETE,
+    RECEIPT_POST,
+    RECEIPT_VIEW,
+    RETURN_APPROVE,
+    RETURN_CREATE,
+    RETURN_DELETE,
+    RETURN_VIEW,
+    STOCK_TRANSFER,
+    STOCK_VIEW,
+    WAREHOUSE_REPORT_VIEW,
+)
 
-# Still to be added by the lead:
-RECEIPT_VIEW = "receipt.view"                    # NEW
-RECEIPT_CREATE = "receipt.create"                # NEW
-RECEIPT_POST = "receipt.post"                    # NEW
-INSPECTION_VIEW = "inspection.view"              # NEW
-INSPECTION_EXECUTE = "inspection.execute"        # NEW
-PUTAWAY_VIEW = "putaway.view"                    # NEW
-PUTAWAY_EXECUTE = "putaway.execute"              # NEW
-PICKING_VIEW = "picking.view"                    # NEW
-PICKING_PICK = "picking.pick"                    # NEW
-DISPATCH_VIEW = "dispatch.view"                  # NEW
-DISPATCH_CREATE = "dispatch.create"              # NEW
-DISPATCH_APPROVE = "dispatch.approve"            # NEW
-DISPATCH_GATE_OUT = "dispatch.gate_out"          # NEW
-DISPATCH_ACKNOWLEDGE = "dispatch.acknowledge"    # NEW
-RETURN_VIEW = "return.view"                      # NEW
-RETURN_CREATE = "return.create"                  # NEW
-RETURN_APPROVE = "return.approve"                # NEW
-WAREHOUSE_REPORT_VIEW = "warehouse.report.view"  # NEW
-
-# Deleting an abandoned draft — one code per document type, so tidying picklists is
-# not the same grant as tidying GRNs.
-RECEIPT_DELETE = "receipt.delete"
-INSPECTION_DELETE = "inspection.delete"
-PUTAWAY_DELETE = "putaway.delete"
-PICKING_DELETE = "picking.delete"
-ISSUE_DELETE = "issue.delete"
-DISPATCH_DELETE = "dispatch.delete"
-RETURN_DELETE = "return.delete"
-MOVEMENT_DELETE = "movement.delete"
+# The one name that differs: this module has always called `issue.issue` ISSUE_POST,
+# and the catalogue calls it ISSUE_ISSUE. Aliased rather than renamed so no router
+# line changes and no permission code moves.
+from app.platform.rbac.permissions import ISSUE_ISSUE as ISSUE_POST  # noqa: F401

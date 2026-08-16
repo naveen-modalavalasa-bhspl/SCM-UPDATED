@@ -1,9 +1,11 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  Comparison, POCreate, POListRow, PurchaseOrder, Quotation, QuoteListRow,
-  QuoteSubmit, ReqCreate, ReqListRow, Requisition, RFQ, RFQCreate, RFQInvite,
-  RFQListRow, RFQUpdate, VendorAccount, VendorProfile, VendorToken,
+  Comparison, Consolidation, ConsolidationCreate, ConsolidationListRow,
+  ConsolidationSource, EvaluationMethodOption, POCreate, POListRow, PurchaseOrder,
+  Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqListRow, Requisition, RFQ,
+  RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
+  VendorToken,
 } from "./types";
 
 export const poApi = {
@@ -42,6 +44,41 @@ export const requisitionApi = {
     api.post<Requisition>(`/api/requisitions/${id}/cancel`).then((r) => r.data),
 };
 
+export const consolidationApi = {
+  /** Approved requisitions not already on a sheet — the picker's source. */
+  candidates: (params: { project_id?: number; page?: number; size?: number } = {}) =>
+    api.get<Paginated<ReqListRow>>("/api/consolidations/candidates", { params })
+      .then((r) => r.data),
+  list: (params: { status?: string; project_id?: number; page?: number; size?: number } = {}) =>
+    api.get<Paginated<ConsolidationListRow>>("/api/consolidations", { params })
+      .then((r) => r.data),
+  get: (id: number) =>
+    api.get<Consolidation>(`/api/consolidations/${id}`).then((r) => r.data),
+  create: (data: ConsolidationCreate) =>
+    api.post<Consolidation>("/api/consolidations", data).then((r) => r.data),
+  /** Change which requisitions are on the sheet — the lines are re-aggregated. */
+  rebuild: (id: number, data: ConsolidationCreate) =>
+    api.put<Consolidation>(`/api/consolidations/${id}`, data).then((r) => r.data),
+  setLines: (id: number, lines: { line_id: number; approved_qty: number; remarks?: string | null }[]) =>
+    api.put<Consolidation>(`/api/consolidations/${id}/lines`, { lines })
+      .then((r) => r.data),
+  remove: (id: number) => api.delete(`/api/consolidations/${id}`).then((r) => r.data),
+  sources: (id: number) =>
+    api.get<ConsolidationSource[]>(`/api/consolidations/${id}/sources`)
+      .then((r) => r.data),
+  submit: (id: number) =>
+    api.post<Consolidation>(`/api/consolidations/${id}/submit`).then((r) => r.data),
+  approve: (id: number, comments = "") =>
+    api.post<Consolidation>(`/api/consolidations/${id}/approve`, { comments })
+      .then((r) => r.data),
+  reject: (id: number, comments: string) =>
+    api.post<Consolidation>(`/api/consolidations/${id}/reject`, { comments })
+      .then((r) => r.data),
+  cancel: (id: number, comments = "") =>
+    api.post<Consolidation>(`/api/consolidations/${id}/cancel`, { comments })
+      .then((r) => r.data),
+};
+
 export const rfqApi = {
   list: (params: { status?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<RFQListRow>>("/api/rfqs", { params }).then((r) => r.data),
@@ -58,8 +95,13 @@ export const rfqApi = {
   cancel: (id: number) => api.post<RFQ>(`/api/rfqs/${id}/cancel`).then((r) => r.data),
   invites: (id: number) =>
     api.get<RFQInvite[]>(`/api/rfqs/${id}/invites`).then((r) => r.data),
-  comparison: (id: number) =>
-    api.get<Comparison>(`/api/rfqs/${id}/comparison`).then((r) => r.data),
+  /** `method` previews a different ranking without saving it to the RFQ. */
+  comparison: (id: number, method?: string) =>
+    api.get<Comparison>(`/api/rfqs/${id}/comparison`, { params: { method } })
+      .then((r) => r.data),
+  evaluationMethods: () =>
+    api.get<EvaluationMethodOption[]>("/api/rfqs/evaluation-methods")
+      .then((r) => r.data),
   award: (id: number, quotation_id: number, comments = "") =>
     api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_id, comments }).then((r) => r.data),
   quotations: (params: { rfq_id?: number; vendor_id?: number; page?: number; size?: number } = {}) =>

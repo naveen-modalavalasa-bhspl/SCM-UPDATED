@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Button, Card, ErrorBanner, Field, FormActions, Input, PageHeader, useToast,
+  Button, Card, ErrorBanner, Field, FormActions, Input, PageHeader, Select,
+  useToast,
 } from "@/shared/components";
 import { api } from "@/shared/api/client";
 import { requisitionApi, rfqApi } from "../api";
@@ -34,6 +35,9 @@ export function RFQFormPage() {
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [terms, setTerms] = useState("");
+  // Empty means "use the default" — the backend decides what that is, so the form
+  // never has to carry a copy of it.
+  const [evaluationMethod, setEvaluationMethod] = useState("");
   const [vendorIds, setVendorIds] = useState<number[]>([]);
   const [vendorSearch, setVendorSearch] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
@@ -59,11 +63,17 @@ export function RFQFormPage() {
       }).then((r) => r.data.items),
   });
 
+  const { data: methods } = useQuery({
+    queryKey: ["rfq-evaluation-methods"],
+    queryFn: rfqApi.evaluationMethods,
+  });
+
   useEffect(() => {
     if (!existing) return;
     setTitle(existing.title ?? "");
     setDueDate(existing.due_date ?? "");
     setTerms(existing.terms ?? "");
+    setEvaluationMethod(existing.evaluation_method ?? "");
     setVendorIds(existing.vendors.map((v) => v.vendor_id));
     setLines(existing.items.map((item) => ({
       item_id: item.item_id,
@@ -91,6 +101,7 @@ export function RFQFormPage() {
         title: title || null,
         due_date: dueDate || null,
         terms: terms || null,
+        evaluation_method: evaluationMethod || null,
         vendor_ids: vendorIds,
         lines: usable.map((line) => ({
           item_id: Number(line.item_id),
@@ -152,6 +163,18 @@ export function RFQFormPage() {
           <Field label="Terms">
             <Input value={terms} onChange={(e) => setTerms(e.target.value)}
                    placeholder="Payment, delivery, warranty" />
+          </Field>
+          <Field
+            label="Award on"
+            hint={methods?.find((m) => m.value === evaluationMethod)?.help
+              ?? methods?.find((m) => m.is_default)?.help}
+          >
+            <Select
+              value={evaluationMethod}
+              placeholder="Lowest landed cost (default)"
+              options={(methods ?? []).map((m) => ({ value: m.value, label: m.label }))}
+              onChange={setEvaluationMethod}
+            />
           </Field>
         </div>
 

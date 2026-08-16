@@ -150,6 +150,20 @@ class DocType(str, Enum):
     # material and where it then goes, which is a different ladder from the one that
     # let the material leave — hence a second doc type rather than a second stage.
     STOCK_RETURN_RECEIPT = "STOCK_RETURN_RECEIPT"
+    # Logistics. The warehouse has packed and asks for transport; this is the request
+    # that says what is moving, how heavy it is and by which mode. Signed by Logistics
+    # before any carrier is approached, because approaching one publishes the shipment.
+    TRANSPORT_REQUEST = "TRANSPORT_REQUEST"
+    # Picking the provider commits freight spend, which the transport request itself
+    # did not. Its own ladder for the same reason RFQ and PO have separate ones: the
+    # person who says "we need a truck" is not always the person who says "this truck,
+    # at this price". Only ever raised for THIRD_PARTY and COURIER — an own-vehicle or
+    # hand-over leg awards nobody and never starts this workflow.
+    CARRIER_AWARD = "CARRIER_AWARD"
+    # Procurement. Many requisitions rolled into one buying sheet, item-wise, so the
+    # CPO and the SCM Head see the whole month's demand as one document instead of
+    # forty. Approved once; the RFQs that follow point back at it.
+    CONSOLIDATION = "CONSOLIDATION"
 
 
 class InstanceStatus(str, Enum):
@@ -334,6 +348,52 @@ class RequisitionStatus(str, Enum):
     RFQ_RAISED = "RFQ_RAISED"
     ORDERED = "ORDERED"
     CANCELLED = "CANCELLED"
+    # Folded into a consolidated buying sheet. Terminal for the requisition itself —
+    # from here the sheet is what gets tendered, and a requisition that could still be
+    # picked up individually would be bought twice.
+    CONSOLIDATED = "CONSOLIDATED"
+
+
+class ConsolidationStatus(str, Enum):
+    """pro_consolidations.status — the month's demand as one document."""
+    DRAFT = "DRAFT"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    # An RFQ has gone out against it. Not terminal: a sheet is tendered in parts.
+    RFQ_RAISED = "RFQ_RAISED"
+    CLOSED = "CLOSED"
+    CANCELLED = "CANCELLED"
+
+
+class EvaluationMethod(str, Enum):
+    """How a set of competing quotes is ranked.
+
+    Shared rather than owned by procurement, because logistics ranks carrier quotes
+    the same way and sits later in the import chain — "cheapest" and "soonest" mean
+    the same thing whether the thing being bought is bandages or a truck.
+
+    Every method scores so that HIGHER IS BETTER, normalised against the best quote
+    actually received. There is no absolute scale: a 40-km run and a 900-km run are
+    not comparable, and only the quotes in hand define what good looks like.
+    """
+    LOWEST_PRICE = "LOWEST_PRICE"
+    # Price plus everything else that costs money — freight, packing, tax.
+    LOWEST_LANDED_COST = "LOWEST_LANDED_COST"
+    SHORTEST_LEAD_TIME = "SHORTEST_LEAD_TIME"
+    # Landed cost and lead time together, 70/30.
+    WEIGHTED_SCORE = "WEIGHTED_SCORE"
+
+
+#: What an RFQ or a transport request is evaluated by when nobody has said. Landed
+#: cost, not headline price: it is what the company actually pays, and it is what the
+#: old `ORDER BY grand_total` was already approximating.
+DEFAULT_EVALUATION_METHOD = EvaluationMethod.LOWEST_LANDED_COST.value
+
+#: The weights WEIGHTED_SCORE uses. Named so the number on the comparison sheet can
+#: be explained without reading the scoring code.
+WEIGHTED_COST_SHARE = 0.7
+WEIGHTED_TIME_SHARE = 0.3
 
 
 class RFQStatus(str, Enum):

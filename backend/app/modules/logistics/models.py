@@ -11,12 +11,17 @@ modules and are out of scope for the Admin & Masters build, so they are left as-
 and flagged here rather than silently half-migrated.
 """
 from sqlalchemy import (
-    Column, Date, ForeignKey, Integer, Numeric, String, Text, Index,
+    BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Integer, Numeric,
+    String, Text, Index,
 )
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
+from app.modules.logistics.enums import QuoteStatus, TransportStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
+
+QTY = Numeric(16, 3)
+MONEY = Numeric(16, 2)
 
 
 class GRN(Base):
@@ -108,5 +113,247 @@ class IssueItem(Base):
     batch_no = Column(String(60), nullable=True)
 
     issue = relationship("Issue", back_populates="items")
+
+
+# ---------------------------------------------------------------------------
+# Transport — the outward leg the warehouse hands over
+#
+# Deliberately NOT columns on `out_dispatches`. A dispatch is the warehouse saying
+# "this left the building"; a transport request is logistics saying "this is what has
+# to travel, and here is who is taking it". One dispatch can be re-tendered after a
+# carrier declines without the dispatch changing at all, and a request can exist
+# before any dispatch does — the warehouse asks for transport while it is still
+# packing. Linked by `dispatch_id`, which stays nullable for exactly that reason.
+#
+# Soft pointers throughout (`source_*`, `carrier_id`): the referents live in the
+# warehouse module and in `mst_vendors`, and a hard FK to a warehouse table would put
+# logistics in front of warehouse in the import chain.
+# ---------------------------------------------------------------------------
+
+class TransportRequest(Base):
+    """`lgs_transport_requests` — one consignment's worth of transport."""
+    __tablename__ = "lgs_transport_requests"
+
+    id = pk()
+    tr_no = Column(String(50), unique=True, nullable=False)
+    tr_date = Column(Date, nullable=True)
+    # DIRECT / COURIER / OWN_VEHICLE / THIRD_PARTY. Decides which columns below are
+    # required and whether the quoting round runs at all — see enums.MODE_RULES.
+    mode = Column(String(30), nullable=False, index=True)
+    status = Column(String(30), nullable=False, index=True,
+                    default=TransportStatus.DRAFT.value)
+
+    # What it came from. Any of the three may be set; `source_type`/`source_id` is the
+    # generic pointer the timeline reads, the named ones are for filtering.
+    source_type = Column(String(30), nullable=True)
+    source_id = Column(BigInteger, index=True, nullable=True)
+    source_no = Column(String(50), nullable=True)
+    issue_id = Column(BigInteger, index=True, nullable=True)
+    dispatch_id = Column(BigInteger, index=True, nullable=True)
+    indent_id = Column(BigInteger, index=True, nullable=True)
+    indent_no = Column(String(50), nullable=True)
+
+    from_warehouse_id = Column(BigInteger, index=True, nullable=True)
+    from_warehouse_name = Column(String(200), nullable=True)
+    to_location_name = Column(String(200), nullable=True)
+    delivery_address = Column(String(500), nullable=True)
+    contact_person = Column(String(200), nullable=True)
+    contact_phone = Column(String(30), nullable=True)
+    distance_km = Column(Numeric(10, 2), nullable=True)
+    project_id = Column(BigInteger, index=True, nullable=True)
+    project_name = Column(String(200), nullable=True)
+
+    # Totals, kept on the header so a carrier can price the job without reading every
+    # line. Recomputed from the lines on every write; never edited directly.
+    total_items = Column(Integer, nullable=False, default=0)
+    total_qty = Column(QTY, nullable=False, default=0)
+    total_weight_kg = Column(QTY, nullable=False, default=0)
+    total_volume_cbm = Column(Numeric(14, 4), nullable=False, default=0)
+    total_packages = Column(Integer, nullable=False, default=0)
+
+    # Who is taking it. `carrier_id` is a `mst_vendors` row of a transport type — a
+    # carrier is a vendor, so it reuses the vendor master, the vendor portal login and
+    # the vendor's rate history rather than opening a second supplier table.
+    carrier_id = Column(BigInteger, index=True, nullable=True)
+    carrier_name = Column(String(200), nullable=True)
+    evaluation_method = Column(String(30), nullable=True)
+    freight_amount = Column(MONEY, nullable=True)
+    awarded_quote_id = Column(BigInteger, nullable=True)
+    awarded_by_id = soft_fk()
+    awarded_by_name = Column(String(200), nullable=True)
+    awarded_at = Column(DateTime, nullable=True)
+
+    # Own vehicle.
+    vehicle_number = Column(String(50), nullable=True)
+    driver_name = Column(String(200), nullable=True)
+    driver_phone = Column(String(30), nullable=True)
+    # The other job the vehicle was already doing — the whole reason this mode is free.
+    trip_reference = Column(String(200), nullable=True)
+
+    # Direct hand-over.
+    handed_over_by_name = Column(String(200), nullable=True)
+    received_by_name = Column(String(200), nullable=True)
+
+    # The tracking handle. `lr_no` for a truck, `docket_no` for a courier; both kept
+    # because a consignment note and a docket are not the same document and a shipment
+    # that changed mode mid-flight carries one of each.
+    lr_no = Column(String(50), nullable=True)
+    docket_no = Column(String(50), nullable=True)
+    tracking_url = Column(String(500), nullable=True)
+    eway_bill_no = Column(String(50), nullable=True)
+
+    expected_delivery = Column(Date, nullable=True)
+    dispatched_at = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+    delivered_to_name = Column(String(200), nullable=True)
+    pod_url = Column(String(500), nullable=True)
+    # Set when the field is told where its material is (doc D5). Read by the indent
+    # team's chase list — an untold field cannot acknowledge.
+    tracking_shared_at = Column(DateTime, nullable=True)
+
+    remarks = Column(Text, nullable=True)
+    requested_by_id = soft_fk()
+    requested_by_name = Column(String(200), nullable=True)
+    requested_position_id = Column(BigInteger, nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship(
+        "TransportRequestItem", back_populates="request",
+        cascade="all, delete-orphan", lazy="selectin",
+        order_by="TransportRequestItem.line_no",
+    )
+    quotes = relationship(
+        "CarrierQuote", back_populates="request",
+        cascade="all, delete-orphan", lazy="selectin",
+        order_by="CarrierQuote.id",
+    )
+    events = relationship(
+        "ShipmentEvent", back_populates="request",
+        cascade="all, delete-orphan", lazy="selectin",
+        order_by="ShipmentEvent.event_at",
+    )
+
+
+Index("ix_lgs_tr_status_date", TransportRequest.status,
+      TransportRequest.tr_date.desc())
+
+
+class TransportRequestItem(Base):
+    """`lgs_transport_request_items` — what is in the consignment.
+
+    Weight and dimensions live here rather than only on the header because that is
+    what a carrier prices, and because a part-delivery has to say which lines arrived.
+    """
+    __tablename__ = "lgs_transport_request_items"
+
+    id = pk()
+    tr_id = Column(ForeignKey("lgs_transport_requests.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    line_no = Column(Integer, nullable=False, default=1)
+
+    item_id = Column(BigInteger, index=True, nullable=True)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    quantity = Column(QTY, nullable=False, default=0)
+    delivered_qty = Column(QTY, nullable=False, default=0)
+
+    package_count = Column(Integer, nullable=False, default=0)
+    package_type = Column(String(50), nullable=True)
+    weight_kg = Column(QTY, nullable=True)
+    length_cm = Column(Numeric(10, 2), nullable=True)
+    width_cm = Column(Numeric(10, 2), nullable=True)
+    height_cm = Column(Numeric(10, 2), nullable=True)
+    is_fragile = Column(Boolean, nullable=False, default=False)
+    remarks = Column(String(500), nullable=True)
+
+    request = relationship("TransportRequest", back_populates="items")
+
+
+class CarrierQuote(Base):
+    """`lgs_carrier_quotes` — one row per carrier invited to a request.
+
+    Invitation and quotation in one row, unlike procurement's split of `pro_rfq_vendors`
+    from `pro_quotations`. A freight quote is a single number with a date beside it;
+    there are no quotation LINES to hang off a second table, and keeping the invite
+    and the answer together is what makes "who was asked and who bothered to reply"
+    one query.
+
+    A losing row is never deleted — three quotes on file is the evidence the award was
+    competitive (doc B8), and deleting the losers destroys exactly that.
+    """
+    __tablename__ = "lgs_carrier_quotes"
+
+    id = pk()
+    tr_id = Column(ForeignKey("lgs_transport_requests.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    carrier_id = Column(BigInteger, index=True, nullable=False)
+    carrier_name = Column(String(200), nullable=True)
+    status = Column(String(30), nullable=False, default=QuoteStatus.INVITED.value)
+
+    freight_amount = Column(MONEY, nullable=True)
+    # Everything on top of the line-haul: loading, packing, detention. Held apart so
+    # LOWEST_PRICE and LOWEST_LANDED_COST can rank the same set differently.
+    other_charges = Column(MONEY, nullable=False, default=0)
+    tax_percent = Column(Numeric(6, 2), nullable=True)
+    transit_days = Column(Integer, nullable=True)
+    valid_until = Column(Date, nullable=True)
+    vehicle_type = Column(String(100), nullable=True)
+    remarks = Column(Text, nullable=True)
+
+    invited_at = Column(DateTime, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    # Snapshotted at award time, not recomputed on read: the ranking that justified the
+    # award has to keep saying what it said, even after the evaluation method changes.
+    score = Column(Numeric(10, 4), nullable=True)
+    rank = Column(Integer, nullable=True)
+
+    request = relationship("TransportRequest", back_populates="quotes")
+
+
+Index("ix_lgs_quote_tr_carrier", CarrierQuote.tr_id, CarrierQuote.carrier_id,
+      unique=True)
+
+
+class ShipmentEvent(Base):
+    """`lgs_shipment_events` — the custody trail and the claims, on one timeline.
+
+    Append-only in spirit: a scan is evidence. The one field that is written after the
+    fact is the exception resolution, because closing a claim is itself an event the
+    same row is the natural home for — a separate `lgs_exceptions` table would have
+    duplicated tr_id, carrier, timestamp and description to hold two extra columns.
+    """
+    __tablename__ = "lgs_shipment_events"
+
+    id = pk()
+    tr_id = Column(ForeignKey("lgs_transport_requests.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    event_type = Column(String(30), nullable=False, index=True)
+    event_at = Column(DateTime, nullable=False)
+    location_name = Column(String(200), nullable=True)
+    description = Column(String(500), nullable=True)
+
+    # Set for DAMAGED / MISSING / DELAYED. A plain boolean rather than deriving it from
+    # event_type on every query: the Exceptions screen is "open claims", and that is an
+    # index on two columns, not a scan with an IN-list.
+    is_exception = Column(Boolean, nullable=False, default=False, index=True)
+    affected_item_name = Column(String(300), nullable=True)
+    affected_qty = Column(QTY, nullable=True)
+    claim_amount = Column(MONEY, nullable=True)
+    resolution = Column(Text, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by_id = soft_fk()
+    resolved_by_name = Column(String(200), nullable=True)
+
+    recorded_by_id = soft_fk()
+    recorded_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+
+    request = relationship("TransportRequest", back_populates="events")
+
+
+Index("ix_lgs_event_open_exception", ShipmentEvent.is_exception,
+      ShipmentEvent.resolved_at)
 
 

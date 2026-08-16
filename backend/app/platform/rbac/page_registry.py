@@ -112,10 +112,42 @@ PAGES: list[PageDef] = [
     PageDef("pro_quotations", "/procurement/quotations", "Quotations",
             parent="grp_purchasing", module="procurement", sort_order=34),
     # Who outside the company can sign in. Under Settings, not Procurement: it mints
-    # an identity, which is an administrator's act rather than a buyer's.
+    # an identity, which is an administrator's act rather than a buyer's. Carriers
+    # ride on this screen too — a transport provider is a vendor row, so it is the
+    # same account and the same button.
     PageDef("admin_supplier_accounts", "/admin/supplier-accounts",
-            "Supplier Logins", parent="grp_settings", module="procurement",
-            icon="key", sort_order=104),
+            "Supplier & Carrier Logins", parent="grp_settings",
+            module="procurement", icon="key", sort_order=104),
+    # The consolidated buying sheet. Last in Procurement so Purchase Orders stays the
+    # module's front door — the left rail opens a module on its FIRST child.
+    PageDef("pro_consolidations", "/procurement/consolidations", "Consolidation",
+            parent="grp_purchasing", module="procurement", sort_order=35),
+
+    # ------------------------------------------------------------------ #
+    #  Logistics — the outward transport leg
+    # ------------------------------------------------------------------ #
+    # A module row of its own. sort_order 55 puts it after Warehouse (which the live
+    # rows have in the 40s) and before Returns at 60, which is the order the material
+    # actually moves in: warehouse packs it, logistics ships it, returns bring it back.
+    PageDef("grp_logistics", "/logistics", "Logistics", module="logistics",
+            icon="truck", sort_order=55),
+    PageDef("logistics_transport", "/logistics/transport", "Transport Requests",
+            parent="grp_logistics", module="logistics", sort_order=1),
+    PageDef("logistics_providers", "/logistics/providers", "Provider Selection",
+            parent="grp_logistics", module="logistics", sort_order=2),
+    PageDef("logistics_tracking", "/logistics/tracking", "Shipment Tracking",
+            parent="grp_logistics", module="logistics", sort_order=3),
+    PageDef("logistics_exceptions", "/logistics/exceptions", "Exceptions",
+            parent="grp_logistics", module="logistics", sort_order=4),
+    # Consignments and Dispatch, reached from Logistics as well as from Warehouse.
+    # The warehouse rows are NOT touched — they keep their codes, their paths and
+    # their permissions, and these are separate rbac_pages rows pointing at the same
+    # screens. That is what lets the warehouse copies be retired later by switching
+    # them off, with nothing here to change.
+    PageDef("logistics_consignments", "/logistics/consignments", "Consignments",
+            parent="grp_logistics", module="logistics", sort_order=5),
+    PageDef("logistics_dispatch", "/logistics/dispatch", "Dispatch",
+            parent="grp_logistics", module="logistics", sort_order=6),
 ]
 
 

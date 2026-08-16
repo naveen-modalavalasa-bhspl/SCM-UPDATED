@@ -70,6 +70,20 @@ import {
 } from "@/modules/returns";
 // The API console — build an API from the screen over any table in the database.
 import { ApiClientsPage, ApiClientDetailPage } from "@/modules/integrations";
+// `PurchaseConsolidation*`, not `Consolidation*`: the approvals module already owns
+// that name for INDENT consolidation, which is a different document entirely.
+import { PurchaseConsolidationListPage } from "@/modules/procurement/pages/PurchaseConsolidationListPage";
+import { PurchaseConsolidationFormPage } from "@/modules/procurement/pages/PurchaseConsolidationFormPage";
+import { PurchaseConsolidationDetailPage } from "@/modules/procurement/pages/PurchaseConsolidationDetailPage";
+import { TransportRequestsPage } from "@/modules/logistics/pages/TransportRequestsPage";
+import { TransportFormPage } from "@/modules/logistics/pages/TransportFormPage";
+import { TransportDetailPage } from "@/modules/logistics/pages/TransportDetailPage";
+import { ProviderSelectionPage } from "@/modules/logistics/pages/ProviderSelectionPage";
+import { ShipmentTrackingPage } from "@/modules/logistics/pages/ShipmentTrackingPage";
+import { LogisticsExceptionsPage } from "@/modules/logistics/pages/LogisticsExceptionsPage";
+import {
+  ConsignmentsScreen, ConsignmentFormScreen, DispatchScreen, DispatchFormScreen,
+} from "@/modules/warehouse";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
 import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
 import { RequisitionDetailPage } from "@/modules/procurement/pages/RequisitionDetailPage";
@@ -185,7 +199,30 @@ function AppRoutes() {
         <Route path="procurement/rfqs/:id" element={<RFQDetailPage />} />
         <Route path="procurement/rfqs/:id/edit" element={<RFQFormPage />} />
         <Route path="procurement/quotations" element={<QuotationListPage />} />
+        {/* Many requisitions, one buying sheet (doc B7). */}
+        <Route path="procurement/consolidations" element={<PurchaseConsolidationListPage />} />
+        <Route path="procurement/consolidations/new" element={<PurchaseConsolidationFormPage />} />
+        <Route path="procurement/consolidations/:id" element={<PurchaseConsolidationDetailPage />} />
         <Route path="admin/supplier-accounts" element={<SupplierAccountsPage />} />
+
+        {/* Logistics — the outward transport leg (doc Phase E). */}
+        <Route path="logistics" element={<Navigate to="/logistics/transport" replace />} />
+        <Route path="logistics/transport" element={<TransportRequestsPage />} />
+        <Route path="logistics/transport/new" element={<TransportFormPage />} />
+        <Route path="logistics/transport/:id" element={<TransportDetailPage />} />
+        <Route path="logistics/transport/:id/edit" element={<TransportFormPage />} />
+        <Route path="logistics/providers" element={<ProviderSelectionPage />} />
+        <Route path="logistics/tracking" element={<ShipmentTrackingPage />} />
+        <Route path="logistics/exceptions" element={<LogisticsExceptionsPage />} />
+        {/* The SAME screens the warehouse serves, reached from Logistics as well.
+         * The /warehouse/* routes above are untouched, so both entry points work
+         * until the warehouse copies are retired. */}
+        <Route path="logistics/consignments" element={<ConsignmentsScreen />} />
+        <Route path="logistics/consignments/new" element={<ConsignmentFormScreen />} />
+        <Route path="logistics/consignments/:id" element={<ConsignmentFormScreen />} />
+        <Route path="logistics/dispatch" element={<DispatchScreen />} />
+        <Route path="logistics/dispatch/new" element={<DispatchFormScreen />} />
+        <Route path="logistics/dispatch/:id" element={<DispatchFormScreen />} />
         <Route path="grn/*" element={<WarehouseModule />} />
         <Route path="stock/*" element={<WarehouseModule />} />
         <Route path="issues/*" element={<WarehouseModule />} />

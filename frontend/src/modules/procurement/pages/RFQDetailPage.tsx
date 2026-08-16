@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill,
+  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill,
   useToast, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
@@ -33,11 +33,22 @@ export function RFQDetailPage() {
 
   const published = ["PUBLISHED", "CLOSED", "AWARDED"].includes(rfq?.status ?? "");
 
+  // Previewing a different ranking is a query parameter, not a save: looking at the
+  // quotes another way is not choosing one, so the RFQ's own method is untouched
+  // until somebody edits it on the form.
+  const [method, setMethod] = useState("");
+
   const { data: comparison } = useQuery({
-    queryKey: ["rfq-comparison", id],
-    queryFn: () => rfqApi.comparison(rfqId),
+    queryKey: ["rfq-comparison", id, method],
+    queryFn: () => rfqApi.comparison(rfqId, method || undefined),
     // Only once vendors can actually have answered — asking earlier returns an empty
     // sheet that reads as "nobody quoted" rather than "nobody was asked yet".
+    enabled: published,
+  });
+
+  const { data: methods } = useQuery({
+    queryKey: ["rfq-evaluation-methods"],
+    queryFn: rfqApi.evaluationMethods,
     enabled: published,
   });
 
@@ -279,7 +290,34 @@ export function RFQDetailPage() {
 
       {published && (
         <>
-          <h2 className="mb-2 text-sm font-semibold text-ink">Comparison</h2>
+          <div className="mb-2 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-ink">Comparison</h2>
+              <p className="text-xs text-muted">
+                {comparison
+                  ? `${comparison.responded} quote${comparison.responded === 1 ? "" : "s"} in, ranked by ${
+                      methods?.find((m) => m.value === comparison.evaluation_method)?.label
+                      ?? comparison.evaluation_method.replace(/_/g, " ").toLowerCase()}`
+                  : "Waiting on quotes"}
+              </p>
+            </div>
+            <div className="w-56">
+              <Select
+                value={method || comparison?.evaluation_method || ""}
+                placeholder="Rank by…"
+                options={(methods ?? []).map((m) => ({ value: m.value, label: m.label }))}
+                onChange={setMethod}
+              />
+            </div>
+          </div>
+
+          {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
+            <p className="mb-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
+              Only {comparison.responded} quote{comparison.responded === 1 ? "" : "s"} on
+              file. The standard is three — award anyway if this is a single-source item.
+            </p>
+          )}
+
           <Card className="p-2">
             <ResponsiveList
               data={comparison?.quotations ?? []}

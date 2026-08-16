@@ -3,6 +3,10 @@
 May import inventory, indents and procurement (all backward in the chain). Stock is
 mutated ONLY through inventory_service.move_stock(); no code here assigns to
 stk_balance columns.
+
+The transport leg — transport requests, carrier quotes, tracking and claims — lives in
+`transport.py` and is re-exported at the bottom of this file, so the router keeps one
+import site while the two surfaces stay separately readable.
 """
 from decimal import Decimal
 
@@ -181,3 +185,52 @@ async def issue_stock(db: AsyncSession, issue_id: int, user) -> Issue:
     await db.commit()
     await db.refresh(issue)
     return issue
+
+
+# --------------------------------------------------------------------------- #
+#  Transport — re-exported from transport.py
+# --------------------------------------------------------------------------- #
+# Imported at the bottom, not the top: transport.py imports nothing from this file,
+# but keeping the import here makes it obvious that these names belong to the other
+# surface and are only passing through.
+from app.modules.logistics.transport import (  # noqa: E402
+    act_on_award,
+    act_on_tr,
+    add_event,
+    award_carrier,
+    cancel_tr,
+    carrier_get_request,
+    carrier_open_requests,
+    carrier_options,
+    carrier_quote,
+    close_tr,
+    comparison,
+    create_tr,
+    delete_tr,
+    deliver_tr,
+    dispatch_tr,
+    evaluation_methods,
+    get_tr,
+    history,
+    invite_carriers,
+    list_trs,
+    mode_catalogue,
+    open_exceptions,
+    record_quote,
+    resolve_exception,
+    set_provider,
+    share_tracking,
+    submit_tr,
+    update_tr,
+)
+
+__all__ = [
+    "act_on_award", "act_on_tr", "add_event", "award_carrier", "cancel_tr",
+    "carrier_get_request", "carrier_open_requests", "carrier_options",
+    "carrier_quote", "close_tr", "comparison", "create_grn_from_po", "create_issue",
+    "create_tr", "delete_tr", "deliver_tr", "dispatch_tr", "evaluation_methods",
+    "get_grn", "get_tr", "history", "invite_carriers", "issue_stock", "list_grn",
+    "list_issues", "list_trs", "mode_catalogue", "open_exceptions", "qc_fail",
+    "qc_pass", "record_quote", "resolve_exception", "set_provider", "share_tracking",
+    "submit_tr", "update_tr",
+]
