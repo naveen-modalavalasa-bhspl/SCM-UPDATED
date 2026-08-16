@@ -184,6 +184,25 @@ async def _legacy_steps(db: AsyncSession, stages: list[Stage]) -> list[dict]:
             select(HcmPosition.role_id, HcmPosition.role_name)
             .where(HcmPosition.role_id.in_(role_ids)).distinct()
         )).all()}
+    # Who actually sits in each chair. Left empty here once, which made every HCM and
+    # local step of a legacy chain render as "nobody seated, will be skipped" even when
+    # the post was filled — the screen accusing the mirror of being empty. Read with
+    # project_id=None for the same reason the picker no longer filters: a cross-project
+    # chair is a real holder.
+    enabled = [s for s in stages if s.is_enabled]
+    holders_of, _first = await ladder._position_people(
+        db, [s.position_id for s in enabled if s.position_id], None)
+    local_seats = await posts.members_of(
+        db, [s.post_id for s in enabled if s.post_id])
+
+    def _seats(stage: Stage) -> list[dict]:
+        if stage.post_id is not None:
+            return local_seats.get(stage.post_id, [])
+        if stage.position_id is not None:
+            return [{"id": h.id, "name": h.full_name, "code": h.emp_code}
+                    for h in holders_of.get(stage.position_id, [])]
+        return []
+
     return [{
         "sequence": index + 1,
         "position_id": stage.position_id,
@@ -192,9 +211,10 @@ async def _legacy_steps(db: AsyncSession, stages: list[Stage]) -> list[dict]:
         "kind": ("rank" if stage.position_role_id is not None
                  else "local" if stage.post_id is not None else "hcm"),
         "name": stage.name or ranks.get(stage.position_role_id or 0) or "Step",
-        "holders": [],
-        "is_dead": False,
-    } for index, stage in enumerate(s for s in stages if s.is_enabled)]
+        "holders": _seats(stage)[:8],
+        # A rank rung has no fixed holder, so it is never "dead" for want of one.
+        "is_dead": stage.position_role_id is None and not _seats(stage),
+    } for index, stage in enumerate(enabled)]
 
 
 async def versions(db: AsyncSession, project_id: int | None, doc_type: str) -> dict:
@@ -321,13 +341,12 @@ async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> d
                 .where(HcmPosition.is_active.is_(True),
                        HcmPosition.name.like(f"%{term}%"))
                 .order_by(HcmPosition.name).limit(25))
-        # Positions HCM sends with no project must stay findable: every SCM warehouse
-        # post arrives that way, and filtering them out is what made them invisible on
-        # the old screen when a project was selected.
-        if project_id is not None:
-            stmt = stmt.where(
-                HcmPosition.id.in_(ladder._held_position_ids(project_id))
-                | HcmPosition.project_id.is_(None))
+        # Deliberately NOT filtered to the selected project. A chair that serves every
+        # project — the Inventory Manager, who sees every item in every warehouse — is
+        # seated on a post HCM tags with somebody else's project, and scoping the search
+        # to this project's own posts is what hid them. Resolution was never scoped
+        # (custom_ladder resolves an HCM step with project_id=None), so a post picked
+        # from another project already approves correctly once saved.
         hcm = [{"id": row[0], "name": row[1], "role_name": row[2] or ""}
                for row in (await db.execute(stmt)).all()]
 

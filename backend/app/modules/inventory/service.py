@@ -1069,6 +1069,136 @@ async def act_on_mr(db: AsyncSession, mr_id: int, action: str, user,
     return mr
 
 
+async def revise_mr_items(db: AsyncSession, mr_id: int, lines: list[dict], user,
+                          comments: str = "") -> MaterialRequest:
+    """Change how much an MR asks for, before it is signed.
+
+    The shortfall that raised this document is what stock could not cover on the day —
+    it is a starting figure, not a purchase decision. Procurement routinely buys a
+    round case rather than the exact 7 that were short, or trims a line it knows is
+    already on its way. Without this the only way to change the number was to reject
+    the whole request and re-run the allocation.
+
+    PENDING_APPROVAL only, for the same reason the allocation revise is: an approved MR
+    is what procurement raises a PO against, and moving the quantity underneath a PO
+    would leave the two disagreeing about what was bought. A rejected one is history.
+    """
+    mr = await get_mr(db, mr_id, user=user)
+    if mr.status != MRStatus.PENDING_APPROVAL.value:
+        raise ValidationError(
+            f"Material request is not awaiting approval (status {mr.status})")
+    if not lines:
+        raise ValidationError("Nothing to change")
+
+    rows = {row.id: row for row in (await db.execute(
+        select(MaterialRequestItem).where(MaterialRequestItem.mr_id == mr.id)
+    )).scalars().all()}
+
+    changed: list[dict] = []
+    for line in lines:
+        row = rows.get(line["id"])
+        if row is None:
+            raise ValidationError(f"Line {line['id']} is not on {mr.mr_no}")
+        quantity = _d(line["quantity"])
+        if quantity <= Decimal("0"):
+            raise ValidationError(
+                f"{row.item_code or 'Line'}: quantity must be more than zero. "
+                f"Reject the request instead of asking for nothing.")
+        # Already-ordered units are a fact, not a proposal. Cutting the line below them
+        # would ask procurement to un-buy something.
+        if quantity < _d(row.ordered_quantity):
+            raise ValidationError(
+                f"{row.item_code or 'Line'}: {row.ordered_quantity} already ordered, "
+                f"so it cannot be cut to {quantity}.")
+        if quantity == _d(row.quantity):
+            continue
+        changed.append({"line_id": row.id, "item_code": row.item_code,
+                        "from": float(_d(row.quantity)), "to": float(quantity)})
+        row.quantity = quantity
+
+    if not changed:
+        return mr
+
+    await write_audit(
+        db, entity="inv_material_requests", entity_id=mr.id, entity_no=mr.mr_no,
+        action=AuditAction.UPDATE, actor=user,
+        after={"revisions": changed, "comments": comments},
+        summary=f"Quantities revised on {mr.mr_no} by "
+                f"{getattr(user, 'full_name', '')}".strip(),
+    )
+    logger.info("MR %s revised by %s: %s", mr.mr_no, getattr(user, "id", None), changed)
+    await db.commit()
+    await db.refresh(mr)
+    return mr
+
+
+async def mr_item_claims(db: AsyncSession, mr_id: int, item_id: int) -> dict:
+    """Who ELSE is asking for this item, itemised — the MR answer to the question the
+    allocation screen answers with `allocations.competing_claims`.
+
+    The allocation version counts claims against the SHELF, because that is what an
+    allocator is spending. An MR spends nothing on the shelf; it creates purchase
+    demand. So the competing documents here are the other open material requests, and
+    the number that matters is how much more of this item the company is already about
+    to buy — which is exactly what stops the same shortage being ordered twice.
+
+    Not REJECTED and not this request. `ordered_quantity` rides along so a line already
+    covered by a PO reads differently from one still waiting for a buyer.
+    """
+    from app.modules.indents.models import Indent
+
+    rows = (await db.execute(
+        select(
+            MaterialRequest.id, MaterialRequest.mr_no, MaterialRequest.status,
+            MaterialRequest.indent_id, MaterialRequest.indent_no,
+            MaterialRequest.requested_by_name, MaterialRequest.department_name,
+            MaterialRequest.project_name, MaterialRequest.priority,
+            MaterialRequest.created_at,
+            MaterialRequestItem.quantity, MaterialRequestItem.ordered_quantity,
+        )
+        .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+        .where(MaterialRequestItem.item_id == item_id,
+               MaterialRequest.id != mr_id,
+               MaterialRequest.status != MRStatus.REJECTED.value)
+        .order_by(MaterialRequest.created_at.desc(), MaterialRequest.id.desc())
+    )).all()
+
+    claims = [{
+        "mr_id": row.id, "mr_no": row.mr_no, "status": row.status,
+        "indent_id": row.indent_id, "indent_no": row.indent_no,
+        "requested_by_name": row.requested_by_name,
+        "department_name": row.department_name,
+        "project_name": row.project_name,
+        "priority": row.priority,
+        "quantity": float(_d(row.quantity)),
+        "ordered_quantity": float(_d(row.ordered_quantity)),
+        "created_at": row.created_at,
+    } for row in rows]
+
+    item = await db.get(Item, item_id)
+    total_qty, available_qty, reserved_qty = (await db.execute(
+        select(func.coalesce(func.sum(Stock.total_qty), 0),
+               func.coalesce(func.sum(Stock.available_qty), 0),
+               func.coalesce(func.sum(Stock.reserved_qty), 0))
+        .where(Stock.item_id == item_id)
+    )).one()
+
+    return {
+        "item_id": item_id,
+        "item_code": item.code if item else None,
+        "item_name": item.name if item else None,
+        "uom_code": item.uom_code if item else None,
+        "total_qty": float(_d(total_qty)),
+        "available_qty": float(_d(available_qty)),
+        "reserved_qty": float(_d(reserved_qty)),
+        "claimed_total": float(sum((_d(row.quantity) for row in rows), Decimal("0"))),
+        # Requests raised outside an indent (a manual top-up) have no indent to count,
+        # so this is the number of DISTINCT indents behind the claims, not of claims.
+        "indent_count": len({row.indent_id for row in rows if row.indent_id}),
+        "claims": claims,
+    }
+
+
 # ---------------- releasing what an indent holds ----------------
 #
 # There is deliberately no allocate_for_indent() here any more. Deciding how much

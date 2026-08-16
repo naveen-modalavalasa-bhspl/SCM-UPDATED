@@ -9,7 +9,8 @@ from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.inventory import locations, service
 from app.modules.inventory.schemas import (
-    ActionIn, MovementRow, MRListRow, MROut, StockRow, TransferIn,
+    ActionIn, MovementRow, MRClaimsOut, MRListRow, MROut, MRReviseIn, StockRow,
+    TransferIn,
     AdjustmentIn, AdjustmentOut, AdjustmentListRow, AdjustmentRejectIn, ReplenishmentRow,
     ReservationRow, ReservationReleaseOut, ItemAvailabilityOut,
     AgeingSummaryOut, ValuationSummaryOut, NearExpiryAlertRow,
@@ -302,6 +303,25 @@ async def list_mrs(params: PageParams = Depends(), status: str | None = None,
 async def get_mr(mr_id: int, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission(perms.MR_VIEW))):
     return await service.get_mr(db, mr_id, user=user)
+
+
+@mr_router.get("/{mr_id}/claims/{item_id}", response_model=MRClaimsOut)
+async def mr_item_claims(mr_id: int, item_id: int, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.MR_VIEW))):
+    """Which other open requests are already asking to buy this item."""
+    await service.get_mr(db, mr_id, user=user)
+    return await service.mr_item_claims(db, mr_id, item_id)
+
+
+@mr_router.patch("/{mr_id}/items", response_model=MROut)
+async def revise_mr_items(mr_id: int, body: MRReviseIn,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.MR_APPROVE))):
+    """Change the quantities before signing. Gated on approve, not create: the shortfall
+    is written by the system, and the person entitled to change what gets bought is the
+    one entitled to approve the buying."""
+    return await service.revise_mr_items(
+        db, mr_id, [line.model_dump() for line in body.lines], user, body.comments)
 
 
 @mr_router.post("/{mr_id}/approve", response_model=MROut)

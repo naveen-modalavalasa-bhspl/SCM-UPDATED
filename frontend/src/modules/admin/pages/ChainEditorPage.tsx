@@ -24,6 +24,20 @@ const PICKER_GROUPS: { kind: StepKind; label: string }[] = [
   { kind: "hcm", label: "HCM posts" },
 ];
 
+/** The hover text behind a chip: what this rung is, in the numbers that decide whether
+ *  it is the right one. Two ranks can share a name (HCM's cutover left old role ids in
+ *  place), and the size is what separates the live one from the leftover. */
+function rungHint(kind: StepKind, rung: FlowRung): string | undefined {
+  if (kind !== "rank" || rung.position_count === undefined) return undefined;
+  const posts = `${rung.position_count} post${rung.position_count === 1 ? "" : "s"}`;
+  const people = rung.people_count === undefined
+    ? "" : `, ${rung.people_count} ${rung.people_count === 1 ? "person" : "people"}`;
+  return rung.position_count <= 1
+    ? `${rung.name}: only ${posts}${people}. Almost every raiser will climb past this `
+      + `rung — check it is not an old rank left behind by the HCM cutover.`
+    : `${rung.name}: ${posts}${people} under this rank.`;
+}
+
 export function ChainEditorPage() {
   const { docType = "" } = useParams();
   const [params] = useSearchParams();
@@ -195,9 +209,22 @@ export function ChainEditorPage() {
                           type="button"
                           disabled={chosen.has(`${kind}:${rung.id}`)}
                           onClick={() => add(kind, rung)}
+                          title={rungHint(kind, rung)}
                           className="flex min-h-11 items-center gap-1 rounded-full border border-line/70 px-2.5 text-xs transition-colors hover:border-primary hover:bg-content2 disabled:pointer-events-none disabled:opacity-35"
                         >
                           <Plus size={11} /> {rung.name}
+                          {/* How big this rank actually is. HCM re-keyed its roles at the
+                            * 2026-08-10 cutover and a few positions kept their old role
+                            * id, so the same NAME can arrive twice — a real District
+                            * Manager over 27 posts and a leftover over 1. A rung is a
+                            * role id, and picking the small one builds a chain almost
+                            * every raiser climbs straight past. The count is the only
+                            * thing on screen that tells them apart. */}
+                          {kind === "rank" && rung.position_count !== undefined && (
+                            <span className="tabular text-[10px] text-muted">
+                              · {rung.position_count}
+                            </span>
+                          )}
                         </button>
                       ))}
                     </div>

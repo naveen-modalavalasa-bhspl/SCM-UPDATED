@@ -1190,6 +1190,23 @@ async def list_indents(
                 > IndentItem.allocated_quantity + committed,
             ).correlate(Indent)
         ))
+        # Quantity alone cannot express "already claimed, nothing given". An allocation
+        # that gives ZERO — the whole line is going to procurement, nothing is on the
+        # shelf — sums to the same 0 as no allocation at all, so the arithmetic above
+        # reads the indent as untouched and every allocator keeps seeing it. It is not
+        # work anybody can do: `allocations.ensure_no_active` refuses a second
+        # allocation while an unsigned one exists, so the row only invites a form to be
+        # filled in and rejected at submit.
+        #
+        # Same statuses as that guard, and deliberately not APPROVED: the cascade
+        # depends on an approved allocation leaving the indent visible so the rung above
+        # can serve the remainder it did not cover.
+        stmt = stmt.where(~exists(
+            select(Allocation.id).where(
+                Allocation.indent_id == Indent.id,
+                Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES),
+            ).correlate(Indent)
+        ))
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
     stmt = stmt.order_by(_indent_sort(sort_by, sort_dir), id_tie_breaker)
     return await paginate(db, stmt, params)

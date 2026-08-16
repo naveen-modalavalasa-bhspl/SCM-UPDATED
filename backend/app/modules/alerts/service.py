@@ -427,6 +427,11 @@ _DEFINITIONS: list[AlertDef] = [
         "{number} has been refused and nothing was reserved.",
     ),
     _alert(
+        "material_request.revised", AlertVariant.SUCCESS, "Quantities saved",
+        "{number} now asks for the amounts you entered. Approve it to send them to "
+        "procurement.",
+    ),
+    _alert(
         "adjustment.approved", AlertVariant.SUCCESS, "Adjustment approved",
         "{item} now reads {qty}.",
     ),

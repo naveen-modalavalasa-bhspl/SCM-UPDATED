@@ -5,13 +5,22 @@ import {
   PageHeader, Button, Can, Card, Field, Input, ResponsiveList, StatusPill,
   type Column,
 } from "@/shared/components";
-import { approveMaterialRequest, getMaterialRequest, rejectMaterialRequest } from "../api";
+import {
+  approveMaterialRequest, getMaterialRequest, rejectMaterialRequest,
+  reviseMaterialRequest,
+} from "../api";
+import { MRClaimsPanel } from "../components/MRClaimsPanel";
 import { alerts } from "@/modules/alerts";
 import type { MaterialRequestItem } from "../types";
 
 /**
  * One material request: the shortfall an allocation could not cover, and the buttons
  * procurement uses to accept or refuse it.
+ *
+ * The quantity is editable while the request is awaiting approval. What the allocation
+ * was short of is a starting figure, not a purchase decision — procurement buys a whole
+ * case rather than the exact 7, or trims a line already on its way — and before this the
+ * only way to change it was to reject the whole request and re-run the allocation.
  */
 export function MaterialRequestDetailPage() {
   const { id } = useParams();
@@ -19,6 +28,10 @@ export function MaterialRequestDetailPage() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const [comments, setComments] = useState("");
+  // Only the lines actually touched, keyed by line id. Absent means "unchanged" —
+  // seeding this from the server would send every line back on every save and make an
+  // untouched line indistinguishable from one edited to the same number.
+  const [edits, setEdits] = useState<Record<number, string>>({});
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["material-request", mrId],
@@ -35,6 +48,28 @@ export function MaterialRequestDetailPage() {
         approve ? "material_request.approved" : "material_request.rejected",
         { number },
       );
+      qc.invalidateQueries({ queryKey: ["material-request", mrId] });
+      qc.invalidateQueries({ queryKey: ["material-requests"] });
+    },
+  });
+
+  const save = useMutation({
+    // Only the lines whose number actually moved. Sending a box that was focused and
+    // left alone would write an audit row saying 10 became 10.
+    mutationFn: () =>
+      reviseMaterialRequest(
+        mrId,
+        (data?.items ?? [])
+          .filter((row) => {
+            const raw = edits[row.id];
+            return raw !== undefined && raw.trim() !== "" && Number(raw) !== row.quantity;
+          })
+          .map((row) => ({ id: row.id, quantity: Number(edits[row.id]) })),
+        comments,
+      ),
+    onSuccess: () => {
+      setEdits({});
+      void alerts.success("material_request.revised", { number: data?.mr_no ?? "" });
       qc.invalidateQueries({ queryKey: ["material-request", mrId] });
       qc.invalidateQueries({ queryKey: ["material-requests"] });
     },
@@ -57,10 +92,88 @@ export function MaterialRequestDetailPage() {
   if (error) return <p className="p-6 text-danger">{(error as Error).message}</p>;
   if (!data) return null;
 
+  const open = data.status === "PENDING_APPROVAL";
+
+  /** What the box should show: the pending edit if there is one, else the saved value. */
+  const shown = (row: MaterialRequestItem) =>
+    edits[row.id] ?? String(row.quantity);
+
+  /** A quantity that cannot be saved. Zero is not "no change" — it is a request for
+   *  nothing, which is a rejection and has its own button. Already-ordered units are a
+   *  fact, so a line cannot be cut below them; the backend enforces both.
+   *
+   *  There is deliberately no ceiling. An MR is a request to BUY, not a claim on the
+   *  shelf: procurement routinely orders a full case above the shortfall, or trims a
+   *  line already part-covered. The allocation screen caps at what is free because
+   *  giving away stock you do not have is a different mistake. */
+  const problem = (row: MaterialRequestItem): string | null => {
+    const raw = edits[row.id];
+    if (raw === undefined) return null;
+    const value = Number(raw);
+    if (raw.trim() === "" || Number.isNaN(value)) return "Enter a number";
+    if (value <= 0) return "Must be more than zero — reject instead";
+    if (value < row.ordered_quantity) return `${row.ordered_quantity} already ordered`;
+    return null;
+  };
+
+  /** Typed a different number, not merely touched the box. Retyping 10 over 10 left the
+   *  "unsaved changes" warning on screen and Approve disabled with nothing to save. */
+  const isChanged = (row: MaterialRequestItem) => {
+    const raw = edits[row.id];
+    return raw !== undefined && raw.trim() !== "" && Number(raw) !== row.quantity;
+  };
+
+  const items = data.items ?? [];
+  const problems = items.map(problem).filter(Boolean);
+  const dirty = items.some(isChanged);
+
+  const quantityCell = (row: MaterialRequestItem) => {
+    if (!open) {
+      return (
+        <span className="tabular font-semibold text-ink">
+          {row.quantity} {row.uom_code ?? ""}
+        </span>
+      );
+    }
+    const issue = problem(row);
+    return (
+      <div className="min-w-[11rem]">
+        <div className="flex items-center gap-1.5">
+          {/* Deliberately not type="number". The spinner arrows eat the right-hand end
+              of a narrow box, which hid the digits being typed, and the scroll-wheel
+              changes a quantity nobody meant to touch. `inputMode` still brings up the
+              numeric keypad on a phone. */}
+          <Input
+            inputMode="decimal"
+            aria-label={`Quantity for ${row.item_name ?? row.item_code ?? "line"}`}
+            value={shown(row)}
+            onChange={(e) =>
+              setEdits((current) => ({ ...current, [row.id]: e.target.value }))}
+            className="w-28"
+          />
+          <span className="text-xs text-muted">{row.uom_code ?? ""}</span>
+        </div>
+        {issue && <p className="mt-1 text-xs text-danger">{issue}</p>}
+        {!issue && isChanged(row) && (
+          <p className="mt-1 text-xs text-muted">was {row.quantity}</p>
+        )}
+      </div>
+    );
+  };
+
   const columns: Column<MaterialRequestItem>[] = [
     { key: "line", header: "#", render: (r) => <span className="tabular text-muted">{r.line_no}</span> },
     { key: "code", header: "Code", render: (r) => <span className="mono text-muted">{r.item_code}</span> },
-    { key: "name", header: "Item", render: (r) => r.item_name ?? "—" },
+    {
+      key: "name",
+      header: "Item",
+      render: (r) => (
+        <div>
+          <div>{r.item_name ?? "—"}</div>
+          <MRClaimsPanel mrId={mrId} itemId={r.item_id} uom={r.uom_code} />
+        </div>
+      ),
+    },
     {
       key: "qty",
       header: "Needed",
@@ -77,8 +190,6 @@ export function MaterialRequestDetailPage() {
       hideOnNarrow: true,
     },
   ];
-
-  const open = data.status === "PENDING_APPROVAL";
 
   return (
     <>
@@ -110,21 +221,63 @@ export function MaterialRequestDetailPage() {
         {data.remarks && <p className="mt-3 text-sm text-muted">{data.remarks}</p>}
       </Card>
 
-      <ResponsiveList
-        data={data.items ?? []}
-        keyOf={(r) => r.id}
-        columns={columns}
-        empty="No lines on this request."
-        renderCard={(r) => (
-          <div className="space-y-1">
-            <span className="mono text-xs text-muted">{r.item_code}</span>
-            <p className="font-semibold text-ink">{r.item_name}</p>
-            <p className="tabular text-sm text-muted">
-              {r.quantity} {r.uom_code ?? ""}
-            </p>
+      {/* Two renderings on purpose, not a table with an input in it.
+        *
+        * HeroUI's Table (behind ResponsiveList) is a react-aria COLLECTION: it rebuilds
+        * its cell nodes on every render, so a text box living in a cell is remounted on
+        * each keystroke and loses focus — you type a digit, the caret leaves, and the
+        * field appears not to accept anything. Read-only lines stay in the table, where
+        * it is the right component; the editable form is plain rows, exactly as the
+        * allocation screen builds its "Give" boxes. */}
+      {open ? (
+        <Card className="divide-y divide-line p-0">
+          <div className="flex items-center justify-between px-4 py-3">
+            <h2 className="text-sm font-semibold text-ink">Lines</h2>
+            <p className="text-xs text-muted">Edit a quantity to buy more or less</p>
           </div>
-        )}
-      />
+          {items.length === 0 && (
+            <p className="px-4 py-8 text-center text-sm text-muted">
+              No lines on this request.
+            </p>
+          )}
+          {items.map((row) => (
+            <div key={row.id} className="flex flex-wrap items-start gap-4 px-4 py-3">
+              <span className="tabular pt-3 text-sm text-muted">{row.line_no}</span>
+              <div className="min-w-[14rem] flex-1">
+                <span className="mono text-xs text-muted">{row.item_code}</span>
+                <p className="font-semibold text-ink">{row.item_name ?? "—"}</p>
+                <MRClaimsPanel mrId={mrId} itemId={row.item_id} uom={row.uom_code} />
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted">
+                  Needed
+                </span>
+                {quantityCell(row)}
+              </div>
+              <div className="pt-5 text-sm text-muted">
+                <span className="tabular">{row.ordered_quantity}</span> ordered
+              </div>
+            </div>
+          ))}
+        </Card>
+      ) : (
+        <ResponsiveList
+          data={items}
+          keyOf={(r) => r.id}
+          columns={columns}
+          empty="No lines on this request."
+          renderCard={(r) => (
+            <div className="space-y-1">
+              <span className="mono text-xs text-muted">{r.item_code}</span>
+              <p className="font-semibold text-ink">{r.item_name}</p>
+              <p className="tabular text-sm text-muted">
+                {r.quantity} {r.uom_code ?? ""}
+              </p>
+              <MRClaimsPanel mrId={mrId} itemId={r.item_id} uom={r.uom_code} />
+            </div>
+          )}
+        />
+      )}
 
       {open && (
         <div className="mt-4 space-y-3">
@@ -132,13 +285,29 @@ export function MaterialRequestDetailPage() {
             <Input
               value={comments}
               onChange={(e) => setComments(e.target.value)}
-              placeholder="Optional — why you are approving or refusing"
+              placeholder="Optional — why you are approving, refusing or changing a quantity"
             />
           </Field>
           {act.error && <p className="text-danger">{(act.error as Error).message}</p>}
-          <div className="flex gap-2">
+          {save.error && <p className="text-danger">{(save.error as Error).message}</p>}
+          {dirty && (
+            <p className="text-sm text-warning">
+              Unsaved quantity changes. Save them before approving — approval signs what
+              is stored, not what is on screen.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
             <Can do="mr.approve">
-              <Button onClick={() => void decide(true)} disabled={act.isPending}>
+              <Button
+                variant="subtle"
+                onClick={() => save.mutate()}
+                disabled={!dirty || problems.length > 0 || save.isPending}
+              >
+                {save.isPending ? "Saving…" : "Save quantities"}
+              </Button>
+            </Can>
+            <Can do="mr.approve">
+              <Button onClick={() => void decide(true)} disabled={act.isPending || dirty}>
                 Approve
               </Button>
             </Can>

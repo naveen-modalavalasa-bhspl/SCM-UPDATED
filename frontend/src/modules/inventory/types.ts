@@ -383,6 +383,36 @@ export interface MaterialRequest extends MaterialRequestListRow {
   items: MaterialRequestItem[];
 }
 
+/** Another open request wanting the same item. The MR answer to the allocation
+ *  screen's "claimed by other indents": what else is already queued to be bought. */
+export interface MRClaim {
+  mr_id: number;
+  mr_no: string;
+  status: string;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  requested_by_name?: string | null;
+  department_name?: string | null;
+  project_name?: string | null;
+  priority?: string | null;
+  quantity: number;
+  ordered_quantity: number;
+  created_at?: string | null;
+}
+
+export interface MRClaims {
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  claimed_total: number;
+  indent_count: number;
+  claims: MRClaim[];
+}
+
 /** One warehouse's share of what is on hand for an item. */
 export interface AllocationWarehouseOption {
   warehouse_id: number;

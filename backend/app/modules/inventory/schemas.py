@@ -156,6 +156,51 @@ class MROut(MRListRow):
     items: list[MRItemOut] = Field(default_factory=list)
 
 
+class MRLineReviseIn(BaseModel):
+    """One line's new quantity. Keyed by the MR LINE id, not the item: an MR may carry
+    the same item twice when two indent lines were short of it, and keying on item_id
+    would silently rewrite both."""
+    id: int
+    quantity: float = Field(gt=0)
+
+
+class MRReviseIn(BaseModel):
+    lines: list[MRLineReviseIn] = Field(default_factory=list)
+    comments: str = ""
+
+
+class MRClaimRow(BaseModel):
+    """Another open request for the same item, so the number below the line can be
+    opened up into the documents behind it."""
+    mr_id: int
+    mr_no: str
+    status: str
+    indent_id: int | None = None
+    indent_no: str | None = None
+    requested_by_name: str | None = None
+    department_name: str | None = None
+    project_name: str | None = None
+    priority: str | None = None
+    quantity: float
+    ordered_quantity: float
+    created_at: datetime | None = None
+
+
+class MRClaimsOut(BaseModel):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    total_qty: float
+    available_qty: float
+    reserved_qty: float
+    # What every OTHER open request wants, and across how many indents. This request
+    # is excluded from both, exactly as the allocation screen excludes its own indent.
+    claimed_total: float
+    indent_count: int
+    claims: list[MRClaimRow] = Field(default_factory=list)
+
+
 class ActionIn(BaseModel):
     comments: str = ""
 

@@ -17,6 +17,7 @@ import type {
   CatalogItemOption,
   MaterialRequest,
   MaterialRequestListRow,
+  MRClaims,
   MovementRow,
   Page,
   ReplenishmentRule,
@@ -343,6 +344,23 @@ export const rejectMaterialRequest = (id: number, comments = "") =>
     .post<MaterialRequest>(`/api/material-requests/${id}/reject`, { comments })
     .then((r) => r.data);
 
+/** Change what the request asks for before it is signed. Lines are keyed by MR LINE
+ *  id, never item id — one MR can carry the same item twice. */
+export const reviseMaterialRequest = (
+  id: number,
+  lines: { id: number; quantity: number }[],
+  comments = "",
+) =>
+  api
+    .patch<MaterialRequest>(`/api/material-requests/${id}/items`, { lines, comments })
+    .then((r) => r.data);
+
+/** The other open requests wanting this item — this one excluded. */
+export const getMRItemClaims = (mrId: number, itemId: number) =>
+  api
+    .get<MRClaims>(`/api/material-requests/${mrId}/claims/${itemId}`)
+    .then((r) => r.data);
+
 // ---- fulfilment queue ----
 
 /**
@@ -608,6 +626,8 @@ export const inventoryApi = {
   getMaterialRequest,
   approveMaterialRequest,
   rejectMaterialRequest,
+  reviseMaterialRequest,
+  getMRItemClaims,
   getFulfillmentQueue,
 
   // STO methods
