@@ -12,7 +12,7 @@ import secrets
 from decimal import Decimal
 from types import SimpleNamespace
 
-from sqlalchemy import select, true
+from sqlalchemy import func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,11 +23,13 @@ from app.modules.indents import service as indent_service
 from app.modules.indents.models import IndentItem
 from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
-    POItem, PurchaseConsolidation, PurchaseOrder, Quotation, QuotationItem,
-    Requisition, RequisitionItem, RFQ, RFQItem, RFQVendor, VendorUser,
+    DespatchNote, DespatchNoteItem, POItem, PurchaseConsolidation,
+    PurchaseConsolidationSource, PurchaseOrder, Quotation, QuotationItem, Requisition,
+    RequisitionItem, RFQ, RFQItem, RFQVendor, VendorUser,
 )
 from app.modules.procurement.schemas import (
-    AwardIn, POCreate, QuoteSubmit, ReqCreate, RFQCreate, RFQUpdate, VendorAccountIn,
+    AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, QuoteSubmit, ReqCreate,
+    RFQCreate, RFQUpdate, VendorAccountIn,
 )
 from app.modules.procurement import consolidation
 from app.platform.workflow import engine
@@ -36,11 +38,11 @@ from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
 from app.shared.enums import (
-    ConsolidationStatus, DocType, IndentStatus, InstanceStatus, MRStatus, POStatus,
-    QuotationStatus, RequisitionStatus, RFQStatus,
+    ConsolidationStatus, DespatchNoteStatus, DocType, IndentStatus, InstanceStatus,
+    MRStatus, POStatus, QuotationStatus, RequisitionStatus, RFQStatus,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item, Vendor
+from app.shared.models.master import Item, Vendor, VendorItem
 from app.shared.numbering import next_number
 
 
@@ -164,6 +166,219 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     await db.commit()
     await db.refresh(po)
     return po
+
+
+async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
+                                   data: POFromQuotationIn, user) -> PurchaseOrder:
+    """Turn the awarded quotation into a purchase order, lines, rates and tax and all.
+
+    The last hop of the buying chain, and the one that was missing: `award_rfq` picks a
+    winner and says the PO is "a separate, approved act" — but the only way to raise one
+    was `from-indent`, which knows nothing about the offer. So the winning vendor's
+    rates were retyped, and nothing connected the PO to the RFQ that chose it.
+
+    Written from the QUOTATION, never from the RFQ: the RFQ says what was asked for, the
+    quotation says what was offered, and a purchase order is an acceptance of an offer.
+    Discount is applied before tax, exactly as the vendor's own line total was computed.
+
+    Every quantity is rolled BACKWARD as it goes — the requisition line, then the
+    material request line it came from — so a chain bought in two tenders shows what is
+    still owed rather than going quiet after the first one.
+    """
+    quote = (await db.execute(
+        select(Quotation)
+        .options(selectinload(Quotation.items))
+        .where(Quotation.id == quotation_id)
+    )).scalars().first()
+    if quote is None:
+        raise NotFoundError(f"Quotation {quotation_id} not found")
+
+    rfq = await db.get(RFQ, quote.rfq_id)
+    if rfq is None:
+        raise NotFoundError(f"RFQ {quote.rfq_id} not found")
+    if rfq.status != RFQStatus.AWARDED.value:
+        raise ValidationError(
+            f"{rfq.rfq_no} is {rfq.status}; award it before raising the purchase order")
+    if quote.status != QuotationStatus.ACCEPTED.value:
+        raise ValidationError(
+            f"{quote.quotation_no} did not win {rfq.rfq_no}; only the awarded "
+            "quotation becomes a purchase order")
+
+    existing = await db.scalar(
+        select(PurchaseOrder.po_no).where(
+            PurchaseOrder.quotation_id == quote.id,
+            PurchaseOrder.status != POStatus.CANCELLED.value,
+        ).limit(1)
+    )
+    if existing:
+        raise ValidationError(f"{quote.quotation_no} already became {existing}")
+
+    vendor = await db.get(Vendor, quote.vendor_id)
+    if vendor is None:
+        raise ValidationError(f"Unknown vendor {quote.vendor_id}")
+
+    lines = [line for line in quote.items if _d(line.quantity) > 0]
+    if not lines:
+        raise ValidationError(f"{quote.quotation_no} has no quantities to order")
+
+    requisition = (await db.get(Requisition, rfq.requisition_id)
+                   if rfq.requisition_id else None)
+    req_items = list((await db.execute(
+        select(RequisitionItem)
+        .where(RequisitionItem.requisition_id == requisition.id)
+        .order_by(RequisitionItem.line_no)
+    )).scalars().all()) if requisition else []
+
+    # An indent only rides along when the whole requisition served exactly one. A
+    # consolidated sheet serves many, and stamping one of them on the PO would say the
+    # other indents were never ordered.
+    indent_ids = {row.indent_id for row in req_items if row.indent_id}
+    indent_id = next(iter(indent_ids)) if len(indent_ids) == 1 else None
+    indent_no = next((row.indent_no for row in req_items
+                      if row.indent_id == indent_id and row.indent_no), None)
+
+    po = PurchaseOrder(
+        po_no=await next_number(db, "po", project=rfq.project_name),
+        po_date=utcnow().date(),
+        expected_date=data.expected_date,
+        indent_id=indent_id,
+        indent_no=indent_no,
+        requisition_id=requisition.id if requisition else None,
+        requisition_no=requisition.req_no if requisition else None,
+        rfq_id=rfq.id,
+        rfq_no=rfq.rfq_no,
+        quotation_id=quote.id,
+        quotation_no=quote.quotation_no,
+        vendor_id=vendor.id,
+        vendor_name=vendor.name,
+        vendor_gstin=vendor.gstin,
+        created_by_id=user.id,
+        created_by_name=user.full_name,
+        office_id=None,
+        facility_id=None,
+        facility_name=rfq.warehouse_name,
+        status=POStatus.DRAFT.value,
+        remarks=data.remarks or f"Raised from {quote.quotation_no} against {rfq.rfq_no}",
+    )
+    db.add(po)
+    await db.flush()
+
+    # item -> the requisition lines still owed on it, in line order. Matched on the item
+    # rather than on a line id because an RFQ line carries no pointer back to the
+    # requisition line, and the consolidated sheet aggregates one line per (item, uom)
+    # anyway — two requisition lines for the same item are one thing to buy.
+    owed: dict[int, list[RequisitionItem]] = {}
+    for row in req_items:
+        owed.setdefault(row.item_id, []).append(row)
+
+    sub_total = tax_total = Decimal("0")
+    for index, line in enumerate(lines, start=1):
+        quantity = _d(line.quantity)
+        gross = quantity * _d(line.rate)
+        amount = gross - gross * _d(line.discount_percent or 0) / _d(100)
+        tax = amount * _d(line.tax_percent or 0) / _d(100)
+        sub_total += amount
+        tax_total += tax
+
+        remaining = quantity
+        indent_item_id = None
+        for req_line in owed.get(line.item_id, []):
+            if remaining <= 0:
+                break
+            free = _d(req_line.quantity) - _d(req_line.ordered_qty or 0)
+            if free <= 0:
+                continue
+            applied = min(free, remaining)
+            req_line.ordered_qty = _d(req_line.ordered_qty or 0) + applied
+            remaining -= applied
+            indent_item_id = indent_item_id or req_line.indent_item_id
+
+        db.add(POItem(
+            po_id=po.id, indent_item_id=indent_item_id, item_id=line.item_id,
+            item_code=line.item_code, item_name=line.item_name,
+            uom_code=line.uom_code, quantity=quantity, rate=_d(line.rate),
+            tax_percent=_d(line.tax_percent or 0), amount=amount,
+        ))
+
+    # Freight is money the company pays for these goods, so it belongs on the order.
+    # Left off, a PO raised from a quote quietly under-reads its own quotation.
+    po.sub_total = sub_total + _d(quote.freight_amount or 0)
+    po.tax_amount = tax_total
+    po.total_amount = po.sub_total + tax_total
+
+    if requisition is not None:
+        await _close_requisition_if_ordered(db, requisition, req_items)
+    if rfq.consolidation_id:
+        await _close_sheet_if_ordered(db, rfq.consolidation_id)
+
+    await db.commit()
+    logger.info("purchase order %s raised from %s (%s, %d line(s))",
+                po.po_no, quote.quotation_no, rfq.rfq_no, len(lines))
+    return await get_po(db, po.id)
+
+
+async def _close_requisition_if_ordered(db: AsyncSession, requisition: Requisition,
+                                        req_items: list[RequisitionItem]) -> None:
+    """Move the requisition — and the material request behind it — forward.
+
+    ORDERED only when every line is fully covered. A requisition bought in two tenders
+    must keep reading RFQ_RAISED in between, or the second half looks already done.
+    """
+    fully = all(_d(row.ordered_qty or 0) >= _d(row.quantity) for row in req_items)
+    if requisition.status in (RequisitionStatus.APPROVED.value,
+                              RequisitionStatus.CONSOLIDATED.value,
+                              RequisitionStatus.RFQ_RAISED.value):
+        requisition.status = (RequisitionStatus.ORDERED.value if fully
+                              else RequisitionStatus.RFQ_RAISED.value)
+
+    if not requisition.source_mr_id:
+        return
+    mr = await db.get(MaterialRequest, requisition.source_mr_id)
+    if mr is None:
+        return
+    mr_items = list((await db.execute(
+        select(MaterialRequestItem)
+        .where(MaterialRequestItem.mr_id == mr.id)
+        .order_by(MaterialRequestItem.line_no)
+    )).scalars().all())
+
+    # The MR is the document the field is waiting on, so its ordered quantities must
+    # track the requisition's rather than being recomputed from the PO — the requisition
+    # is what was actually tendered, and anything it dropped was never bought.
+    by_item: dict[int, Decimal] = {}
+    for row in req_items:
+        by_item[row.item_id] = by_item.get(row.item_id, Decimal("0")) + _d(row.ordered_qty or 0)
+    for row in mr_items:
+        claimable = by_item.get(row.item_id, Decimal("0"))
+        if claimable <= 0:
+            continue
+        applied = min(claimable, _d(row.quantity))
+        # The pool is spent whether or not this line moved: two MR lines for the same
+        # item must not both claim the same ordered quantity.
+        by_item[row.item_id] = claimable - applied
+        if applied > _d(row.ordered_quantity or 0):
+            row.ordered_quantity = applied
+
+    if mr.status == MRStatus.APPROVED.value and all(
+        _d(row.ordered_quantity or 0) >= _d(row.quantity) for row in mr_items
+    ):
+        mr.status = MRStatus.ORDERED.value
+
+
+async def _close_sheet_if_ordered(db: AsyncSession, consolidation_id: int) -> None:
+    """A consolidated sheet closes only when every requisition on it is ORDERED."""
+    sheet = await db.get(PurchaseConsolidation, consolidation_id)
+    if sheet is None or sheet.status not in (ConsolidationStatus.APPROVED.value,
+                                             ConsolidationStatus.RFQ_RAISED.value):
+        return
+    statuses = list((await db.execute(
+        select(Requisition.status)
+        .join(PurchaseConsolidationSource,
+              PurchaseConsolidationSource.requisition_id == Requisition.id)
+        .where(PurchaseConsolidationSource.consolidation_id == sheet.id)
+    )).scalars().all())
+    if statuses and all(value == RequisitionStatus.ORDERED.value for value in statuses):
+        sheet.status = ConsolidationStatus.CLOSED.value
 
 
 async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
@@ -334,9 +549,10 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
             item_id=line.item_id,
             quantity=_d(line.quantity) - _d(line.ordered_quantity),
             uom_code=line.uom_code,
-            # Nobody has quoted yet — the rate arrives with the RFQ. The item master's
-            # last purchase price is a guess, and a guess printed as an estimate is
-            # what people end up budgeting against.
+            # Left to `_write_requisition_lines` to price. Nobody has quoted yet, so
+            # this is only ever an estimate — but a requisition worth ₹0 is worse than
+            # an approximate one: the approval ladder routes on `total_amount`, so a
+            # zero sends every requisition down the cheapest branch of the chain.
             estimated_rate=0,
             required_date=None,
             indent_id=mr.indent_id,
@@ -371,20 +587,55 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
     return await get_requisition(db, req.id)
 
 
+async def _last_known_rates(db: AsyncSession, item_ids: list[int]) -> dict[int, Decimal]:
+    """The best guess at what each item costs, for lines that arrive without a rate.
+
+    Order matters. The preferred vendor's agreed rate is a real commercial number; any
+    other vendor's last rate is at least something somebody charged; the item master's
+    `purchase_price` is a valuation figure fed by GRN and is the last resort.
+
+    This is an ESTIMATE and nothing downstream treats it as a price — the PO is written
+    from the quotation. But the requisition ladder routes on `total_amount`, so leaving
+    it at zero is not neutral: it sends every requisition down the cheapest branch of
+    the approval chain regardless of what is actually being bought.
+    """
+    if not item_ids:
+        return {}
+    rates: dict[int, Decimal] = {}
+    # Preferred last, so it overwrites a non-preferred vendor's row for the same item.
+    for row in (await db.execute(
+        select(VendorItem.item_id, VendorItem.last_rate)
+        .where(VendorItem.item_id.in_(item_ids), VendorItem.last_rate.isnot(None),
+               VendorItem.last_rate > 0)
+        .order_by(VendorItem.is_preferred)
+    )).all():
+        rates[row[0]] = _d(row[1])
+    for row in (await db.execute(
+        select(Item.id, Item.purchase_price)
+        .where(Item.id.in_(item_ids), Item.purchase_price > 0)
+    )).all():
+        rates.setdefault(row[0], _d(row[1]))
+    return rates
+
+
 async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines) -> None:
     total = Decimal(0)
+    # Only consulted for lines that came in at zero — a buyer who typed a rate meant it.
+    fallback = await _last_known_rates(
+        db, [line.item_id for line in lines if not _d(line.estimated_rate)])
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
         if item is None:
             raise ValidationError(f"Item {line.item_id} does not exist")
-        amount = _d(line.quantity) * _d(line.estimated_rate)
+        rate = _d(line.estimated_rate) or fallback.get(line.item_id, Decimal(0))
+        amount = _d(line.quantity) * rate
         total += amount
         db.add(RequisitionItem(
             requisition_id=req.id, line_no=index,
             indent_id=line.indent_id, indent_item_id=line.indent_item_id,
             item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=line.uom_code or getattr(item, "uom_code", None),
-            quantity=_d(line.quantity), estimated_rate=_d(line.estimated_rate),
+            quantity=_d(line.quantity), estimated_rate=rate,
             estimated_amount=amount, required_date=line.required_date,
         ))
     req.total_items = len(lines)
@@ -593,6 +844,20 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None) -> RFQ:
     ))).scalar_one_or_none()
     if not rfq:
         raise NotFoundError(f"RFQ {rfq_id} not found")
+    # The order this award already became, if it became one. Transient attributes off a
+    # lookup rather than columns on pro_rfqs: the PO already points backward at the RFQ,
+    # and a second copy of that link on the RFQ is a second thing that can go stale.
+    #
+    # Read here rather than derived in the screen because only the server knows — a
+    # buyer coming back to an awarded RFQ was still being offered "Create purchase
+    # order" for an order that exists, and only found out by pressing it.
+    row = (await db.execute(
+        select(PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.status)
+        .where(PurchaseOrder.rfq_id == rfq.id,
+               PurchaseOrder.status != POStatus.CANCELLED.value)
+        .order_by(PurchaseOrder.id).limit(1)
+    )).first()
+    rfq.po_id, rfq.po_no, rfq.po_status = row if row else (None, None, None)
     return rfq
 
 
@@ -1123,3 +1388,253 @@ list_consolidations = consolidation.list_consolidations
 rebuild_consolidation = consolidation.rebuild_consolidation
 set_consolidation_lines = consolidation.set_line_quantities
 submit_consolidation = consolidation.submit_consolidation
+
+
+# =========================================================================== #
+#  Despatch notes — the vendor's statement of what they sent
+# =========================================================================== #
+#  Same guard as everything above in the portal: `vendor_id` comes from the verified
+#  token and every query filters on it. No function here accepts a vendor id from the
+#  caller, and none of them writes to stock — a despatch note is a claim, and the GRN
+#  is where the company agrees with it or does not.
+
+#: An order a vendor may still despatch against. Not DRAFT or PENDING_APPROVAL — the
+#: vendor has not been told about those and must not see them — and not RECEIVED, which
+#: is finished.
+_DESPATCHABLE = (POStatus.SENT_TO_VENDOR.value, POStatus.PARTIALLY_RECEIVED.value)
+
+
+async def _vendor_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOrder:
+    """One order, only if it belongs to this vendor and they have been sent it."""
+    po = (await db.execute(
+        select(PurchaseOrder).where(
+            PurchaseOrder.id == po_id,
+            PurchaseOrder.vendor_id == vendor_id,
+            PurchaseOrder.status.in_(_DESPATCHABLE),
+        )
+    )).scalars().first()
+    if po is None:
+        raise NotFoundError(f"Purchase order {po_id} not found")
+    return po
+
+
+async def _despatched_by_po_item(db: AsyncSession, po_id: int) -> dict[int, Decimal]:
+    """How much of each line the vendor has already said they sent.
+
+    Summed from the notes rather than kept as a column: a delivery goes out in parts,
+    and a running total on the PO line would be a second place for the same fact to
+    disagree with itself.
+    """
+    rows = (await db.execute(
+        select(DespatchNoteItem.po_item_id,
+               func.coalesce(func.sum(DespatchNoteItem.despatched_qty), 0))
+        .join(DespatchNote, DespatchNote.id == DespatchNoteItem.despatch_note_id)
+        .where(DespatchNote.po_id == po_id,
+               DespatchNote.status == DespatchNoteStatus.SUBMITTED.value)
+        .group_by(DespatchNoteItem.po_item_id)
+    )).all()
+    return {row[0]: _d(row[1]) for row in rows if row[0]}
+
+
+async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams) -> dict:
+    """The orders this vendor has been sent. Never anyone else's, never a draft."""
+    stmt = (select(PurchaseOrder)
+            .where(PurchaseOrder.vendor_id == vendor_id,
+                   PurchaseOrder.status.in_(_DESPATCHABLE))
+            .order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc()))
+    page = await paginate(db, stmt, params)
+    counts = dict((await db.execute(
+        select(DespatchNote.po_id, func.count(DespatchNote.id))
+        .where(DespatchNote.vendor_id == vendor_id,
+               DespatchNote.status != DespatchNoteStatus.CANCELLED.value)
+        .group_by(DespatchNote.po_id)
+    )).all())
+    for row in page["items"]:
+        row.despatch_note_count = counts.get(row.id, 0)
+    return page
+
+
+async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOrder:
+    """One order with what is still owed on each line, and the notes filed so far."""
+    po = await _vendor_po(db, vendor_id, po_id)
+    already = await _despatched_by_po_item(db, po.id)
+
+    po.lines = [
+        SimpleNamespace(
+            po_item_id=line.id, item_id=line.item_id, item_code=line.item_code,
+            item_name=line.item_name, uom_code=line.uom_code,
+            ordered_qty=_d(line.quantity),
+            despatched_qty=already.get(line.id, Decimal(0)),
+            pending_qty=max(_d(line.quantity) - already.get(line.id, Decimal(0)),
+                            Decimal(0)),
+        )
+        for line in po.items
+    ]
+    po.despatch_notes = list((await db.execute(
+        select(DespatchNote)
+        .options(selectinload(DespatchNote.items))
+        .where(DespatchNote.po_id == po.id, DespatchNote.vendor_id == vendor_id)
+        .order_by(DespatchNote.id.desc())
+    )).scalars().all())
+    return po
+
+
+async def vendor_get_despatch_note(db: AsyncSession, vendor_id: int,
+                                   note_id: int) -> DespatchNote:
+    note = (await db.execute(
+        select(DespatchNote)
+        .options(selectinload(DespatchNote.items))
+        .where(DespatchNote.id == note_id, DespatchNote.vendor_id == vendor_id)
+    )).scalars().first()
+    if note is None:
+        raise NotFoundError(f"Despatch note {note_id} not found")
+    return note
+
+
+async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int,
+                                    data: DespatchNoteIn,
+                                    note_id: int | None = None) -> DespatchNote:
+    """Create or replace the vendor's draft note for an order.
+
+    Lines are matched to the PO by `po_item_id`, and anything that is not on the order
+    is refused: a despatch note answers a purchase order, so a vendor cannot use it to
+    declare something nobody bought. Quantities are capped at what is still owed for
+    the same reason.
+
+    A SUBMITTED note is not editable. It is what the gate is about to receive against,
+    and letting it change underneath a storekeeper who has already started counting is
+    the one way this document could make things worse rather than better.
+    """
+    po = await _vendor_po(db, vendor_id, po_id)
+
+    note = None
+    if note_id is not None:
+        note = await vendor_get_despatch_note(db, vendor_id, note_id)
+        if note.po_id != po.id:
+            raise ValidationError("That despatch note belongs to a different order")
+        if note.status != DespatchNoteStatus.DRAFT.value:
+            raise ValidationError(
+                f"{note.dn_no} is {note.status} and can no longer be edited")
+
+    po_items = {line.id: line for line in po.items}
+    already = await _despatched_by_po_item(db, po.id)
+    # This note's own quantities do not count against its own ceiling on a re-save.
+    if note is not None:
+        for line in note.items:
+            if line.po_item_id in already:
+                already[line.po_item_id] -= _d(line.despatched_qty)
+
+    lines = [line for line in data.lines if _d(line.despatched_qty) > 0]
+    if not lines:
+        raise ValidationError("A despatch note needs at least one quantity")
+
+    for line in lines:
+        po_line = po_items.get(line.po_item_id)
+        if po_line is None:
+            raise ValidationError(f"Line {line.po_item_id} is not on {po.po_no}")
+        pending = _d(po_line.quantity) - already.get(line.po_item_id, Decimal(0))
+        if _d(line.despatched_qty) > pending:
+            raise ValidationError(
+                f"{po_line.item_code or po_line.item_name}: {line.despatched_qty} "
+                f"exceeds the {pending} still owed on {po.po_no}")
+        if line.expiry_date and line.mfg_date and line.expiry_date <= line.mfg_date:
+            raise ValidationError(
+                f"{po_line.item_code or po_line.item_name}: expiry must be after "
+                "the manufacture date")
+
+    if note is None:
+        note = DespatchNote(
+            dn_no=await next_number(db, DocType.DESPATCH_NOTE.value),
+            po_id=po.id, po_no=po.po_no,
+            vendor_id=vendor_id, vendor_name=po.vendor_name,
+            status=DespatchNoteStatus.DRAFT.value,
+        )
+        db.add(note)
+        await db.flush()
+
+    note.dn_date = data.dn_date or utcnow().date()
+    note.invoice_no = data.invoice_no
+    note.invoice_date = data.invoice_date
+    note.invoice_amount = data.invoice_amount
+    note.eway_bill_no = data.eway_bill_no
+    note.vehicle_no = data.vehicle_no
+    note.transporter_name = data.transporter_name
+    note.lr_no = data.lr_no
+    note.expected_date = data.expected_date
+    note.remarks = data.remarks
+
+    # Only a re-saved draft has lines to clear. A note created a moment ago has an
+    # unloaded `items` collection, and reading it here is a lazy load inside the async
+    # session — which is a MissingGreenlet, not an empty list.
+    if note_id is not None:
+        for existing in list(note.items):
+            await db.delete(existing)
+        await db.flush()
+
+    for index, line in enumerate(lines, start=1):
+        po_line = po_items[line.po_item_id]
+        db.add(DespatchNoteItem(
+            despatch_note_id=note.id, line_no=index,
+            po_item_id=line.po_item_id, item_id=po_line.item_id,
+            item_code=po_line.item_code, item_name=po_line.item_name,
+            uom_code=po_line.uom_code,
+            despatched_qty=_d(line.despatched_qty),
+            batch_no=line.batch_no, mfg_date=line.mfg_date,
+            expiry_date=line.expiry_date, remarks=line.remarks,
+        ))
+
+    await db.commit()
+    return await vendor_get_despatch_note(db, vendor_id, note.id)
+
+
+async def vendor_submit_despatch_note(db: AsyncSession, vendor_id: int,
+                                      note_id: int) -> DespatchNote:
+    """File it. Invoice and e-way bill are required HERE, not on the draft.
+
+    Doc B12 makes both mandatory before dispatch, and this is the moment the vendor
+    says the vehicle has left. Checked at submit rather than at save so a note can be
+    started while the invoice is still being raised.
+    """
+    note = await vendor_get_despatch_note(db, vendor_id, note_id)
+    if note.status != DespatchNoteStatus.DRAFT.value:
+        raise ValidationError(f"{note.dn_no} is already {note.status}")
+    missing = [label for label, value in (
+        ("invoice number", note.invoice_no),
+        ("e-way bill number", note.eway_bill_no),
+    ) if not (value or "").strip()]
+    if missing:
+        raise ValidationError(
+            f"{' and '.join(missing).capitalize()} is required before despatch")
+
+    note.status = DespatchNoteStatus.SUBMITTED.value
+    note.submitted_at = utcnow()
+    await db.commit()
+    logger.info("despatch note %s submitted against %s", note.dn_no, note.po_no)
+    return await vendor_get_despatch_note(db, vendor_id, note.id)
+
+
+async def vendor_cancel_despatch_note(db: AsyncSession, vendor_id: int,
+                                      note_id: int) -> DespatchNote:
+    """Withdraw a note. Refused once a receipt points at it — by then the warehouse
+    has begun receiving against what it says, and it is a record, not a plan."""
+    note = await vendor_get_despatch_note(db, vendor_id, note_id)
+    if note.status == DespatchNoteStatus.CANCELLED.value:
+        raise ValidationError(f"{note.dn_no} is already cancelled")
+    if await _despatch_note_is_received(db, note.id):
+        raise ValidationError(
+            f"{note.dn_no} has already been received against and cannot be cancelled")
+    note.status = DespatchNoteStatus.CANCELLED.value
+    await db.commit()
+    return await vendor_get_despatch_note(db, vendor_id, note.id)
+
+
+async def _despatch_note_is_received(db: AsyncSession, note_id: int) -> bool:
+    """Whether the warehouse has booked anything in against this note.
+
+    Imported here rather than at module scope: warehouse sits AFTER procurement in the
+    import chain (rule 5), so procurement may only reach it from inside a function.
+    """
+    from app.modules.warehouse.models import Receipt
+
+    return bool(await db.scalar(
+        select(Receipt.id).where(Receipt.despatch_note_id == note_id).limit(1)))

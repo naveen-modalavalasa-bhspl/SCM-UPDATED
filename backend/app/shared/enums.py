@@ -132,6 +132,10 @@ class DocType(str, Enum):
     # the VENDOR's document. It needs a number; nobody inside the company approves it.
     # What gets approved is the award, and that rides on the PO.
     QUOTATION = "QUOTATION"
+    # Numbering only, like QUOTATION and for the same reason: a despatch note is the
+    # VENDOR's statement of what they put on the vehicle. Nobody inside the company
+    # approves it — the GRN is where we agree with it or do not.
+    DESPATCH_NOTE = "DESPATCH_NOTE"
     PO = "PO"
     GRN = "GRN"
     ISSUE = "ISSUE"
@@ -406,6 +410,19 @@ class RFQStatus(str, Enum):
     CLOSED = "CLOSED"
     # A quotation was picked. Terminal, and the awarded vendor is on the row.
     AWARDED = "AWARDED"
+    CANCELLED = "CANCELLED"
+
+
+class DespatchNoteStatus(str, Enum):
+    """pro_despatch_notes.status — what the vendor says they have sent.
+
+    No approval states: nobody inside the company signs a vendor's despatch note. It is
+    a claim, and the GRN is where that claim is agreed with or contradicted. SUBMITTED
+    is therefore terminal from our side — only the vendor can cancel one, and only
+    while nothing has been received against it.
+    """
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"
     CANCELLED = "CANCELLED"
 
 

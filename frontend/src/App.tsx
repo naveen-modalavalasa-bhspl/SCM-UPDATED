@@ -98,6 +98,8 @@ import { SupplierLoginPage } from "@/modules/supplier/pages/SupplierLoginPage";
 import { SupplierPasswordPage } from "@/modules/supplier/pages/SupplierPasswordPage";
 import { SupplierRFQListPage } from "@/modules/supplier/pages/SupplierRFQListPage";
 import { SupplierRFQDetailPage } from "@/modules/supplier/pages/SupplierRFQDetailPage";
+import { SupplierPOListPage } from "@/modules/supplier/pages/SupplierPOListPage";
+import { SupplierPODetailPage } from "@/modules/supplier/pages/SupplierPODetailPage";
 import { SupplierProfilePage } from "@/modules/supplier/pages/SupplierProfilePage";
 import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
 import { CodeFormatsPage } from "@/modules/settings/pages/CodeFormatsPage";
@@ -138,6 +140,10 @@ function AppRoutes() {
         <Route index element={<Navigate to="/supplier/rfqs" replace />} />
         <Route path="rfqs" element={<SupplierRFQListPage />} />
         <Route path="rfqs/:id" element={<SupplierRFQDetailPage />} />
+        {/* The orders they have been sent, and the despatch note they file against
+            one before the vehicle leaves (doc B12). */}
+        <Route path="pos" element={<SupplierPOListPage />} />
+        <Route path="pos/:id" element={<SupplierPODetailPage />} />
         <Route path="profile" element={<SupplierProfilePage />} />
       </Route>
 

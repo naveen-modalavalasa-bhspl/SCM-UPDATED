@@ -144,7 +144,9 @@ describe("AllocationApprovalDetailPage", () => {
     const give = await screen.findByLabelText("Give quantity for Cement");
     fireEvent.change(give, { target: { value: "40" } });
 
-    fireEvent.click(screen.getByText("Approve revised and reserve"));
+    // 40 of 100 asked for: the button says what the signature does, and part of this
+    // one is a purchase.
+    fireEvent.click(screen.getByText("Approve, reserve and raise MR"));
     await waitFor(() => {
       expect(mockPost).toHaveBeenCalledWith("/api/allocations/3/approve", {
         comments: "", revisions: [{ id: 1, quantity: 40 }],
@@ -155,8 +157,8 @@ describe("AllocationApprovalDetailPage", () => {
   it("sends no revision when the quantity is left alone", async () => {
     render(wrap(<AllocationApprovalDetailPage />, "/inventory/allocation-approvals/3"));
 
-    await waitFor(() => expect(screen.getByText("Approve and reserve")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Approve and reserve"));
+    const approve = await screen.findByText("Approve, reserve and raise MR");
+    fireEvent.click(approve);
     await waitFor(() => {
       expect(mockPost).toHaveBeenCalledWith("/api/allocations/3/approve", {
         comments: "", revisions: [],
@@ -164,7 +166,43 @@ describe("AllocationApprovalDetailPage", () => {
     });
   });
 
-  it("withholds Approve and reserve from a profile without the action, keeping Reject",
+  /** Nothing on the shelf: the whole line goes to procurement, and approving reserves
+   *  nothing at all. The button promised "Approve and reserve" on exactly this
+   *  document — the one allocation where no reservation is possible. */
+  it("offers to raise the material request when there is nothing to reserve", async () => {
+    const empty = { ...line, quantity: 0, warehouse_id: null, warehouse_name: null };
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/api/workflow/pending") {
+        return Promise.resolve({
+          data: { items: [{ instance_id: 9, doc_type: "ALLOCATION", doc_id: 3,
+                            doc_no: "ALC/0003" }] },
+        });
+      }
+      if (url === "/api/allocations/3") {
+        return Promise.resolve({
+          data: { ...listRow, total_qty: 0, remarks: null, items: [empty] },
+        });
+      }
+      if (url === "/api/allocations/3/availability") {
+        return Promise.resolve({
+          data: [{ ...availability[0], quantity: 0, on_shelf: 0,
+                   pledged_elsewhere: 0, free: 0, max_allowed: 0 }],
+        });
+      }
+      if (url === "/api/workflow/history/ALLOCATION/3") {
+        return Promise.resolve({ data: { items: [] } });
+      }
+      return Promise.reject(new Error(`Unexpected GET ${url}`));
+    });
+
+    render(wrap(<AllocationApprovalDetailPage />, "/inventory/allocation-approvals/3"));
+
+    await waitFor(() =>
+      expect(screen.getByText("Approve and raise material request")).toBeInTheDocument());
+    expect(screen.getByText(/Nothing is free to reserve/)).toBeInTheDocument();
+  });
+
+  it("withholds the approve button from a profile without the action, keeping Reject",
      async () => {
     heldPermissions.clear();
     render(wrap(<AllocationApprovalDetailPage />, "/inventory/allocation-approvals/3"));
@@ -172,7 +210,7 @@ describe("AllocationApprovalDetailPage", () => {
     // Still the approver's turn — the ladder says so — but the job profile does not
     // carry the button. Reject stays, or the document would be stuck here.
     await waitFor(() => expect(screen.getByText("Reject")).toBeInTheDocument());
-    expect(screen.queryByText("Approve and reserve")).toBeNull();
+    expect(screen.queryByText(/^Approve/)).toBeNull();
   });
 
   it("is read-only for an allocation that is not waiting on this login", async () => {
@@ -199,7 +237,7 @@ describe("AllocationApprovalDetailPage", () => {
 
     await waitFor(() => expect(screen.getByText("Review ALC/0003")).toBeInTheDocument());
     expect(screen.queryByLabelText("Give quantity for Cement")).not.toBeInTheDocument();
-    expect(screen.queryByText("Approve and reserve")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Approve/)).not.toBeInTheDocument();
     expect(screen.queryByText("Reject")).not.toBeInTheDocument();
   });
 });

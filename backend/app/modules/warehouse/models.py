@@ -68,6 +68,11 @@ class Receipt(Base):
 
     po_id = Column(BigInteger, index=True, nullable=True)
     po_no = Column(String(50), nullable=True)
+    # The vendor's own despatch note, when they filed one before the vehicle left.
+    # Soft FK — procurement owns that table, and a delivery can still arrive without
+    # one, which is why this is nullable and nothing checks it before receiving.
+    despatch_note_id = Column(BigInteger, index=True, nullable=True)
+    despatch_note_no = Column(String(30), nullable=True)
     transfer_id = Column(BigInteger, nullable=True)
     transfer_no = Column(String(50), nullable=True)
 

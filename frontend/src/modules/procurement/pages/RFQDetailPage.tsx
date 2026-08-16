@@ -7,7 +7,7 @@ import {
   useToast, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
-import { rfqApi } from "../api";
+import { poApi, rfqApi } from "../api";
 import { money } from "./RequisitionListPage";
 import type { QuoteListRow, RFQItem, RFQVendor } from "../types";
 
@@ -74,8 +74,28 @@ export function RFQDetailPage() {
     onSuccess: refresh("Awarded"),
   });
 
+  // The offer that won. Read off the comparison rather than off the RFQ's awarded
+  // vendor id: a vendor can hold more than one quotation on an RFQ (they revise), and
+  // the PO is raised against the exact quote that was accepted, not against the vendor.
+  const awardedQuote = (comparison?.quotations ?? []).find((q) => q.status === "ACCEPTED");
+
+  /** The last hop of the chain: accept the offer as a purchase order.
+   *
+   *  Vendor, rates, discount and tax all come from the quotation server-side — nothing
+   *  is sent — so the PO cannot disagree with the offer it says it is for. It lands in
+   *  DRAFT and still climbs the PO ladder; awarding is not approving a spend. */
+  const raisePo = useMutation({
+    mutationFn: () => poApi.createFromQuotation(awardedQuote!.id),
+    onSuccess: (po) => {
+      queryClient.invalidateQueries({ queryKey: ["rfq", id] });
+      queryClient.invalidateQueries({ queryKey: ["pos"] });
+      toast.success(`${po.po_no} raised from ${awardedQuote?.vendor_name ?? "the winner"}`);
+      nav(`/pos/${po.id}`);
+    },
+  });
+
   const busy = submit.isPending || approve.isPending || reject.isPending
-    || close.isPending || award.isPending;
+    || close.isPending || award.isPending || raisePo.isPending;
 
   const copyInvite = async (vendorId: number, path: string) => {
     await navigator.clipboard.writeText(`${location.origin}${path}`);
@@ -217,11 +237,26 @@ export function RFQDetailPage() {
                 </Button>
               </Can>
             )}
+            {/* Once the order exists the offer to raise one is wrong, not merely
+              * redundant: the backend refuses the second, so the button could only
+              * ever produce an error. It becomes the way to the order instead. */}
+            {rfq?.status === "AWARDED" && rfq.po_id && (
+              <Button variant="subtle" onClick={() => nav(`/pos/${rfq.po_id}`)}>
+                {rfq.po_no ?? "Purchase order"}
+              </Button>
+            )}
+            {rfq?.status === "AWARDED" && !rfq.po_id && awardedQuote && (
+              <Can do="po.create">
+                <Button disabled={busy} onClick={() => raisePo.mutate()}>
+                  {raisePo.isPending ? "Raising…" : "Create purchase order"}
+                </Button>
+              </Can>
+            )}
           </>
         }
       />
 
-      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error} />
+      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? raisePo.error} />
 
       {rfq && (
         <Card className="mb-4 p-5">
@@ -247,6 +282,24 @@ export function RFQDetailPage() {
               </dd>
             </div>
           </dl>
+          {/* Where the award went next. Without it an AWARDED RFQ is a dead end on
+            * screen even though the order exists — the chain only reads forward here. */}
+          {rfq.po_id && (
+            <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-line pt-4 text-sm sm:grid-cols-4">
+              <div>
+                <dt className="text-xs text-muted">Purchase order</dt>
+                <dd className="mt-1">
+                  <button className="font-mono text-brand underline" onClick={() => nav(`/pos/${rfq.po_id}`)}>
+                    {rfq.po_no ?? `#${rfq.po_id}`}
+                  </button>
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted">Order status</dt>
+                <dd className="mt-1"><StatusPill status={rfq.po_status ?? "DRAFT"} /></dd>
+              </div>
+            </dl>
+          )}
           {rfq.terms && (
             <p className="mt-4 border-t border-line pt-4 text-sm text-body">{rfq.terms}</p>
           )}

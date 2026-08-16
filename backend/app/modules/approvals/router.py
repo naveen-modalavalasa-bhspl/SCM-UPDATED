@@ -12,7 +12,8 @@ from app.platform.rbac import permissions as perms
 from . import fulfilment, service
 from .schemas import (
     ApprovalActionIn, ApprovalActionOut, ApprovalIndentOut, ApprovalRejectionIn,
-    ApprovalReportOut, ConsolidationApprovalIn, ConsolidationApprovalOut,
+    ApprovalReportOut, BulkActionIn, BulkActionOut,
+    ConsolidationApprovalIn, ConsolidationApprovalOut,
     ConsolidationFilters, ConsolidationOut, IndentApprovalActionIn,
     IndentRejectionIn, IndentReturnIn, IssueFromStockIn, ReminderOut,
 )
@@ -111,6 +112,24 @@ async def reject_document(doc_type: str, doc_id: int, body: ApprovalRejectionIn,
                           user=Depends(get_current_user)):
     return await service.act_on_document(
         db, doc_type, doc_id, "REJECTED", body.comments, user,
+    )
+
+
+# Declared before `/documents/{doc_type}/…`: `bulk-approve` would otherwise be read as
+# a doc_type and the request would 422 on the missing doc_id.
+@router.post("/documents/bulk-approve", response_model=BulkActionOut)
+async def bulk_approve(body: BulkActionIn, db: AsyncSession = Depends(get_db),
+                       user=Depends(get_current_user)):
+    return await service.act_on_documents(
+        db, body.documents, "APPROVED", body.comments, user,
+    )
+
+
+@router.post("/documents/bulk-reject", response_model=BulkActionOut)
+async def bulk_reject(body: BulkActionIn, db: AsyncSession = Depends(get_db),
+                      user=Depends(get_current_user)):
+    return await service.act_on_documents(
+        db, body.documents, "REJECTED", body.comments, user,
     )
 
 

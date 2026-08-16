@@ -22,8 +22,10 @@ from app.core.pagination import Page, PageParams
 from app.modules.procurement import service
 from app.modules.procurement.schemas import (
     ActionIn, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
-    ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut, POCreate,
-    POListRow, POOut, QuoteListRow, QuoteOut, QuoteSubmit, ReqCreate, ReqListRow,
+    ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
+    DespatchNoteIn, DespatchNoteOut, VendorPOListRow, VendorPOOut, POCreate,
+    POFromQuotationIn, POListRow, POOut, QuoteListRow, QuoteOut, QuoteSubmit,
+    ReqCreate, ReqListRow,
     ReqOut, RFQCreate, RFQListRow, RFQOut, RFQUpdate, VendorAccountIn,
     VendorAccountOut, VendorLoginIn, VendorPasswordIn, VendorProfileOut,
     VendorTokenOut,
@@ -59,6 +61,14 @@ async def open_for_grn(params: PageParams = Depends(), db: AsyncSession = Depend
 async def create_from_indent(indent_id: int, data: POCreate, db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(perms.PO_CREATE))):
     return await service.create_po_from_indent(db, indent_id, data, user)
+
+
+@pos.post("/from-quotation/{quotation_id}", response_model=POOut, status_code=201)
+async def create_from_quotation(quotation_id: int,
+                                data: POFromQuotationIn = POFromQuotationIn(),
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.PO_CREATE))):
+    return await service.create_po_from_quotation(db, quotation_id, data, user)
 
 
 @pos.get("/{po_id}", response_model=POOut)
@@ -354,6 +364,57 @@ async def vendor_get_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
 async def vendor_get_quotation(rfq_id: int, db: AsyncSession = Depends(get_db),
                                account=Depends(get_current_vendor)):
     return await service.vendor_get_quotation(db, account.vendor_id, rfq_id)
+
+
+# --- the vendor's own orders, and what they say they have sent ----------------
+# Every one of these takes the vendor id from `get_current_vendor`, never from the
+# request, so a vendor can only ever reach their own orders.
+
+@supplier.get("/pos", response_model=Page[VendorPOListRow])
+async def vendor_list_pos(params: PageParams = Depends(),
+                          db: AsyncSession = Depends(get_db),
+                          account=Depends(get_current_vendor)):
+    return await service.vendor_list_pos(db, account.vendor_id, params)
+
+
+@supplier.get("/pos/{po_id}", response_model=VendorPOOut)
+async def vendor_get_po(po_id: int, db: AsyncSession = Depends(get_db),
+                        account=Depends(get_current_vendor)):
+    return await service.vendor_get_po(db, account.vendor_id, po_id)
+
+
+@supplier.post("/pos/{po_id}/despatch-notes", response_model=DespatchNoteOut,
+               status_code=201)
+async def vendor_create_despatch_note(po_id: int, body: DespatchNoteIn,
+                                      db: AsyncSession = Depends(get_db),
+                                      account=Depends(get_current_vendor)):
+    return await service.vendor_save_despatch_note(db, account.vendor_id, po_id, body)
+
+
+@supplier.put("/pos/{po_id}/despatch-notes/{note_id}", response_model=DespatchNoteOut)
+async def vendor_update_despatch_note(po_id: int, note_id: int, body: DespatchNoteIn,
+                                      db: AsyncSession = Depends(get_db),
+                                      account=Depends(get_current_vendor)):
+    return await service.vendor_save_despatch_note(
+        db, account.vendor_id, po_id, body, note_id)
+
+
+@supplier.get("/despatch-notes/{note_id}", response_model=DespatchNoteOut)
+async def vendor_get_despatch_note(note_id: int, db: AsyncSession = Depends(get_db),
+                                   account=Depends(get_current_vendor)):
+    return await service.vendor_get_despatch_note(db, account.vendor_id, note_id)
+
+
+@supplier.post("/despatch-notes/{note_id}/submit", response_model=DespatchNoteOut)
+async def vendor_submit_despatch_note(note_id: int, db: AsyncSession = Depends(get_db),
+                                      account=Depends(get_current_vendor)):
+    return await service.vendor_submit_despatch_note(db, account.vendor_id, note_id)
+
+
+@supplier.post("/despatch-notes/{note_id}/cancel", response_model=DespatchNoteOut)
+async def vendor_cancel_despatch_note(note_id: int, db: AsyncSession = Depends(get_db),
+                                      account=Depends(get_current_vendor)):
+    return await service.vendor_cancel_despatch_note(db, account.vendor_id, note_id)
 
 
 @supplier.post("/rfqs/{rfq_id}/quotation", response_model=QuoteOut)

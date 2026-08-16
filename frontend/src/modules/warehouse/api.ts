@@ -24,6 +24,7 @@ import type {
   PackageWrite,
   Picking,
   PickingWrite,
+  DespatchPrefill,
   PoLineOption,
   PurchaseReturn,
   PurchaseReturnWrite,
@@ -157,6 +158,16 @@ export const cancelReceipt = (id: number, reason?: string) =>
 /** Open PO lines, so the GRN form fills itself from the order. */
 export const getPoLines = (poId: number) =>
   get<PoLineOption[]>(`${BASE}/options/po-lines`, { po_id: poId });
+
+/** Despatch notes the vendor has filed against an order — only SUBMITTED ones, since
+ *  a draft is the vendor still typing. */
+export const despatchNoteOptions = (poId: number) =>
+  get<Option[]>(`${BASE}/options/despatch-notes`, { po_id: poId });
+
+/** The vendor's paperwork and per-line batch/expiry, in the shape this form needs.
+ *  Header and lines in one call — at the gate they are one act. */
+export const getDespatchPrefill = (noteId: number) =>
+  get<DespatchPrefill>(`${BASE}/options/despatch-prefill`, { note_id: noteId });
 
 /* ----------------------------------------------------------- quality (in) -- */
 
@@ -546,6 +557,9 @@ export const binOptions = (
 export const batchOptions = (item_id: number, warehouse_id: number, bin_id?: number | null) =>
   get<Option[]>(`${BASE}/options/batches`, { item_id, warehouse_id, bin_id });
 
+/** Orders a delivery can arrive against — sent to the vendor, not yet fully received.
+ *  Behind `receipt.view`, not `po.view`: a storekeeper picks the order the goods came
+ *  on without being given the run of procurement. */
 export const poOptions = (search?: string) => get<Option[]>(`${BASE}/options/purchase-orders`, { search });
 
 /** GRNs this login can see. `for_putaway` narrows it to the ones with stock actually

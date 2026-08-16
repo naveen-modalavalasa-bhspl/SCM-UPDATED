@@ -2,7 +2,8 @@ import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
   Comparison, Consolidation, ConsolidationCreate, ConsolidationListRow,
-  ConsolidationSource, EvaluationMethodOption, POCreate, POListRow, PurchaseOrder,
+  ConsolidationSource, DespatchNote, DespatchNoteWrite, EvaluationMethodOption,
+  POCreate, POFromQuotation, POListRow, PurchaseOrder, VendorPO, VendorPOListRow,
   Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
   VendorToken,
@@ -16,6 +17,11 @@ export const poApi = {
   get: (id: number) => api.get<PurchaseOrder>(`/api/pos/${id}`).then((r) => r.data),
   createFromIndent: (indentId: number, data: POCreate) =>
     api.post<PurchaseOrder>(`/api/pos/from-indent/${indentId}`, data).then((r) => r.data),
+  /** Accept the awarded offer. No vendor and no lines — both come from the quotation,
+   *  so a PO can never disagree with the quote it says it is for. */
+  createFromQuotation: (quotationId: number, data: POFromQuotation = {}) =>
+    api.post<PurchaseOrder>(`/api/pos/from-quotation/${quotationId}`, data)
+      .then((r) => r.data),
   submit: (id: number) => api.post<PurchaseOrder>(`/api/pos/${id}/submit`).then((r) => r.data),
   approve: (id: number, comments = "") =>
     api.post<PurchaseOrder>(`/api/pos/${id}/approve`, { comments }).then((r) => r.data),
@@ -32,6 +38,12 @@ export const requisitionApi = {
     api.get<Requisition>(`/api/requisitions/${id}`).then((r) => r.data),
   create: (data: ReqCreate) =>
     api.post<Requisition>("/api/requisitions", data).then((r) => r.data),
+  /** Pick up an approved material request as a requisition, lines and all. The one
+   *  join in the chain a buyer was making by hand — and the one place a quantity
+   *  could change between two documents. */
+  createFromMr: (mrId: number) =>
+    api.post<Requisition>(`/api/requisitions/from-material-request/${mrId}`)
+      .then((r) => r.data),
   update: (id: number, data: ReqCreate) =>
     api.put<Requisition>(`/api/requisitions/${id}`, data).then((r) => r.data),
   submit: (id: number) =>
@@ -135,6 +147,24 @@ export const supplierApi = {
   rfqs: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<RFQListRow>>("/api/supplier/rfqs", { params }).then((r) => r.data),
   rfq: (id: number) => api.get<RFQ>(`/api/supplier/rfqs/${id}`).then((r) => r.data),
+  /* --- orders, and what the vendor says they have sent against them --- */
+  pos: (params: { page?: number; size?: number } = {}) =>
+    api.get<Paginated<VendorPOListRow>>("/api/supplier/pos", { params }).then((r) => r.data),
+  po: (id: number) => api.get<VendorPO>(`/api/supplier/pos/${id}`).then((r) => r.data),
+  createDespatch: (poId: number, body: DespatchNoteWrite) =>
+    api.post<DespatchNote>(`/api/supplier/pos/${poId}/despatch-notes`, body)
+      .then((r) => r.data),
+  updateDespatch: (poId: number, noteId: number, body: DespatchNoteWrite) =>
+    api.put<DespatchNote>(`/api/supplier/pos/${poId}/despatch-notes/${noteId}`, body)
+      .then((r) => r.data),
+  despatch: (noteId: number) =>
+    api.get<DespatchNote>(`/api/supplier/despatch-notes/${noteId}`).then((r) => r.data),
+  submitDespatch: (noteId: number) =>
+    api.post<DespatchNote>(`/api/supplier/despatch-notes/${noteId}/submit`)
+      .then((r) => r.data),
+  cancelDespatch: (noteId: number) =>
+    api.post<DespatchNote>(`/api/supplier/despatch-notes/${noteId}/cancel`)
+      .then((r) => r.data),
   quotation: (rfqId: number) =>
     api.get<Quotation>(`/api/supplier/rfqs/${rfqId}/quotation`).then((r) => r.data),
   submitQuotation: (rfqId: number, data: QuoteSubmit) =>

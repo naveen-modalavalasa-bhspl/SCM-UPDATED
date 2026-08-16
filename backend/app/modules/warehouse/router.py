@@ -901,6 +901,23 @@ async def po_lines(po_id: int = Query(...), db: AsyncSession = Depends(get_db),
     return await service.po_lines(db, po_id)
 
 
+@router.get("/options/despatch-notes", response_model=list[s.Option])
+async def despatch_note_options(po_id: int = Query(...),
+                                db: AsyncSession = Depends(get_db),
+                                _=Depends(require_permission(RECEIPT_VIEW))):
+    return await service.despatch_note_options(db, po_id)
+
+
+@router.get("/options/despatch-prefill", response_model=s.DespatchPrefill)
+async def despatch_prefill(note_id: int = Query(...),
+                           db: AsyncSession = Depends(get_db),
+                           _=Depends(require_permission(RECEIPT_VIEW))):
+    """The vendor's paperwork and per-line batch/expiry, so the gate confirms rather
+    than transcribes. Behind `receipt.view` like the PO options — a storekeeper reads
+    a supplier's despatch note without being handed procurement."""
+    return await service.despatch_note_prefill(db, note_id)
+
+
 @router.get("/options/receipts", response_model=list[s.Option])
 async def receipt_options(search: str | None = None, receipt_type: str | None = None,
                           warehouse_id: int | None = None, for_putaway: bool = False,

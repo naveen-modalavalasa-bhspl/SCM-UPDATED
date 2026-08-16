@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { AlarmClock, BarChart3, Inbox, RefreshCw, Search, TriangleAlert, X } from "lucide-react";
 import {
@@ -21,7 +21,21 @@ const LABELS: Record<string, string> = {
   WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
   OWN_STOCK_ALLOCATION: "Allocation from my point",
   DISPATCH: "Dispatch", PURCHASE_RETURN: "Purchase return",
+  REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
+  RFQ: "Request for quotation",
 };
+
+/** Document types this screen can sign without opening them.
+ *
+ *  Deliberately a list rather than "everything in the queue". An indent approval sets
+ *  per-line quantities and an allocation picks the stocking point to serve from —
+ *  approving either from a checkbox would silently accept a default the approver never
+ *  looked at. What is here are the documents whose decision really is yes or no.
+ */
+const BULK_SIGNABLE = new Set([
+  "REQUISITION", "CONSOLIDATION", "RFQ", "PO", "MR", "GRN", "PURCHASE_RETURN",
+]);
+const refOf = (row: PendingApproval) => `${row.doc_type}:${row.doc_id}`;
 const label = (value: string) => LABELS[value] ?? value.replace(/_/g, " ");
 const DAY = 86_400_000;
 const daysSince = (value?: string | null) => value
@@ -42,6 +56,7 @@ const RAISED_RANGES: Array<{ value: RaisedRange; label: string }> = [
 
 export function ApprovalsPage() {
   const nav = useNavigate();
+  const queryClient = useQueryClient();
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [docType, setDocType] = useState("");
@@ -87,7 +102,56 @@ export function ApprovalsPage() {
 
   const setSelected = (row: PendingApproval) => nav(approvalDocumentPath(row));
 
+  // --- bulk signing ------------------------------------------------------------
+  // Keyed by doc_type:doc_id, not by instance id: that is what the endpoint takes, and
+  // it survives a refetch that renumbers nothing but re-creates the row objects.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [bulkNote, setBulkNote] = useState("");
+  const signable = useMemo(() => rows.filter((row) => BULK_SIGNABLE.has(row.doc_type)), [rows]);
+  // A selection is dropped as soon as its row leaves the page — a filter change or a
+  // page turn means the approver is no longer looking at what they ticked.
+  useEffect(() => {
+    const onPage = new Set(signable.map(refOf));
+    setPicked((current) => {
+      const kept = new Set([...current].filter((ref) => onPage.has(ref)));
+      return kept.size === current.size ? current : kept;
+    });
+  }, [signable]);
+  const toggle = (row: PendingApproval) => setPicked((current) => {
+    const next = new Set(current);
+    if (!next.delete(refOf(row))) next.add(refOf(row));
+    return next;
+  });
+  const allPicked = signable.length > 0 && picked.size === signable.length;
+  const [bulkResult, setBulkResult] = useState<string | null>(null);
+  const bulk = useMutation({
+    mutationFn: (approve: boolean) => {
+      const documents = [...picked].map((ref) => {
+        const [doc_type, doc_id] = ref.split(":");
+        return { doc_type, doc_id: Number(doc_id) };
+      });
+      return approve
+        ? approvalsApi.bulkApprove(documents, bulkNote)
+        : approvalsApi.bulkReject(documents, bulkNote);
+    },
+    onSuccess: (result) => {
+      // Partial success is normal — someone else may have signed a row in between —
+      // so the count is always reported rather than assumed.
+      setBulkResult(result.failed.length === 0
+        ? `${result.succeeded} signed.`
+        : `${result.succeeded} of ${result.requested} signed. ${result.failed.length} could not be: `
+          + result.failed.map((row) => `${row.doc_type} #${row.doc_id} — ${row.error}`).join("; "));
+      setPicked(new Set());
+      setBulkNote("");
+      void queryClient.invalidateQueries({ queryKey: ["approvals"] });
+    },
+    onError: (error: Error) => setBulkResult(error.message),
+  });
+
   const columns: Column<PendingApproval>[] = [
+    { key: "pick", header: "", className: "w-10", render: (row) => BULK_SIGNABLE.has(row.doc_type)
+      ? <input type="checkbox" aria-label={`Select ${row.doc_no ?? row.doc_id}`} className="h-5 w-5" checked={picked.has(refOf(row))} onClick={(event) => event.stopPropagation()} onChange={() => toggle(row)} />
+      : <span className="text-xs text-muted" title="Open this one to decide it">—</span> },
     { key: "document", header: "Document", render: (row) => <div><strong className="font-mono text-ink">{row.doc_no ?? `#${row.doc_id}`}</strong><p className="text-xs text-muted">{label(row.doc_type)}</p></div> },
     { key: "summary", header: "What it is", render: (row) => <div><p className="text-sm text-ink">{row.summary ?? "Awaiting your decision"}</p><p className="text-xs text-muted">{row.current_stage_name ?? `Stage ${row.stage_sequence}`}</p></div> },
     { key: "requester", header: "Raised by", hideOnNarrow: true, render: (row) => row.requested_by_name ?? "—" },
@@ -150,6 +214,24 @@ export function ApprovalsPage() {
         </>}
       </div>
     </Card>
+    {/* One decision, one request. The bar only appears once something is ticked, so
+        the screen is unchanged for an approver who works document by document. */}
+    {signable.length > 0 && <Card className="mb-4 flex flex-wrap items-center gap-3 p-4">
+      <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm font-semibold text-ink">
+        <input type="checkbox" className="h-5 w-5" aria-label="Select every signable document on this page" checked={allPicked} onChange={() => setPicked(allPicked ? new Set() : new Set(signable.map(refOf)))} />
+        Select all {signable.length} on this page
+      </label>
+      {picked.size > 0 && <>
+        <input className="h-11 min-w-60 flex-1 rounded-lg border border-line bg-content1 px-3 text-sm text-ink" aria-label="Comment for every document in this batch" value={bulkNote} onChange={(event) => setBulkNote(event.target.value)} placeholder="Comment (required to reject)" />
+        <Button disabled={bulk.isPending} onClick={() => bulk.mutate(true)}>
+          {bulk.isPending ? "Signing…" : `Approve ${picked.size}`}
+        </Button>
+        <Button variant="danger" disabled={bulk.isPending || !bulkNote.trim()} onClick={() => bulk.mutate(false)}>
+          Reject {picked.size}
+        </Button>
+      </>}
+      {bulkResult && <p className="w-full text-sm text-body">{bulkResult}</p>}
+    </Card>}
     {query.error ? <p className="rounded-xl bg-danger/10 p-4 text-sm text-danger">{(query.error as Error).message}</p> : <Card className="p-2"><ResponsiveList data={rows} loading={query.isLoading} keyOf={(row) => row.instance_id} columns={columns} onRowClick={setSelected} empty={filtered ? "Nothing matches these filters." : "Nothing is waiting for your approval."} renderCard={(row) => <div className={`space-y-2 rounded-lg p-2 ${overdue(row) ? "bg-danger/5" : ""}`}><div className="flex justify-between gap-2"><strong className="font-mono text-ink">{row.doc_no ?? `#${row.doc_id}`}</strong><StatusPill status={overdue(row) ? "OVERDUE" : row.doc_type} /></div><p className="text-sm text-body">{row.summary ?? "Awaiting your decision"}</p><p className="text-xs text-muted">{row.requested_by_name ?? "—"} · waiting {daysSince(row.waiting_since) ?? "—"}d</p><Button onClick={() => setSelected(row)}>View details</Button></div>} /></Card>}
     {!query.error && <ApprovalPager page={page} size={size} total={query.data?.total ?? 0} onPage={setPage} />}
   </>;

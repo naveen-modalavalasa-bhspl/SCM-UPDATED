@@ -1,7 +1,8 @@
 import { api } from "@/shared/api/client";
 import type {
   ApprovalDecisionRow, ApprovalHistoryRow, ApprovalIndent, ApprovalQuantityInput,
-  ApprovalReport, ConsolidationApprovalInput, ConsolidationApprovalResult,
+  ApprovalReport, BulkActionResult, BulkDocumentRef,
+  ConsolidationApprovalInput, ConsolidationApprovalResult,
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
   CorrectionIndent, PendingApproval, TeamQueueRow,
@@ -188,6 +189,15 @@ export const approvalsApi = {
   rejectDocument: (docType: string, id: number, comments: string) =>
     api.post(`/api/approvals/documents/${docType}/${id}/reject`, { comments })
       .then((r) => r.data),
+  /** Sign a whole selection in one request. One round trip rather than one per row —
+   *  an approver holding forty requisitions was spending minutes on a single decision.
+   *  Partial success is normal and is reported per document in `failed`. */
+  bulkApprove: (documents: BulkDocumentRef[], comments = "") =>
+    api.post<BulkActionResult>("/api/approvals/documents/bulk-approve",
+      { documents, comments }).then((r) => r.data),
+  bulkReject: (documents: BulkDocumentRef[], comments: string) =>
+    api.post<BulkActionResult>("/api/approvals/documents/bulk-reject",
+      { documents, comments }).then((r) => r.data),
   history: (docType: string, docId: number) =>
     api.get<{ items: ApprovalHistoryRow[] }>(`/api/approvals/history/${docType}/${docId}`)
       .then((r) => r.data.items),

@@ -249,6 +249,10 @@ class ReceiptWrite(BaseModel):
     # was never raised in this system, so the number is accepted as text. When `po_id`
     # is set the service snapshots the order's own number and ignores this.
     po_no: str | None = Field(default=None, max_length=50)
+    # The vendor's despatch note this delivery arrived on, when they filed one. The
+    # service copies its paperwork and per-line batch/expiry, so nothing here is taken
+    # on trust from the client beyond the id.
+    despatch_note_id: int | None = None
     transfer_id: int | None = None
     # The incoming consignment being inwarded, on a DISPATCH receipt. It is stored in
     # the same `transfer_id`/`transfer_no` pair the STO uses — `receipt_type` says
@@ -309,6 +313,8 @@ class ReceiptRead(_Read):
     grn_date: date
     po_id: int | None = None
     po_no: str | None = None
+    despatch_note_id: int | None = None
+    despatch_note_no: str | None = None
     transfer_id: int | None = None
     transfer_no: str | None = None
     vendor_id: int | None = None
@@ -1479,3 +1485,41 @@ BinRead.model_rebuild()
 class IssueBatchIn(BaseModel):
     """The issues to post in one go — a whole monthly cycle, usually."""
     issue_ids: list[int]
+
+
+class DespatchPrefillLine(BaseModel):
+    """One line of what the vendor says they sent, ready to become a receipt line."""
+    po_item_id: int | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    ordered_qty: Decimal = Decimal("0")
+    despatched_qty: Decimal = Decimal("0")
+    rate: Decimal | None = None
+    batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
+
+
+class DespatchPrefill(BaseModel):
+    """A vendor's despatch note in the shape the receipt form needs.
+
+    Header and lines together: the paperwork and the cartons arrive as one act, and
+    asking the gate for two round trips to describe one delivery is how a form ends up
+    half-filled.
+    """
+    despatch_note_id: int
+    despatch_note_no: str
+    po_id: int | None = None
+    po_no: str | None = None
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    invoice_no: str | None = None
+    invoice_date: date | None = None
+    invoice_amount: Decimal | None = None
+    eway_bill_no: str | None = None
+    vehicle_no: str | None = None
+    transporter_name: str | None = None
+    lr_no: str | None = None
+    lines: list[DespatchPrefillLine] = []

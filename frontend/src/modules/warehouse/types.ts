@@ -208,6 +208,9 @@ export interface Receipt {
   grn_date: string;
   po_id?: number | null;
   po_no?: string | null;
+  /** The vendor's despatch note this delivery arrived on, when they filed one. */
+  despatch_note_id?: number | null;
+  despatch_note_no?: string | null;
   transfer_id?: number | null;
   transfer_no?: string | null;
   vendor_id?: number | null;
@@ -315,6 +318,9 @@ export interface ReceiptWrite {
   /** Typed on a gate entry, straight off the driver's paperwork. Ignored when
    *  `po_id` is set — a PO-backed receipt takes the order's own number. */
   po_no?: string | null;
+  /** The vendor's despatch note this delivery arrived on. The server copies its
+   *  paperwork and per-line batch/expiry; only the id is sent. */
+  despatch_note_id?: number | null;
   /** The incoming consignment an MDP / LIP / warehouse is inwarding, on a
    *  `DISPATCH` receipt. */
   dispatch_id?: number | null;
@@ -1240,6 +1246,40 @@ export interface ItemOption extends Option {
 }
 
 /** An open PO line the GRN screen pulls in when a PO is chosen. */
+/** One line of what the vendor says they sent, ready to become a receipt line. */
+export interface DespatchPrefillLine {
+  po_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  ordered_qty: number;
+  despatched_qty: number;
+  rate?: number | null;
+  batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+}
+
+/** A vendor's despatch note in the shape the receipt form needs — the paperwork the
+ *  gate would otherwise retype, plus the batch and expiry it cannot know. */
+export interface DespatchPrefill {
+  despatch_note_id: number;
+  despatch_note_no: string;
+  po_id?: number | null;
+  po_no?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  invoice_no?: string | null;
+  invoice_date?: string | null;
+  invoice_amount?: number | null;
+  eway_bill_no?: string | null;
+  vehicle_no?: string | null;
+  transporter_name?: string | null;
+  lr_no?: string | null;
+  lines: DespatchPrefillLine[];
+}
+
 export interface PoLineOption {
   po_item_id: number;
   item_id: number;

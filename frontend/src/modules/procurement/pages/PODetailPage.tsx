@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, X } from "lucide-react";
+import { ArrowLeft, Check, Send, X } from "lucide-react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Button, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { poApi } from "../api";
 import { alerts } from "@/modules/alerts";
 import { fmtDate } from "@/shared/datetime";
@@ -28,6 +28,12 @@ export function PODetailPage() {
     queryFn: () => poApi.get(poId),
     enabled: Number.isFinite(poId) && poId > 0,
   });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["purchase-order", poId] });
+    qc.invalidateQueries({ queryKey: ["pos"] });
+    qc.invalidateQueries({ queryKey: ["approvals"] });
+  };
+
   const decide = useMutation({
     mutationFn: (action: "approve" | "reject") => action === "approve"
       ? poApi.approve(poId, comments)
@@ -35,11 +41,43 @@ export function PODetailPage() {
     onSuccess: (_result, action) => {
       const number = po.data?.po_no ?? "The purchase order";
       void alerts.success(action === "approve" ? "po.approved" : "po.rejected", { number });
-      qc.invalidateQueries({ queryKey: ["purchase-order", poId] });
-      qc.invalidateQueries({ queryKey: ["approvals"] });
-      nav("/approvals");
+      setComments("");
+      refresh();
+      // Only when the approver came from their inbox. Signing a PO opened directly
+      // must leave them on the document — sending them to /approvals from here is
+      // navigating away from a screen they did not arrive at through approvals.
+      if (approvalView || decisionView) nav("/approvals");
     },
   });
+
+  /** Hand the draft to its approver. The engine owns who that is — this only moves
+   *  the document's own status, exactly as `submit_po` does server-side. */
+  const submit = useMutation({
+    mutationFn: () => poApi.submit(poId),
+    onSuccess: () => {
+      void alerts.success("po.submitted", { number: po.data?.po_no ?? "" });
+      refresh();
+    },
+  });
+
+  /** The last step before the warehouse can receive: the GRN guard requires
+   *  SENT_TO_VENDOR, so nothing can be booked in against an unsent order. */
+  const send = useMutation({
+    mutationFn: () => poApi.sendToVendor(poId),
+    onSuccess: () => {
+      void alerts.success("po.sent_to_vendor", {
+        number: po.data?.po_no ?? "", vendor: po.data?.vendor_name ?? "the vendor",
+      });
+      refresh();
+    },
+  });
+
+  const sendWithConfirm = async () => {
+    if (send.isPending || !po.data) return;
+    if (await alerts.confirm("po.send_vendor", {
+      number: po.data.po_no, vendor: po.data.vendor_name ?? "the vendor",
+    })) send.mutate();
+  };
 
   const decideWithConfirm = async (action: "approve" | "reject") => {
     if (decide.isPending || !po.data) return;
@@ -56,8 +94,13 @@ export function PODetailPage() {
   if (po.error) return <p className="rounded-lg bg-danger/10 p-4 text-danger">{(po.error as Error).message}</p>;
   if (!po.data) return <p className="p-6 text-muted">Purchase order not found.</p>;
 
-  const canDecide = approvalView && po.data.status === "PENDING_APPROVAL";
+  // Was `approvalView && …`, so the panel only appeared when the approver arrived from
+  // their inbox: a PO opened from the register showed no way to sign it at all. The
+  // status is the real gate — and the engine still refuses anyone who is not the
+  // current approver, so this widens the doorway, never the authority.
+  const canDecide = po.data.status === "PENDING_APPROVAL";
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
+  const busy = submit.isPending || send.isPending || decide.isPending;
 
   return <>
     <Button variant="ghost" onClick={() => nav(backTo)}>
@@ -66,8 +109,27 @@ export function PODetailPage() {
     <PageHeader
       eyebrow="Purchase order"
       title={po.data.po_no}
-      actions={<StatusPill status={po.data.status} />}
+      actions={<div className="flex flex-wrap items-center gap-2">
+        <StatusPill status={po.data.status} />
+        {/* One button per status, never two: a draft can only be submitted, an
+          * approved order can only be sent. Each is gated on its own permission —
+          * raising an order and committing it to a vendor are different rights. */}
+        {po.data.status === "DRAFT" && <Can do="po.submit">
+          <Button disabled={busy} onClick={() => submit.mutate()}>
+            <Send className="h-4 w-4" /> {submit.isPending ? "Sending…" : "Send for approval"}
+          </Button>
+        </Can>}
+        {po.data.status === "APPROVED" && <Can do="po.send_vendor">
+          <Button disabled={busy} onClick={() => void sendWithConfirm()}>
+            <Send className="h-4 w-4" /> {send.isPending ? "Sending…" : "Send to vendor"}
+          </Button>
+        </Can>}
+      </div>}
     />
+
+    {(submit.error || send.error) && <p className="mb-4 rounded-xl bg-danger/10 p-4 text-sm text-danger">
+      {((submit.error ?? send.error) as Error).message}
+    </p>}
 
     <Card className="mb-4 p-4">
       <dl className="grid gap-3 text-sm sm:grid-cols-4">
@@ -76,6 +138,16 @@ export function PODetailPage() {
         <div><dt className="text-muted">Expected date</dt><dd className="text-ink">{fmtDate(po.data.expected_date)}</dd></div>
         <div><dt className="text-muted">Total</dt><dd className="font-semibold text-ink">{money(po.data.total_amount)}</dd></div>
       </dl>
+      {/* Where this order came from, when it came off an award rather than an indent.
+        * Every document in the chain points backward at the one before it, and this is
+        * the row that lets somebody reading a PO find the offer it was written from. */}
+      {po.data.quotation_no && (
+        <dl className="mt-3 grid gap-3 border-t border-line pt-3 text-sm sm:grid-cols-3">
+          <div><dt className="text-muted">Requisition</dt><dd className="font-mono text-ink">{po.data.requisition_no ?? "—"}</dd></div>
+          <div><dt className="text-muted">RFQ</dt><dd className="font-mono text-ink">{po.data.rfq_no ?? "—"}</dd></div>
+          <div><dt className="text-muted">Quotation</dt><dd className="font-mono text-ink">{po.data.quotation_no}</dd></div>
+        </dl>
+      )}
     </Card>
 
     <div className="overflow-x-auto rounded-xl border border-line">
@@ -92,13 +164,20 @@ export function PODetailPage() {
     </div>
 
     {canDecide && <Card className="mt-4 space-y-3 p-4">
+      {po.data.current_approver_name && <p className="text-sm text-muted">
+        Waiting on {po.data.current_approver_name}.
+      </p>}
       <Field label="Comments">
         <Input value={comments} onChange={(event) => setComments(event.target.value)} placeholder="Optional approval comment" />
       </Field>
       {decide.error && <p className="text-sm text-danger">{(decide.error as Error).message}</p>}
       <div className="flex justify-end gap-2">
-        <Button variant="danger" disabled={decide.isPending} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4" /> Reject</Button>
-        <Button disabled={decide.isPending} onClick={() => void decideWithConfirm("approve")}><Check className="h-4 w-4" /> Approve</Button>
+        <Can do="po.reject">
+          <Button variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4" /> Reject</Button>
+        </Can>
+        <Can do="po.approve">
+          <Button disabled={busy} onClick={() => void decideWithConfirm("approve")}><Check className="h-4 w-4" /> Approve</Button>
+        </Can>
       </div>
     </Card>}
   </>;

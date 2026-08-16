@@ -16,6 +16,11 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
     case "OWN_STOCK_ALLOCATION":
       return `/inventory/allocation-approvals/${document.doc_id}`;
     case "PO": return `/pos/${document.doc_id}?approval=1`;
+    // The rest of the buying chain. Each of these was already landing in the queue and
+    // falling through to `default`, i.e. back to the page the approver was already on.
+    case "REQUISITION": return `/procurement/requisitions/${document.doc_id}?approval=1`;
+    case "CONSOLIDATION": return `/procurement/consolidations/${document.doc_id}?approval=1`;
+    case "RFQ": return `/procurement/rfqs/${document.doc_id}?approval=1`;
     case "GRN": return `/warehouse/grn/${document.doc_id}`;
     case "ISSUE":
     case "WH_ISSUE":
@@ -39,6 +44,9 @@ export function approvalDecisionDocumentPath(document: ApprovalDocument): string
     case "OWN_STOCK_ALLOCATION":
       return `/inventory/allocation-approvals/${document.doc_id}?decision=1`;
     case "PO": return `/pos/${document.doc_id}?decision=1`;
+    case "REQUISITION": return `/procurement/requisitions/${document.doc_id}?decision=1`;
+    case "CONSOLIDATION": return `/procurement/consolidations/${document.doc_id}?decision=1`;
+    case "RFQ": return `/procurement/rfqs/${document.doc_id}?decision=1`;
     case "MR": return `/inventory/material-requests/${document.doc_id}`;
     case "GRN": return `/warehouse/grn/${document.doc_id}`;
     case "ISSUE":

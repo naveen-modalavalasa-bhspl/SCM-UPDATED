@@ -18,6 +18,17 @@ class POCreate(BaseModel):
     lines: list[POLineIn]
 
 
+class POFromQuotationIn(BaseModel):
+    """Everything the awarded quotation does NOT already say.
+
+    No vendor and no lines: both come from the offer being accepted, and letting the
+    caller send them would make it possible to raise a PO that disagrees with the
+    quotation it claims to be for.
+    """
+    expected_date: date | None = None
+    remarks: str | None = None
+
+
 class ActionIn(BaseModel):
     comments: str = ""
 
@@ -44,6 +55,14 @@ class POOut(BaseModel):
     expected_date: date | None = None
     indent_id: int | None = None
     indent_no: str | None = None
+    # The buying chain behind this order, when it came off an award rather than an
+    # indent. All optional — a PO raised straight from an indent carries none of them.
+    requisition_id: int | None = None
+    requisition_no: str | None = None
+    rfq_id: int | None = None
+    rfq_no: str | None = None
+    quotation_id: int | None = None
+    quotation_no: str | None = None
     vendor_id: int
     vendor_name: str | None = None
     facility_id: int | None = None
@@ -228,6 +247,11 @@ class RFQOut(RFQListRow):
     evaluation_method: str | None = None
     awarded_vendor_id: int | None = None
     created_by_name: str | None = None
+    # The purchase order this award became. Not stored on pro_rfqs — the PO points
+    # backward at the RFQ and this is read from there, so there is one link, not two.
+    po_id: int | None = None
+    po_no: str | None = None
+    po_status: str | None = None
     items: list[RFQItemOut] = []
     vendors: list[RFQVendorOut] = []
 
@@ -453,3 +477,116 @@ class VendorAccountOut(BaseModel):
 class VendorAccountIn(BaseModel):
     vendor_id: int
     username: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+#  Despatch note — the vendor's statement of what they sent
+# --------------------------------------------------------------------------- #
+
+class DespatchLineIn(BaseModel):
+    """One line the vendor says is on the vehicle.
+
+    `po_item_id` rather than a free item choice: a despatch note answers an order, and
+    a vendor must not be able to add a line nobody bought. The service rejects any id
+    that is not on the PO.
+    """
+    po_item_id: int
+    despatched_qty: float = Field(ge=0, default=0)
+    batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
+    remarks: str | None = None
+
+
+class DespatchNoteIn(BaseModel):
+    """Saved as a draft with anything filled in; the invoice and e-way bill are only
+    required at submit, which is where `submit_despatch_note` checks them."""
+    dn_date: date | None = None
+    invoice_no: str | None = None
+    invoice_date: date | None = None
+    invoice_amount: float | None = Field(ge=0, default=None)
+    eway_bill_no: str | None = None
+    vehicle_no: str | None = None
+    transporter_name: str | None = None
+    lr_no: str | None = None
+    expected_date: date | None = None
+    remarks: str | None = None
+    lines: list[DespatchLineIn] = Field(min_length=1)
+
+
+class DespatchItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    line_no: int
+    po_item_id: int | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    despatched_qty: float
+    batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
+    remarks: str | None = None
+
+
+class DespatchNoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    dn_no: str
+    dn_date: date | None = None
+    po_id: int
+    po_no: str | None = None
+    vendor_id: int
+    vendor_name: str | None = None
+    invoice_no: str | None = None
+    invoice_date: date | None = None
+    invoice_amount: float | None = None
+    eway_bill_no: str | None = None
+    vehicle_no: str | None = None
+    transporter_name: str | None = None
+    lr_no: str | None = None
+    expected_date: date | None = None
+    status: str
+    remarks: str | None = None
+    submitted_at: datetime | None = None
+    created_at: datetime
+    items: list[DespatchItemOut] = []
+
+
+class VendorPOLineOut(BaseModel):
+    """A PO line as the VENDOR sees it. `pending_qty` is what is still owed, so a
+    second delivery opens with the remainder rather than the whole order."""
+    model_config = ConfigDict(from_attributes=True)
+    po_item_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    ordered_qty: float
+    despatched_qty: float
+    pending_qty: float
+
+
+class VendorPOOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_no: str
+    po_date: date | None = None
+    expected_date: date | None = None
+    status: str
+    total_amount: float
+    remarks: str | None = None
+    lines: list[VendorPOLineOut] = []
+    despatch_notes: list[DespatchNoteOut] = []
+
+
+class VendorPOListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_no: str
+    po_date: date | None = None
+    expected_date: date | None = None
+    status: str
+    total_amount: float
+    despatch_note_count: int = 0

@@ -332,7 +332,9 @@ export function AllocationCycleApprovalPage() {
               were sent — which is how a signature looked like it had half worked. */}
           Signs {signable.length} of {visible.length} allocation
           {visible.length === 1 ? "" : "s"} shown — each on its own ladder,
-          each with its own audit row. Approving reserves the stock.
+          each with its own audit row. Approving reserves whatever stock was given
+          and raises a material request for any line that came up short, which goes
+          to procurement.
           {visible.length > signable.length && (
             <> The rest sit at a rung this position does not hold.</>
           )}

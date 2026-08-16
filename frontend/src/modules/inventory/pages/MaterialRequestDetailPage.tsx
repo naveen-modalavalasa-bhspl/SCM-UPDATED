@@ -10,6 +10,9 @@ import {
   reviseMaterialRequest,
 } from "../api";
 import { MRClaimsPanel } from "../components/MRClaimsPanel";
+// Reaching across into procurement for one call, the same direction the chain already
+// runs on the backend: inventory raises the request, procurement picks it up.
+import { requisitionApi } from "@/modules/procurement/api";
 import { alerts } from "@/modules/alerts";
 import type { MaterialRequestItem } from "../types";
 
@@ -75,15 +78,33 @@ export function MaterialRequestDetailPage() {
     },
   });
 
+  /** Hand the approved request to Purchase, lines and all.
+   *
+   *  The one join in the chain a buyer was making by hand: the endpoint existed, no
+   *  screen called it, so an approved MR sat still and its lines were retyped into a
+   *  blank requisition — the one place a quantity could change between two documents.
+   *  Only what is still owed comes across, so a second pass carries the remainder. */
+  const raiseRequisition = useMutation({
+    mutationFn: () => requisitionApi.createFromMr(mrId),
+    onSuccess: (requisition) => {
+      void alerts.success("material_request.requisition_raised", {
+        number: requisition.req_no,
+      });
+      qc.invalidateQueries({ queryKey: ["material-request", mrId] });
+      nav(`/procurement/requisitions/${requisition.id}`);
+    },
+  });
+
   const decide = async (approve: boolean) => {
     if (act.isPending || !data) return;
     const first = data.items[0];
+    // One line: name it. More: count them — quoting only the first line's quantity
+    // described a five-line request by one of its lines.
+    const lines = data.items.length === 1 && first
+      ? `${first.quantity} ${first.uom_code ?? ""} of ${first.item_name ?? first.item_code}`.replace(/\s+/g, " ")
+      : `${data.items.length} lines`;
     const asked = approve
-      ? await alerts.confirm("material_request.approve", {
-        number: data.mr_no,
-        qty: first ? `${first.quantity} ${first.uom_code ?? ""}`.trim() : "the requested quantity",
-        item: first?.item_name ?? first?.item_code ?? "the requested items",
-      })
+      ? await alerts.confirm("material_request.approve", { number: data.mr_no, lines })
       : await alerts.confirm("material_request.reject", { number: data.mr_no });
     if (asked) act.mutate(approve);
   };
@@ -220,6 +241,34 @@ export function MaterialRequestDetailPage() {
         </dl>
         {data.remarks && <p className="mt-3 text-sm text-muted">{data.remarks}</p>}
       </Card>
+
+      {/* The handoff into Procurement. Shown only once the request is approved: before
+        * that there is nothing to buy, and after it this is the only thing left to do
+        * on this screen. The backend refuses a second one, so a request that already
+        * crossed says so rather than raising a duplicate demand. */}
+      {data.status === "APPROVED" && (
+        <Card className="mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
+          <div>
+            <p className="font-semibold text-ink">Ready for Purchase</p>
+            <p className="text-sm text-muted">
+              Raise a purchase requisition carrying what is still owed on {data.mr_no}.
+            </p>
+          </div>
+          <Can do="requisition.create">
+            <Button
+              onClick={() => raiseRequisition.mutate()}
+              disabled={raiseRequisition.isPending}
+            >
+              {raiseRequisition.isPending ? "Raising…" : "Raise purchase requisition"}
+            </Button>
+          </Can>
+          {raiseRequisition.error && (
+            <p className="w-full text-sm text-danger">
+              {(raiseRequisition.error as Error).message}
+            </p>
+          )}
+        </Card>
+      )}
 
       {/* Two renderings on purpose, not a table with an input in it.
         *

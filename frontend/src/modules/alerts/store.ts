@@ -76,6 +76,14 @@ export function pushAlert(
     // should be impossible to miss while developing.
     console.warn(`[alerts] no catalog entry for "${code}" — using the overrides only`);
   }
+  // A code with no entry and no title override used to render an empty white box: the
+  // action had in fact succeeded, and the dialog said nothing at all. Falling back to
+  // the variant's own word is not good copy, but it is readable, and a blank dialog is
+  // worse than a plain one — the user cannot tell it from a broken screen.
+  const FALLBACK_TITLE: Record<string, string> = {
+    success: "Done", info: "Note", warning: "Careful", error: "That did not work",
+    danger: "Are you sure?",
+  };
 
   const mode = options.mode ?? def?.mode ?? "alert";
   const variant = options.variant ?? def?.variant ?? "info";
@@ -90,7 +98,8 @@ export function pushAlert(
     id,
     variant,
     mode,
-    title: interpolate(options.title ?? def?.title ?? "", options.params),
+    title: interpolate(
+      options.title ?? def?.title ?? FALLBACK_TITLE[variant] ?? "Note", options.params),
     message: interpolate(options.message ?? def?.message ?? "", options.params),
     confirmLabel: options.confirmLabel !== undefined
       ? options.confirmLabel

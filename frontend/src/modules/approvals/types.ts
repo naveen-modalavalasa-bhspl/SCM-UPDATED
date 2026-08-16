@@ -320,3 +320,19 @@ export interface IssueFromStockResult {
    *  must leave rather than refetch a document that is no longer awaiting anyone. */
   closed?: boolean;
 }
+
+/** One row of the queue, named the way the engine names it. */
+export interface BulkDocumentRef {
+  doc_type: string;
+  doc_id: number;
+}
+
+/** Counts first: after a bulk sign the approver's question is "did they all go?",
+ *  and `failed` names the ones that did not so the queue can be retried on those. */
+export interface BulkActionResult {
+  action: string;
+  requested: number;
+  succeeded: number;
+  items: Array<{ doc_type: string; doc_id: number; action: string }>;
+  failed: Array<{ doc_type?: string | null; doc_id?: number | null; error: string }>;
+}

@@ -94,7 +94,7 @@ get added until the action it announces is real.
 | `stock.transfer` | two ledger rows, effective immediately | Inventory › Transfers |
 | `stock.adjust` | changes on-hand qty, logged against your name | Inventory › Adjustments |
 | `adjustment.approve` | writes the adjustment to the append-only ledger | Inventory › Adjustments |
-| `material_request.approve` | reserves stock against the request | Inventory › Material Requests |
+| `material_request.approve` | clears the shortage for purchase; reserves nothing | Inventory › Material Requests |
 | `allocation.override` | allocating past the suggestion; logged with your reason | Inventory › Allocation Approvals |
 | `vendor.deactivate` | no new POs; open ones still receivable | Masters › Vendors |
 | `bulk.apply` | runs an action on every selected row, no per-row undo | any multi-select toolbar |
@@ -119,7 +119,7 @@ get added until the action it announces is real.
 | `dispatch.gated_out` | dispatch has left the site |
 | `indent.deleted` / `indent.rejected` / `indent.returned` | indent removed / sent back / with the raiser to edit |
 | `po.approved` | PO cleared and ready to send |
-| `material_request.approved` | request approved, stock reserved |
+| `material_request.approved` | request approved, cleared for purchase |
 | `inspection.completed` | inspected and passed to put-away |
 | `reminder.sent` | an approver has been nudged |
 | `delegation.created` / `delegation.ended` | someone else approves for you / it is back with you |

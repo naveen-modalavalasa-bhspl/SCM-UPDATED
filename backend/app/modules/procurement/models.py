@@ -18,6 +18,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
+from app.shared.enums import DespatchNoteStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 
 
@@ -30,6 +31,18 @@ class PurchaseOrder(Base):
 
     indent_id = Column(ForeignKey("ind_indents.id"), index=True, nullable=True)  # backward pointer
     indent_no = Column(String(30), nullable=True)   # snapshot
+
+    # The buying chain this PO came off, when it was raised from an award rather than
+    # straight off an indent. Soft FKs, all nullable: a PO raised from an indent has
+    # none of them, and the quotation is what carries the vendor, the rates and the tax
+    # the PO is written with — without it the winning offer had to be retyped and the
+    # trail indent -> MR -> requisition -> RFQ -> quotation -> PO broke at the last hop.
+    requisition_id = soft_fk()
+    requisition_no = Column(String(30), nullable=True)    # snapshot
+    rfq_id = soft_fk()
+    rfq_no = Column(String(30), nullable=True)            # snapshot
+    quotation_id = soft_fk()
+    quotation_no = Column(String(50), nullable=True)      # snapshot
 
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)   # snapshot
@@ -326,6 +339,91 @@ class QuotationItem(Base):
     delivery_days = Column(Integer, nullable=True)
 
     quotation = relationship("Quotation", back_populates="items")
+
+
+# --------------------------------------------------------------------------- #
+#  Despatch note — what the vendor says they put on the vehicle
+# --------------------------------------------------------------------------- #
+
+class DespatchNote(Base):
+    """`pro_despatch_notes`. The vendor's own statement of a delivery, filed before it
+    arrives.
+
+    Doc B12 makes the invoice and the e-way bill mandatory before dispatch, and until
+    now that paperwork reached us on paper: a storekeeper at the gate retyped the
+    invoice number, the e-way bill, the vehicle, and then a batch and an expiry date per
+    line — every one of them already typed once, by the vendor, in their own system.
+
+    So this is the same document, filed by the party that has the facts. The warehouse
+    then confirms what physically arrived rather than transcribing what was sent.
+
+    It is NOT approved by anybody here. A despatch note is a claim; the GRN is where we
+    agree with it or do not, and `received_qty` on the receipt is the number that counts
+    against stock. Nothing here ever writes to `stk_`.
+    """
+    __tablename__ = "pro_despatch_notes"
+    id = pk()
+    dn_no = Column(String(30), unique=True, nullable=False)
+    dn_date = Column(Date, nullable=True)
+
+    # Backward pointer, like every other link in this chain.
+    po_id = Column(ForeignKey("pro_purchase_orders.id"), index=True, nullable=False)
+    po_no = Column(String(30), nullable=True)              # snapshot
+    vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
+    vendor_name = Column(String(200), nullable=True)       # snapshot
+
+    # The paperwork the gate would otherwise retype. Same names as `inb_receipts`
+    # carries, so the prefill is a copy rather than a translation.
+    invoice_no = Column(String(50), nullable=True)
+    invoice_date = Column(Date, nullable=True)
+    invoice_amount = Column(Numeric(16, 2), nullable=True)
+    eway_bill_no = Column(String(50), nullable=True)
+    vehicle_no = Column(String(50), nullable=True)
+    transporter_name = Column(String(200), nullable=True)
+    lr_no = Column(String(50), nullable=True)
+    expected_date = Column(Date, nullable=True)
+
+    status = Column(String(30), nullable=False,
+                    default=DespatchNoteStatus.DRAFT.value, index=True)
+    remarks = Column(Text, nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("DespatchNoteItem", back_populates="note",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+Index("ix_pro_dn_po_status", DespatchNote.po_id, DespatchNote.status)
+
+
+class DespatchNoteItem(Base):
+    """`pro_despatch_note_items`. Batch, manufacture and expiry per line.
+
+    These three are the reason this document earns its place. They cannot be derived
+    from the PO — they are properties of the physical goods, known only to whoever
+    packed them — and they drive FEFO picking and expiry alerts for the rest of the
+    item's life. Typed at a gate, off a carton, they are typed wrong.
+    """
+    __tablename__ = "pro_despatch_note_items"
+    id = pk()
+    despatch_note_id = Column(ForeignKey("pro_despatch_notes.id", ondelete="CASCADE"),
+                              index=True, nullable=False)
+    line_no = Column(Integer, nullable=False, default=1)
+
+    po_item_id = soft_fk()
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)          # snapshot
+    item_name = Column(String(300), nullable=True)         # snapshot
+    uom_code = Column(String(20), nullable=True)
+
+    despatched_qty = Column(Numeric(16, 3), nullable=False, default=0)
+    batch_no = Column(String(50), nullable=True)
+    mfg_date = Column(Date, nullable=True)
+    expiry_date = Column(Date, nullable=True)
+    remarks = Column(String(500), nullable=True)
+
+    note = relationship("DespatchNote", back_populates="items")
 
 
 # --------------------------------------------------------------------------- #

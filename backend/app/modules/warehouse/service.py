@@ -51,7 +51,8 @@ from app.platform.workflow.models import Instance as WfInstance
 from app.modules.inventory.service import warehouse_ids_for_user
 from app.shared.scope import scope_condition
 from app.shared.enums import (
-    AuditAction, DocType, IndentStatus, InstanceStatus, POStatus, ReservationStatus,
+    AuditAction, DespatchNoteStatus, DocType, IndentStatus, InstanceStatus, POStatus,
+    ReservationStatus,
     RefType as InventoryRefType, StockDirection, UomClass,
 )
 from app.shared.models.base import utcnow
@@ -1171,6 +1172,11 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
     )
 
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
+    # A receipt against an order is from that order's vendor — a fact of the PO, not a
+    # choice at the gate. Derived only when nothing was sent, so a delivery that names
+    # its own vendor (an arrival with no PO behind it) is left exactly as entered.
+    if vendor is None and data.po_id:
+        vendor = await _po_vendor(db, data.po_id)
     if data.project_id:
         from app.shared.models.master import Project
         project = await db.get(Project, data.project_id)
@@ -1184,6 +1190,8 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         grn_date=data.grn_date,
         po_id=data.po_id,
         po_no=await _receipt_po_number(db, data),
+        despatch_note_id=data.despatch_note_id,
+        despatch_note_no=await _despatch_note_number(db, data.despatch_note_id),
         transfer_id=(transfer.id if transfer else dispatch.id if dispatch else None),
         transfer_no=(transfer.sto_no if transfer
                      else dispatch.dispatch_no if dispatch else None),
@@ -1260,6 +1268,8 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
     receipt.grn_date = data.grn_date
     receipt.po_id = data.po_id
     receipt.po_no = await _receipt_po_number(db, data)
+    receipt.despatch_note_id = data.despatch_note_id
+    receipt.despatch_note_no = await _despatch_note_number(db, data.despatch_note_id)
     receipt.transfer_id = (transfer.id if transfer
                            else dispatch.id if dispatch else None)
     receipt.transfer_no = (transfer.sto_no if transfer
@@ -1911,6 +1921,103 @@ async def _receipt_po_number(db: AsyncSession, data: s.ReceiptWrite) -> str | No
     one the driver's paperwork says, typed in by the storekeeper — the goods arrive
     whether or not the order was ever raised in this system."""
     return await _po_number(db, data.po_id) or (data.po_no or "").strip() or None
+
+
+async def _despatch_note_number(db: AsyncSession, note_id: int | None) -> str | None:
+    """Snapshot the note's own number, so a receipt still reads correctly on its own."""
+    if not note_id:
+        return None
+    from app.modules.procurement.models import DespatchNote
+
+    return await db.scalar(
+        select(DespatchNote.dn_no).where(DespatchNote.id == note_id))
+
+
+async def despatch_note_options(db: AsyncSession, po_id: int) -> list[dict]:
+    """The notes a vendor has filed against this order, for the gate to pick from.
+
+    Only SUBMITTED ones: a draft is the vendor still typing, and receiving against a
+    document they have not finished is how the gate ends up holding figures that change
+    underneath it.
+    """
+    from app.modules.procurement.models import DespatchNote
+
+    rows = (await db.execute(
+        select(DespatchNote.id, DespatchNote.dn_no, DespatchNote.invoice_no,
+               DespatchNote.vehicle_no)
+        .where(DespatchNote.po_id == po_id,
+               DespatchNote.status == DespatchNoteStatus.SUBMITTED.value)
+        .order_by(DespatchNote.id.desc())
+    )).all()
+    return [{
+        "id": row[0], "code": row[1],
+        # What a storekeeper actually matches against the paper in their hand.
+        "name": " · ".join(part for part in (row[2], row[3]) if part) or row[1],
+    } for row in rows]
+
+
+async def despatch_note_prefill(db: AsyncSession, note_id: int) -> s.DespatchPrefill:
+    """Everything a receipt would otherwise be typed from.
+
+    Header and lines in one call, because they are one act at the gate — the paperwork
+    and the cartons arrive together. `received_qty` is seeded from what the vendor says
+    they sent, as a count to CONFIRM rather than a figure to trust: the storekeeper
+    overwrites it with what is physically there, and the difference is the shortage the
+    GRN is for.
+    """
+    from app.modules.procurement.models import (
+        DespatchNote, DespatchNoteItem, POItem,
+    )
+
+    note = (await db.execute(
+        select(DespatchNote).where(DespatchNote.id == note_id))).scalars().first()
+    if note is None:
+        raise NotFoundError(f"Despatch note {note_id} not found")
+
+    lines = (await db.execute(
+        select(DespatchNoteItem)
+        .where(DespatchNoteItem.despatch_note_id == note.id)
+        .order_by(DespatchNoteItem.line_no))).scalars().all()
+
+    ordered = {row[0]: _d(row[1]) for row in (await db.execute(
+        select(POItem.id, POItem.quantity).where(POItem.po_id == note.po_id)))
+        .all()} if note.po_id else {}
+    rates = {row[0]: row[1] for row in (await db.execute(
+        select(POItem.id, POItem.rate).where(POItem.po_id == note.po_id)))
+        .all()} if note.po_id else {}
+
+    return s.DespatchPrefill(
+        despatch_note_id=note.id, despatch_note_no=note.dn_no,
+        po_id=note.po_id, po_no=note.po_no,
+        vendor_id=note.vendor_id, vendor_name=note.vendor_name,
+        invoice_no=note.invoice_no, invoice_date=note.invoice_date,
+        invoice_amount=note.invoice_amount, eway_bill_no=note.eway_bill_no,
+        vehicle_no=note.vehicle_no, transporter_name=note.transporter_name,
+        lr_no=note.lr_no,
+        lines=[s.DespatchPrefillLine(
+            po_item_id=line.po_item_id, item_id=line.item_id,
+            item_code=line.item_code, item_name=line.item_name,
+            uom_code=line.uom_code,
+            ordered_qty=ordered.get(line.po_item_id or 0, ZERO),
+            despatched_qty=_d(line.despatched_qty),
+            rate=rates.get(line.po_item_id or 0),
+            batch_no=line.batch_no, mfg_date=line.mfg_date,
+            expiry_date=line.expiry_date,
+        ) for line in lines],
+    )
+
+
+async def _po_vendor(db: AsyncSession, po_id: int) -> Vendor | None:
+    """The vendor an order was placed with.
+
+    Two columns, not the mapped row — see `_po_number`: selecting `PurchaseOrder`
+    itself is a 1054 against the live schema.
+    """
+    from app.modules.procurement.models import PurchaseOrder
+
+    vendor_id = await db.scalar(
+        select(PurchaseOrder.vendor_id).where(PurchaseOrder.id == po_id))
+    return await db.get(Vendor, vendor_id) if vendor_id else None
 
 
 async def po_lines(db: AsyncSession, po_id: int) -> list[s.PoLineOption]:
@@ -9028,6 +9135,12 @@ async def po_options(db: AsyncSession, search: str | None = None) -> list[dict]:
     # PurchaseOrder is a 1054 against the live schema.
     from app.modules.procurement.models import PurchaseOrder
     stmt = select(PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.vendor_name)
+    # Only orders the vendor has actually been told about. Listing every PO offered a
+    # storekeeper drafts nobody has approved and orders already cancelled — and the
+    # receipt would then post stock against a commitment that was never made. Mirrors
+    # the GRN guard, which has always required an order to have been sent.
+    stmt = stmt.where(PurchaseOrder.status.in_((
+        POStatus.SENT_TO_VENDOR.value, POStatus.PARTIALLY_RECEIVED.value)))
     if search:
         stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
     rows = (await db.execute(

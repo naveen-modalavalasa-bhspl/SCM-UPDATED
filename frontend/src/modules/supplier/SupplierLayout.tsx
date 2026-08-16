@@ -1,6 +1,6 @@
 import { Link, Navigate, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { FileText, LogOut, User } from "lucide-react";
+import { FileText, LogOut, Truck, User } from "lucide-react";
 import { SUPPLIER_TOKEN_KEY } from "@/shared/api/client";
 import { supplierApi } from "@/modules/procurement/api";
 
@@ -59,6 +59,9 @@ export function SupplierLayout() {
           <div className="flex gap-6">
             <NavLink to="/supplier/rfqs" className={tab}>
               <FileText className="h-4 w-4" /> Requests
+            </NavLink>
+            <NavLink to="/supplier/pos" className={tab}>
+              <Truck className="h-4 w-4" /> Orders
             </NavLink>
             <NavLink to="/supplier/profile" className={tab}>
               <User className="h-4 w-4" /> Profile

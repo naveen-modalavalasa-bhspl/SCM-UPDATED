@@ -87,6 +87,24 @@ export function AllocationApprovalDetailPage() {
     if (!Number.isFinite(quantity) || quantity < 0) return [];
     return quantity === Number(item.quantity) ? [] : [{ id: item.id, quantity }];
   });
+  // What this signature will actually do. An allocation whose lines are all zero —
+  // the shelf was empty when it was decided — reserves nothing: approving it raises
+  // the material request and sends the indent to procurement. The button used to
+  // promise "Approve and reserve" on exactly that document.
+  const giveFor = (item: { id: number; quantity: number | string }) => {
+    const typed = edits[item.id];
+    const value = typed === undefined || typed === "" ? Number(item.quantity) : Number(typed);
+    return Number.isFinite(value) ? value : 0;
+  };
+  const givenTotal = (a?.items ?? []).reduce((sum, item) => sum + giveFor(item), 0);
+  const requestedTotal = (a?.items ?? []).reduce((sum, item) => sum + Number(item.requested_qty), 0);
+  const buys = givenTotal < requestedTotal;
+  const approveLabel = givenTotal <= 0
+    ? "Approve and raise material request"
+    : buys
+      ? "Approve, reserve and raise MR"
+      : revisions.length ? "Approve revised and reserve" : "Approve and reserve";
+
   const overCap = (a?.items ?? []).some((item) => {
     const typed = edits[item.id];
     if (typed === undefined || typed === "") return false;
@@ -296,6 +314,13 @@ export function AllocationApprovalDetailPage() {
                   records the change against your name.
                 </div>
               )}
+              {buys && (
+                <div className="mb-3 rounded-lg bg-warn-bg p-3 text-sm text-warn">
+                  {givenTotal <= 0
+                    ? "Nothing is free to reserve. Approving raises a material request for the whole quantity and sends the indent to procurement."
+                    : "Approving reserves what is free and raises a material request for the shortage, which goes to procurement."}
+                </div>
+              )}
               <Field label="Comments">
                 <Input
                   value={comments}
@@ -321,7 +346,7 @@ export function AllocationApprovalDetailPage() {
                     onClick={() => act.mutate({ approve: true })}
                   >
                     <CheckCircle2 className="h-4 w-4" />
-                    {revisions.length ? "Approve revised and reserve" : "Approve and reserve"}
+                    {approveLabel}
                   </Button>
                 </Can>
               </div>

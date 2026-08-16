@@ -171,13 +171,15 @@ const DEFINITIONS: AlertDef[] = [
     "Approve",
   ),
   confirm(
+    // An MR reserves nothing — it exists because there was nothing on the shelf to
+    // reserve. Approving releases the shortage to procurement to be bought.
     "material_request.approve", "warning", "Approve this material request?",
-    "Approving {number} reserves {qty} of {item} against it, so that stock stops being available to anyone else.",
+    "Approving {number} clears {lines} to be bought. It reserves no stock — this material has to be purchased before anyone can be issued it.",
     "Approve",
   ),
   confirm(
     "material_request.reject", "warning", "Reject this material request?",
-    "{number} is refused and no stock is reserved against it. The shortfall it was raised for stays unfilled.",
+    "{number} is refused and nothing will be bought against it. The shortfall it was raised for stays unfilled.",
     "Reject",
   ),
   confirm(
@@ -322,7 +324,15 @@ const DEFINITIONS: AlertDef[] = [
   alert("indent.deleted", "success", "Indent deleted", "{number} has been removed."),
   alert("indent.rejected", "success", "Indent rejected", "{number} has gone back to {raiser}."),
   alert("indent.returned", "success", "Returned for correction", "{number} is with {raiser} to edit."),
+  alert(
+    "po.submitted", "success", "Sent for approval",
+    "{number} is with its approver. Nothing reaches the vendor until it is signed.",
+  ),
   alert("po.approved", "success", "Purchase order approved", "{number} is ready to send."),
+  alert(
+    "po.sent_to_vendor", "success", "Sent to vendor",
+    "{number} has gone to {vendor}. Goods can now be received against it.",
+  ),
   alert("po.rejected", "success", "Purchase order rejected", "{number} has gone back to procurement."),
   alert(
     "allocation.saved", "success", "Allocation sent for approval",
@@ -338,11 +348,19 @@ const DEFINITIONS: AlertDef[] = [
   ),
   alert(
     "material_request.approved", "success", "Request approved",
-    "{number} is approved and stock is reserved.",
+    "{number} is cleared for purchase. Raise a requisition from it to start buying.",
   ),
   alert(
     "material_request.rejected", "success", "Request rejected",
-    "{number} has been refused and nothing was reserved.",
+    "{number} has been refused and nothing will be bought against it.",
+  ),
+  alert(
+    "material_request.requisition_raised", "success", "Requisition raised",
+    "{number} carries what is still owed on this request. Submit it for approval and it goes out for quotation.",
+  ),
+  alert(
+    "material_request.revised", "success", "Quantities saved",
+    "{number} now asks for the amounts you entered. Approve it to send them to procurement.",
   ),
   alert("adjustment.approved", "success", "Adjustment approved", "{item} now reads {qty}."),
   alert(
@@ -369,6 +387,10 @@ const DEFINITIONS: AlertDef[] = [
   alert(
     "receipt.saved", "success", "Receipt saved",
     "{number} has been saved as a draft. Nothing is in stock yet.",
+  ),
+  alert(
+    "receipt.po_nothing_pending", "info", "Nothing left on this order",
+    "Every line has already been received. Add lines by hand if something arrived that the order does not cover.",
   ),
   alert(
     "inspection.completed", "success", "Inspection complete",

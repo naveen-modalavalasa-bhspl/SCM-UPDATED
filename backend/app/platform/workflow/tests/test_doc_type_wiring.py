@@ -19,10 +19,22 @@ from app.shared.enums import DocType
 
 RETURN_PERMS = workflow_service.RETURN_PERMISSION_BY_DOC_TYPE
 
-#: Types that are deliberately NOT configurable. ISSUE is the legacy value superseded
-#: by WH_ISSUE; QUOTATION is the vendor's own document and nobody inside the company
-#: approves one. Both are numbering-only.
-NOT_CONFIGURABLE = {DocType.ISSUE.value, DocType.QUOTATION.value}
+#: Types that are deliberately NOT configurable, each for a stated reason:
+#:
+#:   ISSUE         — the legacy value, superseded by WH_ISSUE. Nothing starts a
+#:                   workflow with it.
+#:   QUOTATION     — the vendor's own document. What gets approved is the award.
+#:   DESPATCH_NOTE — also the vendor's: their statement of what went on the vehicle.
+#:                   The GRN is where we agree with it or do not.
+#:
+#: All three are numbering-only. Adding a DocType without deciding which side of this
+#: line it falls on fails the test below, which is the point — that decision is easy
+#: to make and impossible to notice you skipped.
+NOT_CONFIGURABLE = {
+    DocType.ISSUE.value,
+    DocType.QUOTATION.value,
+    DocType.DESPATCH_NOTE.value,
+}
 
 
 def test_every_doc_type_is_either_configurable_or_deliberately_excluded():

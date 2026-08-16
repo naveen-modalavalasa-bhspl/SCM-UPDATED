@@ -1,4 +1,5 @@
 """Business logic for the approver's operational workspace."""
+import logging
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ from app.platform.workflow.models import Action, Instance, Pending
 from app.shared.enums import AuditAction, DocType, InstanceStatus
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.uom import MAX_DECIMALS, decimals_by_code
+
+logger = logging.getLogger(__name__)
 
 from .schemas import (
     ApprovalIndentLineOut, ApprovalIndentOut, ApprovalQuantityIn,
@@ -345,6 +348,21 @@ async def act_on_document(
     elif normalized == DocType.PO.value:
         from app.modules.procurement import service as procurement_service
         await procurement_service.act_on_po(db, doc_id, action, comments, user)
+    # The rest of the buying chain. Each was already submitting to the engine and
+    # landing in this queue, but had no branch here — so clicking one of them from
+    # Approvals answered "approval is not supported", and the only way to sign was to
+    # find the document's own screen. The engine owns the chain in every case; these
+    # calls exist so the module that owns the document still moves its own status.
+    elif normalized == DocType.REQUISITION.value:
+        from app.modules.procurement import service as procurement_service
+        await procurement_service.act_on_requisition(db, doc_id, action, comments, user)
+    elif normalized == DocType.RFQ.value:
+        from app.modules.procurement import service as procurement_service
+        await procurement_service.act_on_rfq(db, doc_id, action, comments, user)
+    elif normalized == DocType.CONSOLIDATION.value:
+        from app.modules.procurement import consolidation as procurement_consolidation
+        await procurement_consolidation.act_on_consolidation(
+            db, doc_id, action, comments, user)
     elif normalized in {"ISSUE", "WH_ISSUE", DocType.OWN_STOCK_ISSUE.value}:
         from app.modules.warehouse import service as warehouse_service
         await warehouse_service.act_on_issue(db, doc_id, action, comments, user)
@@ -357,6 +375,54 @@ async def act_on_document(
     else:
         raise ValidationError(f"Approval action is not supported for {normalized}")
     return {"doc_type": normalized, "doc_id": doc_id, "action": action}
+
+
+async def act_on_documents(db: AsyncSession, documents: list, action: str,
+                           comments: str, user) -> dict:
+    """Sign a whole selection in one request.
+
+    An approver holding forty requisitions was making forty round trips through the UI,
+    which is minutes of clicking for a decision they made once. One call, one pass.
+
+    Deliberately NOT one transaction. Each module's own approve is already a complete
+    load -> validate -> change -> audit -> commit, and wrapping forty of them in a
+    single commit would mean one document whose status moved underneath the approver
+    (someone else signed it, it was cancelled) discards the thirty-nine that were fine.
+    So each is committed on its own and the failures come back named — the approver sees
+    exactly which ones still need them, rather than an all-or-nothing error.
+    """
+    if not documents:
+        raise ValidationError("Choose at least one document to act on")
+    # A guard, not a preference: this runs one approval per element, and an unbounded
+    # list is a request that holds a connection for minutes.
+    if len(documents) > 200:
+        raise ValidationError("Act on at most 200 documents at a time")
+
+    approved: list[dict] = []
+    failed: list[dict] = []
+    for document in documents:
+        doc_type = getattr(document, "doc_type", None)
+        doc_id = getattr(document, "doc_id", None)
+        try:
+            approved.append(
+                await act_on_document(db, doc_type, doc_id, action, comments, user))
+        except Exception as error:  # noqa: BLE001 - reported per document, never swallowed
+            # Without this the session stays poisoned and every later document in the
+            # loop fails for a reason that has nothing to do with it.
+            await db.rollback()
+            logger.warning("bulk %s failed for %s %s: %s",
+                           action, doc_type, doc_id, error)
+            failed.append({
+                "doc_type": doc_type, "doc_id": doc_id,
+                "error": getattr(error, "message", None) or str(error),
+            })
+    return {
+        "action": action,
+        "requested": len(documents),
+        "succeeded": len(approved),
+        "items": approved,
+        "failed": failed,
+    }
 
 
 async def report_summary(db: AsyncSession, user) -> dict:

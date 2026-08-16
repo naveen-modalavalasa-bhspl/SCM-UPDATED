@@ -399,8 +399,16 @@ _DEFINITIONS: list[AlertDef] = [
         "{number} is with {raiser} to edit.",
     ),
     _alert(
+        "po.submitted", AlertVariant.SUCCESS, "Sent for approval",
+        "{number} is with its approver. Nothing reaches the vendor until it is signed.",
+    ),
+    _alert(
         "po.approved", AlertVariant.SUCCESS, "Purchase order approved",
         "{number} is ready to send.",
+    ),
+    _alert(
+        "po.sent_to_vendor", AlertVariant.SUCCESS, "Sent to vendor",
+        "{number} has gone to {vendor}. Goods can now be received against it.",
     ),
     _alert(
         "po.rejected", AlertVariant.SUCCESS, "Purchase order rejected",
@@ -426,6 +434,30 @@ _DEFINITIONS: list[AlertDef] = [
         "material_request.rejected", AlertVariant.SUCCESS, "Request rejected",
         "{number} has been refused and nothing was reserved.",
     ),
+    # Four entries the frontend mirror already carried and this catalog did not, so
+    # `/api/alerts/catalog` overlaid nothing for them and only the bundled copy showed.
+    _alert(
+        "receipt.posted_direct", AlertVariant.SUCCESS, "Goods received",
+        "{number} needed no inspection, so the stock is in and the receipt is closed.",
+    ),
+    _alert(
+        "receipt.ready_for_putaway", AlertVariant.SUCCESS, "Ready for put-away",
+        "{number} needed no inspection. Put the goods away to bring the stock in.",
+    ),
+    _alert(
+        "issue.forwarded", AlertVariant.SUCCESS, "Forwarded to the points below",
+        "{number}. Review and submit each one from Material Issues.",
+    ),
+    _alert(
+        "issue.forwarded_none", AlertVariant.INFO, "Nothing to forward",
+        "Every indent on this GRN already has an issue at this point.",
+    ),
+    _alert(
+        "material_request.requisition_raised", AlertVariant.SUCCESS,
+        "Requisition raised",
+        "{number} carries what is still owed on this request. Submit it for approval "
+        "and it goes out for quotation.",
+    ),
     _alert(
         "material_request.revised", AlertVariant.SUCCESS, "Quantities saved",
         "{number} now asks for the amounts you entered. Approve it to send them to "
@@ -450,6 +482,11 @@ _DEFINITIONS: list[AlertDef] = [
     _alert(
         "receipt.saved", AlertVariant.SUCCESS, "Receipt saved",
         "{number} has been saved as a draft. Nothing is in stock yet.",
+    ),
+    _alert(
+        "receipt.po_nothing_pending", AlertVariant.INFO, "Nothing left on this order",
+        "Every line has already been received. Add lines by hand if something arrived "
+        "that the order does not cover.",
     ),
     _alert(
         "inspection.completed", AlertVariant.SUCCESS, "Inspection complete",

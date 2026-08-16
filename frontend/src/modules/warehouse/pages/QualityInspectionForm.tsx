@@ -183,11 +183,22 @@ export default function QualityInspectionForm({
       }),
     }));
 
+  /** A line is seeded PENDING when the receipt raises the inspection, and the server
+   *  derives its real result from the accepted/inspected split on save
+   *  (`_derive_result`). Counting the stored PENDING as neither pass nor fail is how
+   *  the confirm modal announced "0 pass, 0 fail" over a full sheet of accepted lines.
+   *  Count what the save is about to write, by the same rule. */
+  const resultOf = (line: InspectionItemWrite) =>
+    line.result && line.result !== "PENDING"
+      ? line.result
+      : deriveResult(num(line.inspected_qty), num(line.accepted_qty));
+
   const totals = useMemo(
     () => ({
       lines: form.items.length,
-      passed: form.items.filter((l) => l.result === "PASSED").length,
-      failed: form.items.filter((l) => l.result === "FAILED").length,
+      passed: form.items.filter((l) => resultOf(l) === "PASSED").length,
+      failed: form.items.filter((l) => resultOf(l) === "FAILED").length,
+      partial: form.items.filter((l) => resultOf(l) === "PARTIAL").length,
       inspected: form.items.reduce((s, l) => s + num(l.inspected_qty), 0),
       rejected: form.items.reduce((s, l) => s + num(l.rejected_qty), 0),
     }),
@@ -611,8 +622,9 @@ export default function QualityInspectionForm({
         title="Complete this inspection?"
         message={
           <>
-            The result is written back onto the GRN lines: {totals.passed} pass, {totals.failed} fail,{" "}
-            <b>{fmtQty(totals.rejected)}</b> rejected. The inspection can no longer be edited.
+            The result is written back onto the GRN lines: {totals.passed} pass, {totals.failed} fail
+            {totals.partial > 0 && <>, {totals.partial} partial</>}, <b>{fmtQty(totals.rejected)}</b>{" "}
+            rejected. The inspection can no longer be edited.
             {totals.failed > 0 && (
               <Chip size="sm" variant="flat" color="danger" className="ml-2">
                 Failed lines will block the receipt from posting in full

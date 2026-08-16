@@ -18,6 +18,14 @@ export interface PurchaseOrder {
   expected_date?: string | null;
   indent_id?: number | null;
   indent_no?: string | null;
+  // The buying chain behind this order. Present only when it was raised from an
+  // awarded quotation; a PO raised straight off an indent carries none of them.
+  requisition_id?: number | null;
+  requisition_no?: string | null;
+  rfq_id?: number | null;
+  rfq_no?: string | null;
+  quotation_id?: number | null;
+  quotation_no?: string | null;
   vendor_id: number;
   vendor_name?: string | null;
   facility_id?: number | null;
@@ -52,6 +60,13 @@ export interface POCreate {
     rate: number;
     tax_percent?: number;
   }[];
+}
+
+/** Everything the awarded quotation does not already say. Vendor, lines, rates and
+ *  tax all come from the offer being accepted, so none of them are sent. */
+export interface POFromQuotation {
+  expected_date?: string | null;
+  remarks?: string | null;
 }
 
 /* ------------------------------------------------------------------ Requisition */
@@ -244,6 +259,12 @@ export interface RFQ extends RFQListRow {
   terms?: string | null;
   awarded_vendor_id?: number | null;
   created_by_name?: string | null;
+  /** The purchase order this award already became. Read off the PO's backward
+   *  pointer, so it is never stale — and it is what tells the screen to stop
+   *  offering "Create purchase order" for an order that exists. */
+  po_id?: number | null;
+  po_no?: string | null;
+  po_status?: string | null;
   items: RFQItem[];
   vendors: RFQVendor[];
 }
@@ -395,4 +416,104 @@ export interface VendorProfile {
   city?: string | null;
   state?: string | null;
   gstin?: string | null;
+}
+
+/* ------------------------------------------------------- Vendor despatch note */
+
+/** One line the vendor says is on the vehicle. Keyed to the ORDER line, never to a
+ *  free item choice — a despatch note answers a purchase order. */
+export interface DespatchItem {
+  id: number;
+  line_no: number;
+  po_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  despatched_qty: number;
+  batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+  remarks?: string | null;
+}
+
+export interface DespatchNote {
+  id: number;
+  dn_no: string;
+  dn_date?: string | null;
+  po_id: number;
+  po_no?: string | null;
+  vendor_id: number;
+  vendor_name?: string | null;
+  invoice_no?: string | null;
+  invoice_date?: string | null;
+  invoice_amount?: number | null;
+  eway_bill_no?: string | null;
+  vehicle_no?: string | null;
+  transporter_name?: string | null;
+  lr_no?: string | null;
+  expected_date?: string | null;
+  status: string;
+  remarks?: string | null;
+  submitted_at?: string | null;
+  created_at: string;
+  items: DespatchItem[];
+}
+
+export interface DespatchLineWrite {
+  po_item_id: number;
+  despatched_qty: number;
+  batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+  remarks?: string | null;
+}
+
+export interface DespatchNoteWrite {
+  dn_date?: string | null;
+  invoice_no?: string | null;
+  invoice_date?: string | null;
+  invoice_amount?: number | null;
+  eway_bill_no?: string | null;
+  vehicle_no?: string | null;
+  transporter_name?: string | null;
+  lr_no?: string | null;
+  expected_date?: string | null;
+  remarks?: string | null;
+  lines: DespatchLineWrite[];
+}
+
+/** A PO line as the vendor sees it. `pending_qty` is what is still owed, so a second
+ *  delivery opens with the remainder rather than the whole order. */
+export interface VendorPOLine {
+  po_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  ordered_qty: number;
+  despatched_qty: number;
+  pending_qty: number;
+}
+
+export interface VendorPO {
+  id: number;
+  po_no: string;
+  po_date?: string | null;
+  expected_date?: string | null;
+  status: string;
+  total_amount: number;
+  remarks?: string | null;
+  lines: VendorPOLine[];
+  despatch_notes: DespatchNote[];
+}
+
+export interface VendorPOListRow {
+  id: number;
+  po_no: string;
+  po_date?: string | null;
+  expected_date?: string | null;
+  status: string;
+  total_amount: number;
+  despatch_note_count: number;
 }

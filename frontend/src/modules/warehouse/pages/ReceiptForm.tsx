@@ -10,9 +10,9 @@ import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   binOptions, completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
-  dispatchReceiptSource, gateEntryOptions,
-  getReceipt, incomingDispatchOptions, itemOptions, submitReceipt,
-  myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
+  despatchNoteOptions, dispatchReceiptSource, gateEntryOptions, getDespatchPrefill,
+  getPoLines, getReceipt, incomingDispatchOptions, itemOptions, poOptions,
+  submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
@@ -111,6 +111,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     grn_date: today(),
     po_id: null,
     po_no: "",
+    despatch_note_id: null,
     dispatch_id: null,
     vendor_id: null,
     warehouse_id: 0,
@@ -160,6 +161,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       grn_date: doc.grn_date,
       po_id: doc.po_id ?? null,
       po_no: doc.po_no ?? "",
+      despatch_note_id: doc.despatch_note_id ?? null,
       // `transfer_id` carries the source document; `receipt_type` says which one.
       dispatch_id: doc.receipt_type === "DISPATCH" ? doc.transfer_id ?? null : null,
       vendor_id: doc.vendor_id ?? null,
@@ -202,6 +204,127 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     });
   }, [doc]);
 
+  /**
+   * Pick the order once; the delivery fills itself in.
+   *
+   * The PO was a free-text box because, when this form was written, nothing in the
+   * system raised purchase orders — so a picker would have offered an empty list while
+   * the goods arrived anyway. Procurement raises them now, so the order is the one
+   * thing worth identifying at the gate: every line, its unit, what was ordered and at
+   * what rate comes from it, and the storekeeper is left counting rather than typing.
+   *
+   * `po_item_id` on each line is the part that matters beyond convenience — it is what
+   * lets a part-delivery know what is still owed, and what lets the receipt push the
+   * order to PARTIALLY_RECEIVED / RECEIVED when it posts.
+   *
+   * Lines already entered are kept. Somebody who has started counting must not lose it
+   * because they then identified the order; the pending lines are appended to what is
+   * there, minus any already on the form.
+   */
+  const fillFromPo = useMutation({
+    mutationFn: (poId: number) => getPoLines(poId),
+    onSuccess: (lines) => {
+      const already = new Set(
+        form.items.map((line) => line.po_item_id).filter(Boolean) as number[],
+      );
+      const added = lines.filter((line) => !already.has(line.po_item_id)).map((line) => ({
+        ...emptyLine(),
+        po_item_id: line.po_item_id,
+        indent_id: line.indent_id ?? undefined,
+        item_id: line.item_id,
+        item_code: line.item_code,
+        item_name: line.item_name,
+        uom_code: line.uom_code,
+        ordered_qty: num(line.ordered_qty),
+        // What is still owed, as the count to confirm rather than a figure to trust:
+        // the storekeeper overwrites it with what actually turned up.
+        received_qty: num(line.pending_qty),
+        accepted_qty: isGrn ? num(line.pending_qty) : 0,
+        rate: line.rate ?? null,
+      }));
+      if (!added.length) {
+        void alerts.info("receipt.po_nothing_pending");
+        return;
+      }
+      setForm((current) => ({ ...current, items: [...current.items, ...added] }));
+      setTouched(true);
+    },
+  });
+
+  /** The vendor is left to the server, which reads it off the order itself rather
+   *  than trusting a field the gate could contradict. */
+  const choosePo = (poId: number | null, poNo: string) => {
+    setForm((current) => ({
+      ...current, po_id: poId, po_no: poNo, despatch_note_id: null,
+    }));
+    setTouched(true);
+    if (poId) fillFromPo.mutate(poId);
+  };
+
+  /**
+   * Fill the whole delivery from the vendor's own despatch note.
+   *
+   * The stronger version of picking the order: the PO says what was bought, the note
+   * says what was actually put on the vehicle — invoice, e-way bill, vehicle, LR, and
+   * per line the batch, manufacture and expiry. Those last three cannot be derived
+   * from anything we hold; they are properties of the physical cartons, known only to
+   * whoever packed them, and they drive FEFO picking and expiry alerts for the rest of
+   * the item's life. Typed at a gate off a carton, they are typed wrong.
+   *
+   * Replaces the lines rather than appending: a despatch note is a complete statement
+   * of one delivery, and merging it with a half-typed guess produces a receipt that
+   * matches neither.
+   */
+  const fillFromDespatch = useMutation({
+    mutationFn: (noteId: number) => getDespatchPrefill(noteId),
+    onSuccess: (prefill) => {
+      setForm((current) => ({
+        ...current,
+        despatch_note_id: prefill.despatch_note_id,
+        po_id: prefill.po_id ?? current.po_id,
+        po_no: prefill.po_no ?? current.po_no,
+        // Only where the gate has not already written something: a storekeeper who
+        // typed the invoice off the paper in their hand is looking at the real
+        // document, and must not be overruled by what the vendor filed earlier.
+        invoice_no: current.invoice_no || (prefill.invoice_no ?? ""),
+        invoice_date: current.invoice_date ?? prefill.invoice_date ?? null,
+        invoice_amount: current.invoice_amount ?? prefill.invoice_amount ?? null,
+        eway_bill_no: current.eway_bill_no || (prefill.eway_bill_no ?? ""),
+        vehicle_no: current.vehicle_no || (prefill.vehicle_no ?? ""),
+        transporter_name: current.transporter_name || (prefill.transporter_name ?? ""),
+        lr_no: current.lr_no || (prefill.lr_no ?? ""),
+        items: prefill.lines.map((line) => ({
+          ...emptyLine(),
+          po_item_id: line.po_item_id ?? undefined,
+          item_id: line.item_id,
+          item_code: line.item_code,
+          item_name: line.item_name,
+          uom_code: line.uom_code,
+          ordered_qty: num(line.ordered_qty),
+          // What the vendor says is on the vehicle, as the count to CONFIRM. The
+          // storekeeper overwrites it with what is physically there, and the gap is
+          // exactly the shortage the GRN exists to record.
+          received_qty: num(line.despatched_qty),
+          accepted_qty: isGrn ? num(line.despatched_qty) : 0,
+          rate: line.rate ?? null,
+          batch_no: line.batch_no,
+          mfg_date: line.mfg_date,
+          expiry_date: line.expiry_date,
+        })),
+      }));
+      setTouched(true);
+    },
+  });
+
+  /** Whether this order has any vendor paperwork behind it at all. Advisory only —
+   *  see the hint below the picker: goods turn up without a note and are received. */
+  const { data: despatchNotes = [] } = useQuery({
+    queryKey: ["wh-lookup", "despatch-notes", form.po_id ?? 0],
+    queryFn: () => despatchNoteOptions(form.po_id as number),
+    staleTime: 5 * 60_000,
+    enabled: Boolean(form.po_id),
+  });
+
   /** Snapshot labels for lines loaded from the server, so the grid needs no joins. */
   const savedLine = (index: number) => doc?.items?.[index];
 
@@ -214,6 +337,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         grn_date: today(),
         po_id: source.po_id ?? null,
         po_no: source.po_no ?? "",
+        despatch_note_id: source.despatch_note_id ?? null,
         dispatch_id: null,
         vendor_id: source.vendor_id ?? null,
         warehouse_id: source.warehouse_id,
@@ -918,11 +1042,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               />
             </Field>
           )}
-          {/* Typed, not picked, on the GRN as well as the gate entry: the number comes
-            * off the paperwork the driver hands over. Procurement does not raise orders
-            * in this system yet, so a picker would offer a list nobody can fill and the
-            * goods arrive regardless. `po_id` stays on the form so a receipt already
-            * linked to an order keeps its link through an edit.
+          {/* Picked, not typed. It used to be a free-text box because nothing in this
+            * system raised purchase orders, so a picker would have offered an empty
+            * list while the goods arrived anyway. Procurement raises them now, and the
+            * order is the one thing worth identifying at the gate — the lines, units,
+            * ordered quantities and rates all come off it.
+            *
+            * The typed box survives underneath for a delivery whose order is not in
+            * this system: those still turn up, and refusing to receive them would be a
+            * worse failure than an unlinked receipt.
             *
             * Hidden at an MDP or LIP: nothing is bought there. Every arrival is a
             * consignment from the point above, so both fields were dead boxes that
@@ -931,20 +1059,74 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             * with. */}
           {!isLocalPoint && (
             <>
-              <Field label="Purchase order" hint="As printed on the delivery paperwork.">
-                <Input
-                  value={form.po_no ?? ""}
-                  disabled={locked}
-                  placeholder="PO number"
-                  onChange={(e) => set("po_no", e.target.value)}
+              <Field
+                label="Purchase order"
+                hint={form.po_id
+                  ? "Lines, units and rates come from the order — enter what arrived."
+                  : "Pick the order the goods came against."}
+              >
+                <Lookup
+                  name="purchase-orders"
+                  load={poOptions}
+                  value={form.po_id ?? ""}
+                  isDisabled={locked || fillFromPo.isPending}
+                  // A receipt already linked to an order that has since been fully
+                  // received is off the picker's list; without this its number would
+                  // render as the placeholder on a document that plainly has one.
+                  fallback={form.po_id && form.po_no
+                    ? [{ id: form.po_id, code: form.po_no, name: form.po_no }]
+                    : undefined}
+                  onChange={(v, option) =>
+                    choosePo(v === "" ? null : Number(v), option?.code ?? "")}
+                  placeholder={fillFromPo.isPending ? "Loading lines…" : "Purchase order"}
                 />
               </Field>
-              <Field label="Vendor">
+              {!form.po_id && (
+                <Field label="PO number (not in this system)"
+                       hint="Only for an order raised outside SCM.">
+                  <Input
+                    value={form.po_no ?? ""}
+                    disabled={locked}
+                    placeholder="As printed on the paperwork"
+                    onChange={(e) => set("po_no", e.target.value)}
+                  />
+                </Field>
+              )}
+              {/* Advisory, never a gate. Doc B12 makes the invoice and e-way bill
+                * mandatory before dispatch, and a vendor who filed a note here has
+                * already given us both — but goods turn up without one, and a blocked
+                * gate is a worse failure than an unlinked receipt. So this offers the
+                * note when there is one and says so plainly when there is not. */}
+              {form.po_id && (
+                <Field
+                  label="Vendor's despatch note"
+                  hint={despatchNotes.length
+                    ? "Fills the paperwork and each line's batch and expiry."
+                    : "The vendor has not filed one — enter the delivery by hand."}
+                >
+                  <Lookup
+                    name={`despatch-notes-${form.po_id}`}
+                    load={() => despatchNoteOptions(form.po_id as number)}
+                    value={form.despatch_note_id ?? ""}
+                    isDisabled={locked || !despatchNotes.length
+                      || fillFromDespatch.isPending}
+                    onChange={(v) => {
+                      const noteId = v === "" ? null : Number(v);
+                      set("despatch_note_id", noteId);
+                      if (noteId) fillFromDespatch.mutate(noteId);
+                    }}
+                    placeholder={fillFromDespatch.isPending
+                      ? "Loading despatch…"
+                      : despatchNotes.length ? "Despatch note" : "None filed"}
+                  />
+                </Field>
+              )}
+              <Field label="Vendor" hint={form.po_id ? "Taken from the order." : undefined}>
                 <Lookup
                   name="vendors"
                   load={vendorOptions}
                   value={form.vendor_id ?? ""}
-                  isDisabled={locked}
+                  isDisabled={locked || !!form.po_id}
                   onChange={(v) => set("vendor_id", v === "" ? null : v)}
                   placeholder="Vendor"
                 />

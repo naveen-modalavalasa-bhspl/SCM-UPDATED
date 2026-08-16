@@ -109,6 +109,33 @@ class ApprovalActionOut(BaseModel):
     action: str
 
 
+class BulkDocumentRef(BaseModel):
+    doc_type: str = Field(min_length=1, max_length=40)
+    doc_id: int = Field(gt=0)
+
+
+class BulkActionIn(BaseModel):
+    """A whole selection, signed once. Capped for the same reason the service caps it."""
+    documents: list[BulkDocumentRef] = Field(min_length=1, max_length=200)
+    comments: str = Field(default="", max_length=2000)
+
+
+class BulkActionFailureOut(BaseModel):
+    doc_type: str | None = None
+    doc_id: int | None = None
+    error: str
+
+
+class BulkActionOut(BaseModel):
+    """Counts first: the approver's question after a bulk sign is "did they all go?",
+    and `failed` names the ones that did not so the queue can be re-tried on those."""
+    action: str
+    requested: int
+    succeeded: int
+    items: list[ApprovalActionOut] = []
+    failed: list[BulkActionFailureOut] = []
+
+
 class ApprovalReportOut(BaseModel):
     total_decisions: int
     approved: int
