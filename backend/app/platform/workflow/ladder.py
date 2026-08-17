@@ -521,6 +521,62 @@ async def project_ranks(db: AsyncSession, project_id: int | None) -> list[dict]:
     return sorted(out, key=lambda r: (r["depth"], r["role_name"]))
 
 
+async def company_ranks(db: AsyncSession, project_id: int | None) -> list[dict]:
+    """Ranks whose people sit OUTSIDE this project — the shared chairs.
+
+    HCM has now created the posts the SCM flow always needed: SCM HEAD, INDENT TEAM,
+    P O, CPO, DIRECTOR, LOGISTICS, QC. Every one of them is seated from the SUPPLY
+    CHAIN MANAGEMENT and H O projects, so `project_ranks` — which lists the ranks of
+    the SELECTED project's own people — never showed them to an admin configuring
+    104-MMU, and the only way to name those chairs was a locally-invented post.
+
+    They are returned separately, and never merged into the climbable list, because
+    they resolve differently: a rank on the raiser's own line is climbed to, and one
+    off it is read straight off its holders (ApproverType.ROLE_ANY). Presenting them
+    as the same thing is what would put a rung on a chain that can never resolve.
+    """
+    mine = {rank["role_id"] for rank in await project_ranks(db, project_id)}
+    holders_of = await _rank_holders(db, None)
+    rows = (await db.execute(
+        select(HcmPosition.role_id,
+               func.min(func.coalesce(HcmPosition.role_name, HcmPosition.job_name,
+                                      HcmPosition.name)).label("role_name"),
+               func.count(func.distinct(HcmPosition.id)).label("position_count"))
+        .where(HcmPosition.is_active.is_(True), HcmPosition.role_id.isnot(None))
+        .group_by(HcmPosition.role_id)
+    )).all()
+
+    out = []
+    for role_id, role_name, position_count in rows:
+        if role_id in mine:
+            continue
+        holders = holders_of.get(role_id, [])
+        # A rank nobody fills is not a chair anybody can be sent to. Offering it would
+        # put a rung on the chain that is skipped at submit time, silently.
+        if not holders:
+            continue
+        out.append({
+            "role_id": role_id,
+            "role_name": role_name or f"Rank {role_id}",
+            "position_count": position_count,
+            "holders": holders[:8],
+            "holder_count": len(holders),
+        })
+    return sorted(out, key=lambda r: r["role_name"])
+
+
+async def rank_any_holders(db: AsyncSession, role_id: int,
+                           exclude_employee_id: int | None = None) -> list[dict]:
+    """Everyone holding a rank, company-wide. The ROLE_ANY rung's approvers.
+
+    Deliberately unfiltered by project: the point of these chairs is that one SCM Head
+    signs for every project. Inactive people and vacant posts drop out, so a rung with
+    nobody left in it is skipped rather than stranding the document.
+    """
+    people = (await _rank_holders(db, None)).get(role_id, [])
+    return [person for person in people if person["id"] != exclude_employee_id]
+
+
 async def _rank_holders(db: AsyncSession,
                         project_id: int | None) -> dict[int, list[dict]]:
     """rank -> the people who fill it, deduplicated (someone can hold two posts at one).

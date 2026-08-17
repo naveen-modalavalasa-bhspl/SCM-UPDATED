@@ -24,6 +24,11 @@ import type {
 const PICKER_GROUPS: { kind: StepKind; label: string }[] = [
   { kind: "local", label: "Posts" },
   { kind: "rank", label: "Reporting line" },
+  // The chairs HCM has now created — SCM HEAD, INDENT TEAM, P O, CPO, DIRECTOR. They
+  // are seated out of the SUPPLY CHAIN MANAGEMENT and H O projects, so they are not on
+  // any field raiser's reporting line and never appeared under "Reporting line" for a
+  // project like 104-MMU. Everyone holding the rank signs; nothing is climbed.
+  { kind: "shared_rank", label: "Shared chairs (SCM / Head Office)" },
   { kind: "hcm", label: "HCM posts" },
 ];
 
@@ -31,6 +36,12 @@ const PICKER_GROUPS: { kind: StepKind; label: string }[] = [
  *  it is the right one. Two ranks can share a name (HCM's cutover left old role ids in
  *  place), and the size is what separates the live one from the leftover. */
 function rungHint(kind: StepKind, rung: FlowRung): string | undefined {
+  if (kind === "shared_rank") {
+    const people = rung.people?.length
+      ? rung.people.join(", ") : "nobody is seated in it yet";
+    return `${rung.name}: signed by ${people}. Not on the raiser's reporting line, `
+      + `so every holder of this rank sees it whoever raised the document.`;
+  }
   if (kind !== "rank" || rung.position_count === undefined) return undefined;
   const posts = `${rung.position_count} post${rung.position_count === 1 ? "" : "s"}`;
   const people = rung.people_count === undefined
@@ -181,7 +192,9 @@ export function ChainEditorPage() {
       kind,
       position_id: kind === "hcm" ? rung.id : null,
       post_id: kind === "local" ? rung.id : null,
-      position_role_id: kind === "rank" ? rung.id : null,
+      // Both rank kinds travel as a rank. Which one it IS — climbed or shared — is the
+      // server's call, decided from whether this project's own people hold it.
+      position_role_id: kind === "rank" || kind === "shared_rank" ? rung.id : null,
       holders: rung.members ?? [],
     }]);
   }
@@ -195,7 +208,9 @@ export function ChainEditorPage() {
     kind,
     label: groupLabel,
     items: (kind === "local" ? rungs.data?.local
-      : kind === "rank" ? rungs.data?.ranks : rungs.data?.hcm) ?? [],
+      : kind === "rank" ? rungs.data?.ranks
+        : kind === "shared_rank" ? rungs.data?.shared_ranks
+          : rungs.data?.hcm) ?? [],
   }));
 
   return (
@@ -331,6 +346,11 @@ export function ChainEditorPage() {
                             * role id, and picking the small one builds a chain almost
                             * every raiser climbs straight past. The count is the only
                             * thing on screen that tells them apart. */}
+                          {kind === "shared_rank" && rung.people_count !== undefined && (
+                            <span className="ml-1 text-[11px] text-muted">
+                              {rung.people_count} {rung.people_count === 1 ? "person" : "people"}
+                            </span>
+                          )}
                           {kind === "rank" && rung.position_count !== undefined && (
                             <span className="tabular text-[10px] text-muted">
                               · {rung.position_count}

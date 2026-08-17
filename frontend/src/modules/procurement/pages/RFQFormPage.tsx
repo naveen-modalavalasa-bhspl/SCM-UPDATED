@@ -84,6 +84,7 @@ export function RFQFormPage() {
     setOrg({
       departmentId: existing.department_id ?? "",
       warehouseId: existing.warehouse_id ?? "",
+      warehouseName: existing.warehouse_name ?? "",
       projectId: existing.project_id ?? "",
       companyName: existing.company_name ?? "",
     });
@@ -105,6 +106,7 @@ export function RFQFormPage() {
     setOrg({
       departmentId: source.department_id ?? "",
       warehouseId: source.warehouse_id ?? "",
+      warehouseName: source.warehouse_name ?? "",
       projectId: source.project_id ?? "",
       companyName: source.company_name ?? "",
     });

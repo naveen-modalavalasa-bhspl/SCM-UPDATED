@@ -24,9 +24,9 @@ from app.modules.procurement.schemas import (
     ActionIn, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
-    POCreate, POFromQuotationIn, POListRow, POOut, QuoteListRow, QuoteOut, QuoteSubmit,
-    ReqCreate, ReqFromMRsIn, ReqListRow,
-    ReqOut, RFQCreate, RFQListRow, RFQOut, RFQUpdate, VendorAccountIn,
+    POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut, QuoteListRow,
+    QuoteOut, QuoteSubmit, ReqCreate, ReqFromMRsIn, ReqListRow,
+    ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
     VendorAccountOut, VendorLoginIn, VendorPasswordIn, VendorProfileOut,
     VendorTokenOut,
 )
@@ -82,6 +82,13 @@ async def create_from_quotation(quotation_id: int,
 async def get_one(po_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.PO_VIEW))):
     return await service.get_po(db, po_id, user=user)
+
+
+@pos.put("/{po_id}", response_model=POOut)
+async def update_po(po_id: int, body: POHeaderUpdate, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.PO_EDIT))):
+    """The header a draft order was raised without — terms, addresses, project."""
+    return await service.update_po_header(db, po_id, body, user)
 
 
 @pos.post("/{po_id}/submit", response_model=POOut)
@@ -260,6 +267,15 @@ async def update_rfq(rfq_id: int, body: RFQUpdate, db: AsyncSession = Depends(ge
 async def submit_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.RFQ_CREATE))):
     return await service.submit_rfq(db, rfq_id, user)
+
+
+@rfqs.put("/{rfq_id}/quantities", response_model=RFQOut)
+async def set_rfq_quantities(rfq_id: int, body: RFQQuantitiesIn,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.RFQ_APPROVE))):
+    """The approver's own edit: how much, and nothing else. `rfq.approve`, not
+    `rfq.create` — the person signing the tender rarely holds the buyer's rights."""
+    return await service.set_rfq_quantities(db, rfq_id, body, user)
 
 
 @rfqs.post("/{rfq_id}/approve", response_model=RFQOut)

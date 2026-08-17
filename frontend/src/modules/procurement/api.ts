@@ -3,7 +3,7 @@ import type { Paginated } from "@/shared/types";
 import type {
   Comparison, Consolidation, ConsolidationCreate, ConsolidationListRow,
   ConsolidationSource, DespatchNote, DespatchNoteWrite, EvaluationMethodOption,
-  MRCandidate, POCreate, POFromQuotation, POListRow, PurchaseOrder, VendorPO,
+  MRCandidate, POCreate, POFromQuotation, POHeader, POListRow, PurchaseOrder, VendorPO,
   VendorPOListRow,
   Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
@@ -26,6 +26,10 @@ export const poApi = {
   createFromQuotation: (quotationId: number, data: POFromQuotation = {}) =>
     api.post<PurchaseOrder>(`/api/pos/from-quotation/${quotationId}`, data)
       .then((r) => r.data),
+  /** The header a draft order was raised without — terms, addresses, project. DRAFT
+   *  only, server-side; the screen only offers it on a draft for the same reason. */
+  update: (id: number, data: POHeader & { expected_date?: string | null }) =>
+    api.put<PurchaseOrder>(`/api/pos/${id}`, data).then((r) => r.data),
   submit: (id: number) => api.post<PurchaseOrder>(`/api/pos/${id}/submit`).then((r) => r.data),
   approve: (id: number, comments = "") =>
     api.post<PurchaseOrder>(`/api/pos/${id}/approve`, { comments }).then((r) => r.data),
@@ -114,6 +118,9 @@ export const rfqApi = {
   update: (id: number, data: RFQUpdate) =>
     api.put<RFQ>(`/api/rfqs/${id}`, data).then((r) => r.data),
   submit: (id: number) => api.post<RFQ>(`/api/rfqs/${id}/submit`).then((r) => r.data),
+  /** The approver's own edit: how much, and nothing else. Gated on `rfq.approve`. */
+  setQuantities: (id: number, lines: { id: number; quantity: number }[], comments = "") =>
+    api.put<RFQ>(`/api/rfqs/${id}/quantities`, { lines, comments }).then((r) => r.data),
   approve: (id: number, comments = "") =>
     api.post<RFQ>(`/api/rfqs/${id}/approve`, { comments }).then((r) => r.data),
   reject: (id: number, comments = "") =>

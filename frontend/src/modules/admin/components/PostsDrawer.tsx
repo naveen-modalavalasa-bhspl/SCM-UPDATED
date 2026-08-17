@@ -69,17 +69,35 @@ function Drawer({ title, onBack, onClose, children }: {
 function PostList({ onEdit }: { onEdit: (post: ApprovalPost | "new") => void }) {
   const toast = useToast();
   const queryClient = useQueryClient();
+  // Retired chairs are hidden by default and shown on demand. A retired post is
+  // skipped at submit time (custom_ladder._local_post_rung) AND missing from the rung
+  // picker, so a chain that names one silently falls through to the fallback — the
+  // admin has to be able to see that it happened and undo it.
+  const [showRetired, setShowRetired] = useState(false);
   const posts = useQuery({
-    queryKey: ["approval-posts"],
-    queryFn: adminApi.approvalPosts.list,
+    queryKey: ["approval-posts", showRetired],
+    queryFn: () => adminApi.approvalPosts.list(showRetired),
   });
+  const refreshPosts = () => {
+    queryClient.invalidateQueries({ queryKey: ["approval-posts"] });
+    queryClient.invalidateQueries({ queryKey: ["approval-flow-rungs"] });
+    queryClient.invalidateQueries({ queryKey: ["approval-flow-chain"] });
+  };
   const retire = useMutation({
     mutationFn: (id: number) => adminApi.approvalPosts.retire(id),
-    onSuccess: () => {
-      toast.success("Post retired");
-      queryClient.invalidateQueries({ queryKey: ["approval-posts"] });
-      queryClient.invalidateQueries({ queryKey: ["approval-flow-rungs"] });
-    },
+    onSuccess: () => { toast.success("Post retired"); refreshPosts(); },
+  });
+  // Restoring is the same save the form does, with the flag turned back on. The
+  // seating is sent unchanged so a restore never quietly empties the chair.
+  const restore = useMutation({
+    mutationFn: (post: ApprovalPost) => adminApi.approvalPosts.update(post.id, {
+      name: post.name,
+      department: post.department,
+      rbac_role_id: post.rbac_role_id,
+      employee_ids: post.members.map((m) => m.id),
+      is_active: true,
+    }),
+    onSuccess: () => { toast.success("Post restored"); refreshPosts(); },
   });
 
   const groups = new Map<string, ApprovalPost[]>();
@@ -90,10 +108,20 @@ function PostList({ onEdit }: { onEdit: (post: ApprovalPost | "new") => void }) 
 
   return (
     <div className="space-y-4">
-      <ErrorBanner error={posts.error ?? retire.error} />
-      <Button variant="soft" onClick={() => onEdit("new")}>
-        <Plus size={16} className="mr-1.5" /> New post
-      </Button>
+      <ErrorBanner error={posts.error ?? retire.error ?? restore.error} />
+      <div className="flex items-center justify-between gap-2">
+        <Button variant="soft" onClick={() => onEdit("new")}>
+          <Plus size={16} className="mr-1.5" /> New post
+        </Button>
+        <label className="flex items-center gap-2 text-xs text-muted">
+          <input
+            type="checkbox"
+            checked={showRetired}
+            onChange={(e) => setShowRetired(e.target.checked)}
+          />
+          Show retired
+        </label>
+      </div>
 
       {[...groups.entries()].map(([group, items]) => (
         <section key={group}>
@@ -108,7 +136,14 @@ function PostList({ onEdit }: { onEdit: (post: ApprovalPost | "new") => void }) 
                   onClick={() => onEdit(post)}
                   className="min-w-0 flex-1 py-1 text-left"
                 >
-                  <p className="truncate text-sm font-medium">{post.name}</p>
+                  <p className={`truncate text-sm font-medium ${post.is_active === false ? "text-muted line-through" : ""}`}>
+                    {post.name}
+                  </p>
+                  {post.is_active === false && (
+                    <p className="truncate text-xs text-warn">
+                      Retired — any chain naming it skips this step
+                    </p>
+                  )}
                   <p className="truncate text-xs text-muted">
                     {post.members.length
                       ? post.members.map((m) => m.name).join(", ")
@@ -120,16 +155,36 @@ function PostList({ onEdit }: { onEdit: (post: ApprovalPost | "new") => void }) 
                     </p>
                   )}
                 </button>
-                <button
-                  type="button"
-                  aria-label={`Retire ${post.name}`}
-                  title={post.used_in_ladders > 0
-                    ? `On ${post.used_in_ladders} chain(s)` : "Retire"}
-                  onClick={() => retire.mutate(post.id)}
-                  className="grid h-11 w-8 shrink-0 place-items-center text-muted hover:text-bad"
-                >
-                  <X size={15} />
-                </button>
+                {post.is_active === false ? (
+                  <button
+                    type="button"
+                    onClick={() => restore.mutate(post)}
+                    className="h-11 shrink-0 px-2 text-xs font-medium text-brand hover:underline"
+                  >
+                    Restore
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    aria-label={`Retire ${post.name}`}
+                    /* Asked first. Retiring is one click on a bare X and it takes the
+                     * chair out of every chain that names it — silently, because a
+                     * retired rung is skipped at submit time rather than refused. */
+                    title={post.used_in_ladders > 0
+                      ? `On ${post.used_in_ladders} chain(s)` : "Retire"}
+                    onClick={() => {
+                      const used = post.used_in_ladders > 0
+                        ? ` It is on ${post.used_in_ladders} chain(s), which will skip this step.`
+                        : "";
+                      if (window.confirm(`Retire ${post.name}?${used}`)) {
+                        retire.mutate(post.id);
+                      }
+                    }}
+                    className="grid h-11 w-8 shrink-0 place-items-center text-muted hover:text-bad"
+                  >
+                    <X size={15} />
+                  </button>
+                )}
               </li>
             ))}
           </ul>

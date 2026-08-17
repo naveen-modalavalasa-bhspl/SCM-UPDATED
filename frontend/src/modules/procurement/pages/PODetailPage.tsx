@@ -1,9 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Send, X } from "lucide-react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import {
+  Button, Can, Card, Field, Input, PageHeader, StatusPill, useToast,
+} from "@/shared/components";
 import { poApi } from "../api";
+import {
+  blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue,
+} from "../components/POHeaderFields";
 import { alerts } from "@/modules/alerts";
 import { fmtDate } from "@/shared/datetime";
 
@@ -17,11 +22,17 @@ export function PODetailPage() {
   const { id } = useParams();
   const poId = Number(id);
   const nav = useNavigate();
+  const toast = useToast();
   const qc = useQueryClient();
   const [params] = useSearchParams();
   const approvalView = params.get("approval") === "1";
   const decisionView = params.get("decision") === "1";
   const [comments, setComments] = useState("");
+  // The header a draft order can still be given: project, remarks, the four terms,
+  // the two addresses, discount and freight. An order written from a won tender
+  // arrives with none of them — the quotation never carried any — so this is where a
+  // buyer says what was actually agreed before sending it up for approval.
+  const [header, setHeader] = useState<POHeaderValue>(blankPOHeader());
 
   const po = useQuery({
     queryKey: ["purchase-order", poId],
@@ -33,6 +44,20 @@ export function PODetailPage() {
     qc.invalidateQueries({ queryKey: ["pos"] });
     qc.invalidateQueries({ queryKey: ["approvals"] });
   };
+
+  useEffect(() => {
+    if (po.data) setHeader(poHeaderFrom(po.data));
+  }, [po.data]);
+
+  /** DRAFT only, server-side too: past that the order is in approval or has been sent,
+   *  and a term that changes after somebody signed it is a different agreement. */
+  const saveHeader = useMutation({
+    mutationFn: () => poApi.update(poId, poHeaderPayload(header)),
+    onSuccess: () => {
+      toast.success("Order details saved");
+      refresh();
+    },
+  });
 
   const decide = useMutation({
     mutationFn: (action: "approve" | "reject") => action === "approve"
@@ -99,6 +124,7 @@ export function PODetailPage() {
   // status is the real gate — and the engine still refuses anyone who is not the
   // current approver, so this widens the doorway, never the authority.
   const canDecide = po.data.status === "PENDING_APPROVAL";
+  const isDraft = po.data.status === "DRAFT";
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
   const busy = submit.isPending || send.isPending || decide.isPending;
 
@@ -163,6 +189,31 @@ export function PODetailPage() {
         </tr>)}</tbody>
       </table>
     </div>
+
+    {/* Fill in what the chain could not: an order raised from an award knows the
+      * money and nothing that was agreed in words. Draft only, and gated on po.edit —
+      * hiding it is not the guard, the endpoint refuses a non-draft either way. */}
+    {isDraft && <Can do="po.edit">
+      <Card className="mt-4 space-y-4 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-ink">Order details</h2>
+          <Button
+            variant="subtle"
+            disabled={saveHeader.isPending}
+            onClick={() => saveHeader.mutate()}
+          >
+            {saveHeader.isPending ? "Saving…" : "Save details"}
+          </Button>
+        </div>
+        {saveHeader.error && (
+          <p className="text-sm text-danger">{(saveHeader.error as Error).message}</p>
+        )}
+        <POHeaderFields
+          value={header}
+          onChange={(patch) => setHeader({ ...header, ...patch })}
+        />
+      </Card>
+    </Can>}
 
     {/* What the order comes to: the lines summed, then the money that belongs to the
       * document rather than to any line. Same arithmetic the server stored —

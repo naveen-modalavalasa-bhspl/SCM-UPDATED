@@ -3,9 +3,10 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill,
-  useToast, type Column,
+  Button, Can, Card, ErrorBanner, Input, PageHeader, ResponsiveList, Select,
+  StatusPill, useToast, type Column,
 } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { poApi, rfqApi } from "../api";
 import { QuotationComparison } from "../components/QuotationComparison";
@@ -32,6 +33,11 @@ export function RFQDetailPage() {
   });
 
   const published = ["PUBLISHED", "CLOSED", "AWARDED"].includes(rfq?.status ?? "");
+
+  // Editable only while nobody outside has seen it, and only for the person who signs
+  // it. The endpoint enforces both again — hiding the boxes is courtesy, not the guard.
+  const { can } = useAuth();
+  const editableQty = rfq?.status === "PENDING_APPROVAL" && can("rfq.approve");
 
   // Previewing a different ranking is a query parameter, not a save: looking at the
   // quotes another way is not choosing one, so the RFQ's own method is untouched
@@ -64,6 +70,20 @@ export function RFQDetailPage() {
     queryClient.invalidateQueries({ queryKey: ["rfq-comparison", id] });
     toast.success(message);
   };
+
+  // The approver's own edit: how much, and nothing else. `rfq.approve` reaches it —
+  // the buyer's Edit screen needs `rfq.create`, which an approver rarely holds, and
+  // the deadline, the vendors and the item list are not theirs to change anyway.
+  const [qtyEdits, setQtyEdits] = useState<Record<number, string>>({});
+  const saveQuantities = useMutation({
+    mutationFn: () => rfqApi.setQuantities(
+      rfqId,
+      Object.entries(qtyEdits)
+        .filter(([, value]) => value !== "" && Number(value) > 0)
+        .map(([lineId, value]) => ({ id: Number(lineId), quantity: Number(value) })),
+    ),
+    onSuccess: () => { setQtyEdits({}); refresh("Quantities updated")(); },
+  });
 
   const submit = useMutation({ mutationFn: () => rfqApi.submit(rfqId), onSuccess: refresh("Sent for approval") });
   const approve = useMutation({ mutationFn: () => rfqApi.approve(rfqId), onSuccess: refresh("Approved — vendors can now see it") });
@@ -120,7 +140,16 @@ export function RFQDetailPage() {
       key: "qty",
       header: "Quantity",
       className: "text-right",
-      render: (r) => `${r.quantity} ${r.uom_code ?? ""}`.trim(),
+      render: (r) => (editableQty ? (
+        <div className="flex items-center justify-end gap-2">
+          <Input
+            type="number" min="0" step="0.001" className="w-28"
+            value={qtyEdits[r.id] ?? String(r.quantity)}
+            onChange={(e) => setQtyEdits({ ...qtyEdits, [r.id]: e.target.value })}
+          />
+          <span className="text-xs text-muted">{r.uom_code ?? ""}</span>
+        </div>
+      ) : `${r.quantity} ${r.uom_code ?? ""}`.trim()),
     },
     {
       key: "needed",
@@ -333,10 +362,28 @@ export function RFQDetailPage() {
           renderCard={(r) => (
             <div className="space-y-1">
               <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
-              <div className="text-xs text-muted">{r.quantity} {r.uom_code ?? ""}</div>
+              <div className="text-xs text-muted">
+                {r.quantity} {r.uom_code ?? ""}
+                {r.required_date ? ` · needed by ${fmtDate(r.required_date)}` : ""}
+              </div>
             </div>
           )}
         />
+        {editableQty && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line p-3">
+            <p className="text-xs text-muted">
+              Change what is being asked for before you sign. The quantities are frozen
+              once the RFQ is published — the vendors have seen them by then.
+            </p>
+            <Button
+              variant="subtle"
+              disabled={saveQuantities.isPending || Object.keys(qtyEdits).length === 0}
+              onClick={() => saveQuantities.mutate()}
+            >
+              {saveQuantities.isPending ? "Saving…" : "Save quantities"}
+            </Button>
+          </div>
+        )}
       </Card>
 
       <h2 className="mb-2 text-sm font-semibold text-ink">Vendors asked</h2>

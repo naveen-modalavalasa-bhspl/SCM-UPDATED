@@ -180,6 +180,12 @@ class InstanceStatus(str, Enum):
 class ApproverType(str, Enum):
     POSITION = "POSITION"
     ROLE = "ROLE"
+    # A RANK that is NOT on the raiser's reporting line — the SCM Head, the Indent
+    # Team, the PO desk. ROLE is climbed upward from whoever raised the document;
+    # ROLE_ANY is a chair the whole company shares, so its holders are read directly.
+    # Without it those ranks could be ticked and would then resolve to nobody, because
+    # a field store keeper's line tops out at his own SPH and never reaches them.
+    ROLE_ANY = "ROLE_ANY"
     SPECIFIC_USER = "SPECIFIC_USER"
     DEPT_HEAD = "DEPT_HEAD"
     REPORTING_MANAGER = "REPORTING_MANAGER"

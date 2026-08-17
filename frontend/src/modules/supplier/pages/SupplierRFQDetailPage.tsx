@@ -16,7 +16,11 @@ interface QuoteLine {
   item_name: string;
   item_code: string;
   uom_code: string;
-  quantity: number;
+  /** What the vendor says they can supply. Typed, so it can be short of the ask. */
+  quantity: string;
+  /** What the RFQ asked for — the ceiling, and what the buyer will compare against. */
+  requested: number;
+  required_date?: string | null;
   rate: string;
   discount_percent: string;
   cgst_rate: string;
@@ -81,7 +85,9 @@ export function SupplierRFQDetailPage() {
       item_name: item.item_name ?? `Item ${item.item_id}`,
       item_code: item.item_code ?? "—",
       uom_code: item.uom_code ?? "",
-      quantity: Number(item.quantity),
+      quantity: String(item.quantity),
+      requested: Number(item.requested_quantity ?? item.quantity),
+      required_date: item.required_date,
       rate: String(item.rate ?? 0),
       discount_percent: String(item.discount_percent ?? 0),
       // Opens at the notified rate. That is what is normally charged, so the vendor
@@ -122,7 +128,7 @@ export function SupplierRFQDetailPage() {
     let sub = 0;
     let tax = 0;
     for (const line of lines) {
-      const gross = line.quantity * Number(line.rate || 0);
+      const gross = Number(line.quantity || 0) * Number(line.rate || 0);
       const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
       sub += net;
       tax += (net * taxRate(line)) / 100;
@@ -147,6 +153,7 @@ export function SupplierRFQDetailPage() {
         // on the wrong side is a vendor charging something they cannot charge.
         lines: lines.map((line) => ({
           rfq_item_id: line.rfq_item_id,
+          quantity: Number(line.quantity || 0),
           rate: Number(line.rate || 0),
           discount_percent: Number(line.discount_percent || 0),
           tax_percent: taxRate(line),
@@ -224,21 +231,36 @@ export function SupplierRFQDetailPage() {
         {isLoading && <p className="text-sm text-muted">Loading…</p>}
 
         {lines.map((line, index) => {
-          const gross = line.quantity * Number(line.rate || 0);
+          const gross = Number(line.quantity || 0) * Number(line.rate || 0);
           const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
           const limit = ceiling(line);
           const over = limit != null && taxRate(line) > limit + 1e-9;
+          const short = Number(line.quantity || 0) < line.requested;
           const taxed = net + (net * taxRate(line)) / 100;
           return (
             <div key={line.rfq_item_id} className="rounded-xl border border-line p-3">
               <div className="mb-3">
                 <div className="text-sm font-medium text-ink">{line.item_name}</div>
                 <div className="font-mono text-[11px] text-muted">
-                  {line.item_code} · {line.quantity} {line.uom_code}
+                  {line.item_code} · asked {line.requested} {line.uom_code}
+                  {line.required_date ? ` · needed by ${fmtDate(line.required_date)}` : ""}
                   {line.hsn_code ? ` · HSN ${line.hsn_code}` : ""}
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
+                {/* Short is an ordinary answer — say what you can actually supply. More
+                  * than was asked for is refused by the server: a quotation answers a
+                  * request, it does not enlarge it. */}
+                <Field
+                  label="Quantity"
+                  hint={short ? `${line.requested} asked for` : undefined}
+                >
+                  <Input
+                    type="number" min="0" step="0.001" max={line.requested}
+                    value={line.quantity} disabled={!open}
+                    onChange={(e) => set(index, { quantity: e.target.value })}
+                  />
+                </Field>
                 <Field label="Rate">
                   <Input
                     type="number" min="0" step="0.01" value={line.rate} disabled={!open}

@@ -27,6 +27,10 @@ export interface OrgValue {
   warehouseId: number | "";
   projectId: number | "";
   companyName: string;
+  /** The selected warehouse's name, as the source document already recorded it.
+   *  Carried so the box can show what is selected before the search that would
+   *  contain it has been typed — see `warehouseOptions` below. */
+  warehouseName?: string;
 }
 
 interface NamedRow { id: number; code?: string | null; name: string }
@@ -84,9 +88,21 @@ export function OrgFields({
 
   // The selected warehouse may not be in the current search result — keep its option
   // present or the box would blank itself the moment the query changes.
-  const warehouseOptions = warehouses.map((w) => ({
-    value: w.id, label: w.code ? `${w.code} — ${w.name}` : w.name,
-  }));
+  //
+  // That is also why a warehouse carried from a requisition looked like it had not
+  // arrived: there are 983 stocking points, the first page of 50 rarely holds the one
+  // the document names, and a Select with a value that matches no option renders the
+  // placeholder. The value was there and saved correctly all along — the box just had
+  // nothing to draw. The document's own snapshot fills that in.
+  const selected = warehouses.find((w) => w.id === value.warehouseId);
+  const warehouseOptions = [
+    ...(value.warehouseId !== "" && !selected
+      ? [{ value: value.warehouseId, label: value.warehouseName || "Selected warehouse" }]
+      : []),
+    ...warehouses.map((w) => ({
+      value: w.id, label: w.code ? `${w.code} — ${w.name}` : w.name,
+    })),
+  ];
 
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

@@ -28,8 +28,8 @@ from app.modules.procurement.models import (
     RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor, VendorUser,
 )
 from app.modules.procurement.schemas import (
-    AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, QuoteSubmit, ReqCreate,
-    RFQCreate, RFQUpdate, VendorAccountIn,
+    AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, POHeaderUpdate, QuoteSubmit,
+    ReqCreate, RFQCreate, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
 )
 from app.modules.procurement import consolidation
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
@@ -645,6 +645,45 @@ async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
     if not po:
         raise NotFoundError(f"PO {po_id} not found")
     return po
+
+
+async def update_po_header(db: AsyncSession, po_id: int,
+                           data: POHeaderUpdate, user) -> PurchaseOrder:
+    """Fill in a DRAFT order's header — terms, addresses, project, discount, freight.
+
+    An order written by the chain arrives right on the money and silent on everything
+    a buyer negotiates in words, because the quotation it came from never carried any
+    of it. Until now only a hand-typed PO could say those things, so a PO raised from
+    an award printed blank and the buyer had nowhere to put what was agreed.
+
+    DRAFT only. Past that the order is in approval or has been sent to the vendor, and
+    a term that changes after somebody signed it is a different agreement — the way
+    back is reject and re-raise, which is the audit trail doing its job.
+
+    The totals are recomputed from the stored lines, never from the caller: this route
+    can move discount and freight and must never be able to move a rate.
+    """
+    po = await get_po(db, po_id, user)
+    if po.status != POStatus.DRAFT.value:
+        raise ValidationError(
+            f"Only a draft purchase order can be edited (this one is {po.status})")
+
+    if data.expected_date is not None:
+        po.expected_date = data.expected_date
+    if data.remarks is not None:
+        po.remarks = data.remarks
+    await _apply_po_header(db, po, data)
+
+    sub_total = tax_total = Decimal("0")
+    for line in po.items:
+        amount = _d(line.amount)
+        sub_total += amount
+        tax_total += amount * _d(line.tax_percent or 0) / _d(100)
+    _apply_po_totals(po, sub_total, tax_total)
+
+    await db.commit()
+    logger.info("purchase order %s header edited by %s", po.po_no, user.full_name)
+    return await get_po(db, po_id, user)
 
 
 async def list_pos(db: AsyncSession, params: PageParams, status: str | None = None,
@@ -1433,6 +1472,46 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
     return await get_rfq(db, rfq_id)
 
 
+async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
+                             data: RFQQuantitiesIn, user) -> RFQ:
+    """Trim the quantities on a tender that is waiting to be signed.
+
+    The approver's own edit. `update_rfq` cannot be it: that route needs `rfq.create`,
+    which an approver does not hold, and it rewrites the whole document — deadline,
+    vendors, item list — none of which is theirs to change. Approving is a decision
+    about HOW MUCH, so how much is the one thing that moves here.
+
+    Allowed while the RFQ is still DRAFT or PENDING_APPROVAL, and never once it is
+    PUBLISHED: past that a vendor has been shown the quantity and may already have
+    quoted against it. Every change is logged with who made it.
+    """
+    rfq = await get_rfq(db, rfq_id, user)
+    EDITABLE = (RFQStatus.DRAFT.value, RFQStatus.PENDING_APPROVAL.value)
+    if rfq.status not in EDITABLE:
+        raise ValidationError(
+            f"Quantities can only be changed before an RFQ is published "
+            f"(this one is {rfq.status})")
+
+    by_id = {line.id: line for line in rfq.items}
+    changes: list[str] = []
+    for incoming in data.lines:
+        line = by_id.get(incoming.id)
+        if line is None:
+            raise ValidationError(f"Line {incoming.id} is not on {rfq.rfq_no}")
+        was = _d(line.quantity)
+        now = _d(incoming.quantity)
+        if was == now:
+            continue
+        line.quantity = now
+        changes.append(f"{line.item_code or line.item_id}: {was} -> {now}")
+
+    if changes:
+        logger.info("%s quantities changed by %s (%s)",
+                    rfq.rfq_no, user.full_name, "; ".join(changes))
+    await db.commit()
+    return await get_rfq(db, rfq_id, user)
+
+
 async def submit_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
     rfq = await get_rfq(db, rfq_id, user)
     if rfq.status != RFQStatus.DRAFT.value:
@@ -1983,11 +2062,19 @@ async def _attach_tax_context(db: AsyncSession, quote: Quotation) -> dict[int, d
     company_gstin = await _company_gstin(db)
     region = tax_region(company_gstin, getattr(vendor, "gstin", None))
     ceilings = await _hsn_ceilings(db, [line.item_id for line in quote.items])
+    # What the tender actually asked for. Read here rather than trusted off the quote:
+    # `QuotationItem.quantity` is the vendor's answer and may be short of the request.
+    asked = {row.id: row for row in (await db.execute(
+        select(RFQItem).where(RFQItem.rfq_id == quote.rfq_id)
+    )).scalars().all()}
 
     quote.tax_region = region
     quote.company_gstin = company_gstin
     quote.vendor_gstin = getattr(vendor, "gstin", None)
     for line in quote.items:
+        source = asked.get(line.rfq_item_id)
+        line.requested_quantity = float(source.quantity if source else line.quantity)
+        line.required_date = source.required_date if source else None
         limits = ceilings.get(line.item_id)
         line.hsn_code = limits["hsn_code"] if limits else None
         # No HSN means no ceiling — the field stays open rather than closing to zero.
@@ -2063,9 +2150,21 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
         if line is None:
             raise ValidationError(
                 f"Line {incoming.rfq_item_id} is not on this RFQ")
+        label = line.item_name or line.item_code or f"line {index}"
         cgst, sgst, igst = _checked_gst(
-            incoming, interstate, ceilings.get(line.item_id),
-            line.item_name or line.item_code or f"line {index}")
+            incoming, interstate, ceilings.get(line.item_id), label)
+        # What they can supply. Short is an ordinary answer — a vendor with 6 of the 10
+        # asked for should be able to say so instead of promising 10 — but more is not:
+        # the PO rolls its quantities back onto the requisition and the material
+        # request behind it, and an offer larger than the request would over-order both.
+        if incoming.quantity is not None:
+            offered = _d(incoming.quantity)
+            requested = _d(getattr(line, "requested_quantity", None) or line.quantity)
+            if offered > requested:
+                raise ValidationError(
+                    f"{label}: {offered} is more than the {requested} asked for. "
+                    "Quote for that quantity or less.")
+            line.quantity = offered
         line.line_no = index
         line.rate = _d(incoming.rate)
         line.discount_percent = _d(incoming.discount_percent)
@@ -2108,6 +2207,10 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
         invited.status = quote.status
     await db.commit()
     await db.refresh(quote)
+    # The derived fields are transient and a refresh drops them. Re-read, so the reply
+    # to a submission says the same thing a fresh GET would — including what was asked
+    # for, which the screen draws the vendor's own quantity against.
+    await _attach_tax_context(db, quote)
     return quote
 
 

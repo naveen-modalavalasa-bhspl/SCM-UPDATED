@@ -399,11 +399,15 @@ export interface LadderPost {
 }
 
 /** How a step finds its approver.
- *  - `hcm`   — a post in the HCM mirror.
- *  - `local` — a chair this system owns, for the steps HCM has no post for.
- *  - `rank`  — climbed from the raiser's own reporting line, so who signs depends on
- *              who raised it. */
-export type StepKind = "hcm" | "local" | "rank";
+ *  - `hcm`         — a post in the HCM mirror.
+ *  - `local`       — a chair this system owns, for the steps HCM has no post for.
+ *  - `rank`        — climbed from the raiser's own reporting line, so who signs
+ *                    depends on who raised it.
+ *  - `shared_rank` — a rank held OUTSIDE the raiser's line: SCM Head, Indent Team,
+ *                    the PO desk. Everyone holding it signs, with no climbing —
+ *                    climbing to it is impossible, which is why these chairs used to
+ *                    have to be invented locally. */
+export type StepKind = "hcm" | "local" | "rank" | "shared_rank";
 
 export interface CustomLadderStep {
   sequence: number;
@@ -492,6 +496,9 @@ export interface FlowRung {
   members?: LadderHolder[];
   position_count?: number;
   people_count?: number;
+  /** Who actually holds a shared chair. Named because these rungs resolve to people
+   *  now, not to whoever turns out to be above a future raiser. */
+  people?: string[];
   /** How high this rank sits in the reporting tree — smaller is higher. Only ranks
    *  carry it; it orders the "when raised by" picker and decides which steps a copy
    *  across ranks drops. */
@@ -501,6 +508,8 @@ export interface FlowRung {
 export interface FlowRungs {
   local: FlowRung[];
   ranks: FlowRung[];
+  /** Ranks whose holders sit in another project — the company-wide chairs. */
+  shared_ranks: FlowRung[];
   hcm: FlowRung[];
 }
 

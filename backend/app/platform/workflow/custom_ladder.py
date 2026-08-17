@@ -133,6 +133,14 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str,
         db, [row.position_id for row in rows if row.position_id], None)
     local_seats = await posts.members_of(
         db, [row.post_id for row in rows if row.post_id])
+    # A shared-chair rung DOES have a fixed answer — everyone holding that rank — so it
+    # is read here like any other chair. Only a climbed rank has no answer until a
+    # document exists.
+    shared_seats = {
+        row.position_role_id: await ladder.rank_any_holders(db, row.position_role_id)
+        for row in rows
+        if row.approver_type == ApproverType.ROLE_ANY.value and row.position_role_id
+    }
     in_flight = (await db.execute(
         select(func.count(Instance.id)).where(
             Instance.workflow_id == wf.id,
@@ -154,12 +162,20 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str,
         if row.position_id is not None:
             return [{"id": h.id, "name": h.full_name, "code": h.emp_code}
                     for h in holders_of.get(row.position_id, [])]
+        if row.approver_type == ApproverType.ROLE_ANY.value:
+            return shared_seats.get(row.position_role_id, [])
         return []
 
     warnings: list[str] = []
     by_employee: dict[int, tuple[str, list[str]]] = {}
+    def _is_climbed(row: Stage) -> bool:
+        """Only a ROLE rung is answered at submit time. A ROLE_ANY rung names a chair
+        whose holders are known now, so it counts as fixed everywhere below."""
+        return (row.position_role_id is not None
+                and row.approver_type != ApproverType.ROLE_ANY.value)
+
     for row in rows:
-        if row.position_role_id is not None:
+        if _is_climbed(row):
             continue
         for seat in _seats(row):
             entry = by_employee.setdefault(seat["id"], (seat["name"], []))
@@ -179,7 +195,7 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str,
     try:
         # A rank rung is exempt: it is answered by climbing at submit time, so having
         # nobody attached to it now says nothing about whether it will resolve.
-        fixed_rows = [row for row in rows if row.position_role_id is None]
+        fixed_rows = [row for row in rows if not _is_climbed(row)]
         empty = [row.name or str(row.position_id or row.post_id) for row in fixed_rows
                  if not _seats(row)]
         if empty:
@@ -215,14 +231,16 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str,
             "position_role_id": row.position_role_id,
             # What the screen renders as the step's kind: "rank" is answered by
             # climbing, the other two name a chair outright.
-            "kind": ("rank" if row.position_role_id is not None
+            "kind": ("shared_rank"
+                     if row.approver_type == ApproverType.ROLE_ANY.value
+                     else "rank" if row.position_role_id is not None
                      else "local" if row.post_id is not None else "hcm"),
             "name": row.name,
             "holders": _seats(row)[:8],
             # Nobody sits in this chair any more — it will be skipped at submit rather
             # than stranding the document, but the admin should know. Never true of a
             # rank rung, which has no fixed holder to be missing.
-            "is_dead": row.position_role_id is None and not _seats(row),
+            "is_dead": not _is_climbed(row) and not _seats(row),
         } for row in rows],
     }
 
@@ -335,6 +353,30 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
                 chain.append(rung)
             continue
 
+        # A shared chair: a rank that is NOT on the raiser's reporting line. Read
+        # straight off its holders — climbing to it is impossible by construction, and
+        # that is exactly why these rungs were being invented as local posts before HCM
+        # created the real ones.
+        if stage.approver_type == ApproverType.ROLE_ANY.value and stage.position_role_id:
+            people = await ladder.rank_any_holders(
+                db, stage.position_role_id, exclude_id)
+            if not people:
+                logger.info("Rung %r skipped: nobody holds rank %s",
+                            stage.name, stage.position_role_id)
+                continue
+            chain.append({
+                "sequence": len(chain) + 1,
+                "position_id": None,
+                "position_name": stage.name,
+                "role_id": stage.position_role_id,
+                "role_name": stage.name or f"Rank {stage.position_role_id}",
+                "approver_ids": [person["id"] for person in people],
+                "approver_names": [person["name"] for person in people],
+                # No hat restriction: the chair IS the rank, so holding it is the gate.
+                "allowed_position_ids": [],
+            })
+            continue
+
         # A RANK rung inside a hand-built ladder: climb the raiser's own reporting line
         # and keep the ancestors holding this rank. Delegated to ladder.resolve_chain
         # so there is exactly one implementation of climbing, and spliced in here so a
@@ -378,6 +420,23 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
 
 
 # ---------------- saving ----------------
+
+async def _rank_approver_type(db: AsyncSession, role_id: int,
+                              project_id: int | None) -> str:
+    """ROLE if the rank is climbable from this project, ROLE_ANY if it is a chair.
+
+    Decided here rather than asked of the caller: whether a rank sits on the raiser's
+    line is a fact about the org, not a choice the admin should have to understand. A
+    rank held by this project's own people is climbed to exactly as before; one held
+    only elsewhere — SCM HEAD, INDENT TEAM, the PO desk — is a shared chair, and
+    climbing to it would resolve to nobody every time.
+    """
+    if project_id is None:
+        return ApproverType.ROLE.value
+    mine = {rank["role_id"] for rank in await ladder.project_ranks(db, project_id)}
+    return (ApproverType.ROLE.value if role_id in mine
+            else ApproverType.ROLE_ANY.value)
+
 
 async def save_custom(db: AsyncSession, data, user) -> dict:
     """Write version N+1 and retire every workflow live for this scope.
@@ -498,7 +557,9 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
             # POSITION for a chair known before any document exists — an HCM post or a
             # local one. A rank rung is ROLE: which chair it means depends on who
             # raised the document, so it can only be answered at submit time.
-            approver_type=(ApproverType.ROLE.value if step.position_role_id is not None
+            approver_type=(await _rank_approver_type(db, step.position_role_id,
+                                                     data.project_id)
+                           if step.position_role_id is not None
                            else ApproverType.POSITION.value),
             position_id=step.position_id,
             post_id=step.post_id,

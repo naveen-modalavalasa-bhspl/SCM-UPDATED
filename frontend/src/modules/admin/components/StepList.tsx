@@ -14,6 +14,7 @@ const KIND_LABEL: Record<StepKind, string> = {
   local: "Post",
   hcm: "HCM post",
   rank: "Reporting line",
+  shared_rank: "Shared chair",
 };
 
 export function stepKind(step: CustomLadderStep): StepKind {

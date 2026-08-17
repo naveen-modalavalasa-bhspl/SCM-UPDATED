@@ -399,6 +399,10 @@ export interface QuoteItem {
   max_cgst_rate?: number | null;
   max_sgst_rate?: number | null;
   max_igst_rate?: number | null;
+  /** What the RFQ line asked for, and when it is wanted. `quantity` above is the
+   *  vendor's ANSWER and may be short of it. */
+  requested_quantity?: number | null;
+  required_date?: string | null;
 }
 
 export interface QuoteListRow {
@@ -450,6 +454,8 @@ export interface QuoteSubmit {
   remarks?: string | null;
   lines: {
     rfq_item_id: number;
+    /** What the vendor can supply. Omit to accept the quantity asked for; never more. */
+    quantity?: number | null;
     rate: number;
     discount_percent?: number;
     tax_percent?: number;

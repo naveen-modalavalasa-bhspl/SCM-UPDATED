@@ -524,6 +524,13 @@ async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> d
     """
     local = (await posts.list_posts(db))["items"]
     ranks = await ladder.project_ranks(db, project_id)
+    # The shared chairs HCM has since created — SCM HEAD, INDENT TEAM, P O, CPO,
+    # DIRECTOR — every one of them seated out of the SUPPLY CHAIN MANAGEMENT and H O
+    # projects. They are ranks like any other, but they are not on a field raiser's
+    # reporting line, so they are listed apart and saved as ROLE_ANY: read straight off
+    # their holders instead of climbed to. Listing them beside the climbable ranks is
+    # what would put a rung on a chain that resolves to nobody.
+    shared = await ladder.company_ranks(db, project_id)
 
     hcm: list[dict] = []
     term = (search or "").strip()
@@ -552,5 +559,12 @@ async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> d
                    "position_count": rank.get("position_count", 0),
                    "people_count": rank.get("holder_count", 0),
                    "depth": rank.get("depth", 0)} for rank in ranks],
+        # Same shape, different bucket. `people` is who would actually sign, which the
+        # admin needs to see: these rungs name a chair rather than a step up the line.
+        "shared_ranks": [{"id": rank["role_id"], "name": rank["role_name"],
+                          "position_count": rank.get("position_count", 0),
+                          "people_count": rank.get("holder_count", 0),
+                          "people": [p["name"] for p in rank.get("holders", [])]}
+                         for rank in shared],
         "hcm": hcm,
     }

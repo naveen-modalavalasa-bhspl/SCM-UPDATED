@@ -266,8 +266,13 @@ export const adminApi = {
   },
   // ---- the chairs this system owns, for the steps HCM has no post for ----
   approvalPosts: {
-    list: () => api.get<{ items: ApprovalPost[] }>("/api/workflow/posts")
-      .then((r) => r.data.items),
+    /** `includeInactive` brings back the retired chairs. Without it a post retired by
+     *  a stray click vanishes from this drawer AND from the rung picker, with no way
+     *  back through the UI — which is how every post ended up unreachable. */
+    list: (includeInactive = false) =>
+      api.get<{ items: ApprovalPost[] }>("/api/workflow/posts", {
+        params: { include_inactive: includeInactive },
+      }).then((r) => r.data.items),
     /** Job profiles a post can carry. Seating someone in the post then grants it,
      *  so access follows the chair instead of being handed out per person. */
     profiles: () =>

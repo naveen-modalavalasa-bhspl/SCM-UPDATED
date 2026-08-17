@@ -39,6 +39,17 @@ class POCreate(POHeaderIn):
     lines: list[POLineIn]
 
 
+class POHeaderUpdate(POHeaderIn):
+    """Fill in a DRAFT order's header after it was written for you.
+
+    An order raised from an award arrives complete on the money and empty on
+    everything a buyer negotiates in words — terms, addresses, the project it is
+    booked to. Typing them was only possible on a hand-raised PO, so a PO that came
+    off the chain printed blank. Same fields, same permission, DRAFT only.
+    """
+    expected_date: date | None = None
+
+
 class POFromQuotationIn(POHeaderIn):
     """Everything the awarded quotation does NOT already say.
 
@@ -263,6 +274,25 @@ class RFQCreate(BaseModel):
     lines: list[RFQLineIn] = Field(min_length=1)
 
 
+class RFQQuantityIn(BaseModel):
+    """One line's quantity, by RFQ line id."""
+    id: int
+    quantity: float = Field(gt=0)
+
+
+class RFQQuantitiesIn(BaseModel):
+    """What the approver is sending back down: quantities only.
+
+    A separate body from `RFQUpdate` on purpose. An approver holds `rfq.approve`, not
+    `rfq.create`, so they cannot reach the editing route at all — and they should not:
+    the deadline, the vendor list and the item list are the buyer's. The one thing a
+    person signing a tender genuinely needs to change is HOW MUCH, and that is all
+    this carries.
+    """
+    lines: list[RFQQuantityIn] = Field(min_length=1)
+    comments: str = ""
+
+
 class RFQUpdate(BaseModel):
     """Every field optional: this is a PATCH in a PUT's clothing, because the RFQ
     form saves the whole header and the caller should not have to resend the lines
@@ -447,6 +477,10 @@ class VendorInviteOut(BaseModel):
 
 class QuoteLineIn(BaseModel):
     rfq_item_id: int
+    # What the vendor can actually supply. Optional: say nothing and the quantity asked
+    # for stands. It may never be MORE than was asked — a quotation is an answer to a
+    # request, and a vendor cannot enlarge the order they were invited to.
+    quantity: float | None = Field(default=None, gt=0)
     rate: float = Field(ge=0)
     discount_percent: float = Field(ge=0, le=100, default=0)
     tax_percent: float = Field(ge=0, default=0)
@@ -494,6 +528,12 @@ class QuoteItemOut(BaseModel):
     max_cgst_rate: float | None = None
     max_sgst_rate: float | None = None
     max_igst_rate: float | None = None
+    # What the RFQ line asked for, and when it is wanted. Read off the RFQ at request
+    # time rather than copied: `quantity` above is the vendor's ANSWER and may be
+    # short, so without this the buyer cannot see that the offer covers only part of
+    # what was requested.
+    requested_quantity: float | None = None
+    required_date: date | None = None
 
 
 class QuoteListRow(BaseModel):

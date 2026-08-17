@@ -47,6 +47,7 @@ export function RequisitionFormPage() {
     setOrg({
       departmentId: existing.department_id ?? "",
       warehouseId: existing.warehouse_id ?? "",
+      warehouseName: existing.warehouse_name ?? "",
       projectId: existing.project_id ?? "",
       companyName: existing.company_name ?? "",
     });
