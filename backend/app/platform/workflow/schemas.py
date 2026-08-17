@@ -130,7 +130,33 @@ class CustomLadderStepIn(BaseModel):
 class CustomLadderIn(LadderPolicyMixin):
     project_id: int | None = None
     doc_type: str
+    # The RANK of raiser this chain serves (hcm_positions.role_id). None is the chain
+    # everybody else uses, and is what every chain saved before this existed carries.
+    raiser_role_id: int | None = None
     steps: list[CustomLadderStepIn] = Field(default_factory=list)
+
+
+class FlowCopyIn(BaseModel):
+    """Copy one saved chain onto other projects, other raiser ranks, or both.
+
+    Separate from `LadderCopyIn` because the Approval Flow screen copies a chain
+    verbatim (its steps are already portable) while the rank ladder's copy matches by
+    level. `drop_steps_at_or_below` is what makes a copy across ranks meaningful: an
+    OE's ladder should not contain the Store Keeper step it was copied from, because
+    the OE is above it.
+    """
+    from_project_id: int | None = None
+    from_raiser_role_id: int | None = None
+    doc_type: str
+    to_project_ids: list[int] = Field(default_factory=list)
+    to_raiser_role_ids: list[int] = Field(default_factory=list)
+    drop_steps_at_or_below: bool = True
+
+    @model_validator(mode="after")
+    def _somewhere_to_copy_to(self):
+        if not self.to_project_ids and not self.to_raiser_role_ids:
+            raise ValueError("Pick at least one project or rank to copy to")
+        return self
 
 
 class ApprovalPostIn(BaseModel):

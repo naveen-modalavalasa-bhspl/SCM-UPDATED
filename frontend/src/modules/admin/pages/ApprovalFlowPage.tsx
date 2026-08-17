@@ -13,11 +13,26 @@ import { Button, Card, ErrorBanner, PageHeader, Select } from "@/shared/componen
 import { adminApi } from "../api";
 import type { FlowRow } from "../types";
 import { PostsDrawer } from "../components/PostsDrawer";
+import { JourneyPanel } from "../components/JourneyPanel";
+
+/** The project picked here is remembered across visits. An admin configures one
+ *  project's chains document by document, and coming back to "All projects" after every
+ *  save meant re-picking it a dozen times in a row. */
+const PROJECT_KEY = "approval-flow.project";
 
 export function ApprovalFlowPage() {
   const navigate = useNavigate();
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const [projectId, setProjectId] = useState<number | null>(() => {
+    const saved = localStorage.getItem(PROJECT_KEY);
+    return saved ? Number(saved) : null;
+  });
   const [showPosts, setShowPosts] = useState(false);
+
+  function pickProject(next: number | null) {
+    setProjectId(next);
+    if (next == null) localStorage.removeItem(PROJECT_KEY);
+    else localStorage.setItem(PROJECT_KEY, String(next));
+  }
 
   const options = useQuery({
     queryKey: ["ladder-options"],
@@ -39,6 +54,13 @@ export function ApprovalFlowPage() {
   }, [overview.data]);
 
   const unset = (overview.data?.items ?? []).filter((row) => !row.is_configured).length;
+  const projectName = (options.data?.projects ?? [])
+    .find((project) => project.id === projectId)?.name ?? null;
+
+  function openChain(code: string) {
+    navigate(`/admin/approval-flow/${code}`
+      + (projectId != null ? `?project=${projectId}` : ""));
+  }
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -58,7 +80,7 @@ export function ApprovalFlowPage() {
             ariaLabel="Project"
             value={projectId ?? ""}
             placeholder="All projects"
-            onChange={(value) => setProjectId(value ? Number(value) : null)}
+            onChange={(value) => pickProject(value ? Number(value) : null)}
             options={[
               { value: "", label: "All projects" },
               ...(options.data?.projects ?? []).map((p) => ({
@@ -88,10 +110,7 @@ export function ApprovalFlowPage() {
                   <button
                     key={row.code}
                     type="button"
-                    onClick={() => navigate(
-                      `/admin/approval-flow/${row.code}`
-                      + (projectId != null ? `?project=${projectId}` : ""),
-                    )}
+                    onClick={() => openChain(row.code)}
                     className="flex min-h-14 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-content2"
                   >
                     <div className="min-w-0 flex-1">
@@ -114,6 +133,14 @@ export function ApprovalFlowPage() {
         </div>
       )}
 
+      {!overview.isLoading && (overview.data?.items.length ?? 0) > 0 && (
+        <JourneyPanel
+          rows={overview.data?.items ?? []}
+          projectName={projectName}
+          onOpen={openChain}
+        />
+      )}
+
       {showPosts && <PostsDrawer onClose={() => setShowPosts(false)} />}
     </div>
   );
@@ -129,5 +156,16 @@ function ChainLine({ row }: { row: FlowRow }) {
       <p className="mt-0.5 text-[13px] text-warn">Not set up — uses the reporting line</p>
     );
   }
-  return <p className="mt-0.5 truncate text-[13px] text-muted">{row.summary}</p>;
+  return (
+    <>
+      <p className="mt-0.5 truncate text-[13px] text-muted">{row.summary}</p>
+      {/* Ranks with a chain of their own. Without this the row shows the default chain
+        * and says nothing about the four ranks that never travel it. */}
+      {row.raiser_chains?.length > 0 && (
+        <p className="mt-0.5 truncate text-[11px] text-muted">
+          Different for {row.raiser_chains.map((entry) => entry.role_name).join(", ")}
+        </p>
+      )}
+    </>
+  );
 }

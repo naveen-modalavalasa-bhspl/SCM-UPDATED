@@ -13,8 +13,8 @@ from app.platform.workflow import (
 from app.platform.workflow import scheduler as approval_scheduler
 from app.platform.workflow.schemas import (
     ApprovalPostIn, CustomLadderIn, DelegationEndIn, DelegationIn, DelegationOut,
-    LadderCopyIn, LadderIn, ReminderConfigIn, WorkflowActionIn, WorkflowActionOut,
-    WorkflowIn,
+    FlowCopyIn, LadderCopyIn, LadderIn, ReminderConfigIn, WorkflowActionIn,
+    WorkflowActionOut, WorkflowIn,
 )
 
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
@@ -227,34 +227,49 @@ async def flow_rungs(
 @router.get("/flow/{doc_type}/versions")
 async def flow_versions(
     doc_type: str,
+    raiser_role_id: int | None = None,
     project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
     """Every version, with the documents still riding each one."""
-    return await flow_config.versions(db, project_id, doc_type)
+    return await flow_config.versions(db, project_id, doc_type, raiser_role_id)
 
 
 @router.post("/flow/{doc_type}/restore/{workflow_id}")
 async def restore_flow_version(
     doc_type: str,
     workflow_id: int,
+    raiser_role_id: int | None = None,
     project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
     """Copy an old version's steps forward as a new one. The old row is never revived."""
-    return await flow_config.restore(db, project_id, doc_type, workflow_id, user)
+    return await flow_config.restore(db, project_id, doc_type, workflow_id, user,
+                                     raiser_role_id)
+
+
+# Declared above `/flow/{doc_type}` so "copy" is never read as a document type.
+@router.post("/flow/copy")
+async def copy_flow_chain(
+    body: FlowCopyIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    """Save this chain onto other projects and/or other raiser ranks, step for step."""
+    return await flow_config.copy_flow(db, body, user)
 
 
 @router.get("/flow/{doc_type}")
 async def flow_chain(
     doc_type: str,
+    raiser_role_id: int | None = None,
     project_id: int | None = Depends(_project_id),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
-    return await flow_config.chain(db, project_id, doc_type)
+    return await flow_config.chain(db, project_id, doc_type, raiser_role_id)
 
 
 @router.post("/flow")
@@ -264,7 +279,7 @@ async def save_flow_chain(
     user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
 ):
     """Saved through the hand-built ladder writer, so there is one way a chain is stored."""
-    return await custom_ladder.save_custom(db, body, user)
+    return await flow_config.save(db, body, user)
 
 
 # ---------------- the chairs this system owns ----------------

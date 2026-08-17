@@ -23,6 +23,15 @@ class Workflow(Base):
     # any project that has no ladder of its own. See workflow/ladder.py.
     project_id = Column(BigInteger, index=True, nullable=True)
     project_name = Column(String(200), nullable=True)
+    # Which RANK of raiser this chain is for (hcm_positions.role_id), or NULL for the
+    # default used by everyone else. A Store Keeper's indent and an RM's are the same
+    # document travelling different distances — the same ladder cannot say both, so a
+    # chain may be pinned to the rank that raised it. NULL is what every chain saved
+    # before this existed carries, and it keeps behaving exactly as it did.
+    raiser_role_id = Column(BigInteger, index=True, nullable=True)
+    # Snapshotted at save (rule 10): HCM re-keys its roles at a cutover, and a chain
+    # must still be able to say which rank it was built for.
+    raiser_role_name = Column(String(200), nullable=True)
     module = Column(String(30), nullable=True)
     version = Column(Integer, nullable=False, default=1)
     is_active = Column(Boolean, nullable=False, default=True)

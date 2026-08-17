@@ -662,8 +662,15 @@ async def _department_names(db: AsyncSession,
 # ---------------- loading a saved ladder ----------------
 
 async def active_ladder(db: AsyncSession, project_id: int | None,
-                        doc_type: str) -> tuple[Workflow, list[Stage]] | None:
+                        doc_type: str,
+                        raiser_role_id: int | None = None,
+                        ) -> tuple[Workflow, list[Stage]] | None:
     """The newest active ladder for EXACTLY this scope, or nothing.
+
+    `raiser_role_id` narrows the scope by ONE more thing: the rank that raised the
+    document. Passing None means the chain everybody shares — which is every chain
+    saved before per-rank chains existed, so the default argument is the old behaviour
+    exactly.
 
     Scans the scope's active workflows instead of judging only the top row. More than
     one workflow can be active for a doc type — a seeded WF-*, a policy saved on the
@@ -676,6 +683,9 @@ async def active_ladder(db: AsyncSession, project_id: int | None,
         Workflow.doc_type == doc_type, Workflow.is_active.is_(True))
     stmt = (stmt.where(Workflow.project_id == project_id) if project_id is not None
             else stmt.where(Workflow.project_id.is_(None)))
+    stmt = (stmt.where(Workflow.raiser_role_id == raiser_role_id)
+            if raiser_role_id is not None
+            else stmt.where(Workflow.raiser_role_id.is_(None)))
     rows = (await db.execute(
         stmt.order_by(Workflow.version.desc(), Workflow.id.desc()))).scalars().all()
     for wf in rows:
@@ -690,18 +700,39 @@ async def active_ladder(db: AsyncSession, project_id: int | None,
     return None
 
 
+async def role_of_position(db: AsyncSession,
+                           position_id: int | None) -> int | None:
+    """The RANK a post sits at, or None — the key a per-raiser chain is chosen by.
+
+    None for a raiser with no post, an unknown post, or a post HCM left rankless. All
+    three mean the same thing to the lookup: use the chain everybody shares.
+    """
+    if position_id is None:
+        return None
+    position = await db.get(HcmPosition, position_id)
+    return position.role_id if position is not None else None
+
+
 async def find_ladder(db: AsyncSession, project_id: int | None,
-                      doc_type: str) -> tuple[Workflow, list[Stage]] | None:
+                      doc_type: str,
+                      raiser_role_id: int | None = None,
+                      ) -> tuple[Workflow, list[Stage]] | None:
     """This project's ladder, else the company-wide one, else nothing.
 
     Nothing means the caller keeps its existing behaviour — the configured workflow if
     there is one, otherwise the reporting-line fallback. A project is never blocked by
     having no ladder yet.
+
+    Narrowest wins, and the project beats the rank: this project's chain for this rank,
+    then this project's chain for everybody, then the same two company-wide. A project
+    that has deliberately configured one chain for all its raisers must not be overruled
+    by a company-wide rank chain nobody in that project asked for.
     """
     for candidate in ([project_id, None] if project_id is not None else [None]):
-        found = await active_ladder(db, candidate, doc_type)
-        if found is not None:
-            return found
+        for rank in ([raiser_role_id, None] if raiser_role_id is not None else [None]):
+            found = await active_ladder(db, candidate, doc_type, rank)
+            if found is not None:
+                return found
     return None
 
 

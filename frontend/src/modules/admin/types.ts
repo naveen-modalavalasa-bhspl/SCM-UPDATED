@@ -429,6 +429,22 @@ export interface CustomLadder extends LadderPolicy {
   is_legacy?: boolean;
   label?: string;
   policies?: PolicyChoice[];
+  /** The raiser RANK this chain serves, or null for the one everybody else uses. */
+  raiser_role_id?: number | null;
+  raiser_role_name?: string | null;
+  /** This document's chain may differ by who raised it (today: the Indent). */
+  supports_raiser_chains?: boolean;
+  /** The ranks that already have a chain of their own, for this project. */
+  raiser_chains?: RaiserChain[];
+  /** A rank with no chain yet opens showing the default one, unsaved. */
+  inherited_from_default?: boolean;
+}
+
+/** One rank that has its own saved chain. */
+export interface RaiserChain {
+  role_id: number;
+  role_name: string;
+  version: number;
 }
 
 // ---- Settings > Approval Flow: one screen, one row per document type ----
@@ -452,6 +468,13 @@ export interface FlowRow {
   summary: string;
   step_count: number;
   in_flight: number;
+  /** Job profiles allowed to RAISE this document — the other half of "who does what",
+   *  read from the create permission rather than guessed from the chain. */
+  raised_by: string[];
+  /** This document's chain may be configured per raiser rank. */
+  supports_raiser_chains: boolean;
+  /** The ranks that already have their own chain here. */
+  raiser_chains: RaiserChain[];
 }
 
 export interface FlowOverview {
@@ -469,6 +492,10 @@ export interface FlowRung {
   members?: LadderHolder[];
   position_count?: number;
   people_count?: number;
+  /** How high this rank sits in the reporting tree — smaller is higher. Only ranks
+   *  carry it; it orders the "when raised by" picker and decides which steps a copy
+   *  across ranks drops. */
+  depth?: number;
 }
 
 export interface FlowRungs {

@@ -204,9 +204,15 @@ export const adminApi = {
       api.get<FlowOverview>("/api/workflow/flow", {
         params: projectId != null ? { project_id: projectId } : {},
       }).then((r) => r.data),
-    chain: (projectId: number | null, docType: string) =>
+    /** `raiserRoleId` picks the chain for one RANK of raiser; null is the chain
+     *  everybody else uses, which is what every chain was before ranks existed. */
+    chain: (projectId: number | null, docType: string,
+            raiserRoleId: number | null = null) =>
       api.get<CustomLadder>(`/api/workflow/flow/${docType}`, {
-        params: projectId != null ? { project_id: projectId } : {},
+        params: {
+          ...(projectId != null ? { project_id: projectId } : {}),
+          ...(raiserRoleId != null ? { raiser_role_id: raiserRoleId } : {}),
+        },
       }).then((r) => r.data),
     /** `search` only reaches the HCM posts — local chairs and ranks are short lists and
      *  come back whole, so the picker has something to show before anyone types. */
@@ -215,24 +221,48 @@ export const adminApi = {
         params: { search, ...(projectId != null ? { project_id: projectId } : {}) },
       }).then((r) => r.data),
     /** Every version, newest first, each with the documents still riding it. */
-    versions: (projectId: number | null, docType: string) =>
+    versions: (projectId: number | null, docType: string,
+               raiserRoleId: number | null = null) =>
       api.get<{ items: FlowVersion[] }>(`/api/workflow/flow/${docType}/versions`, {
-        params: projectId != null ? { project_id: projectId } : {},
+        params: {
+          ...(projectId != null ? { project_id: projectId } : {}),
+          ...(raiserRoleId != null ? { raiser_role_id: raiserRoleId } : {}),
+        },
       }).then((r) => r.data.items),
     /** Copies an old version's steps forward as a new one — the old row is never
      *  revived, so documents frozen onto it keep resolving against it. */
-    restore: (projectId: number | null, docType: string, workflowId: number) =>
+    restore: (projectId: number | null, docType: string, workflowId: number,
+              raiserRoleId: number | null = null) =>
       api.post<CustomLadder>(
         `/api/workflow/flow/${docType}/restore/${workflowId}`, null,
-        { params: projectId != null ? { project_id: projectId } : {} },
+        { params: {
+          ...(projectId != null ? { project_id: projectId } : {}),
+          ...(raiserRoleId != null ? { raiser_role_id: raiserRoleId } : {}),
+        } },
       ).then((r) => r.data),
     save: (projectId: number | null, docType: string, steps: CustomLadderStep[],
-           policy?: Partial<LadderPolicy>) =>
+           policy?: Partial<LadderPolicy>, raiserRoleId: number | null = null) =>
       api.post<CustomLadder>("/api/workflow/flow", {
         project_id: projectId, doc_type: docType,
+        raiser_role_id: raiserRoleId,
         steps: steps.map(stepPayload),
         ...policyPayload(policy),
       }).then((r) => r.data),
+    /** The saved chain, onto other projects and/or other raiser ranks — step for step,
+     *  policy included. Each target lands as its own new version, so their histories
+     *  stay separate. Copying across ranks drops the steps the target rank already
+     *  outranks, which is the edit an admin would otherwise make by hand. */
+    copy: (from: { projectId: number | null; raiserRoleId: number | null },
+           docType: string,
+           to: { projectIds?: number[]; raiserRoleIds?: number[] }) =>
+      api.post<{ copied_to: number[]; copied_to_ranks: number[] }>(
+        "/api/workflow/flow/copy", {
+          from_project_id: from.projectId,
+          from_raiser_role_id: from.raiserRoleId,
+          doc_type: docType,
+          to_project_ids: to.projectIds ?? [],
+          to_raiser_role_ids: to.raiserRoleIds ?? [],
+        }).then((r) => r.data),
   },
   // ---- the chairs this system owns, for the steps HCM has no post for ----
   approvalPosts: {

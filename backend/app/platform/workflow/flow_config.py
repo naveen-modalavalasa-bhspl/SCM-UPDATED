@@ -23,12 +23,13 @@ import logging
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmEmployee, HcmPosition
+from app.platform.rbac.models import Permission, Role, RolePermission
 from app.platform.workflow import custom_ladder, ladder, posts
 from app.platform.workflow.models import Instance, Stage, Workflow
 from app.platform.workflow.schemas import CustomLadderIn, CustomLadderStepIn
-from app.shared.enums import InstanceStatus
+from app.shared.enums import DocType, InstanceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,70 @@ POLICY_LABELS = [
     {"value": ladder.POLICY_NONE, "label": "No approval needed",
      "help": "The document is approved the moment it is raised, and says so."},
 ]
+
+
+# Which permission lets someone RAISE each document. The engine's own map
+# (`service.APPROVE_PERMISSION`) answers who signs; this answers who starts, which is
+# the other half of "who does what" and the half no screen showed. Codes rather than
+# imports of each module's router: a doc type without an entry simply says nothing.
+CREATE_PERMISSION = {
+    DocType.INDENT.value: "indent.create",
+    DocType.ALLOCATION.value: "allocation.create",
+    DocType.OWN_STOCK_ALLOCATION.value: "allocation.create",
+    DocType.OWN_STOCK_ISSUE.value: "issue.create",
+    DocType.FORWARD_ISSUE.value: "issue.create",
+    DocType.WH_ISSUE.value: "issue.create",
+    DocType.MR.value: "mr.create",
+    DocType.REQUISITION.value: "requisition.create",
+    DocType.CONSOLIDATION.value: "consolidation.create",
+    DocType.RFQ.value: "rfq.create",
+    DocType.PO.value: "po.create",
+    DocType.GRN.value: "grn.create",
+    DocType.DISPATCH.value: "dispatch.create",
+}
+
+
+# Documents whose chain may differ by the RANK that raised it. An indent is the one
+# that genuinely does: a Store Keeper's climbs the whole field line, an RM's has almost
+# nobody above it. Every other type has one chain for everybody, and offering a rank
+# selector on all of them would be twenty ways to configure something nobody wanted.
+RAISER_SCOPED_DOC_TYPES = frozenset({DocType.INDENT.value})
+
+
+async def _raiser_chains(db: AsyncSession, project_id: int | None,
+                         doc_types: set[str]) -> dict[str, list[dict]]:
+    """The rank-specific chains saved for this scope: doc type -> [{rank, version}]."""
+    if not doc_types:
+        return {}
+    stmt = select(Workflow).where(
+        Workflow.doc_type.in_(doc_types), Workflow.is_active.is_(True),
+        Workflow.raiser_role_id.isnot(None))
+    stmt = (stmt.where(Workflow.project_id == project_id) if project_id is not None
+            else stmt.where(Workflow.project_id.is_(None)))
+    out: dict[str, list[dict]] = {}
+    for wf in (await db.execute(stmt.order_by(Workflow.id))).scalars().all():
+        out.setdefault(wf.doc_type, []).append({
+            "role_id": wf.raiser_role_id,
+            "role_name": wf.raiser_role_name or f"Rank {wf.raiser_role_id}",
+            "version": wf.version,
+        })
+    return out
+
+
+async def _raisers(db: AsyncSession) -> dict[str, list[str]]:
+    """Job profiles that may raise each document, by permission. One query for all."""
+    rows = (await db.execute(
+        select(Permission.code, Role.name)
+        .join(RolePermission, RolePermission.permission_id == Permission.id)
+        .join(Role, Role.id == RolePermission.role_id)
+        .where(Permission.code.in_(set(CREATE_PERMISSION.values())),
+               Role.is_active.is_(True))
+        .order_by(Role.name)
+    )).all()
+    by_code: dict[str, list[str]] = {}
+    for code, name in rows:
+        by_code.setdefault(code, []).append(name)
+    return by_code
 
 
 def _describe(steps: list[dict]) -> str:
@@ -61,6 +126,8 @@ async def overview(db: AsyncSession, project_id: int | None) -> dict:
     doc_types = await ladder.list_doc_types()
     workflows = await _active_by_doc_type(db, project_id)
     in_flight = await _in_flight_counts(db, [wf.id for wf in workflows.values()])
+    raisers = await _raisers(db)
+    raiser_chains = await _raiser_chains(db, project_id, set(RAISER_SCOPED_DOC_TYPES))
 
     rows = []
     for entry in doc_types:
@@ -81,6 +148,9 @@ async def overview(db: AsyncSession, project_id: int | None) -> dict:
             "self_approval_policy": policy,
             "summary": _describe(steps),
             "step_count": len(steps),
+            "raised_by": raisers.get(CREATE_PERMISSION.get(entry["code"], ""), []),
+            "supports_raiser_chains": entry["code"] in RAISER_SCOPED_DOC_TYPES,
+            "raiser_chains": raiser_chains.get(entry["code"], []),
             "in_flight": in_flight.get(wf.id, 0) if wf else 0,
         })
 
@@ -146,9 +216,20 @@ async def _step_summaries(db: AsyncSession, stages: list[Stage]) -> list[dict]:
     } for stage in enabled]
 
 
-async def chain(db: AsyncSession, project_id: int | None, doc_type: str) -> dict:
+async def chain(db: AsyncSession, project_id: int | None, doc_type: str,
+                raiser_role_id: int | None = None) -> dict:
     """One document type's chain, with everything the editor needs to change it."""
-    saved = await custom_ladder.get_custom(db, project_id, doc_type)
+    saved = await custom_ladder.get_custom(db, project_id, doc_type, raiser_role_id)
+    if raiser_role_id is not None and saved.get("is_new"):
+        # A rank with no chain of its own starts from what its raisers travel TODAY —
+        # the default chain — rather than from an empty screen. Loaded as an unsaved
+        # draft (`is_new` stays true, no workflow_id), so nothing exists for this rank
+        # until the admin saves, and the default is never edited by accident.
+        base = await chain(db, project_id, doc_type)
+        return {**base, "workflow_id": None, "version": 0, "is_new": True,
+                "raiser_role_id": raiser_role_id, "in_flight": 0,
+                "inherited_from_default": bool(base.get("steps")),
+                "warnings": []}
     if saved.get("is_new"):
         # Nothing hand-built for this scope, but a rank ladder or a seeded workflow may
         # still be governing it. Show that, so the admin edits what is really in force
@@ -172,6 +253,9 @@ async def chain(db: AsyncSession, project_id: int | None, doc_type: str) -> dict
     saved.setdefault("is_legacy", False)
     saved["label"] = ladder.DOC_TYPE_LABEL.get(doc_type, doc_type)
     saved["policies"] = POLICY_LABELS
+    saved["supports_raiser_chains"] = doc_type in RAISER_SCOPED_DOC_TYPES
+    saved["raiser_chains"] = (await _raiser_chains(
+        db, project_id, {doc_type} & RAISER_SCOPED_DOC_TYPES)).get(doc_type, [])
     return saved
 
 
@@ -217,17 +301,25 @@ async def _legacy_steps(db: AsyncSession, stages: list[Stage]) -> list[dict]:
     } for index, stage in enumerate(enabled)]
 
 
-async def versions(db: AsyncSession, project_id: int | None, doc_type: str) -> dict:
+async def versions(db: AsyncSession, project_id: int | None, doc_type: str,
+                   raiser_role_id: int | None = None) -> dict:
     """Every version of this chain, newest first, with what is still riding each one.
 
     A saved chain is frozen onto the document at submit, so retired versions keep
     governing documents that started under them. Which is exactly the question an admin
     has after editing a chain — "what did I just NOT change?" — and the reason this
     lists in-flight documents per version rather than one total.
+
+    Scoped to one raiser rank's history: the Store Keeper chain and the default one are
+    separate chains, and mixing their versions into one list would offer a Restore that
+    silently moves a chain from one bucket to the other.
     """
     stmt = select(Workflow).where(Workflow.doc_type == doc_type)
     stmt = (stmt.where(Workflow.project_id == project_id) if project_id is not None
             else stmt.where(Workflow.project_id.is_(None)))
+    stmt = (stmt.where(Workflow.raiser_role_id == raiser_role_id)
+            if raiser_role_id is not None
+            else stmt.where(Workflow.raiser_role_id.is_(None)))
     rows = list((await db.execute(
         stmt.order_by(Workflow.version.desc(), Workflow.id.desc()))).scalars().all())
     if not rows:
@@ -292,7 +384,8 @@ async def _in_flight_by_workflow(db: AsyncSession,
 
 
 async def restore(db: AsyncSession, project_id: int | None, doc_type: str,
-                  workflow_id: int, user) -> dict:
+                  workflow_id: int, user,
+                  raiser_role_id: int | None = None) -> dict:
     """Re-save an old version's steps as the newest one.
 
     Never reactivates the old row: a version is a historical record, and documents
@@ -317,12 +410,110 @@ async def restore(db: AsyncSession, project_id: int | None, doc_type: str,
                                  or stage.post_id is not None
                                  or stage.position_role_id is not None)
     ]
-    logger.info("Restoring %s v%s for project %s as a new version",
-                doc_type, wf.version, project_id)
+    logger.info("Restoring %s v%s for project %s (raiser rank %s) as a new version",
+                doc_type, wf.version, project_id, raiser_role_id)
     return await custom_ladder.save_custom(db, CustomLadderIn(
         project_id=project_id, doc_type=doc_type, steps=steps,
+        raiser_role_id=raiser_role_id,
         self_approval_policy=policy, fallback_position_id=fallback_position_id,
     ), user)
+
+
+async def save(db: AsyncSession, data, user) -> dict:
+    """Save a chain, refusing a rank-pinned one for a document that has no ranks.
+
+    The guard is here rather than in the writer because the writer is shared with the
+    older screens: a rank chain is a concept this screen introduced, and a chain saved
+    against a document type the engine never looks up per rank would be configuration
+    that is silently never read.
+    """
+    if (getattr(data, "raiser_role_id", None) is not None
+            and data.doc_type not in RAISER_SCOPED_DOC_TYPES):
+        raise ValidationError(
+            f"{ladder.DOC_TYPE_LABEL.get(data.doc_type, data.doc_type)} uses one chain "
+            f"for every raiser")
+    return await custom_ladder.save_custom(db, data, user)
+
+
+async def copy_flow(db: AsyncSession, data, user) -> dict:
+    """Save one chain onto other projects, other raiser ranks, or both.
+
+    The same chain is usually wanted for every region, and building it a dozen times by
+    hand is how they drift apart. Copied step for step, including the self-approval
+    policy: unlike the rank ladder's copy (which matches by level because positions are
+    per-project), a step here is already portable — a RANK and a locally-owned post mean
+    the same thing everywhere, and an HCM post is a named chair the admin picked
+    deliberately, so it is carried across rather than silently dropped.
+
+    Copying ACROSS RANKS is different in one way, and it is the reason this exists: a
+    chain built for a Store Keeper contains rungs the OE is already above. Carrying
+    "climb to OE" into the OE's own chain would ask an OE to be approved by an OE. So
+    every rank step at or below the target rank is dropped (`drop_steps_at_or_below`),
+    which is exactly the edit an admin would make by hand after copying.
+
+    Each target is an ordinary save, so it lands as a new version with its own history
+    and retires only that target's live chain. Documents already in approval anywhere
+    are frozen onto theirs and never move.
+    """
+    source = await chain(db, data.from_project_id, data.doc_type,
+                         getattr(data, "from_raiser_role_id", None))
+    if not source.get("steps") and source.get("self_approval_policy") != ladder.POLICY_NONE:
+        raise NotFoundError("Save this chain before copying it")
+
+    def _steps(drop_at_or_below_depth: int | None,
+               depths: dict[int, int]) -> list[CustomLadderStepIn]:
+        out = []
+        for step in source["steps"]:
+            role_id = step["position_role_id"]
+            # Only RANK steps are dropped. A named chair — the SCM Head, the Indent
+            # Team — is not part of the reporting line and signs whoever raised it.
+            if (drop_at_or_below_depth is not None and role_id is not None
+                    and depths.get(role_id, -1) >= drop_at_or_below_depth):
+                continue
+            out.append(CustomLadderStepIn(
+                name=step["name"], position_id=step["position_id"],
+                post_id=step["post_id"], position_role_id=role_id,
+            ))
+        return out
+
+    async def _save(project_id: int | None, raiser_role_id: int | None,
+                    steps: list[CustomLadderStepIn]) -> None:
+        await custom_ladder.save_custom(db, CustomLadderIn(
+            project_id=project_id, doc_type=data.doc_type,
+            raiser_role_id=raiser_role_id, steps=steps,
+            self_approval_policy=source["self_approval_policy"],
+            fallback_position_id=source.get("fallback_position_id"),
+        ), user)
+
+    copied_projects: list[int] = []
+    for project_id in data.to_project_ids:
+        # Copying onto the source is a no-op that would still burn a version number.
+        if project_id == data.from_project_id:
+            continue
+        await _save(project_id, getattr(data, "from_raiser_role_id", None),
+                    _steps(None, {}))
+        copied_projects.append(project_id)
+
+    copied_ranks: list[int] = []
+    target_ranks = list(getattr(data, "to_raiser_role_ids", []) or [])
+    if target_ranks:
+        # A rank's DEPTH is how the tree orders them — smaller is higher. Read once
+        # for the project the copy is being made within.
+        depths = {rank["role_id"]: rank["depth"]
+                  for rank in await ladder.project_ranks(db, data.from_project_id)}
+        drop = getattr(data, "drop_steps_at_or_below", True)
+        for role_id in target_ranks:
+            if role_id == getattr(data, "from_raiser_role_id", None):
+                continue
+            target_depth = depths.get(role_id) if drop else None
+            await _save(data.from_project_id, role_id, _steps(target_depth, depths))
+            copied_ranks.append(role_id)
+
+    logger.info("Copied the %s chain from project %s / rank %s onto projects %s "
+                "and ranks %s", data.doc_type, data.from_project_id,
+                getattr(data, "from_raiser_role_id", None), copied_projects,
+                copied_ranks)
+    return {"copied_to": copied_projects, "copied_to_ranks": copied_ranks}
 
 
 async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> dict:
@@ -354,8 +545,12 @@ async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> d
         "local": [{"id": row["id"], "name": row["name"],
                    "department": row["department"],
                    "members": row["members"]} for row in local],
+        # `depth` is how the tree orders ranks — smaller is higher up. Sent so the
+        # "when raised by" picker can list them top-down and so a copy across ranks
+        # knows which steps the target is already above.
         "ranks": [{"id": rank["role_id"], "name": rank["role_name"],
                    "position_count": rank.get("position_count", 0),
-                   "people_count": rank.get("holder_count", 0)} for rank in ranks],
+                   "people_count": rank.get("holder_count", 0),
+                   "depth": rank.get("depth", 0)} for rank in ranks],
         "hcm": hcm,
     }

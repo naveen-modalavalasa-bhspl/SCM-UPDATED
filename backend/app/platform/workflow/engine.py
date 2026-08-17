@@ -889,7 +889,11 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     # No position means no reporting line to climb, and an empty climb reads as "top of
     # the ladder, self-approve". That would hand anyone without a post their own
     # approval, so they take the old path and land on the fallback's admin safety net.
-    found = await ladder.find_ladder(db, project_id, doc_type)
+    # The rank the raiser holds, so a document can travel a chain built for people at
+    # that height. A raiser with no post has no rank, which simply means the chain
+    # everybody shares — the same answer as before this existed.
+    raiser_role_id = await ladder.role_of_position(db, requester_position_id)
+    found = await ladder.find_ladder(db, project_id, doc_type, raiser_role_id)
     if (found is not None and requester_position_id is None
             and not ladder.is_custom_ladder(found[0])):
         found = None

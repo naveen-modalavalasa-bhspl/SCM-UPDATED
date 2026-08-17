@@ -46,8 +46,16 @@ CUSTOM_CODE_PREFIX = ladder.CUSTOM_CODE_PREFIX
 is_custom = ladder.is_custom_ladder
 
 
-def custom_code(project_id: int | None, doc_type: str) -> str:
-    return f"{CUSTOM_CODE_PREFIX}-{doc_type}-{project_id or 'ALL'}"
+def custom_code(project_id: int | None, doc_type: str,
+                raiser_role_id: int | None = None) -> str:
+    """The code identifies the BUCKET a chain belongs to: scope, document, raiser rank.
+
+    A rank suffix rather than a second table: `active_ladder` already tells a custom
+    ladder from a plain workflow by this prefix, and a chain pinned to a rank is the
+    same object with one more thing said about it.
+    """
+    scope = f"{CUSTOM_CODE_PREFIX}-{doc_type}-{project_id or 'ALL'}"
+    return scope if raiser_role_id is None else f"{scope}-R{raiser_role_id}"
 
 
 # ---------------- discovery: departments, then the posts inside one ----------------
@@ -106,13 +114,15 @@ async def department_posts(db: AsyncSession, project_id: int | None,
 
 # ---------------- loading ----------------
 
-async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) -> dict:
+async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str,
+                     raiser_role_id: int | None = None) -> dict:
     """The saved custom ladder for this scope, or an empty draft."""
     ladder_config_validate(doc_type)
-    wf = await _active_custom(db, project_id, doc_type)
+    wf = await _active_custom(db, project_id, doc_type, raiser_role_id)
     if wf is None:
         return {"workflow_id": None, "version": 0, "project_id": project_id,
-                "doc_type": doc_type, "is_new": True, "steps": [], "in_flight": 0,
+                "doc_type": doc_type, "raiser_role_id": raiser_role_id,
+                "is_new": True, "steps": [], "in_flight": 0,
                 "self_approval_policy": ladder.POLICY_INDEPENDENT,
                 "fallback_position_id": None, "warnings": []}
 
@@ -192,7 +202,9 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
 
     return {
         "workflow_id": wf.id, "version": wf.version, "project_id": project_id,
-        "doc_type": doc_type, "is_new": False, "in_flight": in_flight,
+        "doc_type": doc_type, "raiser_role_id": wf.raiser_role_id,
+        "raiser_role_name": wf.raiser_role_name,
+        "is_new": False, "in_flight": in_flight,
         "self_approval_policy": policy,
         "fallback_position_id": fallback_position_id,
         "warnings": warnings,
@@ -215,13 +227,22 @@ async def get_custom(db: AsyncSession, project_id: int | None, doc_type: str) ->
     }
 
 
-async def _active_custom(db: AsyncSession, project_id: int | None,
-                         doc_type: str) -> Workflow | None:
+async def _active_custom(db: AsyncSession, project_id: int | None, doc_type: str,
+                         raiser_role_id: int | None = None) -> Workflow | None:
+    """The live chain for EXACTLY this bucket — no falling back to the default one.
+
+    Deliberately exact: this reads what the editor is editing. Falling back here would
+    show the default chain under a rank heading and the next save would silently copy
+    it onto that rank.
+    """
     stmt = select(Workflow).where(
         Workflow.doc_type == doc_type, Workflow.is_active.is_(True),
         Workflow.code.like(f"{CUSTOM_CODE_PREFIX}-%"))
     stmt = (stmt.where(Workflow.project_id == project_id) if project_id is not None
             else stmt.where(Workflow.project_id.is_(None)))
+    stmt = (stmt.where(Workflow.raiser_role_id == raiser_role_id)
+            if raiser_role_id is not None
+            else stmt.where(Workflow.raiser_role_id.is_(None)))
     return (await db.execute(
         stmt.order_by(Workflow.version.desc(), Workflow.id.desc())
     )).scalars().first()
@@ -401,11 +422,28 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
         )).scalars().first()
         project_name = employee.project_name if employee else None
 
+    raiser_role_id = getattr(data, "raiser_role_id", None)
+    raiser_role_name = None
+    if raiser_role_id is not None:
+        raiser_role_name = (await db.execute(
+            select(HcmPosition.role_name)
+            .where(HcmPosition.role_id == raiser_role_id,
+                   HcmPosition.role_name.isnot(None))
+            .limit(1)
+        )).scalar()
+
+    # Retire only this BUCKET's live rows. Retiring the whole scope is right when
+    # saving the default chain — one scope, one default, and an old rank ladder from
+    # the previous screen must not compete with it — but a chain pinned to Store
+    # Keeper says nothing about the one everybody else uses, and taking the default
+    # down with it would leave every other rank falling through to the reporting line.
     previous = list((await db.execute(
         select(Workflow).where(
             Workflow.doc_type == data.doc_type,
             (Workflow.project_id == data.project_id if data.project_id is not None
              else Workflow.project_id.is_(None)),
+            (Workflow.raiser_role_id == raiser_role_id if raiser_role_id is not None
+             else Workflow.raiser_role_id.is_(None)),
             Workflow.is_active.is_(True),
         ).order_by(Workflow.version.desc(), Workflow.id.desc())
     )).scalars().all())
@@ -417,12 +455,15 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
         row.effective_to = utcnow().date()
 
     wf = Workflow(
-        code=custom_code(data.project_id, data.doc_type),
+        code=custom_code(data.project_id, data.doc_type, raiser_role_id),
         name=f"{ladder.DOC_TYPE_LABEL.get(data.doc_type, data.doc_type)} approval"
-             f"{f' — {project_name}' if project_name else ''}",
+             f"{f' — {project_name}' if project_name else ''}"
+             f"{f' (raised by {raiser_role_name})' if raiser_role_name else ''}",
         doc_type=data.doc_type,
         project_id=data.project_id,
         project_name=project_name,
+        raiser_role_id=raiser_role_id,
+        raiser_role_name=raiser_role_name,
         module=ladder.MODULE_BY_DOC_TYPE.get(data.doc_type, "Other"),
         version=version,
         is_active=True,
@@ -488,15 +529,16 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
         db, entity="wf_workflows", entity_id=wf.id, entity_no=wf.code[:50],
         action=AuditAction.CREATE, actor=user,
         after={"version": version, "project_id": data.project_id,
-               "doc_type": data.doc_type,
+               "doc_type": data.doc_type, "raiser_role_id": raiser_role_id,
                "steps": [step.name for step in data.steps]},
         summary=f"Custom approval ladder v{version} saved "
+                f"{f'for raisers at {raiser_role_name} ' if raiser_role_name else ''}"
                 f"({' → '.join(step.name for step in data.steps)})",
     )
     await db.commit()
     logger.info("Custom approval ladder %s saved as version %s by %s",
                 wf.code, version, getattr(user, "full_name", user))
-    return await get_custom(db, data.project_id, data.doc_type)
+    return await get_custom(db, data.project_id, data.doc_type, raiser_role_id)
 
 
 def ladder_config_validate(doc_type: str) -> None:
