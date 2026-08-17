@@ -51,6 +51,10 @@ class MasterDef:
     order_col: str = "name"
     # Async hook for masters that snapshot a parent's name/code onto the row.
     apply: Callable | None = None
+    # Async hook that annotates rows with response-only derived values after they
+    # have been loaded. Warehouse locations use it for path/depth: neither value is
+    # stored, because both must always follow the current parent tree.
+    prepare: Callable | None = None
     # Masters used as dropdown sources hide inactive rows unless asked; masters managed
     # on the admin screen show everything so a deactivated row can be reactivated.
     default_active_only: bool = False
@@ -122,6 +126,11 @@ async def _apply_fields(db: AsyncSession, defn: MasterDef, row, data: BaseModel,
         return
     for key, value in data.model_dump().items():
         setattr(row, key, value)
+
+
+async def _prepare_rows(db: AsyncSession, defn: MasterDef, rows: Sequence[Any]) -> None:
+    if defn.prepare is not None and rows:
+        await defn.prepare(db, rows)
 
 
 async def _require_in_scope(db: AsyncSession, defn: MasterDef, row_id: int,
@@ -200,9 +209,11 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
 
         if not defn.paginated:
             rows = (await db.execute(stmt)).scalars().all()
+            await _prepare_rows(db, defn, rows)
             return {"items": [defn.serialize(r) for r in rows]}
 
         page = await paginate(db, stmt, params)
+        await _prepare_rows(db, defn, page["items"])
         page["items"] = [defn.serialize(r) for r in page["items"]]
         return page
 
@@ -249,6 +260,7 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         # fire a lazy SELECT from async code and raise MissingGreenlet, so the load
         # happens here, before either serialize call, where awaiting IO is allowed.
         await db.refresh(row)
+        await _prepare_rows(db, defn, [row])
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.CREATE, actor=user, after=defn.serialize(row))
         await _write(db, defn, commit=True)
@@ -265,14 +277,17 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         if not row:
             raise NotFoundError(f"{defn.name} not found")
         await _require_in_scope(db, defn, row_id, user)
+        await _prepare_rows(db, defn, [row])
         before = defn.serialize(row)
         await _apply_fields(db, defn, row, data, user)
         await _write(db, defn)
+        await _prepare_rows(db, defn, [row])
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.UPDATE, actor=user,
                      before=before, after=defn.serialize(row))
         await _write(db, defn, commit=True)
         await db.refresh(row)
+        await _prepare_rows(db, defn, [row])
         return defn.serialize(row)
 
     @router.delete(base + "/{row_id}", name=f"deactivate_{defn.path}")

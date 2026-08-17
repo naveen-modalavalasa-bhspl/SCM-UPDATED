@@ -13,11 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
-from app.modules.logistics import service
+from app.modules.logistics import partners, service
 from app.modules.logistics.schemas import (
-    ActionIn, AwardIn, DeliverIn, DispatchIn, EventIn, EventOut, GRNCreate,
-    GRNListRow, GRNOut, InviteIn, IssueCreate, IssueOut, Option, ProviderIn, QuoteIn,
-    QuoteOut, ResolveIn, TRCreate, TRListRow, TROut, TRUpdate,
+    AcceptQuoteIn, AcknowledgeIn, ActionIn, AwardIn, CarrierAcceptIn, CarrierConfirmIn,
+    CarrierDeclineIn, CarrierTrackIn, ConsignmentLink, DeliverIn, DispatchIn, EventIn,
+    EventOut, GRNCreate, GRNListRow, GRNOut, InviteIn, IssueCreate, IssueOut, Option,
+    PartnerCreate, PartnerLoginIn, PartnerOut, PartnerUpdate, ProviderBoardRow,
+    ProviderIn, QuickDispatchIn, QuoteIn, QuoteOut, ResolveIn, ReviseQuoteIn, TRCreate,
+    TRListRow, TROut, TRUpdate,
 )
 from app.platform.rbac import permissions as perms
 
@@ -98,6 +101,50 @@ async def transport_evaluation_methods(
     return service.evaluation_methods()
 
 
+# The stepper every transport screen draws. Served for the same reason /modes is:
+# a tendered shipment has two stages the others do not, and the screen must not be
+# the thing that decides that.
+@transport_router.get("/flow", response_model=list[dict])
+async def transport_flow(mode: str | None = None,
+                         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return service.flow_catalogue(mode)
+
+
+@transport_router.get("/summary", response_model=dict)
+async def transport_summary(db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return await service.transport_summary(db)
+
+
+# `ids` as a comma-separated string, not repeated query params: the Consignments
+# screen asks about exactly the page it is showing, in one call.
+@transport_router.get("/for-consignments", response_model=list[ConsignmentLink])
+async def transport_for_consignments(
+        ids: str = "", db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    wanted = [int(part) for part in ids.split(",") if part.strip().isdigit()]
+    return await service.for_consignments(db, wanted)
+
+
+# Provider Selection's own board. A register rather than a filter on /api/transport:
+# it carries the reply counts and the best price on the table, which the transport
+# register has no reason to compute for every row it ever shows.
+@transport_router.get("/provider-board", response_model=Page[ProviderBoardRow])
+async def transport_provider_board(
+        params: PageParams = Depends(), status: str | None = None,
+        search: str | None = None, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return await service.provider_board(db, params, status, search)
+
+
+@transport_router.get("/acknowledgements", response_model=Page[TRListRow])
+async def transport_acknowledgements(
+        params: PageParams = Depends(), search: str | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return await service.list_trs(db, params, search=search, awaiting_ack=True)
+
+
 @transport_router.get("/carriers", response_model=list[Option])
 async def transport_carriers(search: str | None = None,
                              db: AsyncSession = Depends(get_db),
@@ -116,10 +163,11 @@ async def transport_exceptions(
 async def list_transport(params: PageParams = Depends(), status: str | None = None,
                          mode: str | None = None, carrier_id: int | None = None,
                          indent_id: int | None = None, search: str | None = None,
+                         dispatch_id: int | None = None,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.list_trs(db, params, status, mode, carrier_id,
-                                  indent_id, search)
+                                  indent_id, search, dispatch_id)
 
 
 @transport_router.post("", response_model=TROut)
@@ -128,20 +176,36 @@ async def create_transport(body: TRCreate, db: AsyncSession = Depends(get_db),
     return await service.create_tr(db, body, user)
 
 
-@transport_router.get("/{tr_id}", response_model=TROut)
+# The Dispatch screen: mode, provider, go. One call, because on the floor it is one
+# decision — see service.dispatch_consignment.
+@transport_router.post("/dispatch-consignment", response_model=TROut)
+async def dispatch_consignment(body: QuickDispatchIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.TRANSPORT_CREATE))):
+    return await service.dispatch_consignment(db, body, user)
+
+
+# `{tr_id:int}` on the three single-segment routes, not a bare `{tr_id}`. A literal
+# one-word path under this prefix (`/carriers`, `/provider-board`, whatever is added
+# next) is otherwise matched by these the moment it is declared below them, and the
+# caller gets "tr_id: Input should be a valid integer" for a route that plainly exists.
+# The convertor restricts the pattern to digits, so the match is decided by the SHAPE
+# of the path rather than by declaration order — which is not something the next person
+# adding an endpoint should have to know.
+@transport_router.get("/{tr_id:int}", response_model=TROut)
 async def get_transport(tr_id: int, db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.get_tr(db, tr_id)
 
 
-@transport_router.put("/{tr_id}", response_model=TROut)
+@transport_router.put("/{tr_id:int}", response_model=TROut)
 async def update_transport(tr_id: int, body: TRUpdate,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(perms.TRANSPORT_CREATE))):
     return await service.update_tr(db, tr_id, body, user)
 
 
-@transport_router.delete("/{tr_id}")
+@transport_router.delete("/{tr_id:int}")
 async def delete_transport(tr_id: int, db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(perms.TRANSPORT_DELETE))):
     return await service.delete_tr(db, tr_id, user)
@@ -202,6 +266,20 @@ async def award_transport(tr_id: int, body: AwardIn,
     return await service.award_carrier(db, tr_id, body, user)
 
 
+@transport_router.post("/{tr_id}/accept-quote", response_model=TROut)
+async def accept_quote(tr_id: int, body: AcceptQuoteIn = AcceptQuoteIn(),
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.TRANSPORT_AWARD))):
+    return await service.accept_quote(db, tr_id, body.quote_id, user)
+
+
+@transport_router.post("/{tr_id}/ask-revised-quote", response_model=TROut)
+async def ask_revised_quote(tr_id: int, body: ReviseQuoteIn,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.TRANSPORT_AWARD))):
+    return await service.ask_revised_quote(db, tr_id, body.note, user)
+
+
 @transport_router.post("/{tr_id}/award/approve", response_model=TROut)
 async def approve_award(tr_id: int, body: ActionIn = ActionIn(),
                         db: AsyncSession = Depends(get_db),
@@ -214,6 +292,24 @@ async def reject_award(tr_id: int, body: ActionIn = ActionIn(),
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.TRANSPORT_APPROVE))):
     return await service.act_on_award(db, tr_id, "REJECTED", user, body.comments)
+
+
+# The carrier's own answer to an award lands on the portal routes at the bottom.
+# This one is the desk confirming a phone call on their behalf — same transition,
+# recorded as what it is so the two can never be confused.
+@transport_router.post("/{tr_id}/carrier-confirm", response_model=TROut)
+async def confirm_carrier(tr_id: int, body: CarrierConfirmIn,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.TRANSPORT_AWARD))):
+    return await service.accept_award(db, tr_id, None, body.carrier_reference, user,
+                                      confirmed_by_desk=body.confirmed_by)
+
+
+@transport_router.post("/{tr_id}/carrier-declined", response_model=TROut)
+async def carrier_declined(tr_id: int, body: CarrierDeclineIn,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.TRANSPORT_AWARD))):
+    return await service.decline_award(db, tr_id, None, body.reason, user)
 
 
 @transport_router.post("/{tr_id}/provider", response_model=TROut)
@@ -249,6 +345,14 @@ async def share_tracking(tr_id: int, db: AsyncSession = Depends(get_db),
     return await service.share_tracking(db, tr_id, user)
 
 
+@transport_router.post("/{tr_id}/acknowledge", response_model=TROut)
+async def acknowledge_transport(
+        tr_id: int, body: AcknowledgeIn = AcknowledgeIn(),
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_ACKNOWLEDGE))):
+    return await service.acknowledge_tr(db, tr_id, body, user)
+
+
 @transport_router.post("/{tr_id}/close", response_model=TROut)
 async def close_transport(tr_id: int, db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(perms.TRANSPORT_TRACK))):
@@ -275,20 +379,34 @@ async def resolve_exception(event_id: int, body: ResolveIn,
 # comes from the token — never from the caller. Login, password change and profile are
 # already served by the supplier portal, because a carrier IS a supplier: these routes
 # add only the transport work to the same account.
-carrier_router = APIRouter(prefix="/api/carrier")
+#
+# Declared without a prefix and mounted TWICE, at /api/carrier and at /api/supplier.
+# The vendor token lives under its own key in the browser and the axios interceptor
+# picks it by URL — everything under /api/supplier gets the vendor token, everything
+# else gets the employee one. Serving the same functions at both addresses is what
+# lets the carrier screens use the portal token without the shared client having to
+# learn a second prefix, and /api/carrier stays live for anything already calling it.
+carrier_router = APIRouter()
 
 
 @carrier_router.get("/transport", response_model=Page[TRListRow])
 async def carrier_list_transport(params: PageParams = Depends(),
+                                 status: str | None = None,
                                  db: AsyncSession = Depends(get_db),
                                  account=Depends(get_current_vendor)):
-    return await service.carrier_open_requests(db, account.vendor_id, params)
+    return await service.carrier_open_requests(db, account.vendor_id, params, status)
+
+
+@carrier_router.get("/transport-summary", response_model=dict)
+async def carrier_transport_summary(db: AsyncSession = Depends(get_db),
+                                    account=Depends(get_current_vendor)):
+    return await service.carrier_summary(db, account.vendor_id)
 
 
 @carrier_router.get("/transport/{tr_id}", response_model=TROut)
 async def carrier_get_transport(tr_id: int, db: AsyncSession = Depends(get_db),
                                 account=Depends(get_current_vendor)):
-    return await service.carrier_get_request(db, account.vendor_id, tr_id)
+    return await service.carrier_view_request(db, account.vendor_id, tr_id)
 
 
 @carrier_router.post("/transport/{tr_id}/quote", response_model=QuoteOut)
@@ -298,7 +416,128 @@ async def carrier_submit_quote(tr_id: int, body: QuoteIn,
     return await service.carrier_quote(db, account.vendor_id, tr_id, body)
 
 
+@carrier_router.post("/transport/{tr_id}/accept", response_model=TROut)
+async def carrier_accept_job(tr_id: int, body: CarrierAcceptIn = CarrierAcceptIn(),
+                             db: AsyncSession = Depends(get_db),
+                             account=Depends(get_current_vendor)):
+    return await service.carrier_accept(db, account.vendor_id, tr_id, body)
+
+
+@carrier_router.post("/transport/{tr_id}/decline", response_model=TROut)
+async def carrier_decline_job(tr_id: int, body: CarrierDeclineIn,
+                              db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    return await service.carrier_decline(db, account.vendor_id, tr_id, body)
+
+
+@carrier_router.post("/transport/{tr_id}/tracking", response_model=TROut)
+async def carrier_add_tracking(tr_id: int, body: CarrierTrackIn,
+                               db: AsyncSession = Depends(get_db),
+                               account=Depends(get_current_vendor)):
+    return await service.carrier_track(db, account.vendor_id, tr_id, body)
+
+
+@carrier_router.post("/transport/{tr_id}/deliver", response_model=TROut)
+async def carrier_deliver_job(tr_id: int, body: DeliverIn = DeliverIn(),
+                              db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    return await service.carrier_deliver(db, account.vendor_id, tr_id, body)
+
+
+# ---- The logistics vendor register ----
+#
+# Under Settings, not Logistics: it mints an identity outside the company, which is an
+# administrator's act rather than a dispatcher's — the same reasoning that put
+# Supplier & Carrier Logins there. Every route is guarded, and `partners._partner`
+# refuses any vendor row that is not a carrier, so this permission can never reach a
+# material supplier's record.
+partner_router = APIRouter(prefix="/api/logistics-vendors", tags=["logistics-vendors"])
+
+
+@partner_router.get("/types", response_model=list[dict])
+async def logistics_vendor_types(
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_VIEW))):
+    """Served, not duplicated in the screen: a type the form offers that Dispatch
+    does not accept would create a partner nobody can ship with."""
+    return partners.partner_types()
+
+
+@partner_router.get("/summary", response_model=dict)
+async def logistics_vendor_summary(
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_VIEW))):
+    return await partners.partner_summary(db)
+
+
+@partner_router.get("", response_model=Page[PartnerOut])
+async def list_logistics_vendors(
+        params: PageParams = Depends(), search: str | None = None,
+        vendor_type: str | None = None, active_only: bool = False,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_VIEW))):
+    return await partners.list_partners(db, params, search, vendor_type, active_only)
+
+
+@partner_router.post("", response_model=PartnerOut, status_code=201)
+async def create_logistics_vendor(
+        body: PartnerCreate, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
+    return await partners.create_partner(db, body, user)
+
+
+@partner_router.get("/{vendor_id}", response_model=PartnerOut)
+async def get_logistics_vendor(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_VIEW))):
+    return await partners.get_partner(db, vendor_id)
+
+
+@partner_router.put("/{vendor_id}", response_model=PartnerOut)
+async def update_logistics_vendor(
+        vendor_id: int, body: PartnerUpdate, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
+    return await partners.update_partner(db, vendor_id, body, user)
+
+
+@partner_router.delete("/{vendor_id}", response_model=PartnerOut)
+async def deactivate_logistics_vendor(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
+    return await partners.deactivate_partner(db, vendor_id, user)
+
+
+@partner_router.post("/{vendor_id}/login", response_model=PartnerOut)
+async def issue_logistics_vendor_login(
+        vendor_id: int, body: PartnerLoginIn = PartnerLoginIn(),
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
+    return await partners.issue_login(db, vendor_id, body.username, user)
+
+
+@partner_router.post("/{vendor_id}/login/reset", response_model=PartnerOut)
+async def reset_logistics_vendor_login(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
+    return await partners.reset_login(db, vendor_id, user)
+
+
+@partner_router.post("/{vendor_id}/login/disable", response_model=PartnerOut)
+async def disable_logistics_vendor_login(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
+    return await partners.set_login_active(db, vendor_id, False, user)
+
+
+@partner_router.post("/{vendor_id}/login/enable", response_model=PartnerOut)
+async def enable_logistics_vendor_login(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
+    return await partners.set_login_active(db, vendor_id, True, user)
+
+
 router.include_router(grn_router)
 router.include_router(issue_router)
 router.include_router(transport_router)
-router.include_router(carrier_router)
+router.include_router(partner_router)
+router.include_router(carrier_router, prefix="/api/carrier", tags=["carrier-portal"])
+router.include_router(carrier_router, prefix="/api/supplier", tags=["carrier-portal"])

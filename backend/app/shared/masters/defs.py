@@ -501,8 +501,47 @@ class BinIn(BaseModel):
 def bin_out(b: Bin) -> dict:
     return {"id": b.id, "warehouse_id": b.warehouse_id, "code": b.code, "name": b.name,
             "parent_id": b.parent_id, "bin_type": b.bin_type,
+            "path": getattr(b, "_derived_path", b.code),
+            "level": getattr(b, "_derived_level", 1),
             "capacity_qty": float(b.capacity_qty) if b.capacity_qty is not None else None,
             "is_pickable": b.is_pickable, "is_active": b.is_active}
+
+
+async def prepare_bins(db: AsyncSession, rows: list[Bin]) -> None:
+    """Derive ancestry for a page or a freshly-written row in one database query.
+
+    A page may contain a child without its parent, so load the complete location tree
+    for the warehouses represented by that page. The identity map reuses page rows;
+    annotating every node also makes create/update and list responses identical.
+    """
+    warehouse_ids = {row.warehouse_id for row in rows}
+    locations = (await db.execute(
+        select(Bin).where(Bin.warehouse_id.in_(warehouse_ids))
+    )).scalars().all()
+    by_id = {row.id: row for row in locations}
+    memo: dict[int, tuple[str, int]] = {}
+
+    def ancestry(row: Bin, visiting: set[int] | None = None) -> tuple[str, int]:
+        if row.id in memo:
+            return memo[row.id]
+        visiting = set() if visiting is None else visiting
+        if row.id in visiting:
+            # Legacy bad data must still be visible and editable; expose the looped
+            # row as a root instead of recursing forever.
+            return row.code, 1
+        visiting.add(row.id)
+        parent = by_id.get(row.parent_id) if row.parent_id else None
+        if parent is None:
+            result = (row.code, 1)
+        else:
+            parent_path, parent_level = ancestry(parent, visiting)
+            result = (f"{parent_path}/{row.code}", parent_level + 1)
+        visiting.remove(row.id)
+        memo[row.id] = result
+        return result
+
+    for location in locations:
+        location._derived_path, location._derived_level = ancestry(location)
 
 
 async def apply_bin(db: AsyncSession, b: Bin, data: BinIn) -> None:
@@ -1595,7 +1634,7 @@ MASTERS: list[MasterDef] = [
               # `path` is derived when a tree is read, not a column — ordering or
               # searching on it is an AttributeError, not an empty result.
               search_cols=("code", "name"), order_col="code",
-              apply=apply_bin),
+              apply=apply_bin, prepare=prepare_bins),
 
     # Read-only: HCM owns projects and platform/hcm/sync.py writes them. A local edit
     # would survive only until the next sync overwrote it without saying so.

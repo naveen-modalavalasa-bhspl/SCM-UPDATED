@@ -10,7 +10,10 @@ export const MODE_LABEL: Record<TransportMode, string> = {
   DIRECT: "Hand-over",
   COURIER: "Courier",
   OWN_VEHICLE: "Own vehicle",
-  THIRD_PARTY: "3PL",
+  // "Third-party", never "3PL": the desk chooses it by that name, the mode filter on
+  // Transport Requests has always read it that way, and a screen that abbreviates it
+  // in the picker and spells it out in the filter reads as two different modes.
+  THIRD_PARTY: "Third-party",
 };
 
 /** Tailwind classes for the mode chip. Deliberately not `StatusPill`: a mode is not
@@ -39,10 +42,59 @@ export const TR_STATUSES = [
   { value: "DRAFT", label: "Draft" },
   { value: "PENDING_APPROVAL", label: "Pending approval" },
   { value: "QUOTING", label: "Out to carriers" },
+  { value: "AWAITING_CARRIER", label: "Awaiting carrier" },
   { value: "READY", label: "Ready to dispatch" },
   { value: "IN_TRANSIT", label: "In transit" },
   { value: "DELIVERED", label: "Delivered" },
+  { value: "ACKNOWLEDGED", label: "Acknowledged" },
   { value: "CLOSED", label: "Closed" },
   { value: "REJECTED", label: "Rejected" },
   { value: "CANCELLED", label: "Cancelled" },
 ];
+
+/** What the desk should DO about a request in this status, in four words.
+ *
+ * Every list in this module shows it next to the status pill. A status names the
+ * state; this names the next move, and a desk working a queue needs the second one. */
+export const NEXT_MOVE: Record<string, string> = {
+  DRAFT: "Finish and send for approval",
+  PENDING_APPROVAL: "Waiting on the approver",
+  QUOTING: "Invite carriers and award",
+  AWAITING_CARRIER: "Carrier has not confirmed yet",
+  READY: "Dispatch it — gate pass and LR",
+  IN_TRANSIT: "Track it and share the LR",
+  DELIVERED: "Waiting for the site to sign",
+  ACKNOWLEDGED: "Close the shipment",
+  CLOSED: "Done",
+  REJECTED: "Rejected",
+  CANCELLED: "Cancelled",
+};
+
+export const nextMove = (status: string) => NEXT_MOVE[status] ?? "";
+
+/** Tailwind tint per status, for the board tiles and the stepper. `StatusPill` is
+ * still the pill everywhere a status is only being reported; these are for the
+ * surfaces that are about the flow itself. */
+export const STATUS_TINT: Record<string, string> = {
+  DRAFT: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+  PENDING_APPROVAL: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
+  QUOTING: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
+  AWAITING_CARRIER: "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300",
+  READY: "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300",
+  IN_TRANSIT: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300",
+  DELIVERED: "bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300",
+  ACKNOWLEDGED: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  CLOSED: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
+  REJECTED: "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300",
+  CANCELLED: "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300",
+};
+
+export const statusTint = (status: string) =>
+  STATUS_TINT[status] ?? STATUS_TINT.DRAFT;
+
+export const humanStatus = (status: string) =>
+  status.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase());
+
+/** kg / m³ / package counts, printed the same way everywhere. */
+export const load = (packages?: number | null, weightKg?: number | null) =>
+  `${Number(packages ?? 0)} pkg · ${Number(weightKg ?? 0).toLocaleString("en-IN")} kg`;

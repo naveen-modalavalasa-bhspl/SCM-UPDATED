@@ -7,6 +7,7 @@ import {
 import { CardBody, Skeleton } from "@heroui/react";
 import { Button, Card } from "@/shared/components";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
+import { JourneyProgress } from "../components/JourneyProgress";
 import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
   isIndentUnavailableError, useIndentAccountCacheIsolation, useIndentAccountScope,
@@ -346,6 +347,11 @@ export function IndentJourneyPage() {
         </div>
         <IndentStatusBadge status={data.status} journey={data} />
       </header>
+
+      {/* Every leg, including the ones still ahead — the timeline below only draws
+          the legs something has happened in, which answers where the indent HAS been
+          and never how far it still has to go. */}
+      <JourneyProgress tracks={tracks} />
 
       {error && <p className="rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}
 

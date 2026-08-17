@@ -18,6 +18,7 @@ on a mode that actually hires somebody.
 import logging
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,21 +26,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.logistics.enums import (
+    ACK_CLAIM_EVENT,
     CARRIER_VENDOR_TYPES,
     EXCEPTION_EVENT_TYPES,
     MODE_RULES,
+    AckCondition,
     QuoteStatus,
     ShipmentEventType,
     TERMINAL_STATUSES,
     TransportMode,
     TransportStatus,
+    flow_stages,
     mode_rule,
 )
 from app.modules.logistics.models import (
     CarrierQuote, ShipmentEvent, TransportRequest, TransportRequestItem,
 )
+from app.modules.logistics.schemas import TROut
 from app.platform.settings.service import write_audit
-from app.platform.workflow import engine
+from app.platform.workflow import engine, ladder
 from app.shared import evaluation
 from app.shared.enums import ApprovalAction, AuditAction, DocType, InstanceStatus
 from app.shared.models.base import utcnow
@@ -57,6 +62,16 @@ def _d(value) -> Decimal:
     return Decimal(str(value or 0))
 
 
+def _and_list(names: list[str]) -> str:
+    """"Amazon, Flipkart and Misaba" — for the audit line a person reads later."""
+    clean = [name for name in names if name]
+    if not clean:
+        return "the provider"
+    if len(clean) == 1:
+        return clean[0]
+    return f"{', '.join(clean[:-1])} and {clean[-1]}"
+
+
 # --------------------------------------------------------------------------- #
 #  Reads
 # --------------------------------------------------------------------------- #
@@ -71,7 +86,9 @@ async def get_tr(db: AsyncSession, tr_id: int) -> TransportRequest:
 async def list_trs(db: AsyncSession, params: PageParams, status: str | None = None,
                    mode: str | None = None, carrier_id: int | None = None,
                    indent_id: int | None = None,
-                   search: str | None = None) -> dict:
+                   search: str | None = None,
+                   dispatch_id: int | None = None,
+                   awaiting_ack: bool = False) -> dict:
     stmt = select(TransportRequest)
     if status:
         # Comma-separated so one screen can ask for the two statuses that make up its
@@ -84,6 +101,11 @@ async def list_trs(db: AsyncSession, params: PageParams, status: str | None = No
         stmt = stmt.where(TransportRequest.carrier_id == carrier_id)
     if indent_id:
         stmt = stmt.where(TransportRequest.indent_id == indent_id)
+    if dispatch_id:
+        stmt = stmt.where(TransportRequest.dispatch_id == dispatch_id)
+    if awaiting_ack:
+        # Landed, nobody has signed for it. The indent team's chase list (doc A7).
+        stmt = stmt.where(TransportRequest.status == TransportStatus.DELIVERED.value)
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.where(or_(
@@ -116,6 +138,147 @@ def mode_catalogue() -> list[dict]:
 def evaluation_methods() -> list[dict]:
     """The same four the RFQ comparison offers — one catalogue, one arithmetic."""
     return evaluation.describe()
+
+
+def flow_catalogue(mode: str | None = None) -> list[dict]:
+    """The stepper, served rather than drawn from a constant in the screen.
+
+    A tendered shipment has two stages the others do not. Letting the frontend decide
+    that is how a hand-over ends up with a "Quotes" step nobody can ever complete.
+    """
+    return [{
+        "key": stage.key,
+        "label": stage.label,
+        "help": stage.help,
+        "statuses": list(stage.statuses),
+    } for stage in flow_stages(mode)]
+
+
+#: The queues the logistics desk actually works, in the order the flow runs. Served
+#: as one call so the board is one round trip rather than nine.
+_SUMMARY_QUEUES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("draft", (TransportStatus.DRAFT.value,)),
+    ("pending_approval", (TransportStatus.PENDING_APPROVAL.value,)),
+    ("quoting", (TransportStatus.QUOTING.value,)),
+    ("awaiting_carrier", (TransportStatus.AWAITING_CARRIER.value,)),
+    ("ready", (TransportStatus.READY.value,)),
+    ("in_transit", (TransportStatus.IN_TRANSIT.value,)),
+    ("delivered", (TransportStatus.DELIVERED.value,)),
+    ("acknowledged", (TransportStatus.ACKNOWLEDGED.value,)),
+    ("closed", (TransportStatus.CLOSED.value,)),
+)
+
+
+async def summary(db: AsyncSession) -> dict:
+    """How many consignments are sitting at each stage, plus the open claims."""
+    rows = (await db.execute(
+        select(TransportRequest.status, func.count(TransportRequest.id))
+        .group_by(TransportRequest.status)
+    )).all()
+    by_status = {status: count for status, count in rows}
+
+    counts = {key: sum(by_status.get(s, 0) for s in statuses)
+              for key, statuses in _SUMMARY_QUEUES}
+    counts["open_claims"] = (await db.execute(
+        select(func.count(ShipmentEvent.id))
+        .where(ShipmentEvent.is_exception.is_(True),
+               ShipmentEvent.resolved_at.is_(None))
+    )).scalar_one()
+    # The two the desk is actually judged on: nothing should sit here.
+    counts["awaiting_ack"] = counts["delivered"]
+    counts["untracked"] = (await db.execute(
+        select(func.count(TransportRequest.id))
+        .where(TransportRequest.status.in_([TransportStatus.IN_TRANSIT.value,
+                                            TransportStatus.DELIVERED.value]),
+               TransportRequest.tracking_shared_at.is_(None))
+    )).scalar_one()
+    return counts
+
+
+async def for_consignments(db: AsyncSession, dispatch_ids: list[int]) -> list[dict]:
+    """Which of these warehouse consignments already have transport, and where it is.
+
+    The Consignments screen asks this once for the page it is showing instead of one
+    lookup per row. Nothing here reads `out_dispatches` — the ids come from the caller,
+    which is what keeps logistics in front of warehouse in the import chain (rule 5).
+    """
+    if not dispatch_ids:
+        return []
+    rows = (await db.execute(
+        select(TransportRequest)
+        .where(TransportRequest.dispatch_id.in_(dispatch_ids))
+        .order_by(TransportRequest.id.desc())
+    )).scalars().all()
+    seen: dict[int, dict] = {}
+    for doc in rows:
+        # Newest first, so the first row per consignment is the live one. A cancelled
+        # attempt followed by a re-raise must show the re-raise.
+        seen.setdefault(doc.dispatch_id, {
+            "dispatch_id": doc.dispatch_id,
+            "tr_id": doc.id,
+            "tr_no": doc.tr_no,
+            "mode": doc.mode,
+            "status": doc.status,
+            "carrier_name": doc.carrier_name,
+            "lr_no": doc.lr_no or doc.docket_no,
+        })
+    return list(seen.values())
+
+
+#: What sits on the provider selection desk, in the order the flow runs. QUOTING is
+#: "prices still coming in", AWAITING_CARRIER is "awarded, the winner has not confirmed
+#: yet", READY is "settled, not yet gone". One desk works all three, because the second
+#: is the consequence of the first and a decline drops a shipment straight back into it.
+PROVIDER_BOARD_STATUSES = (
+    TransportStatus.QUOTING.value,
+    TransportStatus.AWAITING_CARRIER.value,
+    TransportStatus.READY.value,
+)
+
+
+async def provider_board(db: AsyncSession, params: PageParams,
+                         status: str | None = None,
+                         search: str | None = None) -> dict:
+    """Every shipment still waiting on "who is taking this", with its tender attached.
+
+    The transport register answers "where is this consignment"; this answers the only
+    question the provider desk has all day — how many of the partners I asked have
+    answered, and what is the best price on the table. Those counts are computed here
+    rather than left to the screen to derive from the quote rows, because a board that
+    makes you open each request to count the replies is a board that awards late.
+
+    Every mode, not just the tendered one. A courier booking has no quotes and reads
+    0 of 0, which is exactly right: it was settled at dispatch and there is nothing to
+    compare. Filtering it out would take rows off a board that has always shown them,
+    to make a column tidier.
+    """
+    wanted = [s.strip().upper() for s in (status or "").split(",") if s.strip()]
+    stmt = (select(TransportRequest)
+            .where(TransportRequest.status.in_(
+                wanted or list(PROVIDER_BOARD_STATUSES))))
+    if search:
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            TransportRequest.tr_no.ilike(like),
+            TransportRequest.consignment_no.ilike(like),
+            TransportRequest.indent_no.ilike(like),
+            TransportRequest.to_location_name.ilike(like),
+        ))
+    page = await paginate(db, stmt.order_by(TransportRequest.id.desc()), params)
+
+    for row in page["items"]:
+        priced = [q for q in row.quotes if q.freight_amount is not None
+                  and q.status != QuoteStatus.INVITED.value]
+        row.invited_count = len(row.quotes)
+        row.responded_count = len(priced)
+        # The cheapest LANDED cost, not the cheapest headline freight: the register
+        # has to agree with the comparison sheet it links to, and the sheet ranks on
+        # what the company actually pays.
+        best = min(priced, key=_landed_cost) if priced else None
+        row.best_amount = float(_landed_cost(best)) if best else None
+        row.best_carrier_name = best.carrier_name if best else None
+        row.best_transit_days = best.transit_days if best else None
+    return page
 
 
 async def carrier_options(db: AsyncSession, search: str | None = None) -> list[dict]:
@@ -208,16 +371,25 @@ _FIELD_LABELS = {
 }
 
 
-def _check_mode_fields(doc: TransportRequest) -> None:
+def _check_mode_fields(doc: TransportRequest, *, at_submit: bool = False) -> None:
     """Whatever the mode says it must carry, checked in one place.
 
     Runs at submit rather than at create: a draft is allowed to be incomplete, which
     is the whole point of a draft. What must never happen is an approved request that
     nobody can act on because it names no carrier and no vehicle.
+
+    One field is exempt at submit, and only for a tendered mode: the carrier. A
+    third-party shipment's carrier is AWARDED, not declared — it is the answer the
+    tender exists to produce — so demanding it up front made a third-party request
+    impossible to submit at all, while the form beside it correctly said to leave the
+    carrier blank. By dispatch it is set, because an award is what sets it.
     """
     rule = mode_rule(doc.mode)
+    required = rule.required_fields
+    if at_submit and rule.needs_quotes:
+        required = tuple(field for field in required if field != "carrier_id")
     missing = [_FIELD_LABELS.get(field, field)
-               for field in rule.required_fields
+               for field in required
                if not getattr(doc, field, None)]
     if missing:
         raise ValidationError(
@@ -271,6 +443,7 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         source_type=data.source_type, source_id=data.source_id,
         source_no=data.source_no,
         issue_id=data.issue_id, dispatch_id=data.dispatch_id,
+        consignment_no=data.consignment_no,
         indent_id=data.indent_id, indent_no=data.indent_no,
         from_warehouse_id=data.from_warehouse_id,
         from_warehouse_name=data.from_warehouse_name,
@@ -280,6 +453,7 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         distance_km=data.distance_km,
         project_id=data.project_id, project_name=data.project_name,
         expected_delivery=data.expected_delivery, remarks=data.remarks,
+        gate_pass_no=data.gate_pass_no,
         vehicle_number=data.vehicle_number, driver_name=data.driver_name,
         driver_phone=data.driver_phone, trip_reference=data.trip_reference,
         handed_over_by_name=data.handed_over_by_name,
@@ -304,6 +478,246 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
     return doc
 
 
+# --------------------------------------------------------------------------- #
+#  Dispatching a consignment — the whole thing, in one press
+# --------------------------------------------------------------------------- #
+
+def _chosen_carriers(data) -> list[int]:
+    """The providers named on a dispatch, plural first and de-duplicated.
+
+    `carrier_ids` is the real field and `carrier_id` the singular case of it, so both
+    are read and merged: the Dispatch screen sends the list, and anything older (or a
+    non-tendered booking, which only ever names one) sends the single id. Order is
+    kept — the desk's first pick reads first on the comparison sheet — and a provider
+    named twice is invited once, because two invitations to the same carrier is one
+    row in `lgs_carrier_quotes` and a unique index that would have refused the second.
+    """
+    named = [*(getattr(data, "carrier_ids", None) or []),
+             *([data.carrier_id] if data.carrier_id else [])]
+    return list(dict.fromkeys(cid for cid in named if cid))
+
+
+async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest:
+    """"This consignment is going out, this way, with them." One call.
+
+    The Dispatch screen asks two questions and nothing else: how does it travel, and
+    with whom. Everything a transport request needs is already on the consignment the
+    warehouse packed, so raising it, filling it in and sending it to the provider is
+    one action rather than a form, a save, a submit and three follow-ups.
+
+    Where it lands depends only on the mode:
+
+      * THIRD_PARTY — EVERY provider chosen is invited and the request sits in QUOTING.
+        It appears in each of THEIR portals, they price it independently, and it comes
+        back to the RFQ desk as a comparison. That round trip is the whole reason this
+        mode exists, and it is only a tender if more than one carrier was asked: one
+        price is a rate, not a competition.
+      * everything else — the provider is known the moment it is chosen (a courier, a
+        company vehicle, a person carrying it), so it goes straight to READY and the
+        next press is "it has left".
+
+    No second approval BY DEFAULT. The consignment it carries was already raised,
+    approved and released by the warehouse; approving the same movement again is a
+    queue nobody works and a document that sits still while a packed pallet waits on
+    the floor. Approving the SPEND is separate and still happens — that is the award.
+
+    "By default" and not "never", because the ladder is what decides (rule 8). No
+    TRANSPORT_REQUEST ladder configured — every project today — and this lands exactly
+    where it always did. Configure one on Approvals Config and it is honoured here too,
+    rather than saving a row that quietly governs `submit_tr` and nothing else.
+    """
+    mode = (data.mode or "").upper()
+    if mode not in MODE_RULES:
+        raise ValidationError(
+            f"{data.mode!r} is not a transport mode. "
+            f"Choose one of: {', '.join(MODE_RULES)}.")
+    rule = mode_rule(mode)
+    chosen = _chosen_carriers(data)
+    if rule.needs_carrier and not chosen:
+        raise ValidationError(
+            "Choose the logistics provider(s) this consignment goes with")
+    # A booking is made with ONE provider. Only a tender asks several, so naming more
+    # than one on a courier booking is a mistake worth stopping rather than silently
+    # resolving to whichever happened to be first in the list.
+    if not rule.needs_quotes and len(chosen) > 1:
+        raise ValidationError(
+            f"A {rule.label.lower()} booking goes with one provider. "
+            "Choose third-party to send the same job to several and compare.")
+
+    method = getattr(data, "evaluation_method", None)
+    if method and not evaluation.is_valid(method):
+        raise ValidationError(f"{method!r} is not an evaluation method")
+
+    # `create_tr` reads the singular field, so the desk's first pick is what a
+    # non-tendered booking is created against; a tender clears it again below.
+    data.carrier_id = chosen[0] if chosen else None
+    doc = await create_tr(db, data, user)
+    doc.mode = mode
+
+    if rule.needs_quotes:
+        doc.carrier_id = doc.carrier_name = None   # not theirs until it is awarded
+        doc.evaluation_method = (method or "").upper() or None
+        invited = []
+        for carrier_id in chosen:
+            vendor = await _carrier(db, carrier_id)
+            doc.quotes.append(CarrierQuote(
+                carrier_id=vendor.id, carrier_name=vendor.name,
+                status=QuoteStatus.INVITED.value, invited_at=utcnow(),
+            ))
+            invited.append(vendor.name)
+        settled_summary = f"Sent {doc.tr_no} to {_and_list(invited)} for a price"
+    else:
+        if doc.carrier_id is None and chosen:
+            vendor = await _carrier(db, chosen[0])
+            doc.carrier_id, doc.carrier_name = vendor.id, vendor.name
+        if mode == TransportMode.OWN_VEHICLE.value:
+            # A vehicle already going that way costs the shipment nothing.
+            doc.freight_amount = ZERO
+        elif data.freight_amount is not None:
+            doc.freight_amount = _d(data.freight_amount)
+        _check_mode_fields(doc)
+        settled_summary = (f"{doc.tr_no} ready to leave with "
+                           f"{doc.carrier_name or doc.vehicle_number or 'the warehouse'}")
+
+    # Rule 8: whether this needs a signature is the LADDER's answer, not this
+    # function's — but only when somebody actually configured one.
+    #
+    # `find_ladder` returning None means nobody has, which is every project today, and
+    # there the one-press dispatch stays exactly what it was: no approval, straight to
+    # QUOTING or READY. Calling the engine unconditionally would NOT have been the same
+    # thing — with nothing configured it falls back to climbing the raiser's reporting
+    # line, so every dispatch would have started landing in a stranger's queue and a
+    # packed pallet would sit on the floor waiting for a signature nobody asked for.
+    #
+    # A configured ladder is the other case, and it is the reason this asks at all:
+    # Approvals Config OFFERS a TRANSPORT_REQUEST row, so an admin can switch one on and
+    # watch it save. Skipping the engine outright would let that row govern `submit_tr`
+    # and be silently ignored by the screen that raises nearly every transport request.
+    doc.requested_position_id = (doc.requested_position_id
+                                 or getattr(user, "active_position_id", None))
+    raiser_role_id = await ladder.role_of_position(db, doc.requested_position_id)
+    configured = await ladder.find_ladder(
+        db, doc.project_id or None, DocType.TRANSPORT_REQUEST.value, raiser_role_id)
+
+    if configured is None:
+        _advance_after_approval(doc)
+        summary = settled_summary
+    else:
+        instance = await engine.start(
+            db, DocType.TRANSPORT_REQUEST.value, doc.id, _context(doc), user)
+        # A ladder can resolve to nobody (every rung switched off, or NO_APPROVAL).
+        # Reading the instance rather than assuming it is pending is what stops the
+        # request standing still with no one holding it — same rule as `submit_tr`.
+        if instance.status == InstanceStatus.APPROVED.value:
+            _advance_after_approval(doc)
+            summary = settled_summary
+        else:
+            doc.status = TransportStatus.PENDING_APPROVAL.value
+            summary = (f"Raised {doc.tr_no} for {rule.label.lower()} "
+                       f"and sent it for approval")
+
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      after={"mode": doc.mode, "status": doc.status},
+                      summary=summary)
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+async def accept_quote(db: AsyncSession, tr_id: int, quote_id: int | None,
+                       user) -> TransportRequest:
+    """"That price is fine." Accepts the provider's quote and offers them the job.
+
+    Shorter than `award_carrier`, which is the competitive tender: here the desk asked
+    ONE provider what it would cost and they answered, so there is nobody to compare
+    them against and no second approval to run. `quote_id` may be omitted when only
+    one price is on the table, which on this path is the normal case.
+
+    What it does NOT skip is the carrier's own yes. An accepted price is still an
+    OFFER (the same rule the tender path enforces): the provider quoted a lane before
+    they knew the date was theirs, and until they confirm they have a vehicle for it
+    nothing can be loaded against the shipment. So this lands on AWAITING_CARRIER and
+    the provider's portal — or the desk on their behalf, via `/carrier-confirm` —
+    makes it READY. Booking it here instead put consignments on the floor against
+    carriers who had never agreed to come.
+    """
+    doc = await get_tr(db, tr_id)
+    if doc.status != TransportStatus.QUOTING.value:
+        raise ValidationError(f"{doc.tr_no} is not waiting on a price")
+
+    priced = [q for q in doc.quotes if q.status == QuoteStatus.SUBMITTED.value]
+    quote = (next((q for q in doc.quotes if q.id == quote_id), None)
+             if quote_id else (priced[0] if len(priced) == 1 else None))
+    if quote is None:
+        raise ValidationError(
+            "Say which quote is being accepted" if priced
+            else "No provider has sent a price yet")
+    if quote.status != QuoteStatus.SUBMITTED.value:
+        raise ValidationError(f"{quote.carrier_name} has not sent a price")
+
+    for other in doc.quotes:
+        if other.id != quote.id and other.status == QuoteStatus.SUBMITTED.value:
+            other.status = QuoteStatus.NOT_AWARDED.value
+    quote.status = QuoteStatus.AWARDED.value
+
+    doc.carrier_id, doc.carrier_name = quote.carrier_id, quote.carrier_name
+    doc.freight_amount = _landed_cost(quote)
+    doc.awarded_quote_id = quote.id
+    doc.awarded_by_id = getattr(user, "id", None)
+    doc.awarded_by_name = getattr(user, "full_name", None)
+    doc.awarded_at = utcnow()
+    # Cleared, not stamped: the acceptance we are waiting for is THEIRS. A re-quote
+    # that comes back round must not inherit a confirmation from the first attempt.
+    doc.carrier_accepted_at = None
+    doc.carrier_declined_at = None
+    doc.carrier_decline_reason = None
+    doc.status = TransportStatus.AWAITING_CARRIER.value
+
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      after={"carrier": doc.carrier_name,
+                             "freight": float(doc.freight_amount or 0),
+                             "status": doc.status},
+                      summary=(f"Accepted {quote.carrier_name} at "
+                               f"{doc.freight_amount} for {doc.tr_no} — "
+                               f"waiting for them to confirm"))
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+async def ask_revised_quote(db: AsyncSession, tr_id: int, note: str,
+                            user) -> TransportRequest:
+    """"Too dear — price it again." Hands the job back to the provider.
+
+    The quote goes back to INVITED rather than being deleted, so the request reappears
+    on the provider's board as something to price, and the note tells them why. What
+    they quoted last time is overwritten when they answer, which is the whole point:
+    a negotiation is one price at a time, not a thread.
+    """
+    doc = await get_tr(db, tr_id)
+    if doc.status != TransportStatus.QUOTING.value:
+        raise ValidationError(f"{doc.tr_no} is not out for a price")
+    waiting = [q for q in doc.quotes if q.status == QuoteStatus.SUBMITTED.value]
+    if not waiting:
+        raise ValidationError("There is no price to send back")
+    if not (note or "").strip():
+        raise ValidationError("Tell the provider what to change")
+
+    for quote in waiting:
+        quote.status = QuoteStatus.INVITED.value
+        quote.remarks = note.strip()
+        quote.submitted_at = None
+
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      summary=f"Asked for a revised price on {doc.tr_no}: {note.strip()}")
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
 async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequest:
     doc = await get_tr(db, tr_id)
     _guard_editable(doc)
@@ -322,7 +736,8 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
         doc.mode = data.mode.upper()
 
     for field in ("tr_date", "source_type", "source_id", "source_no", "issue_id",
-                  "dispatch_id", "indent_id", "indent_no", "from_warehouse_id",
+                  "dispatch_id", "consignment_no",
+                  "indent_id", "indent_no", "from_warehouse_id",
                   "from_warehouse_name", "to_location_name", "delivery_address",
                   "contact_person", "contact_phone", "distance_km", "project_id",
                   "project_name", "expected_delivery", "remarks", "vehicle_number",
@@ -369,7 +784,7 @@ async def submit_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
     _guard_editable(doc)
     if not doc.items:
         raise ValidationError("Add at least one line before submitting")
-    _check_mode_fields(doc)
+    _check_mode_fields(doc, at_submit=True)
 
     doc.requested_position_id = (doc.requested_position_id
                                  or getattr(user, "active_position_id", None))
@@ -439,7 +854,8 @@ async def cancel_tr(db: AsyncSession, tr_id: int, user,
     if doc.status in TERMINAL_STATUSES:
         raise ValidationError(f"{doc.tr_no} is already {doc.status.lower()}")
     if doc.status in (TransportStatus.IN_TRANSIT.value,
-                      TransportStatus.DELIVERED.value):
+                      TransportStatus.DELIVERED.value,
+                      TransportStatus.ACKNOWLEDGED.value):
         raise ValidationError(
             "This consignment has already left. Close it and raise a claim instead "
             "of cancelling.")
@@ -586,7 +1002,94 @@ def _rank_quotes(quotes: list[CarrierQuote], method: str) -> list[dict]:
             "rank": row.rank,
             "is_recommended": row.is_recommended,
         })
+    _flag_best(rows)
     return rows
+
+
+def _flag_best(rows: list[dict]) -> None:
+    """Mark the cheapest quote and the fastest one, independently of the ranking.
+
+    The rank already says who wins under the chosen method, and that is one number
+    hiding two facts. A desk deciding a shipment wants both of them on the sheet at
+    once: what the cheapest option is, and what the quickest one is. When they are the
+    same carrier there is no decision to make; when they are not, the trade-off IS the
+    decision, and a sheet that only shows the winner has quietly made it for them.
+
+    Ties are all flagged, not just the first: two carriers at the same price are both
+    the cheapest, and picking one of them to wear the badge is arbitrary.
+    """
+    if not rows:
+        return
+    best_cost = min(row["landed_cost"] for row in rows)
+    timed = [row["transit_days"] for row in rows if row["transit_days"] is not None]
+    best_days = min(timed) if timed else None
+    for row in rows:
+        row["is_cheapest"] = row["landed_cost"] == best_cost
+        row["is_fastest"] = (best_days is not None
+                             and row["transit_days"] == best_days)
+
+
+def _brief(row: dict | None) -> dict | None:
+    """One quote, cut down to what a recommendation has to name."""
+    if row is None:
+        return None
+    return {
+        "quote_id": row["quote_id"],
+        "carrier_id": row["carrier_id"],
+        "carrier_name": row["carrier_name"],
+        "landed_cost": row["landed_cost"],
+        "transit_days": row["transit_days"],
+    }
+
+
+def _recommendation(rows: list[dict]) -> dict | None:
+    """Who the numbers point at, and what choosing them costs against the alternatives.
+
+    A recommendation, never a decision: this returns what the ranking found and the
+    two comparisons a desk would otherwise work out on paper — how much the top quote
+    saves against the runner-up, and how many days it gives away against the fastest.
+    The award is still a press somebody has to make, and `award_carrier` will accept
+    any submitted quote, not only this one. That is deliberate: the numbers do not
+    know that a carrier lost a pallet last month.
+
+    Facts only, no sentence. Phrasing it (and printing the money) is the screen's job —
+    the currency format lives beside the rest of the presentation, not in the service.
+    """
+    if not rows:
+        return None
+    top = rows[0]
+    cheapest = next((row for row in rows if row["is_cheapest"]), None)
+    fastest = next((row for row in rows if row["is_fastest"]), None)
+    # The next quote down the ranking, which is what the top one was actually chosen
+    # over. Absent on a single-quote sheet, where there was nothing to choose between.
+    runner_up = rows[1] if len(rows) > 1 else None
+
+    others = [row["landed_cost"] for row in rows
+              if row["quote_id"] != top["quote_id"]]
+    return {
+        **_brief(top),
+        "score": top["score"],
+        "is_cheapest": top["is_cheapest"],
+        "is_fastest": top["is_fastest"],
+        "cheapest": _brief(cheapest),
+        "fastest": _brief(fastest),
+        "runner_up": _brief(runner_up),
+        # What the recommendation saves against the best other price on the sheet, and
+        # what it gives away in days against the quickest. Either may be zero, and the
+        # saving goes NEGATIVE when the winner is not the cheapest — ranked by speed,
+        # the winner can be the dearest quote, and a sheet that hid that would be
+        # relabelling a deliberate trade-off as a bargain. `days_slower` is None when
+        # nobody quoted a transit time: a comparison that invents a lead time is worse
+        # than one that admits it does not have one.
+        "saving": (min(others) - top["landed_cost"]) if others else None,
+        "days_slower": (
+            top["transit_days"] - fastest["transit_days"]
+            if fastest is not None and top["transit_days"] is not None else None),
+        # Cheapest and fastest are different carriers: there is a trade-off here and
+        # the desk, not the ranking, is the one who should settle it.
+        "is_trade_off": bool(cheapest and fastest
+                             and cheapest["quote_id"] != fastest["quote_id"]),
+    }
 
 
 async def comparison(db: AsyncSession, tr_id: int,
@@ -601,12 +1104,24 @@ async def comparison(db: AsyncSession, tr_id: int,
         raise ValidationError(f"{method!r} is not an evaluation method")
     chosen = evaluation.method_of(method or doc.evaluation_method)
     rows = _rank_quotes(list(doc.quotes), chosen)
+    # Invited and silent. Carried on the sheet rather than left to the screen to
+    # diff against the invite list: "who has not answered yet" is the question that
+    # decides whether to award now or wait one more day.
+    pending = [{"quote_id": q.id, "carrier_id": q.carrier_id,
+                "carrier_name": q.carrier_name, "invited_at": q.invited_at}
+               for q in doc.quotes if q.status == QuoteStatus.INVITED.value]
     return {
         "tr_id": doc.id, "tr_no": doc.tr_no, "status": doc.status,
+        "mode": doc.mode,
+        "consignment_no": doc.consignment_no,
+        "to_location_name": doc.to_location_name,
         "evaluation_method": chosen,
         "invited": len(doc.quotes),
         "responded": len(rows),
         "rows": rows,
+        "pending": pending,
+        "recommendation": _recommendation(rows),
+        "awarded_quote_id": doc.awarded_quote_id,
         # Stated rather than enforced: three quotes is the standard (doc B8), but a
         # single-carrier lane is real and blocking it would stop the shipment.
         "meets_three_quote_norm": len(rows) >= 3,
@@ -649,7 +1164,10 @@ async def award_carrier(db: AsyncSession, tr_id: int, data, user) -> TransportRe
     # ladder must never strand a consignment (rule 8).
     instance = await engine.start(db, DocType.CARRIER_AWARD.value, doc.id,
                                   _context(doc), user)
-    doc.status = (TransportStatus.READY.value
+    # Approved internally, but not yet a booking: the carrier has to accept it in their
+    # own portal before anything is loaded. READY means "it can leave", and a shipment
+    # whose truck has not been confirmed emphatically cannot.
+    doc.status = (TransportStatus.AWAITING_CARRIER.value
                   if instance.status == InstanceStatus.APPROVED.value
                   else TransportStatus.QUOTING.value)
 
@@ -673,22 +1191,115 @@ async def act_on_award(db: AsyncSession, tr_id: int, action: str, user,
     instance = await engine.act(db, DocType.CARRIER_AWARD.value, doc.id, action,
                                 user, comments, context=_context(doc))
     if instance.status == InstanceStatus.APPROVED.value:
-        doc.status = TransportStatus.READY.value
+        doc.status = TransportStatus.AWAITING_CARRIER.value
     elif instance.status == InstanceStatus.REJECTED.value:
         # Back to the tender, not to rejected: the shipment still has to travel. The
-        # award is undone so a different carrier can be picked.
-        doc.status = TransportStatus.QUOTING.value
-        for quote in doc.quotes:
-            if quote.id == doc.awarded_quote_id:
-                quote.status = QuoteStatus.SUBMITTED.value
-        doc.carrier_id = doc.carrier_name = None
-        doc.freight_amount = doc.awarded_quote_id = None
-        doc.awarded_at = doc.awarded_by_id = doc.awarded_by_name = None
+        # quote goes back to SUBMITTED — it was overruled, not withdrawn, so it is
+        # still on the comparison sheet and can win again under another method.
+        _unwind_award(doc, QuoteStatus.SUBMITTED.value)
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
                       after={"status": doc.status},
                       summary=f"{action.title()} the carrier award on {doc.tr_no}")
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+# --------------------------------------------------------------------------- #
+#  The carrier's answer
+# --------------------------------------------------------------------------- #
+# An award is an offer. A booking is what the carrier confirms, and until then there
+# is no truck — so AWAITING_CARRIER is a real stage of the flow rather than a status
+# the desk sets on somebody else's behalf. The desk can still confirm a phone call
+# (`confirm_carrier`), but that is recorded as what it is.
+
+def _unwind_award(doc: TransportRequest, quote_status: str) -> None:
+    """Put a tendered request back out to the other carriers.
+
+    Back to the tender, never to rejected: the shipment still has to travel. The award
+    is undone so a different carrier can be picked, and the ex-winner's quote keeps the
+    status that says WHY it is no longer the winner — a decline is not the same as
+    being overruled.
+
+    The LOSERS go back to SUBMITTED, and that is the part that makes this work at all:
+    awarding requires a SUBMITTED quote, so leaving them NOT_AWARDED would send the
+    shipment back to a tender where not one of the prices on file could be awarded to
+    anybody. Nothing is deleted — three quotes on file is still the evidence the award
+    was competitive (doc B8).
+    """
+    for quote in doc.quotes:
+        if quote.id == doc.awarded_quote_id:
+            quote.status = quote_status
+        elif quote.status == QuoteStatus.NOT_AWARDED.value:
+            quote.status = QuoteStatus.SUBMITTED.value
+    doc.carrier_id = doc.carrier_name = None
+    doc.freight_amount = doc.awarded_quote_id = None
+    doc.awarded_at = doc.awarded_by_id = doc.awarded_by_name = None
+    doc.carrier_accepted_at = None
+    doc.status = TransportStatus.QUOTING.value
+
+
+def _guard_awaiting_carrier(doc: TransportRequest) -> None:
+    if doc.status != TransportStatus.AWAITING_CARRIER.value:
+        raise ValidationError(
+            f"{doc.tr_no} is {doc.status.lower().replace('_', ' ')} — "
+            "there is no award waiting to be accepted")
+
+
+async def accept_award(db: AsyncSession, tr_id: int, carrier_id: int | None,
+                       reference: str | None, user=None,
+                       confirmed_by_desk: str | None = None) -> TransportRequest:
+    """The carrier takes the job. One function for the portal and for the desk.
+
+    `carrier_id` is passed only by the portal, and it is checked against the awarded
+    carrier: a carrier holds no RBAC role, so this comparison IS the authorisation.
+    """
+    doc = await get_tr(db, tr_id)
+    _guard_awaiting_carrier(doc)
+    if carrier_id is not None and doc.carrier_id != carrier_id:
+        raise ValidationError("This shipment was awarded to another carrier")
+
+    doc.carrier_accepted_at = utcnow()
+    doc.carrier_declined_at = None
+    doc.carrier_decline_reason = None
+    if reference:
+        doc.carrier_reference = reference
+    doc.carrier_confirmed_by_name = confirmed_by_desk
+    doc.status = TransportStatus.READY.value
+
+    who = confirmed_by_desk or doc.carrier_name or "the carrier"
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      after={"status": doc.status},
+                      summary=(f"{who} accepted {doc.tr_no}"
+                               + (" (confirmed by the desk)" if confirmed_by_desk
+                                  else "")))
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+async def decline_award(db: AsyncSession, tr_id: int, carrier_id: int | None,
+                        reason: str, user=None) -> TransportRequest:
+    """The carrier drops the job. Straight back to the tender, minus that carrier."""
+    doc = await get_tr(db, tr_id)
+    _guard_awaiting_carrier(doc)
+    if carrier_id is not None and doc.carrier_id != carrier_id:
+        raise ValidationError("This shipment was awarded to another carrier")
+    if not (reason or "").strip():
+        raise ValidationError("Say why the job is being declined")
+
+    declined_name = doc.carrier_name
+    doc.carrier_declined_at = utcnow()
+    doc.carrier_decline_reason = reason.strip()
+    _unwind_award(doc, QuoteStatus.DECLINED.value)
+
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      after={"status": doc.status},
+                      summary=f"{declined_name} declined {doc.tr_no}: {reason.strip()}")
     await db.commit()
     await db.refresh(doc)
     return doc
@@ -741,6 +1352,11 @@ async def dispatch_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequ
         raise ValidationError(
             f"{doc.tr_no} is {doc.status.lower()} — it is not ready to leave")
 
+    # The full check now, carrier included: whatever the mode was allowed to leave
+    # blank at submit has been answered by this point, and a consignment must never
+    # leave the yard with nobody named as taking it.
+    _check_mode_fields(doc)
+
     rule = mode_rule(doc.mode)
     if rule.needs_carrier and not (data.lr_no or data.docket_no
                                    or doc.lr_no or doc.docket_no):
@@ -748,7 +1364,7 @@ async def dispatch_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequ
             "Record the LR or docket number — it is what the field is given to "
             "track the consignment.")
     for field in ("lr_no", "docket_no", "tracking_url", "eway_bill_no",
-                  "expected_delivery"):
+                  "gate_pass_no", "expected_delivery"):
         value = getattr(data, field, None)
         if value is not None:
             setattr(doc, field, value)
@@ -757,6 +1373,7 @@ async def dispatch_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequ
 
     doc.status = TransportStatus.IN_TRANSIT.value
     doc.dispatched_at = utcnow()
+    doc.dispatched_by_name = getattr(user, "full_name", None)
     doc.events.append(ShipmentEvent(
         event_type=ShipmentEventType.PICKED_UP.value, event_at=utcnow(),
         location_name=doc.from_warehouse_name,
@@ -884,9 +1501,73 @@ async def share_tracking(db: AsyncSession, tr_id: int, user) -> TransportRequest
     return doc
 
 
+async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequest:
+    """The receiving site signs for it (doc A6).
+
+    Delivered is the carrier's word; this is the field's, and only this one closes the
+    indent's loop. A site reporting SHORT or DAMAGED opens a claim on the same shipment
+    timeline rather than in a second place — the logistics desk chasing the carrier and
+    the site's complaint are one fact, and recording them apart is how they diverge.
+    """
+    doc = await get_tr(db, tr_id)
+    if doc.status == TransportStatus.ACKNOWLEDGED.value:
+        raise ValidationError(f"{doc.tr_no} has already been acknowledged")
+    if doc.status != TransportStatus.DELIVERED.value:
+        raise ValidationError(
+            f"{doc.tr_no} is {doc.status.lower().replace('_', ' ')} — only a delivered "
+            "consignment can be acknowledged")
+
+    condition = (data.condition or AckCondition.GOOD.value).upper()
+    if condition not in {c.value for c in AckCondition}:
+        raise ValidationError(f"{data.condition!r} is not a delivery condition")
+    if condition != AckCondition.GOOD.value and not (data.remarks or "").strip():
+        raise ValidationError(
+            "Say what was short or damaged — it is the claim against the provider")
+
+    doc.status = TransportStatus.ACKNOWLEDGED.value
+    doc.acknowledged_at = utcnow()
+    doc.acknowledged_by_id = getattr(user, "id", None)
+    doc.acknowledged_by_name = (data.acknowledged_by_name
+                                or getattr(user, "full_name", None))
+    doc.ack_condition = condition
+    doc.ack_remarks = data.remarks
+    if data.pod_url:
+        doc.pod_url = data.pod_url
+
+    claim_type = ACK_CLAIM_EVENT.get(condition)
+    if claim_type:
+        doc.events.append(ShipmentEvent(
+            event_type=claim_type, event_at=utcnow(),
+            location_name=doc.to_location_name,
+            description=f"Reported on acknowledgement: {data.remarks}",
+            is_exception=True,
+            affected_item_name=data.affected_item_name,
+            affected_qty=(_d(data.affected_qty)
+                          if data.affected_qty is not None else None),
+            claim_amount=(_d(data.claim_amount)
+                          if data.claim_amount is not None else None),
+            recorded_by_id=getattr(user, "id", None),
+            recorded_by_name=doc.acknowledged_by_name,
+        ))
+
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      before={"status": TransportStatus.DELIVERED.value},
+                      after={"status": doc.status, "condition": condition},
+                      summary=(f"{doc.acknowledged_by_name or 'The site'} acknowledged "
+                               f"{doc.tr_no} as {condition.lower()}"))
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
 async def close_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
     doc = await get_tr(db, tr_id)
-    if doc.status != TransportStatus.DELIVERED.value:
+    # Acknowledged is the normal way in. DELIVERED is still allowed because a
+    # hand-over the receiver signed for on paper has nobody left to acknowledge in
+    # the system, and blocking that would leave the shipment open forever.
+    if doc.status not in (TransportStatus.DELIVERED.value,
+                          TransportStatus.ACKNOWLEDGED.value):
         raise ValidationError("Only a delivered consignment can be closed")
     open_claims = [e for e in doc.events if e.is_exception and e.resolved_at is None]
     if open_claims:
@@ -918,27 +1599,108 @@ async def history(db: AsyncSession, tr_id: int) -> list:
 # carrier id from the verified token and filters on it. No function here accepts a
 # carrier id from the caller. Same rule the supplier portal already runs on.
 
+#: Everything a carrier is entitled to see on a request they were invited to: the
+#: tender they can still price, the job they have won, and the leg they are running.
+#: A closed or cancelled shipment drops off their board — it is no longer their work.
+CARRIER_VISIBLE_STATUSES = (
+    TransportStatus.QUOTING.value,
+    TransportStatus.AWAITING_CARRIER.value,
+    TransportStatus.READY.value,
+    TransportStatus.IN_TRANSIT.value,
+    TransportStatus.DELIVERED.value,
+    TransportStatus.ACKNOWLEDGED.value,
+)
+
+
+def _carrier_scope(carrier_id: int, statuses: list[str]):
+    """The one WHERE clause that decides what a carrier may see.
+
+    Being invited buys visibility of the TENDER, and nothing else. Past the award, the
+    shipment belongs to whoever won it: a carrier who was outbid must not keep watching
+    somebody else's truck run, and must certainly not be shown it in a queue labelled
+    "collect". Both halves are needed — the invitation join alone showed every invited
+    carrier the winner's job, and `carrier_id` alone would hide the tender from
+    everyone still bidding, because no carrier is set yet.
+    """
+    return (
+        CarrierQuote.carrier_id == carrier_id,
+        TransportRequest.status.in_(statuses or ["__none__"]),
+        or_(TransportRequest.status == TransportStatus.QUOTING.value,
+            TransportRequest.carrier_id == carrier_id),
+    )
+
+
 async def carrier_open_requests(db: AsyncSession, carrier_id: int,
-                                params: PageParams) -> dict:
+                                params: PageParams,
+                                status: str | None = None) -> dict:
     """What this carrier has been invited to, and nothing else."""
+    wanted = ([s.strip().upper() for s in status.split(",") if s.strip()]
+              if status else list(CARRIER_VISIBLE_STATUSES))
+    # Intersected, never replaced: a carrier asking for DRAFT must not widen what the
+    # portal shows. The filter narrows their own board; it cannot open somebody's.
+    wanted = [s for s in wanted if s in CARRIER_VISIBLE_STATUSES]
     stmt = (select(TransportRequest)
             .join(CarrierQuote, CarrierQuote.tr_id == TransportRequest.id)
-            .where(CarrierQuote.carrier_id == carrier_id,
-                   TransportRequest.status.in_([
-                       TransportStatus.QUOTING.value,
-                       TransportStatus.READY.value,
-                       TransportStatus.IN_TRANSIT.value,
-                   ]))
+            .where(*_carrier_scope(carrier_id, wanted))
             .order_by(TransportRequest.id.desc()))
-    return await paginate(db, stmt, params)
+    page = await paginate(db, stmt, params)
+
+    # Their own answer, stamped onto every row. A tender stays on the "quote for it"
+    # queue after it has been priced — the desk may ask again and the carrier may
+    # revise — so the row itself has to carry whether they have answered, or the board
+    # reads as untouched work the moment they leave the job screen.
+    for row in page["items"]:
+        mine = next((q for q in row.quotes if q.carrier_id == carrier_id), None)
+        row.my_quote_status = mine.status if mine else None
+        row.my_quote_amount = float(mine.freight_amount) if (
+            mine and mine.freight_amount is not None) else None
+        row.my_quote_submitted_at = mine.submitted_at if mine else None
+    return page
+
+
+async def carrier_summary(db: AsyncSession, carrier_id: int) -> dict:
+    """The five numbers a carrier's board leads with."""
+    rows = (await db.execute(
+        select(TransportRequest.status, func.count(TransportRequest.id))
+        .join(CarrierQuote, CarrierQuote.tr_id == TransportRequest.id)
+        .where(*_carrier_scope(carrier_id, list(CARRIER_VISIBLE_STATUSES)))
+        .group_by(TransportRequest.status)
+    )).all()
+    by_status = {status: count for status, count in rows}
+
+    # Only the ones still needing a price: a tender this carrier has already answered
+    # is not an open invitation, and counting it as one makes the badge lie.
+    to_quote = (await db.execute(
+        select(func.count(CarrierQuote.id))
+        .join(TransportRequest, CarrierQuote.tr_id == TransportRequest.id)
+        .where(CarrierQuote.carrier_id == carrier_id,
+               CarrierQuote.status == QuoteStatus.INVITED.value,
+               TransportRequest.status == TransportStatus.QUOTING.value)
+    )).scalar_one()
+
+    return {
+        "to_quote": to_quote,
+        "to_confirm": by_status.get(TransportStatus.AWAITING_CARRIER.value, 0),
+        "to_pick_up": by_status.get(TransportStatus.READY.value, 0),
+        "on_the_road": by_status.get(TransportStatus.IN_TRANSIT.value, 0),
+        "delivered": (by_status.get(TransportStatus.DELIVERED.value, 0)
+                      + by_status.get(TransportStatus.ACKNOWLEDGED.value, 0)),
+    }
 
 
 async def carrier_get_request(db: AsyncSession, carrier_id: int,
                               tr_id: int) -> TransportRequest:
+    """One request, if this carrier is entitled to it — the same rule as the board.
+
+    Every write a carrier can make goes through here first, so the scope is enforced
+    once: an outbid carrier cannot read the winner's shipment, and therefore cannot
+    accept, track or deliver against it either.
+    """
     doc = (await db.execute(
         select(TransportRequest)
         .join(CarrierQuote, CarrierQuote.tr_id == TransportRequest.id)
-        .where(TransportRequest.id == tr_id, CarrierQuote.carrier_id == carrier_id)
+        .where(TransportRequest.id == tr_id,
+               *_carrier_scope(carrier_id, list(CARRIER_VISIBLE_STATUSES)))
     )).scalars().first()
     if doc is None:
         # Same message whether it does not exist or belongs to somebody else — telling
@@ -947,7 +1709,89 @@ async def carrier_get_request(db: AsyncSession, carrier_id: int,
     return doc
 
 
+def _carrier_view(doc: TransportRequest, carrier_id: int) -> TROut:
+    """The shipment as its carrier may see it: their own quote, nobody else's.
+
+    Serialised here rather than by the router because the narrowing IS the rule — a
+    tender where every bidder can read what the others bid is not a tender. Built as a
+    detached `TROut` so the filtered list can never be written back onto the mapped
+    relationship and delete the other carriers' rows.
+    """
+    out = TROut.model_validate(doc)
+    out.quotes = [q for q in out.quotes if q.carrier_id == carrier_id]
+    return out
+
+
+async def carrier_view_request(db: AsyncSession, carrier_id: int,
+                               tr_id: int) -> TROut:
+    return _carrier_view(await carrier_get_request(db, carrier_id, tr_id), carrier_id)
+
+
 async def carrier_quote(db: AsyncSession, carrier_id: int, tr_id: int,
                         data) -> CarrierQuote:
     await carrier_get_request(db, carrier_id, tr_id)
     return await record_quote(db, tr_id, carrier_id, data, user=None)
+
+
+async def carrier_accept(db: AsyncSession, carrier_id: int, tr_id: int,
+                         data) -> TROut:
+    """The carrier takes the job they won."""
+    await carrier_get_request(db, carrier_id, tr_id)
+    doc = await accept_award(db, tr_id, carrier_id, data.carrier_reference)
+    return _carrier_view(doc, carrier_id)
+
+
+async def carrier_decline(db: AsyncSession, carrier_id: int, tr_id: int,
+                          data) -> TROut:
+    """The carrier drops it. Straight back to the tender for the desk to re-award."""
+    await carrier_get_request(db, carrier_id, tr_id)
+    doc = await decline_award(db, tr_id, carrier_id, data.reason)
+    return _carrier_view(doc, carrier_id)
+
+
+async def carrier_track(db: AsyncSession, carrier_id: int, tr_id: int,
+                        data) -> TROut:
+    """The carrier records the LR / docket and, from then on, its own scans.
+
+    The same two writes the desk makes, reached from the other side of the fence:
+    dispatching a READY job, and adding a progress event to one already moving. Which
+    of the two it is comes from the status, not from the caller — a carrier must not
+    be able to say "this has left" about a shipment nobody has released.
+    """
+    doc = await carrier_get_request(db, carrier_id, tr_id)
+    if doc.carrier_id != carrier_id:
+        raise ValidationError("This shipment was awarded to another carrier")
+    if data.carrier_reference:
+        doc.carrier_reference = data.carrier_reference
+    for field in ("lr_no", "docket_no", "tracking_url"):
+        value = getattr(data, field, None)
+        if value is not None:
+            setattr(doc, field, value)
+    await db.commit()
+    await db.refresh(doc)
+
+    if data.event_type:
+        # Through `add_event`, not a hand-rolled row: a carrier scan and a desk scan
+        # have to land identically, claim flag and all. A carrier cannot raise a claim
+        # against itself, so the three claim fields are fixed at None here.
+        await add_event(db, tr_id, SimpleNamespace(
+            event_type=data.event_type, event_at=None,
+            location_name=data.location_name, description=data.description,
+            affected_item_name=None, affected_qty=None, claim_amount=None,
+        ), user=None)
+        await db.refresh(doc)
+    return _carrier_view(doc, carrier_id)
+
+
+async def carrier_deliver(db: AsyncSession, carrier_id: int, tr_id: int,
+                          data) -> TROut:
+    """The carrier says it arrived, and hands over the proof.
+
+    It stops at DELIVERED on purpose. Only the receiving site can acknowledge, and a
+    carrier marking its own delivery as accepted is exactly the signature a shortage
+    claim would need to be missing.
+    """
+    doc = await carrier_get_request(db, carrier_id, tr_id)
+    if doc.carrier_id != carrier_id:
+        raise ValidationError("This shipment was awarded to another carrier")
+    return _carrier_view(await deliver_tr(db, tr_id, data, user=None), carrier_id)

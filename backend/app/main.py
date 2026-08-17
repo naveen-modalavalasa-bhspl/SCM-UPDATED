@@ -53,9 +53,16 @@ async def lifespan(app: FastAPI):
     try:
         from app.platform.rbac.page_registry import sync_pages, sync_permission_labels
 
+        # Permissions FIRST, pages second. `sync_pages` will create a missing page
+        # permission itself, but it grants that row to Admin and nobody else — it has
+        # no notion of a screen carved out of one already live. `sync_permission_labels`
+        # does (perms.INHERITS_GRANTS_FROM), so letting it insert the catalogued page
+        # codes first is what lets Acknowledgements land with the desk that already
+        # holds Tracking instead of appearing only for an administrator. Pages then
+        # find the row already there and only link it.
         async with SessionLocal() as db:
-            result = await sync_pages(db)
             relabelled = await sync_permission_labels(db)
+            result = await sync_pages(db)
         if result["added"] or result["updated"]:
             log.info("rbac_pages synced: %s", result)
         if relabelled:

@@ -2,8 +2,11 @@ import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type { GRN, GRNCreate, GRNListRow, Issue, MovementRow, StockRow } from "./types";
 import type {
-  CarrierOption, CarrierQuote, Comparison, EvaluationMethod, ModeRule, ShipmentEvent,
-  TransportRequest, TRInput, TRListRow,
+  CarrierOption, CarrierQuote, Comparison, Consignment, ConsignmentDetail,
+  ConsignmentLink, DispatchInput, EvaluationMethod, FlowStage, LogisticsVendor,
+  LogisticsVendorInput, LogisticsVendorSummary, ModeRule, PartnerType,
+  ProviderBoardRow, ShipmentEvent, TransportRequest, TransportSummary, TRInput,
+  TRListRow,
 } from "./transportTypes";
 
 export const grnApi = {
@@ -39,15 +42,42 @@ export const transportApi = {
   modes: () => api.get<ModeRule[]>("/api/transport/modes").then((r) => r.data),
   evaluationMethods: () =>
     api.get<EvaluationMethod[]>("/api/transport/evaluation-methods").then((r) => r.data),
+  /** The stepper for this mode. Served, never hardcoded — see FlowStage. */
+  flow: (mode?: string) =>
+    api.get<FlowStage[]>("/api/transport/flow", { params: { mode } })
+      .then((r) => r.data),
+  summary: () =>
+    api.get<TransportSummary>("/api/transport/summary").then((r) => r.data),
   carriers: (search?: string) =>
     api.get<CarrierOption[]>("/api/transport/carriers", { params: { search } })
       .then((r) => r.data),
 
+  /** Which of these warehouse consignments already have a transport leg. One call
+   * for a whole page of consignments rather than one lookup per row. */
+  forConsignments: (dispatchIds: number[]) =>
+    dispatchIds.length
+      ? api.get<ConsignmentLink[]>("/api/transport/for-consignments",
+          { params: { ids: dispatchIds.join(",") } }).then((r) => r.data)
+      : Promise.resolve([] as ConsignmentLink[]),
+
   list: (params: {
     status?: string; mode?: string; carrier_id?: number; indent_id?: number;
-    search?: string; page?: number; size?: number;
+    dispatch_id?: number; search?: string; page?: number; size?: number;
   } = {}) =>
     api.get<Paginated<TRListRow>>("/api/transport", { params }).then((r) => r.data),
+
+  /** Provider Selection's board: everything still waiting on "who is taking this",
+   * with the reply counts and the best price on the table beside each row. */
+  providerBoard: (params: {
+    status?: string; search?: string; page?: number; size?: number;
+  } = {}) =>
+    api.get<Paginated<ProviderBoardRow>>("/api/transport/provider-board", { params })
+      .then((r) => r.data),
+
+  /** Delivered, nobody has signed for it yet (doc A7). */
+  acknowledgements: (params: { search?: string; page?: number; size?: number } = {}) =>
+    api.get<Paginated<TRListRow>>("/api/transport/acknowledgements", { params })
+      .then((r) => r.data),
   get: (id: number) =>
     api.get<TransportRequest>(`/api/transport/${id}`).then((r) => r.data),
   create: (data: TRInput) =>
@@ -90,6 +120,31 @@ export const transportApi = {
   rejectAward: (id: number, comments: string) =>
     api.post<TransportRequest>(`/api/transport/${id}/award/reject`, { comments })
       .then((r) => r.data),
+  /** Dispatch a packed consignment: mode, providers, go. One call — on the floor it
+   * is one decision. A third-party choice lands in EVERY chosen provider's portal at
+   * once and comes back to Provider Selection as a comparison. */
+  dispatchConsignment: (data: DispatchInput) =>
+    api.post<TransportRequest>("/api/transport/dispatch-consignment", data)
+      .then((r) => r.data),
+  /** "That price is fine" — books the provider and readies the shipment. */
+  acceptQuote: (id: number, quote_id?: number) =>
+    api.post<TransportRequest>(`/api/transport/${id}/accept-quote`,
+      { quote_id: quote_id ?? null }).then((r) => r.data),
+  /** "Too dear, price it again" — hands the job back to the provider with a note. */
+  askRevisedQuote: (id: number, note: string) =>
+    api.post<TransportRequest>(`/api/transport/${id}/ask-revised-quote`, { note })
+      .then((r) => r.data),
+
+  /** The desk confirming, on the phone, what the carrier would otherwise confirm in
+   * their portal. Recorded as a desk confirmation, never as the carrier's own. */
+  confirmCarrier: (id: number, confirmed_by: string, carrier_reference?: string) =>
+    api.post<TransportRequest>(`/api/transport/${id}/carrier-confirm`,
+      { confirmed_by, carrier_reference: carrier_reference || null })
+      .then((r) => r.data),
+  carrierDeclined: (id: number, reason: string) =>
+    api.post<TransportRequest>(`/api/transport/${id}/carrier-declined`, { reason })
+      .then((r) => r.data),
+
   setProvider: (id: number, data: {
     carrier_id?: number | null; freight_amount?: number | null;
     vehicle_number?: string | null; driver_name?: string | null;
@@ -100,8 +155,8 @@ export const transportApi = {
 
   dispatch: (id: number, data: {
     lr_no?: string | null; docket_no?: string | null; tracking_url?: string | null;
-    eway_bill_no?: string | null; expected_delivery?: string | null;
-    remarks?: string | null;
+    eway_bill_no?: string | null; gate_pass_no?: string | null;
+    expected_delivery?: string | null; remarks?: string | null;
   }) =>
     api.post<TransportRequest>(`/api/transport/${id}/dispatch`, data).then((r) => r.data),
   addEvent: (id: number, data: {
@@ -117,6 +172,15 @@ export const transportApi = {
     api.post<TransportRequest>(`/api/transport/${id}/deliver`, data).then((r) => r.data),
   shareTracking: (id: number) =>
     api.post<TransportRequest>(`/api/transport/${id}/share-tracking`).then((r) => r.data),
+  /** The receiving site signs for it. Anything but GOOD opens a claim. */
+  acknowledge: (id: number, data: {
+    acknowledged_by_name?: string | null; condition?: string;
+    remarks?: string | null; pod_url?: string | null;
+    affected_item_name?: string | null; affected_qty?: number | null;
+    claim_amount?: number | null;
+  }) =>
+    api.post<TransportRequest>(`/api/transport/${id}/acknowledge`, data)
+      .then((r) => r.data),
   close: (id: number) =>
     api.post<TransportRequest>(`/api/transport/${id}/close`).then((r) => r.data),
   history: (id: number) =>
@@ -128,4 +192,111 @@ export const transportApi = {
   resolveException: (eventId: number, resolution: string) =>
     api.post<ShipmentEvent>(`/api/transport/events/${eventId}/resolve`, { resolution })
       .then((r) => r.data),
+};
+
+// --------------------------------------------------------------------------- //
+//  Consignments — READ ONLY, from the warehouse
+// --------------------------------------------------------------------------- //
+// The consignment is the warehouse's document: it is what was picked, packed and
+// labelled, and only the warehouse writes it. Logistics reads it to plan the leg that
+// carries it, which is why there is no create/update/delete here and why the backend
+// half of this module never touches `out_dispatches` — warehouse sits AFTER logistics
+// in the import chain (rule 5), so the join is done by the screen, over HTTP, or not
+// at all.
+
+export const consignmentApi = {
+  list: (params: {
+    status?: string; search?: string; page?: number; size?: number;
+  } = {}) =>
+    api.get<Paginated<Consignment>>("/api/warehouse/consignments", { params })
+      .then((r) => r.data),
+  get: (id: number) =>
+    api.get<ConsignmentDetail>(`/api/warehouse/consignments/${id}`).then((r) => r.data),
+};
+
+// --------------------------------------------------------------------------- //
+//  The carrier portal
+// --------------------------------------------------------------------------- //
+// Served under /api/supplier on purpose: the shared axios client attaches the VENDOR
+// token to everything under that prefix and the employee token to everything else, so
+// a carrier's session works here without the client having to learn a second rule.
+// The same functions are also mounted at /api/carrier by the backend.
+
+const PORTAL = "/api/supplier";
+
+export const carrierPortalApi = {
+  summary: () =>
+    api.get<{
+      to_quote: number; to_confirm: number; to_pick_up: number;
+      on_the_road: number; delivered: number;
+    }>(`${PORTAL}/transport-summary`).then((r) => r.data),
+  list: (params: { status?: string; page?: number; size?: number } = {}) =>
+    api.get<Paginated<TRListRow>>(`${PORTAL}/transport`, { params })
+      .then((r) => r.data),
+  get: (id: number) =>
+    api.get<TransportRequest>(`${PORTAL}/transport/${id}`).then((r) => r.data),
+  quote: (id: number, data: {
+    freight_amount: number; other_charges?: number; tax_percent?: number | null;
+    transit_days?: number | null; valid_until?: string | null;
+    vehicle_type?: string | null; remarks?: string | null;
+  }) =>
+    api.post<CarrierQuote>(`${PORTAL}/transport/${id}/quote`, data).then((r) => r.data),
+  accept: (id: number, carrier_reference?: string) =>
+    api.post<TransportRequest>(`${PORTAL}/transport/${id}/accept`,
+      { carrier_reference: carrier_reference || null }).then((r) => r.data),
+  decline: (id: number, reason: string) =>
+    api.post<TransportRequest>(`${PORTAL}/transport/${id}/decline`, { reason })
+      .then((r) => r.data),
+  track: (id: number, data: {
+    lr_no?: string | null; docket_no?: string | null; tracking_url?: string | null;
+    carrier_reference?: string | null; event_type?: string | null;
+    location_name?: string | null; description?: string | null;
+  }) =>
+    api.post<TransportRequest>(`${PORTAL}/transport/${id}/tracking`, data)
+      .then((r) => r.data),
+  deliver: (id: number, data: {
+    delivered_to_name?: string | null; pod_url?: string | null;
+    remarks?: string | null;
+  }) =>
+    api.post<TransportRequest>(`${PORTAL}/transport/${id}/deliver`, data)
+      .then((r) => r.data),
+};
+
+// --------------------------------------------------------------------------- //
+//  Logistics vendors — the register behind the Dispatch dropdown
+// --------------------------------------------------------------------------- //
+// Every call returns the WHOLE partner row, login state included, so the screen never
+// has to refetch a second list to find out whether the press worked.
+
+const VENDORS = "/api/logistics-vendors";
+
+export const logisticsVendorApi = {
+  /** Served, not a constant here: a type this form offers that Dispatch does not
+   *  accept would create a partner nobody can ship with. */
+  types: () => api.get<PartnerType[]>(`${VENDORS}/types`).then((r) => r.data),
+  summary: () =>
+    api.get<LogisticsVendorSummary>(`${VENDORS}/summary`).then((r) => r.data),
+  list: (params: {
+    search?: string; vendor_type?: string; active_only?: boolean;
+    page?: number; size?: number;
+  } = {}) =>
+    api.get<Paginated<LogisticsVendor>>(VENDORS, { params }).then((r) => r.data),
+  create: (data: LogisticsVendorInput) =>
+    api.post<LogisticsVendor>(VENDORS, data).then((r) => r.data),
+  update: (id: number, data: Partial<LogisticsVendorInput> & {
+    is_active?: boolean; is_blacklisted?: boolean;
+  }) => api.put<LogisticsVendor>(`${VENDORS}/${id}`, data).then((r) => r.data),
+  deactivate: (id: number) =>
+    api.delete<LogisticsVendor>(`${VENDORS}/${id}`).then((r) => r.data),
+
+  /** Their way in. Same account, same portal, same default password as a supplier —
+   *  a carrier IS a vendor, so there is only ever one kind of login. */
+  issueLogin: (id: number, username?: string) =>
+    api.post<LogisticsVendor>(`${VENDORS}/${id}/login`,
+      { username: username || null }).then((r) => r.data),
+  resetLogin: (id: number) =>
+    api.post<LogisticsVendor>(`${VENDORS}/${id}/login/reset`).then((r) => r.data),
+  setLoginActive: (id: number, active: boolean) =>
+    api.post<LogisticsVendor>(
+      `${VENDORS}/${id}/login/${active ? "enable" : "disable"}`).then((r) => r.data),
 };

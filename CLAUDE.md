@@ -106,6 +106,110 @@ A module only creates tables with its own prefix.
 Indent → PO (`indent_id`) → GRN (`po_id`) → Stock → Issue (`grn_id`/`indent_id`).
 Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock`.
 
+### The outward leg (doc Phase D+E), under Logistics
+
+Logistics runs the whole outward leg, in the order it happens:
+
+```
+Consignments → Dispatch → Transport Requests → Tracking → Acknowledgements → Exceptions
+```
+
+**Consignments is the WAREHOUSE's document** (`out_dispatches`) and its own screen,
+mounted under `/logistics/consignments` as well as `/warehouse/*` — one implementation,
+two front doors, re-exported from `modules/warehouse`. Nothing of the warehouse's is
+touched.
+
+**Dispatch** (`DispatchPage.tsx`, the queue → `DispatchConfirmPage.tsx`, the press →
+`POST /api/transport/dispatch-consignment`) is the one decision the floor makes: how
+does this consignment travel, and with whom. Pick the consignment, write the gate
+pass, pick the mode and the provider from the carrier vendors, press once — the
+transport request is raised, filled in from the packing list and sent on. THIRD_PARTY
+lands in that provider's portal for a price; every other mode is settled on the spot
+and goes straight to READY. The desk accepts the price (`/accept-quote`) or sends it
+back for another (`/ask-revised-quote`). Accepting is our half only: it lands on
+`AWAITING_CARRIER` and the provider's own yes — their portal, or the desk recording
+one via `/carrier-confirm` — makes it READY, because a price quoted for a lane is not
+a promise of a vehicle on the day. No second APPROVAL, though: the consignment was
+already approved and released by the warehouse, and approving the SPEND is the award.
+
+The providers that fill that dropdown are `mst_vendors` rows of a carrier type, kept
+on **Settings > Logistics Vendors** (`/settings/logistics-vendors`,
+`/api/logistics-vendors`, `logistics/partners.py`). One screen: name the partner and
+issue their portal login in the same press, because a partner with no account cannot
+answer the quote request THIRD_PARTY exists to send them. Every route refuses a vendor
+row that is not a carrier, so the logistics desk's permission can never reach a
+material supplier's record or password. The account itself is procurement's
+(`ensure_vendor_account`) — there is one kind of vendor login, and a carrier IS a
+vendor.
+
+The confirm screen (`/logistics/dispatch/new?consignment_id=`) is where BOTH front
+doors land — the queue's Dispatch button and a packed consignment's own Confirm
+dispatch — so the decision is built once. A logistics day never crosses into the
+warehouse module: `ConsignmentForm` reads which door it was opened from and keeps
+every route it pushes on that side, because hardcoded `/warehouse/...` links handed
+the logistics desk over to the warehouse module halfway through the flow.
+
+**Transport** is logistics' own document (`lgs_transport_requests`) and carries the
+leg that moves a consignment:
+
+```
+TR  DRAFT → PENDING_APPROVAL → QUOTING* → AWAITING_CARRIER* → READY
+    → IN_TRANSIT → DELIVERED → ACKNOWLEDGED → CLOSED         (* THIRD_PARTY only)
+```
+
+- The consignment link is `lgs_transport_requests.dispatch_id` plus a snapshot of its
+  number. Logistics' BACKEND never touches `out_dispatches` — warehouse sits after
+  logistics in the import chain (rule 5) — so the transport form reads the consignment
+  over HTTP (`/api/warehouse/consignments`) and prefills its lines from the packing
+  list, counting each carton once.
+- **An award is an offer.** A won tender goes to `AWAITING_CARRIER` and only the
+  carrier accepting it (their portal, or a desk confirmation recorded as one) makes it
+  `READY`. A decline unwinds the award, marks that quote DECLINED, puts every other
+  quote back to SUBMITTED and returns the shipment to the tender. The single-provider
+  dispatch path (`accept_quote`) lands on the same rung for the same reason — the two
+  differ in whether there was a tender, never in whether the carrier gets a say.
+- **Delivered is the carrier's word; acknowledged is the site's.** A carrier can never
+  set `ACKNOWLEDGED` — the receiving site signs, and SHORT/DAMAGED raises a claim on
+  the same shipment timeline (`lgs_shipment_events`, the Exceptions desk).
+- The stepper and the mode rules are SERVED (`/api/transport/flow`, `/modes`), never
+  duplicated in the screen.
+- The carrier portal is the vendor account (`/carrier/*`, served under `/api/supplier`
+  so the shared axios client attaches the vendor token; also mounted at `/api/carrier`).
+  Every function takes the carrier id from the token, and past the award only the
+  winner can read or write the shipment.
+
+**What the merge into `qa` changed** (2026-08-17), on top of the branch as delivered:
+
+- **One Alembic head again.** The logistics branch carried its own mergepoint
+  (`b2d3e4f5a6c7`), cut when the procurement branch still ended at `f2a3b4c5d6e8`;
+  that branch has since grown to `c4d5e6f7a8b0`, so the two sides were two heads and
+  `alembic upgrade head` refused to run at all. `a9b8c7d6e5f4` joins them. No schema
+  of its own.
+- **The one-press dispatch asks the ladder.** `dispatch_consignment` skipped approval
+  outright. It now calls `ladder.find_ladder` first: nothing configured (every project
+  today) and it lands exactly where it did before, straight to QUOTING or READY. A
+  configured TRANSPORT_REQUEST ladder is honoured. It does NOT call `engine.start`
+  unconditionally — with nothing configured the engine climbs the raiser's reporting
+  line, which would have put every dispatch into a stranger's queue.
+- **The logistics pages are in `PAGE_VIEW_CODES`.** They were being invented by
+  `sync_pages`, which grants Admin and nothing else and never revisits the row. Now
+  catalogued, so `page.logistics_acknowledgements.view` inherits from
+  `page.logistics_tracking.view` — the new screen lands with the desk that already
+  works Tracking, matching `transport.acknowledge` inheriting `transport.track`.
+  `settings_logistics_vendors` stays Admin-only on purpose: it mints an outside login,
+  and the Dispatch dropdown reads carrier names from `transport.view` instead.
+- **`sync_permission_labels` runs BEFORE `sync_pages`** in `main.py` for that to work:
+  whichever runs first creates the row, and only the first of the two honours
+  `INHERITS_GRANTS_FROM`.
+- **The rank abbreviation map in `IndentStatusBadge` was taken back out.** RM/DM/OE/
+  SPH/COO hardcoded in the frontend is wrong twice — the rungs are HCM role ids that a
+  cutover re-keys, and an admin picks them per project on Approvals Config — and it hid
+  the approver's name behind their rank.
+- Still true after the merge: the `/logistics/consignments` screens read
+  `/api/warehouse/consignments`, which is guarded by `dispatch.view`. A Logistics job
+  profile needs `dispatch.view` (and `dispatch.create` to edit one) on top of the
+  `transport.*` codes. That is unchanged by this work, not introduced by it.
+
 ---
 
 ## Non-negotiable rules

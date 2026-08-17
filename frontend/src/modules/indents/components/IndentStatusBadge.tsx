@@ -13,6 +13,12 @@ const TOP_ALLOCATION_STATUS_TONE: Partial<Record<string, string>> = {
  * configured per project, so no rank is ever assumed, mapped or abbreviated
  * here — the only edit is dropping a trailing "Review"/"Approval" from a stage
  * title so the badge reads "Pending at X" rather than "Pending at X Review".
+ *
+ * A hardcoded RM/DM/OE/SPH/COO lookup was tried here and taken back out. The rungs
+ * are HCM role ids and an admin picks them per project on Approvals Config, so a map
+ * in the frontend is wrong twice: a rank nobody listed renders as a bare abbreviation,
+ * and the next HCM cutover re-keys the roles without touching this file. It also hid
+ * the approver's NAME behind their rank, which is the one thing the badge is for.
  */
 function stageOwner(stage?: IndentJourneyStage) {
   const approver = stage?.approver_name?.trim().replace(/\s+/g, " ");

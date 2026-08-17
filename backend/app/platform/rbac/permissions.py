@@ -209,10 +209,21 @@ TRANSPORT_APPROVE = "transport.approve"
 TRANSPORT_AWARD = "transport.award"
 # Recording where the consignment is: LR/docket, in-transit scans, delivery.
 TRANSPORT_TRACK = "transport.track"
+# Signing for the consignment at the receiving end (doc A6). Its own code because the
+# holder is the indent team or the site, not the logistics desk: "it arrived" must be
+# sayable by someone who cannot also say "it was dispatched".
+TRANSPORT_ACKNOWLEDGE = "transport.acknowledge"
 # Raising and closing a damage/shortage against the provider. Its own code because
 # it is a claim against a supplier, not a status update.
 TRANSPORT_EXCEPTION = "transport.exception"
 TRANSPORT_DELETE = "transport.delete"
+# The logistics-vendor register: who the Dispatch dropdown offers, and their portal
+# login. MANAGE mints an identity outside the company, exactly like
+# VENDOR_PORTAL_MANAGE does for a supplier — but scoped, because the endpoints behind
+# it refuse any vendor row that is not a carrier. Granting the logistics desk the
+# ability to stand up a courier must not hand them a material supplier's password.
+LOGISTICS_PARTNER_VIEW = "logistics.partner.view"
+LOGISTICS_PARTNER_MANAGE = "logistics.partner.manage"
 
 # --- Returns ---
 # A return borrows no permission from stock. It reads like a transfer and it ends in
@@ -404,10 +415,16 @@ ALL_PERMISSIONS: list[Perm] = [
          "Choose the transport provider and fix the freight"),
     Perm(TRANSPORT_TRACK, "logistics", "transport", "track",
          "Record LR/docket, in-transit events and delivery"),
+    Perm(TRANSPORT_ACKNOWLEDGE, "logistics", "transport", "acknowledge",
+         "Acknowledge a delivered consignment at the receiving site"),
     Perm(TRANSPORT_EXCEPTION, "logistics", "transport", "exception",
          "Raise and close damage or shortage claims against a carrier"),
     Perm(TRANSPORT_DELETE, "logistics", "transport", "delete",
          "Delete a draft transport request"),
+    Perm(LOGISTICS_PARTNER_VIEW, "logistics", "partner", "view",
+         "View the logistics vendor register"),
+    Perm(LOGISTICS_PARTNER_MANAGE, "logistics", "partner", "manage",
+         "Add logistics vendors and issue their portal logins"),
     Perm(RETURN_VIEW, "returns", "return", "view", "View returns"),
     Perm(RETURN_CREATE, "returns", "return", "create",
          "Raise and submit a return"),
@@ -450,6 +467,10 @@ ALL_CODES: list[str] = [p.code for p in ALL_PERMISSIONS]
 INHERITS_GRANTS_FROM: dict[str, str] = {
     ALLOCATION_SUBMIT: ALLOCATION_CREATE,
     ALLOCATION_APPROVE_RESERVE: ALLOCATION_APPROVE,
+    # Carved out of TRACK, which used to cover the whole tail of the flow. Everyone
+    # who could mark a consignment delivered yesterday must still be able to close it
+    # out today — fail-closed is right for a new capability and wrong for a split.
+    TRANSPORT_ACKNOWLEDGE: TRANSPORT_TRACK,
 }
 
 
@@ -520,6 +541,20 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("inv_allocation_approvals", "inventory", "Inventory · Allocation Approvals"),
     ("inv_mr", "inventory", "Inventory · Material Requests"),
     ("inv_labels", "inventory", "Inventory · Labels & Printing"),
+    # Logistics — the outward leg, in the order the material moves. Catalogued rather
+    # than left to `sync_pages` to invent: an auto-created page permission is never
+    # revisited by `sync_permission_labels` (it is not in ALL_PERMISSIONS), so it can
+    # neither be relabelled nor inherit grants from the screen it was carved out of.
+    # Every code here already existed as an auto-created row except the last two;
+    # listing them changes no module, resource or action, only who may refresh them.
+    ("grp_logistics", "logistics", "Logistics"),
+    ("logistics_consignments", "logistics", "Logistics · Consignments"),
+    ("logistics_dispatch", "logistics", "Logistics · Dispatch"),
+    ("logistics_transport", "logistics", "Logistics · Transport Requests"),
+    ("logistics_providers", "logistics", "Logistics · Provider Selection"),
+    ("logistics_tracking", "logistics", "Logistics · Shipment Tracking"),
+    ("logistics_acknowledgements", "logistics", "Logistics · Acknowledgements"),
+    ("logistics_exceptions", "logistics", "Logistics · Exceptions"),
     ("masters", "masters", "Masters"),
     ("grp_reports", "reports", "Reports"),
     ("rep_indents", "reports", "Reports · Indent Ledger"),
@@ -541,6 +576,11 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("admin_audit", "admin", "Settings · Audit Log"),
     ("admin_fallback", "admin", "Settings · Fallback Log"),
     ("admin_app_logs", "admin", "Settings · App Logs"),
+    # Filed under Settings, not Logistics: the screen mints a login for somebody
+    # outside the company. A dispatcher who needs the carrier NAMES already has them
+    # from `transport.view` (the Dispatch dropdown reads /api/transport/carriers), so
+    # leaving this one Admin-only takes no button away from the logistics desk.
+    ("settings_logistics_vendors", "logistics", "Settings · Logistics Vendors"),
 ]
 
 
@@ -561,3 +601,14 @@ PAGE_VIEW_PERMISSIONS: list[Perm] = [
 
 ALL_PERMISSIONS.extend(PAGE_VIEW_PERMISSIONS)
 ALL_CODES.extend(p.code for p in PAGE_VIEW_PERMISSIONS)
+
+# Page-view splits, declared here rather than in the dict above only because
+# `page_view_code` is defined after it. Same rule and the same one-shot behaviour.
+INHERITS_GRANTS_FROM.update({
+    # Acknowledgements is the tail of the tracking board, not a new screen: it lists
+    # the shipments Tracking already carried as far as DELIVERED, and asks the site to
+    # sign. Everyone who could watch a consignment arrive keeps it, which matches
+    # TRANSPORT_ACKNOWLEDGE inheriting TRANSPORT_TRACK — the button and the screen it
+    # sits on must land with the same people or one of them is dead.
+    page_view_code("logistics_acknowledgements"): page_view_code("logistics_tracking"),
+})
