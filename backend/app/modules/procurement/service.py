@@ -77,6 +77,46 @@ async def _place_names(db: AsyncSession, warehouse_id: int | None,
             project.name if project else None)
 
 
+async def _apply_po_header(db: AsyncSession, po: PurchaseOrder, data) -> None:
+    """Write the header a caller typed onto the order — terms, addresses, project.
+
+    One place for all three ways of raising a PO (by hand, from an indent, from an
+    award): a term agreed with a vendor must print the same whichever route the order
+    came in by. Every field is optional and a blank one simply says nothing.
+
+    The project is snapshotted like every other soft FK (rule 10). It is only
+    overwritten when the caller actually chose one — the indent or the RFQ behind the
+    order already put its own project on it, and an untouched field must not wipe that.
+    """
+    if getattr(data, "project_id", None):
+        po.project_id = data.project_id
+        _, po.project_name = await _place_names(db, None, data.project_id)
+    for field in ("payment_terms", "delivery_terms", "material_terms",
+                  "logistics_terms", "billing_address", "shipping_address"):
+        setattr(po, field, getattr(data, field, None) or None)
+    po.discount_amount = _d(getattr(data, "discount_amount", 0) or 0)
+    po.freight_amount = _d(getattr(data, "freight_amount", 0) or 0)
+
+
+def _apply_po_totals(po: PurchaseOrder, sub_total: Decimal, tax_total: Decimal) -> None:
+    """The one place the order total is computed:
+
+        total = sub_total - discount + tax + freight
+
+    Discount comes off before tax is added because the lines were already taxed at
+    their own rate; a document-level discount reduces what is payable, not what was
+    quoted per line.
+    """
+    discount = _d(po.discount_amount or 0)
+    freight = _d(po.freight_amount or 0)
+    if discount > sub_total:
+        raise ValidationError(
+            f"Discount {discount} is more than the order sub-total {sub_total}")
+    po.sub_total = sub_total
+    po.tax_amount = tax_total
+    po.total_amount = sub_total - discount + tax_total + freight
+
+
 async def _header_context(db: AsyncSession, created_by_id: int | None) -> dict:
     """Department (from HCM, via the raiser) and company (from settings).
 
@@ -244,9 +284,13 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         # Warehouse will choose the physical receipt location in its own module.
         facility_id=None,
         facility_name=indent.office_name,
+        # The indent's project, unless the buyer picked another below.
+        project_id=getattr(indent, "project_id", None),
+        project_name=getattr(indent, "project_name", None),
         status=POStatus.DRAFT.value,
         remarks=data.remarks,
     )
+    await _apply_po_header(db, po, data)
     db.add(po)
     await db.flush()
 
@@ -293,9 +337,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
             mr_line.ordered_quantity = _d(mr_line.ordered_quantity or 0) + applied
             to_apply -= applied
 
-    po.sub_total = sub_total
-    po.tax_amount = tax_total
-    po.total_amount = sub_total + tax_total
+    _apply_po_totals(po, sub_total, tax_total)
 
     indent.status = IndentStatus.ORDERED.value
     await db.commit()
@@ -345,6 +387,7 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
         status=POStatus.DRAFT.value,
         remarks=data.remarks,
     )
+    await _apply_po_header(db, po, data)
     db.add(po)
     await db.flush()
 
@@ -363,9 +406,7 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
             tax_percent=_d(line.tax_percent), amount=amount,
         ))
 
-    po.sub_total = sub_total
-    po.tax_amount = tax_total
-    po.total_amount = sub_total + tax_total
+    _apply_po_totals(po, sub_total, tax_total)
     await db.commit()
     logger.info("purchase order %s raised directly by %s (%d line(s))",
                 po.po_no, user.full_name, len(data.lines))
@@ -461,9 +502,12 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         office_id=None,
         facility_id=None,
         facility_name=rfq.warehouse_name,
+        project_id=rfq.project_id,
+        project_name=rfq.project_name,
         status=POStatus.DRAFT.value,
         remarks=data.remarks or f"Raised from {quote.quotation_no} against {rfq.rfq_no}",
     )
+    await _apply_po_header(db, po, data)
     db.add(po)
     await db.flush()
 
@@ -505,10 +549,12 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         ))
 
     # Freight is money the company pays for these goods, so it belongs on the order.
-    # Left off, a PO raised from a quote quietly under-reads its own quotation.
-    po.sub_total = sub_total + _d(quote.freight_amount or 0)
-    po.tax_amount = tax_total
-    po.total_amount = po.sub_total + tax_total
+    # Left off, a PO raised from a quote quietly under-reads its own quotation. It now
+    # has a column of its own rather than being buried in the sub-total — and the
+    # quote's figure is the DEFAULT, which a buyer who typed one of their own keeps.
+    if not _d(po.freight_amount or 0):
+        po.freight_amount = _d(quote.freight_amount or 0)
+    _apply_po_totals(po, sub_total, tax_total)
 
     if requisition is not None:
         await _close_requisition_if_ordered(db, requisition, req_items)

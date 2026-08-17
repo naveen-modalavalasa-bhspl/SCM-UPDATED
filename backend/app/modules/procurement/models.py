@@ -53,9 +53,27 @@ class PurchaseOrder(Base):
     office_id = soft_fk()
     facility_id = soft_fk()
     facility_name = Column(String(200), nullable=True)
+    project_id = soft_fk()
+    project_name = Column(String(200), nullable=True)     # snapshot
+
+    # What the order says besides its lines. Free text on purpose: a term is what was
+    # agreed with THIS vendor for THIS order, and every attempt to code them into a
+    # picklist ends with somebody typing the real one into remarks anyway.
+    payment_terms = Column(Text, nullable=True)
+    delivery_terms = Column(Text, nullable=True)
+    material_terms = Column(Text, nullable=True)
+    logistics_terms = Column(Text, nullable=True)
+    billing_address = Column(Text, nullable=True)
+    shipping_address = Column(Text, nullable=True)
 
     status = Column(String(30), nullable=False, index=True)
     sub_total = Column(Numeric(16, 2), nullable=False, default=0)
+    # Document-level money, on top of the line amounts. Both are stored rather than
+    # derived: a freight charge and a negotiated discount belong to the ORDER, not to
+    # any one line, and splitting them across lines would rewrite rates the vendor
+    # quoted. total = sub_total - discount + tax + freight.
+    discount_amount = Column(Numeric(16, 2), nullable=False, default=0)
+    freight_amount = Column(Numeric(16, 2), nullable=False, default=0)
     tax_amount = Column(Numeric(16, 2), nullable=False, default=0)
     total_amount = Column(Numeric(16, 2), nullable=False, default=0)
     current_approver_name = Column(String(200), nullable=True)

@@ -1,5 +1,5 @@
 import axios from "axios";
-import { api } from "@/shared/api/client";
+import { api, vendorToken } from "@/shared/api/client";
 import { alerts } from "./alerts";
 
 /**
@@ -55,9 +55,22 @@ export function installApiAlerts(): void {
         // "Invalid credentials" inline, which is the whole story; raising "Signed
         // out — your session has expired" on top of it told the user they had been
         // logged out of an account they had never got into.
+        //
+        // Both doors, not just the employee one. A vendor — supplier or carrier —
+        // posts to /api/supplier/login and holds their token in sessionStorage, so
+        // checking only /api/auth/login and localStorage read a carrier's mistyped
+        // username as an expired session, and did it on top of the inline error the
+        // form was already showing. Whether they are signed in is asked of the
+        // audience that actually failed, for the same reason.
         const url = String(error.config?.url ?? "");
-        const signingIn = url.includes("/api/auth/login") || !localStorage.getItem("token");
-        if (!signingIn) {
+        const isLoginPost = url.includes("/api/auth/login")
+          || url.includes("/api/supplier/login");
+        const isVendorCall = url.startsWith("/api/supplier")
+          || url.startsWith("/api/carrier");
+        const wasSignedIn = isVendorCall
+          ? Boolean(vendorToken())
+          : Boolean(localStorage.getItem("token"));
+        if (!isLoginPost && wasSignedIn) {
           // The shared interceptor is already sending the browser to /login. This
           // only explains why, so the redirect does not look like a random bounce.
           alerts.error("session.expired");

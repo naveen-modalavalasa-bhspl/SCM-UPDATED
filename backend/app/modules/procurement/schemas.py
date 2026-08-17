@@ -11,14 +11,35 @@ class POLineIn(BaseModel):
     tax_percent: float = Field(ge=0, default=0)
 
 
-class POCreate(BaseModel):
+class POHeaderIn(BaseModel):
+    """What the order says beyond its lines — the same on every way of raising one.
+
+    One base class rather than four copies: a PO typed by hand, one written off an
+    indent and one written off an award are the same document, so a term agreed on one
+    must be enterable on all three or the printed order changes by route.
+
+    Discount and freight are DOCUMENT money: they are applied to the order, never
+    spread across lines, because spreading them would rewrite rates a vendor quoted.
+    """
+    project_id: int | None = None
+    remarks: str | None = None
+    payment_terms: str | None = None
+    delivery_terms: str | None = None
+    material_terms: str | None = None
+    logistics_terms: str | None = None
+    billing_address: str | None = None
+    shipping_address: str | None = None
+    discount_amount: float = Field(ge=0, default=0)
+    freight_amount: float = Field(ge=0, default=0)
+
+
+class POCreate(POHeaderIn):
     vendor_id: int
     expected_date: date | None = None
-    remarks: str | None = None
     lines: list[POLineIn]
 
 
-class POFromQuotationIn(BaseModel):
+class POFromQuotationIn(POHeaderIn):
     """Everything the awarded quotation does NOT already say.
 
     No vendor and no lines: both come from the offer being accepted, and letting the
@@ -26,7 +47,6 @@ class POFromQuotationIn(BaseModel):
     quotation it claims to be for.
     """
     expected_date: date | None = None
-    remarks: str | None = None
 
 
 class ActionIn(BaseModel):
@@ -67,10 +87,21 @@ class POOut(BaseModel):
     vendor_name: str | None = None
     facility_id: int | None = None
     facility_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
     status: str
     sub_total: float
+    discount_amount: float = 0
     tax_amount: float
+    freight_amount: float = 0
     total_amount: float
+    remarks: str | None = None
+    payment_terms: str | None = None
+    delivery_terms: str | None = None
+    material_terms: str | None = None
+    logistics_terms: str | None = None
+    billing_address: str | None = None
+    shipping_address: str | None = None
     current_approver_name: str | None = None
     created_at: datetime
     items: list[POItemOut] = []

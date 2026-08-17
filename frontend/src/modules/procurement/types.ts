@@ -30,10 +30,21 @@ export interface PurchaseOrder {
   vendor_name?: string | null;
   facility_id?: number | null;
   facility_name?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
   status: string;
   sub_total: number;
+  discount_amount: number;
   tax_amount: number;
+  freight_amount: number;
   total_amount: number;
+  remarks?: string | null;
+  payment_terms?: string | null;
+  delivery_terms?: string | null;
+  material_terms?: string | null;
+  logistics_terms?: string | null;
+  billing_address?: string | null;
+  shipping_address?: string | null;
   current_approver_name?: string | null;
   created_at: string;
   items: POItem[];
@@ -49,10 +60,25 @@ export interface POListRow {
   created_at: string;
 }
 
-export interface POCreate {
+/** The header a purchase order carries beyond its lines — the same on every way of
+ *  raising one, so a term agreed with a vendor prints the same whichever route the
+ *  order came in by. Discount and freight are document money, never per line. */
+export interface POHeader {
+  project_id?: number | null;
+  remarks?: string | null;
+  payment_terms?: string | null;
+  delivery_terms?: string | null;
+  material_terms?: string | null;
+  logistics_terms?: string | null;
+  billing_address?: string | null;
+  shipping_address?: string | null;
+  discount_amount?: number;
+  freight_amount?: number;
+}
+
+export interface POCreate extends POHeader {
   vendor_id: number;
   expected_date?: string | null;
-  remarks?: string | null;
   lines: {
     item_id: number;
     indent_item_id?: number | null;
@@ -64,9 +90,8 @@ export interface POCreate {
 
 /** Everything the awarded quotation does not already say. Vendor, lines, rates and
  *  tax all come from the offer being accepted, so none of them are sent. */
-export interface POFromQuotation {
+export interface POFromQuotation extends POHeader {
   expected_date?: string | null;
-  remarks?: string | null;
 }
 
 /* ------------------------------------------------------------------ Requisition */

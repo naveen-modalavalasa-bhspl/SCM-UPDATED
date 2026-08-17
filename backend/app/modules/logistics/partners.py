@@ -292,6 +292,26 @@ async def deactivate_partner(db: AsyncSession, vendor_id: int, user) -> dict:
 # adds is the guarantee that the vendor id it passes is a logistics partner, so the
 # permission on this page can never mint or reset a material supplier's credentials.
 
+async def _clear_forced_change(db: AsyncSession, vendor_id: int) -> None:
+    """A logistics partner signs in with the password they were handed, once.
+
+    `ensure_vendor_account` sets the forced first change for every vendor it mints, and
+    SUPPLIERS keep it: an RFQ carries prices, so the buyer who typed the password must
+    not stay able to read them. A carrier account is a desk rather than a person — the
+    number it answers with is a freight rate that desk quoted us anyway — and the change
+    screen only meant nobody at the courier could get in on the day a job was tendered.
+
+    Scoped here on purpose: procurement's service is untouched and still forces it for
+    every supplier. Flip this function back to a no-op to restore the old behaviour.
+    """
+    account = (await db.execute(
+        select(VendorUser).where(VendorUser.vendor_id == vendor_id)
+    )).scalars().first()
+    if account is not None and account.must_change_password:
+        account.must_change_password = False
+        await db.commit()
+
+
 async def issue_login(db: AsyncSession, vendor_id: int, username: str | None,
                       user) -> dict:
     from app.modules.procurement.schemas import VendorAccountIn
@@ -301,6 +321,7 @@ async def issue_login(db: AsyncSession, vendor_id: int, username: str | None,
     await ensure_vendor_account(
         db, VendorAccountIn(vendor_id=vendor.id,
                             username=(username or "").strip() or None), user)
+    await _clear_forced_change(db, vendor.id)
     logger.info("Issued a portal login for logistics vendor %s", vendor.name)
     return await get_partner(db, vendor.id)
 
@@ -310,6 +331,7 @@ async def reset_login(db: AsyncSession, vendor_id: int, user) -> dict:
 
     vendor = await _partner(db, vendor_id)
     await reset_vendor_password(db, vendor.id, user)
+    await _clear_forced_change(db, vendor.id)
     return await get_partner(db, vendor.id)
 
 

@@ -135,9 +135,10 @@ export function PODetailPage() {
       <dl className="grid gap-3 text-sm sm:grid-cols-4">
         <div><dt className="text-muted">Vendor</dt><dd className="font-semibold text-ink">{po.data.vendor_name ?? "—"}</dd></div>
         <div><dt className="text-muted">Indent</dt><dd className="font-mono text-ink">{po.data.indent_no ?? "—"}</dd></div>
+        <div><dt className="text-muted">Project</dt><dd className="text-ink">{po.data.project_name ?? "—"}</dd></div>
         <div><dt className="text-muted">Expected date</dt><dd className="text-ink">{fmtDate(po.data.expected_date)}</dd></div>
-        <div><dt className="text-muted">Total</dt><dd className="font-semibold text-ink">{money(po.data.total_amount)}</dd></div>
       </dl>
+      {po.data.remarks && <p className="mt-3 whitespace-pre-line border-t border-line pt-3 text-sm text-body">{po.data.remarks}</p>}
       {/* Where this order came from, when it came off an award rather than an indent.
         * Every document in the chain points backward at the one before it, and this is
         * the row that lets somebody reading a PO find the offer it was written from. */}
@@ -162,6 +163,46 @@ export function PODetailPage() {
         </tr>)}</tbody>
       </table>
     </div>
+
+    {/* What the order comes to: the lines summed, then the money that belongs to the
+      * document rather than to any line. Same arithmetic the server stored —
+      * total = subtotal - discount + tax + freight. */}
+    <Card className="mt-4 p-4">
+      <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
+        <div><dt className="text-muted">Subtotal</dt><dd className="text-ink">{money(po.data.sub_total ?? 0)}</dd></div>
+        <div><dt className="text-muted">Discount</dt><dd className="text-ink">{money(po.data.discount_amount ?? 0)}</dd></div>
+        <div><dt className="text-muted">Tax</dt><dd className="text-ink">{money(po.data.tax_amount ?? 0)}</dd></div>
+        <div><dt className="text-muted">Freight</dt><dd className="text-ink">{money(po.data.freight_amount ?? 0)}</dd></div>
+        <div><dt className="text-muted">Total</dt><dd className="font-semibold text-ink">{money(po.data.total_amount)}</dd></div>
+      </dl>
+    </Card>
+
+    {/* Addresses and terms — shown only when the order says something, so an order
+      * raised before these fields existed reads exactly as it did. */}
+    {(po.data.billing_address || po.data.shipping_address) && <Card className="mt-4 p-4">
+      <dl className="grid gap-3 text-sm sm:grid-cols-2">
+        <div><dt className="text-muted">Billing address</dt><dd className="whitespace-pre-line text-ink">{po.data.billing_address ?? "—"}</dd></div>
+        <div><dt className="text-muted">Shipping address</dt><dd className="whitespace-pre-line text-ink">{po.data.shipping_address ?? "—"}</dd></div>
+      </dl>
+    </Card>}
+
+    {(po.data.payment_terms || po.data.delivery_terms || po.data.material_terms
+      || po.data.logistics_terms) && <Card className="mt-4 p-4">
+      <h2 className="mb-3 text-sm font-semibold text-ink">Terms and conditions</h2>
+      <dl className="grid gap-3 text-sm sm:grid-cols-2">
+        {([
+          ["Payment terms", po.data.payment_terms],
+          ["Delivery terms", po.data.delivery_terms],
+          ["Material terms", po.data.material_terms],
+          ["Logistics terms", po.data.logistics_terms],
+        ] as const).filter(([, text]) => text).map(([label, text]) => (
+          <div key={label}>
+            <dt className="text-muted">{label}</dt>
+            <dd className="whitespace-pre-line text-ink">{text}</dd>
+          </div>
+        ))}
+      </dl>
+    </Card>}
 
     {canDecide && <Card className="mt-4 space-y-3 p-4">
       {po.data.current_approver_name && <p className="text-sm text-muted">
