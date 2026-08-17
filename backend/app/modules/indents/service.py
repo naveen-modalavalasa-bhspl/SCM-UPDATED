@@ -1190,23 +1190,6 @@ async def list_indents(
                 > IndentItem.allocated_quantity + committed,
             ).correlate(Indent)
         ))
-        # Quantity alone cannot express "already claimed, nothing given". An allocation
-        # that gives ZERO — the whole line is going to procurement, nothing is on the
-        # shelf — sums to the same 0 as no allocation at all, so the arithmetic above
-        # reads the indent as untouched and every allocator keeps seeing it. It is not
-        # work anybody can do: `allocations.ensure_no_active` refuses a second
-        # allocation while an unsigned one exists, so the row only invites a form to be
-        # filled in and rejected at submit.
-        #
-        # Same statuses as that guard, and deliberately not APPROVED: the cascade
-        # depends on an approved allocation leaving the indent visible so the rung above
-        # can serve the remainder it did not cover.
-        stmt = stmt.where(~exists(
-            select(Allocation.id).where(
-                Allocation.indent_id == Indent.id,
-                Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES),
-            ).correlate(Indent)
-        ))
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
     stmt = stmt.order_by(_indent_sort(sort_by, sort_dir), id_tie_breaker)
     return await paginate(db, stmt, params)
@@ -5145,16 +5128,15 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "project_id": indent.project_id,
     } for line in indent.items]
 
-    # The points this person actually holds or that report under them, WIDENED by
-    # their job profile's data scope. The narrowing exists so an OE is offered his own
-    # MDP and LIP rather than every store in the company; reading the tagging alone
-    # meant a login given "All" in Settings > Job Profiles was still shown 0 available
-    # for stock outside his own reporting tree. None means every warehouse.
-    my_points = (await inventory_service.drawable_warehouse_ids(db, user)
-                 if user is not None else None)
+    # Only points this person actually holds, or that report under them. Inventory and
+    # anyone with a company-wide scope has no subtree, and sees every warehouse as
+    # before — the narrowing exists so an OE is offered their own MDP and LIP rather
+    # than every store in the company.
+    my_points = (await locations.location_ids_for_user(db, user)
+                 if user is not None else set())
 
     proposal = await allocations.propose(
-        db, indent_id, lines, warehouse_ids=sorted(my_points) if my_points else None)
+        db, indent_id, lines, warehouse_ids=sorted(my_points) or None)
     return {
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
@@ -5184,7 +5166,7 @@ async def item_claims(db: AsyncSession, item_id: int, indent_id: int, user=None)
     is not: an allocator has to know a claim exists even when it was raised somewhere
     they cannot see stock.
     """
-    warehouse_ids = (await inventory_service.drawable_warehouse_ids(db, user)
+    warehouse_ids = (await inventory_service.warehouse_ids_for_user(db, user)
                      if user is not None else None)
     return await allocations.competing_claims(
         db, item_id, indent_id, warehouse_ids=warehouse_ids)

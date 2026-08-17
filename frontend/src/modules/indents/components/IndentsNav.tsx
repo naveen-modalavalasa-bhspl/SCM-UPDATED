@@ -23,9 +23,6 @@ const destinations: Destination[] = [
   { key: "/indents", label: "All requests", icon: List, end: true },
   // Board is parked: the route and BoardPage are still here, just off the tab bar.
   // { key: "/indents/board", label: "Board", icon: Columns3 },
-  // One screen, not two: acknowledging a delivery is what this list is FOR, and the
-  // separate Acknowledgments tab listed the same documents a second time.
-  //
   // `was` lists the paths this screen used to be routed at. On a database the rename
   // migration has not reached, rbac_pages still says "/indents/deliveries" (and may
   // still carry the deleted duplicate at "/indents/acknowledgments"), so matching only

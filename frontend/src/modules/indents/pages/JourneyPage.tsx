@@ -7,7 +7,6 @@ import {
 import { CardBody, Skeleton } from "@heroui/react";
 import { Button, Card } from "@/shared/components";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
-import { JourneyProgress } from "../components/JourneyProgress";
 import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
   isIndentUnavailableError, useIndentAccountCacheIsolation, useIndentAccountScope,
@@ -302,6 +301,9 @@ export function IndentJourneyPage() {
   const journeyCompleted = data.phases.length > 0 && data.phases.every((phase) => (
     COMPLETED_PHASE_STATUSES.has(stageStatus(phase))
   ));
+  const visibleMissingSources = data.missing_sources?.filter(
+    (source) => source !== "out_dispatches.gate_out_at",
+  ) ?? [];
 
   return (
     <div className="min-w-0 space-y-5">
@@ -348,18 +350,13 @@ export function IndentJourneyPage() {
         <IndentStatusBadge status={data.status} journey={data} />
       </header>
 
-      {/* Every leg, including the ones still ahead — the timeline below only draws
-          the legs something has happened in, which answers where the indent HAS been
-          and never how far it still has to go. */}
-      <JourneyProgress tracks={tracks} />
-
       {error && <p className="rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}
 
-      {!journeyCompleted && data.missing_sources?.length > 0 && (
+      {!journeyCompleted && visibleMissingSources.length > 0 && (
         <p className="flex items-start gap-2 rounded-lg border border-warn/30 bg-warn-bg px-4 py-3 text-sm text-warn">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <span className="break-words">
-            Some records could not be read ({data.missing_sources.join(", ")}), so this journey may be incomplete.
+            Some records could not be read ({visibleMissingSources.join(", ")}), so this journey may be incomplete.
           </span>
         </p>
       )}
