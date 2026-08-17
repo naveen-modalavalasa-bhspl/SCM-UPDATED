@@ -9,18 +9,64 @@ import { reportFrontendError } from "@/shared/errorLogging";
 // failure look like "no response", i.e. "Can't reach the server".
 export const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || "" });
 
-// The supplier portal is a second audience with a second token. Kept under its own
-// key so a buyer and a vendor can be signed in in two tabs without evicting each
-// other, and picked by URL rather than by "whichever is present" — sending an
-// employee token to /api/supplier would 401 and log the employee out of SCM.
+// The supplier portal is a second audience with a second token. Vendor tokens are
+// tab-scoped: logistics commonly opens two carrier accounts side by side while
+// checking a tender, and localStorage made both tabs submit as whichever carrier
+// signed in last. The old local value is read only as a migration fallback.
 export const SUPPLIER_TOKEN_KEY = "supplier_token";
+
+export const vendorToken = () =>
+  sessionStorage.getItem(SUPPLIER_TOKEN_KEY)
+  ?? localStorage.getItem(SUPPLIER_TOKEN_KEY);
+
+export const setVendorToken = (token: string) => {
+  sessionStorage.setItem(SUPPLIER_TOKEN_KEY, token);
+  localStorage.removeItem(SUPPLIER_TOKEN_KEY);
+};
+
+export const clearVendorToken = () => {
+  sessionStorage.removeItem(SUPPLIER_TOKEN_KEY);
+  localStorage.removeItem(SUPPLIER_TOKEN_KEY);
+};
+
+// Which door that vendor came in by. The TOKEN is deliberately shared — a carrier IS
+// a vendor, one account, one password — but the DESTINATION is not. The screens both
+// portals share (choose a password, the 401 bounce) used to be hardcoded to the
+// supplier side, so a transport provider who changed their password or got bounced
+// once was dropped into an RFQ list that will always read "Nothing has been sent to
+// you yet", with no way back to their shipments.
+export const VENDOR_PORTAL_KEY = "vendor_portal";
+
+export type VendorPortal = "supplier" | "carrier";
+
+export const setVendorPortal = (portal: VendorPortal) => {
+  sessionStorage.setItem(VENDOR_PORTAL_KEY, portal);
+  localStorage.removeItem(VENDOR_PORTAL_KEY);
+};
+
+/** Defaults to supplier: a session that predates this key, and every vendor who never
+ *  went near /carrier, belongs on the supplier side. */
+export const vendorPortal = (): VendorPortal =>
+  (sessionStorage.getItem(VENDOR_PORTAL_KEY)
+    ?? localStorage.getItem(VENDOR_PORTAL_KEY)) === "carrier" ? "carrier" : "supplier";
+
+/** Where "you are signed in, get on with it" means for this vendor. */
+export const vendorHome = () =>
+  vendorPortal() === "carrier" ? "/carrier/jobs" : "/supplier/rfqs";
 
 const isSupplierCall = (url?: string) => Boolean(url?.startsWith("/api/supplier"));
 
+/** Where they are standing beats what they last logged in as — a carrier looking at a
+ *  /carrier screen goes back to the carrier door even on a fresh browser. */
+const vendorDoor = () =>
+  location.pathname.startsWith("/carrier") ? "/carrier/login"
+    : location.pathname.startsWith("/supplier") ? "/supplier/login"
+      : `/${vendorPortal()}/login`;
+
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem(
-    isSupplierCall(config.url) ? SUPPLIER_TOKEN_KEY : "token",
-  );
+  const token = isSupplierCall(config.url)
+    ? vendorToken()
+    : localStorage.getItem("token");
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
@@ -53,12 +99,15 @@ api.interceptors.response.use(
       },
     });
     if (status === 401) {
-      // Sign out only the audience that failed, and send them to their own door.
-      const supplier = isSupplierCall(error.config?.url)
-        || location.pathname.startsWith("/supplier");
-      const key = supplier ? SUPPLIER_TOKEN_KEY : "token";
-      const door = supplier ? "/supplier/login" : "/login";
-      localStorage.removeItem(key);
+      // Sign out only the audience that failed, and send them to their own door —
+      // which for a vendor means the portal they are actually in, not always the
+      // supplier one.
+      const vendor = isSupplierCall(error.config?.url)
+        || location.pathname.startsWith("/supplier")
+        || location.pathname.startsWith("/carrier");
+      const door = vendor ? vendorDoor() : "/login";
+      if (vendor) clearVendorToken();
+      else localStorage.removeItem("token");
       if (location.pathname !== door) location.href = door;
     }
     if (!error.response) {

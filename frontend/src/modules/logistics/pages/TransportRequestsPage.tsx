@@ -7,8 +7,10 @@ import {
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { transportApi } from "../api";
-import { modeLabel, modeTint, money, TR_STATUSES } from "../components/modeCopy";
-import type { TRListRow } from "../transportTypes";
+import {
+  load, modeLabel, modeTint, money, nextMove, statusTint, TR_STATUSES,
+} from "../components/modeCopy";
+import type { TransportSummary, TRListRow } from "../transportTypes";
 
 const SIZE = 20;
 
@@ -20,12 +22,29 @@ const MODES = [
   { value: "THIRD_PARTY", label: "Third-party" },
 ];
 
+/** The board across the top: one tile per queue, and pressing it filters the list.
+ *  The order is the order the flow runs, so the board reads left to right as the
+ *  journey a consignment takes. */
+const QUEUES: { key: keyof TransportSummary; label: string; status: string }[] = [
+  { key: "draft", label: "Draft", status: "DRAFT" },
+  { key: "pending_approval", label: "Approval", status: "PENDING_APPROVAL" },
+  { key: "quoting", label: "Quotes", status: "QUOTING" },
+  { key: "awaiting_carrier", label: "Carrier", status: "AWAITING_CARRIER" },
+  { key: "ready", label: "To dispatch", status: "READY" },
+  { key: "in_transit", label: "On the road", status: "IN_TRANSIT" },
+  { key: "delivered", label: "To sign", status: "DELIVERED" },
+];
+
 /**
- * The transport register — every consignment the warehouse has asked to move.
+ * The transport register — every consignment logistics has been asked to move.
  *
- * The mode chip is the first thing on the row on purpose: it is what decides what
- * happens next (tender it, book a courier, or just record who carried it), so a
- * logistics desk sorting its day reads that before the status.
+ * The board is the screen's point: seven queues, each one a stage of the flow, each
+ * one a click. A desk opening this in the morning should be able to see where the
+ * work has piled up without reading a single row, and land in that queue by pressing
+ * the number.
+ *
+ * Dispatch is not a separate list any more. A request in READY is one waiting to be
+ * dispatched, which is why "To dispatch" is a filter here and not a second screen.
  */
 export function TransportRequestsPage() {
   const nav = useNavigate();
@@ -33,6 +52,11 @@ export function TransportRequestsPage() {
   const [mode, setMode] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+
+  const { data: summary } = useQuery({
+    queryKey: ["transport-summary"],
+    queryFn: transportApi.summary,
+  });
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["transport", status, mode, search, page],
@@ -55,7 +79,8 @@ export function TransportRequestsPage() {
         <div className="min-w-0">
           <div className="font-mono text-xs font-semibold text-ink">{r.tr_no}</div>
           <div className="text-[11px] text-muted">
-            {r.indent_no ? `Indent ${r.indent_no}` : fmtDate(r.tr_date)}
+            {r.consignment_no
+              ?? (r.indent_no ? `Indent ${r.indent_no}` : fmtDate(r.tr_date))}
           </div>
         </div>
       ),
@@ -69,7 +94,18 @@ export function TransportRequestsPage() {
         </span>
       ),
     },
-    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "status",
+      header: "Status",
+      render: (r) => (
+        <div className="min-w-0">
+          <StatusPill status={r.status} />
+          <div className="mt-0.5 truncate text-[11px] text-muted">
+            {nextMove(r.status)}
+          </div>
+        </div>
+      ),
+    },
     {
       key: "route",
       header: "Route",
@@ -95,9 +131,7 @@ export function TransportRequestsPage() {
       className: "text-right",
       hideOnNarrow: true,
       render: (r) => (
-        <span className="text-sm text-body">
-          {r.total_packages} pkg · {Number(r.total_weight_kg ?? 0)} kg
-        </span>
+        <span className="text-sm text-body">{load(r.total_packages, r.total_weight_kg)}</span>
       ),
     },
     {
@@ -125,12 +159,59 @@ export function TransportRequestsPage() {
         title="Transport Requests"
         actions={
           <Can do="transport.create">
+            <Button variant="ghost" onClick={() => nav("/logistics/consignments")}>
+              From a consignment
+            </Button>
             <Button onClick={() => nav("/logistics/transport/new")}>
               New request
             </Button>
           </Can>
         }
       />
+
+      <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+        {QUEUES.map((queue) => {
+          const active = status === queue.status;
+          const count = summary?.[queue.key] ?? 0;
+          return (
+            <button
+              key={queue.key}
+              type="button"
+              onClick={() => {
+                setStatus(active ? "" : queue.status);
+                setPage(1);
+              }}
+              className={`min-h-11 rounded-xl border px-3 py-2.5 text-left transition ${
+                active
+                  ? "border-brand bg-brand/5 ring-2 ring-brand/20"
+                  : "border-line bg-content1 hover:border-brand/50 hover:bg-surface-2"
+              }`}
+            >
+              <span className="block font-display text-2xl font-bold tabular text-ink">
+                {count}
+              </span>
+              <span className={`mt-0.5 inline-block rounded-full px-1.5 text-[10px] font-semibold uppercase tracking-wide ${statusTint(queue.status)}`}>
+                {queue.label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {Boolean(summary?.open_claims) && (
+        <Card className="mb-4 flex flex-wrap items-center justify-between gap-2 border-amber-300 bg-amber-50 p-3 dark:bg-amber-900/20">
+          <p className="text-sm text-amber-900 dark:text-amber-200">
+            <strong>{summary?.open_claims}</strong> open claim
+            {summary?.open_claims === 1 ? "" : "s"} against carriers
+            {summary?.untracked
+              ? `, and ${summary.untracked} shipment(s) the field has never been told about`
+              : ""}.
+          </p>
+          <Button variant="ghost" onClick={() => nav("/logistics/exceptions")}>
+            Open claims
+          </Button>
+        </Card>
+      )}
 
       <div className="mb-4 flex flex-wrap gap-3">
         <div className="w-full max-w-xs">
@@ -171,7 +252,7 @@ export function TransportRequestsPage() {
           empty={
             status || mode || search
               ? "No transport requests match that."
-              : "No transport requests yet. Raise one when the warehouse has something to move."
+              : "Nothing being moved yet. Start from a packed consignment."
           }
           renderCard={(r) => (
             <div className="space-y-1.5">
@@ -186,10 +267,11 @@ export function TransportRequestsPage() {
                 <span className="text-sm text-body">{r.to_location_name ?? "—"}</span>
               </div>
               <div className="text-xs text-muted">
-                {r.total_packages} pkg · {Number(r.total_weight_kg ?? 0)} kg
+                {load(r.total_packages, r.total_weight_kg)}
                 {r.carrier_name ? ` · ${r.carrier_name}` : ""}
                 {r.freight_amount ? ` · ${money(r.freight_amount)}` : ""}
               </div>
+              <div className="text-[11px] text-brand">{nextMove(r.status)}</div>
             </div>
           )}
         />

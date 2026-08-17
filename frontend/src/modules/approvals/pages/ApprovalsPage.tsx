@@ -22,7 +22,7 @@ const LABELS: Record<string, string> = {
   OWN_STOCK_ALLOCATION: "Allocation from my point",
   DISPATCH: "Dispatch", PURCHASE_RETURN: "Purchase return",
   REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
-  RFQ: "Request for quotation",
+  RFQ: "Request for quotation", CARRIER_AWARD: "Carrier award",
 };
 
 /** Document types this screen can sign without opening them.

@@ -149,7 +149,12 @@ class TransportRequest(Base):
     source_id = Column(BigInteger, index=True, nullable=True)
     source_no = Column(String(50), nullable=True)
     issue_id = Column(BigInteger, index=True, nullable=True)
+    # The warehouse consignment (`out_dispatches`) this leg carries. A soft id and a
+    # snapshot of its number, never a join: the referent lives in the warehouse module,
+    # which sits AFTER logistics in the import chain (rule 5). The number is snapshotted
+    # so the transport register reads on its own, without a cross-module read.
     dispatch_id = Column(BigInteger, index=True, nullable=True)
+    consignment_no = Column(String(50), nullable=True)
     indent_id = Column(BigInteger, index=True, nullable=True)
     indent_no = Column(String(50), nullable=True)
 
@@ -183,6 +188,20 @@ class TransportRequest(Base):
     awarded_by_name = Column(String(200), nullable=True)
     awarded_at = Column(DateTime, nullable=True)
 
+    # The carrier's own answer to the award. Winning a tender is an offer; a booking
+    # is what the carrier confirms in their portal, and until they do there is no
+    # truck. A decline is kept beside the acceptance rather than only unwinding the
+    # award, because "who dropped us, and why" is the reason the next tender excludes
+    # them.
+    carrier_accepted_at = Column(DateTime, nullable=True)
+    carrier_declined_at = Column(DateTime, nullable=True)
+    carrier_decline_reason = Column(String(500), nullable=True)
+    #: The carrier's own booking id, typed in by them. Not the LR — that comes later.
+    carrier_reference = Column(String(100), nullable=True)
+    #: Set when the desk confirms on the carrier's behalf (a phone call). Recorded so
+    #: an acceptance nobody in the portal ever made cannot be mistaken for one.
+    carrier_confirmed_by_name = Column(String(200), nullable=True)
+
     # Own vehicle.
     vehicle_number = Column(String(50), nullable=True)
     driver_name = Column(String(200), nullable=True)
@@ -203,13 +222,28 @@ class TransportRequest(Base):
     eway_bill_no = Column(String(50), nullable=True)
 
     expected_delivery = Column(Date, nullable=True)
+    # The dispatch leg, merged into this document rather than kept on a second one.
+    # The warehouse consignment says what was packed; from the moment it is handed to
+    # logistics, "it left the yard" is a fact about the transport, so the gate pass and
+    # who released it live here beside the LR they were written with.
+    gate_pass_no = Column(String(50), nullable=True)
     dispatched_at = Column(DateTime, nullable=True)
+    dispatched_by_name = Column(String(200), nullable=True)
     delivered_at = Column(DateTime, nullable=True)
     delivered_to_name = Column(String(200), nullable=True)
     pod_url = Column(String(500), nullable=True)
     # Set when the field is told where its material is (doc D5). Read by the indent
     # team's chase list — an untold field cannot acknowledge.
     tracking_shared_at = Column(DateTime, nullable=True)
+
+    # The receiving end (doc A6-A7). Delivered is the carrier's word for it; this is
+    # the site's, and it is the one that closes the loop. `ack_condition` is what the
+    # site says it found — anything but GOOD raises a claim on the same timeline.
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by_id = soft_fk()
+    acknowledged_by_name = Column(String(200), nullable=True)
+    ack_condition = Column(String(20), nullable=True)
+    ack_remarks = Column(Text, nullable=True)
 
     remarks = Column(Text, nullable=True)
     requested_by_id = soft_fk()

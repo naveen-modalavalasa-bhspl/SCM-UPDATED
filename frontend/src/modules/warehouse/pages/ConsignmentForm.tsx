@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox } from "@heroui/react";
 import Barcode from "react-barcode";
@@ -194,6 +194,19 @@ export default function ConsignmentForm() {
   const nav = useNavigate();
   const qc = useQueryClient();
 
+  // One screen, two front doors: the warehouse works consignments under /warehouse,
+  // the logistics desk works the same document under /logistics. Every route this
+  // form pushes has to stay on the side it was opened from — hardcoding /warehouse
+  // handed a logistics user over to the warehouse module mid-flow, and the module
+  // rail, the tabs and the eyebrow all changed under them.
+  const inLogistics = useLocation().pathname.startsWith("/logistics");
+  const listPath = inLogistics ? "/logistics/consignments" : "/warehouse/dispatch/consignments";
+  // And the next step differs with the door: the warehouse confirms the gate pass,
+  // logistics decides the MODE and raises the transport.
+  const dispatchPath = (docId: number) => (inLogistics
+    ? `/logistics/dispatch/new?consignment_id=${docId}`
+    : `/warehouse/dispatch/new?consignment_id=${docId}`);
+
   const [form, setForm] = useState<ConsignmentWrite>({
     issue_id: 0,
     dispatch_type: "PROJECT",
@@ -377,7 +390,7 @@ export default function ConsignmentForm() {
       qc.invalidateQueries({ queryKey: ["wh-consignments"] });
       qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
       qc.invalidateQueries({ queryKey: ["wh-consignment", String(saved.id)] });
-      if (!editing) nav(`/warehouse/dispatch/consignments/${saved.id}`, { replace: true });
+      if (!editing) nav(`${listPath}/${saved.id}`, { replace: true });
     },
   });
 
@@ -620,16 +633,16 @@ export default function ConsignmentForm() {
   return (
     <div>
       <PageHeader
-        eyebrow={pointLabel}
+        eyebrow={inLogistics ? "Logistics" : pointLabel}
         title={editing ? `Consignment ${doc?.dispatch_no ?? ""}` : "New consignment"}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("/warehouse/dispatch/consignments")}>
+            <Button variant="ghost" onClick={() => nav(listPath)}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {doc?.status === "PACKED" && (
-              <Can do="dispatch.gate_out">
-                <Button variant="soft" onClick={() => nav(`/warehouse/dispatch/new?consignment_id=${doc.id}`)}>
+              <Can do={inLogistics ? "transport.create" : "dispatch.gate_out"}>
+                <Button variant="soft" onClick={() => nav(dispatchPath(doc.id))}>
                   <Truck className="h-4 w-4" /> Confirm dispatch
                 </Button>
               </Can>

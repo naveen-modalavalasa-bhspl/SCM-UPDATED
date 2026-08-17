@@ -26,6 +26,15 @@ describe("approval document routes", () => {
       .toBe("/inventory/allocation-approvals/7?decision=1");
   });
 
+  // The award's doc_id is the transport request. Left out of the switch, the one
+  // approval that releases a shipment to its carrier had nowhere to be decided.
+  it("routes a carrier award to its transport request", () => {
+    expect(approvalDocumentPath({ doc_type: "CARRIER_AWARD", doc_id: 1 }))
+      .toBe("/logistics/transport/1?approval=1");
+    expect(approvalDecisionDocumentPath({ doc_type: "CARRIER_AWARD", doc_id: 1 }))
+      .toBe("/logistics/transport/1?decision=1");
+  });
+
   it("opens the exact purchase order instead of the generic PO page", () => {
     expect(approvalDecisionDocumentPath({ doc_type: "PO", doc_id: 9 })).toBe("/pos/9?decision=1");
     expect(approvalDocumentPath({ doc_type: "PO", doc_id: 9 })).toBe("/pos/9?approval=1");

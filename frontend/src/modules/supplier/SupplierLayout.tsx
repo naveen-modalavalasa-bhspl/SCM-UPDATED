@@ -1,7 +1,7 @@
 import { Link, Navigate, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { FileText, LogOut, Truck, User } from "lucide-react";
-import { SUPPLIER_TOKEN_KEY } from "@/shared/api/client";
+import { clearVendorToken, vendorToken } from "@/shared/api/client";
 import { supplierApi } from "@/modules/procurement/api";
 
 /**
@@ -13,7 +13,7 @@ import { supplierApi } from "@/modules/procurement/api";
  */
 export function SupplierLayout() {
   const nav = useNavigate();
-  const token = localStorage.getItem(SUPPLIER_TOKEN_KEY);
+  const token = vendorToken();
 
   const { data: profile } = useQuery({
     queryKey: ["supplier-me"],
@@ -24,7 +24,7 @@ export function SupplierLayout() {
   if (!token) return <Navigate to="/supplier/login" replace />;
 
   const signOut = () => {
-    localStorage.removeItem(SUPPLIER_TOKEN_KEY);
+    clearVendorToken();
     nav("/supplier/login", { replace: true });
   };
 

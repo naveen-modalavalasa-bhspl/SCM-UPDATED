@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
 import { Button, Card, ErrorBanner, Field, Input, useToast } from "@/shared/components";
+import { vendorHome } from "@/shared/api/client";
 import { supplierApi } from "@/modules/procurement/api";
 
 const DEFAULT_PASSWORD = "Bavya@123";
@@ -20,7 +21,10 @@ export function SupplierPasswordPage() {
     mutationFn: () => supplierApi.changePassword(current, next),
     onSuccess: () => {
       toast.success("Password changed");
-      nav("/supplier/rfqs", { replace: true });
+      // Back to the portal they came in by. One screen serves both, so it must not
+      // assume the supplier one — a carrier changing their password was landing on an
+      // RFQ list that is empty for them by definition.
+      nav(vendorHome(), { replace: true });
     },
   });
 

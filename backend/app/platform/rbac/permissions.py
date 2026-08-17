@@ -209,10 +209,21 @@ TRANSPORT_APPROVE = "transport.approve"
 TRANSPORT_AWARD = "transport.award"
 # Recording where the consignment is: LR/docket, in-transit scans, delivery.
 TRANSPORT_TRACK = "transport.track"
+# Signing for the consignment at the receiving end (doc A6). Its own code because the
+# holder is the indent team or the site, not the logistics desk: "it arrived" must be
+# sayable by someone who cannot also say "it was dispatched".
+TRANSPORT_ACKNOWLEDGE = "transport.acknowledge"
 # Raising and closing a damage/shortage against the provider. Its own code because
 # it is a claim against a supplier, not a status update.
 TRANSPORT_EXCEPTION = "transport.exception"
 TRANSPORT_DELETE = "transport.delete"
+# The logistics-vendor register: who the Dispatch dropdown offers, and their portal
+# login. MANAGE mints an identity outside the company, exactly like
+# VENDOR_PORTAL_MANAGE does for a supplier — but scoped, because the endpoints behind
+# it refuse any vendor row that is not a carrier. Granting the logistics desk the
+# ability to stand up a courier must not hand them a material supplier's password.
+LOGISTICS_PARTNER_VIEW = "logistics.partner.view"
+LOGISTICS_PARTNER_MANAGE = "logistics.partner.manage"
 
 # --- Returns ---
 # A return borrows no permission from stock. It reads like a transfer and it ends in
@@ -404,10 +415,16 @@ ALL_PERMISSIONS: list[Perm] = [
          "Choose the transport provider and fix the freight"),
     Perm(TRANSPORT_TRACK, "logistics", "transport", "track",
          "Record LR/docket, in-transit events and delivery"),
+    Perm(TRANSPORT_ACKNOWLEDGE, "logistics", "transport", "acknowledge",
+         "Acknowledge a delivered consignment at the receiving site"),
     Perm(TRANSPORT_EXCEPTION, "logistics", "transport", "exception",
          "Raise and close damage or shortage claims against a carrier"),
     Perm(TRANSPORT_DELETE, "logistics", "transport", "delete",
          "Delete a draft transport request"),
+    Perm(LOGISTICS_PARTNER_VIEW, "logistics", "partner", "view",
+         "View the logistics vendor register"),
+    Perm(LOGISTICS_PARTNER_MANAGE, "logistics", "partner", "manage",
+         "Add logistics vendors and issue their portal logins"),
     Perm(RETURN_VIEW, "returns", "return", "view", "View returns"),
     Perm(RETURN_CREATE, "returns", "return", "create",
          "Raise and submit a return"),
@@ -450,6 +467,10 @@ ALL_CODES: list[str] = [p.code for p in ALL_PERMISSIONS]
 INHERITS_GRANTS_FROM: dict[str, str] = {
     ALLOCATION_SUBMIT: ALLOCATION_CREATE,
     ALLOCATION_APPROVE_RESERVE: ALLOCATION_APPROVE,
+    # Carved out of TRACK, which used to cover the whole tail of the flow. Everyone
+    # who could mark a consignment delivered yesterday must still be able to close it
+    # out today — fail-closed is right for a new capability and wrong for a split.
+    TRANSPORT_ACKNOWLEDGE: TRANSPORT_TRACK,
 }
 
 

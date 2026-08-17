@@ -1,0 +1,125 @@
+import { describe, expect, it } from "vitest";
+import {
+  headerFromConsignment, linesFromConsignment,
+} from "../components/consignmentToLines";
+import type { ConsignmentDetail } from "../transportTypes";
+
+const base = {
+  id: 7,
+  dispatch_no: "CN/2026/0007",
+  dispatch_type: "TRANSFER",
+  dispatch_date: "2026-08-16",
+  status: "PACKED",
+  warehouse_id: 3,
+  warehouse_name: "Central WH",
+  destination_office_name: "Kurnool LIP",
+  delivery_address: "Site gate, Kurnool",
+  contact_person: "Ravi",
+  contact_phone: "9000000000",
+  ref_type: "ISSUE",
+  ref_id: 55,
+  ref_no: "MI/2026/0055",
+  total_items: 2,
+  total_qty: 12,
+  total_packages: 2,
+  total_weight_kg: 30,
+  created_at: "2026-08-16T04:00:00",
+} as unknown as ConsignmentDetail;
+
+const consignment = (over: Partial<ConsignmentDetail>): ConsignmentDetail =>
+  ({ ...base, items: [], packages: [], ...over }) as ConsignmentDetail;
+
+describe("a packed consignment, turned into transport lines", () => {
+  it("counts a carton once however many lines are packed in it", () => {
+    const doc = consignment({
+      packages: [
+        { id: 1, package_no: "P1", package_type: "CARTON", weight_kg: 18,
+          length_cm: 40, width_cm: 30, height_cm: 20, is_fragile: true },
+        { id: 2, package_no: "P2", package_type: "CARTON", weight_kg: 12,
+          length_cm: null, width_cm: null, height_cm: null, is_fragile: false },
+      ],
+      items: [
+        { id: 11, line_no: 1, package_id: 1, item_id: 101, item_name: "Gloves",
+          uom_code: "BOX", quantity: 5 },
+        { id: 12, line_no: 2, package_id: 1, item_id: 102, item_name: "Masks",
+          uom_code: "BOX", quantity: 4 },
+        { id: 13, line_no: 3, package_id: 2, item_id: 103, item_name: "Syringes",
+          uom_code: "BOX", quantity: 3 },
+      ] as ConsignmentDetail["items"],
+    });
+
+    const lines = linesFromConsignment(doc);
+
+    expect(lines).toHaveLength(3);
+    // Two cartons, three lines: the totals a carrier prices off must say two.
+    expect(lines.reduce((sum, line) => sum + (line.package_count ?? 0), 0)).toBe(2);
+    expect(lines[0].package_count).toBe(1);
+    expect(lines[0].weight_kg).toBe(18);
+    expect(lines[0].is_fragile).toBe(true);
+    // Second line rides in the same carton — no count, no weight, or the shipment
+    // would be priced as 48kg across three boxes.
+    expect(lines[1].package_count).toBe(0);
+    expect(lines[1].weight_kg).toBeNull();
+    // …but it still knows it is in a fragile box.
+    expect(lines[1].is_fragile).toBe(true);
+    expect(lines[2].package_count).toBe(1);
+    expect(lines[2].weight_kg).toBe(12);
+  });
+
+  it("puts unmapped cartons on the first line rather than losing them", () => {
+    // An older consignment recorded packages but never said which line went where.
+    const doc = consignment({
+      packages: [
+        { id: 1, package_no: "P1", weight_kg: 10, is_fragile: false } as never,
+        { id: 2, package_no: "P2", weight_kg: 6, is_fragile: true } as never,
+      ],
+      items: [
+        { id: 11, line_no: 1, item_id: 101, item_name: "Gloves", quantity: 5 },
+        { id: 12, line_no: 2, item_id: 102, item_name: "Masks", quantity: 4 },
+      ] as ConsignmentDetail["items"],
+    });
+
+    const lines = linesFromConsignment(doc);
+
+    // A zero-package request is one no carrier will quote, so the load lands whole.
+    expect(lines[0].package_count).toBe(2);
+    expect(lines[0].weight_kg).toBe(16);
+    expect(lines[0].is_fragile).toBe(true);
+    expect(lines[1].package_count).toBe(0);
+  });
+
+  it("carries no packages when the warehouse recorded none", () => {
+    const doc = consignment({
+      items: [
+        { id: 11, line_no: 1, item_id: 101, item_name: "Gloves", quantity: 5 },
+      ] as ConsignmentDetail["items"],
+    });
+    expect(linesFromConsignment(doc)[0].package_count).toBe(0);
+  });
+
+  it("links the transport request back to the consignment and its indent", () => {
+    const doc = consignment({
+      items: [
+        { id: 11, line_no: 1, item_id: 101, item_name: "Gloves", quantity: 5,
+          indent_id: 42, indent_no: "IND/2026/0042" },
+      ] as ConsignmentDetail["items"],
+    });
+
+    const header = headerFromConsignment(doc);
+
+    expect(header.dispatch_id).toBe(7);
+    expect(header.consignment_no).toBe("CN/2026/0007");
+    expect(header.source_type).toBe("CONSIGNMENT");
+    // ref_type ISSUE means the material issue it was picked against.
+    expect(header.issue_id).toBe(55);
+    expect(header.indent_no).toBe("IND/2026/0042");
+    expect(header.to_location_name).toBe("Kurnool LIP");
+    expect(header.from_warehouse_id).toBe(3);
+    expect(header.contact_phone).toBe("9000000000");
+  });
+
+  it("does not claim an issue id when the consignment came from something else", () => {
+    const header = headerFromConsignment(consignment({ ref_type: "STO", ref_id: 9 }));
+    expect(header.issue_id).toBeNull();
+  });
+});

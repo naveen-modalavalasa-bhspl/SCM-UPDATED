@@ -8,20 +8,31 @@ const TOP_ALLOCATION_STATUS_TONE: Partial<Record<string, string>> = {
   [INDENT_STATUS.AWAITING_ALLOCATION]: "bg-info-bg text-info",
 };
 
+const APPROVAL_ROLE_NAMES: Record<string, string> = {
+  RM: "Regional Manager",
+  DM: "District Manager",
+  OE: "Operations Executive",
+  SPH: "State Project Head",
+  COO: "Chief Operating Officer",
+};
+
+function positionRole(position: string) {
+  return position.split(/\s*\/\s*/).map((part) => {
+    const role = part.split("-", 1)[0].trim();
+    return APPROVAL_ROLE_NAMES[role.toUpperCase()] ?? role;
+  }).filter(Boolean).join(" / ");
+}
+
 /**
- * Who a stage belongs to, taken straight from the resolved chain. The ladder is
- * configured per project, so no rank is ever assumed, mapped or abbreviated
- * here — the only edit is dropping a trailing "Review"/"Approval" from a stage
- * title so the badge reads "Pending at X" rather than "Pending at X Review".
+ * Show only the resolved role, without the position's project/location suffix.
+ * A stage title remains the fallback when the resolved position is unavailable.
  */
 function stageOwner(stage?: IndentJourneyStage) {
-  const approver = stage?.approver_name?.trim().replace(/\s+/g, " ");
-  if (approver) return approver;
   const position = stage?.position_name?.trim().replace(/\s+/g, " ");
-  if (position) return position;
+  if (position) return positionRole(position);
   const title = stage?.title?.trim().replace(/\s+/g, " ")
     .replace(/\s+(Review|Approval)$/i, "").trim();
-  return title || null;
+  return title ? (APPROVAL_ROLE_NAMES[title.toUpperCase()] ?? title) : null;
 }
 
 function pendingStageLabel(journey?: IndentJourney) {

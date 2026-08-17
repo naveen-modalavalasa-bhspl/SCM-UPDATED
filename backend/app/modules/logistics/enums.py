@@ -34,10 +34,19 @@ class TransportStatus(str, Enum):
     # Approved and, for a quoted mode, out to carriers. A DIRECT or OWN_VEHICLE
     # request skips this and lands on READY.
     QUOTING = "QUOTING"
+    # Awarded, and waiting for the winning carrier to say yes in their own portal.
+    # A won tender is an offer, not a booking: until the carrier confirms it has a
+    # truck for that lane on that day, nothing can be loaded against it. Only a
+    # tendered mode passes through here — a courier booking and a hand-over have
+    # nobody to hear back from.
+    AWAITING_CARRIER = "AWAITING_CARRIER"
     # A provider is fixed (or none is needed) and the consignment can leave.
     READY = "READY"
     IN_TRANSIT = "IN_TRANSIT"
     DELIVERED = "DELIVERED"
+    # The receiving site has signed for it (doc A6). Delivered is the carrier's word;
+    # acknowledged is the field's, and only the second one closes the indent's loop.
+    ACKNOWLEDGED = "ACKNOWLEDGED"
     CLOSED = "CLOSED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
@@ -60,6 +69,26 @@ class QuoteStatus(str, Enum):
     # winning one was the best of three (doc B8).
     NOT_AWARDED = "NOT_AWARDED"
     DECLINED = "DECLINED"
+
+
+class AckCondition(str, Enum):
+    """How the material actually arrived, said by the site that signed for it.
+
+    Anything but GOOD opens a claim on the same shipment timeline, because a site
+    reporting a shortage and the logistics desk chasing the carrier for it are the
+    same fact — recording it twice is how the two stop agreeing.
+    """
+    GOOD = "GOOD"
+    SHORT = "SHORT"
+    DAMAGED = "DAMAGED"
+
+
+#: What each acknowledgement condition raises against the provider. GOOD raises
+#: nothing; the other two are claims and go to the Exceptions desk.
+ACK_CLAIM_EVENT: dict[str, str] = {
+    AckCondition.SHORT.value: "MISSING",
+    AckCondition.DAMAGED.value: "DAMAGED",
+}
 
 
 class ShipmentEventType(str, Enum):
@@ -143,3 +172,70 @@ def mode_rule(mode: str) -> ModeRule:
 #: carrier is a vendor — same master, same portal login, same rate history — so
 #: nothing here creates a second supplier table.
 CARRIER_VENDOR_TYPES = ("TRANSPORT", "LOGISTICS", "COURIER")
+
+
+# --------------------------------------------------------------------------- #
+#  The flow, as the screen draws it
+# --------------------------------------------------------------------------- #
+# One consignment travels through a fixed set of stages, and the stepper at the top
+# of every transport screen is that list. Held here rather than in the frontend for
+# the same reason MODE_RULES is: the screen must draw the flow the service actually
+# runs. A tendered shipment has two stages the others do not (the tender, and the
+# carrier saying yes), so the list is per-mode and served at /api/transport/flow.
+
+class Stage:
+    __slots__ = ("key", "label", "help", "statuses")
+
+    def __init__(self, key: str, label: str, help: str, statuses: tuple[str, ...]):
+        self.key, self.label, self.help, self.statuses = key, label, help, statuses
+
+
+_PLAN = Stage(
+    "PLAN", "Plan",
+    "Pick the packed consignment and say how it travels.",
+    (TransportStatus.DRAFT.value,),
+)
+_APPROVE = Stage(
+    "APPROVE", "Approval",
+    "The movement is sanctioned before anything is booked.",
+    (TransportStatus.PENDING_APPROVAL.value,),
+)
+_TENDER = Stage(
+    "TENDER", "Quotes",
+    "Invite carriers, compare what they quoted and award the job.",
+    (TransportStatus.QUOTING.value,),
+)
+_CONFIRM = Stage(
+    "CONFIRM", "Carrier confirms",
+    "The awarded carrier accepts the job in their portal.",
+    (TransportStatus.AWAITING_CARRIER.value,),
+)
+_DISPATCH = Stage(
+    "DISPATCH", "Dispatch",
+    "Gate pass, LR / docket and e-way bill — then it leaves the yard.",
+    (TransportStatus.READY.value,),
+)
+_TRANSIT = Stage(
+    "TRANSIT", "In transit",
+    "Scans, delays and damage, tracked to the destination.",
+    (TransportStatus.IN_TRANSIT.value,),
+)
+_DELIVERED = Stage(
+    "DELIVERED", "Delivered",
+    "The carrier says it arrived and hands over the proof of delivery.",
+    (TransportStatus.DELIVERED.value,),
+)
+_ACK = Stage(
+    "ACKNOWLEDGE", "Acknowledged",
+    "The receiving site signs for it. Short or damaged raises a claim.",
+    (TransportStatus.ACKNOWLEDGED.value, TransportStatus.CLOSED.value),
+)
+
+
+def flow_stages(mode: str | None = None) -> list[Stage]:
+    """The stages this mode actually passes through, in order."""
+    tendered = bool(mode) and mode_rule(mode).needs_quotes
+    stages = [_PLAN, _APPROVE]
+    if tendered:
+        stages += [_TENDER, _CONFIRM]
+    return stages + [_DISPATCH, _TRANSIT, _DELIVERED, _ACK]

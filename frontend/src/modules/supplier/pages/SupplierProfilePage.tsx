@@ -23,7 +23,8 @@ export function SupplierProfilePage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Supplier" title={profile?.name ?? "Your details"} />
+      {/* "Account", not "Supplier": this screen is mounted in the carrier shell too. */}
+      <PageHeader eyebrow="Account" title={profile?.name ?? "Your details"} />
 
       <ErrorBanner error={error} />
 

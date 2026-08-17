@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
 import { Button, Card, ErrorBanner, Field, Input } from "@/shared/components";
-import { SUPPLIER_TOKEN_KEY } from "@/shared/api/client";
+import { setVendorPortal, setVendorToken } from "@/shared/api/client";
 import { supplierApi } from "@/modules/procurement/api";
 
 /**
@@ -18,7 +18,10 @@ export function SupplierLoginPage() {
   const signIn = useMutation({
     mutationFn: () => supplierApi.login(username, password),
     onSuccess: (token) => {
-      localStorage.setItem(SUPPLIER_TOKEN_KEY, token.access_token);
+      setVendorToken(token.access_token);
+      // Same account can hold both doors open; the last one used is the one the
+      // shared screens come back to.
+      setVendorPortal("supplier");
       // A vendor still on the shared default sees nothing but the change form.
       nav(token.must_change_password ? "/supplier/password" : "/supplier/rfqs", {
         replace: true,

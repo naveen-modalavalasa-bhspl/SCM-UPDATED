@@ -75,15 +75,17 @@ import { ApiClientsPage, ApiClientDetailPage } from "@/modules/integrations";
 import { PurchaseConsolidationListPage } from "@/modules/procurement/pages/PurchaseConsolidationListPage";
 import { PurchaseConsolidationFormPage } from "@/modules/procurement/pages/PurchaseConsolidationFormPage";
 import { PurchaseConsolidationDetailPage } from "@/modules/procurement/pages/PurchaseConsolidationDetailPage";
-import { TransportRequestsPage } from "@/modules/logistics/pages/TransportRequestsPage";
-import { TransportFormPage } from "@/modules/logistics/pages/TransportFormPage";
-import { TransportDetailPage } from "@/modules/logistics/pages/TransportDetailPage";
-import { ProviderSelectionPage } from "@/modules/logistics/pages/ProviderSelectionPage";
-import { ShipmentTrackingPage } from "@/modules/logistics/pages/ShipmentTrackingPage";
-import { LogisticsExceptionsPage } from "@/modules/logistics/pages/LogisticsExceptionsPage";
+// Logistics: consignment -> dispatch -> transport -> acknowledgement, plus the
+// transport provider's own portal. Consignments and Dispatch are the warehouse's own
+// screens, re-exported by the logistics module and mounted under /logistics/* — the
+// same documents and the same flow, reached from the module that works them.
 import {
-  ConsignmentsScreen, ConsignmentFormScreen, DispatchScreen, DispatchFormScreen,
-} from "@/modules/warehouse";
+  ConsignmentsScreen, ConsignmentFormScreen, DispatchPage, DispatchConfirmPage,
+  TransportRequestsPage, TransportFormPage, TransportDetailPage, ProviderSelectionPage,
+  ShipmentTrackingPage, AcknowledgementsPage as LogisticsAcknowledgementsPage,
+  LogisticsExceptionsPage, LogisticsVendorsPage,
+  CarrierLayout, CarrierLoginPage, CarrierJobsPage, CarrierJobPage,
+} from "@/modules/logistics";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
 import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
 import { RequisitionDetailPage } from "@/modules/procurement/pages/RequisitionDetailPage";
@@ -144,6 +146,23 @@ function AppRoutes() {
             one before the vehicle leaves (doc B12). */}
         <Route path="pos" element={<SupplierPOListPage />} />
         <Route path="pos/:id" element={<SupplierPODetailPage />} />
+        <Route path="profile" element={<SupplierProfilePage />} />
+      </Route>
+
+      {/* The transport provider's portal. Same account and the same token as the
+          supplier portal — a carrier IS a vendor — but a different set of screens,
+          because quoting for a lane, accepting the job and reporting it delivered is
+          not the same work as pricing an RFQ. */}
+      <Route path="/carrier/login" element={<CarrierLoginPage />} />
+      <Route path="/carrier" element={<CarrierLayout />}>
+        <Route index element={<Navigate to="/carrier/jobs" replace />} />
+        <Route path="jobs" element={<CarrierJobsPage />} />
+        <Route path="jobs/:id" element={<CarrierJobPage />} />
+        {/* The same account screen the supplier portal shows, mounted here too. One
+            implementation — a carrier IS a vendor and the details are identical — but
+            reached inside the carrier shell, because linking the tab at
+            /supplier/profile dropped the driver into the supplier portal's header and
+            tabs with no route back to their shipments. */}
         <Route path="profile" element={<SupplierProfilePage />} />
       </Route>
 
@@ -211,24 +230,31 @@ function AppRoutes() {
         <Route path="procurement/consolidations/:id" element={<PurchaseConsolidationDetailPage />} />
         <Route path="admin/supplier-accounts" element={<SupplierAccountsPage />} />
 
-        {/* Logistics — the outward transport leg (doc Phase E). */}
-        <Route path="logistics" element={<Navigate to="/logistics/transport" replace />} />
+        {/* Logistics — the outward leg (doc Phase D+E), in the order it happens:
+         * the packed consignment, the dispatch that releases it, the transport that
+         * carries it, and the signature at the far end. The module opens on
+         * Consignments because that is where a logistics day starts.
+         *
+         * Consignments is the SAME screen the warehouse serves, mounted here as well
+         * as under /warehouse/* — one implementation, two front doors. Dispatch is
+         * this module's own: mode, provider, go. */}
+        <Route path="logistics" element={<Navigate to="/logistics/consignments" replace />} />
+        <Route path="logistics/consignments" element={<ConsignmentsScreen />} />
+        <Route path="logistics/consignments/new" element={<ConsignmentFormScreen />} />
+        <Route path="logistics/consignments/:id" element={<ConsignmentFormScreen />} />
+        <Route path="logistics/dispatch" element={<DispatchPage />} />
+        {/* The press itself: consignment, gate pass, mode, provider. Reached from the
+         * queue and from a packed consignment — a logistics day never crosses into
+         * the warehouse module to send something out. */}
+        <Route path="logistics/dispatch/new" element={<DispatchConfirmPage />} />
         <Route path="logistics/transport" element={<TransportRequestsPage />} />
         <Route path="logistics/transport/new" element={<TransportFormPage />} />
         <Route path="logistics/transport/:id" element={<TransportDetailPage />} />
         <Route path="logistics/transport/:id/edit" element={<TransportFormPage />} />
         <Route path="logistics/providers" element={<ProviderSelectionPage />} />
         <Route path="logistics/tracking" element={<ShipmentTrackingPage />} />
+        <Route path="logistics/acknowledgements" element={<LogisticsAcknowledgementsPage />} />
         <Route path="logistics/exceptions" element={<LogisticsExceptionsPage />} />
-        {/* The SAME screens the warehouse serves, reached from Logistics as well.
-         * The /warehouse/* routes above are untouched, so both entry points work
-         * until the warehouse copies are retired. */}
-        <Route path="logistics/consignments" element={<ConsignmentsScreen />} />
-        <Route path="logistics/consignments/new" element={<ConsignmentFormScreen />} />
-        <Route path="logistics/consignments/:id" element={<ConsignmentFormScreen />} />
-        <Route path="logistics/dispatch" element={<DispatchScreen />} />
-        <Route path="logistics/dispatch/new" element={<DispatchFormScreen />} />
-        <Route path="logistics/dispatch/:id" element={<DispatchFormScreen />} />
         <Route path="grn/*" element={<WarehouseModule />} />
         <Route path="stock/*" element={<WarehouseModule />} />
         <Route path="issues/*" element={<WarehouseModule />} />
@@ -280,6 +306,10 @@ function AppRoutes() {
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/settings" element={<SettingsPage />} />
         <Route path="admin/code-formats" element={<CodeFormatsPage />} />
+        {/* Under Settings, beside Supplier & Carrier Logins: naming a logistics
+            partner and issuing them a way in is an administrator's act, not a
+            dispatcher's. The screen itself lives in the logistics module. */}
+        <Route path="settings/logistics-vendors" element={<LogisticsVendorsPage />} />
         <Route path="rbac/access" element={<UsersPage />} />
         <Route path="rbac/groups" element={<GroupsPage />} />
         {/* Job Profiles: reachable by URL only for now. Adding a menu row means a

@@ -29,9 +29,17 @@ export const BIN_TYPES: Option[] = ["ZONE", "RACK", "SHELF", "STORAGE", "STAGING
 
 // The live column is free text, not an enum. These are the values already in it —
 // offered as a dropdown so a third spelling of "TRANSPORT" never appears.
+// TRANSPORT, LOGISTICS and COURIER are the three the Dispatch dropdown filters on
+// (`logistics/enums.py` CARRIER_VENDOR_TYPES). Offering only one of them here meant a
+// vendor typed in as a logistics aggregator never reached the dropdown, and nothing
+// on this form said why. Those three are better set on Settings › Logistics Vendors,
+// which mints the portal login in the same press; they stay listed so an existing row
+// can be corrected without leaving Masters.
 export const VENDOR_TYPES: Option[] = [
   { value: "MATERIAL", label: "Material" },
-  { value: "TRANSPORT", label: "Transport" },
+  { value: "TRANSPORT", label: "Transport / freight" },
+  { value: "LOGISTICS", label: "Logistics aggregator" },
+  { value: "COURIER", label: "Courier / parcel" },
   { value: "SERVICE", label: "Service" },
 ];
 

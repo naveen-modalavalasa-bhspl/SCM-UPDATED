@@ -131,23 +131,43 @@ PAGES: list[PageDef] = [
     # actually moves in: warehouse packs it, logistics ships it, returns bring it back.
     PageDef("grp_logistics", "/logistics", "Logistics", module="logistics",
             icon="truck", sort_order=55),
-    PageDef("logistics_transport", "/logistics/transport", "Transport Requests",
-            parent="grp_logistics", module="logistics", sort_order=1),
-    PageDef("logistics_providers", "/logistics/providers", "Provider Selection",
-            parent="grp_logistics", module="logistics", sort_order=2),
-    PageDef("logistics_tracking", "/logistics/tracking", "Shipment Tracking",
-            parent="grp_logistics", module="logistics", sort_order=3),
-    PageDef("logistics_exceptions", "/logistics/exceptions", "Exceptions",
-            parent="grp_logistics", module="logistics", sort_order=4),
-    # Consignments and Dispatch, reached from Logistics as well as from Warehouse.
-    # The warehouse rows are NOT touched — they keep their codes, their paths and
-    # their permissions, and these are separate rbac_pages rows pointing at the same
-    # screens. That is what lets the warehouse copies be retired later by switching
-    # them off, with nothing here to change.
+    # The order is the order the material moves, and the module's front door is its
+    # FIRST child: Consignments. That is where a logistics day starts — the warehouse
+    # has packed something and it is sitting on the floor waiting for a truck. Opening
+    # on Transport Requests asked the desk to read the answer before the question.
+    #
+    # Consignments and Dispatch are the SAME screens (and the same documents, and the
+    # same flow) the warehouse serves; these are separate rbac_pages rows pointing at
+    # the same paths under /logistics. The warehouse rows keep their own codes, paths
+    # and permissions and are not touched.
     PageDef("logistics_consignments", "/logistics/consignments", "Consignments",
-            parent="grp_logistics", module="logistics", sort_order=5),
+            parent="grp_logistics", module="logistics", sort_order=1),
     PageDef("logistics_dispatch", "/logistics/dispatch", "Dispatch",
-            parent="grp_logistics", module="logistics", sort_order=6),
+            parent="grp_logistics", module="logistics", sort_order=2),
+    PageDef("logistics_transport", "/logistics/transport", "Transport Requests",
+            parent="grp_logistics", module="logistics", sort_order=3),
+    # Provider Selection is the RFQ desk: Dispatch asks several partners to price the
+    # SAME consignment, and this is where those prices come back, sit side by side and
+    # one of them is awarded. No screen of its own — a tender is not a document, it is
+    # the question "who is taking this", and that question already had a page.
+    PageDef("logistics_providers", "/logistics/providers", "Provider Selection",
+            parent="grp_logistics", module="logistics", sort_order=4),
+    PageDef("logistics_tracking", "/logistics/tracking", "Shipment Tracking",
+            parent="grp_logistics", module="logistics", sort_order=5),
+    PageDef("logistics_acknowledgements", "/logistics/acknowledgements",
+            "Acknowledgements", parent="grp_logistics", module="logistics",
+            sort_order=6),
+    PageDef("logistics_exceptions", "/logistics/exceptions", "Exceptions",
+            parent="grp_logistics", module="logistics", sort_order=7),
+    # The register behind the Dispatch dropdown: the third-party providers (Amazon,
+    # Flipkart, Alibaba, Misaba, a truck operator) and their portal logins. Under
+    # Settings beside Supplier & Carrier Logins for the same reason that one is —
+    # issuing a partner a way in is an administrator's act, not a dispatcher's — and
+    # NOT under Logistics, where it would become the module's front door on any
+    # profile that holds it and no other logistics page.
+    PageDef("settings_logistics_vendors", "/settings/logistics-vendors",
+            "Logistics Vendors", parent="grp_settings", module="logistics",
+            icon="truck", sort_order=105),
 ]
 
 
