@@ -20,34 +20,169 @@ from app.core.exceptions import AuthenticationError, NotFoundError, ValidationEr
 from app.core.pagination import PageParams, paginate
 from app.core.security import create_access_token, hash_password, verify_password
 from app.modules.indents import service as indent_service
-from app.modules.indents.models import IndentItem
+from app.modules.indents.models import Indent, IndentItem
 from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POItem, PurchaseConsolidation,
     PurchaseConsolidationSource, PurchaseOrder, Quotation, QuotationItem, Requisition,
-    RequisitionItem, RFQ, RFQItem, RFQVendor, VendorUser,
+    RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor, VendorUser,
 )
 from app.modules.procurement.schemas import (
     AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, QuoteSubmit, ReqCreate,
     RFQCreate, RFQUpdate, VendorAccountIn,
 )
 from app.modules.procurement import consolidation
+from app.platform.hcm.models import HcmDepartment, HcmEmployee
+from app.platform.settings.service import get_setting, write_audit
 from app.platform.workflow import engine
 from app.shared import evaluation
+from app.shared.models.warehouse import Warehouse
 from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
 from app.shared.enums import (
-    ConsolidationStatus, DespatchNoteStatus, DocType, IndentStatus, InstanceStatus,
-    MRStatus, POStatus, QuotationStatus, RequisitionStatus, RFQStatus,
+    AuditAction, ConsolidationStatus, DespatchNoteStatus, DocType, IndentStatus,
+    InstanceStatus, MRStatus, POStatus, QuotationStatus, RequisitionStatus, RFQStatus,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item, Vendor, VendorItem
+from app.shared.models.master import HsnCode, Item, Project, Vendor, VendorItem
 from app.shared.numbering import next_number
 
 
 def _d(value) -> Decimal:
     return Decimal(str(value))
+
+
+# --------------------------------------------------------------------------- #
+#  Document header context
+# --------------------------------------------------------------------------- #
+#  A requisition names five things a buyer needs before they can act on it:
+#  department, warehouse, project, company, and — when the demand came off the field —
+#  the indents behind it. Only two of them are columns.
+#
+#  Department belongs to the PERSON who raised the document and HCM owns it; the
+#  company is one value for the whole install and settings owns it. Both are read here
+#  rather than copied onto pro_ tables: neither can be edited on the document, so a
+#  stored copy could only ever go stale, and reading them needs no migration.
+
+async def _place_names(db: AsyncSession, warehouse_id: int | None,
+                       project_id: int | None) -> tuple[str | None, str | None]:
+    """Snapshot the two soft FKs a requisition and an RFQ both carry.
+
+    Snapshotted, not joined, because renaming a master must not rewrite a document
+    raised against the old name (rule 10)."""
+    warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
+    project = await db.get(Project, project_id) if project_id else None
+    return (warehouse.name if warehouse else None,
+            project.name if project else None)
+
+
+async def _header_context(db: AsyncSession, created_by_id: int | None) -> dict:
+    """Department (from HCM, via the raiser) and company (from settings).
+
+    The fallback, not the answer: a document that names its own department and company
+    keeps them. This fills in the ones raised before those columns existed, and the
+    ones where the form was left alone.
+    """
+    employee = await db.get(HcmEmployee, created_by_id) if created_by_id else None
+    return {
+        "department_id": employee.department_id if employee else None,
+        "department_name": employee.department_name if employee else None,
+        "company_name": (await get_setting(db, "company.name")) or None,
+    }
+
+
+async def _fill_header_context(db: AsyncSession, document) -> None:
+    """Leave what the document says; supply what it does not."""
+    fallback = await _header_context(db, document.created_by_id)
+    for field, value in fallback.items():
+        if getattr(document, field, None) in (None, ""):
+            setattr(document, field, value)
+
+
+async def _department_snapshot(db: AsyncSession, department_id: int | None) -> str | None:
+    if not department_id:
+        return None
+    row = await db.get(HcmDepartment, department_id)
+    return row.name if row else None
+
+
+# --------------------------------------------------------------------------- #
+#  GST on a quotation
+# --------------------------------------------------------------------------- #
+#  Two rules, and both belong to the company rather than to the vendor quoting.
+#
+#  WHICH TAX applies is decided by the two GSTINs: the first two digits are the state
+#  code, so same state is CGST + SGST and any other state is IGST. That is the law, not
+#  a preference — a vendor offered all three boxes will eventually tick the wrong pair,
+#  and the resulting invoice cannot be reclaimed.
+#
+#  HOW MUCH is capped by the item's HSN, because the rate is a property of the
+#  classification. A vendor may quote UNDER it (they may be absorbing part of it, or
+#  under a composition scheme) but never over: above the notified rate the number is
+#  either a mistake or a charge the company cannot claim back.
+
+async def _company_gstin(db: AsyncSession) -> str | None:
+    return (await get_setting(db, "company.gstin")) or None
+
+
+def _state_code(gstin: str | None) -> str | None:
+    """The first two digits of a GSTIN. Anything shorter is not a GSTIN."""
+    cleaned = (gstin or "").strip()
+    return cleaned[:2] if len(cleaned) >= 2 and cleaned[:2].isdigit() else None
+
+
+def tax_region(company_gstin: str | None, vendor_gstin: str | None) -> str:
+    """INTRA (CGST+SGST) or INTER (IGST).
+
+    Falls back to INTER when either GSTIN is missing or malformed: IGST is the one
+    that is merely wrong rather than unclaimable if the states later turn out to
+    match, and an unregistered counterparty is by definition not an intra-state
+    credit. The screen says which was chosen and why, so nobody has to guess.
+    """
+    company, vendor = _state_code(company_gstin), _state_code(vendor_gstin)
+    if company and vendor and company == vendor:
+        return "INTRA"
+    return "INTER"
+
+
+async def _hsn_ceilings(db: AsyncSession, item_ids: list[int]) -> dict[int, dict]:
+    """Per item: the HSN code and the rates it notifies. The quote may not exceed them.
+
+    Read through the item's `hsn_id` rather than its `hsn_code` snapshot — the snapshot
+    is what the item was created with and the rate is whatever the code says today.
+    An item with no HSN gets no ceiling: blocking it would stop the quote outright, and
+    an unclassified item is a masters problem, not a vendor's.
+    """
+    if not item_ids:
+        return {}
+    rows = (await db.execute(
+        select(Item.id, HsnCode.code, HsnCode.cgst_rate, HsnCode.sgst_rate,
+               HsnCode.igst_rate)
+        .join(HsnCode, HsnCode.id == Item.hsn_id)
+        .where(Item.id.in_(item_ids))
+    )).all()
+    return {
+        row[0]: {
+            "hsn_code": row[1],
+            "cgst_rate": float(row[2] or 0),
+            "sgst_rate": float(row[3] or 0),
+            "igst_rate": float(row[4] or 0),
+        } for row in rows
+    }
+
+
+def _indent_numbers(rows) -> list[str]:
+    """The indents a document is ultimately serving, deduplicated and in order.
+
+    Read off the lines rather than held on the header: a requisition consolidated out
+    of nine indents has nine, and the line is where the pointer already lives."""
+    seen: list[str] = []
+    for row in rows:
+        number = getattr(row, "indent_no", None)
+        if number and number not in seen:
+            seen.append(number)
+    return seen
 
 
 async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate, user) -> PurchaseOrder:
@@ -166,6 +301,75 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     await db.commit()
     await db.refresh(po)
     return po
+
+
+async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
+    """Raise a purchase order directly — no indent, no quotation behind it.
+
+    The chain normally decides what a PO says: an indent asks, a tender answers, and
+    `create_po_from_indent` / `create_po_from_quotation` write the order from that
+    answer. But not every purchase starts as a demand note — a repeat order against an
+    agreed rate, an emergency buy, a service somebody is already performing — and until
+    now the only way to enter one was to raise a fake indent for it.
+
+    So this is the same document with nothing in front of it. It carries no backward
+    pointer because there is nothing to point at, which is exactly what tells a reader
+    later that it was raised by hand. Everything else is unchanged: DRAFT on arrival,
+    the same PO ladder, the same permission.
+    """
+    if not data.lines:
+        raise ValidationError("A purchase order must have at least one line")
+
+    vendor = await db.get(Vendor, data.vendor_id)
+    if vendor is None:
+        raise ValidationError(f"Unknown vendor {data.vendor_id}")
+
+    items = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_([line.item_id for line in data.lines]))
+    )).scalars().all()}
+
+    po = PurchaseOrder(
+        po_no=await next_number(db, "po"),
+        po_date=utcnow().date(),
+        expected_date=data.expected_date,
+        vendor_id=vendor.id,
+        vendor_name=vendor.name,
+        vendor_gstin=vendor.gstin,
+        created_by_id=user.id,
+        created_by_name=user.full_name,
+        # The raiser's own office, so the same data scope that hides a PO raised off an
+        # indent hides this one — `scope_condition` filters on it.
+        office_id=getattr(user, "office_id", None),
+        facility_id=None,
+        facility_name=getattr(user, "office_name", None),
+        status=POStatus.DRAFT.value,
+        remarks=data.remarks,
+    )
+    db.add(po)
+    await db.flush()
+
+    sub_total = tax_total = Decimal("0")
+    for line in data.lines:
+        item = items.get(line.item_id)
+        if item is None:
+            raise ValidationError(f"Unknown item id: {line.item_id}")
+        amount = _d(line.quantity) * _d(line.rate)
+        tax = amount * _d(line.tax_percent) / _d(100)
+        sub_total += amount
+        tax_total += tax
+        db.add(POItem(
+            po_id=po.id, item_id=item.id, item_code=item.code, item_name=item.name,
+            uom_code=item.uom_code, quantity=_d(line.quantity), rate=_d(line.rate),
+            tax_percent=_d(line.tax_percent), amount=amount,
+        ))
+
+    po.sub_total = sub_total
+    po.tax_amount = tax_total
+    po.total_amount = sub_total + tax_total
+    await db.commit()
+    logger.info("purchase order %s raised directly by %s (%d line(s))",
+                po.po_no, user.full_name, len(data.lines))
+    return await get_po(db, po.id)
 
 
 async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
@@ -486,11 +690,19 @@ async def _item_snapshot(db: AsyncSession, item_id: int) -> Item | None:
 
 
 async def create_requisition(db: AsyncSession, data: ReqCreate, user) -> Requisition:
+    warehouse_name, project_name = await _place_names(
+        db, data.warehouse_id, data.project_id)
     req = Requisition(
         req_no=await next_number(db, DocType.REQUISITION.value),
         req_date=utcnow().date(),
         warehouse_id=data.warehouse_id,
+        warehouse_name=warehouse_name,
         project_id=data.project_id,
+        project_name=project_name,
+        department_id=data.department_id,
+        department_name=await _department_snapshot(db, data.department_id),
+        company_name=data.company_name,
+        required_date=data.required_date,
         priority=data.priority,
         remarks=data.remarks,
         status=RequisitionStatus.DRAFT.value,
@@ -499,7 +711,8 @@ async def create_requisition(db: AsyncSession, data: ReqCreate, user) -> Requisi
     )
     db.add(req)
     await db.flush()
-    await _write_requisition_lines(db, req, data.lines)
+    await _write_requisition_lines(db, req, data.lines,
+                                   default_date=data.required_date)
     await db.commit()
     return await get_requisition(db, req.id)
 
@@ -556,6 +769,7 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
             estimated_rate=0,
             required_date=None,
             indent_id=mr.indent_id,
+            indent_no=mr.indent_no,
             indent_item_id=line.indent_item_id,
         )
         for line in mr.items
@@ -564,11 +778,14 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
     if not lines:
         raise ValidationError(f"Every line on {mr.mr_no} is already ordered")
 
+    # The MR names a project but no stocking point; the buyer picks one on the edit.
+    _, project_name = await _place_names(db, None, mr.project_id)
     req = Requisition(
         req_no=await next_number(db, DocType.REQUISITION.value),
         req_date=utcnow().date(),
         warehouse_id=None,
         project_id=mr.project_id,
+        project_name=project_name or getattr(mr, "project_name", None),
         priority=getattr(mr, "priority", None),
         remarks=f"Raised from {mr.mr_no}"
                + (f" for indent {mr.indent_no}" if mr.indent_no else ""),
@@ -585,6 +802,193 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
     logger.info("requisition %s raised from %s (%d line(s))",
                 req.req_no, mr.mr_no, len(lines))
     return await get_requisition(db, req.id)
+
+
+# --------------------------------------------------------------------------- #
+#  Consolidating material requests into one requisition
+# --------------------------------------------------------------------------- #
+#  Inventory raises an MR whenever an approved indent runs short, and it raises one per
+#  shortage — so the same item arrives on five of them in a week, each too small to
+#  tender. Purchase's actual job is to gather those into ONE demand and go to market
+#  once, which is what this does.
+#
+#  Item-wise, like the consolidated buying sheet: five MRs for the same bandage are one
+#  line with one quantity. Every MR that fed it stays on `pro_requisition_sources`, so
+#  the trail runs indent -> MR -> requisition -> RFQ -> PO without a guess.
+#
+#  Two rules, both copied from the indents consolidation because buyers already know
+#  them: an MR that is on one sheet never appears in the picker again, and the
+#  requisition that comes out does not climb an approval ladder — the MRs were approved
+#  in Inventory and asking the same people again is theatre. It is still audited.
+
+async def _consolidated_mr_ids(db: AsyncSession) -> set[int]:
+    """Every MR already claimed by a live requisition, by either route.
+
+    Both routes, because the one-MR path wrote `source_mr_id` long before the sources
+    table existed and those requisitions are still open.
+    """
+    claimed = set((await db.execute(
+        select(RequisitionSource.mr_id)
+        .join(Requisition, Requisition.id == RequisitionSource.requisition_id)
+        .where(Requisition.status != RequisitionStatus.CANCELLED.value)
+    )).scalars().all())
+    claimed |= set((await db.execute(
+        select(Requisition.source_mr_id).where(
+            Requisition.source_mr_id.isnot(None),
+            Requisition.status != RequisitionStatus.CANCELLED.value)
+    )).scalars().all())
+    return {mr_id for mr_id in claimed if mr_id}
+
+
+async def mr_candidates(db: AsyncSession, params: PageParams,
+                        project_id: int | None = None) -> dict:
+    """Approved material requests not already on a requisition — what the buyer picks
+    from. A cancelled requisition releases its MRs back into the list."""
+    stmt = (
+        select(MaterialRequest)
+        .where(MaterialRequest.status == MRStatus.APPROVED.value)
+        .order_by(MaterialRequest.created_at.desc())
+    )
+    claimed = await _consolidated_mr_ids(db)
+    if claimed:
+        stmt = stmt.where(MaterialRequest.id.notin_(claimed))
+    if project_id is not None:
+        stmt = stmt.where(MaterialRequest.project_id == project_id)
+    return await paginate(db, stmt, params)
+
+
+async def create_requisition_from_mrs(db: AsyncSession, data, user) -> Requisition:
+    """Fold a batch of approved material requests into one requisition.
+
+    Only what is still owed is carried over — `quantity - ordered_quantity` per line —
+    so an MR half-bought in an earlier pass contributes only its remainder, and lines
+    for the same item across different MRs become one line with the sum.
+
+    Approved on arrival, deliberately. The demand was approved once already, in
+    Inventory, by the people who own the stock; sending the same quantities back up a
+    second ladder delays a purchase without anybody deciding anything. The audit row
+    still records who consolidated what, and the RFQ and the PO both keep their own
+    approvals — this skips one rung, not the chain.
+    """
+    if not data.mr_ids:
+        raise ValidationError("Pick at least one material request")
+
+    requests = list((await db.execute(
+        select(MaterialRequest)
+        .options(selectinload(MaterialRequest.items))
+        .where(MaterialRequest.id.in_(data.mr_ids))
+        .order_by(MaterialRequest.id)
+    )).scalars().all())
+    missing = set(data.mr_ids) - {mr.id for mr in requests}
+    if missing:
+        raise NotFoundError(f"Material request {sorted(missing)[0]} not found")
+
+    not_approved = [mr.mr_no for mr in requests if mr.status != MRStatus.APPROVED.value]
+    if not_approved:
+        raise ValidationError(
+            f"{', '.join(not_approved)} is not approved — only an approved material "
+            "request can be consolidated")
+
+    claimed = await _consolidated_mr_ids(db)
+    already = [mr.mr_no for mr in requests if mr.id in claimed]
+    if already:
+        raise ValidationError(
+            f"{', '.join(already)} is already on a requisition. An MR is consolidated "
+            "once; cancel that requisition to release it.")
+
+    # item -> the merged line. Keyed on (item, uom) like the buying sheet: two requests
+    # for the same item in the same unit are one thing to buy.
+    merged: dict[tuple[int, str | None], SimpleNamespace] = {}
+    for mr in requests:
+        for line in mr.items:
+            owed = _d(line.quantity) - _d(line.ordered_quantity or 0)
+            if owed <= 0:
+                continue
+            key = (line.item_id, line.uom_code)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = SimpleNamespace(
+                    item_id=line.item_id, quantity=owed, uom_code=line.uom_code,
+                    estimated_rate=0, required_date=data.required_date,
+                    indent_id=mr.indent_id, indent_no=mr.indent_no,
+                    indent_item_id=line.indent_item_id,
+                )
+            else:
+                existing.quantity += owed
+                # The first indent named on the line stays: a merged line can serve
+                # several, and the sources list is where the full answer lives.
+
+    if not merged:
+        raise ValidationError(
+            "Every line on the selected material requests is already ordered")
+
+    project_id = data.project_id or next(
+        (mr.project_id for mr in requests if mr.project_id), None)
+    warehouse_name, project_name = await _place_names(
+        db, data.warehouse_id, project_id)
+    numbers = ", ".join(mr.mr_no for mr in requests)
+
+    req = Requisition(
+        req_no=await next_number(db, DocType.REQUISITION.value),
+        req_date=utcnow().date(),
+        warehouse_id=data.warehouse_id,
+        warehouse_name=warehouse_name,
+        project_id=project_id,
+        project_name=project_name or next(
+            (mr.project_name for mr in requests if mr.project_name), None),
+        department_id=data.department_id,
+        department_name=await _department_snapshot(db, data.department_id),
+        company_name=data.company_name,
+        required_date=data.required_date,
+        priority=data.priority,
+        remarks=data.remarks or f"Consolidated from {numbers}",
+        # Approved, not DRAFT — see the docstring.
+        status=RequisitionStatus.APPROVED.value,
+        approved_by_name=user.full_name,
+        approved_at=utcnow(),
+        # The first MR, so anything reading the old single pointer still works.
+        source_mr_id=requests[0].id,
+        source_mr_no=requests[0].mr_no,
+        created_by_id=user.id,
+        created_by_name=user.full_name,
+    )
+    db.add(req)
+    await db.flush()
+    await _write_requisition_lines(db, req, list(merged.values()),
+                                   default_date=data.required_date)
+
+    for mr in requests:
+        db.add(RequisitionSource(
+            requisition_id=req.id, mr_id=mr.id, mr_no=mr.mr_no,
+            indent_no=mr.indent_no, item_count=len(mr.items),
+        ))
+
+    # Approved without an approver, so the audit row is the only record that it
+    # happened. Written before the commit so it lands in the same transaction.
+    await write_audit(
+        db, entity="pro_requisitions", entity_id=req.id, entity_no=req.req_no,
+        action=AuditAction.CREATE, actor=user,
+        summary=f"Consolidated {len(requests)} material request(s) into {req.req_no}",
+        after={"req_no": req.req_no, "consolidated_from": numbers,
+               "material_requests": len(requests), "lines": len(merged),
+               "approval": "auto — the material requests were approved in Inventory"},
+    )
+    await db.commit()
+    logger.info("requisition %s consolidated from %d material request(s): %s",
+                req.req_no, len(requests), numbers)
+    return await get_requisition(db, req.id)
+
+
+async def requisition_sources(db: AsyncSession, req_id: int, user) -> list[dict]:
+    """The material requests behind a requisition, for the detail screen."""
+    await get_requisition(db, req_id, user)
+    rows = (await db.execute(
+        select(RequisitionSource)
+        .where(RequisitionSource.requisition_id == req_id)
+        .order_by(RequisitionSource.id)
+    )).scalars().all()
+    return [{"mr_id": row.mr_id, "mr_no": row.mr_no, "indent_no": row.indent_no,
+             "item_count": row.item_count} for row in rows]
 
 
 async def _last_known_rates(db: AsyncSession, item_ids: list[int]) -> dict[int, Decimal]:
@@ -618,11 +1022,23 @@ async def _last_known_rates(db: AsyncSession, item_ids: list[int]) -> dict[int, 
     return rates
 
 
-async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines) -> None:
+async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
+                                   default_date=None) -> None:
+    """`default_date` is the header's "needed by", applied to every line that does not
+    name its own. The date was being asked per line, which meant typing one date forty
+    times to say something true of the whole document."""
     total = Decimal(0)
     # Only consulted for lines that came in at zero — a buyer who typed a rate meant it.
     fallback = await _last_known_rates(
         db, [line.item_id for line in lines if not _d(line.estimated_rate)])
+    # The indent number behind each line. The column was always there and never
+    # written, so a requisition raised off the field could not say which indents it
+    # was serving — the header read "raised directly" over lines that were anything
+    # but. One lookup for the whole document, snapshotted like every other name.
+    indent_ids = {line.indent_id for line in lines if getattr(line, "indent_id", None)}
+    indent_nos = dict((await db.execute(
+        select(Indent.id, Indent.indent_no).where(Indent.id.in_(indent_ids))
+    )).all()) if indent_ids else {}
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
         if item is None:
@@ -633,10 +1049,12 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines) ->
         db.add(RequisitionItem(
             requisition_id=req.id, line_no=index,
             indent_id=line.indent_id, indent_item_id=line.indent_item_id,
+            indent_no=getattr(line, "indent_no", None) or indent_nos.get(line.indent_id),
             item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=line.uom_code or getattr(item, "uom_code", None),
             quantity=_d(line.quantity), estimated_rate=rate,
-            estimated_amount=amount, required_date=line.required_date,
+            estimated_amount=amount,
+            required_date=line.required_date or default_date,
         ))
     req.total_items = len(lines)
     req.estimated_value = total
@@ -652,6 +1070,20 @@ async def get_requisition(db: AsyncSession, req_id: int, user=None) -> Requisiti
     ))).scalar_one_or_none()
     if not req:
         raise NotFoundError(f"Requisition {req_id} not found")
+    # What the document says stands; the raiser's HCM record and the settings only fill
+    # in what it left blank — see `_fill_header_context`.
+    await _fill_header_context(db, req)
+    req.source_indent_nos = _indent_numbers(req.items)
+    # Every material request folded into this one, not just the first. `source_mr_id`
+    # still holds that first one, so a requisition raised before consolidation existed
+    # reads exactly as it always did.
+    sources = list((await db.execute(
+        select(RequisitionSource)
+        .where(RequisitionSource.requisition_id == req.id)
+        .order_by(RequisitionSource.id)
+    )).scalars().all())
+    req.source_mr_nos = ([row.mr_no for row in sources if row.mr_no]
+                         or ([req.source_mr_no] if req.source_mr_no else []))
     return req
 
 
@@ -676,9 +1108,16 @@ async def update_requisition(db: AsyncSession, req_id: int, data: ReqCreate,
     await db.flush()
     req.warehouse_id = data.warehouse_id
     req.project_id = data.project_id
+    req.warehouse_name, req.project_name = await _place_names(
+        db, data.warehouse_id, data.project_id)
+    req.department_id = data.department_id
+    req.department_name = await _department_snapshot(db, data.department_id)
+    req.company_name = data.company_name
+    req.required_date = data.required_date
     req.priority = data.priority
     req.remarks = data.remarks
-    await _write_requisition_lines(db, req, data.lines)
+    await _write_requisition_lines(db, req, data.lines,
+                                   default_date=data.required_date)
     await db.commit()
     return await get_requisition(db, req_id)
 
@@ -760,20 +1199,37 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
         raise ValidationError(
             f"{data.evaluation_method!r} is not an evaluation method")
 
+    # Everything the source document already said, carried across rather than retyped:
+    # a tender that loses the warehouse and the project it is buying for cannot be
+    # read on its own, and the buyer was filling those in a second time by hand. The
+    # caller still wins where it sent a value — an RFQ may deliberately be raised for
+    # a different stocking point than the one that asked.
+    source = requisition or sheet
+    warehouse_id = data.warehouse_id or (getattr(source, "warehouse_id", None))
+    project_id = data.project_id or (getattr(source, "project_id", None))
+    warehouse_name, project_name = await _place_names(db, warehouse_id, project_id)
+
     rfq = RFQ(
         rfq_no=await next_number(db, DocType.RFQ.value),
         rfq_date=utcnow().date(),
-        title=data.title,
+        title=data.title or (f"Quotation for {requisition.req_no}" if requisition
+                             else f"Quotation for {sheet.cons_no}" if sheet else None),
         requisition_id=requisition.id if requisition else None,
         requisition_no=requisition.req_no if requisition else None,
         consolidation_id=sheet.id if sheet else None,
         consolidation_no=sheet.cons_no if sheet else None,
-        warehouse_id=data.warehouse_id or (requisition.warehouse_id if requisition else None),
-        warehouse_name=requisition.warehouse_name if requisition else None,
-        project_id=data.project_id or (requisition.project_id if requisition else None),
-        project_name=requisition.project_name if requisition else None,
+        warehouse_id=warehouse_id,
+        warehouse_name=warehouse_name or getattr(source, "warehouse_name", None),
+        project_id=project_id,
+        project_name=project_name or getattr(source, "project_name", None),
+        # Carried from the source, or typed on the form when the RFQ is raised cold —
+        # a tender with no requisition behind it still has to say who is buying.
+        department_id=data.department_id or getattr(source, "department_id", None),
+        department_name=(await _department_snapshot(db, data.department_id)
+                         or getattr(source, "department_name", None)),
+        company_name=data.company_name or getattr(source, "company_name", None),
         due_date=data.due_date,
-        terms=data.terms,
+        terms=data.terms or (getattr(source, "remarks", None) if source else None),
         evaluation_method=(data.evaluation_method.upper()
                            if data.evaluation_method else None),
         status=RFQStatus.DRAFT.value,
@@ -858,6 +1314,33 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None) -> RFQ:
         .order_by(PurchaseOrder.id).limit(1)
     )).first()
     rfq.po_id, rfq.po_no, rfq.po_status = row if row else (None, None, None)
+
+    # What the RFQ itself says stands. Where it says nothing, the requisition behind it
+    # answers — and failing that, the raiser's own HCM record. Department follows the
+    # REQUISITION's raiser rather than the buyer's: Purchase raises the tender, but the
+    # department that asked is the useful fact.
+    requisition = (await db.get(Requisition, rfq.requisition_id)
+                   if rfq.requisition_id else None)
+    if requisition is not None:
+        for field in ("department_id", "department_name", "company_name"):
+            if getattr(rfq, field, None) in (None, ""):
+                setattr(rfq, field, getattr(requisition, field, None))
+    # Still blank on both documents: fall back to whoever asked — the requisition's
+    # raiser where there is one, the buyer otherwise.
+    fallback = await _header_context(
+        db, requisition.created_by_id if requisition else rfq.created_by_id)
+    for field, value in fallback.items():
+        if getattr(rfq, field, None) in (None, ""):
+            setattr(rfq, field, value)
+    rfq.priority = requisition.priority if requisition else None
+    rfq.requisition_status = requisition.status if requisition else None
+    rfq.source_indent_nos = _indent_numbers(
+        (await db.execute(
+            select(RequisitionItem)
+            .where(RequisitionItem.requisition_id == requisition.id)
+            .order_by(RequisitionItem.line_no)
+        )).scalars().all()
+    ) if requisition else []
     return rfq
 
 
@@ -885,6 +1368,14 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
         value = getattr(data, field)
         if value is not None:
             setattr(rfq, field, value)
+    if data.warehouse_id is not None or data.project_id is not None:
+        rfq.warehouse_name, rfq.project_name = await _place_names(
+            db, rfq.warehouse_id, rfq.project_id)
+    if data.department_id is not None:
+        rfq.department_id = data.department_id
+        rfq.department_name = await _department_snapshot(db, data.department_id)
+    if data.company_name is not None:
+        rfq.company_name = data.company_name
     if data.lines is not None:
         for line in list(rfq.items):
             await db.delete(line)
@@ -1034,6 +1525,88 @@ async def list_quotations(db: AsyncSession, params: PageParams,
     return await paginate(db, stmt.order_by(Quotation.created_at.desc()), params)
 
 
+def _line_breakup(line) -> dict:
+    """One quoted line, split the way a buyer reads it.
+
+    Computed here rather than in the screen for the reason every other total is: the
+    arithmetic that decides a winner must be the same arithmetic that wrote
+    `quotation.sub_total`, and two implementations of it will disagree eventually.
+
+    Discount comes off before tax, exactly as `_quote_totals` does it. The GST split
+    is the vendor's own where they gave one; where they only named a single
+    `tax_percent`, that is what is charged and the split is left empty rather than
+    invented — an offer says what it says.
+    """
+    quantity = _d(line.quantity)
+    gross = quantity * _d(line.rate)
+    discount = gross * _d(line.discount_percent or 0) / 100
+    taxable = gross - discount
+    cgst = taxable * _d(line.cgst_rate or 0) / 100
+    sgst = taxable * _d(line.sgst_rate or 0) / 100
+    igst = taxable * _d(line.igst_rate or 0) / 100
+    split = cgst + sgst + igst
+    tax = split if split else taxable * _d(line.tax_percent or 0) / 100
+    return {
+        "quantity": float(quantity),
+        "rate": float(_d(line.rate)),
+        "discount_percent": float(_d(line.discount_percent or 0)),
+        "discount_amount": float(discount),
+        "taxable_amount": float(taxable),
+        "tax_percent": float(_d(line.tax_percent or 0)),
+        "cgst_rate": float(line.cgst_rate) if line.cgst_rate is not None else None,
+        "cgst_amount": float(cgst) if line.cgst_rate is not None else None,
+        "sgst_rate": float(line.sgst_rate) if line.sgst_rate is not None else None,
+        "sgst_amount": float(sgst) if line.sgst_rate is not None else None,
+        "igst_rate": float(line.igst_rate) if line.igst_rate is not None else None,
+        "igst_amount": float(igst) if line.igst_rate is not None else None,
+        "tax_amount": float(tax),
+        "line_total": float(taxable + tax),
+        "delivery_days": line.delivery_days,
+    }
+
+
+def _comparison_grid(rfq: RFQ, quotes) -> list[dict]:
+    """The sheet itself: one row per RFQ line, one cell per vendor.
+
+    Keyed on `rfq_item_id` so a vendor who quoted the lines in a different order still
+    lands in the right row, falling back to the item id for an older quotation whose
+    lines never carried the pointer.
+
+    `is_best` marks the cheapest LANDED cell on that row — the lowest total for that
+    item, tax included, which is the number a buyer is actually comparing. It is a
+    label, not a rule: nothing here refuses an award to any other cell.
+    """
+    rows: list[dict] = []
+    for item in sorted(rfq.items, key=lambda line: line.line_no):
+        cells = []
+        for quote in quotes:
+            line = next(
+                (l for l in quote.items
+                 if (l.rfq_item_id and l.rfq_item_id == item.id)
+                 or (not l.rfq_item_id and l.item_id == item.item_id)),
+                None,
+            )
+            if line is None or not _d(line.rate):
+                continue
+            cells.append({"quotation_id": quote.id, "vendor_id": quote.vendor_id,
+                          "vendor_name": quote.vendor_name, **_line_breakup(line)})
+        best = min(cells, key=lambda cell: cell["line_total"], default=None)
+        for cell in cells:
+            cell["is_best"] = best is not None and cell["line_total"] == best["line_total"]
+        rows.append({
+            "rfq_item_id": item.id,
+            "item_id": item.item_id,
+            "item_code": item.item_code,
+            "item_name": item.item_name,
+            "uom_code": item.uom_code,
+            "quantity": float(_d(item.quantity)),
+            "required_date": item.required_date,
+            "best_quotation_id": best["quotation_id"] if best else None,
+            "cells": cells,
+        })
+    return rows
+
+
 async def comparison(db: AsyncSession, rfq_id: int, user,
                      method: str | None = None) -> dict:
     """Every submitted quote for an RFQ, best first, with the rank written back.
@@ -1088,12 +1661,52 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
 
     await db.commit()
     ordered = sorted(quotes, key=lambda q: q.rank_position or 0)
+
+    # The sheet, and the column footers under it. Both are built from the same lines
+    # the ranking read, so what the screen shows and what the award accepts cannot
+    # drift apart. `best_line_count` answers the question a buyer asks out loud —
+    # "who is cheapest on the most items" — which is not always who is cheapest overall.
+    grid = _comparison_grid(rfq, ordered)
+    best_lines: dict[int, int] = {}
+    for row in grid:
+        for cell in row["cells"]:
+            if cell["is_best"]:
+                best_lines[cell["quotation_id"]] = best_lines.get(cell["quotation_id"], 0) + 1
+    champion = ranked[0].ref if ranked else None
+    totals = [{
+        "quotation_id": quote.id,
+        "quotation_no": quote.quotation_no,
+        "vendor_id": quote.vendor_id,
+        "vendor_name": quote.vendor_name,
+        "status": quote.status,
+        "rank_position": quote.rank_position,
+        "evaluation_score": float(quote.evaluation_score)
+                            if quote.evaluation_score is not None else None,
+        "sub_total": float(_d(quote.sub_total)),
+        "discount_amount": float(_d(quote.discount_amount)),
+        "tax_amount": float(_d(quote.tax_amount)),
+        "freight_amount": float(_d(quote.freight_amount)),
+        "grand_total": float(_d(quote.grand_total)),
+        "expected_delivery_date": quote.expected_delivery_date,
+        "delivery_days": quote.delivery_days,
+        "payment_terms": quote.payment_terms,
+        "valid_till": quote.valid_till,
+        "submitted_at": quote.submitted_at,
+        "revision_count": quote.revision_count,
+        "best_line_count": best_lines.get(quote.id, 0),
+        # A suggestion and nothing more: it is the top of the ranking under the method
+        # in force, and the buyer may award any column on the sheet.
+        "is_recommended": quote.id == champion,
+    } for quote in ordered]
+
     return {
         "rfq": rfq,
         "quotations": ordered,
+        "items": grid,
+        "totals": totals,
         "evaluation_method": chosen,
         "responded": len(ranked),
-        "recommended_quotation_id": ranked[0].ref if ranked else None,
+        "recommended_quotation_id": champion,
         # Stated, not enforced: three quotes is the standard (doc B8), but a
         # single-source item is real and blocking the award would stop the purchase.
         "meets_three_quote_norm": len(ranked) >= 3,
@@ -1305,7 +1918,81 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
     )).scalars().first()
     if quote is None:
         raise NotFoundError("No quotation has been opened for you on this RFQ")
+    await _attach_tax_context(db, quote)
     return quote
+
+
+async def _attach_tax_context(db: AsyncSession, quote: Quotation) -> dict[int, dict]:
+    """Tell the quote form which tax applies and how much of it is allowed.
+
+    Transient, like every other derived header field here: the ceiling is whatever the
+    HSN says at the moment the form is opened, and the region is a fact about two
+    GSTINs. Storing either would be storing an answer that can change without anybody
+    editing the quotation.
+
+    Returns the per-item ceilings so the submit path can validate against exactly what
+    the form was shown, rather than looking them up a second way.
+    """
+    vendor = await db.get(Vendor, quote.vendor_id)
+    company_gstin = await _company_gstin(db)
+    region = tax_region(company_gstin, getattr(vendor, "gstin", None))
+    ceilings = await _hsn_ceilings(db, [line.item_id for line in quote.items])
+
+    quote.tax_region = region
+    quote.company_gstin = company_gstin
+    quote.vendor_gstin = getattr(vendor, "gstin", None)
+    for line in quote.items:
+        limits = ceilings.get(line.item_id)
+        line.hsn_code = limits["hsn_code"] if limits else None
+        # No HSN means no ceiling — the field stays open rather than closing to zero.
+        line.max_cgst_rate = limits["cgst_rate"] if limits else None
+        line.max_sgst_rate = limits["sgst_rate"] if limits else None
+        line.max_igst_rate = limits["igst_rate"] if limits else None
+    return ceilings
+
+
+def _checked_gst(incoming, interstate: bool, limits: dict | None,
+                 label: str) -> tuple[float, float, float]:
+    """The GST split for one quoted line: which halves apply, and capped at the HSN.
+
+    A rate sent for the wrong side of the split is REJECTED rather than dropped. A
+    vendor who typed 9 + 9 on an interstate order meant to charge 18%, and silently
+    zeroing it would accept an offer they did not make.
+
+    `tax_percent` is honoured as a whole-rate shorthand for a vendor (or a screen) that
+    sends only one number: it is spread across whichever halves apply, so the same
+    payload works both ways.
+    """
+    cgst, sgst, igst = incoming.cgst_rate, incoming.sgst_rate, incoming.igst_rate
+    whole = float(incoming.tax_percent or 0)
+
+    if interstate:
+        if cgst or sgst:
+            raise ValidationError(
+                f"{label}: this is an inter-state supply — quote IGST only, not CGST/SGST")
+        igst = float(igst) if igst is not None else whole
+        cgst = sgst = 0.0
+    else:
+        if igst:
+            raise ValidationError(
+                f"{label}: this is an intra-state supply — quote CGST and SGST, not IGST")
+        if cgst is None and sgst is None:
+            cgst = sgst = whole / 2
+        else:
+            cgst, sgst = float(cgst or 0), float(sgst or 0)
+        igst = 0.0
+
+    if limits:
+        ceiling = ("igst_rate", igst) if interstate else None
+        for field, value in ([ceiling] if ceiling else
+                             [("cgst_rate", cgst), ("sgst_rate", sgst)]):
+            allowed = limits[field]
+            if value > allowed + 1e-9:
+                raise ValidationError(
+                    f"{label}: {field[:4].upper()} may not exceed {allowed}% — the rate "
+                    f"notified for HSN {limits['hsn_code']}. Quote at or below it."
+                )
+    return cgst, sgst, igst
 
 
 async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
@@ -1319,19 +2006,30 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
         raise ValidationError("The submission deadline for this RFQ has passed")
 
     quote = await vendor_get_quotation(db, vendor_id, rfq_id)
+    # The same two rules the form was drawn with, enforced here because the form is not
+    # the guard: this endpoint is reachable by anyone holding a vendor token.
+    ceilings = await _attach_tax_context(db, quote)
+    interstate = quote.tax_region == "INTER"
+
     lines_by_rfq_item = {line.rfq_item_id: line for line in quote.items}
     for index, incoming in enumerate(data.lines, start=1):
         line = lines_by_rfq_item.get(incoming.rfq_item_id)
         if line is None:
             raise ValidationError(
                 f"Line {incoming.rfq_item_id} is not on this RFQ")
+        cgst, sgst, igst = _checked_gst(
+            incoming, interstate, ceilings.get(line.item_id),
+            line.item_name or line.item_code or f"line {index}")
         line.line_no = index
         line.rate = _d(incoming.rate)
         line.discount_percent = _d(incoming.discount_percent)
-        line.tax_percent = _d(incoming.tax_percent)
-        line.cgst_rate = incoming.cgst_rate
-        line.sgst_rate = incoming.sgst_rate
-        line.igst_rate = incoming.igst_rate
+        line.cgst_rate = cgst
+        line.sgst_rate = sgst
+        line.igst_rate = igst
+        # The headline rate is the sum of the split that actually applies, never a
+        # third number typed alongside it — `_quote_totals` charges tax_percent, and a
+        # split that disagrees with it is a total nobody can reconcile.
+        line.tax_percent = _d((cgst or 0) + (sgst or 0) + (igst or 0))
         line.delivery_days = incoming.delivery_days
 
     quote.vendor_ref_no = data.vendor_ref_no

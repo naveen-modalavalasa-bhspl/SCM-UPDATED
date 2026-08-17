@@ -3,8 +3,9 @@ import type { Paginated } from "@/shared/types";
 import type {
   Comparison, Consolidation, ConsolidationCreate, ConsolidationListRow,
   ConsolidationSource, DespatchNote, DespatchNoteWrite, EvaluationMethodOption,
-  POCreate, POFromQuotation, POListRow, PurchaseOrder, VendorPO, VendorPOListRow,
-  Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqListRow, Requisition, RFQ,
+  MRCandidate, POCreate, POFromQuotation, POListRow, PurchaseOrder, VendorPO,
+  VendorPOListRow,
+  Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
   VendorToken,
 } from "./types";
@@ -15,6 +16,9 @@ export const poApi = {
   openForGrn: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<POListRow>>("/api/pos/open-for-grn", { params }).then((r) => r.data),
   get: (id: number) => api.get<PurchaseOrder>(`/api/pos/${id}`).then((r) => r.data),
+  /** Raised by hand, with no indent or quotation behind it. */
+  create: (data: POCreate) =>
+    api.post<PurchaseOrder>("/api/pos", data).then((r) => r.data),
   createFromIndent: (indentId: number, data: POCreate) =>
     api.post<PurchaseOrder>(`/api/pos/from-indent/${indentId}`, data).then((r) => r.data),
   /** Accept the awarded offer. No vendor and no lines — both come from the quotation,
@@ -44,6 +48,17 @@ export const requisitionApi = {
   createFromMr: (mrId: number) =>
     api.post<Requisition>(`/api/requisitions/from-material-request/${mrId}`)
       .then((r) => r.data),
+  /** Approved MRs no requisition has claimed yet — the consolidation picker's source. */
+  mrCandidates: (params: { project_id?: number; page?: number; size?: number } = {}) =>
+    api.get<Paginated<MRCandidate>>("/api/requisitions/mr-candidates", { params })
+      .then((r) => r.data),
+  /** Several approved MRs folded into ONE requisition, merged item-wise. */
+  createFromMrs: (data: ReqFromMRs) =>
+    api.post<Requisition>("/api/requisitions/from-material-requests", data)
+      .then((r) => r.data),
+  sources: (id: number) =>
+    api.get<{ mr_id: number; mr_no: string; indent_no?: string | null; item_count: number }[]>(
+      `/api/requisitions/${id}/sources`).then((r) => r.data),
   update: (id: number, data: ReqCreate) =>
     api.put<Requisition>(`/api/requisitions/${id}`, data).then((r) => r.data),
   submit: (id: number) =>

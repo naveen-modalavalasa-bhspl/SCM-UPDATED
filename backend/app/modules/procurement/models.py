@@ -111,11 +111,21 @@ class Requisition(Base):
     warehouse_name = Column(String(200), nullable=True)   # snapshot
     project_id = soft_fk()
     project_name = Column(String(200), nullable=True)     # snapshot
+    # Who is asking, and on whose paper. Both were being derived from the raiser's HCM
+    # record, which is right until somebody raises on behalf of another department —
+    # and a buyer could not correct it because there was nowhere to put the answer.
+    # Nullable: an existing row keeps reading from the raiser (service._header_context).
+    department_id = soft_fk()
+    department_name = Column(String(200), nullable=True)  # snapshot
+    company_name = Column(String(200), nullable=True)     # snapshot of the settings value
 
     status = Column(String(30), nullable=False, index=True)
     # Added to the DB team's columns: urgency is on the raising form and it is what
     # a buyer sorts the queue by. One column beats a convention buried in remarks.
     priority = Column(String(20), nullable=True)
+    # One date for the whole document. It was asked per line, which meant typing the
+    # same date forty times; a line that genuinely differs still carries its own.
+    required_date = Column(Date, nullable=True)
 
     total_items = Column(Integer, nullable=False, default=0)
     estimated_value = Column(Numeric(16, 2), nullable=False, default=0)
@@ -171,6 +181,35 @@ class RequisitionItem(Base):
     requisition = relationship("Requisition", back_populates="items")
 
 
+class RequisitionSource(Base):
+    """`pro_requisition_sources` — which material requests a requisition was built from.
+
+    `Requisition.source_mr_id` holds one, which was the whole story while one MR became
+    one requisition. It no longer is: MRs are raised one item at a time and the same
+    item comes in on several of them, so Purchase consolidates a batch into a single
+    demand and tenders it once.
+
+    Kept as its own table rather than a list on the header for the reason
+    `pro_consolidation_sources` exists: the question asked of it is "is this MR already
+    consolidated?", which has to be answered by MR id, and a text blob cannot be
+    queried. It is also what stops an MR being consolidated twice.
+    """
+    __tablename__ = "pro_requisition_sources"
+    id = pk()
+    requisition_id = Column(ForeignKey("pro_requisitions.id", ondelete="CASCADE"),
+                            index=True, nullable=False)
+    # Soft FK: inventory owns inv_material_requests and a module may not hard-link
+    # across (rule 10).
+    mr_id = soft_fk()
+    mr_no = Column(String(30), nullable=True)             # snapshot
+    indent_no = Column(String(30), nullable=True)         # snapshot, for the trail
+    item_count = Column(Integer, nullable=False, default=0)
+    created_at = created_at_col()
+
+
+Index("ix_pro_req_source_mr", RequisitionSource.mr_id)
+
+
 # --------------------------------------------------------------------------- #
 #  RFQ — what went out to vendors
 # --------------------------------------------------------------------------- #
@@ -191,6 +230,11 @@ class RFQ(Base):
     warehouse_name = Column(String(200), nullable=True)   # snapshot
     project_id = soft_fk()
     project_name = Column(String(200), nullable=True)     # snapshot
+    # Carried from the requisition where there is one, typed on the form where there
+    # is not: an RFQ raised cold still has to say who is buying and on whose paper.
+    department_id = soft_fk()
+    department_name = Column(String(200), nullable=True)  # snapshot
+    company_name = Column(String(200), nullable=True)     # snapshot
 
     title = Column(String(300), nullable=True)
     status = Column(String(30), nullable=False, index=True)

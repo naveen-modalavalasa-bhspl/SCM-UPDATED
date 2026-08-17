@@ -5,10 +5,13 @@ import { poApi, requisitionApi } from "../api";
 describe("procurement api", () => {
   it("exposes the PO operations", () => {
     expect(Object.keys(poApi).sort()).toEqual(
-      ["approve", "createFromIndent", "createFromQuotation", "get", "list",
+      ["approve", "create", "createFromIndent", "createFromQuotation", "get", "list",
        "openForGrn", "reject", "sendToVendor", "submit"].sort(),
     );
     expect(typeof poApi.createFromIndent).toBe("function");
+    // Raised by hand, alongside the two derived paths: an order that begins as a
+    // repeat buy or an emergency has no indent and no quotation to come from.
+    expect(typeof poApi.create).toBe("function");
   });
 
   // The two hops that had a backend and no caller: an approved MR could not become a

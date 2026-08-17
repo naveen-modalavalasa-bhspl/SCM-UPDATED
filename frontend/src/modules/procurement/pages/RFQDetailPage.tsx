@@ -8,8 +8,8 @@ import {
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { poApi, rfqApi } from "../api";
-import { money } from "./RequisitionListPage";
-import type { QuoteListRow, RFQItem, RFQVendor } from "../types";
+import { QuotationComparison } from "../components/QuotationComparison";
+import type { RFQItem, RFQVendor } from "../types";
 
 /**
  * One RFQ: its lines, who was asked, and — once quotes are in — the comparison.
@@ -79,17 +79,18 @@ export function RFQDetailPage() {
   // the PO is raised against the exact quote that was accepted, not against the vendor.
   const awardedQuote = (comparison?.quotations ?? []).find((q) => q.status === "ACCEPTED");
 
-  /** The last hop of the chain: accept the offer as a purchase order.
+  /** The last hop of the chain: accept the chosen offer as a purchase order.
    *
-   *  Vendor, rates, discount and tax all come from the quotation server-side — nothing
-   *  is sent — so the PO cannot disagree with the offer it says it is for. It lands in
-   *  DRAFT and still climbs the PO ladder; awarding is not approving a spend. */
+   *  Vendor, rates, discount and tax all come from the quotation server-side — only
+   *  its id is sent — so the PO cannot disagree with the offer it says it is for. It
+   *  lands in DRAFT and still climbs the PO ladder; awarding is not approving a spend,
+   *  and nothing raises an order on the buyer's behalf. */
   const raisePo = useMutation({
-    mutationFn: () => poApi.createFromQuotation(awardedQuote!.id),
+    mutationFn: (quotationId: number) => poApi.createFromQuotation(quotationId),
     onSuccess: (po) => {
       queryClient.invalidateQueries({ queryKey: ["rfq", id] });
       queryClient.invalidateQueries({ queryKey: ["pos"] });
-      toast.success(`${po.po_no} raised from ${awardedQuote?.vendor_name ?? "the winner"}`);
+      toast.success(`${po.po_no} raised from ${po.vendor_name ?? "the winner"}`);
       nav(`/pos/${po.id}`);
     },
   });
@@ -158,50 +159,6 @@ export function RFQDetailPage() {
     },
   ];
 
-  const quoteColumns: Column<QuoteListRow>[] = [
-    {
-      key: "rank",
-      header: "#",
-      render: (r) => (
-        <span className="font-mono text-xs font-semibold text-ink">{r.rank_position ?? "—"}</span>
-      ),
-    },
-    { key: "vendor", header: "Vendor", render: (r) => r.vendor_name ?? `Vendor ${r.vendor_id}` },
-    {
-      key: "total",
-      header: "Grand total",
-      className: "text-right",
-      render: (r) => <span className="font-semibold text-ink">{money(r.grand_total)}</span>,
-    },
-    {
-      key: "revisions",
-      header: "Revisions",
-      className: "text-right",
-      hideOnNarrow: true,
-      render: (r) => r.revision_count,
-    },
-    {
-      key: "submitted",
-      header: "Submitted",
-      hideOnNarrow: true,
-      render: (r) => (r.submitted_at ? fmtDate(r.submitted_at) : "—"),
-    },
-    {
-      key: "award",
-      header: "",
-      render: (r) =>
-        rfq?.status === "AWARDED" ? (
-          <StatusPill status={r.status} />
-        ) : (
-          <Can do="rfq.award">
-            <Button variant="subtle" disabled={busy} onClick={() => award.mutate(r.id)}>
-              Award
-            </Button>
-          </Can>
-        ),
-    },
-  ];
-
   return (
     <div>
       <PageHeader
@@ -247,7 +204,7 @@ export function RFQDetailPage() {
             )}
             {rfq?.status === "AWARDED" && !rfq.po_id && awardedQuote && (
               <Can do="po.create">
-                <Button disabled={busy} onClick={() => raisePo.mutate()}>
+                <Button disabled={busy} onClick={() => raisePo.mutate(awardedQuote.id)}>
                   {raisePo.isPending ? "Raising…" : "Create purchase order"}
                 </Button>
               </Can>
@@ -282,6 +239,65 @@ export function RFQDetailPage() {
               </dd>
             </div>
           </dl>
+          {/* Everything the requisition said, carried across. A tender that names only
+            * a deadline cannot be checked by the person approving it: department,
+            * warehouse, project and company are what say who is buying, for where, on
+            * whose budget — and the indent numbers say who asked in the first place. */}
+          <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-line pt-4 text-sm sm:grid-cols-4">
+            <div>
+              <dt className="text-xs text-muted">Requisition</dt>
+              <dd className="mt-1">
+                {rfq.requisition_id ? (
+                  <button
+                    className="font-mono text-xs text-brand underline"
+                    onClick={() => nav(`/procurement/requisitions/${rfq.requisition_id}`)}
+                  >
+                    {rfq.requisition_no ?? `#${rfq.requisition_id}`}
+                  </button>
+                ) : (
+                  <span className="font-mono text-xs text-body">
+                    {rfq.consolidation_no ?? "—"}
+                  </span>
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Department</dt>
+              <dd className="mt-1 text-body">{rfq.department_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Warehouse</dt>
+              <dd className="mt-1 text-body">{rfq.warehouse_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Project</dt>
+              <dd className="mt-1 text-body">{rfq.project_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Company</dt>
+              <dd className="mt-1 text-body">{rfq.company_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Priority</dt>
+              <dd className="mt-1 text-body">{rfq.priority ?? "Normal"}</dd>
+            </div>
+            <div className="col-span-2">
+              <dt className="text-xs text-muted">Indents behind it</dt>
+              <dd className="mt-1 flex flex-wrap gap-1.5">
+                {(rfq.source_indent_nos ?? []).length
+                  ? rfq.source_indent_nos!.map((no) => (
+                      <span
+                        key={no}
+                        className="rounded-md bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-body"
+                      >
+                        {no}
+                      </span>
+                    ))
+                  : <span className="text-body">—</span>}
+              </dd>
+            </div>
+          </dl>
+
           {/* Where the award went next. Without it an AWARDED RFQ is a dead end on
             * screen even though the order exists — the chain only reads forward here. */}
           {rfq.po_id && (
@@ -371,27 +387,21 @@ export function RFQDetailPage() {
             </p>
           )}
 
-          <Card className="p-2">
-            <ResponsiveList
-              data={comparison?.quotations ?? []}
-              columns={quoteColumns}
-              keyOf={(r) => r.id}
-              empty="No quotations submitted yet."
-              renderCard={(r) => (
-                <div className="space-y-1.5">
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="text-sm font-medium text-ink">
-                      {r.rank_position ? `#${r.rank_position} · ` : ""}{r.vendor_name}
-                    </span>
-                    <span className="font-semibold text-ink">{money(r.grand_total)}</span>
-                  </div>
-                  <div className="text-xs text-muted">
-                    {r.revision_count} revision{r.revision_count === 1 ? "" : "s"}
-                  </div>
-                </div>
-              )}
+          {/* The sheet decides nothing. It flags the cheapest cell per item and the
+            * top of the ranking, and leaves every column awardable — the buyer picks,
+            * and the PO is raised from whichever quote they picked. */}
+          {comparison && (
+            <QuotationComparison
+              comparison={comparison}
+              awardedQuotationId={awardedQuote?.id ?? null}
+              poId={rfq?.po_id ?? null}
+              poNo={rfq?.po_no ?? null}
+              busy={busy}
+              onAward={(quotationId) => award.mutate(quotationId)}
+              onCreatePo={(quotationId) => raisePo.mutate(quotationId)}
+              onOpenPo={() => nav(`/pos/${rfq?.po_id}`)}
             />
-          </Card>
+          )}
         </>
       )}
     </div>

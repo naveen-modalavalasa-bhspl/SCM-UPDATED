@@ -23,9 +23,9 @@ from app.modules.procurement import service
 from app.modules.procurement.schemas import (
     ActionIn, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
-    DespatchNoteIn, DespatchNoteOut, VendorPOListRow, VendorPOOut, POCreate,
-    POFromQuotationIn, POListRow, POOut, QuoteListRow, QuoteOut, QuoteSubmit,
-    ReqCreate, ReqListRow,
+    DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
+    POCreate, POFromQuotationIn, POListRow, POOut, QuoteListRow, QuoteOut, QuoteSubmit,
+    ReqCreate, ReqFromMRsIn, ReqListRow,
     ReqOut, RFQCreate, RFQListRow, RFQOut, RFQUpdate, VendorAccountIn,
     VendorAccountOut, VendorLoginIn, VendorPasswordIn, VendorProfileOut,
     VendorTokenOut,
@@ -55,6 +55,13 @@ async def list_pos(params: PageParams = Depends(), status: str | None = None,
 async def open_for_grn(params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.PO_VIEW))):
     return await service.open_for_grn(db, params)
+
+
+@pos.post("", response_model=POOut, status_code=201)
+async def create_po(body: POCreate, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.PO_CREATE))):
+    """Raise an order by hand, with no indent or quotation behind it."""
+    return await service.create_po(db, body, user)
 
 
 @pos.post("/from-indent/{indent_id}", response_model=POOut)
@@ -126,6 +133,30 @@ async def create_requisition_from_mr(
 ):
     """Pick up an approved material request as a requisition, lines and all."""
     return await service.create_requisition_from_mr(db, mr_id, user)
+
+
+# Both literals declared above `/{req_id}`, which is int-typed: a literal segment
+# registered after it never matches, it 422s on the path parameter instead.
+@requisitions.get("/mr-candidates", response_model=Page[MRCandidateRow])
+async def mr_candidates(params: PageParams = Depends(), project_id: int | None = None,
+                        db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.REQUISITION_CREATE))):
+    """Approved material requests no requisition has claimed — the picker's source."""
+    return await service.mr_candidates(db, params, project_id)
+
+
+@requisitions.post("/from-material-requests", response_model=ReqOut, status_code=201)
+async def create_requisition_from_mrs(body: ReqFromMRsIn,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(perms.REQUISITION_CREATE))):
+    """Fold a batch of approved material requests into one requisition, item-wise."""
+    return await service.create_requisition_from_mrs(db, body, user)
+
+
+@requisitions.get("/{req_id}/sources", response_model=list[dict])
+async def requisition_sources(req_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    return await service.requisition_sources(db, req_id, user)
 
 
 @requisitions.get("/{req_id}", response_model=ReqOut)

@@ -104,9 +104,45 @@ class ReqLineIn(BaseModel):
 class ReqCreate(BaseModel):
     warehouse_id: int | None = None
     project_id: int | None = None
+    # Who is asking and on whose paper. Both were derived from the raiser's HCM record,
+    # which is only right until somebody raises on another department's behalf.
+    department_id: int | None = None
+    company_name: str | None = None
+    # One date for the document. A line may still override it (`ReqLineIn`), but the
+    # form no longer asks for the same date once per item.
+    required_date: date | None = None
     priority: str | None = None
     remarks: str | None = None
     lines: list[ReqLineIn] = Field(min_length=1)
+
+
+class ReqFromMRsIn(BaseModel):
+    """Fold several approved material requests into one requisition.
+
+    Item-wise: the same item on five requests becomes one line. Every request stays on
+    the requisition's sources, and none of them can be consolidated twice.
+    """
+    mr_ids: list[int] = Field(min_length=1)
+    warehouse_id: int | None = None
+    project_id: int | None = None
+    department_id: int | None = None
+    company_name: str | None = None
+    required_date: date | None = None
+    priority: str | None = None
+    remarks: str | None = None
+
+
+class MRCandidateRow(BaseModel):
+    """An approved material request that no requisition has claimed yet."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    mr_no: str
+    indent_id: int | None = None
+    indent_no: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    status: str
+    created_at: datetime
 
 
 class ReqItemOut(BaseModel):
@@ -148,6 +184,20 @@ class ReqOut(ReqListRow):
     remarks: str | None = None
     approved_by_name: str | None = None
     approved_at: datetime | None = None
+    # Where this demand came from, when Purchase picked it up rather than raising it.
+    source_mr_id: int | None = None
+    source_mr_no: str | None = None
+    # Stored where the form named them; otherwise read from the raiser's HCM record and
+    # the install settings. See service._fill_header_context.
+    department_id: int | None = None
+    department_name: str | None = None
+    company_name: str | None = None
+    required_date: date | None = None
+    # The indents behind the lines, deduplicated. A requisition consolidated out of the
+    # field serves several, and the header could not say which.
+    source_indent_nos: list[str] = []
+    # Every material request folded in, not just `source_mr_no`.
+    source_mr_nos: list[str] = []
     items: list[ReqItemOut] = []
 
 
@@ -169,6 +219,10 @@ class RFQCreate(BaseModel):
     consolidation_id: int | None = None
     warehouse_id: int | None = None
     project_id: int | None = None
+    # Typed only on an RFQ raised cold. Where a requisition or a sheet is named, that
+    # document's own values win and these are left empty.
+    department_id: int | None = None
+    company_name: str | None = None
     due_date: date | None = None
     terms: str | None = None
     # None means "use the default" — see shared/evaluation.method_of. Validated in the
@@ -187,6 +241,8 @@ class RFQUpdate(BaseModel):
     terms: str | None = None
     warehouse_id: int | None = None
     project_id: int | None = None
+    department_id: int | None = None
+    company_name: str | None = None
     evaluation_method: str | None = None
     vendor_ids: list[int] | None = None
     lines: list[RFQLineIn] | None = None
@@ -252,6 +308,15 @@ class RFQOut(RFQListRow):
     po_id: int | None = None
     po_no: str | None = None
     po_status: str | None = None
+    # Carried from the requisition behind it, so a tender reads on its own. Derived at
+    # request time (service.get_rfq) and empty on the vendor-facing routes, which read
+    # the RFQ by a different path — a supplier has no business with our indent numbers.
+    department_id: int | None = None
+    department_name: str | None = None
+    company_name: str | None = None
+    priority: str | None = None
+    requisition_status: str | None = None
+    source_indent_nos: list[str] = []
     items: list[RFQItemOut] = []
     vendors: list[RFQVendorOut] = []
 
@@ -390,6 +455,14 @@ class QuoteItemOut(BaseModel):
     igst_rate: float | None = None
     amount: float
     delivery_days: int | None = None
+    # The classification and the rates it notifies — the ceiling this line may quote up
+    # to. Read at request time off the HSN, never stored: a rate change is a government
+    # notification, not an edit to a quotation. Null when the item has no HSN, which
+    # means no ceiling rather than a ceiling of zero.
+    hsn_code: str | None = None
+    max_cgst_rate: float | None = None
+    max_sgst_rate: float | None = None
+    max_igst_rate: float | None = None
 
 
 class QuoteListRow(BaseModel):
@@ -421,6 +494,11 @@ class QuoteOut(QuoteListRow):
     payment_terms: str | None = None
     delivery_days: int | None = None
     remarks: str | None = None
+    # Which tax applies, decided by the two GSTINs' state codes: INTRA is CGST+SGST,
+    # INTER is IGST. Derived, never stored — see service.tax_region.
+    tax_region: str | None = None
+    company_gstin: str | None = None
+    vendor_gstin: str | None = None
     items: list[QuoteItemOut] = []
 
 

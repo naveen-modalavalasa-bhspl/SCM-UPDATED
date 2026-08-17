@@ -84,6 +84,14 @@ export function RequisitionListPage() {
         title="Requisitions"
         actions={
           <Can do="requisition.create">
+            {/* The usual way in: the demand already exists as approved material
+              * requests, and this gathers them into one document to tender. */}
+            <Button
+              variant="subtle"
+              onClick={() => nav("/procurement/requisitions/from-mrs")}
+            >
+              Consolidate material requests
+            </Button>
             <Button onClick={() => nav("/procurement/requisitions/new")}>
               New requisition
             </Button>

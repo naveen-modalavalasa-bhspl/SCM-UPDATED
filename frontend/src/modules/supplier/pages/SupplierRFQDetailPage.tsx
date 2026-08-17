@@ -19,8 +19,14 @@ interface QuoteLine {
   quantity: number;
   rate: string;
   discount_percent: string;
-  tax_percent: string;
+  cgst_rate: string;
+  sgst_rate: string;
+  igst_rate: string;
   delivery_days: string;
+  hsn_code?: string | null;
+  max_cgst: number | null;
+  max_sgst: number | null;
+  max_igst: number | null;
 }
 
 /**
@@ -29,6 +35,12 @@ interface QuoteLine {
  * Totals are computed here for the vendor to see and recomputed server-side on save —
  * the browser's arithmetic is never trusted into the database. A vendor may re-submit
  * until the deadline; each save bumps `revision_count`, which the buyer can see.
+ *
+ * The tax boxes are not a free choice. Which ones open is decided by the two GSTINs —
+ * same state is CGST + SGST, any other state is IGST — and how high they go is capped
+ * by the rate notified for the item's HSN. Both rules are the server's; this screen
+ * draws them so the vendor is never rejected for something they could not have known,
+ * and the submit endpoint enforces them again regardless of what the browser sent.
  */
 export function SupplierRFQDetailPage() {
   const { id } = useParams();
@@ -72,10 +84,39 @@ export function SupplierRFQDetailPage() {
       quantity: Number(item.quantity),
       rate: String(item.rate ?? 0),
       discount_percent: String(item.discount_percent ?? 0),
-      tax_percent: String(item.tax_percent ?? 0),
+      // Opens at the notified rate. That is what is normally charged, so the vendor
+      // types nothing in the usual case and can only bring it down from there.
+      cgst_rate: String(item.cgst_rate ?? item.max_cgst_rate ?? 0),
+      sgst_rate: String(item.sgst_rate ?? item.max_sgst_rate ?? 0),
+      igst_rate: String(item.igst_rate ?? item.max_igst_rate ?? 0),
       delivery_days: item.delivery_days == null ? "" : String(item.delivery_days),
+      hsn_code: item.hsn_code,
+      max_cgst: item.max_cgst_rate ?? null,
+      max_sgst: item.max_sgst_rate ?? null,
+      max_igst: item.max_igst_rate ?? null,
     })));
   }, [quote]);
+
+  const interstate = quote?.tax_region !== "INTRA";
+
+  /** What this line is taxed at, given which half of the split applies. */
+  const taxRate = (line: QuoteLine) =>
+    interstate
+      ? Number(line.igst_rate || 0)
+      : Number(line.cgst_rate || 0) + Number(line.sgst_rate || 0);
+
+  /** The ceiling this line may quote up to, or null where the item has no HSN. */
+  const ceiling = (line: QuoteLine) =>
+    interstate
+      ? line.max_igst
+      : line.max_cgst == null && line.max_sgst == null
+        ? null
+        : (line.max_cgst ?? 0) + (line.max_sgst ?? 0);
+
+  const overCeiling = lines.filter((line) => {
+    const limit = ceiling(line);
+    return limit != null && taxRate(line) > limit + 1e-9;
+  });
 
   const totals = useMemo(() => {
     let sub = 0;
@@ -84,12 +125,12 @@ export function SupplierRFQDetailPage() {
       const gross = line.quantity * Number(line.rate || 0);
       const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
       sub += net;
-      tax += (net * Number(line.tax_percent || 0)) / 100;
+      tax += (net * taxRate(line)) / 100;
     }
     const grand = sub + tax + Number(header.freight_amount || 0)
       - Number(header.discount_amount || 0);
     return { sub, tax, grand };
-  }, [lines, header.freight_amount, header.discount_amount]);
+  }, [lines, interstate, header.freight_amount, header.discount_amount]);
 
   const save = useMutation({
     mutationFn: () => {
@@ -101,11 +142,17 @@ export function SupplierRFQDetailPage() {
         freight_amount: Number(header.freight_amount || 0),
         discount_amount: Number(header.discount_amount || 0),
         remarks: header.remarks || null,
+        // Only the half of the split that applies is sent. The other one is not zero
+        // "for safety" — sending it at all is what the server rejects, because a rate
+        // on the wrong side is a vendor charging something they cannot charge.
         lines: lines.map((line) => ({
           rfq_item_id: line.rfq_item_id,
           rate: Number(line.rate || 0),
           discount_percent: Number(line.discount_percent || 0),
-          tax_percent: Number(line.tax_percent || 0),
+          tax_percent: taxRate(line),
+          cgst_rate: interstate ? null : Number(line.cgst_rate || 0),
+          sgst_rate: interstate ? null : Number(line.sgst_rate || 0),
+          igst_rate: interstate ? Number(line.igst_rate || 0) : null,
           delivery_days: line.delivery_days ? Number(line.delivery_days) : null,
         })),
       };
@@ -160,22 +207,38 @@ export function SupplierRFQDetailPage() {
       )}
 
       <Card className="mb-4 space-y-4 p-5">
-        <h2 className="text-sm font-semibold text-ink">Your prices</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-ink">Your prices</h2>
+          {/* Said out loud, with the reason. A vendor who sees only an IGST box and no
+            * explanation assumes the form is broken. */}
+          <span className="rounded-full bg-surface-2 px-3 py-1 text-[11px] text-body">
+            Tax region: {interstate ? "Inter-state (IGST)" : "Intra-state (CGST + SGST)"}
+            {quote?.vendor_gstin ? ` · your GSTIN ${quote.vendor_gstin}` : ""}
+          </span>
+        </div>
+        <p className="text-xs text-muted">
+          Rates open at what the item's HSN notifies. You may quote below them, not
+          above.
+        </p>
 
         {isLoading && <p className="text-sm text-muted">Loading…</p>}
 
         {lines.map((line, index) => {
           const gross = line.quantity * Number(line.rate || 0);
           const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
+          const limit = ceiling(line);
+          const over = limit != null && taxRate(line) > limit + 1e-9;
+          const taxed = net + (net * taxRate(line)) / 100;
           return (
             <div key={line.rfq_item_id} className="rounded-xl border border-line p-3">
               <div className="mb-3">
                 <div className="text-sm font-medium text-ink">{line.item_name}</div>
                 <div className="font-mono text-[11px] text-muted">
                   {line.item_code} · {line.quantity} {line.uom_code}
+                  {line.hsn_code ? ` · HSN ${line.hsn_code}` : ""}
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
                 <Field label="Rate">
                   <Input
                     type="number" min="0" step="0.01" value={line.rate} disabled={!open}
@@ -189,12 +252,48 @@ export function SupplierRFQDetailPage() {
                     onChange={(e) => set(index, { discount_percent: e.target.value })}
                   />
                 </Field>
-                <Field label="Tax %">
-                  <Input
-                    type="number" min="0" step="0.01" value={line.tax_percent} disabled={!open}
-                    onChange={(e) => set(index, { tax_percent: e.target.value })}
-                  />
-                </Field>
+
+                {/* One side of the split only. The other is not disabled, it is not
+                  * drawn — an interstate supply has no CGST field to grey out. */}
+                {interstate ? (
+                  <Field
+                    label="IGST %"
+                    hint={line.max_igst != null ? `Up to ${line.max_igst}%` : undefined}
+                  >
+                    <Input
+                      type="number" min="0" step="0.01"
+                      max={line.max_igst ?? undefined}
+                      value={line.igst_rate} disabled={!open}
+                      onChange={(e) => set(index, { igst_rate: e.target.value })}
+                    />
+                  </Field>
+                ) : (
+                  <>
+                    <Field
+                      label="CGST %"
+                      hint={line.max_cgst != null ? `Up to ${line.max_cgst}%` : undefined}
+                    >
+                      <Input
+                        type="number" min="0" step="0.01"
+                        max={line.max_cgst ?? undefined}
+                        value={line.cgst_rate} disabled={!open}
+                        onChange={(e) => set(index, { cgst_rate: e.target.value })}
+                      />
+                    </Field>
+                    <Field
+                      label="SGST %"
+                      hint={line.max_sgst != null ? `Up to ${line.max_sgst}%` : undefined}
+                    >
+                      <Input
+                        type="number" min="0" step="0.01"
+                        max={line.max_sgst ?? undefined}
+                        value={line.sgst_rate} disabled={!open}
+                        onChange={(e) => set(index, { sgst_rate: e.target.value })}
+                      />
+                    </Field>
+                  </>
+                )}
+
                 <Field label="Delivery days">
                   <Input
                     type="number" min="0" value={line.delivery_days} disabled={!open}
@@ -204,10 +303,20 @@ export function SupplierRFQDetailPage() {
                 <div className="flex items-end pb-2">
                   <div>
                     <div className="text-[11px] text-muted">Line total</div>
-                    <div className="font-semibold text-ink">{money(net)}</div>
+                    <div className="font-semibold text-ink">{money(taxed)}</div>
+                    <div className="text-[11px] text-muted">
+                      {money(net)} + {taxRate(line)}% tax
+                    </div>
                   </div>
                 </div>
               </div>
+              {over && (
+                <p className="mt-2 text-xs text-danger">
+                  Above the {limit}% notified for
+                  {line.hsn_code ? ` HSN ${line.hsn_code}` : " this item"}. Quote at or
+                  below it — the submission will be refused otherwise.
+                </p>
+              )}
             </div>
           );
         })}
@@ -281,10 +390,17 @@ export function SupplierRFQDetailPage() {
           </div>
         </dl>
 
+        {open && overCeiling.length > 0 && (
+          <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
+            {overCeiling.length} line{overCeiling.length === 1 ? "" : "s"} quote more tax
+            than the HSN allows. Bring them down to submit.
+          </p>
+        )}
+
         {open && (
           <Button
             className="w-full sm:w-auto"
-            disabled={save.isPending || !lines.length}
+            disabled={save.isPending || !lines.length || overCeiling.length > 0}
             onClick={() => save.mutate()}
           >
             {save.isPending

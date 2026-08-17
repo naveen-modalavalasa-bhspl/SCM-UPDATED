@@ -184,12 +184,51 @@ export interface Requisition extends ReqListRow {
   remarks?: string | null;
   approved_by_name?: string | null;
   approved_at?: string | null;
+  source_mr_id?: number | null;
+  source_mr_no?: string | null;
+  /** Read at request time off HCM (the raiser's department) and settings (the
+   *  company). Neither is a column on `pro_requisitions` and neither is editable. */
+  department_id?: number | null;
+  department_name?: string | null;
+  company_name?: string | null;
+  /** One "needed by" for the whole document. A line may still carry its own. */
+  required_date?: string | null;
+  /** The indents behind the lines, deduplicated — empty on a cold requisition. */
+  source_indent_nos?: string[];
+  /** Every material request folded in, not just the first. */
+  source_mr_nos?: string[];
   items: ReqItem[];
+}
+
+/** An approved material request no requisition has claimed yet. */
+export interface MRCandidate {
+  id: number;
+  mr_no: string;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  project_id?: number | null;
+  project_name?: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface ReqFromMRs {
+  mr_ids: number[];
+  warehouse_id?: number | null;
+  project_id?: number | null;
+  department_id?: number | null;
+  company_name?: string | null;
+  required_date?: string | null;
+  priority?: string | null;
+  remarks?: string | null;
 }
 
 export interface ReqCreate {
   warehouse_id?: number | null;
   project_id?: number | null;
+  department_id?: number | null;
+  company_name?: string | null;
+  required_date?: string | null;
   priority?: string | null;
   remarks?: string | null;
   lines: {
@@ -265,6 +304,13 @@ export interface RFQ extends RFQListRow {
   po_id?: number | null;
   po_no?: string | null;
   po_status?: string | null;
+  /** Carried across from the requisition behind it, so a tender reads on its own. */
+  department_id?: number | null;
+  department_name?: string | null;
+  company_name?: string | null;
+  priority?: string | null;
+  requisition_status?: string | null;
+  source_indent_nos?: string[];
   items: RFQItem[];
   vendors: RFQVendor[];
 }
@@ -276,6 +322,9 @@ export interface RFQCreate {
   evaluation_method?: string | null;
   warehouse_id?: number | null;
   project_id?: number | null;
+  /** Typed only on an RFQ raised cold — a requisition's own values win otherwise. */
+  department_id?: number | null;
+  company_name?: string | null;
   due_date?: string | null;
   terms?: string | null;
   vendor_ids: number[];
@@ -319,6 +368,12 @@ export interface QuoteItem {
   igst_rate?: number | null;
   amount: number;
   delivery_days?: number | null;
+  /** The item's HSN and the rates it notifies — the ceiling this line may quote up to.
+   *  Null means the item has no HSN, so no ceiling applies. */
+  hsn_code?: string | null;
+  max_cgst_rate?: number | null;
+  max_sgst_rate?: number | null;
+  max_igst_rate?: number | null;
 }
 
 export interface QuoteListRow {
@@ -352,6 +407,10 @@ export interface Quotation extends QuoteListRow {
   payment_terms?: string | null;
   delivery_days?: number | null;
   remarks?: string | null;
+  /** "INTRA" (CGST+SGST) or "INTER" (IGST), decided by the two GSTINs' state codes. */
+  tax_region?: string | null;
+  company_gstin?: string | null;
+  vendor_gstin?: string | null;
   items: QuoteItem[];
 }
 
@@ -376,11 +435,78 @@ export interface QuoteSubmit {
   }[];
 }
 
+/** One vendor's offer on one RFQ line, split the way a buyer reads it. The backend
+ *  computes it from the same lines the ranking read — never re-derive it here. */
+export interface ComparisonCell {
+  quotation_id: number;
+  vendor_id: number;
+  vendor_name?: string | null;
+  quantity: number;
+  rate: number;
+  discount_percent: number;
+  discount_amount: number;
+  taxable_amount: number;
+  tax_percent: number;
+  cgst_rate?: number | null;
+  cgst_amount?: number | null;
+  sgst_rate?: number | null;
+  sgst_amount?: number | null;
+  igst_rate?: number | null;
+  igst_amount?: number | null;
+  tax_amount: number;
+  line_total: number;
+  delivery_days?: number | null;
+  /** Cheapest landed total on this row. A label, not a rule. */
+  is_best: boolean;
+}
+
+export interface ComparisonRow {
+  rfq_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  quantity: number;
+  required_date?: string | null;
+  best_quotation_id?: number | null;
+  cells: ComparisonCell[];
+}
+
+/** A column footer: what this vendor's whole offer comes to. */
+export interface ComparisonTotal {
+  quotation_id: number;
+  quotation_no: string;
+  vendor_id: number;
+  vendor_name?: string | null;
+  status: string;
+  rank_position?: number | null;
+  evaluation_score?: number | null;
+  sub_total: number;
+  discount_amount: number;
+  tax_amount: number;
+  freight_amount: number;
+  grand_total: number;
+  expected_delivery_date?: string | null;
+  delivery_days?: number | null;
+  payment_terms?: string | null;
+  valid_till?: string | null;
+  submitted_at?: string | null;
+  revision_count: number;
+  /** How many lines this vendor is cheapest on — not always the cheapest overall. */
+  best_line_count: number;
+  /** Top of the ranking under the method in force. A suggestion; any column may win. */
+  is_recommended: boolean;
+}
+
 export interface Comparison {
   rfq: RFQ;
   /** Already ordered by rank under `evaluation_method` — never re-sort in the screen,
    * or the winner shown stops matching the one the award check accepts. */
   quotations: QuoteListRow[];
+  /** The sheet: one row per RFQ line, one cell per vendor who quoted it. */
+  items: ComparisonRow[];
+  /** The column footers, in the same order as `quotations`. */
+  totals: ComparisonTotal[];
   evaluation_method: string;
   responded: number;
   recommended_quotation_id?: number | null;

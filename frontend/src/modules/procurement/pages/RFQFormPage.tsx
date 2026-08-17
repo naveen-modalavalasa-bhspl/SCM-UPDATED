@@ -8,6 +8,7 @@ import {
 import { api } from "@/shared/api/client";
 import { requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
+import { OrgFields, type OrgValue } from "../components/OrgFields";
 
 interface MasterVendor {
   id: number;
@@ -38,6 +39,12 @@ export function RFQFormPage() {
   // Empty means "use the default" — the backend decides what that is, so the form
   // never has to carry a copy of it.
   const [evaluationMethod, setEvaluationMethod] = useState("");
+  // Carried from the source document where there is one, and typed where there is not:
+  // an RFQ raised cold still has to say who is buying, for where, on whose budget and
+  // on whose paper. Same four fields the requisition form asks for.
+  const [org, setOrg] = useState<OrgValue>({
+    departmentId: "", warehouseId: "", projectId: "", companyName: "",
+  });
   const [vendorIds, setVendorIds] = useState<number[]>([]);
   const [vendorSearch, setVendorSearch] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
@@ -74,6 +81,12 @@ export function RFQFormPage() {
     setDueDate(existing.due_date ?? "");
     setTerms(existing.terms ?? "");
     setEvaluationMethod(existing.evaluation_method ?? "");
+    setOrg({
+      departmentId: existing.department_id ?? "",
+      warehouseId: existing.warehouse_id ?? "",
+      projectId: existing.project_id ?? "",
+      companyName: existing.company_name ?? "",
+    });
     setVendorIds(existing.vendors.map((v) => v.vendor_id));
     setLines(existing.items.map((item) => ({
       item_id: item.item_id,
@@ -83,9 +96,19 @@ export function RFQFormPage() {
     })));
   }, [existing]);
 
+  // Everything the requisition already says, carried across — warehouse, project and
+  // its remarks as the opening terms, not just the lines. Retyping them was the one
+  // place the two documents could quietly disagree about what was being bought.
   useEffect(() => {
     if (!source) return;
     setTitle(`Quotation for ${source.req_no}`);
+    setOrg({
+      departmentId: source.department_id ?? "",
+      warehouseId: source.warehouse_id ?? "",
+      projectId: source.project_id ?? "",
+      companyName: source.company_name ?? "",
+    });
+    setTerms((current) => current || source.remarks || "");
     setLines(source.items.map((item) => ({
       item_id: item.item_id,
       quantity: String(item.quantity),
@@ -102,6 +125,10 @@ export function RFQFormPage() {
         due_date: dueDate || null,
         terms: terms || null,
         evaluation_method: evaluationMethod || null,
+        warehouse_id: org.warehouseId === "" ? null : org.warehouseId,
+        project_id: org.projectId === "" ? null : org.projectId,
+        department_id: org.departmentId === "" ? null : org.departmentId,
+        company_name: org.companyName || null,
         vendor_ids: vendorIds,
         lines: usable.map((line) => ({
           item_id: Number(line.item_id),
@@ -151,7 +178,41 @@ export function RFQFormPage() {
       <ErrorBanner error={save.error} />
       {problem && <ErrorBanner error={problem} />}
 
+      {source && (
+        <Card className="mb-4 p-4">
+          <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
+            Carried from {source.req_no}
+          </p>
+          <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
+            {[
+              ["Department", source.department_name],
+              ["Warehouse", source.warehouse_name],
+              ["Project", source.project_name],
+              ["Company", source.company_name],
+              ["Priority", source.priority ?? "Normal"],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <dt className="text-xs text-muted">{label}</dt>
+                <dd className="mt-1 text-body">{value || "—"}</dd>
+              </div>
+            ))}
+          </dl>
+          {(source.source_indent_nos ?? []).length > 0 && (
+            <p className="mt-3 border-t border-line pt-3 text-xs text-muted">
+              Indents behind it:{" "}
+              <span className="font-mono text-body">
+                {source.source_indent_nos!.join(", ")}
+              </span>
+            </p>
+          )}
+        </Card>
+      )}
+
       <Card className="space-y-5 p-5">
+        {/* Editable either way: a requisition pre-fills them, and an RFQ raised cold
+          * has nowhere else to get them from. */}
+        <OrgFields value={org} onChange={(patch) => setOrg({ ...org, ...patch })} />
+
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Field label="Title">
             <Input value={title} onChange={(e) => setTitle(e.target.value)}

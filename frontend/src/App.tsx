@@ -25,6 +25,7 @@ import {
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 import { PODetailPage } from "@/modules/procurement/pages/PODetailPage";
+import { POFormPage } from "@/modules/procurement/pages/POFormPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
 // sub-pages, so these paths hand the whole subtree to it.
 import { WarehouseModule } from "@/modules/warehouse";
@@ -86,6 +87,7 @@ import {
 } from "@/modules/warehouse";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
 import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
+import { MRConsolidationPage } from "@/modules/procurement/pages/MRConsolidationPage";
 import { RequisitionDetailPage } from "@/modules/procurement/pages/RequisitionDetailPage";
 import { RFQListPage } from "@/modules/procurement/pages/RFQListPage";
 import { RFQFormPage } from "@/modules/procurement/pages/RFQFormPage";
@@ -194,10 +196,15 @@ function AppRoutes() {
             somewhere real instead of on a blank page. */}
         <Route path="approvals/delegations" element={<Navigate to="/approvals" replace />} />
         <Route path="pos" element={<POListPage />} />
+        {/* Declared before `pos/:id`, which is read as an id: "new" would otherwise
+          * open the detail screen for a purchase order that does not exist. */}
+        <Route path="pos/new" element={<POFormPage />} />
         <Route path="pos/:id" element={<PODetailPage />} />
         {/* The buying chain upstream of a PO: requisition -> RFQ -> quotation. */}
         <Route path="procurement/requisitions" element={<RequisitionListPage />} />
         <Route path="procurement/requisitions/new" element={<RequisitionFormPage />} />
+        {/* Both literals before `:id`, which is read as a number. */}
+        <Route path="procurement/requisitions/from-mrs" element={<MRConsolidationPage />} />
         <Route path="procurement/requisitions/:id" element={<RequisitionDetailPage />} />
         <Route path="procurement/requisitions/:id/edit" element={<RequisitionFormPage />} />
         <Route path="procurement/rfqs" element={<RFQListPage />} />

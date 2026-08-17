@@ -73,32 +73,10 @@ export function RequisitionDetailPage() {
       className: "text-right",
       render: (r) => `${r.quantity} ${r.uom_code ?? ""}`.trim(),
     },
-    {
-      key: "ordered",
-      header: "Ordered",
-      className: "text-right",
-      hideOnNarrow: true,
-      render: (r) => r.ordered_qty,
-    },
-    {
-      key: "rate",
-      header: "Est. rate",
-      className: "text-right",
-      hideOnNarrow: true,
-      render: (r) => money(r.estimated_rate),
-    },
-    {
-      key: "amount",
-      header: "Estimated",
-      className: "text-right",
-      render: (r) => <span className="font-semibold text-ink">{money(r.estimated_amount)}</span>,
-    },
-    {
-      key: "needed",
-      header: "Needed by",
-      hideOnNarrow: true,
-      render: (r) => (r.required_date ? fmtDate(r.required_date) : "—"),
-    },
+    // No rate, no amount, no "ordered", no per-line indent. Nobody has quoted yet, so a
+    // figure here reads as a price when it is a guess; the ordered quantity belongs on
+    // the PO; and the indents behind the document are named once in the header rather
+    // than repeated down a column. The line says what is wanted and how much.
   ];
 
   return (
@@ -134,10 +112,13 @@ export function RequisitionDetailPage() {
                 </Button>
               </Can>
             )}
+            {/* Explicit, never automatic: approving a requisition does not send it
+              * out. A buyer decides who is asked and when, and the form opens
+              * pre-filled with everything this document already says. */}
             {isApproved && (
               <Can do="rfq.create">
                 <Button onClick={() => nav(`/procurement/rfqs/new?requisition=${reqId}`)}>
-                  Raise RFQ
+                  Create RFQ
                 </Button>
               </Can>
             )}
@@ -176,8 +157,68 @@ export function RequisitionDetailPage() {
             <div>
               <dt className="text-xs text-muted">Estimated value</dt>
               <dd className="mt-1 font-semibold text-ink">{money(req.estimated_value)}</dd>
+              {/* Asked of every buyer who sees it, so the screen answers before they
+                * ask. It is a routing figure, not a price — the approval ladder needs
+                * a number and the vendors have not quoted yet. */}
+              <dd className="mt-1 text-[11px] leading-snug text-muted">
+                From the preferred vendor's last rate, then any vendor's last rate,
+                then the item's purchase price. Not a quote.
+              </dd>
             </div>
           </dl>
+
+          {/* Who is asking, for what, and on whose budget. None of it was on screen
+            * before, and an approver cannot place a requisition without it. Department
+            * and company are read off the raiser's HCM record and the install
+            * settings — they are not typed on the document. */}
+          <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-line pt-4 text-sm sm:grid-cols-4">
+            <div>
+              <dt className="text-xs text-muted">Department</dt>
+              <dd className="mt-1 text-body">{req.department_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Warehouse</dt>
+              <dd className="mt-1 text-body">{req.warehouse_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Project</dt>
+              <dd className="mt-1 text-body">{req.project_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Company</dt>
+              <dd className="mt-1 text-body">{req.company_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Priority</dt>
+              <dd className="mt-1 text-body">{req.priority ?? "Normal"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Needed by</dt>
+              <dd className="mt-1 text-body">
+                {req.required_date ? fmtDate(req.required_date) : "—"}
+              </dd>
+            </div>
+            {/* Every material request folded in, not just the first. A consolidated
+              * requisition serves several, and the header is where they are named. */}
+            <div className="col-span-2">
+              <dt className="text-xs text-muted">
+                From material request{(req.source_mr_nos ?? []).length > 1 ? "s" : ""}
+              </dt>
+              <dd className="mt-1 flex flex-wrap gap-1.5">
+                {(req.source_mr_nos ?? []).length
+                  ? req.source_mr_nos!.map((no) => (
+                      <span
+                        key={no}
+                        className="rounded-md bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-body"
+                      >
+                        {no}
+                      </span>
+                    ))
+                  : <span className="text-body">Raised directly</span>}
+              </dd>
+            </div>
+          </dl>
+
           {req.remarks && (
             <p className="mt-4 border-t border-line pt-4 text-sm text-body">{req.remarks}</p>
           )}
@@ -197,9 +238,7 @@ export function RequisitionDetailPage() {
                 {r.item_name ?? `Item ${r.item_id}`}
               </div>
               <div className="font-mono text-[11px] text-muted">{r.item_code ?? "—"}</div>
-              <div className="text-xs text-body">
-                {r.quantity} {r.uom_code ?? ""} · {money(r.estimated_amount)}
-              </div>
+              <div className="text-xs text-body">{r.quantity} {r.uom_code ?? ""}</div>
             </div>
           )}
         />

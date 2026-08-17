@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, Select, type Column,
+  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, Select,
+  type Column,
 } from "@/shared/components";
 import { poApi } from "../api";
 import type { POListRow } from "../types";
@@ -29,9 +30,11 @@ const SIZE = 20;
 /**
  * The purchase order list.
  *
- * A PO is only ever raised from an approved indent (`create_po_from_indent`), so this
- * screen has no "New" button on purpose — the chain starts one document upstream.
- * It reads, filters and opens; the detail screen owns every action.
+ * Most orders are written by the chain — from an approved indent, or from the quotation
+ * that won a tender — and those carry the rates the vendor actually offered. "New
+ * purchase order" is the way in for the rest: a repeat buy on an agreed rate, an
+ * emergency, a service already running. Those were being entered as fake indents.
+ * The list reads, filters and opens; the detail screen owns every action after that.
  */
 export function POListPage() {
   const nav = useNavigate();
@@ -81,7 +84,15 @@ export function POListPage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Procurement" title="Purchase Orders" />
+      <PageHeader
+        eyebrow="Procurement"
+        title="Purchase Orders"
+        actions={
+          <Can do="po.create">
+            <Button onClick={() => nav("/pos/new")}>New purchase order</Button>
+          </Can>
+        }
+      />
 
       <div className="mb-4 max-w-xs">
         <Select
@@ -106,7 +117,7 @@ export function POListPage() {
           empty={
             status
               ? "No purchase orders in this status."
-              : "No purchase orders yet. One is raised from an approved indent."
+              : "No purchase orders yet. Raise one here, or award a tender and create it from the winning quote."
           }
           renderCard={(r) => (
             <div className="space-y-1.5">

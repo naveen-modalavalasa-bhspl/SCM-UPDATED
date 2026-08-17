@@ -12,6 +12,9 @@ export interface DraftLine {
   quantity: string;
   uom_code?: string | null;
   rate?: string;
+  /** Only a purchase order states one: an RFQ asks for the tax, a requisition has no
+   *  business guessing it, and an order is where it is finally agreed. */
+  tax_percent?: string;
   required_date?: string;
   description?: string;
 }
@@ -33,11 +36,14 @@ interface MasterItem {
  * in the chain, so importing it is the allowed direction (rule 5).
  */
 export function LinePicker({
-  lines, onChange, showRate = false, disabled = false,
+  lines, onChange, showRate = false, showTax = false, showDate = true,
+  disabled = false,
 }: {
   lines: DraftLine[];
   onChange: (lines: DraftLine[]) => void;
   showRate?: boolean;
+  showTax?: boolean;
+  showDate?: boolean;
   disabled?: boolean;
 }) {
   const [search, setSearch] = useState("");
@@ -68,7 +74,7 @@ export function LinePicker({
           key={index}
           className="grid grid-cols-1 gap-3 rounded-xl border border-line p-3 sm:grid-cols-12"
         >
-          <div className={showRate ? "sm:col-span-5" : "sm:col-span-6"}>
+          <div className={showTax ? "sm:col-span-4" : showRate ? "sm:col-span-5" : "sm:col-span-6"}>
             <Field label={index === 0 ? "Item" : ""}>
               <ItemCombobox
                 value={line.item_id}
@@ -96,7 +102,10 @@ export function LinePicker({
           </div>
           {showRate && (
             <div className="sm:col-span-2">
-              <Field label={index === 0 ? "Est. rate" : ""}>
+              {/* "Rate", not "Est. rate": the only screen that still shows this column
+                * is the purchase order, where the number is an agreed price rather
+                * than a guess. */}
+              <Field label={index === 0 ? "Rate" : ""}>
                 <Input
                   type="number"
                   min="0"
@@ -108,16 +117,32 @@ export function LinePicker({
               </Field>
             </div>
           )}
-          <div className={showRate ? "sm:col-span-2" : "sm:col-span-3"}>
-            <Field label={index === 0 ? "Needed by" : ""}>
-              <Input
-                type="date"
-                value={line.required_date ?? ""}
-                disabled={disabled}
-                onChange={(e) => set(index, { required_date: e.target.value })}
-              />
-            </Field>
-          </div>
+          {showTax && (
+            <div className="sm:col-span-2">
+              <Field label={index === 0 ? "Tax %" : ""}>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={line.tax_percent ?? ""}
+                  disabled={disabled}
+                  onChange={(e) => set(index, { tax_percent: e.target.value })}
+                />
+              </Field>
+            </div>
+          )}
+          {showDate && (
+            <div className={showRate ? "sm:col-span-2" : "sm:col-span-3"}>
+              <Field label={index === 0 ? "Needed by" : ""}>
+                <Input
+                  type="date"
+                  value={line.required_date ?? ""}
+                  disabled={disabled}
+                  onChange={(e) => set(index, { required_date: e.target.value })}
+                />
+              </Field>
+            </div>
+          )}
           <div className="flex items-end sm:col-span-1">
             <button
               type="button"
