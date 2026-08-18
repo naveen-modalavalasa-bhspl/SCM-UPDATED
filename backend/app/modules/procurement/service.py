@@ -1488,6 +1488,14 @@ async def get_requisition(db: AsyncSession, req_id: int, user=None) -> Requisiti
     )).scalars().all())
     req.source_mr_nos = ([row.mr_no for row in sources if row.mr_no]
                          or ([req.source_mr_no] if req.source_mr_no else []))
+
+    existing_rfq = await db.scalar(
+        select(RFQ.id)
+        .where(RFQ.requisition_id == req.id,
+               RFQ.status != RFQStatus.CANCELLED.value)
+        .limit(1)
+    )
+    req.has_rfq = bool(existing_rfq)
     return req
 
 

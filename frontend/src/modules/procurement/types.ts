@@ -268,6 +268,7 @@ export interface Requisition extends ReqListRow {
    *  company). Neither is a column on `pro_requisitions` and neither is editable. */
   department_id?: number | null;
   department_name?: string | null;
+  has_rfq?: boolean;
   company_name?: string | null;
   /** One "needed by" for the whole document. A line may still carry its own. */
   required_date?: string | null;
