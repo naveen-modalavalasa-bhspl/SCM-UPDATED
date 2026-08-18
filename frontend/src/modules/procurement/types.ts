@@ -46,6 +46,10 @@ export interface PurchaseOrder {
   billing_address?: string | null;
   shipping_address?: string | null;
   current_approver_name?: string | null;
+  /** Who the approval engine is waiting on RIGHT NOW, read live by the server.
+   *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
+   *  and goes stale when a ladder is edited or a delegation is added. */
+  pending_with?: string[];
   /** What the vendor said about the order we sent them. Null means never sent. */
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
@@ -94,6 +98,10 @@ export interface POListRow {
   vendor_status?: string | null;
   revision_no?: number;
   total_amount: number;
+  /** Who the approval engine is waiting on RIGHT NOW, read live by the server.
+   *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
+   *  and goes stale when a ladder is edited or a delegation is added. */
+  pending_with?: string[];
   created_at: string;
 }
 
@@ -160,6 +168,10 @@ export interface ReqListRow {
   total_items: number;
   estimated_value: number;
   current_approver_name?: string | null;
+  /** Who the approval engine is waiting on RIGHT NOW, read live by the server.
+   *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
+   *  and goes stale when a ladder is edited or a delegation is added. */
+  pending_with?: string[];
   created_by_name?: string | null;
   created_at: string;
 }
@@ -209,6 +221,10 @@ export interface ConsolidationListRow {
   source_count: number;
   estimated_value: number;
   current_approver_name?: string | null;
+  /** Who the approval engine is waiting on RIGHT NOW, read live by the server.
+   *  On a consolidation this is the ONLY working source: `current_approver_name` is
+   *  never written on this document, only cleared, so the column read blank forever. */
+  pending_with?: string[];
   created_by_name?: string | null;
   created_at: string;
 }
@@ -341,6 +357,10 @@ export interface RFQListRow {
   response_count: number;
   awarded_vendor_name?: string | null;
   current_approver_name?: string | null;
+  /** Who the approval engine is waiting on RIGHT NOW, read live by the server.
+   *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
+   *  and goes stale when a ladder is edited or a delegation is added. */
+  pending_with?: string[];
   created_at: string;
 }
 
@@ -725,4 +745,38 @@ export interface VendorPOListRow {
   status: string;
   total_amount: number;
   despatch_note_count: number;
+}
+
+
+// --------------------------------------------------------------------------- //
+//  Approval trail — the same shape for every procurement document
+// --------------------------------------------------------------------------- //
+
+export interface ApprovalPendingRow {
+  id: number;
+  name: string;
+}
+
+export interface ApprovalEventRow {
+  stage_sequence?: number | null;
+  /** Whatever the ladder calls this rung. Rendered verbatim: the rungs are configured
+   *  per project on Settings > Approvals Config, so any map in the frontend would go
+   *  stale the moment somebody renames one. */
+  stage_name?: string | null;
+  actor_id?: number | null;
+  actor_name?: string | null;
+  actor_position?: string | null;
+  action: string;
+  comments?: string | null;
+  acted_at?: string | null;
+}
+
+export interface ApprovalTrail {
+  doc_type: string;
+  doc_id: number;
+  /** Null when the document has never been submitted. */
+  instance_status?: string | null;
+  stage_name?: string | null;
+  pending_with: ApprovalPendingRow[];
+  history: ApprovalEventRow[];
 }

@@ -6,6 +6,7 @@ import {
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { requisitionApi } from "../api";
+import { ApprovalTrail } from "../components/ApprovalTrail";
 import { money } from "./RequisitionListPage";
 import type { ReqItem } from "../types";
 
@@ -243,6 +244,8 @@ export function RequisitionDetailPage() {
           )}
         />
       </Card>
+
+      <ApprovalTrail docType="REQUISITION" docId={Number(id)} />
     </div>
   );
 }

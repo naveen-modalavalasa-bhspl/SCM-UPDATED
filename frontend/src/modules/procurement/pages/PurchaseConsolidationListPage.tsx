@@ -96,9 +96,13 @@ export function PurchaseConsolidationListPage() {
     },
     {
       key: "with",
-      header: "With",
+      header: "Pending with",
       hideOnNarrow: true,
-      render: (r) => r.current_approver_name ?? "—",
+      // `current_approver_name` is NEVER written on a consolidation — only cleared —
+      // so this column read "—" on every sheet. `pending_with` is the live answer.
+      render: (r) => (r.pending_with?.length
+        ? r.pending_with.join(", ")
+        : "—"),
     },
   ];
 

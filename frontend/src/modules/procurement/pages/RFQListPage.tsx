@@ -48,6 +48,17 @@ export function RFQListPage() {
     },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     {
+      key: "with",
+      header: "Pending with",
+      hideOnNarrow: true,
+      // Live from the approval engine. `current_approver_name` behind it is the
+      // snapshot the row used to carry, kept only as a fallback.
+      render: (r) => (r.pending_with?.length
+        ? r.pending_with.join(", ")
+        : (r.current_approver_name ?? "—")),
+    },
+
+    {
       key: "responses",
       header: "Responses",
       className: "text-right",

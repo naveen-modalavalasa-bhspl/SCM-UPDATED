@@ -110,6 +110,42 @@ class ActionIn(BaseModel):
     comments: str = ""
 
 
+# --------------------------------------------------------------------------- #
+#  Approval trail — one shape for every procurement document
+# --------------------------------------------------------------------------- #
+
+class ApprovalPendingRow(BaseModel):
+    """A person the engine is waiting on. A NAME, never a permission: who may press
+    the button is `engine.actionable_doc_ids`, and appearing here grants nothing."""
+    id: int
+    name: str
+
+
+class ApprovalEventRow(BaseModel):
+    """One rung, as it actually happened. `stage_name` is whatever the ladder called
+    it at the time — never mapped, abbreviated or re-titled here, because the rungs
+    are configured per project on Settings > Approvals Config and a lookup in code
+    would go stale the moment somebody renames one."""
+    stage_sequence: int | None = None
+    stage_name: str | None = None
+    actor_id: int | None = None
+    actor_name: str | None = None
+    actor_position: str | None = None
+    action: str
+    comments: str | None = None
+    acted_at: datetime | None = None
+
+
+class ApprovalTrailOut(BaseModel):
+    doc_type: str
+    doc_id: int
+    #: None when the document has never been submitted — no instance exists yet.
+    instance_status: str | None = None
+    stage_name: str | None = None
+    pending_with: list[ApprovalPendingRow] = []
+    history: list[ApprovalEventRow] = []
+
+
 class POItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -160,6 +196,12 @@ class POOut(BaseModel):
     billing_address: str | None = None
     shipping_address: str | None = None
     current_approver_name: str | None = None
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
     # What the vendor said, and which revision they said it about. Both null on an
     # order that has never been sent, which is how a reader tells "not asked yet" from
     # "asked and waiting".
@@ -185,6 +227,12 @@ class POListRow(BaseModel):
     vendor_status: str | None = None
     revision_no: int = 0
     total_amount: float
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
     created_at: datetime
 
 
@@ -275,6 +323,12 @@ class ReqListRow(BaseModel):
     total_items: int
     estimated_value: float
     current_approver_name: str | None = None
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
     created_by_name: str | None = None
     created_at: datetime
 
@@ -407,6 +461,12 @@ class RFQListRow(BaseModel):
     response_count: int
     awarded_vendor_name: str | None = None
     current_approver_name: str | None = None
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
     created_at: datetime
 
 
@@ -508,6 +568,12 @@ class ConsolidationListRow(BaseModel):
     source_count: int
     estimated_value: float
     current_approver_name: str | None = None
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
     created_by_name: str | None = None
     created_at: datetime
 

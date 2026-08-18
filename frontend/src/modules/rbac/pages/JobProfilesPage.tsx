@@ -69,7 +69,13 @@ const MODULE_ALIAS: Record<string, string> = {
   indent: "indents",
   master: "masters",
   report: "reports",
-  logistics: "warehouse",      // the endpoints moved; the screens are under Warehouse
+  // `logistics` was aliased to "warehouse" back when the outward leg was a handful of
+  // screens filed under the Warehouse group. It stopped being true on 2026-08-17, when
+  // Logistics became a module row of its own (grp_logistics) — and the stale alias then
+  // collapsed both modules into ONE card. Logistics sorts first (its children are
+  // sort_order 1-7 against Warehouse's 40-59), so it won the card's name and the whole
+  // Warehouse module — 17 screens and 29 actions — disappeared from Job Profiles.
+  // Two module rows in the rail are two cards here; neither side needs an alias now.
 };
 
 const moduleKey = (name: string) => {
@@ -217,6 +223,18 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   },
   wh_issues: {
     hint: "Record stock issued from the warehouse to a department.",
+  },
+  wh_material_returns: {
+    hint: "Record stock coming back into the warehouse from a department.",
+  },
+  wh_segregation: {
+    hint: "Split received stock into good, damaged and rejected before it is put away.",
+  },
+  wh_stock_movements: {
+    hint: "Move stock between bins and storage areas inside the warehouse.",
+  },
+  wh_ack: {
+    hint: "Confirm that a dispatched consignment arrived at the receiving site.",
   },
   wh_consignments: {
     hint: "Group and track goods that are being prepared for delivery.",

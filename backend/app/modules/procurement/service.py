@@ -36,6 +36,7 @@ from app.modules.procurement import consolidation
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
 from app.platform.settings.service import get_setting, write_audit
 from app.platform.workflow import engine
+from app.platform.workflow.models import Instance as WorkflowInstance
 from app.shared import evaluation
 from app.shared.models.warehouse import Warehouse
 from app.shared.scope import scope_condition
@@ -707,17 +708,31 @@ async def list_pos(db: AsyncSession, params: PageParams, status: str | None = No
         stmt = stmt.where(PurchaseOrder.status == status)
     if vendor_id is not None:
         stmt = stmt.where(PurchaseOrder.vendor_id == vendor_id)
-    return await paginate(db, stmt.order_by(PurchaseOrder.created_at.desc()), params)
+    return await _attach_pending_with(db, DocType.PO.value, await paginate(
+        db, stmt.order_by(PurchaseOrder.created_at.desc()), params))
 
 
 async def submit_po(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
     po = await get_po(db, po_id)
     if po.status != POStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit a PO in {po.status} status")
-    await engine.start(db, DocType.PO.value, po.id,
-                       context={"total_amount": float(po.total_amount)}, user=user)
-    po.status = POStatus.PENDING_APPROVAL.value
-    await _refresh_current_approver(db, po)
+    instance = await engine.start(db, DocType.PO.value, po.id,
+                                  context={"total_amount": float(po.total_amount)},
+                                  user=user)
+    # A ladder can finish AT submit — every rung switched off, NO_APPROVAL, or the
+    # raiser is the top of it — and the engine hands back an already-approved
+    # instance. Recording PENDING_APPROVAL anyway left the order waiting for an
+    # approval that had already happened, with no pending row to make it happen and
+    # no way out: `act_on_po` passed the status guard and then died on "No
+    # in-progress approval for this document". Same rule the MR, the allocation, the
+    # transport request and the consolidation sheet already follow (rule 8).
+    if instance.status == InstanceStatus.APPROVED.value:
+        po.status = POStatus.APPROVED.value
+        po.approved_at = utcnow()
+        po.current_approver_name = None
+    else:
+        po.status = POStatus.PENDING_APPROVAL.value
+        await _refresh_current_approver(db, po)
     await db.commit()
     await db.refresh(po)
     return po
@@ -933,6 +948,25 @@ async def open_for_grn(db: AsyncSession, params: PageParams) -> dict:
     return await paginate(db, stmt, params)
 
 
+async def _attach_pending_with(db: AsyncSession, doc_type: str, page: dict) -> dict:
+    """Hang "who is it waiting on" on a whole screenful, in ONE query.
+
+    `engine.pending_approver_names` exists for exactly this: asking
+    `current_approvers` once per row would be a query per document. The names are set
+    on the ORM rows themselves — not a mapped column, so nothing is persisted; the
+    response schema reads it off the attribute, the same trick the indent register
+    uses for `office_sac`.
+    """
+    rows = page.get("items") or []
+    if not rows:
+        return page
+    waiting = await engine.pending_approver_names(
+        db, doc_type, [row.id for row in rows])
+    for row in rows:
+        row.pending_with = waiting.get(row.id, [])
+    return page
+
+
 async def _refresh_current_approver(db: AsyncSession, po: PurchaseOrder) -> None:
     approvers = await engine.current_approvers(db, DocType.PO.value, po.id)
     po.current_approver_name = ", ".join(a.full_name for a in approvers) or None
@@ -945,6 +979,103 @@ async def _refresh_current_approver(db: AsyncSession, po: PurchaseOrder) -> None
 async def _approver_names(db: AsyncSession, doc_type: str, doc_id: int) -> str | None:
     approvers = await engine.current_approvers(db, doc_type, doc_id)
     return ", ".join(a.full_name for a in approvers) or None
+
+
+# =========================================================================== #
+#  Where a document is waiting, and everything that has happened to it
+# =========================================================================== #
+
+async def _approval_trail(db: AsyncSession, doc_type: str, doc_id: int) -> dict:
+    """Who holds this document right now, and every rung it has already passed.
+
+    Read LIVE from the engine rather than from the document's own
+    `current_approver_name`: that column is a snapshot written at submit and at each
+    decision, so a ladder edited afterwards, a delegation, or a post retired under it
+    leaves the stored name pointing at somebody who can no longer sign. The engine is
+    the only thing that knows who is actually in `wf_pending` today (rule 8).
+
+    Nothing here decides anything. It reads, and the caller has already loaded the
+    document through its own getter, so the reader's scope has been applied before we
+    get here — the trail can never be a way to read a document you cannot open.
+    """
+    instance = (await db.execute(
+        select(WorkflowInstance).where(
+            WorkflowInstance.doc_type == doc_type,
+            WorkflowInstance.doc_id == doc_id,
+        )
+    )).scalars().first()
+    approvers = await engine.current_approvers(db, doc_type, doc_id)
+    actions = await engine.history(db, doc_type, doc_id)
+    return {
+        "doc_type": doc_type,
+        "doc_id": doc_id,
+        "instance_status": instance.status if instance else None,
+        "stage_name": instance.current_stage_name if instance else None,
+        # Names only. Who MAY press the button is `engine.actionable_doc_ids`, and
+        # showing a name here must never be mistaken for granting one.
+        "pending_with": [{
+            "id": a.id, "name": a.full_name,
+        } for a in approvers],
+        "history": [{
+            "stage_sequence": a.stage_sequence,
+            "stage_name": a.stage_name,
+            "actor_id": a.actor_id,
+            "actor_name": a.actor_name,
+            "actor_position": a.actor_position,
+            "action": a.action,
+            "comments": a.comments,
+            "acted_at": a.acted_at.isoformat() if a.acted_at else None,
+        } for a in actions],
+    }
+
+
+async def _attach_pending_one(db: AsyncSession, doc_type: str, doc):
+    """The list helper, for a single document, so a detail response never carries an
+    empty `pending_with` that a reader would mistake for "nobody is holding it"."""
+    waiting = await engine.pending_approver_names(db, doc_type, [doc.id])
+    doc.pending_with = waiting.get(doc.id, [])
+    return doc
+
+
+async def get_po_detail(db: AsyncSession, po_id: int, user=None):
+    return await _attach_pending_one(
+        db, DocType.PO.value, await get_po(db, po_id, user))
+
+
+async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):
+    return await _attach_pending_one(
+        db, DocType.REQUISITION.value, await get_requisition(db, req_id, user))
+
+
+async def get_rfq_detail(db: AsyncSession, rfq_id: int, user=None):
+    return await _attach_pending_one(
+        db, DocType.RFQ.value, await get_rfq(db, rfq_id, user))
+
+
+async def get_consolidation_detail(db: AsyncSession, cons_id: int):
+    return await _attach_pending_one(
+        db, DocType.CONSOLIDATION.value,
+        await consolidation.get_consolidation(db, cons_id))
+
+
+async def po_approval_trail(db: AsyncSession, po_id: int, user=None) -> dict:
+    po = await get_po(db, po_id, user)
+    return await _approval_trail(db, DocType.PO.value, po.id)
+
+
+async def requisition_approval_trail(db: AsyncSession, req_id: int, user=None) -> dict:
+    req = await get_requisition(db, req_id, user)
+    return await _approval_trail(db, DocType.REQUISITION.value, req.id)
+
+
+async def rfq_approval_trail(db: AsyncSession, rfq_id: int, user=None) -> dict:
+    rfq = await get_rfq(db, rfq_id, user)
+    return await _approval_trail(db, DocType.RFQ.value, rfq.id)
+
+
+async def consolidation_approval_trail(db: AsyncSession, cons_id: int) -> dict:
+    doc = await consolidation.get_consolidation(db, cons_id)
+    return await _approval_trail(db, DocType.CONSOLIDATION.value, doc.id)
 
 
 async def _item_snapshot(db: AsyncSession, item_id: int) -> Item | None:
@@ -1359,7 +1490,8 @@ async def list_requisitions(db: AsyncSession, params: PageParams,
             db, user, owner_col=Requisition.created_by_id))
     if status:
         stmt = stmt.where(Requisition.status == status)
-    return await paginate(db, stmt.order_by(Requisition.created_at.desc()), params)
+    return await _attach_pending_with(db, DocType.REQUISITION.value, await paginate(
+        db, stmt.order_by(Requisition.created_at.desc()), params))
 
 
 async def update_requisition(db: AsyncSession, req_id: int, data: ReqCreate,
@@ -1390,11 +1522,20 @@ async def submit_requisition(db: AsyncSession, req_id: int, user) -> Requisition
     req = await get_requisition(db, req_id, user)
     if req.status != RequisitionStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit a requisition in {req.status} status")
-    await engine.start(db, DocType.REQUISITION.value, req.id,
-                       context={"total_amount": float(req.estimated_value)}, user=user)
-    req.status = RequisitionStatus.PENDING_APPROVAL.value
-    req.current_approver_name = await _approver_names(
-        db, DocType.REQUISITION.value, req.id)
+    instance = await engine.start(
+        db, DocType.REQUISITION.value, req.id,
+        context={"total_amount": float(req.estimated_value)}, user=user)
+    # See submit_po: a ladder that resolves to nobody comes back APPROVED, and
+    # parking the requisition at PENDING_APPROVAL strands it for good.
+    if instance.status == InstanceStatus.APPROVED.value:
+        req.status = RequisitionStatus.APPROVED.value
+        req.approved_at = utcnow()
+        req.approved_by_name = user.full_name
+        req.current_approver_name = None
+    else:
+        req.status = RequisitionStatus.PENDING_APPROVAL.value
+        req.current_approver_name = await _approver_names(
+            db, DocType.REQUISITION.value, req.id)
     await db.commit()
     return await get_requisition(db, req_id)
 
@@ -1615,7 +1756,8 @@ async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = N
         stmt = stmt.where(await scope_condition(db, user, owner_col=RFQ.created_by_id))
     if status:
         stmt = stmt.where(RFQ.status == status)
-    return await paginate(db, stmt.order_by(RFQ.created_at.desc()), params)
+    return await _attach_pending_with(db, DocType.RFQ.value, await paginate(
+        db, stmt.order_by(RFQ.created_at.desc()), params))
 
 
 async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RFQ:
@@ -1697,10 +1839,18 @@ async def submit_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
         raise ValidationError(f"Cannot submit an RFQ in {rfq.status} status")
     if not rfq.vendors:
         raise ValidationError("Add at least one vendor before sending an RFQ out")
-    await engine.start(db, DocType.RFQ.value, rfq.id,
-                       context={"vendor_count": rfq.vendor_count}, user=user)
-    rfq.status = RFQStatus.PENDING_APPROVAL.value
-    rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
+    instance = await engine.start(db, DocType.RFQ.value, rfq.id,
+                                  context={"vendor_count": rfq.vendor_count}, user=user)
+    # See submit_po: a ladder that resolves to nobody comes back APPROVED, and
+    # parking the RFQ at PENDING_APPROVAL strands it for good. Approved means
+    # PUBLISHED for an RFQ — `_publish_rfq` is the same call `act_on_rfq` makes, so a
+    # ladder-free project opens the RFQ to its vendors exactly as an approved one
+    # does, rather than inventing a status the enum does not have.
+    if instance.status == InstanceStatus.APPROVED.value:
+        await _publish_rfq(db, rfq)
+    else:
+        rfq.status = RFQStatus.PENDING_APPROVAL.value
+        rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
     await db.commit()
     return await get_rfq(db, rfq_id)
 

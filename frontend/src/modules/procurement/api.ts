@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
+  ApprovalTrail,
   Comparison, Consolidation, ConsolidationCreate, ConsolidationListRow,
   ConsolidationSource, DespatchNote, DespatchNoteWrite, EvaluationMethodOption,
   MRCandidate, POAmend, POCreate, POFromQuotation, POHeader, POListRow, PORevision,
@@ -204,3 +205,34 @@ export const supplierApi = {
   submitQuotation: (rfqId: number, data: QuoteSubmit) =>
     api.post<Quotation>(`/api/supplier/rfqs/${rfqId}/quotation`, data).then((r) => r.data),
 };
+
+
+// --------------------------------------------------------------------------- //
+//  Approval trail
+//
+//  One route per document, each guarded by that document's OWN view permission on
+//  the server (`po.view`, `requisition.view`, `rfq.view`, `consolidation.view`) —
+//  no new permission code, so nothing needs reseeding and no job profile changes.
+//  Deliberately NOT `/api/approvals/history/...`: that one is scoped to people who
+//  took part in the approval, so a buyer reading somebody else's order gets an
+//  empty list from it.
+// --------------------------------------------------------------------------- //
+
+/** The base path each procurement document is served under. */
+const TRAIL_PATH: Record<string, string> = {
+  PO: "/api/pos",
+  REQUISITION: "/api/requisitions",
+  RFQ: "/api/rfqs",
+  CONSOLIDATION: "/api/consolidations",
+};
+
+export type ProcurementDocType = keyof typeof TRAIL_PATH;
+
+export const approvalTrailApi = {
+  get: (docType: ProcurementDocType, docId: number) =>
+    api.get<ApprovalTrail>(`${TRAIL_PATH[docType]}/${docId}/approvals`)
+      .then((r) => r.data),
+};
+
+export const approvalTrailKey = (docType: string, docId: number) =>
+  ["procurement", "approval-trail", docType, docId] as const;

@@ -81,7 +81,17 @@ async def list_consolidations(db: AsyncSession, params: PageParams,
         stmt = stmt.where(PurchaseConsolidation.status.in_(wanted))
     if project_id:
         stmt = stmt.where(PurchaseConsolidation.project_id == project_id)
-    return await paginate(db, stmt.order_by(PurchaseConsolidation.id.desc()), params)
+    page = await paginate(
+        db, stmt.order_by(PurchaseConsolidation.id.desc()), params)
+    # `current_approver_name` is never written on a consolidation — only cleared — so
+    # the register's approver column read blank on every sheet. This is the live one.
+    rows = page.get("items") or []
+    if rows:
+        waiting = await engine.pending_approver_names(
+            db, DocType.CONSOLIDATION.value, [row.id for row in rows])
+        for row in rows:
+            row.pending_with = waiting.get(row.id, [])
+    return page
 
 
 async def sources_of(db: AsyncSession, cons_id: int) -> list[PurchaseConsolidationSource]:

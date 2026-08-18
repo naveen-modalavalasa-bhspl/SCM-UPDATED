@@ -6,6 +6,7 @@ import {
   Button, Can, Card, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
 import { poApi } from "../api";
+import { ApprovalTrail } from "../components/ApprovalTrail";
 import {
   blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue,
 } from "../components/POHeaderFields";
@@ -386,9 +387,17 @@ export function PODetailPage() {
       </div>
     </Card>}
 
+    <div className="mt-4">
+      <ApprovalTrail docType="PO" docId={po.data.id} />
+    </div>
+
     {canDecide && <Card className="mt-4 space-y-3 p-4">
-      {po.data.current_approver_name && <p className="text-sm text-muted">
-        Waiting on {po.data.current_approver_name}.
+      {/* `pending_with` is read live by the server; `current_approver_name` is the
+          snapshot behind it and only used where the live read came back empty. */}
+      {(po.data.pending_with?.length || po.data.current_approver_name) && <p className="text-sm text-muted">
+        Waiting on {po.data.pending_with?.length
+          ? po.data.pending_with.join(", ")
+          : po.data.current_approver_name}.
       </p>}
       <Field label="Comments">
         <Input value={comments} onChange={(event) => setComments(event.target.value)} placeholder="Optional approval comment" />

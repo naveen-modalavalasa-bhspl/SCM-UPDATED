@@ -7,6 +7,7 @@ import {
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
+import { ApprovalTrail } from "../components/ApprovalTrail";
 import { money } from "./RequisitionListPage";
 
 const EDITABLE = ["DRAFT"];
@@ -245,6 +246,8 @@ export function PurchaseConsolidationDetailPage() {
           )}
         </Card>
       </div>
+
+      <ApprovalTrail docType="CONSOLIDATION" docId={Number(id)} />
 
       <ConfirmModal
         isOpen={reject}

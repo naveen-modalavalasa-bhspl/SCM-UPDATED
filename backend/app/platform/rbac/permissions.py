@@ -522,6 +522,14 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("wh_segregation", "warehouse", "Warehouse · Stock Segregation"),
     ("wh_stock_movements", "warehouse", "Warehouse · Stock Movements"),
     ("wh_issues", "warehouse", "Warehouse · Material Issues"),
+    # The two screens the catalogue never listed, so the Job Profiles tick for each
+    # was somebody else's ACTION: Material Returns rode on `issue.view` (shared with
+    # Material Issues until that got its own code) and Acknowledge Delivery rode on
+    # `dispatch.acknowledge`, so unticking the screen took the button away with it.
+    # Both are live routes (`/warehouse/material-returns`, `/warehouse/acknowledge-
+    # delivery`); they are gated below by INHERITS_GRANTS_FROM so nobody loses them.
+    ("wh_material_returns", "warehouse", "Warehouse · Material Returns"),
+    ("wh_ack", "warehouse", "Warehouse · Acknowledge Delivery"),
     ("wh_picklist", "warehouse", "Warehouse · Picklists"),
     ("wh_consignments", "warehouse", "Warehouse · Consignments"),
     ("wh_dispatch", "warehouse", "Warehouse · Dispatch"),
@@ -611,4 +619,9 @@ INHERITS_GRANTS_FROM.update({
     # TRANSPORT_ACKNOWLEDGE inheriting TRANSPORT_TRACK — the button and the screen it
     # sits on must land with the same people or one of them is dead.
     page_view_code("logistics_acknowledgements"): page_view_code("logistics_tracking"),
+    # Not a split but a late catalogue entry, which needs the same treatment: the
+    # screen has been reachable on these two codes for months, and minting its page
+    # permission fail-closed would silently retire a screen people work every day.
+    page_view_code("wh_material_returns"): ISSUE_VIEW,
+    page_view_code("wh_ack"): DISPATCH_ACKNOWLEDGE,
 })

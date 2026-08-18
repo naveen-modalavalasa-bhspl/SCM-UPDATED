@@ -21,7 +21,7 @@ from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.procurement import service
 from app.modules.procurement.schemas import (
-    ActionIn, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
+    ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
     POAmendIn, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
@@ -82,7 +82,7 @@ async def create_from_quotation(quotation_id: int,
 @pos.get("/{po_id}", response_model=POOut)
 async def get_one(po_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.PO_VIEW))):
-    return await service.get_po(db, po_id, user=user)
+    return await service.get_po_detail(db, po_id, user=user)
 
 
 @pos.put("/{po_id}", response_model=POOut)
@@ -106,6 +106,21 @@ async def po_revisions(po_id: int, db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.PO_VIEW))):
     """Every version this order has been. Reading one needs only `po.view`."""
     return await service.po_revisions(db, po_id, user)
+
+
+
+# --------------------------------------------------------------------------- #
+#  Approval trail — one route per document, each on that document's OWN view
+#  permission. No new permission code is invented (rule 6): if a login may open the
+#  order, it may see who signed it and who is holding it now. That also means every
+#  job profile already configured keeps working with no reseed.
+# --------------------------------------------------------------------------- #
+
+@pos.get("/{po_id}/approvals", response_model=ApprovalTrailOut)
+async def po_approvals(po_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.PO_VIEW))):
+    """Where this order is waiting, and every rung it has already passed."""
+    return await service.po_approval_trail(db, po_id, user)
 
 
 @pos.post("/{po_id}/submit", response_model=POOut)
@@ -186,7 +201,7 @@ async def requisition_sources(req_id: int, db: AsyncSession = Depends(get_db),
 @requisitions.get("/{req_id}", response_model=ReqOut)
 async def get_requisition(req_id: int, db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(perms.REQUISITION_VIEW))):
-    return await service.get_requisition(db, req_id, user=user)
+    return await service.get_requisition_detail(db, req_id, user=user)
 
 
 @requisitions.put("/{req_id}", response_model=ReqOut)
@@ -194,6 +209,13 @@ async def update_requisition(req_id: int, body: ReqCreate,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(perms.REQUISITION_CREATE))):
     return await service.update_requisition(db, req_id, body, user)
+
+
+@requisitions.get("/{req_id}/approvals", response_model=ApprovalTrailOut)
+async def requisition_approvals(
+        req_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    return await service.requisition_approval_trail(db, req_id, user)
 
 
 @requisitions.post("/{req_id}/submit", response_model=ReqOut)
@@ -271,13 +293,19 @@ async def rfq_evaluation_methods(
 @rfqs.get("/{rfq_id}", response_model=RFQOut)
 async def get_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.RFQ_VIEW))):
-    return await service.get_rfq(db, rfq_id, user=user)
+    return await service.get_rfq_detail(db, rfq_id, user=user)
 
 
 @rfqs.put("/{rfq_id}", response_model=RFQOut)
 async def update_rfq(rfq_id: int, body: RFQUpdate, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.RFQ_CREATE))):
     return await service.update_rfq(db, rfq_id, body, user)
+
+
+@rfqs.get("/{rfq_id}/approvals", response_model=ApprovalTrailOut)
+async def rfq_approvals(rfq_id: int, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await service.rfq_approval_trail(db, rfq_id, user)
 
 
 @rfqs.post("/{rfq_id}/submit", response_model=RFQOut)
@@ -533,7 +561,7 @@ async def create_consolidation(body: ConsolidationCreate,
 @consolidations.get("/{cons_id}", response_model=ConsolidationOut)
 async def get_consolidation(cons_id: int, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
-    return await service.get_consolidation(db, cons_id)
+    return await service.get_consolidation_detail(db, cons_id)
 
 
 @consolidations.put("/{cons_id}", response_model=ConsolidationOut)
@@ -566,6 +594,13 @@ async def consolidation_sources(cons_id: int, db: AsyncSession = Depends(get_db)
 async def consolidation_history(cons_id: int, db: AsyncSession = Depends(get_db),
                                 user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
     return await service.consolidation_history(db, cons_id)
+
+
+@consolidations.get("/{cons_id}/approvals", response_model=ApprovalTrailOut)
+async def consolidation_approvals(
+        cons_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
+    return await service.consolidation_approval_trail(db, cons_id)
 
 
 @consolidations.post("/{cons_id}/submit", response_model=ConsolidationOut)

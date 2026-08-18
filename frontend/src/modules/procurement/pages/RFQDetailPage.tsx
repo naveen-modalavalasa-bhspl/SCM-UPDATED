@@ -9,6 +9,7 @@ import {
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { poApi, rfqApi } from "../api";
+import { ApprovalTrail } from "../components/ApprovalTrail";
 import { QuotationComparison } from "../components/QuotationComparison";
 import type { RFQItem, RFQVendor } from "../types";
 
@@ -451,6 +452,8 @@ export function RFQDetailPage() {
           )}
         </>
       )}
+
+      {rfq && <ApprovalTrail docType="RFQ" docId={rfq.id} />}
     </div>
   );
 }

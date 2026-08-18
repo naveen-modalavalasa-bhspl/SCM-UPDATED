@@ -68,6 +68,26 @@ describe("buildAccessSections", () => {
       .toEqual(["Home", "Procurement"]);
   });
 
+  /* Logistics used to be a set of screens filed under Warehouse, and the alias that
+     recorded that outlived it: once Logistics became a module row of its own, the two
+     collapsed into one card — and because Logistics sorts first, the card was called
+     Logistics and the Warehouse module vanished from the screen entirely. Two module
+     rows in the rail are two cards here. */
+  it("keeps Logistics and Warehouse as separate cards", () => {
+    const logistics = page("grp_logistics", "Logistics", null);
+    const warehouse = page("grp_warehouse", "Warehouse", null);
+    const sections = buildAccessSections(
+      [logistics, page("logistics_transport", "Transport Requests", logistics.id),
+       warehouse, page("wh_grn", "Goods Receipt", warehouse.id)],
+      [{ code: "transport.view", module: "logistics", description: "View transport" },
+       { code: "receipt.view", module: "warehouse", description: "View receipts" }],
+    );
+    expect(sections.map((s) => s.name)).toEqual(["Logistics", "Warehouse"]);
+    expect(sections[1].pages.map((p) => p.code))
+      .toEqual(["grp_warehouse", "wh_grn"]);
+    expect(sections[1].features.map((f) => f.code)).toEqual(["receipt.view"]);
+  });
+
   it("loses no action when its module has no screens at all", () => {
     const sections = buildAccessSections(
       [], [{ code: "x.do", module: "orphan", description: "Do x" }],
