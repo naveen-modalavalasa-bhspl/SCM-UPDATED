@@ -70,3 +70,25 @@ async def test_failed_entity_is_logged_not_raised(db):
     log = await sync.sync_entity(db, "offices", Boom())
     assert log.status == "FAILED"
     assert "HCM down" in log.error_message
+
+
+class _Row:
+    """Just the two attributes _stale_position_ids reads off a mirror row."""
+    def __init__(self, is_active=True, raw=None):
+        self.is_active = is_active
+        self.raw = raw if raw is not None else {"id": 1}
+
+
+def test_stale_positions_are_the_active_ones_the_feed_dropped():
+    existing = {1: _Row(), 2: _Row(), 3: _Row(is_active=False)}
+    assert sync._stale_position_ids({1}, existing) == [2]
+
+
+def test_rescued_positions_are_never_retired():
+    # The positions feed never lists these, so absence from it says nothing.
+    existing = {1: _Row(), 9: _Row(raw={"employee": {"id": 12290}})}
+    assert sync._stale_position_ids({1}, existing) == []
+
+
+def test_an_empty_feed_retires_nothing():
+    assert sync._stale_position_ids(set(), {1: _Row(), 2: _Row()}) == []
