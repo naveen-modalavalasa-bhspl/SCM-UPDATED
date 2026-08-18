@@ -1646,6 +1646,17 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
                 "Only an approved requisition can go out for quotation "
                 f"(status {requisition.status})")
 
+        existing_rfq = await db.scalar(
+            select(RFQ.id)
+            .where(RFQ.requisition_id == requisition.id,
+                   RFQ.status != RFQStatus.CANCELLED.value)
+            .limit(1)
+        )
+        if existing_rfq:
+            raise ValidationError(
+                f"Requisition {requisition.req_no} has already been converted to an RFQ"
+            )
+
     sheet = None
     if data.consolidation_id:
         sheet = await consolidation.get_consolidation(db, data.consolidation_id)
