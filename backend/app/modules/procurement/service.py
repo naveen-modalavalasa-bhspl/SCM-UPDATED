@@ -1436,10 +1436,17 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
     indent_nos = dict((await db.execute(
         select(Indent.id, Indent.indent_no).where(Indent.id.in_(indent_ids))
     )).all()) if indent_ids else {}
+    seen_items = set()
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
         if item is None:
             raise ValidationError(f"Item {line.item_id} does not exist")
+        if line.item_id in seen_items:
+            raise ValidationError(
+                f"Item '{item.name or item.code}' is already added. "
+                "An item cannot be added more than once in the same requisition."
+            )
+        seen_items.add(line.item_id)
         rate = _d(line.estimated_rate) or fallback.get(line.item_id, Decimal(0))
         amount = _d(line.quantity) * rate
         total += amount
