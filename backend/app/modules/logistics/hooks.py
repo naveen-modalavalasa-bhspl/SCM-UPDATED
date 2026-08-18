@@ -23,8 +23,31 @@ ON_RELEASE: list[Callable[..., Awaitable[None]]] = []
 #: Signature: `(db, transport_request, user)`.
 ON_ACKNOWLEDGE: list[Callable[..., Awaitable[None]]] = []
 
+#: Asked BEFORE the load is released, while a release can still be refused.
+#: Signature: `(db, transport_request, user) -> str | None` — a reason it may not
+#: leave, or None.
+#:
+#: `ON_RELEASE` runs AFTER the goods have gone and so cannot veto anything: a hook
+#: that declines to settle its own paperwork there does not stop the departure, it
+#: only stops the RECORD of it, and the two documents end up further apart than if it
+#: had said nothing. Whatever wants a say has to be asked here instead.
+#:
+#: Only the strict path asks. A carrier scan or a site signature arriving on a
+#: shipment still reading READY is news that it left days ago — news to be recorded,
+#: never a decision to veto.
+BEFORE_RELEASE: list[Callable[..., Awaitable["str | None"]]] = []
+
 
 async def fire(hooks: list, db, doc, user) -> None:
     """Run every registered hook, in registration order, in the caller's transaction."""
     for hook in hooks:
         await hook(db, doc, user)
+
+
+async def first_objection(hooks: list, db, doc, user) -> str | None:
+    """The first registered reason the load may not leave, or None if there is none."""
+    for hook in hooks:
+        reason = await hook(db, doc, user)
+        if reason:
+            return reason
+    return None

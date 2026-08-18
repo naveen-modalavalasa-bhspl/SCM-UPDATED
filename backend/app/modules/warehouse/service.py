@@ -6417,7 +6417,8 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
 
 
 async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
-                                      user) -> list[str]:
+                                      user, *, condition: str | None = None,
+                                      remarks: str | None = None) -> list[str]:
     """Sign off every open issue serving this indent that the raiser has now confirmed.
 
     The warehouse used to click Acknowledge a second time after the requester had
@@ -6459,12 +6460,14 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
         await _apply_issue_acknowledgement(db, issue, _name(user), None, user)
         signed.append(issue.issue_no)
 
-    signed += await _sign_transport_for_indent(db, indent_id, user)
+    signed += await _sign_transport_for_indent(
+        db, indent_id, user, condition=condition, remarks=remarks)
     return signed
 
 
-async def _sign_transport_for_indent(db: AsyncSession, indent_id: int,
-                                     user) -> list[str]:
+async def _sign_transport_for_indent(db: AsyncSession, indent_id: int, user, *,
+                                     condition: str | None = None,
+                                     remarks: str | None = None) -> list[str]:
     """Close the outward legs behind an indent its raiser has just confirmed.
 
     The requester saying "it reached me" is the same signature the logistics
@@ -6477,24 +6480,45 @@ async def _sign_transport_for_indent(db: AsyncSession, indent_id: int,
     way in, and re-entering through the transport service would run that cascade a
     second time. Neither commits — the caller owns the transaction.
     """
-    from app.modules.logistics.enums import AWAITING_ACK_STATUSES, TransportStatus
+    from app.modules.logistics.enums import (
+        SIGNABLE_STATUSES, AckCondition, TransportStatus,
+    )
     from app.modules.logistics.models import TransportRequest
 
+    # SIGNABLE_STATUSES, not "everything still open". The set is READY, IN_TRANSIT and
+    # DELIVERED — legs that have left — and the exclusions are the whole point of it.
+    # Receipts accumulate (see `acknowledge_receipt`: six today, four next week), so
+    # this runs on EVERY partial acknowledgement, not just the last one. Reaching any
+    # further back would let a requester confirming the first half of their order close
+    # the leg carrying the second half, and a QUOTING leg has carriers actively bidding
+    # on it — that one would vanish out of their portals mid-tender.
     legs = (await db.execute(
         select(TransportRequest)
         .options(selectinload(TransportRequest.items))
         .where(TransportRequest.indent_id == indent_id,
-               TransportRequest.status.in_(AWAITING_ACK_STATUSES))
+               TransportRequest.status.in_(SIGNABLE_STATUSES))
     )).scalars().all()
+
+    # The requester's word on the state of the goods, mapped onto logistics' own enum.
+    # Absent (or GOOD) keeps the previous behaviour exactly: the leg closes clean.
+    reported = (condition or AckCondition.GOOD.value).strip().upper()
 
     now = utcnow()
     for leg in legs:
+        # A leg signed for straight out of READY never had its departure recorded —
+        # nobody pressed "it has left". The goods are in the requester's hands, so it
+        # plainly went; stamping it keeps the shipment from reading as delivered on a
+        # date it was never dispatched. The consignment and the issue behind it are
+        # settled by `_apply_issue_acknowledgement` on the way in, which is why this
+        # does not fire the release hook and run that cascade a second time.
+        leg.dispatched_at = leg.dispatched_at or now
         leg.delivered_at = leg.delivered_at or now
         leg.status = TransportStatus.ACKNOWLEDGED.value
         leg.acknowledged_at = now
         leg.acknowledged_by_id = getattr(user, "id", None)
         leg.acknowledged_by_name = _name(user)
-        leg.ack_condition = leg.ack_condition or "GOOD"
+        leg.ack_condition = leg.ack_condition or reported
+        leg.ack_remarks = leg.ack_remarks or remarks
         for line in leg.items:
             if not line.delivered_qty:
                 line.delivered_qty = line.quantity
@@ -6503,7 +6527,52 @@ async def _sign_transport_for_indent(db: AsyncSession, indent_id: int,
                           after={"status": leg.status},
                           summary=(f"{_name(user) or 'The requester'} confirmed "
                                    f"{leg.tr_no} on the indent"))
+
+    await _raise_receipt_claim(db, legs, reported, remarks, user)
     return [leg.tr_no for leg in legs]
+
+
+async def _raise_receipt_claim(db: AsyncSession, legs: list, condition: str,
+                               remarks: str | None, user) -> None:
+    """Damage reported on an indent receipt, opened as a claim on the shipment.
+
+    ONE claim, not one per leg. A requester reports on the delivery in front of them,
+    not on the transport paperwork behind it, so an indent served by three legs would
+    otherwise open three identical claims for one damaged carton and leave the
+    Exceptions desk reconciling them. It lands on the most recently dispatched leg —
+    the one the goods most likely came on — and the remarks travel with it, which is
+    what the desk actually investigates from.
+
+    DIRECT and OWN_VEHICLE have no carrier, so there is nobody to claim against. The
+    damage is still recorded, because the Exceptions desk wants to know a delivery
+    arrived broken whoever was driving; it is simply not called a carrier claim.
+    """
+    from app.modules.logistics.enums import (
+        ACK_CLAIM_EVENT, AckCondition, ShipmentEventType, TransportMode,
+    )
+    from app.modules.logistics.models import ShipmentEvent
+
+    claim_type = ACK_CLAIM_EVENT.get(condition)
+    if not legs or condition == AckCondition.GOOD.value or not claim_type:
+        return
+
+    target = max(legs, key=lambda leg: (leg.dispatched_at or leg.id, leg.id))
+    in_house = target.mode in (TransportMode.DIRECT.value,
+                               TransportMode.OWN_VEHICLE.value)
+    against = (target.carrier_name if not in_house and target.carrier_name
+               else None)
+    who = _name(user) or "The requester"
+    target.events.append(ShipmentEvent(
+        event_type=claim_type, event_at=utcnow(),
+        location_name=target.to_location_name,
+        description=(f"{who} reported damage on the indent receipt"
+                     + (f" — claim against {against}" if against
+                        else " — delivered in house, no carrier to claim against")
+                     + (f": {remarks}" if remarks else "")),
+        is_exception=True,
+        recorded_by_id=getattr(user, "id", None),
+        recorded_by_name=who,
+    ))
 
 
 async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None,
@@ -7222,16 +7291,16 @@ async def update_dispatch(db: AsyncSession, dispatch_id: int, data: s.DispatchWr
     return await get_dispatch(db, dispatch_id)
 
 
-async def submit_dispatch(db: AsyncSession, dispatch_id: int, user) -> m.Dispatch:
-    dispatch = await get_dispatch(db, dispatch_id)
-    # PACKED as well as DRAFT: a consignment is packed before anyone is asked to
-    # release it, so PACKED is the normal state to submit from — the Consignments
-    # screen saves straight to it. Allowing only DRAFT meant a packed consignment
-    # could never enter its own approval chain.
-    _guard(dispatch.status,
-           {DispatchStatus.DRAFT.value, DispatchStatus.PACKED.value},
-           "submit", "dispatch")
+async def _apply_dispatch_submit(db: AsyncSession, dispatch: m.Dispatch, user):
+    """Start the consignment's approval chain and set its status from the answer.
 
+    Split out of `submit_dispatch` for the same reason `_apply_gate_out` was: the
+    release guard (`transport_release_blocked`) has to ask the ladder the real
+    question — does anyone actually have to sign this — and it runs inside the
+    transport service's transaction. Neither commits nor audits; the caller owns both.
+    Returns the workflow instance, so "nobody had to sign" is distinguishable from
+    "it is now with an approver".
+    """
     context = {
         "warehouse_id": dispatch.warehouse_id,
         "total_value": float(_d(dispatch.total_value)),
@@ -7256,6 +7325,20 @@ async def submit_dispatch(db: AsyncSession, dispatch_id: int, user) -> m.Dispatc
         )
         dispatch.current_approver_name = _approver_label(approvers)
         dispatch.status = DispatchStatus.PENDING_APPROVAL.value
+    return instance
+
+
+async def submit_dispatch(db: AsyncSession, dispatch_id: int, user) -> m.Dispatch:
+    dispatch = await get_dispatch(db, dispatch_id)
+    # PACKED as well as DRAFT: a consignment is packed before anyone is asked to
+    # release it, so PACKED is the normal state to submit from — the Consignments
+    # screen saves straight to it. Allowing only DRAFT meant a packed consignment
+    # could never enter its own approval chain.
+    _guard(dispatch.status,
+           {DispatchStatus.DRAFT.value, DispatchStatus.PACKED.value},
+           "submit", "dispatch")
+
+    await _apply_dispatch_submit(db, dispatch, user)
 
     await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
                       entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE, actor=user,
@@ -10316,10 +10399,16 @@ async def transport_released(db: AsyncSession, tr, user) -> None:
         # way there is nothing left for the release to say.
         return
     if await _dispatch_signature_outstanding(db, dispatch, user):
+        # Logged, never refused. `transport_release_blocked` is where that signature is
+        # demanded, and it runs while the load can still be held back; reaching this
+        # line means it went anyway — a carrier scan or a delivery landing on a leg
+        # nobody pressed the button on. Recording a departure that has physically
+        # happened is the lesser wrong: leaving the consignment at PACKED behind a
+        # shipment already in transit is what kept `dispatched_quantity` at zero and
+        # the requester's acknowledgement out of reach.
         logger.warning(
-            "%s released transport but %s still owes a dispatch signature; "
-            "not gated out", tr.tr_no, dispatch.dispatch_no)
-        return
+            "%s gated %s out on a release that never got its dispatch signature",
+            tr.tr_no, dispatch.dispatch_no)
     if (dispatch.ref_type or "").upper() in {"ISSUE", "WH_ISSUE"} and dispatch.ref_id:
         issue = await db.get(m.MaterialIssue, dispatch.ref_id)
         if issue is None or not issue.is_stock_posted:
@@ -10330,6 +10419,60 @@ async def transport_released(db: AsyncSession, tr, user) -> None:
 
     await _apply_gate_out(db, dispatch, tr.gate_pass_no, user)
     logger.info("%s gated out %s on transport release", tr.tr_no, dispatch.dispatch_no)
+
+
+async def transport_release_blocked(db: AsyncSession, tr, user) -> str | None:
+    """May the load leave? Asked BEFORE logistics releases it.
+
+    The one place a refusal still means something. This check used to sit in
+    `transport_released`, which runs after the goods have gone: it could not stop the
+    departure, only decline to record it, and a consignment left at PACKED behind a
+    shipment already IN_TRANSIT is strictly worse than either outcome — `_delivery_rows`
+    counts nothing as dispatched, the requester is never offered the acknowledgement,
+    and the indent stays open on goods that are already on a truck.
+
+    Silent where the project never configured a Dispatch chain, which is the same
+    contract `_dispatch_signature_outstanding` has always had.
+    """
+    dispatch = await _consignment_of(db, tr)
+    if dispatch is None:
+        return None
+    if dispatch.status in _ON_THE_ROAD:
+        # Already gated out through the warehouse's own screen — the signature, if one
+        # was owed, was settled there.
+        return None
+    if dispatch.status == DispatchStatus.CANCELLED.value:
+        return f"{dispatch.dispatch_no} is cancelled — it cannot be dispatched"
+    if dispatch.status == DispatchStatus.PENDING_APPROVAL.value:
+        # Actively with an approver. Not conditional on a ladder lookup: the document
+        # is already IN one.
+        return (f"{dispatch.dispatch_no} is waiting on "
+                f"{dispatch.current_approver_name or 'approval'} and cannot leave yet")
+    if dispatch.status == DispatchStatus.REJECTED.value:
+        return f"{dispatch.dispatch_no} was rejected — it cannot be dispatched"
+    if not await _dispatch_signature_outstanding(db, dispatch, user):
+        return None
+
+    # A ladder EXISTING is not the same as anybody having to sign, and only the engine
+    # can tell the two apart: every rung switched off, or a local post retired, and it
+    # resolves to NO_APPROVAL. Refusing on the mere existence of a chain would block
+    # releases nobody was ever waiting on. So ask it properly — the same call
+    # `gate_out` makes through `_dispatch_approval_pending`, minus the commit.
+    #
+    # Safe to write here: an objection is raised by the caller and takes the whole
+    # transport transaction down with it, so a chain started for a load that is then
+    # refused is rolled back with everything else. Nothing is left half-submitted.
+    instance = await _apply_dispatch_submit(db, dispatch, user)
+    if instance.status == InstanceStatus.APPROVED.value:
+        # Nobody had to sign. The consignment now reads APPROVED and `transport_released`
+        # gates it out on the way past, which is exactly the old behaviour.
+        return None
+    # Worded as a requirement, not as an accomplished fact: the objection rolls this
+    # submit back with the rest of the transaction, so the chain has NOT actually
+    # started. Naming the approver is still the useful half.
+    return (f"{dispatch.dispatch_no} cannot leave yet — this project asks "
+            f"{dispatch.current_approver_name or 'an approver'} to release it first. "
+            f"Send it for release on Consignments, then dispatch it again.")
 
 
 async def _dispatch_signature_outstanding(db: AsyncSession, dispatch: m.Dispatch,
@@ -10400,7 +10543,8 @@ def _register_transport_hooks() -> None:
     """Wire this module onto the outward leg, once, at import."""
     from app.modules.logistics import hooks as lgs_hooks
 
-    for registry, hook in ((lgs_hooks.ON_RELEASE, transport_released),
+    for registry, hook in ((lgs_hooks.BEFORE_RELEASE, transport_release_blocked),
+                           (lgs_hooks.ON_RELEASE, transport_released),
                            (lgs_hooks.ON_ACKNOWLEDGE, transport_acknowledged)):
         if hook not in registry:
             registry.append(hook)

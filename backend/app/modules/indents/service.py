@@ -374,7 +374,7 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     )
     await db.commit()
     await db.refresh(indent)
-    return indent
+    return await _attach_office_sac(db, indent)
 
 
 def _values(values) -> list[str]:
@@ -1498,8 +1498,47 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
         upload=upload, doc_category=doc_category, user=user)
 
 
+#: What the requester may say about the state of what arrived.
+#:
+#: GOOD and DAMAGED, and deliberately NOT SHORT. A shortage is already stated by the
+#: quantities — someone who types 6 against 10 has reported it, and the indent stays
+#: open for the rest of its own accord. Offering SHORT here as well would let one form
+#: say "all ten arrived" and "it was short" at the same time.
+#:
+#: Nor is SHORT derived from those numbers, which was the other tempting option: this
+#: path accepts PARTIAL receipts by design (six today, four next week), so "received
+#: less than was dispatched" is the normal shape of a first instalment and flagging it
+#: as a shortage would raise a claim against a carrier who is still mid-delivery.
+#: Damage is the one fact the quantities genuinely cannot carry, so it is the one fact
+#: this asks for.
+ACK_CONDITION_GOOD = "GOOD"
+ACK_CONDITION_DAMAGED = "DAMAGED"
+ACK_CONDITIONS = (ACK_CONDITION_GOOD, ACK_CONDITION_DAMAGED)
+
+
+def _delivery_condition(condition: str | None, remarks: str | None) -> str:
+    """Validate what the requester said about the goods, defaulting to GOOD.
+
+    Values are plain strings rather than logistics' `AckCondition`: logistics sits
+    AFTER indents in the import chain (rule 5), so this module may not import it. The
+    warehouse maps them onto the enum on the way to the transport leg.
+    """
+    value = (condition or ACK_CONDITION_GOOD).strip().upper()
+    if value not in ACK_CONDITIONS:
+        raise ValidationError(
+            f"{condition!r} is not a delivery condition. Say whether the goods "
+            "arrived GOOD or DAMAGED.")
+    if value != ACK_CONDITION_GOOD and not (remarks or "").strip():
+        raise ValidationError(
+            "Describe the damage — it is what the claim against the carrier is "
+            "investigated from.")
+    return value
+
+
 async def acknowledge_receipt(db: AsyncSession, indent_id: int,
-                              lines: dict[int, Decimal], user) -> Indent:
+                              lines: dict[int, Decimal], user, *,
+                              condition: str | None = None,
+                              remarks: str | None = None) -> Indent:
     """The requester confirms what physically reached them.
 
     This is the only thing that closes an indent. The warehouse issuing and dispatching
@@ -1554,6 +1593,8 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
 
     indent.status = _fulfilment_status(indent.items)
 
+    ack_condition = _delivery_condition(condition, remarks)
+
     # Imported here, not at module load: warehouse sits after indents in the import
     # chain, so a top-level import would run it backwards.
     from app.modules.warehouse import service as warehouse_service
@@ -1562,7 +1603,8 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     # to sign the same delivery again afterwards recorded nothing new and left indents
     # open on a forgotten second click, so the issues settle here instead. Same
     # transaction as the receipt that made them settleable.
-    signed = await warehouse_service.auto_acknowledge_for_indent(db, indent.id, user)
+    signed = await warehouse_service.auto_acknowledge_for_indent(
+        db, indent.id, user, condition=ack_condition, remarks=remarks)
 
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,

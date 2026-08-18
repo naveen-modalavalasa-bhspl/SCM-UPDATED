@@ -507,7 +507,9 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("approvals", "approvals", "Approvals"),
     ("approval_waiting", "approvals", "Approvals · Waiting for Me"),
     ("approval_decisions", "approvals", "Approvals · My Decisions"),
-    ("approval_team", "approvals", "Approvals · Team Queue"),
+    # `approval_team` is gone with the Team Queue screen. Dropped from the catalogue
+    # only — `seed_permissions` never prunes, so the existing
+    # `page.approval_team.view` row and every grant on it stay untouched.
     ("grp_purchasing", "procurement", "Purchasing"),
     ("po_list", "procurement", "Purchase Orders"),
     ("grp_warehouse", "warehouse", "Warehouse"),

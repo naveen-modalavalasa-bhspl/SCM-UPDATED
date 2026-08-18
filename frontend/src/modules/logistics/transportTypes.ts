@@ -306,6 +306,16 @@ export interface TransportRequest {
   events: ShipmentEvent[];
 }
 
+export interface ReceiptEvidence {
+  id: number;
+  file_name: string;
+  file_size?: number | null;
+  mime_type?: string | null;
+  doc_category?: string | null;
+  uploaded_by_name?: string | null;
+  created_at?: string | null;
+}
+
 export interface TRListRow {
   id: number;
   tr_no: string;
@@ -498,7 +508,6 @@ export interface TRInput {
   driver_phone?: string | null;
   trip_reference?: string | null;
   handed_over_by_name?: string | null;
-  received_by_name?: string | null;
   lines?: TRLineInput[];
 }
 

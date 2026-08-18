@@ -211,7 +211,7 @@ test.describe("Approvals — Waiting for me queue", () => {
       await capture("empty-filtered-queue");
     });
 
-    await log.runStep("N10 · My Decisions and Team Queue empty/disabled behaviour", async () => {
+    await log.runStep("N10 · My Decisions empty/disabled behaviour", async () => {
       await goto("/approvals/decisions", "decisions-screen");
       const exportButton = page.getByRole("button", { name: /Export Excel/i }).first();
       const rowCount = await listRows(page).count();
@@ -220,20 +220,6 @@ test.describe("Approvals — Waiting for me queue", () => {
         expect.soft(await exportButton.isDisabled(), "Export Excel must be disabled when there is nothing to export.").toBe(true);
       }
 
-      await goto("/approvals/team-queue", "team-queue-screen");
-      const teamRows = await listRows(page).count();
-      if (!teamRows) {
-        await expect.soft(page.getByText("No approval team is mapped below your active position.").first()).toBeVisible({ timeout: 10_000 });
-      } else {
-        // "Remind" must be dead for an approver with nothing pending.
-        const zeroPending = page.locator("table tbody tr").filter({ hasText: /^\D*0\D/ }).first();
-        if (await zeroPending.count()) {
-          const button = zeroPending.getByRole("button", { name: /Remind/i });
-          if (await button.count()) {
-            expect.soft(await button.first().isDisabled(), "Remind should be disabled for an approver with 0 pending.").toBe(true);
-          }
-        }
-      }
     });
 
     await log.runStep("N10 · the queue renders as cards at 375px with 44px tap targets", async () => {

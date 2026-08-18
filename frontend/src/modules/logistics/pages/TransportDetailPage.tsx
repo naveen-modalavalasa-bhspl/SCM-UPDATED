@@ -1,9 +1,12 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Clock, PhoneCall } from "lucide-react";
 import {
-  Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select,
+  AlertTriangle, ArrowRight, Camera, CheckCircle2, Clock, Download, FileText,
+  MapPin, PhoneCall, Warehouse,
+} from "lucide-react";
+import {
+  Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
   StatCard, StatusPill, useAction,
 } from "@/shared/components";
 import { fmtDate, fmtDateTime } from "@/shared/datetime";
@@ -12,12 +15,6 @@ import { FlowStepper } from "../components/FlowStepper";
 import { load, modeLabel, modeTint, money, nextMove } from "../components/modeCopy";
 import { CarrierComparison } from "../components/CarrierComparison";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
-
-const CONDITIONS = [
-  { value: "GOOD", label: "Received in good condition" },
-  { value: "SHORT", label: "Short — something is missing" },
-  { value: "DAMAGED", label: "Damaged in transit" },
-];
 
 /**
  * One consignment's transport leg, from planning to the signature at the far end.
@@ -51,11 +48,8 @@ export function TransportDetailPage() {
   const [confirm, setConfirm] = useState({ confirmed_by: "", carrier_reference: "" });
   const [declining, setDeclining] = useState(false);
   const [declineNote, setDeclineNote] = useState("");
-  const [acking, setAcking] = useState(false);
-  const [ack, setAck] = useState({
-    acknowledged_by_name: "", condition: "GOOD", remarks: "", pod_url: "",
-    affected_item_name: "", affected_qty: "", claim_amount: "",
-  });
+  const [downloadingEvidence, setDownloadingEvidence] = useState<number | null>(null);
+  const [evidenceDownloadError, setEvidenceDownloadError] = useState<unknown>(null);
 
   // Half of this document is written by somebody who is not in this tab: the provider
   // sends a price, accepts the job or declines it, and the driver's leg is tracked from
@@ -66,6 +60,26 @@ export function TransportDetailPage() {
     refetchInterval: 10_000,
     refetchOnWindowFocus: true,
   });
+  const evidence = useQuery({
+    queryKey: ["transport", id, "receipt-evidence"],
+    queryFn: () => transportApi.receiptEvidence(trId),
+    enabled: Boolean(doc?.indent_id && doc?.acknowledged_at),
+  });
+
+  const openDispatch = () => {
+    if (!doc) return;
+    const reference = doc.consignment_no || doc.tr_no;
+    setTracking({
+      // Fetch anything recorded during booking. A company vehicle has no outside
+      // carrier to issue an LR, so SCM's own consignment reference becomes its LR.
+      lr_no: doc.lr_no || (doc.mode === "OWN_VEHICLE" ? `LR/${reference}` : ""),
+      docket_no: doc.docket_no || "",
+      tracking_url: doc.tracking_url || "",
+      eway_bill_no: doc.eway_bill_no || "",
+      gate_pass_no: doc.gate_pass_no || `GP/${reference}`,
+    });
+    setDispatching(true);
+  };
 
   const invalidates = [["transport"], ["transport", id], ["lgs-consignment-links"]];
   const submit = useAction({
@@ -120,19 +134,6 @@ export function TransportDetailPage() {
     success: "Back out to the other carriers", invalidates,
     onDone: () => { setDeclining(false); setDeclineNote(""); },
   });
-  const acknowledge = useAction({
-    run: () => transportApi.acknowledge(trId, {
-      acknowledged_by_name: ack.acknowledged_by_name || null,
-      condition: ack.condition,
-      remarks: ack.remarks || null,
-      pod_url: ack.pod_url || null,
-      affected_item_name: ack.affected_item_name || null,
-      affected_qty: ack.affected_qty ? Number(ack.affected_qty) : null,
-      claim_amount: ack.claim_amount ? Number(ack.claim_amount) : null,
-    }),
-    success: "Acknowledged", invalidates,
-    onDone: () => setAcking(false),
-  });
   const share = useAction({
     run: () => transportApi.shareTracking(trId),
     success: "Tracking shared with the field", invalidates,
@@ -142,11 +143,28 @@ export function TransportDetailPage() {
     success: "Shipment closed", invalidates,
   });
 
+  const downloadEvidence = async (attachmentId: number, fileName: string) => {
+    setDownloadingEvidence(attachmentId);
+    setEvidenceDownloadError(null);
+    try {
+      const blob = await transportApi.downloadReceiptEvidence(trId, attachmentId);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (downloadError) {
+      setEvidenceDownloadError(downloadError);
+    } finally {
+      setDownloadingEvidence(null);
+    }
+  };
+
   if (isLoading) return <div className="p-6 text-muted">Loading…</div>;
   if (!doc) return <ErrorBanner error={error} />;
 
   const openClaims = doc.events.filter((e) => e.is_exception && !e.resolved_at).length;
-  const isClaim = ack.condition !== "GOOD";
   // Awarding freight starts its OWN approval (CARRIER_AWARD sanctions the spend), and
   // the request stays at QUOTING until that is signed — so there is no status to read
   // it off. A won tender is the only thing that stamps `awarded_at` while still at
@@ -211,7 +229,7 @@ export function TransportDetailPage() {
 
             {doc.status === "READY" && (
               <Can do="transport.track">
-                <Button onClick={() => setDispatching(true)}>Dispatch it</Button>
+                <Button onClick={openDispatch}>Dispatch it</Button>
               </Can>
             )}
 
@@ -225,17 +243,9 @@ export function TransportDetailPage() {
             )}
 
             {doc.status === "DELIVERED" && (
-              <>
-                <Can do="transport.acknowledge">
-                  <Button onClick={() => setAcking(true)}>Acknowledge receipt</Button>
-                </Can>
-                <Can do="transport.track">
-                  <Button variant="ghost" onClick={() => close.mutate()}
-                    disabled={close.isPending}>
-                    Close without signature
-                  </Button>
-                </Can>
-              </>
+              <span className="text-sm font-medium text-muted">
+                Waiting for the indent requester
+              </span>
             )}
 
             {doc.status === "ACKNOWLEDGED" && (
@@ -251,8 +261,8 @@ export function TransportDetailPage() {
 
       <ErrorBanner error={submit.error ?? approve.error ?? dispatch.error
         ?? deliver.error ?? close.error ?? share.error ?? confirmCarrier.error
-        ?? carrierDeclined.error ?? acknowledge.error ?? approveAward.error
-        ?? rejectAward.error} />
+        ?? carrierDeclined.error ?? approveAward.error
+        ?? rejectAward.error ?? evidence.error ?? evidenceDownloadError} />
 
       <FlowStepper mode={doc.mode} status={doc.status} />
 
@@ -280,6 +290,18 @@ export function TransportDetailPage() {
           <Clock className="h-4 w-4 shrink-0 text-brand" />
           <p className="text-sm font-medium text-ink">
             {awardPending ? "Waiting on sign-off for the freight" : nextMove(doc.status)}
+          </p>
+        </Card>
+      )}
+
+      {["IN_TRANSIT", "DELIVERED"].includes(doc.status) && doc.indent_id && (
+        <Card className="mb-4 border-brand/30 bg-brand/5 p-4">
+          <p className="text-sm font-semibold text-ink">
+            Waiting for {doc.indent_no ?? "the indent"} requester to confirm receipt
+          </p>
+          <p className="mt-1 text-xs text-muted">
+            Logistics can record delivery, but only the person who raised the indent can
+            confirm the received quantities and attach the delivery photo and bill.
           </p>
         </Card>
       )}
@@ -330,7 +352,7 @@ export function TransportDetailPage() {
         </Card>
       )}
 
-      {doc.status === "ACKNOWLEDGED" && (
+      {doc.acknowledged_at && (
         <Card className="mb-4 border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900 dark:bg-emerald-900/20">
           <div className="flex items-start gap-3">
             {doc.ack_condition === "GOOD"
@@ -347,6 +369,52 @@ export function TransportDetailPage() {
         </Card>
       )}
 
+      {doc.acknowledged_at && doc.indent_id && (
+        <Card className="mb-4 p-4">
+          <div className="mb-3">
+            <h2 className="text-sm font-semibold text-ink">Requester receipt evidence</h2>
+            <p className="mt-0.5 text-xs text-muted">
+              Uploaded by the indent requester while confirming the received quantities.
+            </p>
+          </div>
+          {evidence.isLoading ? (
+            <p className="text-xs text-muted">Loading receipt evidence…</p>
+          ) : (evidence.data ?? []).length > 0 ? (
+            <ul className="space-y-2">
+              {(evidence.data ?? []).map((attachment) => {
+                const isBill = attachment.doc_category === "RECEIPT_BILL";
+                return (
+                  <li key={attachment.id}
+                    className="flex items-center gap-3 rounded-xl border border-line px-3 py-2">
+                    {isBill
+                      ? <FileText className="h-4 w-4 shrink-0 text-brand" />
+                      : <Camera className="h-4 w-4 shrink-0 text-brand" />}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-ink">
+                        {attachment.file_name}
+                      </div>
+                      <div className="text-[11px] text-muted">
+                        {isBill ? "Bill" : "Delivery photo"}
+                        {attachment.uploaded_by_name
+                          ? ` · uploaded by ${attachment.uploaded_by_name}` : ""}
+                      </div>
+                    </div>
+                    <Button variant="ghost"
+                      disabled={downloadingEvidence === attachment.id}
+                      onClick={() => downloadEvidence(attachment.id, attachment.file_name)}>
+                      <Download className="h-4 w-4" />
+                      {downloadingEvidence === attachment.id ? "Opening…" : "Open"}
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="text-xs text-muted">No receipt photo or bill is attached.</p>
+          )}
+        </Card>
+      )}
+
       {openClaims > 0 && (
         <Card className="mb-4 border-amber-300 bg-amber-50 p-4 dark:bg-amber-900/20">
           <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
@@ -357,67 +425,134 @@ export function TransportDetailPage() {
       )}
 
       <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="space-y-3 p-5 lg:col-span-2">
-          <h2 className="font-display text-lg font-semibold text-ink">Consignment</h2>
-          <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
-            <Detail label="Packed as" value={doc.consignment_no} />
-            <Detail label="From" value={doc.from_warehouse_name} />
-            <Detail label="To" value={doc.to_location_name} />
-            <Detail label="Address" value={doc.delivery_address} />
-            <Detail label="Contact" value={doc.contact_person
-              ? `${doc.contact_person}${doc.contact_phone ? ` · ${doc.contact_phone}` : ""}`
-              : null} />
-            <Detail label="Against indent" value={doc.indent_no} />
-            <Detail label="Needed by" value={fmtDate(doc.expected_delivery)} />
-            <Detail label="Carrier" value={doc.carrier_name} />
-            <Detail label="Carrier's booking ref" value={doc.carrier_reference} />
-            <Detail label="Carrier accepted" value={fmtDateTime(doc.carrier_accepted_at)} />
-            <Detail label="Confirmed by the desk" value={doc.carrier_confirmed_by_name} />
-            <Detail label="Vehicle" value={doc.vehicle_number} />
-            <Detail label="Driver" value={doc.driver_name} />
-            <Detail label="Rides on" value={doc.trip_reference} />
-            <Detail label="Handed over by" value={doc.handed_over_by_name} />
-            <Detail label="Received by" value={doc.received_by_name} />
-            <Detail label="Gate pass" value={doc.gate_pass_no} />
-            <Detail label="LR" value={doc.lr_no} />
-            <Detail label="Docket" value={doc.docket_no} />
-            <Detail label="E-way bill" value={doc.eway_bill_no} />
-            <Detail label="Dispatched" value={fmtDateTime(doc.dispatched_at)} />
-            <Detail label="Released by" value={doc.dispatched_by_name} />
-            <Detail label="Delivered" value={fmtDateTime(doc.delivered_at)} />
-            <Detail label="Weight" value={`${Number(doc.total_weight_kg ?? 0)} kg`} />
-            <Detail label="Volume" value={`${Number(doc.total_volume_cbm ?? 0)} m³`} />
-            <Detail label="Tracking shared" value={fmtDateTime(doc.tracking_shared_at)} />
-          </dl>
+        <Card className="p-5 lg:col-span-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-display text-lg font-semibold text-ink">Consignment</h2>
+            {doc.consignment_no && (
+              <span className="rounded-md bg-surface px-2 py-1 font-mono text-xs text-ink-500"
+                title="Packed as">
+                {doc.consignment_no}
+              </span>
+            )}
+          </div>
 
-          <div className="pt-2">
-            <h3 className="mb-2 text-sm font-semibold text-ink">Lines</h3>
+          {/* The leg itself, read left to right. Where it came from and where it is
+           * going were two label/value rows lost among twenty-four others; they are
+           * the first question anyone asks of a consignment. */}
+          <div className="mt-4 rounded-xl border border-line bg-surface/60 p-4">
+            <div className="grid gap-3 sm:grid-cols-[1fr_auto_1fr] sm:items-center">
+              <div className="min-w-0">
+                <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                  <Warehouse size={12} aria-hidden />From
+                </div>
+                <div className="break-words text-sm font-semibold text-ink">
+                  {doc.from_warehouse_name ?? "—"}
+                </div>
+              </div>
+              <div className="flex items-center justify-center gap-1 text-brand" aria-hidden>
+                <span className="hidden h-px w-6 bg-brand/30 sm:block" />
+                <ArrowRight size={16} className="rotate-90 sm:rotate-0" />
+                <span className="hidden h-px w-6 bg-brand/30 sm:block" />
+              </div>
+              <div className="min-w-0">
+                <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                  <MapPin size={12} aria-hidden />To
+                </div>
+                <div className="break-words text-sm font-semibold text-ink">
+                  {doc.to_location_name ?? "—"}
+                </div>
+                {/* Only when it says something the destination name did not. */}
+                {doc.delivery_address && doc.delivery_address !== doc.to_location_name && (
+                  <div className="mt-0.5 break-words text-xs text-muted">
+                    {doc.delivery_address}
+                  </div>
+                )}
+                {doc.contact_person && (
+                  <div className="mt-1 flex items-center gap-1 text-xs text-muted">
+                    <PhoneCall size={12} aria-hidden />
+                    {doc.contact_person}
+                    {doc.contact_phone ? ` · ${doc.contact_phone}` : ""}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Grouped, and a group with nothing in it does not draw itself: a booking
+           * with no carrier yet should not show four empty carrier rows. */}
+          <div className="mt-1 divide-y divide-line/70">
+            <Section title="Reference" rows={[
+              ["Against indent", doc.indent_no],
+              ["Needed by", fmtDate(doc.expected_delivery, "")],
+            ]} />
+            <Section title="Carrier & vehicle" rows={[
+              ["Carrier", doc.carrier_name],
+              ["Booking ref", doc.carrier_reference],
+              ["Carrier accepted", fmtDateTime(doc.carrier_accepted_at, "")],
+              ["Confirmed by the desk", doc.carrier_confirmed_by_name],
+              ["Vehicle", doc.vehicle_number],
+              ["Driver", doc.driver_name],
+              ["Rides on", doc.trip_reference],
+            ]} />
+            <Section title="Dispatch" rows={[
+              ["Gate pass", doc.gate_pass_no],
+              ["LR", doc.lr_no],
+              ["Docket", doc.docket_no],
+              ["E-way bill", doc.eway_bill_no],
+              ["Handed over by", doc.handed_over_by_name],
+              ["Released by", doc.dispatched_by_name],
+              ["Dispatched", fmtDateTime(doc.dispatched_at, "")],
+              ["Delivered", fmtDateTime(doc.delivered_at, "")],
+              ["Tracking shared", fmtDateTime(doc.tracking_shared_at, "")],
+            ]} />
+            <Section title="Load" rows={[
+              ["Weight", `${Number(doc.total_weight_kg ?? 0)} kg`],
+              ["Volume", `${Number(doc.total_volume_cbm ?? 0)} m³`],
+            ]} />
+          </div>
+
+          <div className="mt-4 border-t border-line/70 pt-4">
+            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
+              Lines
+            </h3>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[520px] text-sm">
                 <thead>
-                  <tr className="border-b border-line text-left text-xs text-muted">
-                    <th className="py-2">Item</th>
-                    <th className="py-2 text-right">Qty</th>
-                    <th className="py-2 text-right">Pkgs</th>
-                    <th className="py-2 text-right">Weight</th>
-                    <th className="py-2 text-right">Delivered</th>
+                  <tr className="border-b border-line text-left text-[11px] uppercase tracking-wide text-muted">
+                    <th className="py-2 font-semibold">Item</th>
+                    <th className="py-2 text-right font-semibold">Qty</th>
+                    <th className="py-2 text-right font-semibold">Pkgs</th>
+                    <th className="py-2 text-right font-semibold">Weight</th>
+                    <th className="py-2 text-right font-semibold">Delivered</th>
                   </tr>
                 </thead>
                 <tbody>
                   {doc.items.map((line) => (
-                    <tr key={line.id} className="border-b border-line/50">
-                      <td className="py-2">
+                    <tr key={line.id} className="border-b border-line/50 last:border-0">
+                      <td className="py-2.5 pr-3 text-body">
                         {line.item_name ?? "—"}
                         {line.is_fragile && (
-                          <span className="ml-2 text-[11px] text-amber-600">Fragile</span>
+                          <span className="ml-2 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                            Fragile
+                          </span>
                         )}
                       </td>
-                      <td className="py-2 text-right">{Number(line.quantity)}</td>
-                      <td className="py-2 text-right">{line.package_count}</td>
-                      <td className="py-2 text-right">
+                      <td className="py-2.5 text-right font-mono text-body">
+                        {Number(line.quantity)}
+                      </td>
+                      <td className="py-2.5 text-right font-mono text-body">
+                        {line.package_count}
+                      </td>
+                      <td className="py-2.5 text-right font-mono text-muted">
                         {line.weight_kg != null ? `${Number(line.weight_kg)} kg` : "—"}
                       </td>
-                      <td className="py-2 text-right">{Number(line.delivered_qty)}</td>
+                      {/* Short delivery is the one number worth spotting from a
+                        * metre away, so it is the only one that changes colour. */}
+                      <td className={`py-2.5 text-right font-mono font-semibold ${
+                        Number(line.delivered_qty) < Number(line.quantity)
+                          ? "text-amber-600" : "text-emerald-600"}`}>
+                        {Number(line.delivered_qty)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -564,66 +699,34 @@ export function TransportDetailPage() {
         </div>
       </ConfirmModal>
 
-      <ConfirmModal
-        isOpen={acking}
-        title="Acknowledge receipt"
-        message="What the receiving site actually found. Short or damaged raises a claim against the provider."
-        confirmLabel="Sign for it"
-        busy={acknowledge.isPending}
-        confirmDisabled={isClaim && !ack.remarks.trim()}
-        onConfirm={() => acknowledge.mutate()}
-        onClose={() => setAcking(false)}
-      >
-        <div className="space-y-3">
-          <Field label="Who received it">
-            <Input value={ack.acknowledged_by_name}
-              onChange={(e) => setAck({ ...ack, acknowledged_by_name: e.target.value })} />
-          </Field>
-          <Field label="Condition">
-            <Select
-              value={ack.condition}
-              options={CONDITIONS}
-              onChange={(value) => setAck({ ...ack, condition: value })}
-            />
-          </Field>
-          <Field label={isClaim ? "What was wrong (required)" : "Note"}>
-            <Input value={ack.remarks}
-              onChange={(e) => setAck({ ...ack, remarks: e.target.value })} />
-          </Field>
-          {isClaim && (
-            <>
-              <Field label="Item affected">
-                <Input value={ack.affected_item_name}
-                  onChange={(e) => setAck({ ...ack, affected_item_name: e.target.value })} />
-              </Field>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Qty">
-                  <Input type="number" value={ack.affected_qty}
-                    onChange={(e) => setAck({ ...ack, affected_qty: e.target.value })} />
-                </Field>
-                <Field label="Claim value">
-                  <Input type="number" value={ack.claim_amount}
-                    onChange={(e) => setAck({ ...ack, claim_amount: e.target.value })} />
-                </Field>
-              </div>
-            </>
-          )}
-          <Field label="Signed acknowledgement link" hint="Optional — a scan or a photo">
-            <Input value={ack.pod_url}
-              onChange={(e) => setAck({ ...ack, pod_url: e.target.value })} />
-          </Field>
-        </div>
-      </ConfirmModal>
     </div>
   );
 }
 
-function Detail({ label, value }: { label: string; value?: string | null }) {
-  if (!value) return null;
+/** One labelled block of the consignment. An empty row is dropped rather than
+ *  printed as an em-dash, and a block with every row empty draws nothing at all —
+ *  a screen of placeholders reads as a screen full of data that is not there. */
+function Section({
+  title, rows,
+}: {
+  title: string;
+  rows: [string, string | null | undefined][];
+}) {
+  const shown = rows.filter(([, value]) => value !== null && value !== undefined && value !== "");
+  if (!shown.length) return null;
   return (
-    <div>
-      <dt className="text-[11px] uppercase tracking-wide text-muted">{label}</dt>
-      <dd className="text-body">{value}</dd>
+    <div className="py-4 first:pt-2 last:pb-0">
+      <h3 className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
+        {title}
+      </h3>
+      <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+        {shown.map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <dt className="text-[11px] uppercase tracking-wide text-muted">{label}</dt>
+            <dd className="break-words text-sm text-body">{value}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }

@@ -19,8 +19,8 @@ describe("logistics api", () => {
     for (const call of [
       "list", "get", "create", "update", "submit", "approve", "invite", "award",
       "confirmCarrier", "carrierDeclined", "dispatch", "addEvent", "deliver",
-      "acknowledge", "close", "shareTracking", "acknowledgements", "summary", "flow",
-      "forConsignments",
+      "close", "shareTracking", "summary", "flow", "forConsignments",
+      "receiptEvidence", "downloadReceiptEvidence",
     ]) {
       expect(typeof (transportApi as Record<string, unknown>)[call]).toBe("function");
     }

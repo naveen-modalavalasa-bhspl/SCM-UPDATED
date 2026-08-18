@@ -6,7 +6,7 @@ import type { Paginated, Option } from "@/shared/types";
 import type {
   Acknowledgement, AcknowledgeLine, ActivityRow,
   BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
-  IndentNotification, IndentStats, IndentUpdate, ReceiptAttachment,
+  IndentNotification, IndentStats, IndentUpdate, RaiserTracking, ReceiptAttachment,
 } from "./types";
 
 export interface IndentQueryParams {
@@ -71,6 +71,8 @@ export const indentKeys = {
     [...indentKeys.all(scope), "vehicles", search] as const,
   journey: (scope: IndentAccountScope, id: number) =>
     [...indentKeys.all(scope), "journey", INDENT_JOURNEY_CONTRACT_VERSION, id] as const,
+  shipments: (scope: IndentAccountScope, id: number) =>
+    [...indentKeys.all(scope), "shipments", id] as const,
   items: (scope: IndentAccountScope, context: unknown = "default") =>
     [...indentKeys.all(scope), "items", context] as const,
   bomChoices: (scope: IndentAccountScope) =>
@@ -213,6 +215,10 @@ export const indentApi = {
     api.get<Indent>(`/api/indents/${id}`, { signal }).then((r) => r.data),
   journey: (id: number, signal?: AbortSignal) =>
     api.get<IndentJourney>(`/api/indents/${id}/journey`, { signal }).then((r) => r.data),
+  /** Shipment visibility follows indent ownership, so raisers need no logistics grant. */
+  shipmentsForIndent: (id: number, signal?: AbortSignal) =>
+    api.get<RaiserTracking[]>(`/api/transport/for-indent/${id}`, { signal })
+      .then((r) => r.data),
   create: (data: IndentCreate) => api.post<Indent>("/api/indents", data).then((r) => r.data),
   update: (id: number, data: IndentUpdate) =>
     api.put<Indent>(`/api/indents/${id}`, data).then((r) => r.data),
@@ -245,8 +251,17 @@ export const indentApi = {
   fulfilment: (id: number) =>
     api.get<FulfilmentStep[]>(`/api/warehouse/indents/${id}/fulfilment`).then((r) => r.data),
 
-  acknowledge: (id: number, lines: AcknowledgeLine[]) =>
-    api.post<Indent>(`/api/indents/${id}/acknowledge`, { lines }).then((r) => r.data),
+  /**
+   * What reached the requester, and what state it was in.
+   *
+   * `condition` is GOOD or DAMAGED and nothing else — a shortage is already stated by
+   * the quantities in `lines`, so there is no SHORT to send. DAMAGED requires remarks;
+   * the backend opens the claim from them.
+   */
+  acknowledge: (id: number, lines: AcknowledgeLine[],
+                receipt: { condition?: string; remarks?: string } = {}) =>
+    api.post<Indent>(`/api/indents/${id}/acknowledge`, { lines, ...receipt })
+      .then((r) => r.data),
 
   receiptAttachments: (id: number) =>
     api.get<ReceiptAttachment[]>(`/api/indents/${id}/receipt-attachments`)

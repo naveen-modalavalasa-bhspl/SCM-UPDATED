@@ -4,7 +4,6 @@ export { ConsolidationDetailPage } from "./pages/ConsolidationDetailPage";
 export { ConsolidationItemPage } from "./pages/ConsolidationItemPage";
 export { ConsolidationIssuePage } from "./pages/ConsolidationIssuePage";
 export { MyDecisionsPage } from "./pages/MyDecisionsPage";
-export { TeamQueuePage } from "./pages/TeamQueuePage";
 export { ApprovalReportsPage } from "./pages/ReportsPage";
 export { ApprovalCorrectionPage } from "./pages/CorrectionPage";
 export { IndentApprovalReviewPage } from "./pages/IndentApprovalReviewPage";

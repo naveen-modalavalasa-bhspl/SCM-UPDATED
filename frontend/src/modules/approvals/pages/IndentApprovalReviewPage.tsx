@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { AlertCircle, ArrowLeft, Check, PackageCheck, RotateCcw, X } from "lucide-react";
+import {
+  AlertCircle, ArrowLeft, Building2, CalendarDays, Check, CheckCircle2, ClipboardCheck,
+  Flag, History, Info, MessageSquare, PackageCheck, RotateCcw, TriangleAlert, User, X,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import { Button, Card, ConfirmModal, PageHeader, StatusPill } from "@/shared/components";
+import { fmtDate, fmtDateTime } from "@/shared/datetime";
 import { approvalsApi } from "../api";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
 import {
@@ -12,6 +18,7 @@ import {
 import { isIndentModuleQuery } from "@/modules/indents/api";
 import { displayUom } from "@/modules/indents/displayFormat";
 import { alerts } from "@/modules/alerts";
+import type { ApprovalHistoryRow, ApprovalIndentLine } from "../types";
 
 type Decision = "approve" | "reject" | "return" | null;
 const CHECKS = [
@@ -19,6 +26,241 @@ const CHECKS = [
   "I checked the business need and priority.",
   "I checked the approved quantities shown below.",
 ];
+
+/* ---------------------------------------------------------------------------
+ * Local presentation pieces.
+ *
+ * The screen is one long act — read the request, set the numbers, confirm, sign —
+ * and it used to read as one long wall: three paragraphs of guidance, a 980px table,
+ * a checklist, a comment box and a history list all stacked at the same weight, with
+ * the decision buttons stranded at the bottom of the scroll.
+ *
+ * These give each stage of that act a surface of its own: a titled section head so a
+ * card announces what it is for, a fact cell for the document's identity, and a
+ * quantity field that is the same control in the table and on a phone. Everything
+ * with a shared primitive behind it — Button, Card, StatusPill, ConfirmModal — still
+ * comes from `@/shared/components` untouched.
+ * ------------------------------------------------------------------------- */
+
+/** A card's own header: what this part of the review is, said once, at the top. */
+function SectionHead({
+  icon: Icon, title, hint, right,
+}: {
+  icon: LucideIcon;
+  title: string;
+  hint?: string;
+  right?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line/70 px-4 py-3 sm:px-5">
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-050 text-brand">
+          <Icon className="h-4.5 w-4.5" />
+        </span>
+        <div className="min-w-0">
+          <h2 className="font-display text-[15px] font-bold leading-tight text-ink">{title}</h2>
+          {hint && <p className="text-xs text-muted">{hint}</p>}
+        </div>
+      </div>
+      {right}
+    </div>
+  );
+}
+
+/** One fact about the document, in the strip under the title. */
+function Fact({
+  icon: Icon, label, children,
+}: {
+  icon: LucideIcon;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-content2 text-muted">
+        <Icon className="h-4 w-4" />
+      </span>
+      <div className="min-w-0">
+        <dt className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</dt>
+        <dd className="truncate text-sm font-semibold text-ink">{children}</dd>
+      </div>
+    </div>
+  );
+}
+
+/** A tinted note. Guidance an approver needs at the moment they type, not a paragraph
+ *  of prose above the numbers — so it is boxed, titled and kept to two lines. */
+function Note({
+  tone, icon: Icon, title, children,
+}: {
+  tone: "info" | "warn";
+  icon: LucideIcon;
+  title: string;
+  children: ReactNode;
+}) {
+  const skin = tone === "warn"
+    ? "border-warn/30 bg-warn-bg text-warn"
+    : "border-line bg-content2 text-body";
+  return (
+    <div className={`flex gap-2.5 rounded-xl border p-3 ${skin}`}>
+      <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+      <div className="min-w-0 text-xs leading-relaxed">
+        <strong className="block font-semibold">{title}</strong>
+        <span className={tone === "warn" ? "" : "text-muted"}>{children}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The approved quantity for one line — the only control on the screen that changes
+ * what is signed, so it is the same control in the table and in the phone card.
+ *
+ * The unit is a SIBLING of the input, never an overlay on top of it. Absolutely
+ * positioned it sat over the field's own text: the number is right-aligned and grew
+ * straight under a unit the padding was not wide enough to clear, so typing into
+ * "UOM-BOX" was unreadable. As a flex row the input takes the space that is left and
+ * the two can never collide, whatever the unit is called. The border and the focus
+ * ring live on the wrapper, so it still reads and behaves as one field.
+ */
+function QuantityField({
+  line, unit, value, error, onChange,
+}: {
+  line: ApprovalIndentLine;
+  unit: string;
+  value: string;
+  error: string | null;
+  onChange: (raw: string) => void;
+}) {
+  return (
+    <div className="w-full">
+      <div
+        className={`flex h-11 items-center rounded-xl border bg-content1 pr-3 transition focus-within:ring-2 ${
+          error
+            ? "border-bad bg-bad-bg/40 focus-within:ring-bad/30"
+            : "border-line focus-within:border-brand focus-within:ring-brand/25"
+        }`}
+      >
+        <input
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          aria-label={`Approved quantity for ${line.item_name ?? line.id}`}
+          aria-invalid={Boolean(error)}
+          aria-describedby={`qty-help-${line.id}`}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="h-full min-w-0 flex-1 rounded-xl bg-transparent px-3 text-right font-semibold tabular-nums text-ink outline-none"
+        />
+        <span className="shrink-0 whitespace-nowrap text-xs font-medium text-muted">{unit}</span>
+      </div>
+      {/* The range is on screen before anything goes wrong, and repeated inside the
+          error when it does — the approver never has to work out the cap. */}
+      <p
+        id={`qty-help-${line.id}`}
+        role={error ? "alert" : undefined}
+        className={`mt-1.5 flex items-start gap-1.5 text-left text-[11px] leading-snug ${
+          error ? "font-medium text-bad" : "text-muted"
+        }`}
+      >
+        {error && <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />}
+        <span>{error ?? `You can approve ${allowedRange(line)}.`}</span>
+      </p>
+    </div>
+  );
+}
+
+/** The difference this approver is making to a line, as a chip rather than a number
+ *  in a column of numbers: "no change" should never look like a decision. */
+function DifferenceChip({ difference, unit }: { difference: number | null; unit: string }) {
+  if (difference == null) return <span className="text-xs text-muted">—</span>;
+  if (difference === 0) {
+    return (
+      <span className="inline-flex min-h-7 items-center rounded-full bg-content2 px-2.5 text-xs font-semibold text-muted">
+        No change
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex min-h-7 items-center gap-1 rounded-full bg-warn-bg px-2.5 text-xs font-semibold tabular-nums text-warn">
+      {formatQuantity(difference)} {unit}
+    </span>
+  );
+}
+
+/** Initials for the history dot — a name is what an approver recognises, and two
+ *  letters of it is enough to tell one rung from the next down a timeline. */
+const initialsOf = (name?: string | null) =>
+  (name ?? "System").trim().split(/\s+/).slice(0, 2).map((part) => part[0] ?? "").join("").toUpperCase() || "S";
+
+const ACTION_TONE: Record<string, string> = {
+  APPROVED: "bg-ok-bg text-ok",
+  REJECTED: "bg-bad-bg text-bad",
+  RETURNED: "bg-warn-bg text-warn",
+  DELEGATED: "bg-info-bg text-info",
+};
+
+/** What happened before this desk, as a timeline: the ladder is a sequence, and a
+ *  stack of separated blocks never said which rung came first. */
+function HistoryTimeline({ rows }: { rows: ApprovalHistoryRow[] }) {
+  return (
+    <ol className="space-y-0">
+      {rows.map((row, index) => (
+        <li key={row.id} className="relative flex gap-3 px-4 py-3 sm:px-5">
+          {/* The connector stops at the last entry, so the line reads as a chain that
+              has ended here rather than one that trails off into the card's edge. */}
+          {index < rows.length - 1 && (
+            <span aria-hidden className="absolute left-[2.1rem] top-12 bottom-0 w-px bg-line sm:left-[2.35rem]" />
+          )}
+          <span
+            className={`grid h-9 w-9 shrink-0 place-items-center rounded-full text-[11px] font-bold ${
+              ACTION_TONE[row.action] ?? "bg-content2 text-muted"
+            }`}
+          >
+            {initialsOf(row.actor_name)}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <strong className="text-sm font-semibold text-ink">{row.actor_name ?? "System"}</strong>
+              <StatusPill status={row.action} />
+            </div>
+            <p className="text-xs text-muted">
+              {row.stage_name ?? `Stage ${row.stage_sequence}`} · {row.actor_position ?? "Position unavailable"}
+              {row.acted_at ? ` · ${fmtDateTime(row.acted_at)}` : ""}
+            </p>
+            {row.comments && (
+              <p className="mt-2 rounded-xl bg-content2 px-3 py-2 text-sm text-body">{row.comments}</p>
+            )}
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** Shape of the screen while it loads, rather than a bare line of text: an approver
+ *  who lands here on a slow connection should see the page they are about to read. */
+function ReviewSkeleton() {
+  return (
+    <div role="status" className="space-y-4">
+      <span className="sr-only">Loading approval details…</span>
+      <div className="h-9 w-56 animate-pulse rounded-xl bg-content2" />
+      <Card className="p-4 sm:p-5">
+        {/* mobile-ok — four placeholder blocks stay legible when they stack */}
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {[0, 1, 2, 3].map((cell) => (
+            <div key={cell} className="h-11 animate-pulse rounded-xl bg-content2" />
+          ))}
+        </div>
+      </Card>
+      <Card className="space-y-3 p-4 sm:p-5">
+        {[0, 1, 2, 3].map((row) => (
+          <div key={row} className="h-12 animate-pulse rounded-xl bg-content2" />
+        ))}
+      </Card>
+    </div>
+  );
+}
 
 /** Normal page-based review. This is deliberately not a drawer or overlay. */
 export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { indentId?: number } = {}) {
@@ -87,6 +329,13 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const invalidQuantity = invalidCount > 0;
   const anyReducedBelow = reviewItems.some(wasReducedBelow);
   const checksDone = checks.every(Boolean);
+  const checkedCount = checks.filter(Boolean).length;
+  // Display only: how many lines this approver is actually cutting. The count is the
+  // one thing a reviewer wants confirmed before signing, and counting the rows by eye
+  // is exactly what a wide table makes hard.
+  const cutCount = useMemo(() => reviewItems.filter((line) => (
+    !errorByLine[line.id] && quantityValue(quantities[line.id]) < approvalCeiling(line)
+  )).length, [errorByLine, quantities, reviewItems]);
 
   // Every keystroke is kept; the message under the field does the correcting. Refusing
   // the key instead leaves the approver staring at a box that will not take their 16.
@@ -146,113 +395,414 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     if (confirming === "return") returnForCorrection.mutate();
   };
 
-  if (indent.isLoading || availability.isLoading) return <p className="p-6 text-sm text-muted">Loading approval details…</p>;
+  if (indent.isLoading || availability.isLoading) return <ReviewSkeleton />;
   // A document that has left approval is not an error, it is an outcome — somebody
   // signed it, or this approver served it and came back on the browser's back button.
   // Painting it red reads as "your action failed" over an act that succeeded.
   if (indent.error) {
     const message = (indent.error as Error).message;
     const movedOn = /not awaiting approval/i.test(message);
-    return <Card className={`p-4 text-sm ${movedOn ? "text-body" : "bg-danger/10 text-danger"}`}>
-      <p>{movedOn ? "This indent has already moved on — it is no longer waiting on you." : message}</p>
-      {movedOn && <p className="mt-1 text-xs text-muted">{message}</p>}
-      <Button className="mt-3" variant="ghost" onClick={() => nav("/approvals")}>
-        <ArrowLeft className="h-4 w-4" /> Back to approvals
-      </Button>
-    </Card>;
+    return (
+      <Card className="p-5">
+        <div className="flex items-start gap-3">
+          <span
+            className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${
+              movedOn ? "bg-ok-bg text-ok" : "bg-bad-bg text-bad"
+            }`}
+          >
+            {movedOn ? <CheckCircle2 className="h-5 w-5" /> : <TriangleAlert className="h-5 w-5" />}
+          </span>
+          <div className="min-w-0">
+            <p className={`font-display text-base font-bold ${movedOn ? "text-ink" : "text-bad"}`}>
+              {movedOn ? "This indent has already moved on" : "This approval could not be opened"}
+            </p>
+            <p className="mt-1 text-sm text-muted">
+              {movedOn ? "It is no longer waiting on you." : message}
+            </p>
+            {movedOn && <p className="mt-1 text-xs text-muted">{message}</p>}
+            <div className="mt-3">
+              <Button variant="subtle" onClick={() => nav("/approvals")}>
+                <ArrowLeft className="h-4 w-4" /> Back to approvals
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Card>
+    );
   }
   if (!indent.data) return <p className="p-6 text-muted">Approval not found.</p>;
 
+  const historyRows = history.data ?? [];
+
   return <>
-    <Button variant="ghost" onClick={() => nav("/approvals")}><ArrowLeft className="h-4 w-4" /> Back to approvals</Button>
+    <Button variant="ghost" onClick={() => nav("/approvals")}>
+      <ArrowLeft className="h-4 w-4" /> Back to approvals
+    </Button>
     <PageHeader
       eyebrow="Approval review"
       title={indent.data.indent_no}
       actions={<>
         <StatusPill status={indent.data.current_stage_name ?? indent.data.status} />
-        {/* Top right, next to the status: serving from your own stock is an action on
-            the whole document, like approving, not a field inside the comparison. */}
-        <Button variant="primary" onClick={() => setServing((open) => !open)}>
+        {/* Next to the status, and deliberately NOT the primary button: serving from
+            your own stock is an action on the whole document, like approving, but the
+            decision this screen exists for is the one in the bar at the foot of it. */}
+        <Button variant="subtle" onClick={() => setServing((open) => !open)}>
           <PackageCheck className="h-4 w-4" /> {serving ? "Hide own stock" : "Serve from own stock"}
         </Button>
       </>}
     />
 
-    <div className="space-y-5">
-      <Card className="p-4"><dl className="grid gap-3 text-sm sm:grid-cols-3"><div><dt className="text-muted">Requested by</dt><dd className="font-semibold text-ink">{indent.data.requested_by_name ?? "—"}</dd></div><div><dt className="text-muted">Department</dt><dd>{indent.data.department_name ?? "—"}</dd></div><div><dt className="text-muted">Priority</dt><dd><StatusPill status={indent.data.priority} /></dd></div></dl></Card>
+    <div className="space-y-4 pb-4">
+      {/* Who is asking, and for what — the context the numbers below are judged
+          against, on one strip instead of a paragraph of definition lists. */}
+      <Card className="p-4 sm:p-5">
+        <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Fact icon={User} label="Requested by">{indent.data.requested_by_name ?? "—"}</Fact>
+          <Fact icon={Building2} label="Department">{indent.data.department_name ?? "—"}</Fact>
+          <Fact icon={CalendarDays} label="Raised on">{fmtDate(indent.data.created_at)}</Fact>
+          <Fact icon={Flag} label="Priority">
+            <StatusPill status={indent.data.priority} />
+          </Fact>
+        </dl>
+      </Card>
 
       {/* Serve-from-own-stock sits above the decision, not after it: an approver who
           holds the goods should give them and let only the remainder climb. Behind a
           button because most approvals are a straight pass-up — the panel opens for
           the approver who means to give stock, and the quantities stay in view for
           everyone else. */}
-      {serving && <section className="space-y-2">
-        <h2 className="font-semibold text-ink">Serve from your own stock</h2>
+      {serving && <section aria-label="Serve from your own stock">
+        <h2 className="mb-2 flex items-center gap-2 font-display text-[15px] font-bold text-ink">
+          <PackageCheck className="h-4 w-4 text-brand" /> Serve from your own stock
+        </h2>
         {/* Serving every line IS the decision: the ladder ends there, so the screen
             leaves exactly as it does after Approve rather than refetching a document
             that is no longer awaiting anyone. */}
         <IssueFromStockPanel indentId={indentId} onClosed={finish("approve")} />
       </section>}
 
-      <section>
-        <h2 className="font-semibold text-ink">Quantity comparison</h2>
-        <p className="mb-2 max-w-3xl text-xs leading-relaxed text-muted">A quantity may be reduced down to zero, never increased, and what you approve becomes the maximum the next approver can pass on. {anyReducedBelow ? "Lines already cut by an earlier approver are capped at that lower quantity, not at the original request." : "Each field shows the range you may enter."}</p>
-        {/* The one thing an approver holding part of the stock gets wrong. Cutting the
-            quantity here and issuing what you hold LOOK the same on this screen and are
-            opposites: a cut ends the request, an issue leaves the rest travelling. Said
-            beside the boxes that do it, because that is where the choice is made. */}
-        <p className="mb-2 max-w-3xl text-xs leading-relaxed text-warn">Reduce a quantity only to cut the request for good — the difference is not owed to anyone afterwards. If you simply do not hold enough, leave the quantity as it is and enter what you can give under <strong>Serve from own stock</strong>; the remainder stays on this indent and carries on to the fulfilment queue.</p>
-        <div className="overflow-x-auto rounded-xl border border-line"><table className="w-full min-w-[980px] table-fixed text-left text-sm"><colgroup><col className="w-[34%]" /><col className="w-[13%]" /><col className="w-[22%]" /><col className="w-[19%]" /><col className="w-[12%]" /></colgroup><thead className="bg-content2 text-xs text-muted"><tr><th className="px-4 py-3 text-left font-semibold">Item</th><th className="px-4 py-3 text-right font-semibold">Requested</th><th className="px-4 py-3 text-right font-semibold">Most you can approve</th><th className="px-4 py-3 text-right font-semibold">Approved at this level</th><th className="px-4 py-3 text-right font-semibold">Difference</th></tr></thead><tbody className="divide-y divide-line">{reviewItems.map((line) => {
-          const ceiling = approvalCeiling(line);
-          const raw = quantities[line.id] ?? "";
-          const lineError = errorByLine[line.id];
-          const difference = lineError ? null : quantityValue(raw) - ceiling;
-          const reduced = wasReducedBelow(line);
-          const unit = displayUom(line.uom_code);
-          return <tr key={line.id}><td className="px-4 py-3 align-top"><strong className="block truncate text-ink" title={line.item_name ?? undefined}>{line.item_name}</strong><p className="font-mono text-xs text-muted">{line.item_code}</p></td><td className="whitespace-nowrap px-4 py-3 text-right align-top tabular-nums">{formatQuantity(line.requested_quantity)} {unit}</td><td className="px-4 py-3 text-right align-top"><span className={`whitespace-nowrap tabular-nums ${reduced ? "font-semibold text-warning" : "text-body"}`}>{formatQuantity(ceiling)} {unit}</span>{reduced && <p className="text-xs text-muted">Cut by a previous approver</p>}</td><td className="px-4 py-3 text-right align-top">
-            {/* One right-aligned block per cell, the same width as the column's
-                right-aligned header: the input, its unit and the help line share
-                the block's left and right edges, so nothing drifts out from under
-                the field. The unit sits inside the field rather than beside it —
-                hung outside, it pushed the box left of the header above it. */}
-            <div className="ml-auto w-36">
-              {/* The unit is a SIBLING of the input, not an overlay on top of it.
-                  Absolutely positioned, it sat over the field's own text: the number
-                  is right-aligned and grew straight under a unit the padding was not
-                  wide enough to clear, so typing into "UOM-BOX" was unreadable. As a
-                  flex row the input takes the space that is left and the two can
-                  never collide, whatever the unit is called. The border and focus
-                  ring move to the wrapper so it still reads as one control. */}
-              <div className={`flex h-10 items-center rounded-lg border bg-content1 pr-3 transition focus-within:ring-2 ${lineError ? "border-danger bg-danger/5 focus-within:ring-danger/30" : "border-line focus-within:border-brand focus-within:ring-brand/25"}`}>
-                <input type="text" inputMode="decimal" autoComplete="off" aria-label={`Approved quantity for ${line.item_name ?? line.id}`} aria-invalid={Boolean(lineError)} aria-describedby={`qty-help-${line.id}`} value={raw} onChange={(event) => setQuantity(line, event.target.value)} className="h-full min-w-0 flex-1 rounded-lg bg-transparent px-3 text-right tabular-nums text-ink outline-none" />
-                <span className="shrink-0 whitespace-nowrap text-xs text-muted">{unit}</span>
-              </div>
-              {/* The range is on screen before anything goes wrong, and repeated inside
-                  the error when it does — the approver never has to work out the cap. */}
-              <p id={`qty-help-${line.id}`} className={`mt-1.5 flex items-start gap-1.5 text-left text-xs leading-snug ${lineError ? "text-danger" : "text-muted"}`} role={lineError ? "alert" : undefined}>
-                {lineError && <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />}
-                <span>{lineError ?? `You can approve ${allowedRange(line)}.`}</span>
-              </p>
-            </div>
-          </td><td className={`whitespace-nowrap px-4 py-3 text-right align-top tabular-nums ${difference != null && difference < 0 ? "font-semibold text-warning" : "text-muted"}`}>{difference == null ? "—" : difference === 0 ? "No change" : `${formatQuantity(difference)} ${unit}`.trim()}</td></tr>;
-        })}</tbody></table></div>
-      </section>
+      <Card>
+        <SectionHead
+          icon={ClipboardCheck}
+          title="Items and quantities"
+          hint="Set what you approve on each line. Everything is prefilled at your ceiling."
+          right={<div className="flex items-center gap-2">
+            <span className="inline-flex min-h-7 items-center rounded-full bg-content2 px-2.5 text-xs font-semibold text-body">
+              {reviewItems.length} {reviewItems.length === 1 ? "line" : "lines"}
+            </span>
+            {cutCount > 0 && (
+              <span className="inline-flex min-h-7 items-center rounded-full bg-warn-bg px-2.5 text-xs font-semibold text-warn">
+                {cutCount} reduced
+              </span>
+            )}
+          </div>}
+        />
 
-      <section><h2 className="mb-2 font-semibold text-ink">Approval checklist</h2><Card className="space-y-2 p-4">{CHECKS.map((label, index) => <label key={label} className="flex min-h-11 cursor-pointer items-center gap-3 text-sm text-body"><input type="checkbox" checked={checks[index]} onChange={(event) => setChecks((current) => current.map((value, item) => item === index ? event.target.checked : value))} className="h-5 w-5" />{label}</label>)}</Card></section>
+        <div className="space-y-3 p-4 sm:p-5">
+          <div className="grid gap-2 lg:grid-cols-2">
+            <Note tone="info" icon={Info} title="How much you may approve">
+              A quantity may be reduced down to zero, never increased, and what you approve becomes
+              the maximum the next approver can pass on.{" "}
+              {anyReducedBelow
+                ? "Lines already cut by an earlier approver are capped at that lower quantity, not at the original request."
+                : "Each field shows the range you may enter."}
+            </Note>
+            {/* The one thing an approver holding part of the stock gets wrong. Cutting
+                the quantity here and issuing what you hold LOOK the same on this screen
+                and are opposites: a cut ends the request, an issue leaves the rest
+                travelling. Said beside the boxes that do it, because that is where the
+                choice is made. */}
+            <Note tone="warn" icon={TriangleAlert} title="Reducing is not the same as serving">
+              Reduce a quantity only to cut the request for good — the difference is not owed to
+              anyone afterwards. If you simply do not hold enough, leave the quantity as it is and
+              enter what you can give under <strong>Serve from own stock</strong>; the remainder
+              stays on this indent and carries on to the fulfilment queue.
+            </Note>
+          </div>
 
-      <section><label className="text-sm font-semibold text-ink">Comments<textarea value={comments} onChange={(event) => setComments(event.target.value)} placeholder="Optional approval comment" className="mt-2 min-h-24 w-full rounded-lg border border-line bg-content1 p-3 text-sm text-ink" /></label></section>
+          {/* Desktop: one row per line, so the four numbers that matter line up down
+              the page and a cut is visible as a column, not as a paragraph. */}
+          <div className="hidden overflow-x-auto rounded-xl border border-line lg:block">
+            <table className="w-full table-fixed text-left text-sm">
+              <colgroup>
+                <col className="w-[32%]" /><col className="w-[13%]" /><col className="w-[17%]" />
+                <col className="w-[24%]" /><col className="w-[14%]" />
+              </colgroup>
+              <thead className="bg-content2">
+                <tr className="text-[11px] uppercase tracking-wider text-muted">
+                  <th className="px-4 py-3 text-left font-semibold">Item</th>
+                  <th className="px-4 py-3 text-right font-semibold">Requested</th>
+                  <th className="px-4 py-3 text-right font-semibold">Most you can approve</th>
+                  <th className="px-4 py-3 text-right font-semibold">Approved at this level</th>
+                  <th className="px-4 py-3 text-right font-semibold">Difference</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line">
+                {reviewItems.map((line, index) => {
+                  const ceiling = approvalCeiling(line);
+                  const raw = quantities[line.id] ?? "";
+                  const lineError = errorByLine[line.id];
+                  const difference = lineError ? null : quantityValue(raw) - ceiling;
+                  const reduced = wasReducedBelow(line);
+                  const unit = displayUom(line.uom_code);
+                  return (
+                    <tr
+                      key={line.id}
+                      className={`transition-colors ${
+                        lineError
+                          ? "bg-bad-bg/40"
+                          : difference != null && difference < 0
+                            ? "bg-warn-bg/40"
+                            : "hover:bg-content2/50"
+                      }`}
+                    >
+                      <td className="px-4 py-3 align-top">
+                        <div className="flex min-w-0 items-start gap-2.5">
+                          <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-lg bg-content2 text-[11px] font-bold tabular-nums text-muted">
+                            {index + 1}
+                          </span>
+                          <div className="min-w-0">
+                            <strong className="block truncate font-semibold text-ink" title={line.item_name ?? undefined}>
+                              {line.item_name}
+                            </strong>
+                            <p className="truncate font-mono text-xs text-muted">{line.item_code}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right align-top tabular-nums text-body">
+                        {formatQuantity(line.requested_quantity)} {unit}
+                      </td>
+                      <td className="px-4 py-3 text-right align-top">
+                        <span className={`whitespace-nowrap font-semibold tabular-nums ${reduced ? "text-warn" : "text-ink"}`}>
+                          {formatQuantity(ceiling)} {unit}
+                        </span>
+                        {reduced && <p className="text-[11px] text-muted">Cut by a previous approver</p>}
+                      </td>
+                      {/* One right-aligned block per cell, the same width as the
+                          column's right-aligned header: the field, its unit and the
+                          help line share the block's edges, so nothing drifts out
+                          from under the box. */}
+                      <td className="px-4 py-3 align-top">
+                        <div className="ml-auto max-w-44">
+                          <QuantityField
+                            line={line}
+                            unit={unit}
+                            value={raw}
+                            error={lineError}
+                            onChange={(value) => setQuantity(line, value)}
+                          />
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right align-top">
+                        <DifferenceChip difference={difference} unit={unit} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
 
-      <section><h2 className="mb-2 font-semibold text-ink">Previous approvals</h2><Card className="divide-y divide-line p-0">{history.isLoading && <p className="p-4 text-sm text-muted">Loading history…</p>}{(history.data ?? []).map((row) => <div key={row.id} className="p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><strong className="text-ink">{row.actor_name ?? "System"}</strong><p className="text-xs text-muted">{row.stage_name ?? `Stage ${row.stage_sequence}`} · {row.actor_position ?? "Position unavailable"}</p></div><StatusPill status={row.action} /></div>{row.comments && <p className="mt-2 text-sm text-body">{row.comments}</p>}<p className="mt-1 text-xs text-muted">{row.acted_at ? new Date(row.acted_at).toLocaleString() : "—"}</p></div>)}{!history.isLoading && !(history.data ?? []).length && <p className="p-4 text-sm text-muted">No previous approval actions.</p>}</Card></section>
+          {/* Phone and tablet: the same four numbers as a card, so nothing has to be
+              scrolled sideways to be signed. */}
+          <div className="space-y-3 lg:hidden">
+            {reviewItems.map((line, index) => {
+              const ceiling = approvalCeiling(line);
+              const raw = quantities[line.id] ?? "";
+              const lineError = errorByLine[line.id];
+              const difference = lineError ? null : quantityValue(raw) - ceiling;
+              const reduced = wasReducedBelow(line);
+              const unit = displayUom(line.uom_code);
+              return (
+                <div
+                  key={line.id}
+                  className={`rounded-xl border p-3 ${lineError ? "border-bad/40 bg-bad-bg/30" : "border-line bg-content1"}`}
+                >
+                  <div className="flex items-start gap-2.5">
+                    <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-lg bg-content2 text-[11px] font-bold tabular-nums text-muted">
+                      {index + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <strong className="block truncate font-semibold text-ink">{line.item_name}</strong>
+                      <p className="truncate font-mono text-xs text-muted">{line.item_code}</p>
+                    </div>
+                    <DifferenceChip difference={difference} unit={unit} />
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <div className="rounded-xl bg-content2 px-3 py-2">
+                      <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted">Requested</span>
+                      <span className="block text-sm font-semibold tabular-nums text-ink">
+                        {formatQuantity(line.requested_quantity)} {unit}
+                      </span>
+                    </div>
+                    <div className="rounded-xl bg-content2 px-3 py-2">
+                      <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted">Most you can approve</span>
+                      <span className={`block text-sm font-semibold tabular-nums ${reduced ? "text-warn" : "text-ink"}`}>
+                        {formatQuantity(ceiling)} {unit}
+                      </span>
+                    </div>
+                  </div>
+                  {reduced && <p className="mt-1 text-[11px] text-muted">Cut by a previous approver</p>}
+                  <div className="mt-3">
+                    <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-muted">
+                      Approved at this level
+                    </span>
+                    <QuantityField
+                      line={line}
+                      unit={unit}
+                      value={raw}
+                      error={lineError}
+                      onChange={(value) => setQuantity(line, value)}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </Card>
 
-      <div className="border-t border-line py-4">
-        {/* A greyed-out Approve with no reason is the other half of the same confusion. */}
-        {(invalidQuantity || !checksDone) && <div className={`mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-sm ${invalidQuantity ? "border-danger/30 bg-danger/10 text-danger" : "border-line bg-content2 text-muted"}`} role="status"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /><span>{invalidQuantity ? `Correct the ${invalidCount === 1 ? "highlighted quantity" : `${invalidCount} highlighted quantities`} before approving.` : "Confirm every item on the checklist before approving."}</span></div>}
-        <div className="flex flex-wrap justify-end gap-2">{canReturnForCorrection && <Button variant="ghost" disabled={busy} onClick={() => { setReason(""); setConfirming("return"); }}><RotateCcw className="h-4 w-4" /> Return for correction</Button>}<Button variant="danger" disabled={busy} onClick={() => { setReason(""); setConfirming("reject"); }}><X className="h-4 w-4" /> Reject</Button><Button disabled={busy || invalidQuantity || !checksDone} onClick={() => setConfirming("approve")}><Check className="h-4 w-4" /> Approve</Button></div>
+      {/* The two things the approver adds to the decision, side by side rather than
+          stacked: neither is long enough to earn a full page-width band of its own. */}
+      <div className="grid items-start gap-4 lg:grid-cols-2">
+        <Card>
+          <SectionHead
+            icon={CheckCircle2}
+            title="Before you approve"
+            hint="All three confirm the Approve button."
+            right={<span
+              className={`inline-flex min-h-7 items-center rounded-full px-2.5 text-xs font-semibold tabular-nums ${
+                checksDone ? "bg-ok-bg text-ok" : "bg-content2 text-muted"
+              }`}
+            >{checkedCount} of {CHECKS.length}</span>}
+          />
+          <div className="space-y-2 p-4 sm:p-5">
+            {CHECKS.map((label, index) => (
+              <label
+                key={label}
+                className={`flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border px-3 py-2 text-sm transition-colors ${
+                  checks[index]
+                    ? "border-ok/30 bg-ok-bg/60 text-ink"
+                    : "border-line bg-content1 text-body hover:border-brand/40"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checks[index]}
+                  onChange={(event) => setChecks((current) =>
+                    current.map((value, item) => (item === index ? event.target.checked : value)))}
+                  className="h-5 w-5 shrink-0 cursor-pointer accent-brand"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <SectionHead
+            icon={MessageSquare}
+            title="Comments"
+            hint="Optional — recorded with your decision."
+          />
+          <div className="p-4 sm:p-5">
+            <textarea
+              value={comments}
+              onChange={(event) => setComments(event.target.value)}
+              aria-label="Approval comment"
+              placeholder="Anything the next approver or the requester should know"
+              className="min-h-28 w-full rounded-xl border border-line bg-content1 p-3 text-sm text-ink outline-none transition placeholder:text-muted focus:border-brand focus:ring-2 focus:ring-brand/25"
+            />
+          </div>
+        </Card>
       </div>
+
+      <Card>
+        <SectionHead
+          icon={History}
+          title="Previous approvals"
+          hint="Every rung this request has already passed."
+          right={historyRows.length > 0 && <span className="inline-flex min-h-7 items-center rounded-full bg-content2 px-2.5 text-xs font-semibold text-body">
+            {historyRows.length}
+          </span>}
+        />
+        {history.isLoading && <p className="p-4 text-sm text-muted sm:p-5">Loading history…</p>}
+        {!history.isLoading && historyRows.length === 0 && (
+          <p className="p-4 text-sm text-muted sm:p-5">
+            No previous approval actions — you are the first rung on this request.
+          </p>
+        )}
+        {historyRows.length > 0 && <HistoryTimeline rows={historyRows} />}
+      </Card>
     </div>
 
-    <ConfirmModal isOpen={confirming !== null} title={confirming === "approve" ? "Approve this request?" : confirming === "reject" ? "Reject this request?" : "Return for correction?"} message={confirming === "approve" ? "The saved quantities move to the next approval level or complete the approval." : confirming === "reject" ? "The request will stop and the requester will see your reason." : "Your correction instructions will be recorded in approval history."} confirmLabel={confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return for correction"} danger={confirming === "reject"} busy={busy || ((confirming === "reject" || confirming === "return") && !reason.trim())} error={actionError} onClose={() => !busy && setConfirming(null)} onConfirm={confirm}>
-      {(confirming === "reject" || confirming === "return") && <label className="text-sm font-semibold text-ink">{confirming === "reject" ? "Rejection reason" : "What must be corrected?"}<textarea autoFocus value={reason} onChange={(event) => setReason(event.target.value)} className="mt-2 min-h-24 w-full rounded-lg border border-line bg-content1 p-3 text-sm text-ink" placeholder="Required" />{!reason.trim() && <p className="mt-1 text-xs text-danger">A reason is required.</p>}</label>}
+    {/* The decision rides the foot of the screen instead of waiting at the bottom of
+        the scroll. An approver who has read the lines should never have to hunt for
+        the button, and what is blocking Approve is said in the same bar as the button
+        it is blocking — a greyed-out Approve with no reason beside it is the other
+        half of the same confusion. */}
+    <div className="sticky bottom-24 z-20 md:bottom-6">
+      <Card className="flex flex-wrap items-center justify-between gap-3 border-brand/30 bg-content1/95 p-3 shadow-lg backdrop-blur">
+        <p
+          role="status"
+          className={`flex min-w-0 items-center gap-2 text-sm font-medium ${
+            invalidQuantity ? "text-bad" : checksDone ? "text-ok" : "text-muted"
+          }`}
+        >
+          {invalidQuantity
+            ? <><AlertCircle className="h-4 w-4 shrink-0" aria-hidden />
+                Correct the {invalidCount === 1 ? "highlighted quantity" : `${invalidCount} highlighted quantities`} before approving.</>
+            : checksDone
+              ? <><CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
+                  Ready to sign — {reviewItems.length} {reviewItems.length === 1 ? "line" : "lines"}
+                  {cutCount > 0 ? `, ${cutCount} reduced` : ", nothing reduced"}.</>
+              : <><Info className="h-4 w-4 shrink-0" aria-hidden />
+                  Confirm every item on the checklist before approving ({checkedCount} of {CHECKS.length}).</>}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {canReturnForCorrection && (
+            <Button variant="ghost" disabled={busy} onClick={() => { setReason(""); setConfirming("return"); }}>
+              <RotateCcw className="h-4 w-4" /> Return for correction
+            </Button>
+          )}
+          <Button variant="danger" disabled={busy} onClick={() => { setReason(""); setConfirming("reject"); }}>
+            <X className="h-4 w-4" /> Reject
+          </Button>
+          <Button disabled={busy || invalidQuantity || !checksDone} onClick={() => setConfirming("approve")}>
+            <Check className="h-4 w-4" /> Approve
+          </Button>
+        </div>
+      </Card>
+    </div>
+
+    <ConfirmModal
+      isOpen={confirming !== null}
+      title={confirming === "approve" ? "Approve this request?" : confirming === "reject" ? "Reject this request?" : "Return for correction?"}
+      message={confirming === "approve"
+        ? "The saved quantities move to the next approval level or complete the approval."
+        : confirming === "reject"
+          ? "The request will stop and the requester will see your reason."
+          : "Your correction instructions will be recorded in approval history."}
+      confirmLabel={confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return for correction"}
+      danger={confirming === "reject"}
+      busy={busy || ((confirming === "reject" || confirming === "return") && !reason.trim())}
+      error={actionError}
+      onClose={() => !busy && setConfirming(null)}
+      onConfirm={confirm}
+    >
+      {(confirming === "reject" || confirming === "return") && (
+        <label className="block text-sm font-semibold text-ink">
+          {confirming === "reject" ? "Rejection reason" : "What must be corrected?"}
+          <textarea
+            autoFocus
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            className="mt-2 min-h-24 w-full rounded-xl border border-line bg-content1 p-3 text-sm font-normal text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/25"
+            placeholder="Required"
+          />
+          {!reason.trim() && <p className="mt-1 text-xs font-normal text-danger">A reason is required.</p>}
+        </label>
+      )}
     </ConfirmModal>
   </>;
 }

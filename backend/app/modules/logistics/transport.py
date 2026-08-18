@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.indents.models import Indent
+from app.modules.indents import service as indent_service
 from app.modules.logistics.enums import (
     ACK_CLAIM_EVENT,
     AWAITING_ACK_STATUSES,
@@ -49,6 +50,7 @@ from app.modules.logistics.models import (
 )
 from app.modules.logistics.schemas import TROut
 from app.platform.settings.service import write_audit
+from app.platform.settings import attachments
 from app.platform.workflow import engine, ladder
 from app.shared import evaluation
 from app.shared.enums import ApprovalAction, AuditAction, DocType, InstanceStatus
@@ -86,6 +88,24 @@ async def get_tr(db: AsyncSession, tr_id: int) -> TransportRequest:
     if doc is None:
         raise NotFoundError(f"Transport request {tr_id} not found")
     return doc
+
+
+async def receipt_evidence(db: AsyncSession, tr_id: int) -> list:
+    """Requester-uploaded photo/bill for this leg, exposed read-only to Logistics."""
+    doc = await get_tr(db, tr_id)
+    if not doc.indent_id:
+        return []
+    return await attachments.list_attachments(
+        db, indent_service.ACK_ENTITY_TYPE, doc.indent_id)
+
+
+async def receipt_evidence_file(db: AsyncSession, tr_id: int,
+                                attachment_id: int):
+    """Download one receipt file only when it belongs to this leg's indent."""
+    rows = await receipt_evidence(db, tr_id)
+    if not any(row.id == attachment_id for row in rows):
+        raise NotFoundError("Receipt evidence not found for this shipment")
+    return await attachments.attachment_file(db, attachment_id)
 
 
 async def list_trs(db: AsyncSession, params: PageParams, status: str | None = None,
@@ -490,7 +510,6 @@ _FIELD_LABELS = {
     "vehicle_number": "the vehicle number",
     "driver_name": "the driver's name",
     "handed_over_by_name": "who handed the material over",
-    "received_by_name": "who received it",
 }
 
 
@@ -593,7 +612,9 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         vehicle_number=data.vehicle_number, driver_name=data.driver_name,
         driver_phone=data.driver_phone, trip_reference=data.trip_reference,
         handed_over_by_name=data.handed_over_by_name,
-        received_by_name=data.received_by_name,
+        # Legacy read column only: logistics cannot name the receiver at dispatch.
+        # The indent requester's receipt stamps the actual receiver later.
+        received_by_name=None,
         requested_by_id=getattr(user, "id", None),
         requested_by_name=getattr(user, "full_name", None),
         requested_position_id=getattr(user, "active_position_id", None),
@@ -887,7 +908,7 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                   "contact_person", "contact_phone", "distance_km", "project_id",
                   "project_name", "expected_delivery", "remarks", "vehicle_number",
                   "driver_name", "driver_phone", "trip_reference",
-                  "handed_over_by_name", "received_by_name"):
+                  "handed_over_by_name"):
         value = getattr(data, field, None)
         if value is not None:
             setattr(doc, field, value)
@@ -1465,7 +1486,7 @@ async def set_provider(db: AsyncSession, tr_id: int, data, user) -> TransportReq
         vendor = await _carrier(db, data.carrier_id)
         doc.carrier_id, doc.carrier_name = vendor.id, vendor.name
     for field in ("freight_amount", "vehicle_number", "driver_name", "driver_phone",
-                  "trip_reference", "handed_over_by_name", "received_by_name"):
+                  "trip_reference", "handed_over_by_name"):
         value = getattr(data, field, None)
         if value is not None:
             setattr(doc, field, value)
@@ -1490,7 +1511,8 @@ async def set_provider(db: AsyncSession, tr_id: int, data, user) -> TransportReq
 #  Tracking
 # --------------------------------------------------------------------------- #
 
-async def _release(db: AsyncSession, doc: TransportRequest, data, user) -> None:
+async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
+                   strict: bool = True) -> None:
     """It has left. Capture the tracking handle the field will be given.
 
     Split out of `dispatch_tr` so the one-press Dispatch screen can release on the same
@@ -1499,25 +1521,53 @@ async def _release(db: AsyncSession, doc: TransportRequest, data, user) -> None:
     second copy of "it has left" is how the two doors start disagreeing about whether
     the consignment ever gated out.
 
+    `strict` is the difference between ASKING to release and DISCOVERING it already
+    happened. The desk pressing "it has left" is asked for the docket, because that
+    press is the moment to capture it. A carrier scan, a delivery or the site's own
+    signature arriving on a shipment still reading READY is evidence it left days ago,
+    and refusing those for a missing docket would throw away a fact that is already
+    true — see `_ensure_released`.
+
     Does not commit: the caller owns the transaction and its audit row.
     """
-    # The full check now, carrier included: whatever the mode was allowed to leave
-    # blank at submit has been answered by this point, and a consignment must never
-    # leave the yard with nobody named as taking it.
-    _check_mode_fields(doc)
+    if strict:
+        # The full check now, carrier included: whatever the mode was allowed to leave
+        # blank at submit has been answered by this point, and a consignment must never
+        # leave the yard with nobody named as taking it.
+        _check_mode_fields(doc)
 
-    rule = mode_rule(doc.mode)
-    if rule.needs_carrier and not (getattr(data, "lr_no", None)
-                                   or getattr(data, "docket_no", None)
-                                   or doc.lr_no or doc.docket_no):
-        raise ValidationError(
-            "Record the LR or docket number — it is what the field is given to "
-            "track the consignment.")
+        rule = mode_rule(doc.mode)
+        if rule.needs_carrier and not (getattr(data, "lr_no", None)
+                                       or getattr(data, "docket_no", None)
+                                       or doc.lr_no or doc.docket_no):
+            raise ValidationError(
+                "Record the LR or docket number — it is what the field is given to "
+                "track the consignment.")
+
+        # And whatever the load is CARRYING gets a say, while saying no still means
+        # something. A consignment that owes its own dispatch signature must not go
+        # out of the gate on a logistics press: refusing afterwards, in `ON_RELEASE`,
+        # left the shipment IN_TRANSIT and the consignment at PACKED — so nothing
+        # counted as dispatched, the requester was never offered the acknowledgement,
+        # and the indent could never close. Nothing registered and this is a no-op.
+        objection = await hooks.first_objection(hooks.BEFORE_RELEASE, db, doc, user)
+        if objection:
+            raise ValidationError(objection)
     for field in ("lr_no", "docket_no", "tracking_url", "eway_bill_no",
                   "gate_pass_no", "expected_delivery"):
         value = getattr(data, field, None)
         if value is not None:
             setattr(doc, field, value)
+
+    # Security and an own vehicle do not depend on an outside carrier to issue these
+    # references. Keep the defaults deterministic so the dialog can show them before
+    # release and a direct API call records the exact same values.
+    reference = doc.consignment_no or doc.tr_no
+    if not (doc.gate_pass_no or "").strip():
+        doc.gate_pass_no = f"GP/{reference}"
+    if (doc.mode == TransportMode.OWN_VEHICLE.value
+            and not (doc.lr_no or "").strip()):
+        doc.lr_no = f"LR/{reference}"
     if getattr(data, "remarks", None):
         doc.remarks = data.remarks
 
@@ -1538,6 +1588,30 @@ async def _release(db: AsyncSession, doc: TransportRequest, data, user) -> None:
     # with the goods already on a truck. Logistics may not import warehouse (rule 5),
     # so the warehouse registered the hand-back itself — see `logistics/hooks.py`.
     await hooks.fire(hooks.ON_RELEASE, db, doc, user)
+
+
+async def _ensure_released(db: AsyncSession, doc: TransportRequest, user,
+                           data=None) -> bool:
+    """Release a shipment that plainly left without anyone pressing the button.
+
+    "It has left" used to be decided in four places. Only `dispatch_tr` and the
+    one-press Dispatch screen went through `_release`; a carrier scan bumped the status
+    inline and `deliver_tr` walked straight from READY to DELIVERED. The status was the
+    least of what those two skipped — `_release` is also what fires `ON_RELEASE`, and
+    that hook is what tells the WAREHOUSE its consignment is gone. Without it the
+    consignment stayed PACKED, `dispatched_quantity` stayed zero, and the requester's
+    Acknowledgements screen never offered the button that closes the indent. A
+    third-party leg whose carrier tracked it from their own portal could therefore
+    never be signed for at all.
+
+    Non-strict on purpose: whatever is calling here has already established that the
+    goods moved, so a missing docket is a gap in the record, not grounds to reject the
+    news. Returns whether it did anything, for the caller's audit line.
+    """
+    if doc.status != TransportStatus.READY.value:
+        return False
+    await _release(db, doc, data, user, strict=False)
+    return True
 
 
 async def dispatch_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequest:
@@ -1579,9 +1653,13 @@ async def add_event(db: AsyncSession, tr_id: int, data, user) -> ShipmentEvent:
     )
     doc.events.append(event)
     # A scan on a request that has not been marked dispatched still means it is moving.
-    if (doc.status == TransportStatus.READY.value
-            and event_type != ShipmentEventType.DELIVERED.value):
-        doc.status = TransportStatus.IN_TRANSIT.value
+    # Through `_ensure_released` rather than by assigning the status here: this used to
+    # move the shipment on without telling the warehouse its consignment had gone, so a
+    # carrier tracking their own job left the requester with nothing to acknowledge.
+    # A DELIVERED scan is still excluded — `deliver_tr` is that door, and it releases
+    # on its own way through.
+    if event_type != ShipmentEventType.DELIVERED.value:
+        await _ensure_released(db, doc, user)
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -1619,6 +1697,12 @@ async def deliver_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReque
     if doc.status not in (TransportStatus.IN_TRANSIT.value,
                           TransportStatus.READY.value):
         raise ValidationError(f"{doc.tr_no} is {doc.status.lower()}")
+
+    # Arriving proves it left. Releasing first stamps the departure and hands the
+    # warehouse its consignment back, which walking straight from READY to DELIVERED
+    # skipped — the shipment read delivered while the consignment behind it was still
+    # sitting PACKED on the warehouse's floor.
+    await _ensure_released(db, doc, user)
 
     doc.status = TransportStatus.DELIVERED.value
     doc.delivered_at = data.delivered_at or utcnow()
@@ -1759,12 +1843,12 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
 
 async def close_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
     doc = await get_tr(db, tr_id)
-    # Acknowledged is the normal way in. DELIVERED is still allowed because a
-    # hand-over the receiver signed for on paper has nobody left to acknowledge in
-    # the system, and blocking that would leave the shipment open forever.
-    if doc.status not in (TransportStatus.DELIVERED.value,
-                          TransportStatus.ACKNOWLEDGED.value):
-        raise ValidationError("Only a delivered consignment can be closed")
+    # Logistics cannot close around the receiver. Direct hand-over also stays open
+    # until the indent requester confirms quantities and delivery evidence.
+    if doc.status != TransportStatus.ACKNOWLEDGED.value:
+        raise ValidationError(
+            "The indent requester must acknowledge this consignment before it can "
+            "be closed")
     open_claims = [e for e in doc.events if e.is_exception and e.resolved_at is None]
     if open_claims:
         raise ValidationError(

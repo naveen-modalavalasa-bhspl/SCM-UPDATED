@@ -92,6 +92,7 @@ class IndentOut(BaseModel):
     department_name: str | None = None
     office_id: int | None = None
     office_name: str | None = None
+    office_sac: str | None = None
     # Region/Location, snapshotted from the requester's HCM location at create.
     # Read-only on create and edit: there is no matching field on IndentCreate/Update.
     region_id: int | None = None
@@ -234,6 +235,15 @@ class AcknowledgeLineIn(BaseModel):
 
 class AcknowledgeIn(BaseModel):
     lines: list[AcknowledgeLineIn] = Field(min_length=1)
+    #: What state the goods arrived in. GOOD or DAMAGED only — SHORT is NOT asked for
+    #: and must never be, because the quantities above already say it: a requester who
+    #: types 6 against 10 dispatched has reported the shortage. Offering a SHORT flag
+    #: as well would let one form say "all ten arrived" and "it was short" in the same
+    #: breath, which is the disagreement this whole path exists to prevent. The service
+    #: derives SHORT from the numbers and takes DAMAGED from here.
+    condition: str | None = None
+    #: Required when something is wrong — it is what the claim is investigated from.
+    remarks: str | None = None
 
 
 class AcknowledgementLineRow(BaseModel):

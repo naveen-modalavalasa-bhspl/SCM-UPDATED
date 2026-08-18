@@ -16,11 +16,11 @@ import { IndentBoardPage } from "@/modules/indents/pages/BoardPage";
 import AcknowledgementsPage from "@/modules/indents/pages/AcknowledgementsPage";
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
-// Approvals is its own module now — the inbox, decisions, team queue, reports and the
+// Approvals is its own module now — the inbox, decisions, reports and the
 // indent review screen all live there, not inside indents.
 import {
   ApprovalCorrectionPage, ApprovalsPage, ConsolidationDetailPage, ConsolidationIssuePage,
-  ConsolidationItemPage, ConsolidationPage, MyDecisionsPage, TeamQueuePage,
+  ConsolidationItemPage, ConsolidationPage, MyDecisionsPage,
 } from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
@@ -209,7 +209,9 @@ function AppRoutes() {
             ?view=reports / ?reviewIndent=, so they need no route of their own. */}
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="approvals/decisions" element={<MyDecisionsPage />} />
-        <Route path="approvals/team-queue" element={<TeamQueuePage />} />
+        {/* Team Queue is retired. The route stays so an old link, a bookmark or a
+            stale menu row lands on the inbox instead of on a blank page. */}
+        <Route path="approvals/team-queue" element={<Navigate to="/approvals" replace />} />
         <Route path="approvals/consolidation" element={<ConsolidationPage />} />
         {/* Child screen, not a menu entry: it is reached by opening a row, and its
             :cycle is the group key the list navigated with. */}

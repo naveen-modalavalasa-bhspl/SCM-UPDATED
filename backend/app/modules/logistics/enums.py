@@ -166,9 +166,11 @@ MODE_RULES: dict[str, ModeRule] = {
     TransportMode.DIRECT.value: ModeRule(
         label="Direct hand-over",
         help="A warehouse person delivers it, or the indenter collects it. "
-             "No carrier and no freight.",
+             "No carrier and no freight. The indent requester confirms receipt.",
         needs_carrier=False, needs_quotes=False,
-        required_fields=("handed_over_by_name", "received_by_name"),
+        # Logistics records who released custody. The receiver is stamped later from
+        # the indent requester's receipt with its quantity, photo and optional bill.
+        required_fields=("handed_over_by_name",),
     ),
     TransportMode.COURIER.value: ModeRule(
         label="Courier",
@@ -347,3 +349,23 @@ AWAITING_ACK_STATUSES = (
     TransportStatus.IN_TRANSIT.value,
     TransportStatus.DELIVERED.value,
 )
+
+
+#: Legs the REQUESTER's own receipt may reconcile — wider than the queue above, and
+#: used only there (`warehouse._sign_transport_for_indent`).
+#:
+#: READY is here and is deliberately NOT in `AWAITING_ACK_STATUSES`, because the two
+#: answer different questions and only one of them is the logistics desk's. "Is this on
+#: my desk to chase?" must not count a shipment that has not left, or the queue and the
+#: KPI beside it fill up with loads still sitting in the yard — and `acknowledge_tr`,
+#: the desk's own door, still refuses anything that has not been released. "Has the
+#: person who asked for this got it?" is the other question, and someone holding the
+#: goods has settled whether it left whatever anybody remembered to press. That receipt
+#: reconciles the leg behind it rather than stranding it in READY forever.
+#:
+#: Everything earlier stays out, and that is the point of naming the set rather than
+#: testing "not terminal": DRAFT, PENDING_APPROVAL, QUOTING and AWAITING_CARRIER are
+#: shipments nobody has released, and a partial receipt on an indent must never reach
+#: back and close the leg carrying the rest of it — least of all a live tender with
+#: carriers still bidding on it.
+SIGNABLE_STATUSES = (TransportStatus.READY.value, *AWAITING_ACK_STATUSES)

@@ -163,6 +163,13 @@ export function CarrierJobPage() {
           <Row label="Agreed price" value={job.freight_amount
             ? money(job.freight_amount) : null} />
           <Row label="Your reference" value={job.carrier_reference} />
+          {/* What this load is FOR. Already in the payload the portal has always been
+              served — `indent_no` is on TROut — it simply was never drawn, so a carrier
+              had a shipment number and no idea which request it answered. Rendered
+              through `Row`, which hides itself when the field is empty: a leg raised
+              against a consolidated consignment names a dispatch rather than any one
+              indent, and an ambiguous number is worse here than none. */}
+          <Row label="Against request" value={job.indent_no} />
           <Row label="LR / docket" value={job.lr_no ?? job.docket_no} />
           <Row label="Note" value={job.remarks} />
         </dl>

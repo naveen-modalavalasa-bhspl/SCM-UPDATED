@@ -5,7 +5,7 @@ import type {
   CarrierOption, CarrierQuote, Comparison, Consignment, ConsignmentDetail,
   ConsignmentLink, DispatchInput, EvaluationMethod, FlowStage, LogisticsVendor,
   LogisticsVendorInput, LogisticsVendorSummary, ModeRule, ModeSuggestion,
-  PartnerType, ProviderBoardRow, RaiserTracking, ShipmentEvent, TransportRequest,
+  PartnerType, ProviderBoardRow, RaiserTracking, ReceiptEvidence, ShipmentEvent, TransportRequest,
   TransportSummary, TRInput, TRListRow,
 } from "./transportTypes";
 
@@ -90,12 +90,15 @@ export const transportApi = {
     api.get<Paginated<ProviderBoardRow>>("/api/transport/provider-board", { params })
       .then((r) => r.data),
 
-  /** Delivered, nobody has signed for it yet (doc A7). */
-  acknowledgements: (params: { search?: string; page?: number; size?: number } = {}) =>
-    api.get<Paginated<TRListRow>>("/api/transport/acknowledgements", { params })
-      .then((r) => r.data),
   get: (id: number) =>
     api.get<TransportRequest>(`/api/transport/${id}`).then((r) => r.data),
+  receiptEvidence: (id: number) =>
+    api.get<ReceiptEvidence[]>(`/api/transport/${id}/receipt-evidence`)
+      .then((r) => r.data),
+  downloadReceiptEvidence: (id: number, attachmentId: number) =>
+    api.get<Blob>(`/api/transport/${id}/receipt-evidence/${attachmentId}/download`, {
+      responseType: "blob",
+    }).then((r) => r.data),
   create: (data: TRInput) =>
     api.post<TransportRequest>("/api/transport", data).then((r) => r.data),
   update: (id: number, data: Partial<TRInput>) =>
@@ -165,7 +168,7 @@ export const transportApi = {
     carrier_id?: number | null; freight_amount?: number | null;
     vehicle_number?: string | null; driver_name?: string | null;
     driver_phone?: string | null; trip_reference?: string | null;
-    handed_over_by_name?: string | null; received_by_name?: string | null;
+    handed_over_by_name?: string | null;
   }) =>
     api.post<TransportRequest>(`/api/transport/${id}/provider`, data).then((r) => r.data),
 
@@ -188,15 +191,6 @@ export const transportApi = {
     api.post<TransportRequest>(`/api/transport/${id}/deliver`, data).then((r) => r.data),
   shareTracking: (id: number) =>
     api.post<TransportRequest>(`/api/transport/${id}/share-tracking`).then((r) => r.data),
-  /** The receiving site signs for it. Anything but GOOD opens a claim. */
-  acknowledge: (id: number, data: {
-    acknowledged_by_name?: string | null; condition?: string;
-    remarks?: string | null; pod_url?: string | null;
-    affected_item_name?: string | null; affected_qty?: number | null;
-    claim_amount?: number | null;
-  }) =>
-    api.post<TransportRequest>(`/api/transport/${id}/acknowledge`, data)
-      .then((r) => r.data),
   close: (id: number) =>
     api.post<TransportRequest>(`/api/transport/${id}/close`).then((r) => r.data),
   history: (id: number) =>

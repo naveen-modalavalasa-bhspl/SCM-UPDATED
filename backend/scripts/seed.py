@@ -131,7 +131,9 @@ PAGE_TREE = [
     ("approval_consolidation", "/approvals/consolidation", "Consolidation", "boxes",
      P.INDENT_APPROVE, 22, "approvals"),
     ("approval_decisions", "/approvals/decisions", "My Decisions", "history", P.INDENT_VIEW, 23, "approvals"),
-    ("approval_team", "/approvals/team-queue", "Team Queue", "users", P.INDENT_VIEW, 24, "approvals"),
+    # Team Queue is gone: a screen that reported on other approvers' backlogs and
+    # could decide nothing. Its route redirects to the inbox. On a database that
+    # already carries the row, migration b3c4d5e6f7a8 parks it with is_active = 0.
     # Delegations is gone: the approvals module does not expose it, and the route now
     # redirects to the inbox. Existing wf_delegations rows are left as history.
 

@@ -35,7 +35,7 @@ export const INDENT_PHASES = [
   { key: "approvals", label: "Approvals" },
   { key: "allocation", label: "Allocation" },
   { key: "warehouse", label: "Warehouse" },
-  { key: "delivery", label: "Delivery" },
+  { key: "delivery", label: "In-Transit" },
   { key: "acknowledgement", label: "Acknowledgement" },
 ] as const;
 

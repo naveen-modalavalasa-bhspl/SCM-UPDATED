@@ -33,7 +33,6 @@ export { TransportFormPage } from "./pages/TransportFormPage";
 export { TransportDetailPage } from "./pages/TransportDetailPage";
 export { ProviderSelectionPage } from "./pages/ProviderSelectionPage";
 export { ShipmentTrackingPage } from "./pages/ShipmentTrackingPage";
-export { AcknowledgementsPage } from "./pages/AcknowledgementsPage";
 export { LogisticsExceptionsPage } from "./pages/LogisticsExceptionsPage";
 
 /** The register behind the Dispatch dropdown: the third-party providers we ship with

@@ -48,16 +48,6 @@ export interface ApprovalReportRow {
   comments?: string | null;
 }
 
-export interface TeamQueueRow {
-  approver_id: number;
-  approver_name: string;
-  pending_count: number;
-  overdue_count: number;
-  oldest_waiting_since?: string | null;
-  average_waiting_hours: number;
-  document_types: string[];
-}
-
 export interface ApprovalIndentLine {
   id: number;
   item_id: number;

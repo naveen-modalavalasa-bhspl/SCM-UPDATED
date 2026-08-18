@@ -35,6 +35,13 @@ describe("approval document routes", () => {
       .toBe("/logistics/transport/1?decision=1");
   });
 
+  it("routes a transport request to its actionable transport detail", () => {
+    expect(approvalDocumentPath({ doc_type: "TRANSPORT_REQUEST", doc_id: 5 }))
+      .toBe("/logistics/transport/5?approval=1");
+    expect(approvalDecisionDocumentPath({ doc_type: "TRANSPORT_REQUEST", doc_id: 5 }))
+      .toBe("/logistics/transport/5?decision=1");
+  });
+
   it("opens the exact purchase order instead of the generic PO page", () => {
     expect(approvalDecisionDocumentPath({ doc_type: "PO", doc_id: 9 })).toBe("/pos/9?decision=1");
     expect(approvalDocumentPath({ doc_type: "PO", doc_id: 9 })).toBe("/pos/9?approval=1");

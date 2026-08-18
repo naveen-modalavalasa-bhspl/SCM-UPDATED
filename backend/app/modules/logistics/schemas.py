@@ -152,7 +152,6 @@ class TRCreate(BaseModel):
     driver_phone: str | None = None
     trip_reference: str | None = None
     handed_over_by_name: str | None = None
-    received_by_name: str | None = None
 
     lines: list[TRLineIn] = []
 
@@ -415,7 +414,6 @@ class ProviderIn(BaseModel):
     driver_phone: str | None = None
     trip_reference: str | None = None
     handed_over_by_name: str | None = None
-    received_by_name: str | None = None
 
 
 class DispatchIn(BaseModel):

@@ -2,15 +2,14 @@ import { test, expect } from "../../src/fixtures.js";
 import { ApprovalsApi, listRows, statCard, users, signIn } from "./helpers.js";
 
 /**
- * P9 and P10 — the three read screens: My Decisions, Team Queue and Reports.
+ * P9 and P10 — the two read screens: My Decisions and Reports.
  *
- * Read-only apart from one reminder, which is only sent when the screen itself
- * says there is somebody with pending work to remind.
+ * Read-only throughout.
  */
 
 const list = users();
 
-test.describe("Approvals — decisions, team queue and reports", () => {
+test.describe("Approvals — decisions and reports", () => {
 
   test("P9 · My Decisions history, filters, routing and export", async ({ page, log, goto, capture, playwright }) => {
     const context = await playwright.request.newContext({ baseURL: process.env.API_URL || "http://localhost:8000" });
@@ -109,53 +108,13 @@ test.describe("Approvals — decisions, team queue and reports", () => {
     await context.dispose();
   });
 
-  test("P10 · Team Queue rows, reminders, and the Reports screen end to end", async ({ page, log, goto, capture, playwright }) => {
+  test("P10 · the Reports screen end to end", async ({ page, log, goto, capture, playwright }) => {
     const context = await playwright.request.newContext({ baseURL: process.env.API_URL || "http://localhost:8000" });
     const api = new ApprovalsApi(context);
 
-    // Pick whichever configured approver actually has a team below them. The
-    // endpoint is asked for every account, because a 500 here is itself a finding
-    // and must not be swallowed into "this person has no team".
-    let account = list.approvers[0]!;
-    let team: any[] = [];
-    for (const candidate of list.approvers) {
-      const response = await api.raw("get", "/api/approvals/team-queue", candidate);
-      if (!response.ok) {
-        log.problem("http-error", `GET /api/approvals/team-queue as ${candidate.label} → ${response.status} ${response.body.slice(0, 200)}`);
-        expect.soft(response.status, `Team Queue answered ${response.status} for ${candidate.label}.`).toBeLessThan(500);
-        continue;
-      }
-      const items = response.json?.items ?? [];
-      log.info(`${candidate.label}: team-queue returns ${items.length} row(s).`);
-      if (items.length) { account = candidate; team = items; break; }
-    }
-    log.info(`Driving Team Queue as ${account.label} (${team.length} team member(s) from the API).`);
+    const account = list.approvers[0]!;
 
     await signIn(page, api, account, log);
-
-    await log.runStep("P10 · Team Queue matches the API and the reminder works", async () => {
-      await goto("/approvals/team-queue", "team-queue");
-      await expect(page.getByRole("heading", { name: "Team Queue" })).toBeVisible({ timeout: 20_000 });
-      const shown = await listRows(page).count();
-      expect.soft(shown, `Team Queue shows ${shown} row(s); the API returns ${team.length}.`).toBe(team.length);
-
-      const withWork = team.find((row: any) => row.pending_count > 0);
-      if (!withWork) {
-        log.info("Nobody in the team has pending work — the reminder path cannot be exercised.");
-        return;
-      }
-      const row = page.locator("table tbody tr").filter({ hasText: String(withWork.approver_name) }).first();
-      const remind = (await row.count()) ? row.getByRole("button", { name: /Remind/i }) : page.getByRole("button", { name: /Remind/i }).first();
-      const [response] = await Promise.all([
-        page.waitForResponse((r) => /\/api\/approvals\/team-queue\/\d+\/remind$/.test(new URL(r.url()).pathname), { timeout: 30_000 }).catch(() => null),
-        remind.click(),
-      ]);
-      if (response) {
-        expect.soft(response.ok(), `Remind answered ${response.status()}: ${await response.text()}`).toBe(true);
-      }
-      await expect.soft(page.getByText("Reminder sent.")).toBeVisible({ timeout: 15_000 });
-      await capture("team-queue-reminder");
-    });
 
     await log.runStep("P10 · the Reports screen loads its KPIs", async () => {
       await goto("/approvals?view=reports", "reports");

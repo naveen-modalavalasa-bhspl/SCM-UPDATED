@@ -25,7 +25,7 @@ const BLANK = {
   // costs the shipment nothing. Asked here as well as on the manual form, so a
   // one-press dispatch does not lose it.
   driver_phone: "", trip_reference: "",
-  handed_over_by_name: "", received_by_name: "",
+  handed_over_by_name: "",
   // The handle the receiving site chases the parcel with. Written here, on the slip
   // the counter just gave you — a docket typed in tomorrow is a docket nobody has.
   docket_no: "", tracking_url: "", eway_bill_no: "",
@@ -39,7 +39,6 @@ const FIELD_LABELS: Record<string, string> = {
   vehicle_number: "the vehicle number",
   driver_name: "the driver",
   handed_over_by_name: "who hands it over",
-  received_by_name: "who receives it",
   docket_no: "the docket / LR number",
 };
 
@@ -176,7 +175,6 @@ export function DispatchConfirmPage() {
         driver_phone: form.driver_phone || null,
         trip_reference: form.trip_reference || null,
         handed_over_by_name: form.handed_over_by_name || null,
-        received_by_name: form.received_by_name || null,
         docket_no: form.docket_no || null,
         tracking_url: form.tracking_url || null,
         eway_bill_no: form.eway_bill_no || null,
@@ -499,16 +497,11 @@ export function DispatchConfirmPage() {
             )}
 
             {needs("handed_over_by_name") && (
-              <>
-                <Field label="Handed over by">
-                  <Input value={form.handed_over_by_name}
-                    onChange={(e) => setForm({ ...form, handed_over_by_name: e.target.value })} />
-                </Field>
-                <Field label="Received by">
-                  <Input value={form.received_by_name}
-                    onChange={(e) => setForm({ ...form, received_by_name: e.target.value })} />
-                </Field>
-              </>
+              <Field label="Handed over by"
+                hint="The indent requester records receipt, photos and bills after it reaches them.">
+                <Input value={form.handed_over_by_name}
+                  onChange={(e) => setForm({ ...form, handed_over_by_name: e.target.value })} />
+              </Field>
             )}
           </div>
 

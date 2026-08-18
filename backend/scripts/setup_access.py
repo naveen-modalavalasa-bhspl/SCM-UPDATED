@@ -48,7 +48,8 @@ from app.shared.enums import DocType, ScopeRung
 HOME = ["home"]
 INDENTS = ["grp_indents", "ind_dashboard", "ind_list", "ind_deliveries",
            "ind_reports", "ind_notifications"]
-APPROVALS = ["approvals", "approval_waiting", "approval_decisions", "approval_team"]
+# `approval_team` dropped with the Team Queue screen.
+APPROVALS = ["approvals", "approval_waiting", "approval_decisions"]
 INVENTORY = ["grp_inventory", "inv_overview", "inv_balance", "inv_ledger",
              "inv_replenishment", "inv_transfers", "inv_fulfillment",
              "inv_allocation_approvals", "inv_stocking_points", "inv_mr",
