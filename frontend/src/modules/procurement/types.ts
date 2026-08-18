@@ -46,8 +46,42 @@ export interface PurchaseOrder {
   billing_address?: string | null;
   shipping_address?: string | null;
   current_approver_name?: string | null;
+  /** What the vendor said about the order we sent them. Null means never sent. */
+  vendor_status?: string | null;
+  vendor_responded_at?: string | null;
+  vendor_response_note?: string | null;
+  /** 0 is the original order; every amendment adds one. */
+  revision_no: number;
+  amended_at?: string | null;
+  amendment_reason?: string | null;
   created_at: string;
   items: POItem[];
+}
+
+/** One version this order used to be, filed away before an amendment changed it. */
+export interface PORevision {
+  id: number;
+  revision_no: number;
+  reason?: string | null;
+  status?: string | null;
+  vendor_status?: string | null;
+  snapshot?: Record<string, unknown> | null;
+  changed_by_name?: string | null;
+  created_at: string;
+}
+
+/** A revision of an order that has already gone out. `reason` is required, and
+ *  sending `lines` replaces the whole line list. */
+export interface POAmend extends POHeader {
+  reason: string;
+  expected_date?: string | null;
+  lines?: {
+    id?: number | null;
+    item_id: number;
+    quantity: number;
+    rate: number;
+    tax_percent?: number;
+  }[] | null;
 }
 
 export interface POListRow {
@@ -56,6 +90,9 @@ export interface POListRow {
   vendor_name?: string | null;
   indent_no?: string | null;
   status: string;
+  /** Two orders can both read SENT_TO_VENDOR while only one has been agreed. */
+  vendor_status?: string | null;
+  revision_no?: number;
   total_amount: number;
   created_at: string;
 }
@@ -661,6 +698,19 @@ export interface VendorPO {
   status: string;
   total_amount: number;
   remarks?: string | null;
+  /** PENDING until the vendor answers, then ACCEPTED or REJECTED. Nothing may be
+   *  despatched against an order still waiting for an answer. */
+  vendor_status?: string | null;
+  vendor_responded_at?: string | null;
+  vendor_response_note?: string | null;
+  revision_no?: number;
+  amendment_reason?: string | null;
+  payment_terms?: string | null;
+  delivery_terms?: string | null;
+  material_terms?: string | null;
+  logistics_terms?: string | null;
+  billing_address?: string | null;
+  shipping_address?: string | null;
   lines: VendorPOLine[];
   despatch_notes: DespatchNote[];
 }
@@ -668,6 +718,8 @@ export interface VendorPO {
 export interface VendorPOListRow {
   id: number;
   po_no: string;
+  vendor_status?: string | null;
+  revision_no?: number;
   po_date?: string | null;
   expected_date?: string | null;
   status: string;

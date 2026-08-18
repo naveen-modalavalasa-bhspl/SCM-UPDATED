@@ -25,7 +25,8 @@ from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POItem, PurchaseConsolidation,
     PurchaseConsolidationSource, PurchaseOrder, Quotation, QuotationItem, Requisition,
-    RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor, VendorUser,
+    PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
+    VendorUser,
 )
 from app.modules.procurement.schemas import (
     AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, POHeaderUpdate, QuoteSubmit,
@@ -42,7 +43,8 @@ from app.shared.scope import scope_condition
 logger = logging.getLogger(__name__)
 from app.shared.enums import (
     AuditAction, ConsolidationStatus, DespatchNoteStatus, DocType, IndentStatus,
-    InstanceStatus, MRStatus, POStatus, QuotationStatus, RequisitionStatus, RFQStatus,
+    InstanceStatus, MRStatus, POStatus, POVendorStatus, QuotationStatus,
+    RequisitionStatus, RFQStatus,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import HsnCode, Item, Project, Vendor, VendorItem
@@ -548,12 +550,18 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
             tax_percent=_d(line.tax_percent or 0), amount=amount,
         ))
 
-    # Freight is money the company pays for these goods, so it belongs on the order.
-    # Left off, a PO raised from a quote quietly under-reads its own quotation. It now
-    # has a column of its own rather than being buried in the sub-total — and the
-    # quote's figure is the DEFAULT, which a buyer who typed one of their own keeps.
+    # The offer's own document-level money, carried across so the order comes to the
+    # same figure as the quotation it accepts. Both are columns of their own now: the
+    # freight used to be added into `sub_total`, which double-counted the moment the
+    # buyer could also see and edit a freight field, and the discount was dropped
+    # entirely, so the PO silently cost more than the quote that won.
+    #
+    # Only when the caller said nothing. A buyer who typed a figure on the create call
+    # has negotiated it, and the quote must not overwrite them.
     if not _d(po.freight_amount or 0):
         po.freight_amount = _d(quote.freight_amount or 0)
+    if not _d(po.discount_amount or 0):
+        po.discount_amount = _d(quote.discount_amount or 0)
     _apply_po_totals(po, sub_total, tax_total)
 
     if requisition is not None:
@@ -739,9 +747,180 @@ async def send_to_vendor(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
     if po.status != POStatus.APPROVED.value:
         raise ValidationError(f"Only an approved PO can be sent to vendor (status {po.status})")
     po.status = POStatus.SENT_TO_VENDOR.value
+    # Sent is asked, not agreed. The vendor answers in their portal, and nothing may be
+    # received against the order until they do — an order is an offer to buy, and a
+    # delivery against an unanswered one is a surprise rather than a contract.
+    po.vendor_status = POVendorStatus.PENDING.value
+    po.vendor_responded_at = None
+    po.vendor_response_note = None
     await db.commit()
     await db.refresh(po)
     return po
+
+
+# --------------------------------------------------------------------------- #
+#  Amendments
+# --------------------------------------------------------------------------- #
+
+#: Orders nobody can amend any more. RECEIVED and CLOSED are finished; the other two
+#: never became agreements, so they are re-raised rather than rewritten.
+_UNAMENDABLE = (POStatus.RECEIVED.value, POStatus.CLOSED.value,
+                POStatus.CANCELLED.value, POStatus.REJECTED.value)
+
+
+def _po_snapshot(po: PurchaseOrder) -> dict:
+    """The whole order as it stands, header and lines, ready to be filed away.
+
+    A snapshot rather than a diff: the point of a revision is being able to show the
+    vendor the exact paper they agreed to, and a diff can only be read against a
+    version that still exists.
+    """
+    return {
+        "po_no": po.po_no,
+        "po_date": po.po_date.isoformat() if po.po_date else None,
+        "expected_date": po.expected_date.isoformat() if po.expected_date else None,
+        "vendor_id": po.vendor_id, "vendor_name": po.vendor_name,
+        "project_id": po.project_id, "project_name": po.project_name,
+        "remarks": po.remarks,
+        "payment_terms": po.payment_terms, "delivery_terms": po.delivery_terms,
+        "material_terms": po.material_terms, "logistics_terms": po.logistics_terms,
+        "billing_address": po.billing_address, "shipping_address": po.shipping_address,
+        "sub_total": float(po.sub_total or 0),
+        "discount_amount": float(po.discount_amount or 0),
+        "tax_amount": float(po.tax_amount or 0),
+        "freight_amount": float(po.freight_amount or 0),
+        "total_amount": float(po.total_amount or 0),
+        "items": [{
+            "item_id": line.item_id, "item_code": line.item_code,
+            "item_name": line.item_name, "uom_code": line.uom_code,
+            "quantity": float(line.quantity or 0), "rate": float(line.rate or 0),
+            "tax_percent": float(line.tax_percent or 0),
+            "amount": float(line.amount or 0),
+            "received_quantity": float(line.received_quantity or 0),
+        } for line in po.items],
+    }
+
+
+async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
+    """Change an order that has already left the building, as a new revision.
+
+    Not an edit. `update_po_header` fills in a draft nobody outside has seen; this
+    rewrites an order that has been approved, sent, and possibly agreed to. So it files
+    the whole previous version away first, bumps the revision number, and puts the
+    order back at the START of its own flow: re-approved by us and, where the vendor
+    had accepted, re-accepted by them. A change one side makes alone is not an
+    agreement.
+
+    Two things it may never do, both refused rather than quietly clamped:
+
+      * drop a line's quantity below what has already been received — the goods are
+        physically here and the paperwork has to be able to explain them;
+      * remove a line that has any receipt against it, for the same reason.
+    """
+    po = await get_po(db, po_id, user)
+    if po.status in _UNAMENDABLE:
+        raise ValidationError(
+            f"{po.po_no} is {po.status} and can no longer be amended")
+    if not (data.reason or "").strip():
+        raise ValidationError("Say why the order is being amended")
+
+    previous_status = po.status
+    was_accepted = po.vendor_status == POVendorStatus.ACCEPTED.value
+
+    db.add(PORevision(
+        po_id=po.id, revision_no=po.revision_no or 0,
+        reason=data.reason.strip(), status=po.status,
+        vendor_status=po.vendor_status, snapshot=_po_snapshot(po),
+        changed_by_id=getattr(user, "id", None),
+        changed_by_name=getattr(user, "full_name", None),
+    ))
+
+    if data.lines is not None:
+        if not data.lines:
+            raise ValidationError("An order must keep at least one line")
+        received = {line.id: _d(line.received_quantity or 0) for line in po.items}
+        kept = {line.id for line in data.lines if line.id is not None}
+        for line in po.items:
+            if line.id not in kept and received.get(line.id, Decimal(0)) > 0:
+                raise ValidationError(
+                    f"{line.item_code or line.item_id} has already been received and "
+                    "cannot be taken off the order")
+
+        items = {row.id: row for row in (await db.execute(
+            select(Item).where(Item.id.in_([l.item_id for l in data.lines]))
+        )).scalars().all()}
+        by_id = {line.id: line for line in po.items}
+        for incoming in data.lines:
+            existing = by_id.get(incoming.id) if incoming.id is not None else None
+            item = items.get(incoming.item_id)
+            if item is None:
+                raise ValidationError(f"Unknown item id: {incoming.item_id}")
+            amount = _d(incoming.quantity) * _d(incoming.rate)
+            if existing is not None:
+                already = received.get(existing.id, Decimal(0))
+                if _d(incoming.quantity) < already:
+                    raise ValidationError(
+                        f"{existing.item_code or existing.item_id}: {already} has "
+                        "already been received, so the quantity cannot go below that")
+                existing.quantity = _d(incoming.quantity)
+                existing.rate = _d(incoming.rate)
+                existing.tax_percent = _d(incoming.tax_percent)
+                existing.amount = amount
+            else:
+                db.add(POItem(
+                    po_id=po.id, item_id=item.id, item_code=item.code,
+                    item_name=item.name, uom_code=item.uom_code,
+                    quantity=_d(incoming.quantity), rate=_d(incoming.rate),
+                    tax_percent=_d(incoming.tax_percent), amount=amount,
+                ))
+        for line in list(po.items):
+            if line.id is not None and line.id not in kept:
+                await db.delete(line)
+        await db.flush()
+
+    if data.expected_date is not None:
+        po.expected_date = data.expected_date
+    if data.remarks is not None:
+        po.remarks = data.remarks
+    await _apply_po_header(db, po, data)
+
+    lines = list((await db.execute(
+        select(POItem).where(POItem.po_id == po.id)
+    )).scalars().all())
+    sub_total = tax_total = Decimal("0")
+    for line in lines:
+        amount = _d(line.amount)
+        sub_total += amount
+        tax_total += amount * _d(line.tax_percent or 0) / _d(100)
+    _apply_po_totals(po, sub_total, tax_total)
+
+    po.revision_no = (po.revision_no or 0) + 1
+    po.amended_at = utcnow()
+    po.amendment_reason = data.reason.strip()
+    # Back to the start of its own flow. A price the vendor agreed to yesterday is not
+    # a price they agreed to today, so the acceptance is cleared and asked for again.
+    po.status = POStatus.DRAFT.value
+    po.approved_at = None
+    po.current_approver_name = None
+    po.vendor_status = None
+    po.vendor_responded_at = None
+    po.vendor_response_note = None
+
+    await db.commit()
+    logger.info("%s amended to revision %s by %s (was %s%s): %s",
+                po.po_no, po.revision_no, getattr(user, "full_name", user),
+                previous_status, ", vendor had accepted" if was_accepted else "",
+                po.amendment_reason)
+    return await get_po(db, po.id, user)
+
+
+async def po_revisions(db: AsyncSession, po_id: int, user=None) -> list:
+    """Every version this order has been, newest first. Read-only, always."""
+    await get_po(db, po_id, user)
+    return list((await db.execute(
+        select(PORevision).where(PORevision.po_id == po_id)
+        .order_by(PORevision.revision_no.desc(), PORevision.id.desc())
+    )).scalars().all())
 
 
 async def open_for_grn(db: AsyncSession, params: PageParams) -> dict:
@@ -2265,6 +2444,53 @@ async def _vendor_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOr
     return po
 
 
+async def vendor_respond_to_po(db: AsyncSession, vendor_id: int, po_id: int,
+                               accept: bool, note: str = "") -> PurchaseOrder:
+    """The vendor's answer to an order: yes, or no with a reason.
+
+    This is the step that turns an order into an agreement. Until it is given, the
+    vendor cannot despatch against the order and the buyer cannot receive against it —
+    and after it is given, the buyer can only change the order by amending it, which
+    asks the question again.
+
+    Answering twice is refused rather than ignored: a vendor who has accepted and then
+    wants out is a conversation with the buyer, not a button. Their only way back is
+    the buyer amending or cancelling the order.
+    """
+    po = await _vendor_po(db, vendor_id, po_id)
+    if po.vendor_status in (POVendorStatus.ACCEPTED.value,
+                            POVendorStatus.REJECTED.value):
+        raise ValidationError(
+            f"{po.po_no} has already been {po.vendor_status.lower()}. "
+            "Ask the buyer to amend it if something needs to change.")
+    if not accept and not (note or "").strip():
+        raise ValidationError("Say why the order is being declined")
+
+    po.vendor_status = (POVendorStatus.ACCEPTED.value if accept
+                        else POVendorStatus.REJECTED.value)
+    po.vendor_responded_at = utcnow()
+    po.vendor_response_note = (note or "").strip() or None
+    await db.commit()
+    await db.refresh(po)
+    logger.info("%s %s by vendor %s", po.po_no, po.vendor_status, vendor_id)
+    return po
+
+
+def _require_accepted(po: PurchaseOrder) -> None:
+    """A despatch note is a claim against an agreement, so there has to be one.
+
+    Orders sent before acceptance existed carry no answer at all; those are let
+    through, because refusing them would strand deliveries that were already agreed
+    by phone. Only an order explicitly still PENDING or REJECTED is blocked.
+    """
+    if po.vendor_status == POVendorStatus.PENDING.value:
+        raise ValidationError(
+            f"Accept {po.po_no} before despatching against it")
+    if po.vendor_status == POVendorStatus.REJECTED.value:
+        raise ValidationError(
+            f"{po.po_no} was declined, so nothing can be despatched against it")
+
+
 async def _despatched_by_po_item(db: AsyncSession, po_id: int) -> dict[int, Decimal]:
     """How much of each line the vendor has already said they sent.
 
@@ -2353,6 +2579,8 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
     the one way this document could make things worse rather than better.
     """
     po = await _vendor_po(db, vendor_id, po_id)
+    # An order the vendor has not answered yet is not an agreement to deliver against.
+    _require_accepted(po)
 
     note = None
     if note_id is not None:

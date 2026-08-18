@@ -16,7 +16,9 @@ import {
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
 import { alerts } from "@/modules/alerts";
-import type { Inspection, InspectionItemWrite, InspectionParameter, InspectionWrite } from "../types";
+import type {
+  Inspection, InspectionItemWrite, InspectionParameter, InspectionWrite, Receipt,
+} from "../types";
 import { usePointLabel } from "../usePointLabel";
 
 /**
@@ -71,6 +73,7 @@ export default function QualityInspectionForm({
   });
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [pulled, setPulled] = useState<Receipt | null>(null);
   const [paramsFor, setParamsFor] = useState<number | null>(null);
   const [serialsFor, setSerialsFor] = useState<number | null>(null);
 
@@ -133,10 +136,17 @@ export default function QualityInspectionForm({
     return serials?.length ? serials : null;
   };
 
+  /** The delivery being inspected: the receipt loaded off a saved inspection, or the
+   *  one just pulled in on a new one. QC was showing the lines and nothing about where
+   *  they came from, so an inspector could not see the order, the vendor or the invoice
+   *  the goods arrived on without opening the GRN in another tab. */
+  const delivery = grn ?? pulled;
+
   /** Pulling the receipt in seeds the lines from what was actually received. */
   const pullReceipt = useMutation({
     mutationFn: (receiptId: number) => getReceipt(receiptId),
-    onSuccess: (receipt) =>
+    onSuccess: (receipt) => {
+      setPulled(receipt);
       setForm((f) => ({
         ...f,
         warehouse_id: receipt.warehouse_id,
@@ -157,7 +167,8 @@ export default function QualityInspectionForm({
           remarks: null,
           serial_numbers: l.serial_numbers ?? [],
         })),
-      })),
+      }));
+    },
   });
 
   const savedLine = (i: number) => doc?.items?.[i];
@@ -440,6 +451,24 @@ export default function QualityInspectionForm({
             label="Pass rate"
             value={<span className="tabular">{percent(doc.passed_items, doc.total_items)}%</span>}
           />
+        </MetaCard>
+      )}
+
+      {/* Where the goods came from, carried straight off the GRN — which carried it off
+        * the vendor's own despatch note. Nothing here is typed at QC. */}
+      {delivery && (
+        <MetaCard title="Delivery">
+          <MetaRow label="GRN" value={<span className="font-mono">{delivery.grn_no}</span>} />
+          {delivery.po_no && <MetaRow label="Purchase order" value={delivery.po_no} />}
+          {delivery.despatch_note_no
+            && <MetaRow label="Despatch note" value={delivery.despatch_note_no} />}
+          {delivery.vendor_name && <MetaRow label="Vendor" value={delivery.vendor_name} />}
+          {delivery.invoice_no && <MetaRow label="Invoice" value={delivery.invoice_no} />}
+          {delivery.eway_bill_no && <MetaRow label="E-way bill" value={delivery.eway_bill_no} />}
+          {delivery.vehicle_no && <MetaRow label="Vehicle" value={delivery.vehicle_no} />}
+          {delivery.transporter_name
+            && <MetaRow label="Transporter" value={delivery.transporter_name} />}
+          {delivery.lr_no && <MetaRow label="LR / docket" value={delivery.lr_no} />}
         </MetaCard>
       )}
 

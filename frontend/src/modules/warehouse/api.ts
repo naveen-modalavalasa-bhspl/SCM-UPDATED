@@ -551,8 +551,12 @@ export const binOptions = (
   batch_id?: number | null,
   storage_type_id?: string | number | null,
   all_locations?: boolean,
+  exclude_bin_id?: number | null,
 ) =>
-  get<Option[]>(`${BASE}/options/bins`, { warehouse_id, search, item_id, batch_id, storage_type_id, all_locations });
+  get<Option[]>(`${BASE}/options/bins`, {
+    warehouse_id, search, item_id, batch_id, storage_type_id, all_locations,
+    exclude_bin_id,
+  });
 
 export const batchOptions = (item_id: number, warehouse_id: number, bin_id?: number | null) =>
   get<Option[]>(`${BASE}/options/batches`, { item_id, warehouse_id, bin_id });

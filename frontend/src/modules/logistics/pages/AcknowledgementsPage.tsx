@@ -20,13 +20,18 @@ const CONDITIONS = [
 ];
 
 /**
- * Landed, and nobody has signed for it (doc A6-A7).
+ * On the road or landed, and nobody has signed for it (doc A6-A7).
  *
  * The last mile of the whole chain and the one that goes missing: the carrier says
  * delivered, the indent stays open, and three weeks later nobody can say whether the
  * site ever got it. This screen is that chase list, and the signature is taken from
  * the row rather than four clicks into the shipment — an acknowledgement desk works
  * down a list, and making each one a navigation is how it stops happening.
+ *
+ * A shipment appears here the moment it LEAVES, not when somebody at this desk ticks
+ * "delivered": signing for it is itself the proof it arrived, so the acknowledgement
+ * stamps the delivery on the way through. Waiting for the tick first put a keystroke
+ * nobody at the destination can make between the goods landing and the indent closing.
  *
  * "Days waiting" is the column the desk sorts its morning by. Short or damaged raises
  * a claim against the provider on the same shipment timeline.
@@ -48,6 +53,9 @@ export function AcknowledgementsPage() {
     }),
   });
 
+  // Signing here settles the whole leg: the consignment, the material issue behind
+  // it and the indent that asked for it all move with this one press, so the caches
+  // those screens read have to be dropped alongside the transport ones.
   const acknowledge = useAction({
     run: () => transportApi.acknowledge(signing!.id, {
       acknowledged_by_name: form.acknowledged_by_name || null,
@@ -59,7 +67,8 @@ export function AcknowledgementsPage() {
       claim_amount: form.claim_amount ? Number(form.claim_amount) : null,
     }),
     success: "Acknowledged",
-    invalidates: [["transport"], ["transport-exceptions"]],
+    invalidates: [["transport"], ["transport-exceptions"], ["transport-summary"],
+      ["indent-acknowledgements"], ["indents"], ["warehouse"]],
     onDone: () => {
       setSigning(null);
       setForm({
@@ -99,15 +108,45 @@ export function AcknowledgementsPage() {
     { key: "to", header: "Site", render: (row) => row.to_location_name ?? "—" },
     {
       key: "landed",
-      header: "Landed",
+      header: "Sent / landed",
       render: (row) => (
         <div className="text-sm">
-          <div className="text-body">{fmtDateTime(row.delivered_at)}</div>
+          <div className="text-body">
+            {fmtDateTime(row.delivered_at ?? row.dispatched_at)}
+          </div>
           <div className="text-[11px] text-muted">
             {row.carrier_name ?? modeLabel(row.mode)}
+            {row.delivered_at ? "" : " · in transit"}
           </div>
         </div>
       ),
+    },
+    {
+      // The handle the site is chasing it with. Reading it off this row is the
+      // difference between "sign for it" and "ring the desk and ask where it is".
+      key: "tracking",
+      header: "Tracking",
+      hideOnNarrow: true,
+      render: (row) => {
+        const handle = row.lr_no ?? row.docket_no;
+        if (!handle && !row.tracking_url) return <span className="text-muted">—</span>;
+        return (
+          <div className="min-w-0 text-xs">
+            {handle && <div className="truncate font-mono text-body">{handle}</div>}
+            {row.tracking_url && (
+              <a
+                href={row.tracking_url}
+                target="_blank"
+                rel="noreferrer noopener"
+                onClick={(e) => e.stopPropagation()}
+                className="font-semibold text-brand underline"
+              >
+                Track
+              </a>
+            )}
+          </div>
+        );
+      },
     },
     {
       key: "waiting",
@@ -201,7 +240,7 @@ export function AcknowledgementsPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
-          empty="Everything delivered has been signed for."
+          empty="Everything that has left has been signed for."
           renderCard={(row) => (
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">
@@ -224,7 +263,7 @@ export function AcknowledgementsPage() {
       <ConfirmModal
         isOpen={Boolean(signing)}
         title={`Acknowledge ${signing?.tr_no ?? ""}`}
-        message="What the site actually found. Short or damaged raises a claim against the provider."
+        message="What the site actually found. This closes the consignment, the material issue behind it and the indent. Short or damaged raises a claim against the provider."
         confirmLabel="Sign for it"
         busy={acknowledge.isPending}
         confirmDisabled={isClaim && !form.remarks.trim()}

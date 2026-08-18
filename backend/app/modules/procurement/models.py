@@ -13,7 +13,8 @@ are also the ones kept: they snapshot `item_code`, `item_name`, `vendor_name` an
 a master is renamed.
 """
 from sqlalchemy import (
-    Column, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, Index,
+    Column, Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text,
+    Index,
 )
 from sqlalchemy.orm import relationship
 
@@ -79,6 +80,22 @@ class PurchaseOrder(Base):
     current_approver_name = Column(String(200), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
     remarks = Column(Text, nullable=True)
+
+    # --- the vendor's answer -------------------------------------------------
+    # An order becomes an agreement when the other side says yes. PENDING from the
+    # moment it is sent; nothing may be received against an order still waiting, and
+    # an ACCEPTED order can only be changed by an amendment they accept again.
+    vendor_status = Column(String(20), nullable=True, index=True)
+    vendor_responded_at = Column(DateTime(timezone=True), nullable=True)
+    vendor_response_note = Column(Text, nullable=True)
+
+    # --- amendments ----------------------------------------------------------
+    # 0 is the original. Each amendment writes the whole previous order into
+    # pro_po_revisions first, so what the vendor agreed to before is never overwritten.
+    revision_no = Column(Integer, nullable=False, default=0)
+    amended_at = Column(DateTime(timezone=True), nullable=True)
+    amendment_reason = Column(Text, nullable=True)
+
     created_at = created_at_col()
     updated_at = updated_at_col()
 
@@ -86,6 +103,33 @@ class PurchaseOrder(Base):
         "POItem", back_populates="po",
         cascade="all, delete-orphan", lazy="selectin",
     )
+
+
+class PORevision(Base):
+    """What a purchase order said BEFORE an amendment changed it.
+
+    A snapshot, not a diff: the point of a revision is to be able to show the vendor
+    the exact paper they agreed to, and a diff can only be read against a version that
+    still exists. The whole header and every line go into `snapshot` as JSON.
+
+    Append-only, like every audit trail here (rule 9). Nothing updates or deletes a
+    revision row, including cancelling the order it belongs to.
+    """
+    __tablename__ = "pro_po_revisions"
+    id = pk()
+    po_id = Column(ForeignKey("pro_purchase_orders.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    revision_no = Column(Integer, nullable=False, default=0)
+    reason = Column(Text, nullable=True)
+    # The status and the vendor's answer AT THE TIME, so a reader can tell an
+    # amendment made before the vendor ever saw the order from one made after they
+    # had accepted it — the two mean very different things.
+    status = Column(String(30), nullable=True)
+    vendor_status = Column(String(20), nullable=True)
+    snapshot = Column(JSON, nullable=True)
+    changed_by_id = soft_fk()
+    changed_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
 
 
 Index("ix_pro_po_date", PurchaseOrder.po_date.desc())

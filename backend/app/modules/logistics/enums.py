@@ -239,3 +239,18 @@ def flow_stages(mode: str | None = None) -> list[Stage]:
     if tendered:
         stages += [_TENDER, _CONFIRM]
     return stages + [_DISPATCH, _TRANSIT, _DELIVERED, _ACK]
+
+
+#: The shipment is on the road or has landed, and nobody at the receiving site has
+#: signed for it yet. This — not DELIVERED alone — is the Acknowledgements queue.
+#:
+#: A consignment becomes the site's business the moment it LEAVES, not the moment
+#: somebody at this desk remembers to tick "delivered". Waiting for that tick meant a
+#: courier parcel that reached the site on Tuesday could not be acknowledged until the
+#: logistics desk marked it arrived on Friday, and the indent behind it stayed open in
+#: between. The receiving site signing for it is itself the proof it arrived, so the
+#: acknowledgement stamps the delivery as well (`acknowledge_tr`).
+AWAITING_ACK_STATUSES = (
+    TransportStatus.IN_TRANSIT.value,
+    TransportStatus.DELIVERED.value,
+)

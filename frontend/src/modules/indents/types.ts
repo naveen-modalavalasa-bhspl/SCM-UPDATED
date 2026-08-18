@@ -188,6 +188,32 @@ export interface AcknowledgementLine {
   pending_with?: string | null;
 }
 
+/**
+ * How the goods are travelling, for the person waiting on them.
+ *
+ * Read-only, and served on the requester's own acknowledgement row rather than from
+ * a Logistics screen they hold no permission for: "it has left" is useless without
+ * the docket number to chase it with, and the carrier's own page is the only thing
+ * that answers "where is it today".
+ */
+export interface ShipmentTrack {
+  tr_id: number;
+  tr_no: string;
+  mode: string;
+  status: string;
+  carrier_name?: string | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  lr_no?: string | null;
+  docket_no?: string | null;
+  tracking_url?: string | null;
+  expected_delivery?: string | null;
+  dispatched_at?: string | null;
+  delivered_at?: string | null;
+  acknowledged_at?: string | null;
+}
+
 export interface Acknowledgement {
   indent_id: number;
   indent_no: string;
@@ -198,6 +224,7 @@ export interface Acknowledgement {
   project_name?: string | null;
   can_acknowledge: boolean;
   lines: AcknowledgementLine[];
+  shipments: ShipmentTrack[];
 }
 
 /** What arrived in THIS delivery, not the running total. */

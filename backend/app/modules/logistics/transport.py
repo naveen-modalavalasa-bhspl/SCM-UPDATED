@@ -27,6 +27,7 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.logistics.enums import (
     ACK_CLAIM_EVENT,
+    AWAITING_ACK_STATUSES,
     CARRIER_VENDOR_TYPES,
     EXCEPTION_EVENT_TYPES,
     MODE_RULES,
@@ -39,6 +40,7 @@ from app.modules.logistics.enums import (
     flow_stages,
     mode_rule,
 )
+from app.modules.logistics import hooks
 from app.modules.logistics.models import (
     CarrierQuote, ShipmentEvent, TransportRequest, TransportRequestItem,
 )
@@ -104,8 +106,12 @@ async def list_trs(db: AsyncSession, params: PageParams, status: str | None = No
     if dispatch_id:
         stmt = stmt.where(TransportRequest.dispatch_id == dispatch_id)
     if awaiting_ack:
-        # Landed, nobody has signed for it. The indent team's chase list (doc A7).
-        stmt = stmt.where(TransportRequest.status == TransportStatus.DELIVERED.value)
+        # On the road or landed, and nobody has signed for it. The indent team's chase
+        # list (doc A7). IN_TRANSIT is in the queue as well as DELIVERED because the
+        # site is the one who knows it arrived: waiting for this desk to tick
+        # "delivered" first held the acknowledgement — and the indent behind it — on a
+        # keystroke nobody at the destination can make.
+        stmt = stmt.where(TransportRequest.status.in_(AWAITING_ACK_STATUSES))
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.where(or_(
@@ -185,7 +191,7 @@ async def summary(db: AsyncSession) -> dict:
                ShipmentEvent.resolved_at.is_(None))
     )).scalar_one()
     # The two the desk is actually judged on: nothing should sit here.
-    counts["awaiting_ack"] = counts["delivered"]
+    counts["awaiting_ack"] = sum(by_status.get(s, 0) for s in AWAITING_ACK_STATUSES)
     counts["untracked"] = (await db.execute(
         select(func.count(TransportRequest.id))
         .where(TransportRequest.status.in_([TransportStatus.IN_TRANSIT.value,
@@ -454,6 +460,14 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         project_id=data.project_id, project_name=data.project_name,
         expected_delivery=data.expected_delivery, remarks=data.remarks,
         gate_pass_no=data.gate_pass_no,
+        # The tracking handles, when the desk already holds them. A courier docket is
+        # written on the booking slip at the counter, so asking for it again on a
+        # second screen is how it ends up typed nowhere. `dispatch_tr` overwrites
+        # whatever is here if a different number comes back with the goods.
+        lr_no=getattr(data, "lr_no", None),
+        docket_no=getattr(data, "docket_no", None),
+        tracking_url=getattr(data, "tracking_url", None),
+        eway_bill_no=getattr(data, "eway_bill_no", None),
         vehicle_number=data.vehicle_number, driver_name=data.driver_name,
         driver_phone=data.driver_phone, trip_reference=data.trip_reference,
         handed_over_by_name=data.handed_over_by_name,
@@ -602,6 +616,15 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     if configured is None:
         _advance_after_approval(doc)
         summary = settled_summary
+        # "Confirm dispatch" on a settled mode is the load LEAVING, not a booking to
+        # release on a second screen: the gate pass, the docket and the driver are all
+        # on the form that was just pressed. `release_now` says so, and only a mode
+        # that needs no tender can be released here — a THIRD_PARTY job has no carrier
+        # yet, and READY is the earliest it can be one.
+        if getattr(data, "release_now", False) and doc.status == TransportStatus.READY.value:
+            await _release(db, doc, data, user)
+            summary = (f"{doc.tr_no} left with "
+                       f"{doc.carrier_name or doc.vehicle_number or 'the warehouse'}")
     else:
         instance = await engine.start(
             db, DocType.TRANSPORT_REQUEST.value, doc.id, _context(doc), user)
@@ -1345,20 +1368,25 @@ async def set_provider(db: AsyncSession, tr_id: int, data, user) -> TransportReq
 #  Tracking
 # --------------------------------------------------------------------------- #
 
-async def dispatch_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequest:
-    """It has left. Capture the tracking handle the field will be given."""
-    doc = await get_tr(db, tr_id)
-    if doc.status != TransportStatus.READY.value:
-        raise ValidationError(
-            f"{doc.tr_no} is {doc.status.lower()} — it is not ready to leave")
+async def _release(db: AsyncSession, doc: TransportRequest, data, user) -> None:
+    """It has left. Capture the tracking handle the field will be given.
 
+    Split out of `dispatch_tr` so the one-press Dispatch screen can release on the same
+    press it books with (`dispatch_consignment(release_now=True)`) and get EXACTLY this
+    — the same checks, the same pickup event, the same hand-back to the warehouse. A
+    second copy of "it has left" is how the two doors start disagreeing about whether
+    the consignment ever gated out.
+
+    Does not commit: the caller owns the transaction and its audit row.
+    """
     # The full check now, carrier included: whatever the mode was allowed to leave
     # blank at submit has been answered by this point, and a consignment must never
     # leave the yard with nobody named as taking it.
     _check_mode_fields(doc)
 
     rule = mode_rule(doc.mode)
-    if rule.needs_carrier and not (data.lr_no or data.docket_no
+    if rule.needs_carrier and not (getattr(data, "lr_no", None)
+                                   or getattr(data, "docket_no", None)
                                    or doc.lr_no or doc.docket_no):
         raise ValidationError(
             "Record the LR or docket number — it is what the field is given to "
@@ -1368,7 +1396,7 @@ async def dispatch_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequ
         value = getattr(data, field, None)
         if value is not None:
             setattr(doc, field, value)
-    if data.remarks:
+    if getattr(data, "remarks", None):
         doc.remarks = data.remarks
 
     doc.status = TransportStatus.IN_TRANSIT.value
@@ -1382,6 +1410,22 @@ async def dispatch_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequ
         recorded_by_id=getattr(user, "id", None),
         recorded_by_name=getattr(user, "full_name", None),
     ))
+    # The consignment this leg carries is the WAREHOUSE's document and it has to know
+    # the load is gone: left at PACKED it never counts as dispatched, so the requester's
+    # own Acknowledgements screen shows nothing to confirm and the indent stays open
+    # with the goods already on a truck. Logistics may not import warehouse (rule 5),
+    # so the warehouse registered the hand-back itself — see `logistics/hooks.py`.
+    await hooks.fire(hooks.ON_RELEASE, db, doc, user)
+
+
+async def dispatch_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequest:
+    """The desk pressing "it has left" on a shipment that was already settled."""
+    doc = await get_tr(db, tr_id)
+    if doc.status != TransportStatus.READY.value:
+        raise ValidationError(
+            f"{doc.tr_no} is {doc.status.lower()} — it is not ready to leave")
+
+    await _release(db, doc, data, user)
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -1512,17 +1556,41 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
     doc = await get_tr(db, tr_id)
     if doc.status == TransportStatus.ACKNOWLEDGED.value:
         raise ValidationError(f"{doc.tr_no} has already been acknowledged")
-    if doc.status != TransportStatus.DELIVERED.value:
+    if doc.status not in AWAITING_ACK_STATUSES:
         raise ValidationError(
-            f"{doc.tr_no} is {doc.status.lower().replace('_', ' ')} — only a delivered "
-            "consignment can be acknowledged")
+            f"{doc.tr_no} is {doc.status.lower().replace('_', ' ')} — only a "
+            "consignment that has left can be acknowledged")
 
+    before_status = doc.status
     condition = (data.condition or AckCondition.GOOD.value).upper()
     if condition not in {c.value for c in AckCondition}:
         raise ValidationError(f"{data.condition!r} is not a delivery condition")
     if condition != AckCondition.GOOD.value and not (data.remarks or "").strip():
         raise ValidationError(
             "Say what was short or damaged — it is the claim against the provider")
+
+    # Signing for it IS the proof it arrived, so a shipment still reading IN_TRANSIT
+    # is marked delivered on the way through rather than refused. Waiting for this desk
+    # to tick "delivered" first put a keystroke nobody at the destination can make
+    # between the goods landing and the indent closing.
+    if doc.status != TransportStatus.DELIVERED.value:
+        doc.delivered_at = doc.delivered_at or utcnow()
+        doc.delivered_to_name = (doc.delivered_to_name or data.acknowledged_by_name
+                                 or getattr(user, "full_name", None))
+        for line in doc.items:
+            # Full delivery unless a shortage was already booked against the line —
+            # the same rule `deliver_tr` runs on, and for the same reason: typing every
+            # line back in on the normal path is how a shortage gets missed.
+            if not line.delivered_qty:
+                line.delivered_qty = line.quantity
+        doc.events.append(ShipmentEvent(
+            event_type=ShipmentEventType.DELIVERED.value, event_at=doc.delivered_at,
+            location_name=doc.to_location_name,
+            description=(f"Confirmed on arrival by "
+                         f"{data.acknowledged_by_name or 'the site'}"),
+            recorded_by_id=getattr(user, "id", None),
+            recorded_by_name=getattr(user, "full_name", None),
+        ))
 
     doc.status = TransportStatus.ACKNOWLEDGED.value
     doc.acknowledged_at = utcnow()
@@ -1550,9 +1618,15 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
             recorded_by_name=doc.acknowledged_by_name,
         ))
 
+    # The site signing for the leg settles what the leg was carrying: the warehouse
+    # consignment, the material issue behind it and, once nothing is still owed, the
+    # indent that asked for it. Registered by the warehouse rather than called into it
+    # — logistics sits in front of warehouse in the import chain (rule 5).
+    await hooks.fire(hooks.ON_ACKNOWLEDGE, db, doc, user)
+
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
-                      before={"status": TransportStatus.DELIVERED.value},
+                      before={"status": before_status},
                       after={"status": doc.status, "condition": condition},
                       summary=(f"{doc.acknowledged_by_name or 'The site'} acknowledged "
                                f"{doc.tr_no} as {condition.lower()}"))

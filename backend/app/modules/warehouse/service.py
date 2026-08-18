@@ -1171,12 +1171,7 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         warehouse_id=wh.id,
     )
 
-    vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
-    # A receipt against an order is from that order's vendor — a fact of the PO, not a
-    # choice at the gate. Derived only when nothing was sent, so a delivery that names
-    # its own vendor (an arrival with no PO behind it) is left exactly as entered.
-    if vendor is None and data.po_id:
-        vendor = await _po_vendor(db, data.po_id)
+    vendor_id, vendor_name, vendor_gstin = await _receipt_vendor(db, data)
     if data.project_id:
         from app.shared.models.master import Project
         project = await db.get(Project, data.project_id)
@@ -1195,9 +1190,9 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         transfer_id=(transfer.id if transfer else dispatch.id if dispatch else None),
         transfer_no=(transfer.sto_no if transfer
                      else dispatch.dispatch_no if dispatch else None),
-        vendor_id=data.vendor_id,
-        vendor_name=vendor.name if vendor else None,
-        vendor_gstin=vendor.gstin if vendor else None,
+        vendor_id=vendor_id,
+        vendor_name=vendor_name,
+        vendor_gstin=vendor_gstin,
         warehouse_id=wh.id,
         warehouse_name=wh.name,
         project_id=data.project_id,
@@ -1258,7 +1253,7 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
         warehouse_id=wh.id,
         receipt_id=receipt.id,
     )
-    vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
+    vendor_id, vendor_name, vendor_gstin = await _receipt_vendor(db, data)
     if data.project_id:
         from app.shared.models.master import Project
         project = await db.get(Project, data.project_id)
@@ -1274,9 +1269,9 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
                            else dispatch.id if dispatch else None)
     receipt.transfer_no = (transfer.sto_no if transfer
                            else dispatch.dispatch_no if dispatch else None)
-    receipt.vendor_id = data.vendor_id
-    receipt.vendor_name = vendor.name if vendor else None
-    receipt.vendor_gstin = vendor.gstin if vendor else None
+    receipt.vendor_id = vendor_id
+    receipt.vendor_name = vendor_name
+    receipt.vendor_gstin = vendor_gstin
     receipt.warehouse_id = wh.id
     receipt.warehouse_name = wh.name
     receipt.project_id = data.project_id
@@ -2007,17 +2002,30 @@ async def despatch_note_prefill(db: AsyncSession, note_id: int) -> s.DespatchPre
     )
 
 
-async def _po_vendor(db: AsyncSession, po_id: int) -> Vendor | None:
-    """The vendor an order was placed with.
+async def _receipt_vendor(db: AsyncSession, data) -> tuple[int | None, str | None, str | None]:
+    """Who the goods came from — id, name and GSTIN, for the receipt's snapshot.
+
+    What the gate chose wins; failing that it is a fact of the order, not a choice at
+    the gate. The ORDER's own snapshot name is the last resort, because a vendor whose
+    master row has since been removed still delivered the goods, and a receipt naming
+    nobody is worse than one naming who it was bought from.
 
     Two columns, not the mapped row — see `_po_number`: selecting `PurchaseOrder`
     itself is a 1054 against the live schema.
     """
-    from app.modules.procurement.models import PurchaseOrder
+    vendor_id, po_vendor_name = data.vendor_id, None
+    if not vendor_id and data.po_id:
+        from app.modules.procurement.models import PurchaseOrder
+        row = (await db.execute(
+            select(PurchaseOrder.vendor_id, PurchaseOrder.vendor_name)
+            .where(PurchaseOrder.id == data.po_id))).first()
+        if row:
+            vendor_id, po_vendor_name = row[0], row[1]
 
-    vendor_id = await db.scalar(
-        select(PurchaseOrder.vendor_id).where(PurchaseOrder.id == po_id))
-    return await db.get(Vendor, vendor_id) if vendor_id else None
+    vendor = await db.get(Vendor, vendor_id) if vendor_id else None
+    if vendor is not None:
+        return vendor.id, vendor.name, vendor.gstin
+    return vendor_id, po_vendor_name, None
 
 
 async def po_lines(db: AsyncSession, po_id: int) -> list[s.PoLineOption]:
@@ -6450,7 +6458,52 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
             continue
         await _apply_issue_acknowledgement(db, issue, _name(user), None, user)
         signed.append(issue.issue_no)
+
+    signed += await _sign_transport_for_indent(db, indent_id, user)
     return signed
+
+
+async def _sign_transport_for_indent(db: AsyncSession, indent_id: int,
+                                     user) -> list[str]:
+    """Close the outward legs behind an indent its raiser has just confirmed.
+
+    The requester saying "it reached me" is the same signature the logistics
+    Acknowledgements desk takes, so a leg still reading in transit after it would
+    leave the transport register disagreeing with the indent it was carrying —
+    a shipment on the road against goods already in someone's hands.
+
+    Stamped here rather than by calling `transport.acknowledge_tr`: the consignment,
+    the issue and the indent were all settled by `_apply_issue_acknowledgement` on the
+    way in, and re-entering through the transport service would run that cascade a
+    second time. Neither commits — the caller owns the transaction.
+    """
+    from app.modules.logistics.enums import AWAITING_ACK_STATUSES, TransportStatus
+    from app.modules.logistics.models import TransportRequest
+
+    legs = (await db.execute(
+        select(TransportRequest)
+        .options(selectinload(TransportRequest.items))
+        .where(TransportRequest.indent_id == indent_id,
+               TransportRequest.status.in_(AWAITING_ACK_STATUSES))
+    )).scalars().all()
+
+    now = utcnow()
+    for leg in legs:
+        leg.delivered_at = leg.delivered_at or now
+        leg.status = TransportStatus.ACKNOWLEDGED.value
+        leg.acknowledged_at = now
+        leg.acknowledged_by_id = getattr(user, "id", None)
+        leg.acknowledged_by_name = _name(user)
+        leg.ack_condition = leg.ack_condition or "GOOD"
+        for line in leg.items:
+            if not line.delivered_qty:
+                line.delivered_qty = line.quantity
+        await write_audit(db, entity="lgs_transport_requests", entity_id=leg.id,
+                          entity_no=leg.tr_no, action=AuditAction.UPDATE, actor=user,
+                          after={"status": leg.status},
+                          summary=(f"{_name(user) or 'The requester'} confirmed "
+                                   f"{leg.tr_no} on the indent"))
+    return [leg.tr_no for leg in legs]
 
 
 async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None,
@@ -7402,6 +7455,25 @@ async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
         # Now with its approvers. The goods stay on the bench until they sign.
         return await get_dispatch(db, dispatch_id)
 
+    await _apply_gate_out(db, dispatch, gate_pass_no, user)
+
+    await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
+                      entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": DispatchStatus.PACKED.value},
+                      after={"status": dispatch.status,
+                             "gate_pass_no": dispatch.gate_pass_no})
+    await db.commit()
+    return await get_dispatch(db, dispatch_id)
+
+
+async def _apply_gate_out(db: AsyncSession, dispatch: m.Dispatch,
+                          gate_pass_no: str | None, user) -> None:
+    """The gate-out itself: stock leaves, the consignment reads DISPATCHED.
+
+    Split out so the logistics desk releasing the same load (`hooks.ON_RELEASE`) does
+    exactly this and not a second, drifting copy of it. Neither commits nor audits —
+    both callers are mid-transaction and own their own audit row.
+    """
     already_issued = False
     linked_issue: m.MaterialIssue | None = None
     if (dispatch.ref_type or "").upper() in {"ISSUE", "WH_ISSUE"} and dispatch.ref_id:
@@ -7470,14 +7542,6 @@ async def gate_out(db: AsyncSession, dispatch_id: int, gate_pass_no: str | None,
         location_name=dispatch.warehouse_name, is_breach=False,
         recorded_by_id=getattr(user, "id", None), recorded_by_name=_name(user),
     ))
-
-    await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
-                      entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE, actor=user,
-                      before={"status": DispatchStatus.PACKED.value},
-                      after={"status": dispatch.status,
-                             "gate_pass_no": dispatch.gate_pass_no})
-    await db.commit()
-    return await get_dispatch(db, dispatch_id)
 
 
 async def add_dispatch_event(db: AsyncSession, dispatch_id: int, data: s.DispatchEventWrite,
@@ -7570,6 +7634,25 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
             DispatchStatus.DELIVERED.value},
            "acknowledge", "dispatch")
 
+    short = await _apply_dispatch_acknowledgement(db, dispatch, data, user)
+
+    await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
+                      entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": DispatchStatus.IN_TRANSIT.value},
+                      after={"status": dispatch.status, "short_qty": str(short)})
+    await db.commit()
+    return await get_dispatch(db, dispatch_id)
+
+
+async def _apply_dispatch_acknowledgement(db: AsyncSession, dispatch: m.Dispatch,
+                                          data: s.AcknowledgeWrite, user) -> Decimal:
+    """Sign the consignment off and settle what it was carrying.
+
+    Split out so the logistics desk taking the same signature on the transport leg
+    (`hooks.ON_ACKNOWLEDGE`) settles the issue and the indent through exactly this
+    path. Neither commits nor audits — both callers own their transaction. Returns the
+    shortfall, for the caller's audit row.
+    """
     by_id = {l.id: l for l in dispatch.items}
     for entry in data.lines:
         line = by_id.get(entry.id)
@@ -7622,12 +7705,7 @@ async def acknowledge_dispatch(db: AsyncSession, dispatch_id: int, data: s.Ackno
             if await _is_final_delivery_leg(db, issue, dispatch):
                 await _close_indents_on_issue(db, issue, user)
 
-    await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
-                      entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE, actor=user,
-                      before={"status": DispatchStatus.IN_TRANSIT.value},
-                      after={"status": dispatch.status, "short_qty": str(short)})
-    await db.commit()
-    return await get_dispatch(db, dispatch_id)
+    return short
 
 
 async def cancel_dispatch(db: AsyncSession, dispatch_id: int, reason: str | None,
@@ -8460,6 +8538,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     )).all()
     dispatched_by_line = {row[0]: _d(row[1]) for row in dispatched_rows}
 
+    shipments = await _shipments_by_indent(db, indent_ids)
+
     out = []
     for indent in indents:
         lines = []
@@ -8493,8 +8573,74 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             "can_acknowledge": any(line["dispatched_quantity"] > line["received_quantity"]
                                    for line in lines),
             "lines": lines,
+            # "Where is it and how do I follow it" — the courier docket and the
+            # tracking link, on the same row as the confirm button. Without this the
+            # requester was told a consignment had left and given no way to chase it.
+            "shipments": shipments.get(indent.id, []),
         })
     return out
+
+
+async def _shipments_by_indent(db: AsyncSession,
+                               indent_ids: list[int]) -> dict[int, list[dict]]:
+    """The transport legs carrying each of these indents, newest first.
+
+    Read from `lgs_transport_requests` directly: logistics owns the leg and sits before
+    this module in the import chain (rule 5), so reading it here is the allowed
+    direction — and it keeps the requester's screen to one round trip.
+
+    Matched on `indent_id` OR on the consignment the leg is carrying, because a leg
+    raised against a consolidated consignment names the dispatch and not always an
+    indent, and a requester whose parcel travelled in somebody else's carton still has
+    to be able to track it.
+    """
+    from app.modules.logistics.models import TransportRequest
+
+    if not indent_ids:
+        return {}
+
+    dispatch_rows = (await db.execute(
+        select(m.Dispatch.id, m.MaterialIssue.indent_id)
+        .join(m.MaterialIssue, and_(
+            m.Dispatch.ref_id == m.MaterialIssue.id,
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .where(m.MaterialIssue.indent_id.in_(indent_ids),
+               m.Dispatch.status != DispatchStatus.CANCELLED.value)
+    )).all()
+    indent_of_dispatch = {row[0]: row[1] for row in dispatch_rows}
+
+    legs = (await db.execute(
+        select(TransportRequest)
+        .where(or_(TransportRequest.indent_id.in_(indent_ids),
+                   TransportRequest.dispatch_id.in_(list(indent_of_dispatch) or [0])))
+        .order_by(TransportRequest.id.desc())
+    )).scalars().all()
+
+    by_indent: dict[int, list[dict]] = {}
+    for leg in legs:
+        indent_id = leg.indent_id or indent_of_dispatch.get(leg.dispatch_id)
+        if indent_id not in indent_ids:
+            continue
+        by_indent.setdefault(indent_id, []).append({
+            "tr_id": leg.id,
+            "tr_no": leg.tr_no,
+            "mode": leg.mode,
+            "status": leg.status,
+            "carrier_name": leg.carrier_name,
+            "vehicle_number": leg.vehicle_number,
+            "driver_name": leg.driver_name,
+            "driver_phone": leg.driver_phone,
+            # The handle the field is given. A courier books on a docket, a truck on
+            # an LR; the screen shows whichever one exists.
+            "lr_no": leg.lr_no,
+            "docket_no": leg.docket_no,
+            "tracking_url": leg.tracking_url,
+            "expected_delivery": leg.expected_delivery,
+            "dispatched_at": leg.dispatched_at,
+            "delivered_at": leg.delivered_at,
+            "acknowledged_at": leg.acknowledged_at,
+        })
+    return by_indent
 
 
 async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str | None = None,
@@ -9074,12 +9220,17 @@ async def warehouse_options(db: AsyncSession, *, mine_only: bool = False,
 async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = None,
                       item_id: int | None = None, batch_id: int | None = None,
                       storage_type_id: str | None = None,
-                      all_locations: bool = False) -> list[dict]:
+                      all_locations: bool = False,
+                      exclude_bin_id: int | None = None) -> list[dict]:
     # A picker chooses somewhere to put stock, so offer bins and not the lanes and
     # racks they hang from, unless all_locations is True.
     stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True))
     if not all_locations:
         stmt = stmt.where(Bin.bin_type.in_(m.BIN_TYPES))
+    # A destination that is also the source is not a movement. Excluded here rather
+    # than only in the form, so the offer and the rule the service enforces agree.
+    if exclude_bin_id:
+        stmt = stmt.where(Bin.id != exclude_bin_id)
     if storage_type_id:
         if storage_type_id.isdigit():
             stmt = stmt.where(Bin.storage_type_id == int(storage_type_id))
@@ -10120,3 +10271,139 @@ async def post_issues_batch(db: AsyncSession, issue_ids: list[int], user) -> dic
         "posted_count": len(posted),
         "failed_count": len(failed),
     }
+
+
+# ---------------------------------------------------------------------------
+# The hand-back from the outward leg
+# ---------------------------------------------------------------------------
+# Logistics carries the consignment; the paperwork it settles is ours. Logistics sits
+# BEFORE warehouse in the import chain (rule 5) and may not call into this module, so
+# the direction is inverted: this module registers itself on `logistics.hooks` at
+# import time and the transport service calls whatever it finds there.
+#
+# Both hooks run inside the transport service's transaction and neither commits. Both
+# are also written never to RAISE on a state they cannot settle — the load leaving the
+# yard is a physical fact, and refusing to record it because the consignment behind it
+# is in an unexpected state would leave the two documents further apart, not closer.
+# Anything skipped is logged loudly, which is the same rule the workflow fallbacks run
+# on (rule 8).
+
+async def _consignment_of(db: AsyncSession, tr) -> m.Dispatch | None:
+    """The warehouse consignment a transport request is carrying, if it names one."""
+    if not getattr(tr, "dispatch_id", None):
+        return None
+    return (await db.execute(
+        select(m.Dispatch)
+        .options(selectinload(m.Dispatch.items), selectinload(m.Dispatch.packages))
+        .where(m.Dispatch.id == tr.dispatch_id)
+    )).scalar_one_or_none()
+
+
+async def transport_released(db: AsyncSession, tr, user) -> None:
+    """The load left with logistics — gate the consignment out behind it.
+
+    Without this the consignment sat at PACKED forever: `_delivery_rows` counts a line
+    as dispatched only once its consignment is on the road, so the requester's own
+    Acknowledgements screen showed nothing to confirm while the goods were already on
+    a truck, and the indent stayed open with no way to close it.
+    """
+    dispatch = await _consignment_of(db, tr)
+    if dispatch is None:
+        return
+    if dispatch.status not in (DispatchStatus.APPROVED.value,
+                               DispatchStatus.PACKED.value):
+        # Already gated out through the warehouse's own screen, or cancelled. Either
+        # way there is nothing left for the release to say.
+        return
+    if await _dispatch_signature_outstanding(db, dispatch, user):
+        logger.warning(
+            "%s released transport but %s still owes a dispatch signature; "
+            "not gated out", tr.tr_no, dispatch.dispatch_no)
+        return
+    if (dispatch.ref_type or "").upper() in {"ISSUE", "WH_ISSUE"} and dispatch.ref_id:
+        issue = await db.get(m.MaterialIssue, dispatch.ref_id)
+        if issue is None or not issue.is_stock_posted:
+            logger.warning(
+                "%s released transport but the issue behind %s has not posted stock; "
+                "not gated out", tr.tr_no, dispatch.dispatch_no)
+            return
+
+    await _apply_gate_out(db, dispatch, tr.gate_pass_no, user)
+    logger.info("%s gated out %s on transport release", tr.tr_no, dispatch.dispatch_no)
+
+
+async def _dispatch_signature_outstanding(db: AsyncSession, dispatch: m.Dispatch,
+                                          user) -> bool:
+    """Read-only twin of `_dispatch_approval_pending`, for the hook.
+
+    Same question, none of the side effects: the original SUBMITS an unsubmitted
+    consignment and raises when one is mid-approval, and neither belongs inside a hook
+    running in somebody else's transaction — a commit there would split the transport
+    release in half, and a raise would refuse to record a load that has physically
+    gone. This only answers "may it leave", and the caller logs and walks away when it
+    may not.
+
+    Like the original, conditional on a DISPATCH ladder EXISTING for this scope. Where
+    nobody configured one — every project today — a packed consignment gates straight
+    out exactly as it did before.
+    """
+    if dispatch.status == DispatchStatus.APPROVED.value:
+        return False
+
+    project_id, _ = await wf_ladder.project_for(
+        db, getattr(user, "active_position_id", None), user)
+    if await wf_ladder.find_ladder(
+            db, project_id, WarehouseDocType.DISPATCH.value) is None:
+        return False
+
+    instance = (await db.execute(
+        select(WfInstance)
+        .where(WfInstance.doc_type == WarehouseDocType.DISPATCH.value,
+               WfInstance.doc_id == dispatch.id)
+        .order_by(WfInstance.id.desc()).limit(1)
+    )).scalars().first()
+    return instance is None or instance.status != InstanceStatus.APPROVED.value
+
+
+async def transport_acknowledged(db: AsyncSession, tr, user) -> None:
+    """The receiving site signed for the leg — settle what the leg was carrying.
+
+    One signature, one set of consequences: the consignment reads ACKNOWLEDGED, the
+    material issue behind it is signed off, the arrival is credited to the receiving
+    shelf and the indent closes once nothing is still owed on it. All of that already
+    lives in `_apply_dispatch_acknowledgement`; this only decides that it applies.
+    """
+    dispatch = await _consignment_of(db, tr)
+    if dispatch is None:
+        return
+    if dispatch.status not in (DispatchStatus.DISPATCHED.value,
+                               DispatchStatus.IN_TRANSIT.value,
+                               DispatchStatus.DELIVERED.value):
+        return
+
+    note = tr.ack_remarks or None
+    if (tr.ack_condition or "GOOD") != "GOOD":
+        # The claim itself stays on the shipment timeline where the Exceptions desk
+        # works it. What the consignment records is that the site said so.
+        note = f"{tr.ack_condition.title()} on arrival: {note or '—'}"
+    await _apply_dispatch_acknowledgement(
+        db, dispatch,
+        s.AcknowledgeWrite(acknowledged_by_name=tr.acknowledged_by_name,
+                           pod_url=tr.pod_url, remarks=note, lines=[]),
+        user,
+    )
+    logger.info("%s acknowledged %s for the receiving site",
+                tr.tr_no, dispatch.dispatch_no)
+
+
+def _register_transport_hooks() -> None:
+    """Wire this module onto the outward leg, once, at import."""
+    from app.modules.logistics import hooks as lgs_hooks
+
+    for registry, hook in ((lgs_hooks.ON_RELEASE, transport_released),
+                           (lgs_hooks.ON_ACKNOWLEDGE, transport_acknowledged)):
+        if hook not in registry:
+            registry.append(hook)
+
+
+_register_transport_hooks()

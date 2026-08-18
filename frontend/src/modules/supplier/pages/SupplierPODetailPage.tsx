@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Send, Truck } from "lucide-react";
+import { ArrowLeft, Check, Send, Truck, X } from "lucide-react";
 import {
-  Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill,
+  Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
@@ -43,6 +43,7 @@ export function SupplierPODetailPage() {
   const poId = Number(id);
   const nav = useNavigate();
   const qc = useQueryClient();
+  const toast = useToast();
 
   const { data: po, isLoading, error } = useQuery({
     queryKey: ["supplier-po", poId],
@@ -58,6 +59,20 @@ export function SupplierPODetailPage() {
   });
   const [lines, setLines] = useState<LineDraft[]>([]);
   const [editing, setEditing] = useState<DespatchNote | null>(null);
+  const [responseNote, setResponseNote] = useState("");
+
+  /** Yes, or no with a reason. The vendor id comes from the token server-side, so this
+   *  can only ever answer this vendor's own order. */
+  const respond = useMutation({
+    mutationFn: (accept: boolean) =>
+      supplierApi.respondToPo(poId, accept, responseNote),
+    onSuccess: (_result, accept) => {
+      toast.success(accept ? "Order accepted" : "Order declined");
+      setResponseNote("");
+      qc.invalidateQueries({ queryKey: ["supplier-po", poId] });
+      qc.invalidateQueries({ queryKey: ["supplier-pos"] });
+    },
+  });
   const [composing, setComposing] = useState(false);
 
   /** Open the composer on what is still owed, so a second delivery starts from the
@@ -160,6 +175,13 @@ export function SupplierPODetailPage() {
   const nothingLeft = (po.lines ?? []).every((line) => line.pending_qty <= 0);
   const busy = save.isPending || submit.isPending;
 
+  // An order is an offer to buy. Until it is answered nothing can be despatched
+  // against it, and once it is answered the buyer can only change it by amending it —
+  // which asks the question again. Orders sent before this step existed carry no
+  // answer at all and are left alone.
+  const awaitingAnswer = po.vendor_status === "PENDING";
+  const declined = po.vendor_status === "REJECTED";
+
   return (
     <>
       <Button variant="ghost" onClick={() => nav("/supplier/pos")}>
@@ -171,7 +193,16 @@ export function SupplierPODetailPage() {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <StatusPill status={po.status} />
-            {!composing && !nothingLeft && (
+            {po.vendor_status && <StatusPill status={po.vendor_status} />}
+            {(po.revision_no ?? 0) > 0 && (
+              <span className="rounded-full bg-surface-2 px-2.5 py-1 text-xs text-body">
+                Rev {po.revision_no}
+              </span>
+            )}
+            {/* Not offered until the order has been accepted: a despatch note is a
+              * claim against an agreement, so there has to be one. The server refuses
+              * it too — this only stops the vendor filling in a form for nothing. */}
+            {!composing && !nothingLeft && !awaitingAnswer && !declined && (
               <Button onClick={startNew}>
                 <Truck className="h-4 w-4" /> File a despatch note
               </Button>
@@ -204,6 +235,94 @@ export function SupplierPODetailPage() {
         </dl>
         {po.remarks && <p className="mt-4 border-t border-line pt-4 text-sm text-body">{po.remarks}</p>}
       </Card>
+
+      {/* The step that turns an order into an agreement. Shown above the goods, because
+        * answering it is the first thing this screen is for. */}
+      {awaitingAnswer && (
+        <Card className="mb-5 space-y-3 p-5">
+          <div>
+            <h2 className="text-sm font-semibold text-ink">
+              {(po.revision_no ?? 0) > 0
+                ? `Revision ${po.revision_no} of this order needs your answer`
+                : "This order needs your answer"}
+            </h2>
+            <p className="mt-1 text-xs text-muted">
+              Check the quantities, rates and terms below. Accepting confirms you will
+              supply them; you cannot despatch against the order until you do.
+              {(po.revision_no ?? 0) > 0 && po.amendment_reason
+                ? ` The buyer amended it: ${po.amendment_reason}`
+                : ""}
+            </p>
+          </div>
+          <Field label="Note to the buyer">
+            <Input
+              value={responseNote}
+              onChange={(event) => setResponseNote(event.target.value)}
+              placeholder="Optional when accepting, required when declining"
+            />
+          </Field>
+          {respond.error && (
+            <p className="text-sm text-danger">{(respond.error as Error).message}</p>
+          )}
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              variant="danger"
+              disabled={respond.isPending || !responseNote.trim()}
+              onClick={() => respond.mutate(false)}
+            >
+              <X className="h-4 w-4" /> Decline
+            </Button>
+            <Button disabled={respond.isPending} onClick={() => respond.mutate(true)}>
+              <Check className="h-4 w-4" /> Accept this order
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {declined && (
+        <Card className="mb-5 p-5">
+          <p className="text-sm text-ink">
+            You declined this order{po.vendor_responded_at ? ` on ${fmtDate(po.vendor_responded_at)}` : ""}.
+            {po.vendor_response_note ? ` Reason given: ${po.vendor_response_note}` : ""}
+          </p>
+          <p className="mt-1 text-xs text-muted">
+            Nothing can be despatched against it. The buyer can amend the order and
+            send it back to you.
+          </p>
+        </Card>
+      )}
+
+      {po.vendor_status === "ACCEPTED" && (
+        <p className="mb-5 rounded-lg bg-surface-2 px-3 py-2 text-xs text-body">
+          You accepted this order{po.vendor_responded_at ? ` on ${fmtDate(po.vendor_responded_at)}` : ""}.
+          It can only change now if the buyer amends it, which comes back here for a
+          fresh answer.
+        </p>
+      )}
+
+      {/* What was agreed in words. The vendor is bound by these too, so they belong on
+        * the vendor's copy and not only on ours. */}
+      {(po.payment_terms || po.delivery_terms || po.material_terms
+        || po.logistics_terms || po.billing_address || po.shipping_address) && (
+        <Card className="mb-5 p-5">
+          <h2 className="mb-3 text-sm font-semibold text-ink">Terms and addresses</h2>
+          <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            {([
+              ["Payment terms", po.payment_terms],
+              ["Delivery terms", po.delivery_terms],
+              ["Material terms", po.material_terms],
+              ["Logistics terms", po.logistics_terms],
+              ["Bill to", po.billing_address],
+              ["Ship to", po.shipping_address],
+            ] as const).filter(([, text]) => text).map(([label, text]) => (
+              <div key={label}>
+                <dt className="text-xs text-muted">{label}</dt>
+                <dd className="mt-1 whitespace-pre-line text-body">{text}</dd>
+              </div>
+            ))}
+          </dl>
+        </Card>
+      )}
 
       <h2 className="mb-2 text-sm font-semibold text-ink">Ordered</h2>
       <Card className="mb-5 overflow-x-auto p-0">

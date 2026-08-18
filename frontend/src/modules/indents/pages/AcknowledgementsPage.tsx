@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Camera, CheckCircle2, Circle, FileText, ListFilter, PackageCheck, Trash2,
+  Camera, CheckCircle2, Circle, ExternalLink, FileText, ListFilter, PackageCheck,
+  Trash2, Truck,
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, EmptyState, ErrorBanner, Input, ResponsiveList, Select,
@@ -12,7 +13,9 @@ import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge
 import { INDENT_STATUS } from "../constants";
 import { indentApi, useIndentAccountScope } from "../api";
 import { cancelIndentReceiptReads, commitConfirmedIndentReceipt } from "../receiptRefresh";
-import type { Acknowledgement, AcknowledgementLine, ReceiptAttachment } from "../types";
+import type {
+  Acknowledgement, AcknowledgementLine, ReceiptAttachment, ShipmentTrack,
+} from "../types";
 
 /**
  * What the requester is still owed, and acknowledging it arrived.
@@ -191,6 +194,65 @@ function LineCard({ line, value, onChange }: {
   );
 }
 
+/** The handle a requester actually chases a parcel with, whichever the mode issued. */
+const trackingHandle = (leg: ShipmentTrack) => leg.lr_no ?? leg.docket_no ?? null;
+
+/**
+ * How this delivery is travelling — the answer to "where is my stuff".
+ *
+ * Logistics knows the courier, the docket and the carrier's tracking page; the person
+ * waiting on the goods held none of it, and had no screen they were permitted to read
+ * it on. It rides on this row instead: told once, on the same card as the button that
+ * says it arrived.
+ */
+function ShipmentCard({ leg }: { leg: ShipmentTrack }) {
+  const handle = trackingHandle(leg);
+  const who = leg.carrier_name
+    || [leg.vehicle_number, leg.driver_name].filter(Boolean).join(" · ");
+  const landed = leg.acknowledged_at ?? leg.delivered_at;
+  return (
+    <li className="rounded-xl border border-line bg-content1 p-3">
+      <div className="flex items-start gap-2.5">
+        <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-050 text-brand">
+          <Truck className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <span className="font-mono text-xs font-semibold text-ink">{leg.tr_no}</span>
+            <span className="text-[11px] uppercase tracking-wide text-muted">
+              {leg.status.replace(/_/g, " ").toLowerCase()}
+            </span>
+          </div>
+          <div className="text-sm text-body">{who || "Hand delivery"}</div>
+          {handle && (
+            <div className="mt-0.5 text-xs text-muted">
+              Docket <span className="font-mono text-ink">{handle}</span>
+            </div>
+          )}
+          <div className="mt-0.5 text-[11px] text-muted">
+            {landed
+              ? `Arrived ${landed.slice(0, 10)}`
+              : leg.dispatched_at
+                ? `Sent ${leg.dispatched_at.slice(0, 10)}${
+                  leg.expected_delivery ? ` · due ${leg.expected_delivery}` : ""}`
+                : "Not yet sent"}
+          </div>
+        </div>
+        {leg.tracking_url && (
+          <a
+            href={leg.tracking_url}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-flex h-11 shrink-0 items-center gap-1 rounded-lg border border-line px-3 text-xs font-semibold text-brand transition hover:border-brand hover:bg-brand-050"
+          >
+            Track <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        )}
+      </div>
+    </li>
+  );
+}
+
 /** One line of the "before you acknowledge" list — ticked green the moment it is satisfied. */
 function Requirement({ met, label }: { met: boolean; label: string }) {
   return (
@@ -307,6 +369,17 @@ function AcknowledgementModal({ row, onClose }: {
             </span>
           )}
         </div>
+
+        {row.shipments.length > 0 && (
+          <div>
+            <div className="mb-2 text-sm font-semibold text-ink">On its way to you</div>
+            <ul className="space-y-2">
+              {row.shipments.map((leg) => (
+                <ShipmentCard key={leg.tr_id} leg={leg} />
+              ))}
+            </ul>
+          </div>
+        )}
 
         <ul className="space-y-2.5">
           {row.lines.map((line) => (
@@ -441,7 +514,23 @@ export default function AcknowledgementsPage() {
     {
       key: "progress",
       header: "Progress",
-      render: (row) => <span className="text-sm text-muted">{summarise(row)}</span>,
+      render: (row) => {
+        // The docket, on the row. Someone scanning this list for "has mine shipped"
+        // should not have to open every one of them to find out.
+        const leg = row.shipments[0];
+        const handle = leg ? trackingHandle(leg) : null;
+        return (
+          <div className="min-w-0">
+            <div className="text-sm text-muted">{summarise(row)}</div>
+            {leg && (
+              <div className="truncate text-[11px] text-muted">
+                {leg.carrier_name ?? leg.vehicle_number ?? "Hand delivery"}
+                {handle ? ` · ${handle}` : ""}
+              </div>
+            )}
+          </div>
+        );
+      },
     },
     {
       key: "status",

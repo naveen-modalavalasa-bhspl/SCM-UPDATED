@@ -254,6 +254,31 @@ class AcknowledgementLineRow(BaseModel):
     pending_with: str | None = None
 
 
+class ShipmentTrackRow(BaseModel):
+    """How the goods are travelling, for the person waiting on them.
+
+    Served on the requester's own row rather than behind a logistics screen they have
+    no permission for: "it has left" is useless without the docket number to chase it
+    with, and the carrier's tracking page is the only thing that answers "where is it
+    today". Read-only — the leg itself belongs to Logistics.
+    """
+    tr_id: int
+    tr_no: str
+    mode: str
+    status: str
+    carrier_name: str | None = None
+    vehicle_number: str | None = None
+    driver_name: str | None = None
+    driver_phone: str | None = None
+    lr_no: str | None = None
+    docket_no: str | None = None
+    tracking_url: str | None = None
+    expected_delivery: date | None = None
+    dispatched_at: datetime | None = None
+    delivered_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+
+
 class AcknowledgementRow(BaseModel):
     indent_id: int
     indent_no: str
@@ -264,6 +289,7 @@ class AcknowledgementRow(BaseModel):
     project_name: str | None = None
     can_acknowledge: bool = False
     lines: list[AcknowledgementLineRow] = []
+    shipments: list[ShipmentTrackRow] = []
 
 
 class IndentNotificationRow(BaseModel):

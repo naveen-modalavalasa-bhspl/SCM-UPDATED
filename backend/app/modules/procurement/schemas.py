@@ -50,6 +50,52 @@ class POHeaderUpdate(POHeaderIn):
     expected_date: date | None = None
 
 
+class POAmendLineIn(BaseModel):
+    """One line of an amended order.
+
+    `id` is the EXISTING line being changed. Omit it and the line is new; leave an
+    existing id out of the payload altogether and that line is removed — which the
+    service refuses if anything has already been received against it.
+    """
+    id: int | None = None
+    item_id: int
+    quantity: float = Field(gt=0)
+    rate: float = Field(ge=0)
+    tax_percent: float = Field(ge=0, default=0)
+
+
+class POAmendIn(POHeaderIn):
+    """A revision of an order that has already gone out.
+
+    `reason` is required: an amendment is a change to something somebody has already
+    agreed to, and a revision history with no reasons in it answers no questions.
+
+    `lines` is optional — most amendments move a date or a term and leave the goods
+    alone. Sending it replaces the whole line list.
+    """
+    reason: str
+    expected_date: date | None = None
+    lines: list[POAmendLineIn] | None = None
+
+
+class POVendorResponseIn(BaseModel):
+    """The vendor's answer. A decline must say why; an acceptance need not."""
+    accept: bool
+    note: str = ""
+
+
+class PORevisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    revision_no: int
+    reason: str | None = None
+    status: str | None = None
+    vendor_status: str | None = None
+    snapshot: dict | None = None
+    changed_by_name: str | None = None
+    created_at: datetime
+
+
 class POFromQuotationIn(POHeaderIn):
     """Everything the awarded quotation does NOT already say.
 
@@ -114,6 +160,15 @@ class POOut(BaseModel):
     billing_address: str | None = None
     shipping_address: str | None = None
     current_approver_name: str | None = None
+    # What the vendor said, and which revision they said it about. Both null on an
+    # order that has never been sent, which is how a reader tells "not asked yet" from
+    # "asked and waiting".
+    vendor_status: str | None = None
+    vendor_responded_at: datetime | None = None
+    vendor_response_note: str | None = None
+    revision_no: int = 0
+    amended_at: datetime | None = None
+    amendment_reason: str | None = None
     created_at: datetime
     items: list[POItemOut] = []
 
@@ -125,6 +180,10 @@ class POListRow(BaseModel):
     vendor_name: str | None = None
     indent_no: str | None = None
     status: str
+    # Two orders can both read SENT_TO_VENDOR while one is agreed and the other has
+    # been sitting unanswered for a week. The register has to be able to say which.
+    vendor_status: str | None = None
+    revision_no: int = 0
     total_amount: float
     created_at: datetime
 
@@ -726,6 +785,19 @@ class VendorPOOut(BaseModel):
     status: str
     total_amount: float
     remarks: str | None = None
+    # The order's own answer state, so the portal can ask for one rather than
+    # presenting a despatch form for something never agreed to.
+    vendor_status: str | None = None
+    vendor_responded_at: datetime | None = None
+    vendor_response_note: str | None = None
+    revision_no: int = 0
+    amendment_reason: str | None = None
+    payment_terms: str | None = None
+    delivery_terms: str | None = None
+    material_terms: str | None = None
+    logistics_terms: str | None = None
+    billing_address: str | None = None
+    shipping_address: str | None = None
     lines: list[VendorPOLineOut] = []
     despatch_notes: list[DespatchNoteOut] = []
 
@@ -734,6 +806,8 @@ class VendorPOListRow(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     po_no: str
+    vendor_status: str | None = None
+    revision_no: int = 0
     po_date: date | None = None
     expected_date: date | None = None
     status: str

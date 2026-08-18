@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, Send, X } from "lucide-react";
+import { ArrowLeft, Check, FilePen, Printer, Send, X } from "lucide-react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Button, Can, Card, Field, Input, PageHeader, StatusPill, useToast,
@@ -48,6 +48,37 @@ export function PODetailPage() {
   useEffect(() => {
     if (po.data) setHeader(poHeaderFrom(po.data));
   }, [po.data]);
+
+  // Only fetched once the order has actually been amended. An order on revision 0 has
+  // no history worth a round trip, and most orders never leave it.
+  const revisions = useQuery({
+    queryKey: ["purchase-order-revisions", poId],
+    queryFn: () => poApi.revisions(poId),
+    enabled: (po.data?.revision_no ?? 0) > 0,
+  });
+
+  // An amendment is a change to something somebody has already agreed to, so it is
+  // deliberately a separate act from editing a draft: it asks for a reason, and the
+  // server files the whole previous order away before applying it.
+  const [amending, setAmending] = useState(false);
+  const [amendReason, setAmendReason] = useState("");
+  const amend = useMutation({
+    mutationFn: () => poApi.amend(poId, {
+      reason: amendReason,
+      expected_date: po.data?.expected_date ?? null,
+      ...poHeaderPayload(header),
+    }),
+    onSuccess: (updated) => {
+      toast.success(
+        `${updated.po_no} amended to revision ${updated.revision_no} — `
+        + "send it for approval again",
+      );
+      setAmending(false);
+      setAmendReason("");
+      qc.invalidateQueries({ queryKey: ["purchase-order-revisions", poId] });
+      refresh();
+    },
+  });
 
   /** DRAFT only, server-side too: past that the order is in approval or has been sent,
    *  and a term that changes after somebody signed it is a different agreement. */
@@ -125,6 +156,10 @@ export function PODetailPage() {
   // current approver, so this widens the doorway, never the authority.
   const canDecide = po.data.status === "PENDING_APPROVAL";
   const isDraft = po.data.status === "DRAFT";
+  // Nothing left to change: the goods are in and the paperwork is closed, or the order
+  // never became one. The server refuses an amendment on these too.
+  const isFinished = ["RECEIVED", "CLOSED", "CANCELLED", "REJECTED"]
+    .includes(po.data.status);
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
   const busy = submit.isPending || send.isPending || decide.isPending;
 
@@ -137,6 +172,27 @@ export function PODetailPage() {
       title={po.data.po_no}
       actions={<div className="flex flex-wrap items-center gap-2">
         <StatusPill status={po.data.status} />
+        {/* The vendor's answer is a different axis from our own status: an order can be
+          * SENT_TO_VENDOR and either agreed or still unanswered. Said out loud. */}
+        {po.data.vendor_status && <StatusPill status={po.data.vendor_status} />}
+        {(po.data.revision_no ?? 0) > 0 && (
+          <span className="rounded-full bg-surface-2 px-2.5 py-1 text-xs text-body">
+            Rev {po.data.revision_no}
+          </span>
+        )}
+        {/* Opens the order on its own, laid out for paper. The browser's own print
+          * dialog saves it as a PDF — no server-side renderer to keep in step with
+          * the screen, and it prints exactly what is on the document. */}
+        <Button variant="subtle" onClick={() => window.open(`/pos/${poId}/print`, "_blank")}>
+          <Printer className="h-4 w-4" /> PDF
+        </Button>
+        {/* Amend is for an order that has left the building. A draft is simply edited,
+          * and a finished order can no longer be changed at all. */}
+        {!isDraft && !isFinished && <Can do="po.edit">
+          <Button variant="subtle" onClick={() => setAmending(true)}>
+            <FilePen className="h-4 w-4" /> Amend
+          </Button>
+        </Can>}
         {/* One button per status, never two: a draft can only be submitted, an
           * approved order can only be sent. Each is gated on its own permission —
           * raising an order and committing it to a vendor are different rights. */}
@@ -228,17 +284,18 @@ export function PODetailPage() {
       </dl>
     </Card>
 
-    {/* Addresses and terms — shown only when the order says something, so an order
-      * raised before these fields existed reads exactly as it did. */}
-    {(po.data.billing_address || po.data.shipping_address) && <Card className="mt-4 p-4">
+    {/* Addresses and terms, ALWAYS — including the blanks. This is what an approver is
+      * signing, and a field that disappears when empty cannot be told apart from a
+      * field nobody thought to ask for. An empty term on an order worth six figures is
+      * something the person signing it should see. */}
+    <Card className="mt-4 p-4">
       <dl className="grid gap-3 text-sm sm:grid-cols-2">
-        <div><dt className="text-muted">Billing address</dt><dd className="whitespace-pre-line text-ink">{po.data.billing_address ?? "—"}</dd></div>
-        <div><dt className="text-muted">Shipping address</dt><dd className="whitespace-pre-line text-ink">{po.data.shipping_address ?? "—"}</dd></div>
+        <div><dt className="text-muted">Billing address</dt><dd className="whitespace-pre-line text-ink">{po.data.billing_address || "—"}</dd></div>
+        <div><dt className="text-muted">Shipping address</dt><dd className="whitespace-pre-line text-ink">{po.data.shipping_address || "—"}</dd></div>
       </dl>
-    </Card>}
+    </Card>
 
-    {(po.data.payment_terms || po.data.delivery_terms || po.data.material_terms
-      || po.data.logistics_terms) && <Card className="mt-4 p-4">
+    <Card className="mt-4 p-4">
       <h2 className="mb-3 text-sm font-semibold text-ink">Terms and conditions</h2>
       <dl className="grid gap-3 text-sm sm:grid-cols-2">
         {([
@@ -246,13 +303,87 @@ export function PODetailPage() {
           ["Delivery terms", po.data.delivery_terms],
           ["Material terms", po.data.material_terms],
           ["Logistics terms", po.data.logistics_terms],
-        ] as const).filter(([, text]) => text).map(([label, text]) => (
+        ] as const).map(([label, text]) => (
           <div key={label}>
             <dt className="text-muted">{label}</dt>
-            <dd className="whitespace-pre-line text-ink">{text}</dd>
+            <dd className="whitespace-pre-line text-ink">{text || "—"}</dd>
           </div>
         ))}
       </dl>
+    </Card>
+
+    {/* What has been changed since, and why. Empty on an order still on its original
+      * revision, which is most of them. */}
+    {(po.data.revision_no ?? 0) > 0 && <Card className="mt-4 p-4">
+      <h2 className="mb-3 text-sm font-semibold text-ink">
+        Amendment history · now at revision {po.data.revision_no}
+      </h2>
+      {po.data.amendment_reason && (
+        <p className="mb-3 text-sm text-body">
+          Latest: {po.data.amendment_reason}
+          {po.data.amended_at ? ` · ${fmtDate(po.data.amended_at)}` : ""}
+        </p>
+      )}
+      <ol className="space-y-2 text-sm">
+        {(revisions.data ?? []).map((rev) => (
+          <li key={rev.id} className="rounded-lg border border-line p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium text-ink">Revision {rev.revision_no}</span>
+              <span className="text-xs text-muted">
+                {rev.changed_by_name ?? "—"} · {fmtDate(rev.created_at)}
+              </span>
+            </div>
+            <p className="mt-1 text-body">{rev.reason ?? "—"}</p>
+            <p className="mt-1 text-xs text-muted">
+              Was {rev.status ?? "—"}
+              {rev.vendor_status ? ` · vendor had ${rev.vendor_status.toLowerCase()} it` : ""}
+              {typeof rev.snapshot?.total_amount === "number"
+                ? ` · total was ${money(rev.snapshot.total_amount as number)}` : ""}
+            </p>
+          </li>
+        ))}
+        {(revisions.data ?? []).length === 0 && (
+          <li className="text-muted">Loading the earlier versions…</li>
+        )}
+      </ol>
+    </Card>}
+
+    {amending && <Card className="mt-4 space-y-3 p-4">
+      <h2 className="text-sm font-semibold text-ink">Amend this order</h2>
+      <p className="text-xs text-muted">
+        The current version is filed away and the order goes back to draft: it is
+        approved again, and{" "}
+        {po.data.vendor_status === "ACCEPTED"
+          ? "the vendor has to accept the new version before anything can be delivered."
+          : "sent to the vendor again for their answer."}
+      </p>
+      <Field label="Why is it being amended?">
+        <Input
+          autoFocus
+          value={amendReason}
+          onChange={(event) => setAmendReason(event.target.value)}
+          placeholder="Required — e.g. delivery pushed to month end at the vendor's request"
+        />
+      </Field>
+      {/* The same fields the draft editor shows. Quantities and rates stay as they are
+        * here: changing what is being bought is a bigger act than changing a term, and
+        * the endpoint takes lines separately when that day comes. */}
+      <POHeaderFields
+        value={header}
+        onChange={(patch) => setHeader({ ...header, ...patch })}
+      />
+      {amend.error && <p className="text-sm text-danger">{(amend.error as Error).message}</p>}
+      <div className="flex justify-end gap-2">
+        <Button variant="subtle" onClick={() => { setAmending(false); setAmendReason(""); }}>
+          Cancel
+        </Button>
+        <Button
+          disabled={amend.isPending || !amendReason.trim()}
+          onClick={() => amend.mutate()}
+        >
+          {amend.isPending ? "Amending…" : "Save as a new revision"}
+        </Button>
+      </div>
     </Card>}
 
     {canDecide && <Card className="mt-4 space-y-3 p-4">

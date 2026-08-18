@@ -67,6 +67,18 @@ export default function StockMovementForm() {
     if (key === "item_id" || key === "source_bin_id" || key === "batch_id") {
       newLines[index].serial_numbers = [];
     }
+    // A source bin is only offered because it holds the item that was chosen. Change
+    // the item and the bin underneath it is a bin for something else — kept, it was
+    // posted as a source with no stock in it and the save came back "Only 0 is
+    // available". Same for the batch, which is read off the source.
+    if (key === "item_id") {
+      newLines[index].source_bin_id = 0;
+      newLines[index].batch_id = null;
+    }
+    // Never leave the destination sitting on the bin just chosen as the source.
+    if (key === "source_bin_id" && value === newLines[index].destination_bin_id) {
+      newLines[index].destination_bin_id = 0;
+    }
     setLines(newLines);
   };
 
@@ -181,10 +193,12 @@ function MovementLineEditor({
   const [serialsOpen, setSerialsOpen] = useState(false);
   const [storageType, setStorageType] = useState<number | string | "">("");
 
-  const STORAGE_ENUMS = [
-    "BLOCK", "FLOOR", "LANE", "RACK", "SHELF", "BIN", "LOT",
-    "COLD_ROOM", "REFRIGERATOR", "COLD_STORAGE_BIN", "PALLET"
-  ];
+  /* Only the storage types stock is actually counted in. The full BinType list was on
+   * offer — BLOCK, FLOOR, LANE, RACK, SHELF — and every one of them is structure you
+   * walk past on the way to a bin: picking one gave an empty destination list, and
+   * `all_locations` let a rack be chosen anyway, which the service then rejected with
+   * "Stock can move only between stock-holding bins". Mirrors BIN_TYPES on the server. */
+  const STORAGE_ENUMS = ["BIN", "COLD_STORAGE_BIN"];
 
   const availability = useQuery({
     queryKey: ["wh-stock-movement-availability", warehouseId, line.source_bin_id, line.item_id, line.batch_id],
@@ -229,14 +243,19 @@ function MovementLineEditor({
         </Field>
 
         {isBinManaged && (
-          <Field label="Source location">
+          /* Only the bins that actually hold this item. The name carries the item and
+           * the batch because Lookup keys its cache on it — without them the first
+           * line's list was reused for every later item, and every bin in the
+           * warehouse was on offer for stock standing in three of them. */
+          <Field label="Source location"
+                 hint={!line.item_id ? "Pick the item first." : undefined}>
             <Lookup
-              name={`line-source-${index}-${warehouseId}`}
-              load={(search) => binOptions(warehouseId, search)}
+              name={`line-source-${index}-${warehouseId}-${line.item_id}-${line.batch_id ?? 0}`}
+              load={(search) => binOptions(warehouseId, search, line.item_id, line.batch_id)}
               value={line.source_bin_id || ""}
-              isDisabled={!warehouseId}
+              isDisabled={!warehouseId || !line.item_id}
               onChange={(value) => onChange("source_bin_id", value === "" ? 0 : value)}
-              placeholder="Source location"
+              placeholder={line.item_id ? "Source location" : "Select the item first"}
             />
           </Field>
         )}
@@ -268,7 +287,11 @@ function MovementLineEditor({
         <Field label="Destination Storage Type">
           <Select
             value={String(storageType)}
-            onChange={(val) => setStorageType(val || "")}
+            onChange={(val) => {
+              setStorageType(val || "");
+              // The bin below no longer belongs to the type now selected.
+              onChange("destination_bin_id", 0);
+            }}
             options={[
               ...STORAGE_ENUMS.map(e => ({ value: e, label: e })),
               ...storageTypes.map(st => ({ value: String(st.id), label: st.name }))
@@ -278,10 +301,17 @@ function MovementLineEditor({
         </Field>
 
         {isBinManaged && (
+          /* Stock-holding bins only (never `all_locations`, which offered racks and
+           * floors the service refuses), narrowed to the chosen storage type, and never
+           * the source bin — a move to where it already is is not a move. All three are
+           * in the cache name for the same reason the source's are. */
           <Field label="Destination location">
             <Lookup
-              name={`line-dest-${index}-${warehouseId}`}
-              load={(search) => binOptions(warehouseId, search, undefined, undefined, String(storageType), true)}
+              name={`line-dest-${index}-${warehouseId}-${storageType || "any"}-${line.source_bin_id}`}
+              load={(search) => binOptions(
+                warehouseId, search, undefined, undefined, String(storageType) || undefined,
+                false, line.source_bin_id || undefined,
+              )}
               value={line.destination_bin_id || ""}
               isDisabled={!warehouseId}
               onChange={(value) => onChange("destination_bin_id", value === "" ? 0 : value)}

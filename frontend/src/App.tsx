@@ -25,6 +25,7 @@ import {
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 import { PODetailPage } from "@/modules/procurement/pages/PODetailPage";
+import { POPrintPage } from "@/modules/procurement/pages/POPrintPage";
 import { POFormPage } from "@/modules/procurement/pages/POFormPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
 // sub-pages, so these paths hand the whole subtree to it.
@@ -167,6 +168,14 @@ function AppRoutes() {
             tabs with no route back to their shipments. */}
         <Route path="profile" element={<SupplierProfilePage />} />
       </Route>
+
+      {/* The order as a document, for paper and for "save as PDF". Outside the shell
+          on purpose: what prints has to be the order, not a sidebar with an order next
+          to it. Still signed-in only — it is the same data the detail page shows. */}
+      <Route
+        path="/pos/:id/print"
+        element={me ? <POPrintPage /> : <Navigate to="/login" replace />}
+      />
 
       <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
         <Route index element={<HomePage />} />

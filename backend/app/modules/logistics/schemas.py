@@ -138,6 +138,13 @@ class TRCreate(BaseModel):
     #: in hand. `dispatch_tr` overwrites it if a different one is quoted when the
     #: goods actually leave — the last word is the one the security desk wrote.
     gate_pass_no: str | None = None
+    #: The tracking handles, when the desk already holds them at booking time — a
+    #: courier docket is written on the slip at the counter. Optional everywhere:
+    #: a tendered job has no number until a carrier has been awarded and answered.
+    lr_no: str | None = None
+    docket_no: str | None = None
+    tracking_url: str | None = None
+    eway_bill_no: str | None = None
 
     carrier_id: int | None = None
     vehicle_number: str | None = None
@@ -174,6 +181,12 @@ class QuickDispatchIn(TRCreate):
     #: than when it comes back, so the rule the quotes are judged by is fixed before
     #: anybody has seen a price.
     evaluation_method: str | None = None
+    #: Release it on the same press. On a settled mode the gate pass, the docket and
+    #: the driver are all on this form, so "confirm dispatch" IS the load leaving and
+    #: the shipment goes straight to IN_TRANSIT — which is what puts it in front of
+    #: the receiving site to acknowledge. Ignored on a tendered mode: there is no
+    #: carrier to leave with until the award is made.
+    release_now: bool = False
 
 
 class AcceptQuoteIn(BaseModel):
@@ -332,6 +345,7 @@ class TRListRow(BaseModel):
     total_weight_kg: float
     lr_no: str | None = None
     docket_no: str | None = None
+    tracking_url: str | None = None
     expected_delivery: date | None = None
     dispatched_at: datetime | None = None
     delivered_at: datetime | None = None

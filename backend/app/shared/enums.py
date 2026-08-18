@@ -44,6 +44,23 @@ class POStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class POVendorStatus(str, Enum):
+    """What the VENDOR has said about an order we sent them.
+
+    Kept apart from `POStatus` on purpose. A purchase order's status is where the
+    document is in OUR process; this is the counterparty's answer to it, and folding
+    the two together would have meant a new PO status that every existing filter,
+    badge, GRN guard and report had to learn about.
+
+    PENDING is set when the order is sent. Nothing may be received against an order
+    the vendor has not accepted, and an accepted order can only be changed by an
+    amendment the vendor accepts again — that is what makes it a contract.
+    """
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+
+
 class GRNStatus(str, Enum):
     DRAFT = "DRAFT"
     RECEIVED = "RECEIVED"

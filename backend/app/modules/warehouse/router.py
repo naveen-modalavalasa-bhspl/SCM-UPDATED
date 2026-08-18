@@ -873,10 +873,13 @@ async def bin_options(warehouse_id: int, search: str | None = None,
                       item_id: int | None = None, batch_id: int | None = None,
                       storage_type_id: str | None = None,
                       all_locations: bool = False,
+                      exclude_bin_id: int | None = None,
                       db: AsyncSession = Depends(get_db),
                       _=Depends(require_permission(STOCK_VIEW))):
     return await service.bin_options(
-        db, warehouse_id, search, item_id=item_id, batch_id=batch_id, storage_type_id=storage_type_id, all_locations=all_locations
+        db, warehouse_id, search, item_id=item_id, batch_id=batch_id,
+        storage_type_id=storage_type_id, all_locations=all_locations,
+        exclude_bin_id=exclude_bin_id,
     )
 
 

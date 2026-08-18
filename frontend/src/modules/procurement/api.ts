@@ -3,7 +3,8 @@ import type { Paginated } from "@/shared/types";
 import type {
   Comparison, Consolidation, ConsolidationCreate, ConsolidationListRow,
   ConsolidationSource, DespatchNote, DespatchNoteWrite, EvaluationMethodOption,
-  MRCandidate, POCreate, POFromQuotation, POHeader, POListRow, PurchaseOrder, VendorPO,
+  MRCandidate, POAmend, POCreate, POFromQuotation, POHeader, POListRow, PORevision,
+  PurchaseOrder, VendorPO,
   VendorPOListRow,
   Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
@@ -30,6 +31,12 @@ export const poApi = {
    *  only, server-side; the screen only offers it on a draft for the same reason. */
   update: (id: number, data: POHeader & { expected_date?: string | null }) =>
     api.put<PurchaseOrder>(`/api/pos/${id}`, data).then((r) => r.data),
+  /** Revise an order that has already gone out. Files the old version away, bumps the
+   *  revision and sends it back through approval — and back to the vendor to accept. */
+  amend: (id: number, data: POAmend) =>
+    api.post<PurchaseOrder>(`/api/pos/${id}/amend`, data).then((r) => r.data),
+  revisions: (id: number) =>
+    api.get<PORevision[]>(`/api/pos/${id}/revisions`).then((r) => r.data),
   submit: (id: number) => api.post<PurchaseOrder>(`/api/pos/${id}/submit`).then((r) => r.data),
   approve: (id: number, comments = "") =>
     api.post<PurchaseOrder>(`/api/pos/${id}/approve`, { comments }).then((r) => r.data),
@@ -173,6 +180,11 @@ export const supplierApi = {
   pos: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<VendorPOListRow>>("/api/supplier/pos", { params }).then((r) => r.data),
   po: (id: number) => api.get<VendorPO>(`/api/supplier/pos/${id}`).then((r) => r.data),
+  /** Accept the order, or decline it with a reason. Nothing may be despatched against
+   *  an order that has not been accepted. */
+  respondToPo: (id: number, accept: boolean, note = "") =>
+    api.post<VendorPO>(`/api/supplier/pos/${id}/respond`, { accept, note })
+      .then((r) => r.data),
   createDespatch: (poId: number, body: DespatchNoteWrite) =>
     api.post<DespatchNote>(`/api/supplier/pos/${poId}/despatch-notes`, body)
       .then((r) => r.data),

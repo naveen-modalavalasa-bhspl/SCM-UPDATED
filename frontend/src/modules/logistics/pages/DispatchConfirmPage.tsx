@@ -19,6 +19,9 @@ import type {
 const BLANK = {
   freight_amount: "", vehicle_number: "", driver_name: "",
   driver_phone: "", handed_over_by_name: "", received_by_name: "",
+  // The handle the receiving site chases the parcel with. Written here, on the slip
+  // the counter just gave you — a docket typed in tomorrow is a docket nobody has.
+  docket_no: "", tracking_url: "", eway_bill_no: "",
 };
 
 const destinationOf = (row?: Consignment | null) =>
@@ -48,8 +51,10 @@ const destinationOf = (row?: Consignment | null) =>
  *     one and calling the answer a comparison is the thing the three-quote norm
  *     exists to prevent. No amount is sent to any of them.
  *   * everything else — settled the moment it is chosen (a courier's rate is
- *     published, a company vehicle costs nothing, a hand-over hires nobody), so it
- *     goes straight to READY, and exactly one provider is named.
+ *     published, a company vehicle costs nothing, a hand-over hires nobody), so
+ *     exactly one provider is named and the load LEAVES on this press. Every check
+ *     the release runs is answered by this form, so stopping at READY and asking for
+ *     a second "it has left" only held the moment the receiving site can sign for it.
  */
 export function DispatchConfirmPage() {
   const nav = useNavigate();
@@ -121,12 +126,20 @@ export function DispatchConfirmPage() {
         driver_phone: form.driver_phone || null,
         handed_over_by_name: form.handed_over_by_name || null,
         received_by_name: form.received_by_name || null,
+        docket_no: form.docket_no || null,
+        tracking_url: form.tracking_url || null,
+        eway_bill_no: form.eway_bill_no || null,
+        // A settled mode leaves on this press. Everything the release checks is on
+        // this form, so sending it to READY and asking for a second "it has left"
+        // only delayed the moment the receiving site can sign for it — and the indent
+        // behind it stayed open in the gap. A tender has no carrier yet, so it waits.
+        release_now: !rule?.needs_quotes,
       };
       return transportApi.dispatchConsignment(body);
     },
     success: (tr) => (tr.status === "QUOTING"
       ? `${tr.tr_no} sent to ${carrierIds.length} provider${carrierIds.length === 1 ? "" : "s"} for a price`
-      : `${tr.tr_no} is ready to leave`),
+      : `${tr.tr_no} is on its way — the site can acknowledge it now`),
     invalidates: [["lgs-dispatch-queue"], ["lgs-consignment-links"],
       ["lgs-packed-consignments"], ["transport"], ["transport-summary"],
       ["transport-provider-board"]],
@@ -142,6 +155,8 @@ export function DispatchConfirmPage() {
   const blocked = !id
     || Boolean(already)
     || (Boolean(rule?.needs_carrier) && carrierIds.length === 0)
+    // Released on this press, so the number it travels with is needed on this press.
+    || (Boolean(rule?.needs_carrier) && !rule?.needs_quotes && !form.docket_no.trim())
     || send.isPending;
 
   return (
@@ -161,7 +176,7 @@ export function DispatchConfirmPage() {
                   ? "Sending..."
                   : rule?.needs_quotes
                     ? `Send for a price${carrierIds.length > 1 ? ` (${carrierIds.length})` : ""}`
-                    : "Confirm dispatch"}
+                    : "Dispatch it"}
               </Button>
             </Can>
           </>
@@ -351,10 +366,29 @@ export function DispatchConfirmPage() {
             )}
 
             {rule?.needs_carrier && !rule.needs_quotes && (
-              <Field label="Agreed freight" hint="Their published rate">
-                <Input type="number" value={form.freight_amount}
-                  onChange={(e) => setForm({ ...form, freight_amount: e.target.value })} />
-              </Field>
+              <>
+                <Field label="Agreed freight" hint="Their published rate">
+                  <Input type="number" value={form.freight_amount}
+                    onChange={(e) => setForm({ ...form, freight_amount: e.target.value })} />
+                </Field>
+                {/* The service refuses to release a hired leg with no number on it:
+                    it is the only thing the receiving site can chase the parcel
+                    with, and it is on the booking slip in your hand right now. */}
+                <Field label="Docket / LR number"
+                  hint="From the booking slip. The site tracks the parcel on this.">
+                  <Input value={form.docket_no}
+                    onChange={(e) => setForm({ ...form, docket_no: e.target.value })} />
+                </Field>
+                <Field label="Tracking link"
+                  hint="Optional. The carrier's own tracking page, shown to the requester.">
+                  <Input value={form.tracking_url} placeholder="https://..."
+                    onChange={(e) => setForm({ ...form, tracking_url: e.target.value })} />
+                </Field>
+                <Field label="E-way bill no" hint="Optional.">
+                  <Input value={form.eway_bill_no}
+                    onChange={(e) => setForm({ ...form, eway_bill_no: e.target.value })} />
+                </Field>
+              </>
             )}
 
             {needs("vehicle_number") && (

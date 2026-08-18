@@ -24,7 +24,8 @@ from app.modules.procurement.schemas import (
     ActionIn, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
-    POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut, QuoteListRow,
+    POAmendIn, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
+    PORevisionOut, POVendorResponseIn, QuoteListRow,
     QuoteOut, QuoteSubmit, ReqCreate, ReqFromMRsIn, ReqListRow,
     ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
     VendorAccountOut, VendorLoginIn, VendorPasswordIn, VendorProfileOut,
@@ -89,6 +90,22 @@ async def update_po(po_id: int, body: POHeaderUpdate, db: AsyncSession = Depends
                     user=Depends(require_permission(perms.PO_EDIT))):
     """The header a draft order was raised without — terms, addresses, project."""
     return await service.update_po_header(db, po_id, body, user)
+
+
+@pos.post("/{po_id}/amend", response_model=POOut)
+async def amend_po(po_id: int, body: POAmendIn, db: AsyncSession = Depends(get_db),
+                   user=Depends(require_permission(perms.PO_EDIT))):
+    """Revise an order that has already gone out. It files the previous version away,
+    bumps the revision, and sends the order back through approval — and, where the
+    vendor had accepted, back to them for a fresh answer."""
+    return await service.amend_po(db, po_id, body, user)
+
+
+@pos.get("/{po_id}/revisions", response_model=list[PORevisionOut])
+async def po_revisions(po_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.PO_VIEW))):
+    """Every version this order has been. Reading one needs only `po.view`."""
+    return await service.po_revisions(db, po_id, user)
 
 
 @pos.post("/{po_id}/submit", response_model=POOut)
@@ -427,6 +444,17 @@ async def vendor_list_pos(params: PageParams = Depends(),
 @supplier.get("/pos/{po_id}", response_model=VendorPOOut)
 async def vendor_get_po(po_id: int, db: AsyncSession = Depends(get_db),
                         account=Depends(get_current_vendor)):
+    return await service.vendor_get_po(db, account.vendor_id, po_id)
+
+
+@supplier.post("/pos/{po_id}/respond", response_model=VendorPOOut)
+async def vendor_respond_to_po(po_id: int, body: POVendorResponseIn,
+                               db: AsyncSession = Depends(get_db),
+                               account=Depends(get_current_vendor)):
+    """Accept the order, or decline it with a reason. The vendor id comes from the
+    token, never from the caller, so this can only ever answer their own order."""
+    await service.vendor_respond_to_po(
+        db, account.vendor_id, po_id, body.accept, body.note)
     return await service.vendor_get_po(db, account.vendor_id, po_id)
 
 

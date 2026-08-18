@@ -252,14 +252,44 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   });
 
   /** The vendor is left to the server, which reads it off the order itself rather
-   *  than trusting a field the gate could contradict. */
+   *  than trusting a field the gate could contradict.
+   *
+   *  Picking the order pulls the vendor's own despatch note WITH it when they have
+   *  filed one — the newest, which is the delivery standing at the gate. It used to
+   *  fill from the order alone and leave the note to a second picker below, so the
+   *  invoice, the e-way bill, the vehicle, the transporter and every line's batch and
+   *  expiry sat one click away and were simply never fetched: the receipts on this
+   *  system show a linked order and an empty invoice box. The picker stays, for the
+   *  delivery that is the second note against an order.
+   *
+   *  Falls back to the order's own lines when no note has been filed — goods turn up
+   *  without paperwork and are still received. */
   const choosePo = (poId: number | null, poNo: string) => {
     setForm((current) => ({
       ...current, po_id: poId, po_no: poNo, despatch_note_id: null,
     }));
     setTouched(true);
-    if (poId) fillFromPo.mutate(poId);
+    if (poId) fillFromOrder.mutate(poId);
   };
+
+  /** Whichever of the two the order actually has behind it. One mutation so the form
+   *  is never filled twice from two sources racing each other. */
+  const fillFromOrder = useMutation({
+    mutationFn: async (poId: number) => {
+      const notes = await qc.fetchQuery({
+        queryKey: ["wh-lookup", "despatch-notes", poId],
+        queryFn: () => despatchNoteOptions(poId),
+        staleTime: 5 * 60_000,
+      });
+      return notes.length ? { noteId: Number(notes[0].id) } : { noteId: null };
+    },
+    onSuccess: ({ noteId }, poId) => {
+      if (noteId) fillFromDespatch.mutate(noteId);
+      else fillFromPo.mutate(poId);
+    },
+    // A lookup that fails must not cost the storekeeper the order they just picked.
+    onError: (_error, poId) => fillFromPo.mutate(poId),
+  });
 
   /**
    * Fill the whole delivery from the vendor's own despatch note.
@@ -1062,14 +1092,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               <Field
                 label="Purchase order"
                 hint={form.po_id
-                  ? "Lines, units and rates come from the order — enter what arrived."
+                  ? (form.despatch_note_id
+                    ? "Filled from the vendor's despatch note — confirm what arrived."
+                    : "Lines, units and rates come from the order — enter what arrived.")
                   : "Pick the order the goods came against."}
               >
                 <Lookup
                   name="purchase-orders"
                   load={poOptions}
                   value={form.po_id ?? ""}
-                  isDisabled={locked || fillFromPo.isPending}
+                  isDisabled={locked || fillFromPo.isPending || fillFromOrder.isPending
+                    || fillFromDespatch.isPending}
                   // A receipt already linked to an order that has since been fully
                   // received is off the picker's list; without this its number would
                   // render as the placeholder on a document that plainly has one.
@@ -1078,7 +1111,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                     : undefined}
                   onChange={(v, option) =>
                     choosePo(v === "" ? null : Number(v), option?.code ?? "")}
-                  placeholder={fillFromPo.isPending ? "Loading lines…" : "Purchase order"}
+                  placeholder={fillFromPo.isPending || fillFromOrder.isPending
+                    || fillFromDespatch.isPending
+                    ? "Loading the delivery…" : "Purchase order"}
                 />
               </Field>
               {!form.po_id && (

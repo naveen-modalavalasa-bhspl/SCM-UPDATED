@@ -281,6 +281,7 @@ export interface TRListRow {
   total_weight_kg: number;
   lr_no?: string | null;
   docket_no?: string | null;
+  tracking_url?: string | null;
   expected_delivery?: string | null;
   dispatched_at?: string | null;
   delivered_at?: string | null;
@@ -440,6 +441,13 @@ export interface TRInput {
   /** Written on the dispatch screen, when the pass is already in hand. The dispatch
    *  step overwrites it if a different one is quoted as the goods leave. */
   gate_pass_no?: string | null;
+  /** The tracking handles, when the desk already holds them at booking time — a
+   *  courier docket is written on the slip at the counter, and asking for it again
+   *  on a second screen is how it ends up typed nowhere. */
+  lr_no?: string | null;
+  docket_no?: string | null;
+  tracking_url?: string | null;
+  eway_bill_no?: string | null;
   carrier_id?: number | null;
   vehicle_number?: string | null;
   driver_name?: string | null;
@@ -458,6 +466,11 @@ export interface DispatchInput extends TRInput {
   freight_amount?: number | null;
   carrier_ids?: number[];
   evaluation_method?: string | null;
+  /** Release it on the same press. On a settled mode the gate pass, the docket and
+   *  the driver are all on this form, so "confirm dispatch" IS the load leaving —
+   *  and leaving is what puts it in front of the receiving site to acknowledge.
+   *  Ignored on a tender: there is no carrier to leave with until it is awarded. */
+  release_now?: boolean;
 }
 
 // --------------------------------------------------------------------------- //
