@@ -12,7 +12,7 @@ import secrets
 from decimal import Decimal
 from types import SimpleNamespace
 
-from sqlalchemy import func, select, true
+from sqlalchemy import func, select, true, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1544,7 +1544,8 @@ async def ensure_mr_drafts(db: AsyncSession, user) -> int:
 
 
 async def list_requisitions(db: AsyncSession, params: PageParams,
-                            status: str | None = None, user=None) -> dict:
+                            status: str | None = None, search: str | None = None,
+                            user=None) -> dict:
     if user is not None:
         await ensure_mr_drafts(db, user)
     stmt = select(Requisition)
@@ -1553,6 +1554,14 @@ async def list_requisitions(db: AsyncSession, params: PageParams,
             db, user, owner_col=Requisition.created_by_id))
     if status:
         stmt = stmt.where(Requisition.status == status)
+    if search:
+        stmt = stmt.where(
+            or_(
+                Requisition.req_no.ilike(f"%{search}%"),
+                Requisition.project_name.ilike(f"%{search}%"),
+                Requisition.warehouse_name.ilike(f"%{search}%")
+            )
+        )
     return await _attach_pending_with(db, DocType.REQUISITION.value, await paginate(
         db, stmt.order_by(Requisition.created_at.desc()), params))
 
@@ -1824,12 +1833,21 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None) -> RFQ:
 
 
 async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = None,
-                    user=None) -> dict:
+                    search: str | None = None, user=None) -> dict:
     stmt = select(RFQ)
     if user is not None:
         stmt = stmt.where(await scope_condition(db, user, owner_col=RFQ.created_by_id))
     if status:
         stmt = stmt.where(RFQ.status == status)
+    if search:
+        stmt = stmt.where(
+            or_(
+                RFQ.rfq_no.ilike(f"%{search}%"),
+                RFQ.title.ilike(f"%{search}%"),
+                RFQ.project_name.ilike(f"%{search}%"),
+                RFQ.warehouse_name.ilike(f"%{search}%")
+            )
+        )
     return await _attach_pending_with(db, DocType.RFQ.value, await paginate(
         db, stmt.order_by(RFQ.created_at.desc()), params))
 
@@ -2044,12 +2062,20 @@ async def get_quotation(db: AsyncSession, quote_id: int) -> Quotation:
 
 async def list_quotations(db: AsyncSession, params: PageParams,
                           rfq_id: int | None = None,
-                          vendor_id: int | None = None) -> dict:
+                          vendor_id: int | None = None,
+                          search: str | None = None) -> dict:
     stmt = select(Quotation)
     if rfq_id is not None:
         stmt = stmt.where(Quotation.rfq_id == rfq_id)
     if vendor_id is not None:
         stmt = stmt.where(Quotation.vendor_id == vendor_id)
+    if search:
+        stmt = stmt.where(
+            or_(
+                Quotation.quotation_no.ilike(f"%{search}%"),
+                Quotation.vendor_name.ilike(f"%{search}%")
+            )
+        )
     return await paginate(db, stmt.order_by(Quotation.created_at.desc()), params)
 
 

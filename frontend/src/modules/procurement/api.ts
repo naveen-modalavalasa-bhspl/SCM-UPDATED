@@ -48,7 +48,7 @@ export const poApi = {
 };
 
 export const requisitionApi = {
-  list: (params: { status?: string; page?: number; size?: number } = {}) =>
+  list: (params: { status?: string; search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<ReqListRow>>("/api/requisitions", { params }).then((r) => r.data),
   get: (id: number) =>
     api.get<Requisition>(`/api/requisitions/${id}`).then((r) => r.data),
@@ -119,7 +119,7 @@ export const consolidationApi = {
 };
 
 export const rfqApi = {
-  list: (params: { status?: string; page?: number; size?: number } = {}) =>
+  list: (params: { status?: string; search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<RFQListRow>>("/api/rfqs", { params }).then((r) => r.data),
   get: (id: number) => api.get<RFQ>(`/api/rfqs/${id}`).then((r) => r.data),
   create: (data: RFQCreate) => api.post<RFQ>("/api/rfqs", data).then((r) => r.data),
@@ -146,7 +146,7 @@ export const rfqApi = {
       .then((r) => r.data),
   award: (id: number, quotation_id: number, comments = "") =>
     api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_id, comments }).then((r) => r.data),
-  quotations: (params: { rfq_id?: number; vendor_id?: number; page?: number; size?: number } = {}) =>
+  quotations: (params: { rfq_id?: number; vendor_id?: number; search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<QuoteListRow>>("/api/rfqs/quotations", { params }).then((r) => r.data),
   quotation: (id: number) =>
     api.get<Quotation>(`/api/rfqs/quotations/${id}`).then((r) => r.data),

@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Search } from "lucide-react";
 import {
   Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill,
-  type Column,
+  Input, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
 import type { RFQListRow } from "../types";
+import { useDebouncedValue } from "@/modules/inventory/hooks/useDebouncedValue";
 
 /** RFQStatus, as the backend enum spells it. */
 const STATUSES = [
@@ -25,11 +27,17 @@ const SIZE = 20;
 export function RFQListPage() {
   const nav = useNavigate();
   const [status, setStatus] = useState("");
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
   const [page, setPage] = useState(1);
 
+  useEffect(() => {
+    setPage(1);
+  }, [status, debouncedSearch]);
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ["rfqs", status, page],
-    queryFn: () => rfqApi.list({ status: status || undefined, page, size: SIZE }),
+    queryKey: ["rfqs", status, debouncedSearch, page],
+    queryFn: () => rfqApi.list({ status: status || undefined, search: debouncedSearch || undefined, page, size: SIZE }),
   });
 
   const rows = data?.items ?? [];
@@ -95,12 +103,23 @@ export function RFQListPage() {
         }
       />
 
-      <div className="mb-4 max-w-xs">
-        <Select
-          value={status}
-          options={STATUSES}
-          onChange={(value) => { setStatus(String(value)); setPage(1); }}
-        />
+      <div className="mb-4 flex max-w-2xl flex-col gap-4 sm:flex-row">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search RFQs, titles..."
+            className="pl-9"
+          />
+        </div>
+        <div className="w-full sm:w-64">
+          <Select
+            value={status}
+            options={STATUSES}
+            onChange={(value) => { setStatus(String(value)); }}
+          />
+        </div>
       </div>
 
       <ErrorBanner error={error} />

@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Search } from "lucide-react";
 import {
-  Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, type Column,
+  Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, Input, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
 import { money } from "./RequisitionListPage";
 import type { QuoteListRow } from "../types";
+import { useDebouncedValue } from "@/modules/inventory/hooks/useDebouncedValue";
 
 const SIZE = 20;
 
@@ -19,11 +21,17 @@ const SIZE = 20;
  */
 export function QuotationListPage() {
   const nav = useNavigate();
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
   const [page, setPage] = useState(1);
 
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ["quotations", page],
-    queryFn: () => rfqApi.quotations({ page, size: SIZE }),
+    queryKey: ["quotations", debouncedSearch, page],
+    queryFn: () => rfqApi.quotations({ search: debouncedSearch || undefined, page, size: SIZE }),
   });
 
   const rows = data?.items ?? [];
@@ -66,6 +74,18 @@ export function QuotationListPage() {
   return (
     <div>
       <PageHeader eyebrow="Procurement" title="Quotations" />
+
+      <div className="mb-4 max-w-sm">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search quotations, vendors..."
+            className="pl-9"
+          />
+        </div>
+      </div>
 
       <ErrorBanner error={error} />
 
