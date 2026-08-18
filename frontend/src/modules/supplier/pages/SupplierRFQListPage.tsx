@@ -8,7 +8,7 @@ import {
 import { fmtDate } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type { RFQListRow } from "@/modules/procurement/types";
-import { useDebouncedValue } from "@/modules/inventory/hooks/useDebouncedValue";
+import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 
 const SIZE = 20;
 

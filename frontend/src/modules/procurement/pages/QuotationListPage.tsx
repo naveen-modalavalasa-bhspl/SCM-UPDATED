@@ -9,7 +9,7 @@ import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
 import { money } from "./RequisitionListPage";
 import type { QuoteListRow } from "../types";
-import { useDebouncedValue } from "@/modules/inventory/hooks/useDebouncedValue";
+import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 
 const SIZE = 20;
 

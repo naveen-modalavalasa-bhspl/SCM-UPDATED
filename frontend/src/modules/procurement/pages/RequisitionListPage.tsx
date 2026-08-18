@@ -9,7 +9,7 @@ import {
 import { fmtDate } from "@/shared/datetime";
 import { requisitionApi } from "../api";
 import type { ReqListRow } from "../types";
-import { useDebouncedValue } from "@/modules/inventory/hooks/useDebouncedValue";
+import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 
 /** RequisitionStatus, as the backend enum spells it. */
 const STATUSES = [

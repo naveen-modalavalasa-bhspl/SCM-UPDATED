@@ -9,7 +9,7 @@ import {
 import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
 import type { RFQListRow } from "../types";
-import { useDebouncedValue } from "@/modules/inventory/hooks/useDebouncedValue";
+import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 
 /** RFQStatus, as the backend enum spells it. */
 const STATUSES = [
