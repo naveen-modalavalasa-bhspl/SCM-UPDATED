@@ -153,7 +153,7 @@ async def send_to_vendor(po_id: int, db: AsyncSession = Depends(get_db),
 
 @requisitions.get("", response_model=Page[ReqListRow])
 async def list_requisitions(params: PageParams = Depends(), status: str | None = None,
-                            search: str | None = None,
+                            search: str | None = None,  # Real-time search filter for requisition number, project, and warehouse
                             db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.REQUISITION_VIEW))):
     return await service.list_requisitions(db, params, status, search, user=user)
@@ -253,7 +253,7 @@ async def cancel_requisition(req_id: int, db: AsyncSession = Depends(get_db),
 
 @rfqs.get("", response_model=Page[RFQListRow])
 async def list_rfqs(params: PageParams = Depends(), status: str | None = None,
-                    search: str | None = None,
+                    search: str | None = None,  # Real-time search filter for RFQ number, title, project, and warehouse
                     db: AsyncSession = Depends(get_db),
                     user=Depends(require_permission(perms.RFQ_VIEW))):
     return await service.list_rfqs(db, params, status, search, user=user)
@@ -270,7 +270,7 @@ async def create_rfq(body: RFQCreate, db: AsyncSession = Depends(get_db),
 @rfqs.get("/quotations", response_model=Page[QuoteListRow])
 async def list_quotations(params: PageParams = Depends(), rfq_id: int | None = None,
                           vendor_id: int | None = None,
-                          search: str | None = None,
+                          search: str | None = None,  # Real-time search filter for quotation number and vendor name
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(perms.RFQ_COMPARE))):
     return await service.list_quotations(db, params, rfq_id, vendor_id, search)
@@ -444,7 +444,7 @@ async def vendor_change_password(body: VendorPasswordIn,
 
 @supplier.get("/rfqs", response_model=Page[RFQListRow])
 async def vendor_list_rfqs(params: PageParams = Depends(),
-                           search: str | None = None,
+                           search: str | None = None,  # Real-time search filter for RFQ number and title in supplier portal
                            db: AsyncSession = Depends(get_db),
                            account=Depends(get_current_vendor)):
     return await service.vendor_list_rfqs(db, account.vendor_id, params, search)
@@ -468,7 +468,7 @@ async def vendor_get_quotation(rfq_id: int, db: AsyncSession = Depends(get_db),
 
 @supplier.get("/pos", response_model=Page[VendorPOListRow])
 async def vendor_list_pos(params: PageParams = Depends(),
-                          search: str | None = None,
+                          search: str | None = None,  # Real-time search filter for PO number in supplier portal
                           db: AsyncSession = Depends(get_db),
                           account=Depends(get_current_vendor)):
     return await service.vendor_list_pos(db, account.vendor_id, params, search)

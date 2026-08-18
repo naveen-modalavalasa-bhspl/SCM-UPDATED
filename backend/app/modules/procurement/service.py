@@ -1554,6 +1554,9 @@ async def list_requisitions(db: AsyncSession, params: PageParams,
             db, user, owner_col=Requisition.created_by_id))
     if status:
         stmt = stmt.where(Requisition.status == status)
+    
+    # Apply real-time search filtering if a search query is provided.
+    # We search across requisition number, project name, and warehouse name.
     if search:
         stmt = stmt.where(
             or_(
@@ -1839,6 +1842,9 @@ async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = N
         stmt = stmt.where(await scope_condition(db, user, owner_col=RFQ.created_by_id))
     if status:
         stmt = stmt.where(RFQ.status == status)
+    
+    # Apply real-time search filtering if a search query is provided.
+    # We search across RFQ number, title, project name, and warehouse name.
     if search:
         stmt = stmt.where(
             or_(
@@ -2069,6 +2075,9 @@ async def list_quotations(db: AsyncSession, params: PageParams,
         stmt = stmt.where(Quotation.rfq_id == rfq_id)
     if vendor_id is not None:
         stmt = stmt.where(Quotation.vendor_id == vendor_id)
+        
+    # Apply real-time search filtering if a search query is provided.
+    # We search across quotation number and vendor name.
     if search:
         stmt = stmt.where(
             or_(
@@ -2456,6 +2465,9 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
         .join(RFQVendor, RFQVendor.rfq_id == RFQ.id)
         .where(RFQVendor.vendor_id == vendor_id, _vendor_visible())
     )
+    
+    # Apply real-time search filtering for the supplier portal if a search query is provided.
+    # We search across RFQ number and title.
     if search:
         stmt = stmt.where(
             or_(
@@ -2795,6 +2807,9 @@ async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams, 
     stmt = (select(PurchaseOrder)
             .where(PurchaseOrder.vendor_id == vendor_id,
                    PurchaseOrder.status.in_(_DESPATCHABLE)))
+                   
+    # Apply real-time search filtering for the supplier portal if a search query is provided.
+    # We search by Purchase Order number.
     if search:
         stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
     stmt = stmt.order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc())

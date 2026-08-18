@@ -26,9 +26,11 @@ const money = (value: number) => new Intl.NumberFormat(undefined, {
 export function SupplierPOListPage() {
   const nav = useNavigate();
   const [search, setSearch] = useState("");
+  // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
   const [page, setPage] = useState(1);
 
+  // Automatically reset to the first page whenever the search query changes
   useEffect(() => {
     setPage(1);
   }, [debouncedSearch]);

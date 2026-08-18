@@ -40,9 +40,11 @@ export function RequisitionListPage() {
   const nav = useNavigate();
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
+  // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
   const [page, setPage] = useState(1);
 
+  // Automatically reset to the first page whenever the search query or status filter changes
   useEffect(() => {
     setPage(1);
   }, [status, debouncedSearch]);
