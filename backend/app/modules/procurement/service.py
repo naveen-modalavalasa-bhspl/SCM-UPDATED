@@ -2450,13 +2450,20 @@ def _vendor_visible():
 
 
 async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
-                           params: PageParams) -> dict:
+                           params: PageParams, search: str | None = None) -> dict:
     stmt = (
         select(RFQ)
         .join(RFQVendor, RFQVendor.rfq_id == RFQ.id)
         .where(RFQVendor.vendor_id == vendor_id, _vendor_visible())
-        .order_by(RFQ.created_at.desc())
     )
+    if search:
+        stmt = stmt.where(
+            or_(
+                RFQ.rfq_no.ilike(f"%{search}%"),
+                RFQ.title.ilike(f"%{search}%")
+            )
+        )
+    stmt = stmt.order_by(RFQ.created_at.desc())
     return await paginate(db, stmt, params)
 
 
@@ -2783,12 +2790,14 @@ async def _despatched_by_po_item(db: AsyncSession, po_id: int) -> dict[int, Deci
     return {row[0]: _d(row[1]) for row in rows if row[0]}
 
 
-async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams) -> dict:
+async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams, search: str | None = None) -> dict:
     """The orders this vendor has been sent. Never anyone else's, never a draft."""
     stmt = (select(PurchaseOrder)
             .where(PurchaseOrder.vendor_id == vendor_id,
-                   PurchaseOrder.status.in_(_DESPATCHABLE))
-            .order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc()))
+                   PurchaseOrder.status.in_(_DESPATCHABLE)))
+    if search:
+        stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
+    stmt = stmt.order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc())
     page = await paginate(db, stmt, params)
     counts = dict((await db.execute(
         select(DespatchNote.po_id, func.count(DespatchNote.id))

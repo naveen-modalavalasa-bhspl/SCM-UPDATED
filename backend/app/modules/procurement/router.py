@@ -444,9 +444,10 @@ async def vendor_change_password(body: VendorPasswordIn,
 
 @supplier.get("/rfqs", response_model=Page[RFQListRow])
 async def vendor_list_rfqs(params: PageParams = Depends(),
+                           search: str | None = None,
                            db: AsyncSession = Depends(get_db),
                            account=Depends(get_current_vendor)):
-    return await service.vendor_list_rfqs(db, account.vendor_id, params)
+    return await service.vendor_list_rfqs(db, account.vendor_id, params, search)
 
 
 @supplier.get("/rfqs/{rfq_id}", response_model=RFQOut)
@@ -467,9 +468,10 @@ async def vendor_get_quotation(rfq_id: int, db: AsyncSession = Depends(get_db),
 
 @supplier.get("/pos", response_model=Page[VendorPOListRow])
 async def vendor_list_pos(params: PageParams = Depends(),
+                          search: str | None = None,
                           db: AsyncSession = Depends(get_db),
                           account=Depends(get_current_vendor)):
-    return await service.vendor_list_pos(db, account.vendor_id, params)
+    return await service.vendor_list_pos(db, account.vendor_id, params, search)
 
 
 @supplier.get("/pos/{po_id}", response_model=VendorPOOut)

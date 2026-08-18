@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Search } from "lucide-react";
 import {
-  Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, type Column,
+  Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, Input, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type { VendorPOListRow } from "@/modules/procurement/types";
+import { useDebouncedValue } from "@/modules/inventory/hooks/useDebouncedValue";
 
 const SIZE = 20;
 
@@ -23,11 +25,17 @@ const money = (value: number) => new Intl.NumberFormat(undefined, {
  */
 export function SupplierPOListPage() {
   const nav = useNavigate();
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
   const [page, setPage] = useState(1);
 
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ["supplier-pos", page],
-    queryFn: () => supplierApi.pos({ page, size: SIZE }),
+    queryKey: ["supplier-pos", debouncedSearch, page],
+    queryFn: () => supplierApi.pos({ search: debouncedSearch || undefined, page, size: SIZE }),
   });
 
   const columns: Column<VendorPOListRow>[] = [
@@ -71,6 +79,19 @@ export function SupplierPOListPage() {
       <p className="mb-4 text-sm text-muted">
         Tell us what you are sending before the vehicle leaves.
       </p>
+
+      <div className="mb-4 max-w-sm">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search orders..."
+            className="pl-9"
+          />
+        </div>
+      </div>
+
       <ErrorBanner error={error} />
       <Card className="p-2">
         <ResponsiveList

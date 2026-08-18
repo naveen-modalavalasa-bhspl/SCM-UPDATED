@@ -174,11 +174,11 @@ export const supplierApi = {
   me: () => api.get<VendorProfile>("/api/supplier/me").then((r) => r.data),
   changePassword: (current_password: string, new_password: string) =>
     api.post("/api/supplier/change-password", { current_password, new_password }),
-  rfqs: (params: { page?: number; size?: number } = {}) =>
+  rfqs: (params: { search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<RFQListRow>>("/api/supplier/rfqs", { params }).then((r) => r.data),
   rfq: (id: number) => api.get<RFQ>(`/api/supplier/rfqs/${id}`).then((r) => r.data),
   /* --- orders, and what the vendor says they have sent against them --- */
-  pos: (params: { page?: number; size?: number } = {}) =>
+  pos: (params: { search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<VendorPOListRow>>("/api/supplier/pos", { params }).then((r) => r.data),
   po: (id: number) => api.get<VendorPO>(`/api/supplier/pos/${id}`).then((r) => r.data),
   /** Accept the order, or decline it with a reason. Nothing may be despatched against
