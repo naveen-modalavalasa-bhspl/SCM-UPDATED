@@ -4,9 +4,9 @@ import type { GRN, GRNCreate, GRNListRow, Issue, MovementRow, StockRow } from ".
 import type {
   CarrierOption, CarrierQuote, Comparison, Consignment, ConsignmentDetail,
   ConsignmentLink, DispatchInput, EvaluationMethod, FlowStage, LogisticsVendor,
-  LogisticsVendorInput, LogisticsVendorSummary, ModeRule, PartnerType,
-  ProviderBoardRow, ShipmentEvent, TransportRequest, TransportSummary, TRInput,
-  TRListRow,
+  LogisticsVendorInput, LogisticsVendorSummary, ModeRule, ModeSuggestion,
+  PartnerType, ProviderBoardRow, RaiserTracking, ShipmentEvent, TransportRequest,
+  TransportSummary, TRInput, TRListRow,
 } from "./transportTypes";
 
 export const grnApi = {
@@ -42,6 +42,13 @@ export const transportApi = {
   modes: () => api.get<ModeRule[]>("/api/transport/modes").then((r) => r.data),
   evaluationMethods: () =>
     api.get<EvaluationMethod[]>("/api/transport/evaluation-methods").then((r) => r.data),
+  /** Which mode SUITS this load (doc E3). Advice, not a decision — the thresholds are
+   * a business rule and they live in the backend, so there is one copy of them. */
+  suggestMode: (params: {
+    distance_km?: number | null; weight_kg?: number | null; packages?: number | null;
+  }) =>
+    api.get<ModeSuggestion | null>("/api/transport/suggest-mode", { params })
+      .then((r) => r.data),
   /** The stepper for this mode. Served, never hardcoded — see FlowStage. */
   flow: (mode?: string) =>
     api.get<FlowStage[]>("/api/transport/flow", { params: { mode } })
@@ -63,8 +70,17 @@ export const transportApi = {
   list: (params: {
     status?: string; mode?: string; carrier_id?: number; indent_id?: number;
     dispatch_id?: number; search?: string; page?: number; size?: number;
+    /** CONSIGNMENT / ISSUE for the outward leg, RETURN for the way back (doc E7). */
+    source_type?: string;
   } = {}) =>
     api.get<Paginated<TRListRow>>("/api/transport", { params }).then((r) => r.data),
+
+  /** "Where is my material?" — the legs carrying an indent, readable by the person
+   * who RAISED that indent rather than by the logistics desk. Authorised by
+   * ownership, so an indent screen can call it with no transport permission. */
+  forIndent: (indentId: number) =>
+    api.get<RaiserTracking[]>(`/api/transport/for-indent/${indentId}`)
+      .then((r) => r.data),
 
   /** Provider Selection's board: everything still waiting on "who is taking this",
    * with the reply counts and the best price on the table beside each row. */
@@ -192,6 +208,37 @@ export const transportApi = {
   resolveException: (eventId: number, resolution: string) =>
     api.post<ShipmentEvent>(`/api/transport/events/${eventId}/resolve`, { resolution })
       .then((r) => r.data),
+};
+
+// --------------------------------------------------------------------------- //
+//  Indents — READ ONLY, for the "against indent" picker
+// --------------------------------------------------------------------------- //
+// A transport leg points BACKWARD at the indent that asked for the material, and that
+// pointer is a number somebody used to type from memory. Typing it is how a leg ends
+// up against an indent that does not exist, which breaks the raiser's own tracking
+// (`/api/transport/for-indent/{id}`) silently — nothing errors, the material simply
+// never appears on the screen of the person waiting for it.
+//
+// `/api/indents` is guarded by `indent.view`, which a logistics job profile may not
+// hold. So this RESOLVES TO AN EMPTY LIST rather than throwing: the form falls back to
+// a plain text box, exactly as it behaved before. A picker the desk cannot load must
+// not be a picker that stops the desk working.
+
+export interface IndentOption {
+  id: number;
+  indent_no: string;
+  status: string;
+  department_name?: string | null;
+  requested_by_name?: string | null;
+}
+
+export const indentLookupApi = {
+  options: (search?: string) =>
+    api.get<Paginated<IndentOption>>("/api/indents", {
+      params: { search: search?.trim() || undefined, size: 50 },
+    })
+      .then((r) => r.data.items)
+      .catch(() => [] as IndentOption[]),
 };
 
 // --------------------------------------------------------------------------- //

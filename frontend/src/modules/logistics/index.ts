@@ -37,9 +37,11 @@ export { AcknowledgementsPage } from "./pages/AcknowledgementsPage";
 export { LogisticsExceptionsPage } from "./pages/LogisticsExceptionsPage";
 
 /** The register behind the Dispatch dropdown: the third-party providers we ship with
- *  and the portal logins they answer with. Mounted under Settings — issuing an
- *  identity outside the company is an administrator's act — but owned here, because
- *  a partner is only ever a logistics concept. */
+ *  and the portal logins they answer with. Lives in the Logistics tabs
+ *  (`/logistics/vendors`) beside the screen that reads it, and keeps its ADMIN-only
+ *  page grant — issuing an identity outside the company is an administrator's act,
+ *  whichever menu it hangs from. The old `/settings/logistics-vendors` path still
+ *  resolves to this same screen. */
 export { LogisticsVendorsPage } from "./pages/LogisticsVendorsPage";
 
 export { CarrierLayout } from "./portal/CarrierLayout";
