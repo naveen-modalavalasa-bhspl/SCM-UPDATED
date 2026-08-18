@@ -2118,9 +2118,12 @@ def _comparison_grid(rfq: RFQ, quotes) -> list[dict]:
                 continue
             cells.append({"quotation_id": quote.id, "vendor_id": quote.vendor_id,
                           "vendor_name": quote.vendor_name, **_line_breakup(line)})
-        best = min(cells, key=lambda cell: cell["line_total"], default=None)
+        def _unit_cost(c):
+            return c["line_total"] / c["quantity"] if c["quantity"] else c["line_total"]
+
+        best = min(cells, key=_unit_cost, default=None)
         for cell in cells:
-            cell["is_best"] = best is not None and cell["line_total"] == best["line_total"]
+            cell["is_best"] = best is not None and _unit_cost(cell) == _unit_cost(best)
         rows.append({
             "rfq_item_id": item.id,
             "item_id": item.item_id,
@@ -2162,16 +2165,37 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
         .order_by(Quotation.grand_total.asc())
     )).scalars().all()
 
-    ranked = evaluation.rank([
-        evaluation.Candidate(
-            ref=quote.id,
-            # `sub_total` is the headline the vendor named; `grand_total` is that plus
-            # discount, tax and freight — which is exactly the landed/price split.
-            price=_d(quote.sub_total) or _d(quote.grand_total),
-            landed_cost=_d(quote.grand_total),
-            lead_days=quote.delivery_days,
-        ) for quote in quotes
-    ], chosen)
+    candidates = []
+    for quote in quotes:
+        normalized_price = Decimal("0")
+        normalized_landed_cost = Decimal("0")
+        for item in rfq.items:
+            line = next(
+                (l for l in quote.items
+                 if (l.rfq_item_id and l.rfq_item_id == item.id)
+                 or (not l.rfq_item_id and l.item_id == item.item_id)),
+                None,
+            )
+            if line and _d(line.quantity) > 0:
+                breakup = _line_breakup(line)
+                unit_price = Decimal(str(breakup["taxable_amount"])) / _d(line.quantity)
+                unit_landed = Decimal(str(breakup["line_total"])) / _d(line.quantity)
+                normalized_price += unit_price * _d(item.quantity)
+                normalized_landed_cost += unit_landed * _d(item.quantity)
+        
+        # Add freight only once, as it is a document-level charge
+        normalized_landed_cost += _d(quote.freight_amount)
+
+        candidates.append(
+            evaluation.Candidate(
+                ref=quote.id,
+                price=normalized_price or _d(quote.sub_total) or _d(quote.grand_total),
+                landed_cost=normalized_landed_cost or _d(quote.grand_total),
+                lead_days=quote.delivery_days,
+            )
+        )
+
+    ranked = evaluation.rank(candidates, chosen)
 
     by_id = {quote.id: quote for quote in quotes}
     placed = set()
