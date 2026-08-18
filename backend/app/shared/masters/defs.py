@@ -16,7 +16,8 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
 from app.shared.enums import (
-    AttributeDataType, BinType, CategoryTagType, UomClass, WarehouseType,
+    CARRIER_VENDOR_TYPES, AttributeDataType, BinType, CategoryTagType, UomClass,
+    WarehouseType,
 )
 from app.shared.masters.crud import MasterDef
 from app.shared.models.master import (
@@ -634,6 +635,23 @@ class VendorIn(BaseModel):
     is_approved: bool = False
     is_blacklisted: bool = False
     is_active: bool = True
+
+
+def vendor_kind_filter(request, stmt):
+    """`?kind=MATERIAL` / `?kind=CARRIER` on the vendor list.
+
+    One master holds both a bandage supplier and a courier — that is on purpose, a
+    carrier IS a vendor — but a picker only ever means one of them. Procurement's RFQ,
+    PO and supplier-account screens were offering the logistics partners alongside the
+    material suppliers, so an RFQ could be sent to a truck operator for gauze. Left off,
+    the list is unchanged: the masters screen still manages every row.
+    """
+    kind = (request.query_params.get("kind") or "").strip().upper()
+    if not kind:
+        return stmt
+    carriers = func.upper(func.coalesce(Vendor.vendor_type, "MATERIAL")).in_(
+        CARRIER_VENDOR_TYPES)
+    return stmt.where(carriers if kind == "CARRIER" else ~carriers)
 
 
 def vendor_out(v: Vendor) -> dict:
@@ -1645,6 +1663,7 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="vendors", name="Vendor", model=Vendor, schema=VendorIn,
               manage_perm=perms.MASTER_VENDOR_MANAGE, serialize=vendor_out,
               search_cols=("name", "code"), default_active_only=True,
+              filters=("vendor_type",), list_filter=vendor_kind_filter,
               usage=VENDOR_USAGE),
 
     # No is_active column on the live table, so this master cannot be deactivated;

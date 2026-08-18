@@ -549,7 +549,7 @@ export function StockBalanceView() {
         {summary?.reorder_configured !== false && (
           <FilterToggle active={belowReorder} onChange={setBelowReorder}>Below reorder</FilterToggle>
         )}
-        <FilterToggle active={includeZero} onChange={setIncludeZero}>Include zero stock</FilterToggle>
+        <FilterToggle active={includeZero} onChange={setIncludeZero}>Include zero / fully reserved</FilterToggle>
       </FilterBar>
 
       <Card className="p-2">

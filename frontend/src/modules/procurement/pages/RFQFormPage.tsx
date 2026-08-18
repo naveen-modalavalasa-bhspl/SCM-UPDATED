@@ -65,8 +65,11 @@ export function RFQFormPage() {
   const { data: vendors = [] } = useQuery({
     queryKey: ["rfq-vendors", vendorSearch],
     queryFn: () =>
+      // Material suppliers only: the logistics partners share this master, and an
+      // RFQ sent to a truck operator for gauze is a tender nobody can answer.
       api.get<{ items: MasterVendor[] }>("/api/vendors", {
-        params: { search: vendorSearch || undefined, size: 50, is_active: true },
+        params: { search: vendorSearch || undefined, size: 50, is_active: true,
+                  kind: "MATERIAL" },
       }).then((r) => r.data.items),
   });
 
@@ -242,13 +245,19 @@ export function RFQFormPage() {
         </div>
 
         <div>
-          <h2 className="mb-3 text-sm font-semibold text-ink">What is being asked for</h2>
+          <h2 className="mb-3 text-sm font-semibold text-ink">
+            What is being asked for
+            <span aria-hidden="true" className="ml-0.5 text-danger">*</span>
+            <span className="sr-only"> (required)</span>
+          </h2>
           <LinePicker lines={lines} onChange={setLines} />
         </div>
 
         <div>
           <h2 className="mb-1 text-sm font-semibold text-ink">
             Who to ask
+            <span aria-hidden="true" className="ml-0.5 text-danger">*</span>
+            <span className="sr-only"> (required)</span>
             <span className="ml-2 text-xs font-normal text-muted">
               {vendorIds.length} selected
             </span>

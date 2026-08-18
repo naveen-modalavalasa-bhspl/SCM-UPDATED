@@ -1183,11 +1183,29 @@ async def list_indents(
             .correlate(IndentItem)
             .scalar_subquery()
         )
+        # A shortage already handed to procurement is not fulfilment work either. The
+        # allocation that gave nothing is APPROVED — deliberately left visible above so
+        # the rung ABOVE can still serve what it did not cover — but once that remainder
+        # has become a live material request, nobody in inventory can act on it and the
+        # row only invites an allocation the backend will refuse. Counted like
+        # `committed`, so a partly-ordered line still shows what is genuinely owed.
+        on_order = (
+            select(func.coalesce(func.sum(MaterialRequestItem.quantity), 0))
+            .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+            .where(
+                MaterialRequestItem.indent_item_id == IndentItem.id,
+                MaterialRequest.status.notin_([
+                    MRStatus.REJECTED.value, MRStatus.CANCELLED.value,
+                ]),
+            )
+            .correlate(IndentItem)
+            .scalar_subquery()
+        )
         stmt = stmt.where(exists(
             select(IndentItem.id).where(
                 IndentItem.indent_id == Indent.id,
                 IndentItem.approved_quantity
-                > IndentItem.allocated_quantity + committed,
+                > IndentItem.allocated_quantity + committed + on_order,
             ).correlate(Indent)
         ))
         # Quantity alone cannot express "already claimed, nothing given". An allocation

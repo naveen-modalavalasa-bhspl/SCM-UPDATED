@@ -86,10 +86,11 @@ export function FulfillmentQueuePage() {
   // look up what had been fulfilled — or what was rejected on the way. Owed stays the
   // default, because that is the work; "Everything" drops the filter and lets the
   // Status select beside it narrow to any indent state.
-  // Everything by default. "Still owed" is the work, but a queue that hides what was
-  // just settled reads as data loss to the person who settled it — the narrowing is
-  // one choice away and the count stays honest either way.
-  const [view, setView] = useState("ALL");
+  // Still owed by default. "Everything" is one choice away and the count stays honest
+  // either way, but defaulting to it put every indent an approver had already served —
+  // and every shortage already sent to procurement — back in front of the desk that
+  // had just cleared it, which reads as "nothing I did stuck".
+  const [view, setView] = useState("OWED");
 
   const queue = useQuery({
     queryKey: ["fulfillment-queue", view],
@@ -301,12 +302,12 @@ export function FulfillmentQueuePage() {
           setPriorityFilter("");
           setDeptFilter("");
           setStatusFilter("");
-          setView("ALL");
+          setView("OWED");
           setPage(1);
         }}
         active={(search ? 1 : 0) + (priorityFilter ? 1 : 0) + (deptFilter ? 1 : 0)
           + (statusFilter ? 1 : 0) + (showDoneCycles ? 1 : 0)
-          + (view === "ALL" ? 0 : 1)}
+          + (view === "OWED" ? 0 : 1)}
       >
         <FilterSelect
           value={view}

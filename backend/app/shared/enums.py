@@ -625,3 +625,11 @@ class ScopeRung(str, Enum):
     SUBTREE = "SUBTREE"      # own position and everything reporting under it
     PROJECT = "PROJECT"      # own hcm_employees.project_id
     ALL = "ALL"              # the whole network
+
+
+#: The `mst_vendors.vendor_type` values that mark a row as a transport provider
+#: rather than a material supplier. Lives here, not in logistics, because the vendor
+#: master has to be able to leave carriers out of procurement's pickers — an RFQ that
+#: offers a courier alongside three bandage suppliers invites a tender nobody can fill
+#: — and shared may not import a module (rule 5). `logistics.enums` re-exports it.
+CARRIER_VENDOR_TYPES = ("TRANSPORT", "LOGISTICS", "COURIER")

@@ -34,6 +34,8 @@ from app.modules.procurement.schemas import (
 )
 from app.modules.procurement import consolidation
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
+from app.platform.rbac import permissions as perms
+from app.platform.rbac.service import get_user_permissions
 from app.platform.settings.service import get_setting, write_audit
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance as WorkflowInstance
@@ -1482,8 +1484,54 @@ async def get_requisition(db: AsyncSession, req_id: int, user=None) -> Requisiti
     return req
 
 
+async def ensure_mr_drafts(db: AsyncSession, user) -> int:
+    """Give every approved, unclaimed material request a DRAFT requisition.
+
+    §3.3 step 2-3 says Purchase picks the approved MR up; until now "picks up" meant
+    remembering that the demand exists, walking to a second screen and consolidating it
+    by hand. A buyer who opened the requisition list saw their own material requests
+    sitting there with nothing to press, because the only thing that turned one into a
+    requisition was a button on another page. The draft is now waiting for them: fill
+    in the stocking point and the estimated rates, then submit it up the ladder like
+    any other requisition.
+
+    Lazy rather than a hook on MR approval: inventory sits BEFORE procurement in the
+    import chain (rule 5) and may not reach forward to raise this document. Idempotent
+    — `create_requisition_from_mr` refuses an MR that already has a live requisition,
+    which is exactly the guard this needs, and `_consolidated_mr_ids` keeps the
+    consolidated route's MRs out too.
+
+    One bad MR never blocks the list: a request whose lines are all already ordered is
+    logged and skipped, and the buyer still gets their screen.
+    """
+    # Reading the list needs REQUISITION_VIEW; raising a document needs
+    # REQUISITION_CREATE (rule 6). An auditor who may only look must not leave a trail
+    # of drafts behind them just by opening the screen.
+    if perms.REQUISITION_CREATE not in await get_user_permissions(db, user):
+        return 0
+    claimed = await _consolidated_mr_ids(db)
+    stmt = select(MaterialRequest.id).where(
+        MaterialRequest.status == MRStatus.APPROVED.value)
+    if claimed:
+        stmt = stmt.where(MaterialRequest.id.notin_(claimed))
+    made = 0
+    for mr_id in (await db.execute(stmt)).scalars().all():
+        try:
+            await create_requisition_from_mr(db, mr_id, user)
+            made += 1
+        except (ValidationError, NotFoundError) as exc:
+            await db.rollback()
+            logger.info("no draft requisition for MR %s: %s", mr_id, exc)
+    if made:
+        logger.info("raised %d draft requisition(s) from approved material requests",
+                    made)
+    return made
+
+
 async def list_requisitions(db: AsyncSession, params: PageParams,
                             status: str | None = None, user=None) -> dict:
+    if user is not None:
+        await ensure_mr_drafts(db, user)
     stmt = select(Requisition)
     if user is not None:
         stmt = stmt.where(await scope_condition(

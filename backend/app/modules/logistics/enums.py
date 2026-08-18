@@ -10,6 +10,8 @@ what each mode must carry and how far through the flow it goes.
 """
 from enum import Enum
 
+from app.shared.enums import CARRIER_VENDOR_TYPES
+
 
 class TransportMode(str, Enum):
     """How the consignment actually travels."""
@@ -170,8 +172,10 @@ def mode_rule(mode: str) -> ModeRule:
 
 #: The vendor_type on `mst_vendors` that marks a row as a transport provider. A
 #: carrier is a vendor — same master, same portal login, same rate history — so
-#: nothing here creates a second supplier table.
-CARRIER_VENDOR_TYPES = ("TRANSPORT", "LOGISTICS", "COURIER")
+#: nothing here creates a second supplier table. Defined in shared/enums.py and
+#: re-exported here: the vendor master itself has to know which rows are carriers so
+#: procurement's pickers can leave them out, and shared may not import a module.
+CARRIER_VENDOR_TYPES = CARRIER_VENDOR_TYPES  # noqa: PLW0127 - re-export
 
 
 # --------------------------------------------------------------------------- #

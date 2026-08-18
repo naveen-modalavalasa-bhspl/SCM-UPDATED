@@ -84,6 +84,11 @@ class MasterDef:
     # Optional guard for masters whose active rows form an ordered structure. Item
     # packaging, for example, may remove only its highest level.
     before_deactivate: Callable | None = None
+    # Sync hook that narrows the LIST from the query string, for a master whose
+    # dropdown means different rows to different callers. Declared per master rather
+    # than branched on `path` in the generic handler. Takes (request, stmt) and
+    # returns a statement.
+    list_filter: Callable | None = None
     # Where this master is referenced, as (label, table, column). Declared as plain
     # strings rather than models because most referents live in app.modules, and
     # shared may not import a module (rule 5). Powers GET {base}/{id}/usage, so the
@@ -201,6 +206,8 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
             raw = request.query_params.get(column)
             if raw not in (None, ""):
                 stmt = stmt.where(getattr(defn.model, column) == raw)
+        if defn.list_filter is not None:
+            stmt = defn.list_filter(request, stmt)
         if search:
             clause = _search_clause(defn, search)
             if clause is not None:
