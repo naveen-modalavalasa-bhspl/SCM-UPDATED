@@ -154,20 +154,41 @@ PAGES: list[PageDef] = [
             parent="grp_logistics", module="logistics", sort_order=4),
     PageDef("logistics_tracking", "/logistics/tracking", "Shipment Tracking",
             parent="grp_logistics", module="logistics", sort_order=5),
-    PageDef("logistics_acknowledgements", "/logistics/acknowledgements",
-            "Acknowledgements", parent="grp_logistics", module="logistics",
-            sort_order=6),
-    PageDef("logistics_exceptions", "/logistics/exceptions", "Exceptions",
-            parent="grp_logistics", module="logistics", sort_order=7),
+    # Acknowledgements and Exceptions are NOT listed here any more, and that is
+    # deliberate rather than an omission.
+    #
+    # Signing for what arrived is the INDENT RAISER's act — they asked for the material,
+    # so they are the only person who can say what turned up — and that screen lives
+    # under Indents. A claim their signature raises stays on the shipment timeline,
+    # which Shipment Tracking draws, so nothing is lost: only the second desk reading it
+    # is gone.
+    #
+    # Dropping the rows from this catalogue keeps a NEW database clean. It cannot clear
+    # an existing one: `sync_pages` inserts and refreshes but never deletes, and never
+    # forces `is_active` either way, precisely so an admin who retired a screen does not
+    # get it back on the next restart. On a database that already has these two rows, an
+    # admin deactivates them on the RBAC screen; until they do, the paths redirect to
+    # Shipment Tracking rather than dead-ending.
     # The register behind the Dispatch dropdown: the third-party providers (Amazon,
-    # Flipkart, Alibaba, Misaba, a truck operator) and their portal logins. Under
-    # Settings beside Supplier & Carrier Logins for the same reason that one is —
-    # issuing a partner a way in is an administrator's act, not a dispatcher's — and
-    # NOT under Logistics, where it would become the module's front door on any
-    # profile that holds it and no other logistics page.
-    PageDef("settings_logistics_vendors", "/settings/logistics-vendors",
-            "Logistics Vendors", parent="grp_settings", module="logistics",
-            icon="truck", sort_order=105),
+    # Flipkart, Alibaba, Misaba, a truck operator) and their portal logins. It now sits
+    # in the LOGISTICS tabs, beside the Dispatch screen whose dropdown it fills — a
+    # dispatcher who finds no provider in that list is one click from the register that
+    # feeds it, instead of being sent to Settings and back.
+    #
+    # The page CODE is deliberately unchanged. `page.settings_logistics_vendors.view` is
+    # what carries the Admin-only grant, and issuing a login outside the company is
+    # still an administrator's act whichever menu it hangs from — renaming the code
+    # would mint a fresh permission and silently drop whoever already holds this one.
+    # `sync_pages` refreshes path, parent and order for a code it already knows, so
+    # moving the row is these three fields and nothing else.
+    #
+    # sort_order 8 keeps it LAST among the logistics children. The left rail sends a
+    # module to its first child, so a low order here would make the vendor register the
+    # front door of Logistics for anyone holding it, which is exactly what putting it
+    # under Settings was avoiding.
+    PageDef("settings_logistics_vendors", "/logistics/vendors",
+            "Logistics Vendors", parent="grp_logistics", module="logistics",
+            icon="truck", sort_order=8),
 ]
 
 

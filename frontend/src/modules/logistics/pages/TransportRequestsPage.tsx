@@ -22,6 +22,19 @@ const MODES = [
   { value: "THIRD_PARTY", label: "Third-party" },
 ];
 
+/** Which WAY the leg runs, filtered on `source_type` (doc E7).
+ *
+ *  One equality each, which is why there is no single "outward" option: outward is
+ *  CONSIGNMENT *or* ISSUE, and the register filter is one column compared to one
+ *  value. Offering "Outward" here would mean either a second backend filter or a
+ *  screen that quietly drops issue legs out of its own list. */
+const DIRECTIONS = [
+  { value: "", label: "Everything" },
+  { value: "CONSIGNMENT", label: "Out — consignments" },
+  { value: "ISSUE", label: "Out — issues" },
+  { value: "RETURN", label: "Returns from the field" },
+];
+
 /** The board across the top: one tile per queue, and pressing it filters the list.
  *  The order is the order the flow runs, so the board reads left to right as the
  *  journey a consignment takes. */
@@ -50,8 +63,13 @@ export function TransportRequestsPage() {
   const nav = useNavigate();
   const [status, setStatus] = useState("");
   const [mode, setMode] = useState("");
+  // Which way the legs in this list run. A return is the same document backwards, so
+  // it belongs in this register rather than in a second one — but "show me only the
+  // returns" is a real question, so it is a filter.
+  const [direction, setDirection] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const onlyReturns = direction === "RETURN";
 
   const { data: summary } = useQuery({
     queryKey: ["transport-summary"],
@@ -59,10 +77,11 @@ export function TransportRequestsPage() {
   });
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["transport", status, mode, search, page],
+    queryKey: ["transport", status, mode, direction, search, page],
     queryFn: () => transportApi.list({
       status: status || undefined,
       mode: mode || undefined,
+      source_type: direction || undefined,
       search: search.trim() || undefined,
       page, size: SIZE,
     }),
@@ -156,11 +175,22 @@ export function TransportRequestsPage() {
     <div>
       <PageHeader
         eyebrow="Logistics"
-        title="Transport Requests"
+        title={onlyReturns ? "Return legs" : "Transport Requests"}
         actions={
           <Can do="transport.create">
             <Button variant="ghost" onClick={() => nav("/logistics/consignments")}>
               From a consignment
+            </Button>
+            {/* The trip BACK, raised on its own rather than hidden behind a tickbox
+                inside the outward form. A return is planned, priced, tracked and
+                closed exactly like an outward leg (doc E7), so it is the same document
+                and the same screens — but it starts from a different question, and a
+                desk arranging a collection from a site should be able to say so in one
+                press instead of finding a checkbox halfway down a form titled
+                "Where it goes". */}
+            <Button variant="ghost"
+              onClick={() => nav("/logistics/transport/new?direction=return")}>
+              Return leg
             </Button>
             <Button onClick={() => nav("/logistics/transport/new")}>
               New request
@@ -207,7 +237,7 @@ export function TransportRequestsPage() {
               ? `, and ${summary.untracked} shipment(s) the field has never been told about`
               : ""}.
           </p>
-          <Button variant="ghost" onClick={() => nav("/logistics/exceptions")}>
+          <Button variant="ghost" onClick={() => nav("/logistics/tracking")}>
             Open claims
           </Button>
         </Card>
@@ -226,6 +256,13 @@ export function TransportRequestsPage() {
             value={mode}
             options={MODES}
             onChange={(value) => { setMode(String(value)); setPage(1); }}
+          />
+        </div>
+        <div className="w-full max-w-[14rem]">
+          <Select
+            value={direction}
+            options={DIRECTIONS}
+            onChange={(value) => { setDirection(String(value)); setPage(1); }}
           />
         </div>
         <div className="w-full max-w-xs">
@@ -250,9 +287,11 @@ export function TransportRequestsPage() {
           totalPages={totalPages}
           onPageChange={setPage}
           empty={
-            status || mode || search
-              ? "No transport requests match that."
-              : "Nothing being moved yet. Start from a packed consignment."
+            onlyReturns && !status && !mode && !search
+              ? "No return legs yet. Raise one with “Return leg” when a site is sending material back."
+              : status || mode || direction || search
+                ? "No transport requests match that."
+                : "Nothing being moved yet. Start from a packed consignment."
           }
           renderCard={(r) => (
             <div className="space-y-1.5">

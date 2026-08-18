@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.modules.indents.models import Indent
 from app.modules.logistics.enums import (
     ACK_CLAIM_EVENT,
     AWAITING_ACK_STATUSES,
@@ -38,7 +39,9 @@ from app.modules.logistics.enums import (
     TransportMode,
     TransportStatus,
     flow_stages,
+    is_inbound,
     mode_rule,
+    suggest_mode,
 )
 from app.modules.logistics import hooks
 from app.modules.logistics.models import (
@@ -90,8 +93,13 @@ async def list_trs(db: AsyncSession, params: PageParams, status: str | None = No
                    indent_id: int | None = None,
                    search: str | None = None,
                    dispatch_id: int | None = None,
+                   source_type: str | None = None,
                    awaiting_ack: bool = False) -> dict:
     stmt = select(TransportRequest)
+    if source_type:
+        # The one filter that separates the outward leg from the return one (doc E7).
+        # Same register, same statuses, opposite direction.
+        stmt = stmt.where(TransportRequest.source_type == source_type.upper())
     if status:
         # Comma-separated so one screen can ask for the two statuses that make up its
         # queue without two round trips.
@@ -144,6 +152,19 @@ def mode_catalogue() -> list[dict]:
 def evaluation_methods() -> list[dict]:
     """The same four the RFQ comparison offers — one catalogue, one arithmetic."""
     return evaluation.describe()
+
+
+def mode_suggestion(distance_km: float | None = None,
+                    weight_kg: float | None = None,
+                    packages: int | None = None) -> dict | None:
+    """"Based on distance, weight, items" (doc E3), answered before the desk picks.
+
+    Advice, never a decision: the service validates whatever mode is chosen and this
+    changes none of it. Served rather than computed in the screen for the same reason
+    `mode_catalogue` is — the thresholds are a business rule, and a rule the frontend
+    keeps its own copy of is a rule with two values.
+    """
+    return suggest_mode(distance_km, weight_kg, packages)
 
 
 def flow_catalogue(mode: str | None = None) -> list[dict]:
@@ -240,6 +261,102 @@ PROVIDER_BOARD_STATUSES = (
     TransportStatus.AWAITING_CARRIER.value,
     TransportStatus.READY.value,
 )
+
+
+def _raiser_view(doc: TransportRequest) -> dict:
+    """What a raiser is shown about the leg carrying their indent.
+
+    Deliberately short: it is "where is my material", not the transport register, and
+    the freight, the losing quotes and who awarded it are none of the field's business.
+    """
+    return {
+        "tr_id": doc.id, "tr_no": doc.tr_no,
+        "status": doc.status, "mode": doc.mode,
+        "consignment_no": doc.consignment_no,
+        "carrier_name": doc.carrier_name,
+        # The tracking handle and the carrier's own page, pasted by the desk at
+        # dispatch. A raiser who has the number does not need to be told it twice.
+        "lr_no": doc.lr_no, "docket_no": doc.docket_no,
+        "tracking_url": doc.tracking_url,
+        # No carrier to track on a hand-over or a company vehicle — the answer to
+        # "where is it" there is a person and a phone number.
+        "vehicle_number": doc.vehicle_number,
+        "driver_name": doc.driver_name, "driver_phone": doc.driver_phone,
+        "handed_over_by_name": doc.handed_over_by_name,
+        "expected_delivery": doc.expected_delivery,
+        "dispatched_at": doc.dispatched_at,
+        "delivered_at": doc.delivered_at,
+        "tracking_shared_at": doc.tracking_shared_at,
+        # Acknowledged already, and by whom. The raiser's own screen has to know
+        # whether it is still theirs to sign for, and this is the only field that says.
+        "acknowledged_at": doc.acknowledged_at,
+        "ack_condition": doc.ack_condition,
+        "events": [{
+            "event_type": e.event_type, "event_at": e.event_at,
+            "location_name": e.location_name, "description": e.description,
+            "is_exception": e.is_exception,
+        } for e in doc.events[-5:]],
+    }
+
+
+async def for_indent(db: AsyncSession, indent_id: int, user) -> list[dict]:
+    """"Where is my material?", answered for the person who asked for it.
+
+    The raiser of an indent holds `indent.view` and nothing of transport's, so this is
+    the one transport read that is authorised by OWNERSHIP rather than by a logistics
+    permission: you may see the leg carrying the indent you raised, and no other. Same
+    shape as the carrier portal, where the token's identity IS the authorisation.
+
+    Not gated on `tracking_shared_at`. That stamp records that the desk told the field;
+    a field asking where its material is, is exactly the case where nobody did.
+    """
+    indent = await db.get(Indent, indent_id)
+    if indent is None:
+        raise NotFoundError(f"Indent {indent_id} not found")
+    # Same message either way: telling a stranger that an indent exists but is not
+    # theirs is still telling them it exists.
+    if indent.requested_by_id != getattr(user, "id", None):
+        raise NotFoundError("That indent is not open to you")
+
+    rows = await db.execute(
+        select(TransportRequest)
+        .where(TransportRequest.indent_id == indent_id)
+        .order_by(TransportRequest.id.desc()))
+    return [_raiser_view(doc) for doc in rows.scalars().all()]
+
+
+async def _own_indent_leg(db: AsyncSession, tr_id: int, user) -> TransportRequest:
+    """One transport request, but only if the caller RAISED the indent it carries.
+
+    The other half of `for_indent`. Reading where your material is and signing for it
+    when it lands are the same person's business, so they are authorised the same way —
+    by ownership of the indent, not by a logistics permission the raiser never holds.
+    """
+    doc = await get_tr(db, tr_id)
+    if not doc.indent_id:
+        # Nothing to own. A leg with no indent behind it is the desk's alone.
+        raise NotFoundError("That consignment is not open to you")
+    indent = await db.get(Indent, doc.indent_id)
+    # Same message in all three cases: telling a stranger that a shipment exists but is
+    # not theirs is still telling them it exists.
+    if indent is None or indent.requested_by_id != getattr(user, "id", None):
+        raise NotFoundError("That consignment is not open to you")
+    return doc
+
+
+async def acknowledge_as_raiser(db: AsyncSession, tr_id: int, data,
+                                user) -> TransportRequest:
+    """The indent's raiser signs for what reached them (doc A6/E8).
+
+    The same transition as `acknowledge_tr` and deliberately the same function beneath
+    it — a signature is a signature, and a second copy of "the site accepted it" is how
+    the two start disagreeing about SHORT and DAMAGED. What differs is only who is
+    allowed to make it: this door is opened by having raised the indent, so the person
+    the material was for can close their own loop without being granted the logistics
+    desk's tracking and dispatch buttons alongside it.
+    """
+    await _own_indent_leg(db, tr_id, user)
+    return await acknowledge_tr(db, tr_id, data, user)
 
 
 async def provider_board(db: AsyncSession, params: PageParams,
@@ -440,6 +557,11 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         raise ValidationError(
             f"{data.mode!r} is not a transport mode. "
             f"Choose one of: {', '.join(MODE_RULES)}.")
+    # A return leg (doc E7) runs the other way, and the thing it must name is where it
+    # is going BACK to. An outward leg can be raised without one — the consignment
+    # carries the address — but nothing carries a return's destination for it.
+    if is_inbound(data.source_type) and not (data.to_location_name or "").strip():
+        raise ValidationError("Name the warehouse this return is coming back to")
 
     doc = TransportRequest(
         tr_no=await next_number(db, DocType.TRANSPORT_REQUEST.value.lower()),

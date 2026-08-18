@@ -223,12 +223,15 @@ from app.modules.logistics.transport import (  # noqa: E402
     dispatch_tr,
     evaluation_methods,
     flow_catalogue,
+    acknowledge_as_raiser,
     for_consignments,
+    for_indent,
     get_tr,
     history,
     invite_carriers,
     list_trs,
     mode_catalogue,
+    mode_suggestion,
     open_exceptions,
     provider_board,
     record_quote,
@@ -244,7 +247,8 @@ from app.modules.logistics.transport import (  # noqa: E402
 from app.modules.logistics.transport import summary as transport_summary  # noqa: E402
 
 __all__ = [
-    "accept_award", "accept_quote", "acknowledge_tr", "act_on_award", "act_on_tr",
+    "accept_award", "accept_quote", "acknowledge_as_raiser", "acknowledge_tr",
+    "act_on_award", "act_on_tr",
     "add_event", "ask_revised_quote", "award_carrier", "cancel_tr", "carrier_accept",
     "carrier_decline", "carrier_deliver", "carrier_get_request",
     "carrier_open_requests", "carrier_options", "carrier_quote", "carrier_summary",
@@ -252,8 +256,10 @@ __all__ = [
     "carrier_track", "close_tr", "comparison", "create_grn_from_po", "create_issue",
     "create_tr", "decline_award", "delete_tr", "deliver_tr", "dispatch_consignment",
     "dispatch_tr", "evaluation_methods", "flow_catalogue", "for_consignments",
+    "for_indent",
     "get_grn", "get_tr", "history", "invite_carriers", "issue_stock", "list_grn",
-    "list_issues", "list_trs", "mode_catalogue", "open_exceptions", "provider_board",
+    "list_issues", "list_trs", "mode_catalogue", "mode_suggestion", "open_exceptions",
+    "provider_board",
     "qc_fail", "qc_pass", "record_quote", "resolve_exception", "set_provider",
     "share_tracking", "submit_tr", "transport_summary", "update_tr",
 ]

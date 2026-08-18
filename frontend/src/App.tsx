@@ -84,8 +84,7 @@ import { PurchaseConsolidationDetailPage } from "@/modules/procurement/pages/Pur
 import {
   ConsignmentsScreen, ConsignmentFormScreen, DispatchPage, DispatchConfirmPage,
   TransportRequestsPage, TransportFormPage, TransportDetailPage, ProviderSelectionPage,
-  ShipmentTrackingPage, AcknowledgementsPage as LogisticsAcknowledgementsPage,
-  LogisticsExceptionsPage, LogisticsVendorsPage,
+  ShipmentTrackingPage, LogisticsVendorsPage,
   CarrierLayout, CarrierLoginPage, CarrierJobsPage, CarrierJobPage,
 } from "@/modules/logistics";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
@@ -269,8 +268,26 @@ function AppRoutes() {
         <Route path="logistics/transport/:id/edit" element={<TransportFormPage />} />
         <Route path="logistics/providers" element={<ProviderSelectionPage />} />
         <Route path="logistics/tracking" element={<ShipmentTrackingPage />} />
-        <Route path="logistics/acknowledgements" element={<LogisticsAcknowledgementsPage />} />
-        <Route path="logistics/exceptions" element={<LogisticsExceptionsPage />} />
+        {/* Retired from Logistics. Signing for what arrived is the indent RAISER's act,
+            and Indents already carries that screen — with the shipment leg on it, so
+            they can track it too. Claims raised by that signature stay on the shipment
+            timeline, which Shipment Tracking draws.
+
+            Redirects rather than deletions: `sync_pages` never removes a menu row, so an
+            existing database still lists these two until an admin deactivates them, and
+            a listed tab that renders nothing is worse than one that lands somewhere
+            real. */}
+        <Route path="logistics/acknowledgements"
+               element={<Navigate to="/indents/acknowledgements" replace />} />
+        <Route path="logistics/exceptions"
+               element={<Navigate to="/logistics/tracking" replace />} />
+        {/* The register behind the Dispatch dropdown, now in the Logistics tabs beside
+            the screen that reads it. Same component and the same Admin-only page grant
+            as before — issuing a login outside the company is an administrator's act
+            whichever menu it hangs from; only the menu row moved. The old
+            /settings/logistics-vendors path below still resolves, so existing links
+            and bookmarks keep working. */}
+        <Route path="logistics/vendors" element={<LogisticsVendorsPage />} />
         <Route path="grn/*" element={<WarehouseModule />} />
         <Route path="stock/*" element={<WarehouseModule />} />
         <Route path="issues/*" element={<WarehouseModule />} />

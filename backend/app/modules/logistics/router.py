@@ -95,6 +95,17 @@ async def transport_modes(user=Depends(require_permission(perms.TRANSPORT_VIEW))
     return service.mode_catalogue()
 
 
+# Which mode SUITS this load (doc E3). Advice only — whatever the desk picks is
+# validated by the same rules either way — but it is the backend's advice, so the
+# thresholds live in one place instead of being retyped into a screen.
+@transport_router.get("/suggest-mode", response_model=dict | None)
+async def transport_suggest_mode(
+        distance_km: float | None = None, weight_kg: float | None = None,
+        packages: int | None = None,
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return service.mode_suggestion(distance_km, weight_kg, packages)
+
+
 @transport_router.get("/evaluation-methods", response_model=list[dict])
 async def transport_evaluation_methods(
         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
@@ -124,6 +135,30 @@ async def transport_for_consignments(
         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     wanted = [int(part) for part in ids.split(",") if part.strip().isdigit()]
     return await service.for_consignments(db, wanted)
+
+
+# "Where is my material?" — for the person who raised the indent, not for the desk.
+# `indent.view` and not a transport code on purpose: a raiser holds no logistics
+# permission, and the real check is ownership, done in the service against the indent's
+# own requester. The desk's read of the same leg is GET /api/transport.
+@transport_router.get("/for-indent/{indent_id}", response_model=list[dict])
+async def transport_for_indent(
+        indent_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.INDENT_VIEW))):
+    return await service.for_indent(db, indent_id, user)
+
+
+# The raiser signing for their own material. Same transition as /acknowledge below and
+# the same function beneath it — what differs is only the door: this one is opened by
+# having RAISED the indent (checked in the service), so the person the material was for
+# can close their own loop without being handed the logistics desk's tracking and
+# dispatch buttons, which `transport.acknowledge` would bring with it.
+@transport_router.post("/{tr_id:int}/raiser-acknowledge", response_model=TROut)
+async def raiser_acknowledge_transport(
+        tr_id: int, body: AcknowledgeIn = AcknowledgeIn(),
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.INDENT_VIEW))):
+    return await service.acknowledge_as_raiser(db, tr_id, body, user)
 
 
 # Provider Selection's own board. A register rather than a filter on /api/transport:
@@ -164,10 +199,11 @@ async def list_transport(params: PageParams = Depends(), status: str | None = No
                          mode: str | None = None, carrier_id: int | None = None,
                          indent_id: int | None = None, search: str | None = None,
                          dispatch_id: int | None = None,
+                         source_type: str | None = None,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.list_trs(db, params, status, mode, carrier_id,
-                                  indent_id, search, dispatch_id)
+                                  indent_id, search, dispatch_id, source_type)
 
 
 @transport_router.post("", response_model=TROut)

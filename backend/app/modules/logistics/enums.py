@@ -30,6 +30,34 @@ class TransportMode(str, Enum):
     THIRD_PARTY = "THIRD_PARTY"
 
 
+class TransportSource(str, Enum):
+    """What the leg is carrying, which is also WHICH WAY it runs.
+
+    Outward legs are the whole of doc Phase E up to E6 and they all start at a
+    warehouse. E7 — "return items from field tracked, returned back to the warehouse" —
+    is the same document run backwards, and it is the source that says so: the trip
+    from a site to a warehouse is planned, priced, tracked and closed exactly like the
+    trip out, so it is one table and one flow rather than a second half-copy of both.
+    """
+    #: A packed warehouse consignment going out to the field (E1-E6).
+    CONSIGNMENT = "CONSIGNMENT"
+    #: A material issue going out.
+    ISSUE = "ISSUE"
+    #: Coming BACK: the field is sending material to a warehouse (E7). The return
+    #: DECISION is the returns module's; this is only the trip it needs to travel.
+    RETURN = "RETURN"
+
+
+#: Sources whose leg runs field -> warehouse rather than warehouse -> field. Read
+#: wherever a screen has to label the two ends, so "from" and "to" never have to be
+#: guessed from which columns happen to be filled.
+INBOUND_SOURCES = frozenset({TransportSource.RETURN.value})
+
+
+def is_inbound(source_type: str | None) -> bool:
+    return (source_type or "").upper() in INBOUND_SOURCES
+
+
 class TransportStatus(str, Enum):
     DRAFT = "DRAFT"
     PENDING_APPROVAL = "PENDING_APPROVAL"
@@ -170,6 +198,67 @@ def mode_rule(mode: str) -> ModeRule:
     return rule
 
 
+# --------------------------------------------------------------------------- #
+#  Which mode SUITS this load (doc E3)
+# --------------------------------------------------------------------------- #
+# "Logistics provider identified — based on distance, weight, items." The desk still
+# chooses; this only answers first, so the choice starts from the load rather than from
+# whatever the last dispatch used. Held as thresholds rather than as branches for the
+# same reason MODE_RULES is: the numbers are a business rule somebody will want to
+# change, and they must change in ONE place, not in a service and again in a screen.
+#
+# The numbers below are a starting position, not a policy anybody signed off:
+#   * 30 km — inside this a company vehicle can do the round trip and be back the same
+#     day, so hiring anybody is a cost with nothing bought.
+#   * 5 km / 10 kg — small enough and near enough that a person carries it.
+#   * 25 kg — a courier's parcel ceiling. Past it a courier is priced as freight, and
+#     freight is worth tendering.
+
+#: Distance under which the warehouse's own vehicle is the sensible leg.
+LOCAL_KM = 30
+#: A load a person can reasonably walk or ride over.
+HANDOVER_KM = 5
+HANDOVER_KG = 10
+#: The heaviest a courier will still treat as a parcel.
+PARCEL_KG = 25
+
+
+def suggest_mode(distance_km: float | None = None,
+                 weight_kg: float | None = None,
+                 packages: int | None = None) -> dict | None:
+    """The mode this load looks like, and WHY — or None when nothing is known.
+
+    Returning None rather than a default matters: a consignment whose distance and
+    weight were never captured has told us nothing, and advising THIRD_PARTY off no
+    evidence is worse than staying quiet, because a suggestion reads as an answer.
+    """
+    if distance_km is None and weight_kg is None:
+        return None
+
+    near = distance_km is not None and distance_km <= HANDOVER_KM
+    local = distance_km is not None and distance_km <= LOCAL_KM
+    light = weight_kg is not None and weight_kg <= HANDOVER_KG
+    parcel = weight_kg is not None and weight_kg <= PARCEL_KG
+    few = packages is None or packages <= 2
+
+    if near and light and few:
+        mode, why = (TransportMode.DIRECT.value,
+                     f"{distance_km:g} km and {weight_kg:g} kg — somebody can carry it")
+    elif local:
+        mode, why = (TransportMode.OWN_VEHICLE.value,
+                     f"{distance_km:g} km — inside {LOCAL_KM} km a company vehicle can "
+                     "do the round trip")
+    elif parcel:
+        mode, why = (TransportMode.COURIER.value,
+                     f"{weight_kg:g} kg — a courier still prices this as a parcel")
+    else:
+        mode, why = (TransportMode.THIRD_PARTY.value,
+                     "too heavy or too far to book at a published rate — worth asking "
+                     "several providers for a price")
+
+    return {"mode": mode, "label": MODE_RULES[mode].label, "reason": why}
+
+
 #: The vendor_type on `mst_vendors` that marks a row as a transport provider. A
 #: carrier is a vendor — same master, same portal login, same rate history — so
 #: nothing here creates a second supplier table. Defined in shared/enums.py and
@@ -195,8 +284,8 @@ class Stage:
 
 
 _PLAN = Stage(
-    "PLAN", "Plan",
-    "Pick the packed consignment and say how it travels.",
+    "PLAN", "Transport request",
+    "Items, quantity, weight and dimensions, taken off the packing list (E2).",
     (TransportStatus.DRAFT.value,),
 )
 _APPROVE = Stage(
@@ -205,33 +294,33 @@ _APPROVE = Stage(
     (TransportStatus.PENDING_APPROVAL.value,),
 )
 _TENDER = Stage(
-    "TENDER", "Quotes",
-    "Invite carriers, compare what they quoted and award the job.",
+    "TENDER", "Provider identified",
+    "Invite providers, compare what they quoted and award the job (E3).",
     (TransportStatus.QUOTING.value,),
 )
 _CONFIRM = Stage(
-    "CONFIRM", "Carrier confirms",
-    "The awarded carrier accepts the job in their portal.",
+    "CONFIRM", "Provider confirms",
+    "The awarded provider accepts the job in their portal.",
     (TransportStatus.AWAITING_CARRIER.value,),
 )
 _DISPATCH = Stage(
-    "DISPATCH", "Dispatch",
-    "Gate pass, LR / docket and e-way bill — then it leaves the yard.",
+    "DISPATCH", "Sent to provider",
+    "Gate pass, LR / docket and e-way bill — then it leaves the yard (E4).",
     (TransportStatus.READY.value,),
 )
 _TRANSIT = Stage(
-    "TRANSIT", "In transit",
-    "Scans, delays and damage, tracked to the destination.",
+    "TRANSIT", "Tracked to destination",
+    "Scans, delays and damage, tracked to the final destination (E5).",
     (TransportStatus.IN_TRANSIT.value,),
 )
 _DELIVERED = Stage(
     "DELIVERED", "Delivered",
-    "The carrier says it arrived and hands over the proof of delivery.",
+    "The provider says it arrived and hands over the proof of delivery.",
     (TransportStatus.DELIVERED.value,),
 )
 _ACK = Stage(
-    "ACKNOWLEDGE", "Acknowledged",
-    "The receiving site signs for it. Short or damaged raises a claim.",
+    "ACKNOWLEDGE", "Cycle closed",
+    "The indent's raiser signs for what reached them, and the leg is closed (E8).",
     (TransportStatus.ACKNOWLEDGED.value, TransportStatus.CLOSED.value),
 )
 

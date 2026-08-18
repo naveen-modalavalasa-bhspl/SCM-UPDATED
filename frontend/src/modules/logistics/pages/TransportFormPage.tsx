@@ -6,8 +6,12 @@ import {
   Button, Card, ErrorBanner, Field, Input, PageHeader, Select, useAction,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
-import { consignmentApi, transportApi } from "../api";
+import { consignmentApi, indentLookupApi, transportApi } from "../api";
 import { headerFromConsignment, linesFromConsignment } from "../components/consignmentToLines";
+import {
+  notPastError, numberError, phoneError, PHONE_HINT, problems, requiredError,
+  sanitizePhone, todayISO,
+} from "../components/validate";
 import type {
   ModeRule, TransportMode, TRInput, TRLineInput,
 } from "../transportTypes";
@@ -61,6 +65,18 @@ export function TransportFormPage() {
   const [pickSearch, setPickSearch] = useState("");
 
   const [mode, setMode] = useState<TransportMode>("THIRD_PARTY");
+  // Which WAY this leg runs (doc E7). An outward leg leaves a warehouse; a return
+  // comes back to one, and it is the same document, the same modes and the same
+  // statuses — only the two ends swap. The returns module owns the DECISION to send
+  // something back; this is only the trip it has to travel.
+  //
+  // Decided by the URL, not by a control on the form. `?direction=return` is what the
+  // "Return leg" button opens, so the desk has already answered "which way" before it
+  // sees a field — a checkbox halfway down a section headed "Where it goes" made the
+  // direction look like an afterthought on the outward form, and a leg raised with it
+  // unticked by mistake is a collection booked as a delivery.
+  const [isReturn, setIsReturn] = useState(
+    () => (params.get("direction") ?? "").toLowerCase() === "return");
   const [header, setHeader] = useState({ ...BLANK_HEADER });
   const [linked, setLinked] = useState<Partial<TRInput>>({});
   const [provider, setProvider] = useState({
@@ -101,6 +117,9 @@ export function TransportFormPage() {
   useEffect(() => {
     if (!existing) return;
     setMode(existing.mode);
+    // Reopening a return must reopen as a return, or saving it would quietly turn it
+    // back into an outward leg and swap both ends of the trip.
+    setIsReturn((existing.source_type ?? "").toUpperCase() === "RETURN");
     setHeader({
       to_location_name: existing.to_location_name ?? "",
       delivery_address: existing.delivery_address ?? "",
@@ -169,9 +188,93 @@ export function TransportFormPage() {
     qty: acc.qty + Number(line.quantity ?? 0),
   }), { packages: 0, weight: 0, qty: 0 }), [lines]);
 
+  // The lines came off a packing list, so they are NOT the desk's to retype. A packed
+  // consignment has been picked, counted and sealed by the warehouse; changing the
+  // quantity here would make the carrier price a load that does not match what is in
+  // the cartons, and the receiving site sign for a number nobody packed. Amend the
+  // consignment in Warehouse if it is wrong — that is the document that owns it.
+  const fromPackingList = Boolean(linked.dispatch_id) && !isReturn;
+
+  // The indents this leg can point at. Free-typing this number is how a leg ends up
+  // against an indent that does not exist, and the raiser's own tracking then shows
+  // nothing with no error anywhere. Locked once a consignment supplies it: the
+  // consignment already knows which indent it was packed for, and letting the desk
+  // overwrite that is letting two documents disagree about the same fact.
+  const indentLocked = Boolean(linked.indent_id) || fromPackingList;
+  const { data: indentOptions } = useQuery({
+    queryKey: ["lgs-indent-options"],
+    queryFn: () => indentLookupApi.options(),
+    enabled: !indentLocked,
+  });
+  // An empty list means the picker could not load — most likely this profile holds no
+  // `indent.view` — so the field stays a text box rather than becoming a dead dropdown.
+  const canPickIndent = Boolean(indentOptions?.length);
+
+  /** What is WRONG, as opposed to merely unfinished.
+   *
+   *  A malformed phone number or a delivery promised into the past is wrong whatever the
+   *  person does next, so these block the DRAFT as well. Anything a draft is simply
+   *  allowed to be missing lives in `submitProblems` instead.
+   *
+   *  Collected in one place and shown at the foot beside the buttons rather than each
+   *  field shouting on its own: a long form with six red boxes scattered down it makes
+   *  the person hunt, and a disabled button with no reason beside it reads as broken.
+   *
+   *  These mirror what `service.py` enforces — never a second set of rules. */
+  const dataProblems = useMemo(() => problems(
+    phoneError(header.contact_phone, "Contact phone"),
+    phoneError(provider.driver_phone, "Driver phone"),
+    notPastError(header.expected_delivery, "Needed by"),
+    numberError(header.distance_km, "Distance", { min: 0 }),
+    lines.some((line) => Number(line.quantity) < 0 || Number(line.package_count) < 0)
+      ? "Quantities and package counts cannot be negative" : null,
+    lines.some((line) => Number(line.weight_kg) < 0)
+      ? "A weight cannot be negative" : null,
+  ), [header, provider, lines]);
+
+  /** What must be answered before this can go for APPROVAL.
+   *
+   *  A draft is allowed to be incomplete — that is the whole point of a draft, and the
+   *  service says so in `_check_mode_fields`. So these gate the submit and not the save.
+   *
+   *  `carrier_id` is dropped for a TENDERED mode for exactly the reason the service
+   *  drops it: a third-party carrier is AWARDED off the quotes, so demanding one up
+   *  front would make a third-party leg impossible to submit, while the form beside it
+   *  correctly tells the desk to leave the carrier blank. */
+  const submitProblems = useMemo(() => {
+    const labels: Record<string, string> = {
+      vehicle_number: "Vehicle number",
+      driver_name: "Driver name",
+      handed_over_by_name: "Who hands it over",
+      received_by_name: "Who receives it",
+    };
+    const modeFields = (rule?.required_fields ?? [])
+      .filter((field) => !(field === "carrier_id" && rule?.needs_quotes));
+    return problems(
+      requiredError(header.to_location_name,
+        isReturn ? "The warehouse it comes back to" : "Destination"),
+      lines.some((line) => line.item_name || line.item_id || Number(line.quantity))
+        ? null : "Add at least one line",
+      // A line that exists must say WHAT and HOW MANY: a nameless line prices nothing,
+      // and a zero-quantity line is one somebody started and walked away from.
+      lines.some((line) => (line.item_name || line.item_id) && !Number(line.quantity))
+        ? "Every line needs a quantity" : null,
+      ...modeFields.map((field) => (
+        field === "carrier_id"
+          ? requiredError(provider.carrier_id, "A carrier")
+          : requiredError(
+              (provider as unknown as Record<string, string>)[field],
+              labels[field] ?? field)
+      )),
+    );
+  }, [header, provider, lines, rule, isReturn]);
+
   const payload = (): TRInput => ({
     ...linked,
     mode,
+    // A return leg runs the other way (doc E7). `linked` carries the source of a leg
+    // raised FROM a consignment, so this only ever overrides a leg raised by hand.
+    ...(isReturn ? { source_type: "RETURN" } : {}),
     to_location_name: header.to_location_name || null,
     delivery_address: header.delivery_address || null,
     contact_person: header.contact_person || null,
@@ -218,12 +321,40 @@ export function TransportFormPage() {
     setLines((all) => all.map((line, i) => (i === index ? { ...line, ...patch } : line)));
 
   const busy = save.isPending || saveAndSubmit.isPending;
+  // A draft may be unfinished but must not be malformed; a submission must be both.
+  const cannotSave = busy || dataProblems.length > 0;
+  const cannotSubmit = cannotSave || submitProblems.length > 0;
+  const shown = dataProblems.length ? dataProblems : submitProblems;
+
+  /** The step numbers, counted rather than written in.
+   *
+   *  A return leg has no consignment to pick, so section 1 is not on the form — and
+   *  hardcoding the numbers meant the return form opened at "2 How it travels" with no
+   *  1 above it, which reads as a screen that failed to load half of itself. */
+  const step = isReturn
+    ? { travel: 1, where: 2, load: 3 }
+    : { moving: 1, travel: 2, where: 3, load: 4 };
+
+  /** Flip the direction, and clear the two ends with it.
+   *
+   *  The fields do not mean the same thing on the other side: a warehouse typed into
+   *  "Back to warehouse" is not a site, and carrying it across left the form asserting
+   *  that material was going out to a warehouse it had just come back from. Everything
+   *  else — mode, lines, contact, dates — is direction-agnostic and stays. */
+  const flipDirection = (next: boolean) => {
+    setIsReturn(next);
+    setHeader((current) => ({
+      ...current, to_location_name: "", from_warehouse_name: "",
+    }));
+  };
 
   return (
     <div className="pb-24">
       <PageHeader
         eyebrow="Logistics"
-        title={editing ? `Edit ${existing?.tr_no ?? "request"}` : "Plan a movement"}
+        title={editing
+          ? `Edit ${existing?.tr_no ?? "request"}`
+          : isReturn ? "Plan a return leg" : "Plan a movement"}
         actions={
           <Button variant="ghost" onClick={() => nav(-1)}>Back</Button>
         }
@@ -232,8 +363,48 @@ export function TransportFormPage() {
       <ErrorBanner error={loadError ?? consignmentError ?? save.error
         ?? saveAndSubmit.error} />
 
-      {/* 1 — what is moving */}
+      {/* Which way the leg runs, asked FIRST and as a plain either/or.
+          It was a link at the foot of section 3 reading "make this an outward leg",
+          which is a sentence, not a control: you could not see which of the two you
+          were on without reading the paragraph beside it. A return travels exactly like
+          an outward leg — same modes, same statuses, both ends swapped (doc E7) — so
+          this is one document with a direction, and the direction is the first thing to
+          settle. Locked once saved: flipping an existing leg would swap both its ends
+          under a document already in approval. */}
       {!editing && (
+        <div className="mb-4 inline-flex rounded-xl border border-line bg-surface-2 p-1">
+          {[
+            { value: false, label: "Outward", hint: "Warehouse → field" },
+            { value: true, label: "Return", hint: "Field → warehouse" },
+          ].map((option) => (
+            <button
+              key={option.label}
+              type="button"
+              onClick={() => flipDirection(option.value)}
+              aria-pressed={isReturn === option.value}
+              className={`min-h-11 rounded-lg px-4 py-1.5 text-left transition ${
+                isReturn === option.value
+                  ? "bg-content1 shadow-sm ring-1 ring-brand/30"
+                  : "hover:bg-content1/60"
+              }`}
+            >
+              <span className={`block text-sm font-semibold ${
+                isReturn === option.value ? "text-brand" : "text-body"
+              }`}>
+                {option.label}
+              </span>
+              <span className="block text-[11px] text-muted">{option.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 1 — what is moving.
+          Hidden on a return: a packed consignment is something the WAREHOUSE built to
+          send out, and there is never one behind material coming back from a site. The
+          lines are typed in section 4 instead, which is what a collection is — you
+          write down what the site is handing over. */}
+      {!editing && !isReturn && (
         <Card className="mb-4 p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
@@ -316,7 +487,7 @@ export function TransportFormPage() {
       {/* 2 — how it travels */}
       <Card className="mb-4 p-5">
         <h2 className="font-display text-lg font-semibold text-ink">
-          <span className="mr-2 text-brand">2</span>How it travels
+          <span className="mr-2 text-brand">{step.travel}</span>How it travels
         </h2>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {(modes ?? []).map((option) => {
@@ -406,15 +577,24 @@ export function TransportFormPage() {
       {/* 3 — where it goes */}
       <Card className="mb-4 space-y-4 p-5">
         <h2 className="font-display text-lg font-semibold text-ink">
-          <span className="mr-2 text-brand">3</span>Where it goes
+          <span className="mr-2 text-brand">{step.where}</span>
+          {isReturn ? "Where it comes back to" : "Where it goes"}
         </h2>
+
+
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Destination">
-            <Input value={header.to_location_name} placeholder="Site or office name"
+          <Field
+            required
+            label={isReturn ? "Back to warehouse" : "Destination"}
+            hint={isReturn ? "Which warehouse receives it" : undefined}
+          >
+            <Input value={header.to_location_name}
+              placeholder={isReturn ? "Warehouse name" : "Site or office name"}
               onChange={(e) => setHeader({ ...header, to_location_name: e.target.value })} />
           </Field>
-          <Field label="From warehouse">
+          <Field label={isReturn ? "Collected from" : "From warehouse"}>
             <Input value={header.from_warehouse_name}
+              placeholder={isReturn ? "Site or office sending it back" : undefined}
               onChange={(e) => setHeader({ ...header, from_warehouse_name: e.target.value })} />
           </Field>
           <div className="sm:col-span-2">
@@ -427,20 +607,68 @@ export function TransportFormPage() {
             <Input value={header.contact_person}
               onChange={(e) => setHeader({ ...header, contact_person: e.target.value })} />
           </Field>
-          <Field label="Contact phone">
-            <Input value={header.contact_phone}
-              onChange={(e) => setHeader({ ...header, contact_phone: e.target.value })} />
+          {/* The message replaces the hint rather than sitting beside it: `Field` takes
+              a hint and nothing else, and widening the shared kit is not this module's
+              to do. The footer carries the blocking list either way. */}
+          <Field label="Contact phone"
+            hint={phoneError(header.contact_phone, "Contact phone") ?? PHONE_HINT}>
+            <Input value={header.contact_phone} inputMode="numeric" maxLength={18}
+              onChange={(e) => setHeader({
+                ...header, contact_phone: sanitizePhone(e.target.value),
+              })} />
           </Field>
-          <Field label="Against indent" hint="Links the consignment back">
-            <Input value={header.indent_no}
-              onChange={(e) => setHeader({ ...header, indent_no: e.target.value })} />
-          </Field>
-          <Field label="Needed by">
-            <Input type="date" value={header.expected_delivery}
+
+          {/* Against indent. Picked, not typed: this pointer is what the RAISER's own
+              tracking reads (`/api/transport/for-indent/{id}`), and a number typed from
+              memory that matches no indent breaks that screen silently — nothing errors,
+              the material simply never appears for the person waiting on it.
+
+              Read-only once a consignment supplies it: the consignment already knows
+              which indent it was packed against, and letting the desk overwrite that is
+              letting two documents disagree about the same fact. */}
+          {indentLocked ? (
+            <Field label="Against indent"
+              hint="From the consignment — amend it in Warehouse if it is wrong">
+              <Input value={header.indent_no} readOnly disabled />
+            </Field>
+          ) : canPickIndent ? (
+            <Field label="Against indent" hint="Links the leg back to what asked for it">
+              <Select
+                value={header.indent_no}
+                onChange={(value) => setHeader({ ...header, indent_no: String(value ?? "") })}
+                options={[
+                  { value: "", label: "Not against an indent" },
+                  ...(indentOptions ?? []).map((row) => ({
+                    value: row.indent_no,
+                    label: `${row.indent_no} · ${row.status}${
+                      row.department_name ? ` · ${row.department_name}` : ""}`,
+                  })),
+                ]}
+                ariaLabel="Against indent"
+              />
+            </Field>
+          ) : (
+            // The picker could not load — most likely no `indent.view` on this profile.
+            // A text box is worse, but a dropdown with nothing in it is a dead end.
+            <Field label="Against indent" hint="Links the leg back to what asked for it">
+              <Input value={header.indent_no}
+                onChange={(e) => setHeader({ ...header, indent_no: e.target.value })} />
+            </Field>
+          )}
+
+          {/* A delivery is always promised FORWARD. `min` greys out the earlier days in
+              the picker; `notPastError` catches the date typed in by keyboard, which no
+              browser blocks. */}
+          <Field label="Needed by"
+            hint={notPastError(header.expected_delivery, "Needed by")
+              ?? "Today or later"}>
+            <Input type="date" value={header.expected_delivery} min={todayISO()}
               onChange={(e) => setHeader({ ...header, expected_delivery: e.target.value })} />
           </Field>
-          <Field label="Distance (km)" hint="Used when comparing carrier quotes">
-            <Input type="number" value={header.distance_km}
+          <Field label="Distance (km)"
+            hint={numberError(header.distance_km, "Distance", { min: 0 })
+              ?? "Used when comparing carrier quotes"}>
+            <Input type="number" min={0} value={header.distance_km}
               onChange={(e) => setHeader({ ...header, distance_km: e.target.value })} />
           </Field>
           <div className="sm:col-span-2 lg:col-span-3">
@@ -457,16 +685,23 @@ export function TransportFormPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="font-display text-lg font-semibold text-ink">
-              <span className="mr-2 text-brand">4</span>What is in the consignment
+              <span className="mr-2 text-brand">{step.load}</span>
+              {isReturn ? "What is coming back" : "What is in the consignment"}
             </h2>
             <p className="text-xs text-muted">
-              Weight and dimensions are what a carrier prices. Filled in from the
-              packing list when this came from a consignment — each carton counted once.
+              {fromPackingList
+                ? "Read from the packing list — the warehouse picked, counted and sealed these cartons, so item and quantity are not editable here (amend the consignment in Warehouse if one is wrong). Weight and L×W×H stay open: they are what a carrier prices, and a packer rarely measures them."
+                : "Weight and dimensions are what a carrier prices. Filled in from the packing list when this came from a consignment — each carton counted once."}
             </p>
           </div>
-          <Button variant="ghost" onClick={() => setLines([...lines, { ...BLANK_LINE }])}>
-            Add line
-          </Button>
+          {/* A packed consignment's line-up is the warehouse's, so nothing may be added
+              to it here either: an extra line would be freight quoted for a carton that
+              is not on the pallet. */}
+          {!fromPackingList && (
+            <Button variant="ghost" onClick={() => setLines([...lines, { ...BLANK_LINE }])}>
+              Add line
+            </Button>
+          )}
         </div>
 
         <div className="space-y-3">
@@ -477,39 +712,52 @@ export function TransportFormPage() {
             >
               <div className="lg:col-span-2">
                 <Field label="Item">
-                  <Input value={line.item_name ?? ""}
+                  <Input value={line.item_name ?? ""} readOnly={fromPackingList}
+                    disabled={fromPackingList}
                     onChange={(e) => setLine(index, { item_name: e.target.value })} />
                 </Field>
               </div>
-              <Field label="Qty">
-                <Input type="number" value={line.quantity?.toString() ?? ""}
+              {/* Quantity and cartons come from the packing list on a consignment leg.
+                  Editing them would have the carrier price a load that does not match
+                  what is in the cartons, and the receiving site sign for a number
+                  nobody packed. */}
+              <Field label="Qty" required={!fromPackingList}>
+                <Input type="number" min={0} value={line.quantity?.toString() ?? ""}
+                  readOnly={fromPackingList} disabled={fromPackingList}
                   onChange={(e) => setLine(index, { quantity: Number(e.target.value) })} />
               </Field>
               <Field label="Packages">
-                <Input type="number" value={line.package_count?.toString() ?? ""}
+                <Input type="number" min={0} value={line.package_count?.toString() ?? ""}
+                  readOnly={fromPackingList} disabled={fromPackingList}
                   onChange={(e) => setLine(index, { package_count: Number(e.target.value) })} />
               </Field>
+              {/* Weight and dimensions stay EDITABLE even off a packing list, and that
+                  is the line between the two documents: the warehouse counted and sealed
+                  the cartons, so what is in them is theirs — but a packer records weight
+                  and almost never records L×W×H, and those are exactly what a carrier
+                  prices. Locking them left every leg quoting against 0 m³. */}
               <Field label="Weight (kg)">
-                <Input type="number" value={line.weight_kg?.toString() ?? ""}
+                <Input type="number" min={0} value={line.weight_kg?.toString() ?? ""}
                   onChange={(e) => setLine(index, { weight_kg: num(e.target.value) })} />
               </Field>
               <Field label="L×W×H (cm)">
                 <div className="flex gap-1">
-                  <Input type="number" value={line.length_cm?.toString() ?? ""}
+                  <Input type="number" min={0} value={line.length_cm?.toString() ?? ""}
                     onChange={(e) => setLine(index, { length_cm: num(e.target.value) })} />
-                  <Input type="number" value={line.width_cm?.toString() ?? ""}
+                  <Input type="number" min={0} value={line.width_cm?.toString() ?? ""}
                     onChange={(e) => setLine(index, { width_cm: num(e.target.value) })} />
-                  <Input type="number" value={line.height_cm?.toString() ?? ""}
+                  <Input type="number" min={0} value={line.height_cm?.toString() ?? ""}
                     onChange={(e) => setLine(index, { height_cm: num(e.target.value) })} />
                 </div>
               </Field>
               <div className="flex items-end justify-between gap-2">
                 <label className="flex min-h-11 items-center gap-2 text-sm text-body">
                   <input type="checkbox" checked={line.is_fragile ?? false}
+                    disabled={fromPackingList}
                     onChange={(e) => setLine(index, { is_fragile: e.target.checked })} />
                   Fragile
                 </label>
-                {lines.length > 1 && (
+                {lines.length > 1 && !fromPackingList && (
                   <Button variant="ghost"
                     onClick={() => setLines(lines.filter((_, i) => i !== index))}>
                     Remove
@@ -540,10 +788,18 @@ export function TransportFormPage() {
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="ghost" onClick={() => save.mutate()} disabled={busy}>
+            {/* Why a press is held back. A draft may be UNFINISHED — that is what a
+                draft is for — so only a malformed value stops the save; a submission
+                has to be complete as well, which is the rule `submit_tr` enforces. */}
+            {shown.length > 0 && (
+              <p className="w-full text-xs text-danger sm:w-auto sm:max-w-md">
+                {shown.join(" · ")}
+              </p>
+            )}
+            <Button variant="ghost" onClick={() => save.mutate()} disabled={cannotSave}>
               {save.isPending ? "Saving…" : "Save draft"}
             </Button>
-            <Button onClick={() => saveAndSubmit.mutate()} disabled={busy}>
+            <Button onClick={() => saveAndSubmit.mutate()} disabled={cannotSubmit}>
               {saveAndSubmit.isPending ? "Sending…" : "Save & send for approval"}
             </Button>
           </div>

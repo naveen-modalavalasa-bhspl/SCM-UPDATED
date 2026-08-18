@@ -205,15 +205,26 @@ async def test_a_carrier_never_invited_cannot_see_the_job_at_all(db):
 async def test_declining_puts_it_back_out_to_the_others(db):
     w = await _world(db)
     doc = await _awarded(db, w)
+    tr_id = doc.id
 
-    doc = await transport.carrier_decline(
-        db, w.cheap.id, doc.id, CarrierDeclineIn(reason="No vehicle on that lane"))
+    view = await transport.carrier_decline(
+        db, w.cheap.id, tr_id, CarrierDeclineIn(reason="No vehicle on that lane"))
 
-    assert doc.status == TransportStatus.QUOTING.value
-    assert doc.carrier_id is None and doc.freight_amount is None
-    assert doc.carrier_decline_reason == "No vehicle on that lane"
-    # The loser's price survives — it is still on the comparison sheet — while the
+    assert view.status == TransportStatus.QUOTING.value
+    assert view.carrier_id is None and view.freight_amount is None
+    assert view.carrier_decline_reason == "No vehicle on that lane"
+    # What the PORTAL hands back is narrowed to the caller's own quote and nobody
+    # else's (`_carrier_view`): a tender where every bidder can read what the others
+    # bid is not a tender. So the decliner sees their row marked DECLINED and no more.
+    assert [q.carrier_id for q in view.quotes] == [w.cheap.id]
+    assert view.quotes[0].status == QuoteStatus.DECLINED.value
+
+    # The DESK's read is the one that carries the whole sheet, and it is the one that
+    # matters here: the loser's price survives as SUBMITTED — awarding requires a
+    # SUBMITTED quote, so leaving it NOT_AWARDED would drop the shipment back into a
+    # tender where not one price on file could be awarded to anybody — while the
     # decliner's is marked as what it is, so the next award does not hand it back.
+    doc = await transport.get_tr(db, tr_id)
     by_carrier = {q.carrier_id: q.status for q in doc.quotes}
     assert by_carrier[w.cheap.id] == QuoteStatus.DECLINED.value
     assert by_carrier[w.fast.id] == QuoteStatus.SUBMITTED.value

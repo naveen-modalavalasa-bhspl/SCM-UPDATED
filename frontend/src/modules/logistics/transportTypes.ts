@@ -17,6 +17,50 @@ export interface ModeRule {
   required_fields: string[];
 }
 
+/** What the leg is carrying, which is also WHICH WAY it runs. RETURN is the same
+ *  document run backwards — field to warehouse (doc E7). */
+export type TransportSource = "CONSIGNMENT" | "ISSUE" | "RETURN";
+
+/** Served by `GET /api/transport/suggest-mode`. Null when the consignment carried no
+ *  distance and no weight — advice off no evidence reads as an answer, so the backend
+ *  says nothing instead of guessing. */
+export interface ModeSuggestion {
+  mode: TransportMode;
+  label: string;
+  reason: string;
+}
+
+/** What the RAISER of an indent is shown about the leg carrying it — enough to answer
+ *  "where is my material", and nothing about freight or who else quoted. */
+export interface RaiserTracking {
+  tr_id: number;
+  tr_no: string;
+  status: string;
+  mode: TransportMode;
+  consignment_no?: string | null;
+  carrier_name?: string | null;
+  lr_no?: string | null;
+  docket_no?: string | null;
+  tracking_url?: string | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  handed_over_by_name?: string | null;
+  expected_delivery?: string | null;
+  dispatched_at?: string | null;
+  delivered_at?: string | null;
+  tracking_shared_at?: string | null;
+  acknowledged_at?: string | null;
+  ack_condition?: string | null;
+  events: {
+    event_type: string;
+    event_at: string;
+    location_name?: string | null;
+    description?: string | null;
+    is_exception: boolean;
+  }[];
+}
+
 export interface EvaluationMethod {
   value: string;
   label: string;
