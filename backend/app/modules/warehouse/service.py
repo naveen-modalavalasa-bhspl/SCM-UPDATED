@@ -5831,6 +5831,29 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     # is append-only — the codes could never be added to them.
     line_units = await _claim_issue_units(db, issue) if outward else {}
 
+    # A move between two points of the SAME tier is a transfer between peers, not a
+    # warehouse issuing down the chain: WH -> WH, MDP -> MDP and LIP -> LIP all belong
+    # on the ledger as STO. `inventory.service` already writes exactly that string for
+    # a stock transfer order, so the ledger's own filter and its label cover these rows
+    # the day they appear — this names the movement, it does not invent a vocabulary.
+    #
+    # The destination comes from `_requesting_point`, the office-to-stocking-point
+    # answer the consignment screens already run on. NOT `indent.warehouse_id`: that
+    # column is written by the warehouse when it fulfils, and is NULL on every live
+    # indent, so a rule reading it would classify nothing at all.
+    #
+    # A return (`outward` False) keeps WH_ISSUE. It reverses whatever the issue was and
+    # is matched by ref_id, so re-labelling it would only split one document's rows
+    # across two ref_types.
+    ledger_ref_type = InventoryRefType.WH_ISSUE.value
+    if outward:
+        source = await db.get(Warehouse, issue.warehouse_id)
+        destination = await _requesting_point(db, issue)
+        if (source is not None and destination is not None
+                and source.id != destination.id
+                and source.warehouse_type == destination.warehouse_type):
+            ledger_ref_type = InventoryRefType.STO.value
+
     for line in issue.items:
         qty = _d(line.issued_qty)
         if qty <= ZERO:
@@ -5883,7 +5906,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     await move_stock(
                         db, item_id=line.item_id, qty=stock.quantity,
                         direction=StockDirection.OUT.value,
-                        ref_type=InventoryRefType.WH_ISSUE.value,
+                        ref_type=ledger_ref_type,
                         ref_id=issue.id, ref_no=issue.issue_no, user=user,
                         warehouse_id=stock.warehouse_id,
                         bin_id=stock.bin_id, batch_id=stock.batch_id,
@@ -5904,7 +5927,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     await _issue_slices(db, issue, line, qty)):
                 await move_stock_out(
                     db, item_id=line.item_id, qty=slice_qty,
-                    ref_type=InventoryRefType.WH_ISSUE.value,
+                    ref_type=ledger_ref_type,
                     ref_id=issue.id, ref_no=issue.issue_no, user=user,
                     warehouse_id=issue.warehouse_id,
                     bin_id=source_bin, batch_id=source_batch,
@@ -5914,7 +5937,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
         else:
             await move_stock(
                 db, item_id=line.item_id, qty=qty, direction=direction,
-                ref_type=InventoryRefType.WH_ISSUE.value,
+                ref_type=ledger_ref_type,
                 ref_id=issue.id, ref_no=issue.issue_no,
                 user=user, warehouse_id=issue.warehouse_id,
                 bin_id=line.bin_id or m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
