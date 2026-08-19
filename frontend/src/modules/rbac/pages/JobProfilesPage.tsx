@@ -232,9 +232,6 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   approval_decisions: {
     hint: "Review requests that you have already approved or rejected.",
   },
-  approval_team: {
-    hint: "See requests that are waiting with other approvers in your team.",
-  },
   grp_purchasing: {
     hint: "Open the Procurement module: requisitions, RFQs, quotations and POs.",
   },

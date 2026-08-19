@@ -81,7 +81,7 @@ export function TransportFormPage() {
   const [linked, setLinked] = useState<Partial<TRInput>>({});
   const [provider, setProvider] = useState({
     carrier_id: "", vehicle_number: "", driver_name: "", driver_phone: "",
-    trip_reference: "", handed_over_by_name: "", received_by_name: "",
+    trip_reference: "", handed_over_by_name: "",
   });
   const [lines, setLines] = useState<TRLineInput[]>([{ ...BLANK_LINE }]);
 
@@ -145,7 +145,6 @@ export function TransportFormPage() {
       driver_phone: existing.driver_phone ?? "",
       trip_reference: existing.trip_reference ?? "",
       handed_over_by_name: existing.handed_over_by_name ?? "",
-      received_by_name: existing.received_by_name ?? "",
     });
     if (existing.items.length) {
       setLines(existing.items.map((item) => ({
@@ -246,7 +245,6 @@ export function TransportFormPage() {
       vehicle_number: "Vehicle number",
       driver_name: "Driver name",
       handed_over_by_name: "Who hands it over",
-      received_by_name: "Who receives it",
     };
     const modeFields = (rule?.required_fields ?? [])
       .filter((field) => !(field === "carrier_id" && rule?.needs_quotes));
@@ -290,7 +288,6 @@ export function TransportFormPage() {
     driver_phone: provider.driver_phone || null,
     trip_reference: provider.trip_reference || null,
     handed_over_by_name: provider.handed_over_by_name || null,
-    received_by_name: provider.received_by_name || null,
     lines: lines.filter((line) => line.item_name || line.item_id || line.quantity),
   });
 
@@ -559,16 +556,11 @@ export function TransportFormPage() {
               </>
             )}
             {needs("handed_over_by_name") && (
-              <>
-                <Field label="Handed over by">
-                  <Input value={provider.handed_over_by_name}
-                    onChange={(e) => setProvider({ ...provider, handed_over_by_name: e.target.value })} />
-                </Field>
-                <Field label="Received by">
-                  <Input value={provider.received_by_name}
-                    onChange={(e) => setProvider({ ...provider, received_by_name: e.target.value })} />
-                </Field>
-              </>
+              <Field label="Handed over by"
+                hint="Receipt is confirmed later by the indent requester with photos and bills.">
+                <Input value={provider.handed_over_by_name}
+                  onChange={(e) => setProvider({ ...provider, handed_over_by_name: e.target.value })} />
+              </Field>
             )}
           </div>
         )}

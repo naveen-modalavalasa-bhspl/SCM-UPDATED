@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, ScrollText } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
   ResponsiveList, StatCard, StatusPill, useAction, type Column,
@@ -279,9 +279,22 @@ export function DispatchPage() {
           );
         }
         return (
-          <Button variant="ghost" onClick={() => nav(`/logistics/transport/${link.tr_id}`)}>
-            Open
-          </Button>
+          <div className="flex items-center justify-end gap-1">
+            {/* This consignment's own trail, scoped by the warehouse document rather
+                than by the transport number — the desk knows the consignment it is
+                chasing, not the TR it grew into. */}
+            <Button
+              variant="ghost"
+              aria-label={`Activity for ${row.dispatch_no}`}
+              onClick={() => nav(
+                `/logistics/activity?dispatch_id=${row.id}&scope=${encodeURIComponent(row.dispatch_no)}`)}
+            >
+              <ScrollText className="h-4 w-4" />
+            </Button>
+            <Button variant="ghost" onClick={() => nav(`/logistics/transport/${link.tr_id}`)}>
+              Open
+            </Button>
+          </div>
         );
       },
     },
@@ -313,6 +326,14 @@ export function DispatchPage() {
             <Button variant="ghost" onClick={refreshNow} disabled={refreshing}>
               <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
               Refresh
+            </Button>
+            {/* The board says where each consignment stands right now; the ledger says
+                how it got there — who approved it, who quoted, who was awarded it and
+                what they charged. Reached from here because this is the screen the
+                question is asked on. */}
+            <Button variant="ghost" onClick={() => nav("/logistics/activity")}>
+              <ScrollText className="h-4 w-4" />
+              Activity ledger
             </Button>
           </>
         }

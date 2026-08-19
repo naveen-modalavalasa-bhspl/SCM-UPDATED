@@ -306,12 +306,15 @@ export function IndentFormPage() {
    *  SAC of the office they happen to be posted to now would be the wrong code
    *  against that indent. Matching on the id means an office we hold no SAC for
    *  reads as absent instead of borrowing someone else's. */
-  const officeSac = deliveryOfficeId === ""
-    ? null
-    : (me?.employee.office_id === deliveryOfficeId
-        ? me?.employee.office_sac
-        : me?.positions.find((position) => position.office_id === deliveryOfficeId)
-          ?.office_sac) ?? null;
+  const officeSac = draft?.office_sac?.trim()
+    || (deliveryOfficeId === ""
+      ? null
+      : (me?.active_position?.office_id === deliveryOfficeId
+          ? me.active_position.office_sac
+          : me?.employee.office_id === deliveryOfficeId
+            ? me.employee.office_sac
+            : me?.positions.find((position) => position.office_id === deliveryOfficeId)
+              ?.office_sac) ?? null);
 
   if (isEditing && isDraftLoading) return <Skeleton className="h-40 rounded-2xl" />;
 

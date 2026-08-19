@@ -507,7 +507,9 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("approvals", "approvals", "Approvals"),
     ("approval_waiting", "approvals", "Approvals · Waiting for Me"),
     ("approval_decisions", "approvals", "Approvals · My Decisions"),
-    ("approval_team", "approvals", "Approvals · Team Queue"),
+    # `approval_team` is gone with the Team Queue screen. Dropped from the catalogue
+    # only — `seed_permissions` never prunes, so the existing
+    # `page.approval_team.view` row and every grant on it stay untouched.
     ("grp_purchasing", "procurement", "Purchasing"),
     ("po_list", "procurement", "Purchase Orders"),
     ("grp_warehouse", "warehouse", "Warehouse"),
@@ -560,6 +562,10 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("logistics_dispatch", "logistics", "Logistics · Dispatch"),
     ("logistics_transport", "logistics", "Logistics · Transport Requests"),
     ("logistics_providers", "logistics", "Logistics · Provider Selection"),
+    ("logistics_activity", "logistics", "Logistics · Activity Ledger"),
+    # Retired screens. The codes stay catalogued because the permission rows and every
+    # grant on them are still in the database — `seed_permissions` never prunes — and
+    # because the ledger's own grant is inherited from Tracking's below.
     ("logistics_tracking", "logistics", "Logistics · Shipment Tracking"),
     ("logistics_acknowledgements", "logistics", "Logistics · Acknowledgements"),
     ("logistics_exceptions", "logistics", "Logistics · Exceptions"),
@@ -619,6 +625,11 @@ INHERITS_GRANTS_FROM.update({
     # TRANSPORT_ACKNOWLEDGE inheriting TRANSPORT_TRACK — the button and the screen it
     # sits on must land with the same people or one of them is dead.
     page_view_code("logistics_acknowledgements"): page_view_code("logistics_tracking"),
+    # The Activity Ledger replaces the Shipment Tracking board and the Exceptions desk,
+    # so it lands with the people who worked them rather than fail-closed to Admin: it
+    # shows the same events, off the same documents, and taking the board away without
+    # handing over the screen that replaced it would leave that desk with nothing.
+    page_view_code("logistics_activity"): page_view_code("logistics_tracking"),
     # Not a split but a late catalogue entry, which needs the same treatment: the
     # screen has been reachable on these two codes for months, and minting its page
     # permission fail-closed would silently retire a screen people work every day.

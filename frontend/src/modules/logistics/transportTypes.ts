@@ -306,6 +306,16 @@ export interface TransportRequest {
   events: ShipmentEvent[];
 }
 
+export interface ReceiptEvidence {
+  id: number;
+  file_name: string;
+  file_size?: number | null;
+  mime_type?: string | null;
+  doc_category?: string | null;
+  uploaded_by_name?: string | null;
+  created_at?: string | null;
+}
+
 export interface TRListRow {
   id: number;
   tr_no: string;
@@ -498,7 +508,6 @@ export interface TRInput {
   driver_phone?: string | null;
   trip_reference?: string | null;
   handed_over_by_name?: string | null;
-  received_by_name?: string | null;
   lines?: TRLineInput[];
 }
 
@@ -576,4 +585,44 @@ export interface LogisticsVendorSummary {
 export interface PartnerType {
   value: string;
   label: string;
+}
+
+// --------------------------------------------------------------------------- //
+//  The activity ledger
+// --------------------------------------------------------------------------- //
+// `GET /api/transport/activity` — one normalised row per event, unioned from the
+// request header, the approval actions, the carrier quotes and the shipment
+// timeline. The screen renders what it is sent: `event_label` and `result` are
+// SERVED, never mapped here, so the ledger and the backend cannot drift.
+
+export interface ActivityRow {
+  /** Unique across the union ("evt:12", "wf:9", "tr:5:awarded"). */
+  event_id: string;
+  tr_id: number;
+  tr_no: string;
+  consignment_no?: string | null;
+  indent_no?: string | null;
+  mode: TransportMode;
+  event_type: string;
+  event_label: string;
+  /** The rung this event put the shipment on — not its status today. */
+  result: string;
+  occurred_at: string;
+  actor_name?: string | null;
+  carrier_name?: string | null;
+  location_name?: string | null;
+  detail?: string | null;
+  /** Freight quoted, freight awarded, or the value of a claim. */
+  amount?: number | null;
+  is_exception: boolean;
+  from_name?: string | null;
+  to_name?: string | null;
+}
+
+/** `GET /api/transport/activity-types` — the filter's options, in the order the
+ *  events happen. Served for the same reason the mode rules are. */
+export interface ActivityType {
+  value: string;
+  label: string;
+  is_exception: boolean;
 }

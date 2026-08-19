@@ -2,10 +2,11 @@ import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type { GRN, GRNCreate, GRNListRow, Issue, MovementRow, StockRow } from "./types";
 import type {
+  ActivityRow, ActivityType,
   CarrierOption, CarrierQuote, Comparison, Consignment, ConsignmentDetail,
   ConsignmentLink, DispatchInput, EvaluationMethod, FlowStage, LogisticsVendor,
   LogisticsVendorInput, LogisticsVendorSummary, ModeRule, ModeSuggestion,
-  PartnerType, ProviderBoardRow, RaiserTracking, ShipmentEvent, TransportRequest,
+  PartnerType, ProviderBoardRow, RaiserTracking, ReceiptEvidence, ShipmentEvent, TransportRequest,
   TransportSummary, TRInput, TRListRow,
 } from "./transportTypes";
 
@@ -90,12 +91,15 @@ export const transportApi = {
     api.get<Paginated<ProviderBoardRow>>("/api/transport/provider-board", { params })
       .then((r) => r.data),
 
-  /** Delivered, nobody has signed for it yet (doc A7). */
-  acknowledgements: (params: { search?: string; page?: number; size?: number } = {}) =>
-    api.get<Paginated<TRListRow>>("/api/transport/acknowledgements", { params })
-      .then((r) => r.data),
   get: (id: number) =>
     api.get<TransportRequest>(`/api/transport/${id}`).then((r) => r.data),
+  receiptEvidence: (id: number) =>
+    api.get<ReceiptEvidence[]>(`/api/transport/${id}/receipt-evidence`)
+      .then((r) => r.data),
+  downloadReceiptEvidence: (id: number, attachmentId: number) =>
+    api.get<Blob>(`/api/transport/${id}/receipt-evidence/${attachmentId}/download`, {
+      responseType: "blob",
+    }).then((r) => r.data),
   create: (data: TRInput) =>
     api.post<TransportRequest>("/api/transport", data).then((r) => r.data),
   update: (id: number, data: Partial<TRInput>) =>
@@ -165,7 +169,7 @@ export const transportApi = {
     carrier_id?: number | null; freight_amount?: number | null;
     vehicle_number?: string | null; driver_name?: string | null;
     driver_phone?: string | null; trip_reference?: string | null;
-    handed_over_by_name?: string | null; received_by_name?: string | null;
+    handed_over_by_name?: string | null;
   }) =>
     api.post<TransportRequest>(`/api/transport/${id}/provider`, data).then((r) => r.data),
 
@@ -188,19 +192,22 @@ export const transportApi = {
     api.post<TransportRequest>(`/api/transport/${id}/deliver`, data).then((r) => r.data),
   shareTracking: (id: number) =>
     api.post<TransportRequest>(`/api/transport/${id}/share-tracking`).then((r) => r.data),
-  /** The receiving site signs for it. Anything but GOOD opens a claim. */
-  acknowledge: (id: number, data: {
-    acknowledged_by_name?: string | null; condition?: string;
-    remarks?: string | null; pod_url?: string | null;
-    affected_item_name?: string | null; affected_qty?: number | null;
-    claim_amount?: number | null;
-  }) =>
-    api.post<TransportRequest>(`/api/transport/${id}/acknowledge`, data)
-      .then((r) => r.data),
   close: (id: number) =>
     api.post<TransportRequest>(`/api/transport/${id}/close`).then((r) => r.data),
   history: (id: number) =>
     api.get<unknown[]>(`/api/transport/${id}/history`).then((r) => r.data),
+
+  /** The activity ledger. `dispatch_id` scopes it to one consignment's own trail,
+   *  which is how the Dispatch queue opens it for a single row. */
+  activity: (params: {
+    search?: string; date_from?: string; date_to?: string; event_type?: string;
+    only_exceptions?: boolean; tr_id?: number; dispatch_id?: number;
+    page?: number; size?: number;
+  } = {}) =>
+    api.get<Paginated<ActivityRow>>("/api/transport/activity", { params })
+      .then((r) => r.data),
+  activityTypes: () =>
+    api.get<ActivityType[]>("/api/transport/activity-types").then((r) => r.data),
 
   exceptions: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<ShipmentEvent>>("/api/transport/exceptions", { params })
@@ -276,6 +283,10 @@ export const carrierPortalApi = {
     api.get<{
       to_quote: number; to_confirm: number; to_pick_up: number;
       on_the_road: number; delivered: number;
+      /** Priced and not won. Its queue is asked for as `status=NOT_AWARDED`, which is
+       *  an outcome rather than a shipment status — the shipment itself is somebody
+       *  else's job by then, and the portal must never show it as this carrier's. */
+      not_awarded: number;
     }>(`${PORTAL}/transport-summary`).then((r) => r.data),
   list: (params: { status?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<TRListRow>>(`${PORTAL}/transport`, { params })

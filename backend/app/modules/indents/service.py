@@ -374,7 +374,7 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     )
     await db.commit()
     await db.refresh(indent)
-    return indent
+    return await _attach_office_sac(db, indent)
 
 
 def _values(values) -> list[str]:
@@ -1216,23 +1216,6 @@ async def list_indents(
                 owed_qty > IndentItem.allocated_quantity + committed + on_order,
             ).correlate(Indent)
         ))
-        # Quantity alone cannot express "already claimed, nothing given". An allocation
-        # that gives ZERO — the whole line is going to procurement, nothing is on the
-        # shelf — sums to the same 0 as no allocation at all, so the arithmetic above
-        # reads the indent as untouched and every allocator keeps seeing it. It is not
-        # work anybody can do: `allocations.ensure_no_active` refuses a second
-        # allocation while an unsigned one exists, so the row only invites a form to be
-        # filled in and rejected at submit.
-        #
-        # Same statuses as that guard, and deliberately not APPROVED: the cascade
-        # depends on an approved allocation leaving the indent visible so the rung above
-        # can serve the remainder it did not cover.
-        stmt = stmt.where(~exists(
-            select(Allocation.id).where(
-                Allocation.indent_id == Indent.id,
-                Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES),
-            ).correlate(Indent)
-        ))
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
     stmt = stmt.order_by(_indent_sort(sort_by, sort_dir), id_tie_breaker)
     return await paginate(db, stmt, params)
@@ -1523,8 +1506,47 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
         upload=upload, doc_category=doc_category, user=user)
 
 
+#: What the requester may say about the state of what arrived.
+#:
+#: GOOD and DAMAGED, and deliberately NOT SHORT. A shortage is already stated by the
+#: quantities — someone who types 6 against 10 has reported it, and the indent stays
+#: open for the rest of its own accord. Offering SHORT here as well would let one form
+#: say "all ten arrived" and "it was short" at the same time.
+#:
+#: Nor is SHORT derived from those numbers, which was the other tempting option: this
+#: path accepts PARTIAL receipts by design (six today, four next week), so "received
+#: less than was dispatched" is the normal shape of a first instalment and flagging it
+#: as a shortage would raise a claim against a carrier who is still mid-delivery.
+#: Damage is the one fact the quantities genuinely cannot carry, so it is the one fact
+#: this asks for.
+ACK_CONDITION_GOOD = "GOOD"
+ACK_CONDITION_DAMAGED = "DAMAGED"
+ACK_CONDITIONS = (ACK_CONDITION_GOOD, ACK_CONDITION_DAMAGED)
+
+
+def _delivery_condition(condition: str | None, remarks: str | None) -> str:
+    """Validate what the requester said about the goods, defaulting to GOOD.
+
+    Values are plain strings rather than logistics' `AckCondition`: logistics sits
+    AFTER indents in the import chain (rule 5), so this module may not import it. The
+    warehouse maps them onto the enum on the way to the transport leg.
+    """
+    value = (condition or ACK_CONDITION_GOOD).strip().upper()
+    if value not in ACK_CONDITIONS:
+        raise ValidationError(
+            f"{condition!r} is not a delivery condition. Say whether the goods "
+            "arrived GOOD or DAMAGED.")
+    if value != ACK_CONDITION_GOOD and not (remarks or "").strip():
+        raise ValidationError(
+            "Describe the damage — it is what the claim against the carrier is "
+            "investigated from.")
+    return value
+
+
 async def acknowledge_receipt(db: AsyncSession, indent_id: int,
-                              lines: dict[int, Decimal], user) -> Indent:
+                              lines: dict[int, Decimal], user, *,
+                              condition: str | None = None,
+                              remarks: str | None = None) -> Indent:
     """The requester confirms what physically reached them.
 
     This is the only thing that closes an indent. The warehouse issuing and dispatching
@@ -1579,6 +1601,8 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
 
     indent.status = _fulfilment_status(indent.items)
 
+    ack_condition = _delivery_condition(condition, remarks)
+
     # Imported here, not at module load: warehouse sits after indents in the import
     # chain, so a top-level import would run it backwards.
     from app.modules.warehouse import service as warehouse_service
@@ -1587,7 +1611,14 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     # to sign the same delivery again afterwards recorded nothing new and left indents
     # open on a forgotten second click, so the issues settle here instead. Same
     # transaction as the receipt that made them settleable.
-    signed = await warehouse_service.auto_acknowledge_for_indent(db, indent.id, user)
+    signed = await warehouse_service.auto_acknowledge_for_indent(
+        db, indent.id, user, condition=ack_condition, remarks=remarks,
+        # Whether anything is still owed on this indent, which decides how far back the
+        # receipt is allowed to reach into the outward legs. A partial receipt settles
+        # only what has actually left; a complete one may also settle a leg still
+        # reading READY, because nothing can be sitting in a yard for an indent whose
+        # every line has now arrived. See `_sign_transport_for_indent`.
+        fully_received=indent.status == IndentStatus.CLOSED.value)
 
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
@@ -5242,16 +5273,15 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "project_id": indent.project_id,
     } for line in indent.items]
 
-    # The points this person actually holds or that report under them, WIDENED by
-    # their job profile's data scope. The narrowing exists so an OE is offered his own
-    # MDP and LIP rather than every store in the company; reading the tagging alone
-    # meant a login given "All" in Settings > Job Profiles was still shown 0 available
-    # for stock outside his own reporting tree. None means every warehouse.
-    my_points = (await inventory_service.drawable_warehouse_ids(db, user)
-                 if user is not None else None)
+    # Only points this person actually holds, or that report under them. Inventory and
+    # anyone with a company-wide scope has no subtree, and sees every warehouse as
+    # before — the narrowing exists so an OE is offered their own MDP and LIP rather
+    # than every store in the company.
+    my_points = (await locations.location_ids_for_user(db, user)
+                 if user is not None else set())
 
     proposal = await allocations.propose(
-        db, indent_id, lines, warehouse_ids=sorted(my_points) if my_points else None)
+        db, indent_id, lines, warehouse_ids=sorted(my_points) or None)
     return {
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
@@ -5281,7 +5311,7 @@ async def item_claims(db: AsyncSession, item_id: int, indent_id: int, user=None)
     is not: an allocator has to know a claim exists even when it was raised somewhere
     they cannot see stock.
     """
-    warehouse_ids = (await inventory_service.drawable_warehouse_ids(db, user)
+    warehouse_ids = (await inventory_service.warehouse_ids_for_user(db, user)
                      if user is not None else None)
     return await allocations.competing_claims(
         db, item_id, indent_id, warehouse_ids=warehouse_ids)

@@ -184,7 +184,7 @@ describe("Indents action help", () => {
 
 describe("plain-language help for the remaining modules", () => {
   const pageCodes = [
-    "approvals", "approval_waiting", "approval_decisions", "approval_team",
+    "approvals", "approval_waiting", "approval_decisions",
     "grp_purchasing", "po_list",
     "grp_warehouse", "wh_dashboard", "wh_inward", "wh_grn", "wh_qc",
     "wh_putaway", "wh_picklist", "wh_issues", "wh_consignments", "wh_dispatch",

@@ -16,11 +16,11 @@ import { IndentBoardPage } from "@/modules/indents/pages/BoardPage";
 import AcknowledgementsPage from "@/modules/indents/pages/AcknowledgementsPage";
 import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
 import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
-// Approvals is its own module now — the inbox, decisions, team queue, reports and the
+// Approvals is its own module now — the inbox, decisions, reports and the
 // indent review screen all live there, not inside indents.
 import {
   ApprovalCorrectionPage, ApprovalsPage, ConsolidationDetailPage, ConsolidationIssuePage,
-  ConsolidationItemPage, ConsolidationPage, MyDecisionsPage, TeamQueuePage,
+  ConsolidationItemPage, ConsolidationPage, MyDecisionsPage,
 } from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
@@ -84,7 +84,7 @@ import { PurchaseConsolidationDetailPage } from "@/modules/procurement/pages/Pur
 import {
   ConsignmentsScreen, ConsignmentFormScreen, DispatchPage, DispatchConfirmPage,
   TransportRequestsPage, TransportFormPage, TransportDetailPage, ProviderSelectionPage,
-  ShipmentTrackingPage, LogisticsVendorsPage,
+  LogisticsActivityPage, LogisticsVendorsPage,
   CarrierLayout, CarrierLoginPage, CarrierJobsPage, CarrierJobPage,
 } from "@/modules/logistics";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
@@ -209,7 +209,9 @@ function AppRoutes() {
             ?view=reports / ?reviewIndent=, so they need no route of their own. */}
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="approvals/decisions" element={<MyDecisionsPage />} />
-        <Route path="approvals/team-queue" element={<TeamQueuePage />} />
+        {/* Team Queue is retired. The route stays so an old link, a bookmark or a
+            stale menu row lands on the inbox instead of on a blank page. */}
+        <Route path="approvals/team-queue" element={<Navigate to="/approvals" replace />} />
         <Route path="approvals/consolidation" element={<ConsolidationPage />} />
         {/* Child screen, not a menu entry: it is reached by opening a row, and its
             :cycle is the group key the list navigated with. */}
@@ -267,20 +269,29 @@ function AppRoutes() {
         <Route path="logistics/transport/:id" element={<TransportDetailPage />} />
         <Route path="logistics/transport/:id/edit" element={<TransportFormPage />} />
         <Route path="logistics/providers" element={<ProviderSelectionPage />} />
-        <Route path="logistics/tracking" element={<ShipmentTrackingPage />} />
-        {/* Retired from Logistics. Signing for what arrived is the indent RAISER's act,
-            and Indents already carries that screen — with the shipment leg on it, so
-            they can track it too. Claims raised by that signature stay on the shipment
-            timeline, which Shipment Tracking draws.
+        {/* The ledger: every event on every shipment, in the order it happened. */}
+        <Route path="logistics/activity" element={<LogisticsActivityPage />} />
+        {/* Retired from Logistics.
 
-            Redirects rather than deletions: `sync_pages` never removes a menu row, so an
-            existing database still lists these two until an admin deactivates them, and
-            a listed tab that renders nothing is worse than one that lands somewhere
-            real. */}
+            Shipment Tracking and Exceptions each drew ONE slice of the ledger above —
+            where is it now, and what went wrong — so a desk chasing a consignment read
+            half the story on one tab and half on another, and neither said who awarded
+            the job, at what price, or when the carrier agreed to it. Both land on the
+            ledger, which carries their contents and the rest of the trail besides.
+
+            Signing for what arrived is the indent RAISER's act, and Indents already
+            carries that screen — with the shipment leg on it, so they can track it too.
+
+            Redirects rather than deletions: `sync_pages` never removes a menu row, so
+            an existing database still lists these until the Alembic migration parks
+            them, and a listed tab that renders nothing is worse than one that lands
+            somewhere real. */}
         <Route path="logistics/acknowledgements"
                element={<Navigate to="/indents/acknowledgements" replace />} />
+        <Route path="logistics/tracking"
+               element={<Navigate to="/logistics/activity" replace />} />
         <Route path="logistics/exceptions"
-               element={<Navigate to="/logistics/tracking" replace />} />
+               element={<Navigate to="/logistics/activity" replace />} />
         {/* The register behind the Dispatch dropdown, now in the Logistics tabs beside
             the screen that reads it. Same component and the same Admin-only page grant
             as before — issuing a login outside the company is an administrator's act

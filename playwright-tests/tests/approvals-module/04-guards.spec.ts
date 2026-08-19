@@ -148,7 +148,7 @@ test.describe("Approvals — authority and race guards", () => {
     await context.dispose();
   });
 
-  test("N9 · permission gating on the endpoints and on Remind", async ({ page, log, goto, capture, playwright }) => {
+  test("N9 · permission gating on the approvals endpoints", async ({ log, playwright }) => {
     const context = await playwright.request.newContext({ baseURL: process.env.API_URL || "http://localhost:8000" });
     const api = new ApprovalsApi(context);
     const approver = list.approvers[0]!;
@@ -177,16 +177,6 @@ test.describe("Approvals — authority and race guards", () => {
       expect.soft(response.status, `${outsider.label} read somebody else's approval task (${response.status}).`).toBeGreaterThanOrEqual(400);
       expect.soft(readable(response), `The permission refusal was unreadable: ${response.status} ${response.body.slice(0, 300)}`).toBe(true);
       log.info(`${outsider.label} GET approvals/indents/${someIndent.doc_id} → ${response.status} ${response.body.slice(0, 200)}`);
-    });
-
-    await log.runStep("N9 · the Team Queue screen does not offer authority it does not have", async () => {
-      await signIn(page, api, approver, log);
-      await goto("/approvals/team-queue", "team-queue-permissions");
-      await expect.soft(page.getByText("This screen does not give you authority to decide for another approver.", { exact: false }))
-        .toBeVisible({ timeout: 15_000 });
-      const decideButtons = page.getByRole("button", { name: /^(Approve|Reject)$/ });
-      expect.soft(await decideButtons.count(), "Team Queue must not offer Approve/Reject for another person's work.").toBe(0);
-      await capture("team-queue-no-authority");
     });
 
     await context.dispose();

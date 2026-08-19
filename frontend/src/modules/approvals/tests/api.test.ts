@@ -16,12 +16,10 @@ describe("approvals api", () => {
   it("uses only the approvals module for the operational approval queue", async () => {
     await approvalsApi.pending();
     await approvalsApi.decisions();
-    await approvalsApi.teamQueue();
     await approvalsApi.consolidation();
     expect(apiMock.get.mock.calls.map((call) => call[0])).toEqual([
       "/api/approvals/pending",
       "/api/approvals/my-decisions",
-      "/api/approvals/team-queue",
       "/api/approvals/consolidation",
     ]);
   });

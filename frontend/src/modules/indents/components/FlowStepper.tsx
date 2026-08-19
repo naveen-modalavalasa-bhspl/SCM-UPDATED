@@ -4,7 +4,7 @@ import {
   INDENT_APPROVAL_STAGE_TYPES, INDENT_APPROVALS_PHASE_INDEX, INDENT_PHASES,
   INDENT_PROCUREMENT_STATUSES, INDENT_STATUS,
 } from "../constants";
-import type { IndentJourney, IndentJourneyStage } from "../types";
+import type { IndentJourney, IndentJourneyStage, RaiserTracking } from "../types";
 
 type StepState =
   | "completed" | "current" | "pending" | "rejected" | "returned" | "cancelled"
@@ -20,6 +20,8 @@ interface SummaryStep {
 interface FlowStepperProps {
   status: string;
   journey?: IndentJourney;
+  /** Present only for the raiser. These legs replace the old warehouse delivery guess. */
+  shipments?: RaiserTracking[];
   isLoading?: boolean;
 }
 
@@ -253,6 +255,79 @@ function buildSteps(status: string, journey?: IndentJourney): SummaryStep[] | nu
   return steps;
 }
 
+const ARRIVED_SHIPMENT_STATUSES = new Set(["DELIVERED", "ACKNOWLEDGED", "CLOSED"]);
+const SIGNED_SHIPMENT_STATUSES = new Set(["ACKNOWLEDGED", "CLOSED"]);
+
+function shipmentLocation(shipments: RaiserTracking[]) {
+  const events = shipments.flatMap((leg) => leg.events ?? []);
+  return [...events]
+    .sort((left, right) => Date.parse(right.event_at) - Date.parse(left.event_at))
+    .find((event) => event.location_name?.trim())?.location_name?.trim();
+}
+
+/**
+ * Once logistics has a leg, it is the source of truth for the final two steps.
+ * The old journey contract stops at warehouse dispatch and cannot tell whether a
+ * courier is still moving, has delivered, or the raiser has actually signed.
+ */
+function applyShipmentProgress(
+  steps: SummaryStep[],
+  shipments: RaiserTracking[] | undefined,
+) {
+  if (shipments === undefined) return steps;
+  const deliveryIndex = steps.findIndex((step) => step.key === "delivery");
+  const receiptIndex = steps.findIndex((step) => step.key === "acknowledgement");
+  if (deliveryIndex < 0 || receiptIndex < 0) return steps;
+
+  const next = steps.map((step) => ({ ...step }));
+  if (shipments.length === 0) {
+    // Do not drag a draft/approval/allocation request forward. Only rename the live
+    // delivery step once the existing journey says the request has reached it.
+    if (next[deliveryIndex].state === "current") {
+      next[deliveryIndex].caption = "Waiting for logistics dispatch";
+      next[receiptIndex] = { ...next[receiptIndex], state: "pending", caption: "After arrival" };
+    }
+    return next;
+  }
+
+  const statuses = shipments.map((leg) => String(leg.status ?? "").toUpperCase());
+  const allArrived = statuses.every((status) => ARRIVED_SHIPMENT_STATUSES.has(status));
+  const allSigned = shipments.every((leg, index) => (
+    Boolean(leg.acknowledged_at) || SIGNED_SHIPMENT_STATUSES.has(statuses[index])
+  ));
+  const location = shipmentLocation(shipments);
+
+  next[deliveryIndex] = {
+    ...next[deliveryIndex],
+    state: allArrived ? "completed" : "current",
+    caption: allArrived
+      ? `${shipments.length} shipment${shipments.length === 1 ? "" : "s"} arrived`
+      : location ? `In transit · ${location}` : "Being handled by logistics",
+  };
+  next[receiptIndex] = {
+    ...next[receiptIndex],
+    state: allSigned ? "completed" : allArrived ? "current" : "pending",
+    caption: allSigned
+      ? "Signed by you"
+      : allArrived ? "Waiting for your signature" : "Sign when it arrives",
+  };
+  return next;
+}
+
+function shipmentStageMessage(shipments: RaiserTracking[] | undefined) {
+  if (!shipments?.length) return undefined;
+  const unsigned = shipments.filter((leg) => !leg.acknowledged_at
+    && !SIGNED_SHIPMENT_STATUSES.has(String(leg.status ?? "").toUpperCase()));
+  if (unsigned.length === 0) return "All delivered material has been signed for";
+  const arrived = unsigned.filter((leg) =>
+    String(leg.status ?? "").toUpperCase() === "DELIVERED").length;
+  if (arrived > 0) {
+    return `${arrived} delivery${arrived === 1 ? " is" : "ies are"} waiting for your signature`;
+  }
+  const location = shipmentLocation(unsigned);
+  return location ? `Your material is in transit at ${location}` : "Your material is with logistics";
+}
+
 function fallbackStageMessage(journey: IndentJourney, steps: SummaryStep[], status: string) {
   const currentIndex = steps.findIndex((step) => step.state === "current");
   if (currentIndex === 0) return "Draft — submit the indent to begin approval";
@@ -343,9 +418,10 @@ function FlowStepperSkeleton() {
 }
 
 export function FlowStepper({
-  status, journey, isLoading = false,
+  status, journey, shipments, isLoading = false,
 }: FlowStepperProps) {
-  const steps = buildSteps(status, journey);
+  const builtSteps = buildSteps(status, journey);
+  const steps = builtSteps ? applyShipmentProgress(builtSteps, shipments) : null;
 
   if (isLoading && !steps) return <FlowStepperSkeleton />;
 
@@ -360,7 +436,8 @@ export function FlowStepper({
   const effectiveStatus = String(status || journey?.status || "").trim().toUpperCase();
   const currentIndex = steps.findIndex((step) => step.state === "current");
   const haltedIndex = steps.findIndex((step) => isHalted(step.state));
-  const currentStageMessage = journey?.current_stage_message?.trim()
+  const currentStageMessage = shipmentStageMessage(shipments)
+    || journey?.current_stage_message?.trim()
     || (journey ? fallbackStageMessage(journey, steps, effectiveStatus) : undefined);
   const settled = steps.every((step) => step.state === "completed" || step.state === "skipped");
   const summaryIndex = currentIndex >= 0

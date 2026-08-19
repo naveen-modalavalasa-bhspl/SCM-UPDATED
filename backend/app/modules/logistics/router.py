@@ -7,7 +7,10 @@ carries no `require_permission`: a carrier holds no RBAC role, so `get_current_v
 is the whole guard and every function filters on the carrier id taken from the token.
 Same arrangement the supplier portal already uses.
 """
+from datetime import date
+
 from fastapi import APIRouter, Depends
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -15,7 +18,7 @@ from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.logistics import partners, service
 from app.modules.logistics.schemas import (
-    AcceptQuoteIn, AcknowledgeIn, ActionIn, AwardIn, CarrierAcceptIn, CarrierConfirmIn,
+    AcceptQuoteIn, ActionIn, ActivityRow, AwardIn, CarrierAcceptIn, CarrierConfirmIn,
     CarrierDeclineIn, CarrierTrackIn, ConsignmentLink, DeliverIn, DispatchIn, EventIn,
     EventOut, GRNCreate, GRNListRow, GRNOut, InviteIn, IssueCreate, IssueOut, Option,
     PartnerCreate, PartnerLoginIn, PartnerOut, PartnerUpdate, ProviderBoardRow,
@@ -23,6 +26,7 @@ from app.modules.logistics.schemas import (
     TRListRow, TROut, TRUpdate,
 )
 from app.platform.rbac import permissions as perms
+from app.platform.settings.schemas import AttachmentRead
 
 router = APIRouter(tags=["logistics"])
 
@@ -148,19 +152,6 @@ async def transport_for_indent(
     return await service.for_indent(db, indent_id, user)
 
 
-# The raiser signing for their own material. Same transition as /acknowledge below and
-# the same function beneath it — what differs is only the door: this one is opened by
-# having RAISED the indent (checked in the service), so the person the material was for
-# can close their own loop without being handed the logistics desk's tracking and
-# dispatch buttons, which `transport.acknowledge` would bring with it.
-@transport_router.post("/{tr_id:int}/raiser-acknowledge", response_model=TROut)
-async def raiser_acknowledge_transport(
-        tr_id: int, body: AcknowledgeIn = AcknowledgeIn(),
-        db: AsyncSession = Depends(get_db),
-        user=Depends(require_permission(perms.INDENT_VIEW))):
-    return await service.acknowledge_as_raiser(db, tr_id, body, user)
-
-
 # Provider Selection's own board. A register rather than a filter on /api/transport:
 # it carries the reply counts and the best price on the table, which the transport
 # register has no reason to compute for every row it ever shows.
@@ -170,14 +161,6 @@ async def transport_provider_board(
         search: str | None = None, db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.provider_board(db, params, status, search)
-
-
-@transport_router.get("/acknowledgements", response_model=Page[TRListRow])
-async def transport_acknowledgements(
-        params: PageParams = Depends(), search: str | None = None,
-        db: AsyncSession = Depends(get_db),
-        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
-    return await service.list_trs(db, params, search=search, awaiting_ack=True)
 
 
 @transport_router.get("/carriers", response_model=list[Option])
@@ -192,6 +175,31 @@ async def transport_exceptions(
         params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.open_exceptions(db, params)
+
+
+# The activity ledger: what happened, to which shipment, in the order it happened.
+# `dispatch_id` is how the Dispatch screen asks for one consignment's own trail
+# without the desk having to know its transport request number.
+@transport_router.get("/activity", response_model=Page[ActivityRow])
+async def transport_activity(
+        params: PageParams = Depends(), search: str | None = None,
+        date_from: date | None = None, date_to: date | None = None,
+        event_type: str | None = None, only_exceptions: bool = False,
+        tr_id: int | None = None, dispatch_id: int | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return await service.activity_ledger(
+        db, params, search=search, date_from=date_from, date_to=date_to,
+        event_type=event_type, only_exceptions=only_exceptions, tr_id=tr_id,
+        dispatch_id=dispatch_id)
+
+
+# Served, never a constant in the screen: a filter offering an event the ledger
+# cannot return is a dropdown that silently empties the page.
+@transport_router.get("/activity-types", response_model=list[dict])
+async def transport_activity_types(
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return service.activity_catalogue()
 
 
 @transport_router.get("", response_model=Page[TRListRow])
@@ -232,6 +240,23 @@ async def dispatch_consignment(body: QuickDispatchIn,
 async def get_transport(tr_id: int, db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.get_tr(db, tr_id)
+
+
+@transport_router.get("/{tr_id:int}/receipt-evidence",
+                      response_model=list[AttachmentRead])
+async def transport_receipt_evidence(
+        tr_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return await service.receipt_evidence(db, tr_id)
+
+
+@transport_router.get("/{tr_id:int}/receipt-evidence/{attachment_id:int}/download")
+async def download_transport_receipt_evidence(
+        tr_id: int, attachment_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    path, file_name, media_type = await service.receipt_evidence_file(
+        db, tr_id, attachment_id)
+    return FileResponse(path, filename=file_name, media_type=media_type)
 
 
 @transport_router.put("/{tr_id:int}", response_model=TROut)
@@ -384,14 +409,6 @@ async def deliver_transport(tr_id: int, body: DeliverIn = DeliverIn(),
 async def share_tracking(tr_id: int, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.TRANSPORT_TRACK))):
     return await service.share_tracking(db, tr_id, user)
-
-
-@transport_router.post("/{tr_id}/acknowledge", response_model=TROut)
-async def acknowledge_transport(
-        tr_id: int, body: AcknowledgeIn = AcknowledgeIn(),
-        db: AsyncSession = Depends(get_db),
-        user=Depends(require_permission(perms.TRANSPORT_ACKNOWLEDGE))):
-    return await service.acknowledge_tr(db, tr_id, body, user)
 
 
 @transport_router.post("/{tr_id}/close", response_model=TROut)

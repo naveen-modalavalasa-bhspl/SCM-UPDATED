@@ -1,5 +1,5 @@
 import { Link, Navigate, NavLink, Outlet, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { LogOut, Truck, User } from "lucide-react";
 import { api, clearVendorToken, vendorToken } from "@/shared/api/client";
 
@@ -19,6 +19,7 @@ import { api, clearVendorToken, vendorToken } from "@/shared/api/client";
  */
 export function CarrierLayout() {
   const nav = useNavigate();
+  const qc = useQueryClient();
   const token = vendorToken();
 
   const { data: profile } = useQuery({
@@ -31,6 +32,11 @@ export function CarrierLayout() {
 
   const signOut = () => {
     clearVendorToken();
+    // The cache goes with the token. None of the portal's query keys carry a carrier
+    // id — there is one signed-in carrier at a time — so anything left behind is
+    // served to whoever signs in next: the previous partner's shipments, their badge
+    // counts, and their price on a lane this one has not answered yet.
+    qc.clear();
     nav("/carrier/login", { replace: true });
   };
 

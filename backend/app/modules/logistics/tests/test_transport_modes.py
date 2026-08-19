@@ -44,7 +44,7 @@ def test_carrier_modes_require_a_carrier_field_and_others_do_not():
 def test_hand_over_records_both_people_and_hires_nobody():
     rule = mode_rule(TransportMode.DIRECT.value)
     assert not rule.needs_carrier and not rule.needs_quotes
-    assert set(rule.required_fields) == {"handed_over_by_name", "received_by_name"}
+    assert set(rule.required_fields) == {"handed_over_by_name"}
 
 
 def test_own_vehicle_records_the_vehicle_and_hires_nobody():

@@ -17,6 +17,21 @@ const SCANS = [
   { value: "DELAYED", label: "Delayed" },
 ];
 
+/** Every number the desk needs before it can compare this offer against another.
+ *
+ * A quote missing the tax or the transit days is not a cheaper quote — it is an
+ * unrankable one: the landed cost and the lead time are what the comparison scores,
+ * and a blank there silently becomes a zero that flatters the bid. So the portal will
+ * not send one. The note stays optional; it is the only field that carries no number.
+ */
+const QUOTE_REQUIRED = [
+  "freight_amount", "other_charges", "tax_percent", "transit_days", "vehicle_type",
+] as const;
+
+/** The one quote status that means the job is theirs. Anything else on a settled
+ *  request — outbid, declined, or never priced — is a tender they did not win. */
+const WON = "AWARDED";
+
 /**
  * One job, from the carrier's side of the fence.
  *
@@ -119,7 +134,19 @@ export function CarrierJobPage() {
   if (isLoading) return <p className="py-10 text-center text-sm text-muted">Loading…</p>;
   if (!job) return <ErrorBanner error={error} />;
 
+  // The tender is over and it went to somebody else. Read off THEIR quote, never off
+  // the shipment's status: past the award the status is describing another carrier's
+  // truck, and the portal serves this screen with the winner's half — price, vehicle,
+  // LR, scans — blanked out. So the answer has to come from the one row that is still
+  // theirs. Every action panel below is gated on it: a losing carrier was being shown
+  // "You won this shipment" the moment the award landed, because that card keyed on
+  // AWAITING_CARRIER alone.
+  const lost = !!myQuote && myQuote.status !== WON && job.status !== "QUOTING";
+
   const quoted = !!myQuote && myQuote.status !== "INVITED";
+  // "0" is an answer; "" is not. Nothing is inferred for them — a zero they typed and
+  // a zero we assumed read identically on the comparison sheet.
+  const quoteReady = QUOTE_REQUIRED.every((key) => quote[key].trim() !== "");
   // The desk sent the price back with a note. It is the first thing to read: it is
   // the only reason this job is on the "quote for it" list a second time.
   const askedAgain = myQuote && myQuote.status === "INVITED"
@@ -137,12 +164,13 @@ export function CarrierJobPage() {
           </h1>
         </div>
         <div className="flex items-center gap-2">
-          <StatusPill status={job.status} />
+          <StatusPill status={lost ? "NOT_AWARDED" : job.status} />
           {/* Back to the queue this job is actually on, not to whatever tab the board
               defaults to — landing somewhere the job isn't reads as it having vanished. */}
           <Button variant="ghost" onClick={() => nav(`/carrier/jobs?queue=${
-            ["DELIVERED", "ACKNOWLEDGED"].includes(job.status)
-              ? "DELIVERED,ACKNOWLEDGED" : job.status}`)}>Back</Button>
+            lost ? "NOT_AWARDED"
+              : ["DELIVERED", "ACKNOWLEDGED"].includes(job.status)
+                ? "DELIVERED,ACKNOWLEDGED" : job.status}`)}>Back</Button>
         </div>
       </div>
 
@@ -163,6 +191,13 @@ export function CarrierJobPage() {
           <Row label="Agreed price" value={job.freight_amount
             ? money(job.freight_amount) : null} />
           <Row label="Your reference" value={job.carrier_reference} />
+          {/* What this load is FOR. Already in the payload the portal has always been
+              served — `indent_no` is on TROut — it simply was never drawn, so a carrier
+              had a shipment number and no idea which request it answered. Rendered
+              through `Row`, which hides itself when the field is empty: a leg raised
+              against a consolidated consignment names a dispatch rather than any one
+              indent, and an ambiguous number is worse here than none. */}
+          <Row label="Against request" value={job.indent_no} />
           <Row label="LR / docket" value={job.lr_no ?? job.docket_no} />
           <Row label="Note" value={job.remarks} />
         </dl>
@@ -200,8 +235,34 @@ export function CarrierJobPage() {
         )}
       </Card>
 
+      {lost && (
+        <Card className="space-y-2 p-5">
+          <h2 className="font-display text-lg font-semibold text-ink">
+            {myQuote?.status === "DECLINED" ? "You declined this job"
+              : myQuote?.status === "INVITED" ? "The tender has closed"
+                : "Not awarded"}
+          </h2>
+          <p className="text-sm text-body">
+            {myQuote?.status === "DECLINED"
+              ? "You turned this shipment down, and the desk placed it with another carrier."
+              : myQuote?.status === "INVITED"
+                ? "This lane was placed with another carrier before your price came in."
+                : "The logistics desk placed this shipment with another carrier. "
+                  + "Nothing more is needed from you on it."}
+          </p>
+          {myQuote?.freight_amount != null && (
+            <p className="text-xs text-muted">
+              You quoted {money(myQuote.freight_amount)}
+              {myQuote.submitted_at ? ` on ${fmtDateTime(myQuote.submitted_at)}` : ""}.
+            </p>
+          )}
+          {/* What it went for, and to whom, is not shown: a tender where the losing
+              bidders can read the winning price is not a tender. */}
+        </Card>
+      )}
+
       {/* Whatever this carrier's next move is — and only that. */}
-      {job.status === "QUOTING" && (
+      {!lost && job.status === "QUOTING" && (
         <Card className="space-y-3 p-5">
           <div>
             <h2 className="font-display text-lg font-semibold text-ink">
@@ -212,7 +273,8 @@ export function CarrierJobPage() {
             <p className="text-xs text-muted">
               {myQuote?.submitted_at
                 ? `You quoted ${money(myQuote.freight_amount)} on ${fmtDateTime(myQuote.submitted_at)}.`
-                : "Your price to move it, anything on top, and how many days you need."}
+                : "Your price to move it, anything on top, and how many days you need. "
+                  + "Every field marked * has to be answered — 0 where nothing applies."}
             </p>
           </div>
 
@@ -241,23 +303,23 @@ export function CarrierJobPage() {
                 {/* "Freight" is the trade word and the API field, but this form is read by
                     a truck operator, not a logistics desk — the label says what to type.
                     The field stays `freight_amount`; only the words changed. */}
-                <Field label="Transport charge" hint="Your price to move this load">
+                <Field label="Transport charge" hint="Your price to move this load" required>
                   <Input type="number" value={quote.freight_amount}
                     onChange={(e) => setQuote({ ...quote, freight_amount: e.target.value })} />
                 </Field>
-                <Field label="Other charges" hint="Loading, detention">
+                <Field label="Other charges" hint="Loading, detention" required>
                   <Input type="number" value={quote.other_charges}
                     onChange={(e) => setQuote({ ...quote, other_charges: e.target.value })} />
                 </Field>
-                <Field label="Tax %">
+                <Field label="Tax %" required>
                   <Input type="number" value={quote.tax_percent}
                     onChange={(e) => setQuote({ ...quote, tax_percent: e.target.value })} />
                 </Field>
-                <Field label="Transit days">
+                <Field label="Transit days" required>
                   <Input type="number" value={quote.transit_days}
                     onChange={(e) => setQuote({ ...quote, transit_days: e.target.value })} />
                 </Field>
-                <Field label="Vehicle type">
+                <Field label="Vehicle type" required>
                   <Input value={quote.vehicle_type}
                     onChange={(e) => setQuote({ ...quote, vehicle_type: e.target.value })} />
                 </Field>
@@ -266,18 +328,25 @@ export function CarrierJobPage() {
                     onChange={(e) => setQuote({ ...quote, remarks: e.target.value })} />
                 </Field>
               </div>
-              <Button
-                onClick={() => sendQuote.mutate()}
-                disabled={sendQuote.isPending || !quote.freight_amount}
-              >
-                {sendQuote.isPending ? "Sending…" : "Send quote"}
-              </Button>
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  onClick={() => sendQuote.mutate()}
+                  disabled={sendQuote.isPending || !quoteReady}
+                >
+                  {sendQuote.isPending ? "Sending…" : "Send quote"}
+                </Button>
+                {!quoteReady && (
+                  <span className="text-xs text-muted">
+                    Fill every field marked * — put 0 where nothing applies.
+                  </span>
+                )}
+              </div>
             </>
           )}
         </Card>
       )}
 
-      {job.status === "AWAITING_CARRIER" && (
+      {!lost && job.status === "AWAITING_CARRIER" && (
         <Card className="space-y-4 p-5">
           <div>
             <h2 className="font-display text-lg font-semibold text-ink">
@@ -317,7 +386,7 @@ export function CarrierJobPage() {
         </Card>
       )}
 
-      {["READY", "IN_TRANSIT"].includes(job.status) && (
+      {!lost && ["READY", "IN_TRANSIT"].includes(job.status) && (
         <Card className="space-y-3 p-5">
           <div>
             <h2 className="font-display text-lg font-semibold text-ink">
@@ -359,7 +428,7 @@ export function CarrierJobPage() {
         </Card>
       )}
 
-      {job.status === "IN_TRANSIT" && (
+      {!lost && job.status === "IN_TRANSIT" && (
         <Card className="space-y-3 p-5">
           <div className="flex items-center gap-2">
             <PackageCheck className="h-4 w-4 text-brand" />
@@ -393,7 +462,7 @@ export function CarrierJobPage() {
         </Card>
       )}
 
-      {["DELIVERED", "ACKNOWLEDGED"].includes(job.status) && (
+      {!lost && ["DELIVERED", "ACKNOWLEDGED"].includes(job.status) && (
         <Card className="p-5">
           <p className="text-sm text-body">
             Delivered {fmtDateTime(job.delivered_at)}

@@ -152,23 +152,29 @@ PAGES: list[PageDef] = [
     # the question "who is taking this", and that question already had a page.
     PageDef("logistics_providers", "/logistics/providers", "Provider Selection",
             parent="grp_logistics", module="logistics", sort_order=4),
-    PageDef("logistics_tracking", "/logistics/tracking", "Shipment Tracking",
+    # What happened, to which shipment, in the order it happened — one register in
+    # place of the three tabs that each drew a slice of it. Shipment Tracking answered
+    # "where is it now", Exceptions answered "what went wrong", and neither said who
+    # awarded the job, at what price, or when the carrier agreed to it; a desk chasing
+    # a consignment read half the story on one tab and half on another. The ledger is
+    # derived from the documents (`transport.activity_ledger`), so it can only ever
+    # show events that were actually recorded.
+    PageDef("logistics_activity", "/logistics/activity", "Activity Ledger",
             parent="grp_logistics", module="logistics", sort_order=5),
-    # Acknowledgements and Exceptions are NOT listed here any more, and that is
-    # deliberate rather than an omission.
+    # Shipment Tracking, Acknowledgements and Exceptions are NOT listed here any more,
+    # and that is deliberate rather than an omission.
     #
-    # Signing for what arrived is the INDENT RAISER's act — they asked for the material,
-    # so they are the only person who can say what turned up — and that screen lives
-    # under Indents. A claim their signature raises stays on the shipment timeline,
-    # which Shipment Tracking draws, so nothing is lost: only the second desk reading it
-    # is gone.
+    # Tracking and Exceptions were replaced by the Activity Ledger above, which carries
+    # both of their contents and the rest of the trail besides. Signing for what arrived
+    # is the INDENT RAISER's act — they asked for the material, so they are the only
+    # person who can say what turned up — and that screen lives under Indents.
     #
     # Dropping the rows from this catalogue keeps a NEW database clean. It cannot clear
     # an existing one: `sync_pages` inserts and refreshes but never deletes, and never
     # forces `is_active` either way, precisely so an admin who retired a screen does not
-    # get it back on the next restart. On a database that already has these two rows, an
-    # admin deactivates them on the RBAC screen; until they do, the paths redirect to
-    # Shipment Tracking rather than dead-ending.
+    # get it back on the next restart. On a database that already has these rows the
+    # Alembic migration parks them; until then, the paths redirect to the ledger rather
+    # than dead-ending.
     # The register behind the Dispatch dropdown: the third-party providers (Amazon,
     # Flipkart, Alibaba, Misaba, a truck operator) and their portal logins. It now sits
     # in the LOGISTICS tabs, beside the Dispatch screen whose dropdown it fills — a

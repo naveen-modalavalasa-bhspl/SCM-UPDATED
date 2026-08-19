@@ -111,7 +111,7 @@ Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock
 Logistics runs the whole outward leg, in the order it happens:
 
 ```
-Consignments → Dispatch → Transport Requests → Tracking → Acknowledgements → Exceptions
+Consignments → Dispatch → Transport Requests → Provider Selection → Activity Ledger
 ```
 
 **Consignments is the WAREHOUSE's document** (`out_dispatches`) and its own screen,
@@ -170,13 +170,44 @@ TR  DRAFT → PENDING_APPROVAL → QUOTING* → AWAITING_CARRIER* → READY
   differ in whether there was a tender, never in whether the carrier gets a say.
 - **Delivered is the carrier's word; acknowledged is the site's.** A carrier can never
   set `ACKNOWLEDGED` — the receiving site signs, and SHORT/DAMAGED raises a claim on
-  the same shipment timeline (`lgs_shipment_events`, the Exceptions desk).
+  the same shipment timeline (`lgs_shipment_events`), which the Activity Ledger reads.
+- **The Activity Ledger replaced Shipment Tracking and Exceptions** (2026-08-19).
+  Those two each drew ONE slice of the same trail — where is it now, what went wrong —
+  so a desk chasing a consignment read half the story on one tab and half on another,
+  and neither said who awarded the job, at what price, or when the carrier agreed to
+  it. `transport.activity_ledger` (`GET /api/transport/activity`) unions the four
+  places a logistics event is ALREADY recorded — the request header, `wf_actions` for
+  both doc types, `lgs_carrier_quotes` and `lgs_shipment_events` — so nothing is
+  written for the ledger's benefit and it cannot show an event the documents do not
+  carry. `?dispatch_id=` scopes it to one consignment's trail, which is how the
+  Dispatch queue opens it per row. The wording of an event and the rung it puts the
+  shipment on are SERVED from `enums.ACTIVITY_META` (`/activity-types` feeds the
+  filter), never mapped in the screen. Closing a claim moved onto the claim itself,
+  in `ShipmentTimeline` — a ledger is a record, not a work queue. Both retired paths
+  redirect to `/logistics/activity`; `c5d6e7f8a9b2` parks their menu rows, and
+  `page.logistics_activity.view` inherits its grants from
+  `page.logistics_tracking.view` so the desk that worked the board keeps the screen
+  that replaced it.
 - The stepper and the mode rules are SERVED (`/api/transport/flow`, `/modes`), never
   duplicated in the screen.
 - The carrier portal is the vendor account (`/carrier/*`, served under `/api/supplier`
   so the shared axios client attaches the vendor token; also mounted at `/api/carrier`).
   Every function takes the carrier id from the token, and past the award only the
-  winner can read or write the shipment.
+  winner can WRITE the shipment. **Losing a tender is an answer, and the portal gives
+  it**: `_carrier_scope(..., lost=True)` is a second, read-only scope — a request past
+  QUOTING, carrying a quote of theirs, awarded to somebody else — served as its own
+  queue (`?status=NOT_AWARDED`, plus `not_awarded` on the summary) and never mixed into
+  the live ones, so an unawarded shipment can't surface under "collect". It reads over
+  `CARRIER_OUTCOME_STATUSES`, which is the live set plus CLOSED: closing ends the
+  WINNER's work, but to the carrier who lost it closed is the final answer, and most
+  tenders end there — leaving it out was the whole queue coming up empty. Rows on it are
+  redacted to `WINNER_ONLY_FIELDS` on a detached schema: the loser keeps the lane, the
+  load and their own quote, and is shown neither the winning price nor the carrier nor
+  the tracking. Which of outbid / declined / never-priced it was comes from THEIR quote
+  status, because past the award the shipment's status describes another carrier's
+  truck. Before this the shipment simply vanished off their board with nothing said —
+  and the "you won this shipment" panel keyed on AWAITING_CARRIER alone, so it drew for
+  the loser too.
 
 **What the merge into `qa` changed** (2026-08-17), on top of the branch as delivered:
 
