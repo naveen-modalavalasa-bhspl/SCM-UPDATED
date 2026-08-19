@@ -8,14 +8,26 @@ const TOP_ALLOCATION_STATUS_TONE: Partial<Record<string, string>> = {
   [INDENT_STATUS.AWAITING_ALLOCATION]: "bg-info-bg text-info",
 };
 
-/** Read the role from the dynamically resolved stage, never from approver names. */
+/**
+ * Who a stage belongs to, taken straight from the resolved chain. The ladder is
+ * configured per project, so no rank is ever assumed, mapped or abbreviated
+ * here — the only edit is dropping a trailing "Review"/"Approval" from a stage
+ * title so the badge reads "Pending at X" rather than "Pending at X Review".
+ *
+ * A hardcoded RM/DM/OE/SPH/COO lookup was tried here and taken back out. The rungs
+ * are HCM role ids and an admin picks them per project on Approvals Config, so a map
+ * in the frontend is wrong twice: a rank nobody listed renders as a bare abbreviation,
+ * and the next HCM cutover re-keys the roles without touching this file. It also hid
+ * the approver's NAME behind their rank, which is the one thing the badge is for.
+ */
 function stageOwner(stage?: IndentJourneyStage) {
-  const title = stage?.title?.trim().replace(/\s+/g, " ");
-  if (!title) return null;
-  if (/^(Final\s+)?Approval$/i.test(title)) {
-    return stage?.position_name?.trim().replace(/\s+/g, " ") || title;
-  }
-  return title.replace(/\s+(Review|Approval)$/i, "").trim();
+  const approver = stage?.approver_name?.trim().replace(/\s+/g, " ");
+  if (approver) return approver;
+  const position = stage?.position_name?.trim().replace(/\s+/g, " ");
+  if (position) return position;
+  const title = stage?.title?.trim().replace(/\s+/g, " ")
+    .replace(/\s+(Review|Approval)$/i, "").trim();
+  return title || null;
 }
 
 function pendingStageLabel(journey?: IndentJourney) {
@@ -80,6 +92,7 @@ export function IndentStatusBadge({ status, journey }: { status: string; journey
       color={status === INDENT_STATUS.REJECTED ? "danger" : "warning"}
       classNames={{ content: `text-[11px] font-semibold uppercase tracking-wide ${status === INDENT_STATUS.RETURNED_FOR_CORRECTION ? "normal-case" : ""}` }}
     >
+      {/* Names come from HCM and can be long — truncate, never abbreviate. */}
       <span className="block max-w-56 truncate" title={label}>{label}</span>
     </Chip>
   );

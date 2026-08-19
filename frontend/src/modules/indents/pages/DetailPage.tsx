@@ -217,7 +217,11 @@ export function IndentDetailPage() {
       ? nonEmptyText(me?.active_position?.office_sac) : null)
     ?? (indent.office_id === me?.employee.office_id
       ? nonEmptyText(me?.employee.office_sac) : null)
-    ?? nonEmptyText(me?.positions.find((position) => position.office_id === indent.office_id)?.office_sac);
+    // `me?.positions?.` and not `me?.positions.` — the optional chain has to cover the
+    // array too. A session with no positions list took the whole detail page down with
+    // it, and this is the last of four fallbacks: an SAC nobody can find is a blank
+    // field, never a blank screen.
+    ?? nonEmptyText(me?.positions?.find((position) => position.office_id === indent.office_id)?.office_sac);
   const returnedBy = returnedByFromJourney(journey);
   const correctionOwner = nonEmptyText(indent.correction_owner?.employee_name)
     ?? (indent.correction_owner?.employee_id ? `Employee #${indent.correction_owner.employee_id}` : null);

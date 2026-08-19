@@ -4,7 +4,7 @@ import { FlowStepper } from "../components/FlowStepper";
 import type { IndentJourney, IndentJourneyStage } from "../types";
 
 const PHASE_TITLES = [
-  "Draft", "Submitted", "Approvals", "Allocation", "Warehouse", "Delivery",
+  "Draft", "Submitted", "Approvals", "Allocation", "Warehouse", "In-Transit",
   "Acknowledgement",
 ];
 
@@ -124,7 +124,7 @@ describe("FlowStepper", () => {
       "ApprovalsCustom Controller Review",
       "4AllocationPending",
       "5WarehousePending",
-      "6DeliveryPending",
+      "6In-TransitPending",
       "7AcknowledgementPending",
     ]);
     expect(screen.getByLabelText("Approvals, current: Custom Controller Review")).toBeInTheDocument();
@@ -175,7 +175,7 @@ describe("FlowStepper", () => {
 
     expect(screen.getByLabelText("Allocation, completed")).toHaveClass("bg-ok");
     expect(screen.getByLabelText("Warehouse, completed")).toHaveClass("bg-ok");
-    expect(screen.getByLabelText("Delivery, current")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("In-Transit, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Acknowledgement, pending")).toHaveClass("border-line");
   });
 
