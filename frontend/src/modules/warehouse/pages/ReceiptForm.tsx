@@ -239,8 +239,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         ordered_qty: num(line.ordered_qty),
         // What is still owed, as the count to confirm rather than a figure to trust:
         // the storekeeper overwrites it with what actually turned up.
-        received_qty: num(line.pending_qty),
-        accepted_qty: isGrn ? num(line.pending_qty) : 0,
+        received_qty: "" as any,
+        accepted_qty: "" as any,
         rate: line.rate ?? null,
       }));
       if (!added.length) {
