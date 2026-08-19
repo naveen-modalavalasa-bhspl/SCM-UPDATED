@@ -61,7 +61,7 @@ export default function StockMovements() {
       searchPlaceholder="Search order no, reason, warehouse…"
       createTo="new"
       createLabel="New order"
-      createPermission="stock.transfer"
+      createPermission="movement.create"
       onRowClick={() => undefined}
       empty="No stock movement orders recorded."
       onDelete={(row) => deleteStockMovement(row.id)}

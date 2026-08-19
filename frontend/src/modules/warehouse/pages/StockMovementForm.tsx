@@ -98,7 +98,7 @@ export default function StockMovementForm() {
             <Button variant="ghost" onClick={() => nav("/warehouse/stock-movements")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            <Can do="stock.transfer">
+            <Can do="movement.create">
               <Button
                 onClick={() => {
                   setTouched(true);

@@ -29,12 +29,13 @@ from app.platform.rbac.permissions import INDENT_VIEW
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
     DISPATCH_GATE_OUT, DISPATCH_VIEW, INSPECTION_DELETE, ISSUE_DELETE, MOVEMENT_DELETE,
+    MOVEMENT_CREATE, MOVEMENT_VIEW,
     PICKING_DELETE, PUTAWAY_DELETE, RECEIPT_DELETE, RETURN_DELETE,
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_FORWARD, ISSUE_POST,
     ISSUE_VIEW,
     MASTER_LOCATION_MANAGE, PICKING_PICK, PICKING_VIEW, PUTAWAY_EXECUTE, PUTAWAY_VIEW,
     RECEIPT_CREATE, RECEIPT_POST, RECEIPT_VIEW, RETURN_APPROVE, RETURN_CREATE, RETURN_VIEW,
-    STOCK_TRANSFER, STOCK_VIEW, WAREHOUSE_REPORT_VIEW,
+    STOCK_VIEW, WAREHOUSE_REPORT_VIEW,
 )
 from app.shared.enums import ApprovalAction
 
@@ -298,14 +299,14 @@ async def skip_putaway(task_id: int, body: s.ReasonIn, db: AsyncSession = Depend
 @router.get("/stock-movements", response_model=Page[s.StockMovementRead])
 async def list_stock_movements(params: PageParams = Depends(),
                                db: AsyncSession = Depends(get_db),
-                               _=Depends(require_permission(STOCK_VIEW))):
+                               _=Depends(require_permission(MOVEMENT_VIEW))):
     return await service.list_stock_movements(db, params)
 
 
 @router.post("/stock-movements", response_model=s.StockMovementRead, status_code=201)
 async def create_stock_movement(data: s.StockMovementWrite,
                                 db: AsyncSession = Depends(get_db),
-                                user=Depends(require_permission(STOCK_TRANSFER))):
+                                user=Depends(require_permission(MOVEMENT_CREATE))):
     return await service.create_stock_movement(db, data, user)
 
 
@@ -313,14 +314,14 @@ async def create_stock_movement(data: s.StockMovementWrite,
 async def list_stock_movement_orders(params: PageParams = Depends(),
                                      search: str | None = None,
                                      db: AsyncSession = Depends(get_db),
-                                     _=Depends(require_permission(STOCK_VIEW))):
+                                     _=Depends(require_permission(MOVEMENT_VIEW))):
     return await service.list_stock_movement_orders(db, params, search=search)
 
 
 @router.post("/stock-movement-orders", response_model=s.StockMovementOrderRead, status_code=201)
 async def create_stock_movement_order(data: s.StockMovementOrderWrite,
                                       db: AsyncSession = Depends(get_db),
-                                      user=Depends(require_permission(STOCK_TRANSFER))):
+                                      user=Depends(require_permission(MOVEMENT_CREATE))):
     return await service.create_stock_movement_order(db, data, user)
 
 

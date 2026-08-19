@@ -508,6 +508,14 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
     "Delete an unfinished dispatch that is still a draft.",
   "return.delete":
     "Delete an unfinished purchase return that is still a draft.",
+  "movement.view":
+    "Open and review stock movement orders.",
+  "movement.create":
+    "Create a new stock movement order to move items between bins.",
+  "movement.update":
+    "Update an existing stock movement order.",
+  "movement.approve":
+    "Approve a pending stock movement order.",
   "movement.delete":
     "Delete an unfinished stock movement that is still a draft.",
   "master.item.manage":

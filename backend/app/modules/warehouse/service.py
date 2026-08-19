@@ -3548,7 +3548,7 @@ async def create_stock_movement_order(
     await write_audit(
         db,
         entity="whs_stock_movements",
-        entity_id=order.id,
+        entity_id=0,
         entity_no=order_no,
         action=AuditAction.CREATE,
         actor=user,

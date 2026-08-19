@@ -133,6 +133,10 @@ ISSUE_DELETE = "issue.delete"
 DISPATCH_DELETE = "dispatch.delete"
 RETURN_DELETE = "return.delete"
 MOVEMENT_DELETE = "movement.delete"
+MOVEMENT_VIEW = "movement.view"
+MOVEMENT_CREATE = "movement.create"
+MOVEMENT_UPDATE = "movement.update"
+MOVEMENT_APPROVE = "movement.approve"
 
 # --- Masters ---
 MASTER_ITEM_MANAGE = "master.item.manage"
@@ -354,6 +358,10 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(RETURN_DELETE, "returns", "return", "delete", "Delete a draft return"),
     Perm(MOVEMENT_DELETE, "warehouse", "movement", "delete",
          "Delete a draft stock movement"),
+    Perm(MOVEMENT_VIEW, "warehouse", "movement", "view", "View stock movements"),
+    Perm(MOVEMENT_CREATE, "warehouse", "movement", "create", "Create stock movements"),
+    Perm(MOVEMENT_UPDATE, "warehouse", "movement", "update", "Update stock movements"),
+    Perm(MOVEMENT_APPROVE, "warehouse", "movement", "approve", "Approve stock movements"),
     Perm(MASTER_ITEM_MANAGE, "masters", "item", "manage", "Manage items"),
     Perm(MASTER_VENDOR_MANAGE, "masters", "vendor", "manage", "Manage vendors"),
     Perm(MASTER_CATEGORY_MANAGE, "masters", "category", "manage", "Manage item categories"),
