@@ -95,7 +95,8 @@ async def _pos_due(db: AsyncSession) -> list[dict]:
     stmt = (
         select(PurchaseOrder)
         .where(PurchaseOrder.status.in_([
-            POStatus.SENT_TO_VENDOR.value, POStatus.PARTIALLY_RECEIVED.value,
+            POStatus.SENT_TO_VENDOR.value, POStatus.ACCEPTED_BY_SUPPLIER.value,
+            POStatus.PARTIALLY_RECEIVED.value,
         ]))
         .where(PurchaseOrder.expected_date.is_not(None))
         .where(PurchaseOrder.expected_date <= due_by)

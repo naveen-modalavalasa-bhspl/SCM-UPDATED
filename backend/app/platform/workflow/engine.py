@@ -9,6 +9,7 @@ Rules honoured:
 - approval_actions rows are append-only (never deleted).
 Engine functions flush but do not commit — the calling module owns the transaction.
 """
+import logging
 from types import SimpleNamespace
 
 from sqlalchemy import func, select
@@ -25,6 +26,8 @@ from app.platform.workflow.models import (
 )
 from app.shared.enums import ApprovalAction, ApprovalMode, ApproverType, InstanceStatus
 from app.shared.models.base import utcnow
+
+logger = logging.getLogger(__name__)
 
 _ACTION_ALIASES = {
     "APPROVE": ApprovalAction.APPROVED.value,
@@ -1118,6 +1121,101 @@ async def settle(db, doc_type: str, doc_id: int, user, reason: str = "") -> Inst
     instance.completed_at = utcnow()
     instance.current_stage_name = None
     await db.flush()
+    return instance
+
+
+async def move_to_workflow(db, instance_id: int, workflow_id: int, user,
+                           reason: str = "") -> Instance:
+    """Re-point a document already in approval at another chain, and re-resolve it.
+
+    An admin who fixes a wrong ladder has, until now, fixed it only for the documents
+    raised *after* the fix: `resolved_chain` is frozen at submit precisely so editing a
+    ladder cannot move a document mid-flight (rule 8). That freeze is right as a
+    default and wrong as an absolute — a chain saved with the wrong rung strands real
+    documents in a stranger's queue, and the only remedy was to reject and re-raise
+    them, which throws away the trail.
+
+    So this is the one deliberate door through the freeze, and it stays narrow:
+
+      * it is the ADMIN's action, never the module's — nothing in app.modules calls it;
+      * it only moves LADDER instances. A legacy stage-walking workflow decides its
+        approvers from `wf_stages` as it goes, so there is no frozen chain to swap and
+        re-pointing one would silently change how it resolves. Refused outright.
+      * it re-resolves from scratch against the target's rungs, using the RAISER's
+        reporting line and the target ladder's own self-approval policy — the same
+        resolution `start()` runs, so a moved document lands exactly where it would
+        have had it been raised on this chain in the first place;
+      * an empty resolution is refused rather than auto-approved. `start()` may close a
+        document the raiser sits at the top of; an admin pressing Move must never be
+        able to approve somebody else's document by choosing an empty ladder.
+      * the document restarts at rung 1 of the new chain. Approvals already given were
+        given by a chain that no longer governs it, and carrying them across by name
+        would silently skip rungs on the new one. The old actions stay (rule 9) — the
+        trail reads as one document that changed chains, with a MOVED row saying when,
+        by whom and why.
+    """
+    instance = (await db.execute(
+        select(Instance).where(Instance.id == instance_id).with_for_update()
+    )).scalars().first()
+    if instance is None:
+        raise ValidationError("Approval not found")
+    if instance.status != InstanceStatus.IN_PROGRESS.value:
+        raise ValidationError("Only a document still in approval can be moved")
+    if not _chain_links(instance):
+        raise ValidationError(
+            "This document is on a stage-by-stage workflow, not a ladder, and cannot "
+            "be moved")
+    if int(instance.workflow_id or 0) == int(workflow_id):
+        raise ValidationError("This document is already on that version")
+
+    wf = await db.get(Workflow, workflow_id)
+    if wf is None or wf.doc_type != instance.doc_type:
+        raise ValidationError(f"No {instance.doc_type} chain with id {workflow_id}")
+
+    stages = await _stages(db, wf.id)
+    policy, _fallback_position_id = await ladder.read_policy(db, stages)
+    if policy == ladder.POLICY_NONE:
+        raise ValidationError(
+            "That chain needs no approval, so a document cannot be moved onto it")
+
+    # The raiser's post, not the admin's: the target ladder is climbed from whoever
+    # raised the document, exactly as it would have been at submit.
+    position_ids = await _requester_position_ids(db, instance, {})
+    requester_position_id = position_ids[0] if position_ids else None
+    context = {"requester_position_id": requester_position_id,
+               "doc_no": instance.doc_no}
+    chain = (
+        await custom_ladder.resolve_fixed_chain(
+            db, stages, instance.started_by_id, policy, requester_position_id, context)
+        if ladder.is_custom_ladder(wf)
+        else await ladder.resolve_chain(
+            db, stages, requester_position_id, instance.started_by_id, context, policy)
+    )
+    if not chain:
+        raise ValidationError(
+            "That chain resolves to nobody for this document's raiser — pick another "
+            "version, or fill its rungs first")
+
+    from_workflow_id = instance.workflow_id
+    await _clear_pending(db, instance.id)
+    instance.workflow_id = wf.id
+    instance.project_id = wf.project_id
+    instance.resolved_chain = chain
+    instance.current_sequence = 1
+
+    db.add(Action(
+        instance_id=instance.id, stage_sequence=0, stage_name="Moved",
+        actor_id=user.id, actor_name=getattr(user, "full_name", None),
+        action=ApprovalAction.MOVED.value,
+        comments=(f"Moved to {wf.code} v{wf.version}"
+                  + (f" — {reason}" if reason else "")),
+    ))
+    await db.flush()
+    await _open_ladder_link(db, instance, chain[0], context)
+    await db.flush()
+    logger.info("Approval %s (%s %s) moved from workflow %s to %s by %s",
+                instance.id, instance.doc_type, instance.doc_no,
+                from_workflow_id, wf.id, getattr(user, "full_name", user))
     return instance
 
 

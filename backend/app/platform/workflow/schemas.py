@@ -136,6 +136,17 @@ class CustomLadderIn(LadderPolicyMixin):
     steps: list[CustomLadderStepIn] = Field(default_factory=list)
 
 
+class FlowMoveDocumentIn(BaseModel):
+    """Move one document already in approval onto another version of its chain.
+
+    `instance_id`, not the document id: the admin is looking at the version history,
+    which lists approvals, and the same document may have had more than one cycle.
+    """
+    instance_id: int
+    workflow_id: int
+    reason: str | None = None
+
+
 class FlowCopyIn(BaseModel):
     """Copy one saved chain onto other projects, other raiser ranks, or both.
 

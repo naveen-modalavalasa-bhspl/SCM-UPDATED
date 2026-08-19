@@ -513,9 +513,20 @@ export interface FlowRungs {
   hcm: FlowRung[];
 }
 
+/** Where a moved document landed on its new chain. */
+export interface FlowMoveResult {
+  instance_id: number;
+  doc_no: string | null;
+  workflow_id: number;
+  stage: string | null;
+  sequence: number;
+}
+
 /** A document still climbing a version of the chain. */
 export interface FlowDocument {
   id: number;
+  /** The version it is riding — the Move picker leaves that one out. */
+  workflow_id: number;
   doc_no: string;
   stage: string | null;
   sequence: number;
@@ -533,7 +544,17 @@ export interface FlowVersion {
   saved_at: string | null;
   saved_by: string | null;
   summary: string;
+  /** The rungs themselves. The one-line `summary` truncates on a narrow row, and the
+   *  question the history is opened with — which rung changed — needs the full list. */
+  steps: FlowStepSummary[];
   documents: FlowDocument[];
+}
+
+/** One rung of a saved version, as the history lists it. */
+export interface FlowStepSummary {
+  sequence: number;
+  name: string;
+  kind: "rank" | "local" | "hcm";
 }
 
 export interface ApprovalPostMember {

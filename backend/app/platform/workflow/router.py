@@ -13,7 +13,7 @@ from app.platform.workflow import (
 from app.platform.workflow import scheduler as approval_scheduler
 from app.platform.workflow.schemas import (
     ApprovalPostIn, CustomLadderIn, DelegationEndIn, DelegationIn, DelegationOut,
-    FlowCopyIn, LadderCopyIn, LadderIn, ReminderConfigIn, WorkflowActionIn,
+    FlowCopyIn, FlowMoveDocumentIn, LadderCopyIn, LadderIn, ReminderConfigIn, WorkflowActionIn,
     WorkflowActionOut, WorkflowIn,
 )
 
@@ -248,6 +248,19 @@ async def restore_flow_version(
     """Copy an old version's steps forward as a new one. The old row is never revived."""
     return await flow_config.restore(db, project_id, doc_type, workflow_id, user,
                                      raiser_role_id)
+
+
+# Declared above `/flow/{doc_type}` for the same reason "copy" is: a literal segment
+# under that path would otherwise be read as a document type.
+@router.post("/flow/move-document")
+async def move_document_to_version(
+    body: FlowMoveDocumentIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.ADMIN_WORKFLOW_MANAGE)),
+):
+    """Re-point one in-flight document at another chain and re-resolve its approvers."""
+    return await flow_config.move_document(db, body.instance_id, body.workflow_id,
+                                           user, body.reason or "")
 
 
 # Declared above `/flow/{doc_type}` so "copy" is never read as a document type.

@@ -18,7 +18,8 @@ import { adminApi } from "../api";
 import { StepList, stepKey, stepKind } from "../components/StepList";
 import { PostsDrawer } from "../components/PostsDrawer";
 import type {
-  CustomLadderStep, FlowRung, FlowVersion, SelfApprovalPolicy, StepKind,
+  CustomLadderStep, FlowDocument, FlowRung, FlowVersion, SelfApprovalPolicy,
+  StepKind,
 } from "../types";
 
 const PICKER_GROUPS: { kind: StepKind; label: string }[] = [
@@ -595,17 +596,32 @@ function HistoryPanel({ docType, projectId, raiserRoleId, onClose, onRestored }:
     },
   });
 
+  // Moving a document is the admin's one door through the freeze that keeps a saved
+  // chain from touching documents already in approval, so it asks before it acts and
+  // names where the document will land.
+  const [moving, setMoving] = useState<FlowDocument | null>(null);
+  const move = useMutation({
+    mutationFn: (vars: { instanceId: number; workflowId: number }) =>
+      adminApi.flow.moveDocument(vars.instanceId, vars.workflowId),
+    onSuccess: (result) => {
+      toast.success(`${result.doc_no ?? "Document"} now waiting at ${result.stage ?? "the first step"}`);
+      setMoving(null);
+      queryClient.invalidateQueries({ queryKey: ["approval-flow-versions"] });
+      queryClient.invalidateQueries({ queryKey: ["approval-flow"] });
+    },
+  });
+
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       <button type="button" aria-label="Close" className="flex-1 bg-black/25"
               onClick={onClose} />
-      <aside className="flex w-full max-w-md flex-col bg-content1 shadow-xl">
+      <aside className="flex w-full max-w-lg flex-col bg-content1 shadow-xl">
         <header className="flex min-h-14 items-center border-b border-line/70 px-4">
           <h2 className="flex-1 text-base font-semibold">History</h2>
           <Button variant="ghost" onClick={onClose}>Close</Button>
         </header>
         <div className="flex-1 space-y-2 overflow-y-auto p-4">
-          <ErrorBanner error={versions.error ?? restore.error} />
+          <ErrorBanner error={versions.error ?? restore.error ?? move.error} />
           {(versions.data ?? []).map((version) => (
             <VersionRow
               key={version.workflow_id}
@@ -615,6 +631,7 @@ function HistoryPanel({ docType, projectId, raiserRoleId, onClose, onRestored }:
               onToggle={() => setExpanded(
                 expanded === version.workflow_id ? null : version.workflow_id)}
               onRestore={() => restore.mutate(version.workflow_id)}
+              onMove={(document) => setMoving(document)}
             />
           ))}
           {(versions.data?.length ?? 0) === 0 && !versions.isLoading && (
@@ -622,16 +639,82 @@ function HistoryPanel({ docType, projectId, raiserRoleId, onClose, onRestored }:
           )}
         </div>
       </aside>
+      {moving && (
+        <MoveDocumentModal
+          document={moving}
+          versions={(versions.data ?? []).filter(
+            (version) => version.workflow_id !== moving.workflow_id)}
+          busy={move.isPending}
+          onClose={() => setMoving(null)}
+          onMove={(workflowId) =>
+            move.mutate({ instanceId: moving.id, workflowId })}
+        />
+      )}
     </div>
   );
 }
 
-function VersionRow({ version, expanded, busy, onToggle, onRestore }: {
+/** Pick the version a document should climb instead. Deliberately not a one-press
+ *  action on the row: it re-resolves who signs a live document, and the admin should
+ *  read which chain that is before pressing. */
+function MoveDocumentModal({ document, versions, busy, onClose, onMove }: {
+  document: FlowDocument;
+  versions: FlowVersion[];
+  busy: boolean;
+  onClose: () => void;
+  onMove: (workflowId: number) => void;
+}) {
+  const [target, setTarget] = useState<string>(
+    String(versions.find((version) => version.is_active)?.workflow_id ?? ""));
+
+  return (
+    <Modal isOpen onClose={onClose} size="lg">
+      <ModalContent>
+        <ModalHeader>Move {document.doc_no}</ModalHeader>
+        <ModalBody className="space-y-3">
+          <p className="text-sm text-muted">
+            It is waiting at <span className="font-medium text-body">
+              {document.stage ?? "the first step"}</span>. Moving it re-resolves who
+            signs from the chain you pick and restarts it at that chain&apos;s first
+            step — approvals already given were given by a chain that no longer governs
+            it. The trail keeps every action.
+          </p>
+          <Select
+            label="Move onto"
+            value={target}
+            onChange={setTarget}
+            options={versions.map((version) => ({
+              value: String(version.workflow_id),
+              label: `v${version.version}${version.is_active ? " (live)" : ""} — ${
+                version.summary || "no steps"}`,
+            }))}
+          />
+        </ModalBody>
+        <ModalFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => onMove(Number(target))}
+                  disabled={!target || busy}>
+            {busy ? "Moving…" : "Move document"}
+          </Button>
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
+  );
+}
+
+const STEP_KIND_LABEL: Record<string, string> = {
+  rank: "reporting line",
+  local: "post",
+  hcm: "HCM post",
+};
+
+function VersionRow({ version, expanded, busy, onToggle, onRestore, onMove }: {
   version: FlowVersion;
   expanded: boolean;
   busy: boolean;
   onToggle: () => void;
   onRestore: () => void;
+  onMove: (document: FlowDocument) => void;
 }) {
   const saved = version.saved_at
     ? new Date(version.saved_at).toLocaleDateString(undefined,
@@ -655,10 +738,31 @@ function VersionRow({ version, expanded, busy, onToggle, onRestore }: {
         )}
       </div>
 
-      <p className="mt-0.5 truncate text-[13px] text-muted">
-        {version.summary || "No steps"}
-      </p>
-      <p className="mt-0.5 text-xs text-muted">
+      {/* The rungs in full, not the truncated one-liner: the whole reason to open a
+          retired version is to see which step it differs by. */}
+      {version.steps.length > 0 ? (
+        <ol className="mt-1.5 space-y-1">
+          {version.steps.map((step, index) => (
+            <li key={`${step.sequence}-${step.name}`}
+                className="flex items-start gap-2 text-[13px]">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center
+                               rounded-full bg-content2 text-[11px] font-semibold
+                               tabular-nums text-muted">
+                {index + 1}
+              </span>
+              <span className="flex-1 leading-5">
+                {step.name}
+                <span className="ml-1.5 text-[11px] text-muted">
+                  {STEP_KIND_LABEL[step.kind] ?? step.kind}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="mt-0.5 text-[13px] text-muted">No steps</p>
+      )}
+      <p className="mt-1.5 text-xs text-muted">
         {[saved, version.saved_by].filter(Boolean).join(" · ") || "—"}
       </p>
 
@@ -675,10 +779,17 @@ function VersionRow({ version, expanded, busy, onToggle, onRestore }: {
           {expanded && (
             <ul className="mt-1 space-y-1 border-t border-line/60 pt-1.5">
               {version.documents.map((document) => (
-                <li key={document.id} className="text-xs text-muted">
-                  <span className="font-medium text-body">{document.doc_no}</span>
-                  {document.stage && ` · at ${document.stage}`}
-                  {document.started_by && ` · by ${document.started_by}`}
+                <li key={document.id}
+                    className="flex items-center gap-2 text-xs text-muted">
+                  <span className="flex-1">
+                    <span className="font-medium text-body">{document.doc_no}</span>
+                    {document.stage && ` · at ${document.stage}`}
+                    {document.started_by && ` · by ${document.started_by}`}
+                  </span>
+                  <Button variant="ghost" onClick={() => onMove(document)}
+                          disabled={busy}>
+                    Move
+                  </Button>
                 </li>
               ))}
             </ul>

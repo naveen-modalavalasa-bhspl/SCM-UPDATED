@@ -13,7 +13,9 @@ per module:
                               service call under it filters on the vendor id from the
                               token — never one from the request.
 """
+from datetime import date
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -46,10 +48,42 @@ accounts = APIRouter(prefix="/api/supplier-accounts", tags=["supplier-portal"])
 
 
 @pos.get("", response_model=Page[POListRow])
-async def list_pos(params: PageParams = Depends(), status: str | None = None,
-                   vendor_id: int | None = None, db: AsyncSession = Depends(get_db),
-                   user=Depends(require_permission(perms.PO_VIEW))):
-    return await service.list_pos(db, params, status, vendor_id, user=user)
+async def list_pos(
+    params: PageParams = Depends(),
+    search: str | None = None,
+    status: str | None = None,
+    vendor_id: int | None = None,
+    project_id: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.PO_VIEW))
+):
+    return await service.list_pos(
+        db, params, search=search, status=status, vendor_id=vendor_id, 
+        project_id=project_id, date_from=date_from, date_to=date_to, user=user
+    )
+
+@pos.get("/export")
+async def export_pos(
+    search: str | None = None,
+    status: str | None = None,
+    vendor_id: int | None = None,
+    project_id: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.PO_VIEW))
+):
+    csv_data = await service.export_pos(
+        db, search=search, status=status, vendor_id=vendor_id,
+        project_id=project_id, date_from=date_from, date_to=date_to, user=user
+    )
+    return StreamingResponse(
+        iter([csv_data]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=purchase_orders.csv"}
+    )
 
 
 @pos.get("/open-for-grn", response_model=Page[POListRow])
@@ -130,13 +164,15 @@ async def submit(po_id: int, db: AsyncSession = Depends(get_db),
 
 
 @pos.post("/{po_id}/approve", response_model=POOut)
-async def approve(po_id: int, body: ActionIn = ActionIn(), db: AsyncSession = Depends(get_db),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def approve(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.PO_APPROVE))):
     return await service.act_on_po(db, po_id, "APPROVE", body.comments, user)
 
 
 @pos.post("/{po_id}/reject", response_model=POOut)
-async def reject(po_id: int, body: ActionIn = ActionIn(), db: AsyncSession = Depends(get_db),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def reject(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission(perms.PO_REJECT))):
     return await service.act_on_po(db, po_id, "REJECT", body.comments, user)
 
@@ -226,7 +262,8 @@ async def submit_requisition(req_id: int, db: AsyncSession = Depends(get_db),
 
 
 @requisitions.post("/{req_id}/approve", response_model=ReqOut)
-async def approve_requisition(req_id: int, body: ActionIn = ActionIn(),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def approve_requisition(req_id: int, body: ActionIn,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.REQUISITION_APPROVE))):
     return await service.act_on_requisition(
@@ -234,7 +271,8 @@ async def approve_requisition(req_id: int, body: ActionIn = ActionIn(),
 
 
 @requisitions.post("/{req_id}/reject", response_model=ReqOut)
-async def reject_requisition(req_id: int, body: ActionIn = ActionIn(),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def reject_requisition(req_id: int, body: ActionIn,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(perms.REQUISITION_APPROVE))):
     return await service.act_on_requisition(
@@ -327,7 +365,8 @@ async def set_rfq_quantities(rfq_id: int, body: RFQQuantitiesIn,
 
 
 @rfqs.post("/{rfq_id}/approve", response_model=RFQOut)
-async def approve_rfq(rfq_id: int, body: ActionIn = ActionIn(),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def approve_rfq(rfq_id: int, body: ActionIn,
                       db: AsyncSession = Depends(get_db),
                       user=Depends(require_permission(perms.RFQ_APPROVE))):
     """Approving publishes it: the vendors can see the RFQ from this moment."""
@@ -336,7 +375,8 @@ async def approve_rfq(rfq_id: int, body: ActionIn = ActionIn(),
 
 
 @rfqs.post("/{rfq_id}/reject", response_model=RFQOut)
-async def reject_rfq(rfq_id: int, body: ActionIn = ActionIn(),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def reject_rfq(rfq_id: int, body: ActionIn,
                      db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.RFQ_APPROVE))):
     return await service.act_on_rfq(
@@ -480,6 +520,13 @@ async def vendor_get_po(po_id: int, db: AsyncSession = Depends(get_db),
     return await service.vendor_get_po(db, account.vendor_id, po_id)
 
 
+@supplier.get("/pos/{po_id}/revisions", response_model=list[PORevisionOut])
+async def vendor_po_revisions(po_id: int, db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    return await service.vendor_po_revisions(db, account.vendor_id, po_id)
+
+
+
 @supplier.post("/pos/{po_id}/respond", response_model=VendorPOOut)
 async def vendor_respond_to_po(po_id: int, body: POVendorResponseIn,
                                db: AsyncSession = Depends(get_db),
@@ -615,7 +662,8 @@ async def submit_consolidation(cons_id: int, db: AsyncSession = Depends(get_db),
 
 
 @consolidations.post("/{cons_id}/approve", response_model=ConsolidationOut)
-async def approve_consolidation(cons_id: int, body: ActionIn = ActionIn(),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def approve_consolidation(cons_id: int, body: ActionIn,
                                 db: AsyncSession = Depends(get_db),
                                 user=Depends(require_permission(perms.CONSOLIDATION_APPROVE))):
     return await service.act_on_consolidation(
@@ -623,7 +671,8 @@ async def approve_consolidation(cons_id: int, body: ActionIn = ActionIn(),
 
 
 @consolidations.post("/{cons_id}/reject", response_model=ConsolidationOut)
-async def reject_consolidation(cons_id: int, body: ActionIn = ActionIn(),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def reject_consolidation(cons_id: int, body: ActionIn,
                                db: AsyncSession = Depends(get_db),
                                user=Depends(require_permission(perms.CONSOLIDATION_APPROVE))):
     return await service.act_on_consolidation(
@@ -631,7 +680,8 @@ async def reject_consolidation(cons_id: int, body: ActionIn = ActionIn(),
 
 
 @consolidations.post("/{cons_id}/cancel", response_model=ConsolidationOut)
-async def cancel_consolidation(cons_id: int, body: ActionIn = ActionIn(),
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def cancel_consolidation(cons_id: int, body: ActionIn,
                                db: AsyncSession = Depends(get_db),
                                user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
     return await service.cancel_consolidation(db, cons_id, user, body.comments)

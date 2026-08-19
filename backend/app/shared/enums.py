@@ -38,6 +38,10 @@ class POStatus(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     SENT_TO_VENDOR = "SENT_TO_VENDOR"
+    #: The vendor answered yes. A rung of its own, not just `vendor_status`,
+    #: so the receiving desk can be shown orders somebody has actually agreed
+    #: to deliver without reading a second column to find out.
+    ACCEPTED_BY_SUPPLIER = "ACCEPTED_BY_SUPPLIER"
     PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED"
     RECEIVED = "RECEIVED"
     CLOSED = "CLOSED"
@@ -88,6 +92,10 @@ class ApprovalAction(str, Enum):
     # Written when configuration failed to produce an approver and the hardcoded
     # reporting-manager ladder took over. Never an action a person performs.
     FALLBACK = "FALLBACK"
+    # Written when an admin re-pointed a document already in approval at a different
+    # ladder (or a different version of the same one) and the chain was re-resolved.
+    # Not a decision either — see workflow.engine.move_to_workflow().
+    MOVED = "MOVED"
 
 
 class StockDirection(str, Enum):

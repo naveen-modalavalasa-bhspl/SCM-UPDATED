@@ -26,10 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmEmployee, HcmPosition
 from app.platform.rbac.models import Permission, Role, RolePermission
-from app.platform.workflow import custom_ladder, ladder, posts
+from app.platform.settings.service import write_audit
+from app.platform.workflow import custom_ladder, engine, ladder, posts
 from app.platform.workflow.models import Instance, Stage, Workflow
 from app.platform.workflow.schemas import CustomLadderIn, CustomLadderStepIn
-from app.shared.enums import DocType, InstanceStatus
+from app.shared.enums import AuditAction, DocType, InstanceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +332,7 @@ async def versions(db: AsyncSession, project_id: int | None, doc_type: str,
     items = []
     for wf in rows:
         stages = await _stages_of(db, wf.id)
+        steps = await _step_summaries(db, stages)
         items.append({
             "workflow_id": wf.id,
             "version": wf.version,
@@ -338,7 +340,12 @@ async def versions(db: AsyncSession, project_id: int | None, doc_type: str,
             "code": wf.code,
             "saved_at": wf.created_at.isoformat() if wf.created_at else None,
             "saved_by": authors.get(wf.created_by_id),
-            "summary": _describe(await _step_summaries(db, stages)),
+            "summary": _describe(steps),
+            # The rungs themselves, not just the one-line summary. A history that only
+            # says "Store Keeper -> OE -> ..." truncated to a row width cannot answer
+            # the question the admin opened it with — which rung changed — and reading
+            # a retired version's steps needs no extra call.
+            "steps": steps,
             "documents": live.get(wf.id, []),
         })
     return {"items": items}
@@ -374,6 +381,9 @@ async def _in_flight_by_workflow(db: AsyncSession,
     for instance in rows:
         out.setdefault(instance.workflow_id, []).append({
             "id": instance.id,
+            # Echoed so the Move picker can leave out the version the document is
+            # already on, rather than the screen inferring it from its own nesting.
+            "workflow_id": instance.workflow_id,
             "doc_no": instance.doc_no or f"#{instance.doc_id}",
             "stage": instance.current_stage_name,
             "sequence": instance.current_sequence,
@@ -381,6 +391,39 @@ async def _in_flight_by_workflow(db: AsyncSession,
             "started_at": instance.started_at.isoformat() if instance.started_at else None,
         })
     return out
+
+
+async def move_document(db: AsyncSession, instance_id: int, workflow_id: int,
+                        user, reason: str = "") -> dict:
+    """Move one in-flight document onto another version of the chain.
+
+    The freeze that keeps a saved chain from moving documents already in approval is
+    the right default (rule 8) and the wrong absolute — a chain saved with a wrong rung
+    strands real documents, and the only remedy was to reject and re-raise them. The
+    re-resolution, and every guard on it, lives in `engine.move_to_workflow`: approvals
+    only ever happen through the engine, and this is the admin's door to it, not a
+    second implementation of one.
+    """
+    instance = await engine.move_to_workflow(db, instance_id, workflow_id, user, reason)
+    wf = await db.get(Workflow, workflow_id)
+    await write_audit(
+        db, entity="wf_instances", entity_id=instance.id,
+        entity_no=(instance.doc_no or str(instance.doc_id))[:50],
+        action=AuditAction.UPDATE, actor=user,
+        after={"workflow_id": workflow_id, "code": wf.code if wf else None,
+               "version": wf.version if wf else None, "reason": reason},
+        summary=(f"{instance.doc_type} {instance.doc_no or instance.doc_id} moved onto "
+                 f"{wf.code if wf else workflow_id} v{wf.version if wf else '?'}"
+                 f"{f' — {reason}' if reason else ''}"),
+    )
+    await db.commit()
+    return {
+        "instance_id": instance.id,
+        "doc_no": instance.doc_no,
+        "workflow_id": instance.workflow_id,
+        "stage": instance.current_stage_name,
+        "sequence": instance.current_sequence,
+    }
 
 
 async def restore(db: AsyncSession, project_id: int | None, doc_type: str,

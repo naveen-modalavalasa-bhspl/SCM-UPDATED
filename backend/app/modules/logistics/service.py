@@ -51,7 +51,9 @@ async def list_grn(db: AsyncSession, params: PageParams, status: str | None = No
 
 async def create_grn_from_po(db: AsyncSession, po_id: int, data: GRNCreate, user) -> GRN:
     po = await po_service.get_po(db, po_id)
-    if po.status not in (POStatus.SENT_TO_VENDOR.value, POStatus.PARTIALLY_RECEIVED.value):
+    if po.status not in (POStatus.SENT_TO_VENDOR.value,
+                         POStatus.ACCEPTED_BY_SUPPLIER.value,
+                         POStatus.PARTIALLY_RECEIVED.value):
         raise ValidationError("PO is not open for receipt")
     if not data.lines:
         raise ValidationError("GRN must have at least one line")

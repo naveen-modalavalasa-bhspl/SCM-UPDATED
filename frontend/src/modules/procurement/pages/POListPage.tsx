@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Download, Search, Filter } from "lucide-react";
 import {
   Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, Select,
   type Column,
@@ -8,6 +9,7 @@ import {
 import { poApi } from "../api";
 import type { POListRow } from "../types";
 import { fmtDate } from "@/shared/datetime";
+import { formatPONo } from "@/shared/format";
 
 /** POStatus, as the backend enum spells it. */
 const STATUSES = [
@@ -16,6 +18,7 @@ const STATUSES = [
   { value: "PENDING_APPROVAL", label: "Pending approval" },
   { value: "APPROVED", label: "Approved" },
   { value: "SENT_TO_VENDOR", label: "Sent to vendor" },
+  { value: "ACCEPTED_BY_SUPPLIER", label: "Accepted by supplier" },
   { value: "PARTIALLY_RECEIVED", label: "Partially received" },
   { value: "RECEIVED", label: "Received" },
   { value: "REJECTED", label: "Rejected" },
@@ -38,13 +41,46 @@ const SIZE = 20;
  */
 export function POListPage() {
   const nav = useNavigate();
+  
+  // Filter state
+  const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [page, setPage] = useState(1);
 
+  // Debounced search text to prevent excessive API calls
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  
+  // Update debounced search after 500ms
+  useMemo(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 500);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // Combine filters for API
+  const queryParams = {
+    search: debouncedSearch || undefined,
+    status: status || undefined,
+    date_from: dateFrom || undefined,
+    date_to: dateTo || undefined,
+    page,
+    size: SIZE,
+  };
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ["pos", status, page],
-    queryFn: () => poApi.list({ status: status || undefined, page, size: SIZE }),
+    queryKey: ["pos", queryParams],
+    queryFn: () => poApi.list(queryParams),
   });
+
+  const handleExport = () => {
+    poApi.export({
+      search: debouncedSearch || undefined,
+      status: status || undefined,
+      date_from: dateFrom || undefined,
+      date_to: dateTo || undefined,
+    });
+  };
 
   const rows = data?.items ?? [];
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
@@ -55,7 +91,7 @@ export function POListPage() {
       header: "PO",
       render: (r) => (
         <div className="min-w-0">
-          <div className="font-mono text-xs font-semibold text-ink">{r.po_no}</div>
+          <div className="font-mono text-xs font-semibold text-ink">{formatPONo(r.po_no, r.revision_no)}</div>
           <div className="text-[11px] text-muted">
             {r.indent_no ? `from ${r.indent_no}` : "No indent"}
           </div>
@@ -99,18 +135,62 @@ export function POListPage() {
         eyebrow="Procurement"
         title="Purchase Orders"
         actions={
-          <Can do="po.create">
-            <Button onClick={() => nav("/pos/new")}>New purchase order</Button>
-          </Can>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={handleExport} className="flex items-center gap-1.5">
+              <Download size={16} /> Export
+            </Button>
+            <Can do="po.create">
+              <Button onClick={() => nav("/pos/new")}>New purchase order</Button>
+            </Can>
+          </div>
         }
       />
 
-      <div className="mb-4 max-w-xs">
-        <Select
-          value={status}
-          options={STATUSES}
-          onChange={(value) => { setStatus(String(value)); setPage(1); }}
-        />
+      <div className="mb-6 rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-neutral-700">
+          <Filter size={16} /> Filters
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
+          <div className="md:col-span-5">
+            <label className="mb-1 block text-xs font-medium text-neutral-600">Search</label>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" size={16} />
+              <input
+                type="text"
+                placeholder="Search PO, RFQ, or Quotation no..."
+                className="w-full rounded-md border border-neutral-300 py-1.5 pl-9 pr-3 text-sm placeholder:text-neutral-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              />
+            </div>
+          </div>
+          <div className="md:col-span-3">
+            <label className="mb-1 block text-xs font-medium text-neutral-600">Status</label>
+            <Select
+              value={status}
+              options={STATUSES}
+              onChange={(value) => { setStatus(String(value)); setPage(1); }}
+            />
+          </div>
+          <div className="md:col-span-4">
+            <label className="mb-1.5 block text-xs font-semibold text-neutral-600 uppercase tracking-wider">Date Range</label>
+            <div className="flex w-full items-center gap-2">
+              <input 
+                type="date" 
+                className="w-full rounded-md border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 shadow-sm outline-none transition-all focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                value={dateFrom}
+                onChange={(e) => { setDateFrom(e.target.value); setPage(1); }}
+              />
+              <span className="text-xs font-medium text-neutral-400">to</span>
+              <input 
+                type="date" 
+                className="w-full rounded-md border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 shadow-sm outline-none transition-all focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                value={dateTo}
+                onChange={(e) => { setDateTo(e.target.value); setPage(1); }}
+              />
+            </div>
+          </div>
+        </div>
       </div>
 
       <ErrorBanner error={error} />
@@ -133,7 +213,7 @@ export function POListPage() {
           renderCard={(r) => (
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">
-                <span className="font-mono text-xs font-semibold text-ink">{r.po_no}</span>
+                <span className="font-mono text-xs font-semibold text-ink">{formatPONo(r.po_no, r.revision_no)}</span>
                 <StatusPill status={r.status} />
               </div>
               <div className="text-sm text-body">{r.vendor_name ?? "—"}</div>

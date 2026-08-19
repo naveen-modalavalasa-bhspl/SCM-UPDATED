@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildAccessSections, featureHint, pageDisplayName, pageHint, sectionSummary,
+  buildAccessSections, buildClip, featureHint, pageDisplayName, pageHint,
+  parseClip, sectionSummary,
 } from "../pages/JobProfilesPage";
 import type { JobProfileMatrix } from "../types";
 
@@ -244,5 +245,30 @@ describe("plain-language help for the remaining modules", () => {
     expect(hints).toHaveLength(actionCodes.length);
     expect(hints.every((hint) => !hint.includes("Grants"))).toBe(true);
     expect(hints.every((hint) => !hint.includes("Option"))).toBe(true);
+  });
+});
+
+/* Copying a profile's access onto another one. The clip is the wire format between
+ * two screens-in-one-browser, so a malformed or stale one must be refused whole —
+ * half a grant applied is worse than none. */
+describe("permission set clipboard", () => {
+  it("round-trips a profile's access", () => {
+    const text = buildClip("Store Keeper", "OFFICE",
+      ["page.b.view", "page.a.view"], ["stock.issue"]);
+    const parsed = parseClip(text);
+    if ("error" in parsed) throw new Error(parsed.error);
+    expect(parsed.clip.from).toBe("Store Keeper");
+    expect(parsed.clip.scope).toBe("OFFICE");
+    expect(parsed.clip.pages).toEqual(["page.a.view", "page.b.view"]);
+    expect(parsed.clip.features).toEqual(["stock.issue"]);
+  });
+
+  it("refuses anything that is not a copied permission set", () => {
+    expect(parseClip("hello")).toHaveProperty("error");
+    expect(parseClip('{"pages":["page.a.view"]}')).toHaveProperty("error");
+    expect(parseClip('{"kind":"scm-job-profile-access","v":2,"pages":[],"features":[]}'))
+      .toHaveProperty("error");
+    expect(parseClip('{"kind":"scm-job-profile-access","v":1,"pages":[]}'))
+      .toHaveProperty("error");
   });
 });

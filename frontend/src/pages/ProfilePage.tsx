@@ -335,19 +335,6 @@ export function ProfilePage() {
 
         <ChangePassword mustChange={!!data.account?.must_change_password} />
 
-        <Section title={`Permissions (${data.permissions.length})`}>
-          <div className="flex flex-wrap gap-1.5 pt-1">
-            {data.permissions.length === 0 ? (
-              <span className="text-sm text-muted">None granted.</span>
-            ) : (
-              data.permissions.map((code) => (
-                <Chip key={code} size="sm" variant="flat" className="font-mono text-[11px]">
-                  {code}
-                </Chip>
-              ))
-            )}
-          </div>
-        </Section>
       </div>
     </>
   );

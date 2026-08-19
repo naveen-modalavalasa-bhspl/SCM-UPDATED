@@ -5,18 +5,22 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Button, Can, Card, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
+import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
+import { revisionLines } from "../types";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import {
   blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue,
 } from "../components/POHeaderFields";
+import { LinePicker, type DraftLine } from "../components/LinePicker";
 import { alerts } from "@/modules/alerts";
 import { fmtDate } from "@/shared/datetime";
+import { formatPONo } from "@/shared/format";
 
-const money = (value: number) => new Intl.NumberFormat(undefined, {
+const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
-}).format(value);
+}).format(value ?? 0);
 
 /** Purchase-order document view used by both the approval inbox and My Decisions. */
 export function PODetailPage() {
@@ -63,15 +67,35 @@ export function PODetailPage() {
   // server files the whole previous order away before applying it.
   const [amending, setAmending] = useState(false);
   const [amendReason, setAmendReason] = useState("");
+  const [amendLines, setAmendLines] = useState<DraftLine[]>([]);
+  const startAmending = () => {
+    setAmending(true);
+    setAmendLines(po.data?.items.map((i: any) => ({
+      id: i.id,
+      item_id: i.item_id,
+      quantity: String(i.quantity),
+      original_quantity: String(i.quantity),
+      rate: String(i.rate),
+      tax_percent: String(i.tax_percent),
+    })) ?? []);
+  };
+  
   const amend = useMutation({
     mutationFn: () => poApi.amend(poId, {
       reason: amendReason,
       expected_date: po.data?.expected_date ?? null,
       ...poHeaderPayload(header),
+      lines: amendLines.map(l => ({
+        id: l.id ?? null,
+        item_id: Number(l.item_id),
+        quantity: Number(l.quantity),
+        rate: Number(l.rate ?? 0),
+        tax_percent: Number(l.tax_percent ?? 0),
+      }))
     }),
     onSuccess: (updated) => {
       toast.success(
-        `${updated.po_no} amended to revision ${updated.revision_no} — `
+        `${formatPONo(updated.po_no, updated.revision_no)} amended — `
         + "send it for approval again",
       );
       setAmending(false);
@@ -96,7 +120,7 @@ export function PODetailPage() {
       ? poApi.approve(poId, comments)
       : poApi.reject(poId, comments),
     onSuccess: (_result, action) => {
-      const number = po.data?.po_no ?? "The purchase order";
+      const number = formatPONo(po.data?.po_no, po.data?.revision_no);
       void alerts.success(action === "approve" ? "po.approved" : "po.rejected", { number });
       setComments("");
       refresh();
@@ -112,7 +136,7 @@ export function PODetailPage() {
   const submit = useMutation({
     mutationFn: () => poApi.submit(poId),
     onSuccess: () => {
-      void alerts.success("po.submitted", { number: po.data?.po_no ?? "" });
+      void alerts.success("po.submitted", { number: formatPONo(po.data?.po_no, po.data?.revision_no) });
       refresh();
     },
   });
@@ -122,8 +146,9 @@ export function PODetailPage() {
   const send = useMutation({
     mutationFn: () => poApi.sendToVendor(poId),
     onSuccess: () => {
+      const number = formatPONo(po.data?.po_no, po.data?.revision_no);
       void alerts.success("po.sent_to_vendor", {
-        number: po.data?.po_no ?? "", vendor: po.data?.vendor_name ?? "the vendor",
+        number, vendor: po.data?.vendor_name ?? "the vendor",
       });
       refresh();
     },
@@ -132,18 +157,19 @@ export function PODetailPage() {
   const sendWithConfirm = async () => {
     if (send.isPending || !po.data) return;
     if (await alerts.confirm("po.send_vendor", {
-      number: po.data.po_no, vendor: po.data.vendor_name ?? "the vendor",
+      number: formatPONo(po.data.po_no, po.data.revision_no), vendor: po.data.vendor_name ?? "the vendor",
     })) send.mutate();
   };
 
   const decideWithConfirm = async (action: "approve" | "reject") => {
     if (decide.isPending || !po.data) return;
+    const number = formatPONo(po.data.po_no, po.data.revision_no);
     const asked = action === "approve"
       ? await alerts.confirm("po.approve", {
-        number: po.data.po_no,
-        amount: money(po.data.total_amount ?? 0),
+        number,
+        amount: money(po.data.total_amount),
       })
-      : await alerts.confirm("po.reject", { number: po.data.po_no });
+      : await alerts.confirm("po.reject", { number });
     if (asked) decide.mutate(action);
   };
 
@@ -164,23 +190,58 @@ export function PODetailPage() {
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
   const busy = submit.isPending || send.isPending || decide.isPending;
 
+  const steps: Step[] = (() => {
+    const s = po.data.status;
+    const vs = po.data.vendor_status;
+    const baseSteps: Step[] = [
+      { id: "draft", label: "Draft", status: "complete" },
+      { id: "approved", label: "Approved", status: "upcoming" },
+      { id: "sent", label: "Sent to Supplier", status: "upcoming" },
+      { id: "accepted", label: "Accepted", status: "upcoming" },
+      { id: "received", label: "Received", status: "upcoming" },
+    ];
+    if (s === "DRAFT" || s === "SUBMITTED" || s === "PENDING_APPROVAL") {
+      baseSteps[1].status = "current";
+    } else if (s === "REJECTED") {
+      baseSteps[1] = { id: "approved", label: "Rejected", status: "error" };
+    } else {
+      baseSteps[1].status = "complete";
+      if (s === "APPROVED") {
+        baseSteps[2].status = "current";
+      } else {
+        baseSteps[2].status = "complete";
+        if (vs === "REJECTED") {
+          baseSteps[3] = { id: "accepted", label: "Rejected by Supplier", status: "error" };
+        } else if (s === "SENT_TO_VENDOR") {
+          baseSteps[3].status = "current";
+        } else {
+          baseSteps[3].status = "complete";
+          if (s === "ACCEPTED_BY_SUPPLIER") {
+            baseSteps[4].status = "current";
+          } else if (s === "PARTIALLY_RECEIVED") {
+            baseSteps[4].status = "current";
+            baseSteps[4].description = "Partially received";
+          } else if (s === "RECEIVED" || s === "CLOSED") {
+            baseSteps[4].status = "complete";
+          }
+        }
+      }
+    }
+    return baseSteps;
+  })();
+
   return <>
     <Button variant="ghost" onClick={() => nav(backTo)}>
       <ArrowLeft className="h-4 w-4" /> {decisionView ? "Back to My Decisions" : approvalView ? "Back to approvals" : "Back to purchase orders"}
     </Button>
     <PageHeader
       eyebrow="Purchase order"
-      title={po.data.po_no}
+      title={formatPONo(po.data.po_no, po.data.revision_no)}
       actions={<div className="flex flex-wrap items-center gap-2">
         <StatusPill status={po.data.status} />
         {/* The vendor's answer is a different axis from our own status: an order can be
           * SENT_TO_VENDOR and either agreed or still unanswered. Said out loud. */}
         {po.data.vendor_status && <StatusPill status={po.data.vendor_status} />}
-        {(po.data.revision_no ?? 0) > 0 && (
-          <span className="rounded-full bg-surface-2 px-2.5 py-1 text-xs text-body">
-            Rev {po.data.revision_no}
-          </span>
-        )}
         {/* Opens the order on its own, laid out for paper. The browser's own print
           * dialog saves it as a PDF — no server-side renderer to keep in step with
           * the screen, and it prints exactly what is on the document. */}
@@ -188,9 +249,12 @@ export function PODetailPage() {
           <Printer className="h-4 w-4" /> PDF
         </Button>
         {/* Amend is for an order that has left the building. A draft is simply edited,
-          * and a finished order can no longer be changed at all. */}
+          * and a finished order can no longer be changed at all — the same line the
+          * server draws in `_UNAMENDABLE`, so the button never offers what the API
+          * would refuse. SENT_TO_VENDOR stays in: every order raised before the
+          * acceptance rung existed sits on it. */}
         {!isDraft && !isFinished && <Can do="po.edit">
-          <Button variant="subtle" onClick={() => setAmending(true)}>
+          <Button variant="subtle" onClick={startAmending}>
             <FilePen className="h-4 w-4" /> Amend
           </Button>
         </Can>}
@@ -209,6 +273,10 @@ export function PODetailPage() {
         </Can>}
       </div>}
     />
+    
+    <div className="mb-6 -mx-2 sm:mx-0">
+      <Stepper steps={steps} className="bg-surface-2/50 rounded-xl" />
+    </div>
 
     {(submit.error || send.error) && <p className="mb-4 rounded-xl bg-danger/10 p-4 text-sm text-danger">
       {((submit.error ?? send.error) as Error).message}
@@ -237,13 +305,32 @@ export function PODetailPage() {
     <div className="overflow-x-auto rounded-xl border border-line">
       <table className="w-full text-left text-sm">
         <thead className="bg-content2 text-xs text-muted"><tr><th className="p-3">Item</th><th className="p-3 text-right">Quantity</th><th className="p-3 text-right">Rate</th><th className="p-3 text-right">Tax</th><th className="p-3 text-right">Amount</th></tr></thead>
-        <tbody className="divide-y divide-line">{po.data.items.map((item) => <tr key={item.id}>
-          <td className="p-3"><strong className="text-ink">{item.item_name ?? "—"}</strong><p className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</p></td>
-          <td className="p-3 text-right">{item.quantity} {item.uom_code ?? ""}</td>
-          <td className="p-3 text-right">{money(item.rate)}</td>
-          <td className="p-3 text-right">{item.tax_percent}%</td>
-          <td className="p-3 text-right font-semibold">{money(item.amount)}</td>
-        </tr>)}</tbody>
+        <tbody className="divide-y divide-line">{po.data.items.map((item) => {
+          const previous = revisionLines(revisions.data?.[0]);
+          const prev = previous.find((line) => line.item_id === item.item_id);
+          // A line the last filed revision does not mention is one this amendment
+          // added. No revision on file means nothing has changed.
+          const isNew = previous.length > 0 && !prev;
+          
+          return (
+            <tr key={item.id} className={isNew ? "bg-primary/5" : ""}>
+              <td className="p-3">
+                <strong className="text-ink">{item.item_name ?? "—"}</strong>
+                {isNew && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">New Item</span>}
+                <p className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</p>
+              </td>
+              <td className="p-3 text-right">
+                {prev && prev.quantity !== item.quantity && (
+                  <span className="line-through text-muted mr-1 text-xs">{prev.quantity}</span>
+                )}
+                {item.quantity} {item.uom_code ?? ""}
+              </td>
+              <td className="p-3 text-right">{money(item.rate)}</td>
+              <td className="p-3 text-right">{item.tax_percent}%</td>
+              <td className="p-3 text-right font-semibold">{money(item.amount)}</td>
+            </tr>
+          );
+        })}</tbody>
       </table>
     </div>
 
@@ -371,15 +458,27 @@ export function PODetailPage() {
         * the endpoint takes lines separately when that day comes. */}
       <POHeaderFields
         value={header}
+        disabled={true}
         onChange={(patch) => setHeader({ ...header, ...patch })}
       />
+      <div className="pt-2 border-t border-line">
+        <h3 className="text-sm font-semibold mb-3">Order Lines</h3>
+        <LinePicker
+          lines={amendLines}
+          onChange={setAmendLines}
+          showRate
+          showTax
+          showDate={false}
+          freezeRateAndTax={true}
+        />
+      </div>
       {amend.error && <p className="text-sm text-danger">{(amend.error as Error).message}</p>}
       <div className="flex justify-end gap-2">
         <Button variant="subtle" onClick={() => { setAmending(false); setAmendReason(""); }}>
           Cancel
         </Button>
         <Button
-          disabled={amend.isPending || !amendReason.trim()}
+          disabled={amend.isPending || !amendReason.trim() || amendLines.length === 0}
           onClick={() => amend.mutate()}
         >
           {amend.isPending ? "Amending…" : "Save as a new revision"}

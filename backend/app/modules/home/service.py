@@ -362,6 +362,7 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
             db, PurchaseOrder, po_range, PurchaseOrder.status.in_([
                 POStatus.APPROVED.value,
                 POStatus.SENT_TO_VENDOR.value,
+                POStatus.ACCEPTED_BY_SUPPLIER.value,
                 POStatus.PARTIALLY_RECEIVED.value,
             ]),
         )

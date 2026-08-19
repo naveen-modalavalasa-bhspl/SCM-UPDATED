@@ -13,8 +13,39 @@ import type {
 } from "./types";
 
 export const poApi = {
-  list: (params: { status?: string; vendor_id?: number; page?: number; size?: number }) =>
+  list: (params: { 
+    search?: string;
+    status?: string; 
+    vendor_id?: number; 
+    project_id?: number;
+    date_from?: string;
+    date_to?: string;
+    page?: number; 
+    size?: number 
+  }) =>
     api.get<Paginated<POListRow>>("/api/pos", { params }).then((r) => r.data),
+  /** The CSV comes back through axios so it carries the bearer token — a plain
+   *  <a href> download hits the endpoint unauthenticated and 401s. */
+  export: async (params: {
+    search?: string;
+    status?: string;
+    vendor_id?: number;
+    project_id?: number;
+    date_from?: string;
+    date_to?: string;
+  }) => {
+    const response = await api.get("/api/pos/export", {
+      params, responseType: "blob",
+    });
+    const url = URL.createObjectURL(response.data as Blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "purchase_orders.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  },
   openForGrn: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<POListRow>>("/api/pos/open-for-grn", { params }).then((r) => r.data),
   get: (id: number) => api.get<PurchaseOrder>(`/api/pos/${id}`).then((r) => r.data),
@@ -181,6 +212,8 @@ export const supplierApi = {
   pos: (params: { search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<VendorPOListRow>>("/api/supplier/pos", { params }).then((r) => r.data),
   po: (id: number) => api.get<VendorPO>(`/api/supplier/pos/${id}`).then((r) => r.data),
+  revisions: (poId: number) =>
+    api.get<PORevision[]>(`/api/supplier/pos/${poId}/revisions`).then((r) => r.data),
   /** Accept the order, or decline it with a reason. Nothing may be despatched against
    *  an order that has not been accepted. */
   respondToPo: (id: number, accept: boolean, note = "") =>

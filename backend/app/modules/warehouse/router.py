@@ -893,12 +893,12 @@ async def batch_options(item_id: int = Query(...), warehouse_id: int = Query(...
 
 
 @router.get("/options/purchase-orders", response_model=list[s.Option])
-async def po_options(search: str | None = None, db: AsyncSession = Depends(get_db),
+async def po_options(search: str | None = None, warehouse_id: int | None = None, db: AsyncSession = Depends(get_db),
                      _=Depends(require_permission(RECEIPT_VIEW))):
-    return await service.po_options(db, search)
+    return await service.po_options(db, search, warehouse_id=warehouse_id)
 
 
-@router.get("/options/po-lines", response_model=list[s.PoLineOption])
+@router.get("/options/po-lines", response_model=s.PoPrefill)
 async def po_lines(po_id: int = Query(...), db: AsyncSession = Depends(get_db),
                    _=Depends(require_permission(RECEIPT_VIEW))):
     return await service.po_lines(db, po_id)

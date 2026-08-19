@@ -66,6 +66,7 @@ const APPROVAL_VERB: Record<string, string> = {
   RETURNED: "returned for changes",
   DELEGATED: "delegated",
   FALLBACK: "routed by fallback",
+  MOVED: "moved to another approval chain",
 };
 
 /**

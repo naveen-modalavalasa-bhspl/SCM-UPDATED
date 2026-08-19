@@ -1294,6 +1294,15 @@ export interface PoLineOption {
   indent_no?: string | null;
 }
 
+export interface PoPrefill {
+  vendor_id?: number;
+  vendor_name?: string;
+  vendor_gstin?: string;
+  project_id?: number;
+  project_name?: string;
+  lines: PoLineOption[];
+}
+
 export interface StockMovementOrderItem {
   id: number;
   order_id: number;

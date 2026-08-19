@@ -12,6 +12,7 @@ const TONE: Record<string, Tone> = {
   PARTIALLY_ORDERED: "primary",
   ORDERED: "primary",
   SENT_TO_VENDOR: "primary",
+  ACCEPTED_BY_SUPPLIER: "success",
   PARTIALLY_RECEIVED: "primary",
   RECEIVED: "success",
   QC_PASSED: "success",

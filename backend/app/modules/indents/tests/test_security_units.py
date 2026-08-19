@@ -2384,6 +2384,8 @@ async def test_complete_journey_and_seven_phases_use_operational_evidence(monkey
             "events": [operational_event],
             "missing_sources": [],
             "has_allocation": True,
+            "allocation_settled": True,
+            "awaiting_procurement": False,
             "has_issue": True,
             "issue_complete": True,
             "has_dispatch": True,
@@ -2471,6 +2473,7 @@ async def test_journey_projects_chronological_batches_without_future_cards(monke
         service, "_journey_operational_evidence", AsyncMock(return_value={
             "stages": [], "events": operational_events, "missing_sources": [],
             "has_allocation": True, "allocation_complete": True,
+            "allocation_settled": True, "awaiting_procurement": False,
             "has_material_request": False, "has_issue": True, "issue_complete": True,
             "has_dispatch": True, "has_delivery": True, "delivery_complete": True,
             "has_acknowledgement": True, "has_receipt": True,
@@ -2501,17 +2504,134 @@ async def test_journey_projects_chronological_batches_without_future_cards(monke
     )
 
 
+def _alloc_line(line_id, approved, allocated=0):
+    return SimpleNamespace(
+        id=line_id, approved_quantity=Decimal(str(approved)), quantity=Decimal(str(approved)),
+        allocated_quantity=Decimal(str(allocated)), item_name=f"Item {line_id}",
+        item_code=None, item_id=line_id,
+    )
+
+
+def test_over_allocation_guard_counts_what_procurement_is_already_buying():
+    """Quantity on a live material request is owed to the requester exactly once.
+
+    Allocating it a second time off a shelf double-counts the demand and leaves a
+    purchase running for goods that were issued from stock. The Fulfilment Queue has
+    always subtracted this; the guard did not, which is how one line ended up with a
+    signed ZERO allocation, a material request AND a second allocation for the same 2.
+    """
+    indent = SimpleNamespace(indent_no="IND/77", items=[_alloc_line(1, 2)])
+    decisions = [{"indent_item_id": 1, "quantity": Decimal("2")}]
+
+    # Nothing on order: the line is genuinely still owed, so this must pass.
+    service._reject_over_allocation(indent, decisions, {})
+
+    with pytest.raises(ValidationError) as excinfo:
+        service._reject_over_allocation(indent, decisions, {1: Decimal("2")})
+    assert "only 0 is still owed" in str(excinfo.value)
+    assert "already on a material request with procurement" in str(excinfo.value)
+
+    # Partly bought: the remainder is still allocatable, and no more than that.
+    service._reject_over_allocation(
+        indent, [{"indent_item_id": 1, "quantity": Decimal("1")}], {1: Decimal("1")},
+    )
+    with pytest.raises(ValidationError):
+        service._reject_over_allocation(
+            indent, [{"indent_item_id": 1, "quantity": Decimal("2")}], {1: Decimal("1")},
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (IndentStatus.PENDING_PROCUREMENT.value, "Not in stock — with procurement"),
+        (IndentStatus.PARTIALLY_ORDERED.value, "Partly ordered — with procurement"),
+        (IndentStatus.ORDERED.value, "Ordered — waiting for goods receipt"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_shortfall_with_procurement_holds_the_allocation_phase(
+    monkeypatch, status, message,
+):
+    """A signed ZERO allocation is a decision, not stock set aside.
+
+    The whole requirement went to a material request, so nothing can reach the
+    warehouse until procurement delivers. Reading `has_allocation` alone marched the
+    document straight on and reported "Waiting for warehouse issue" against an indent
+    no storekeeper could act on, and named `out_issues` as the missing evidence.
+    """
+    timestamp = datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc)
+    indent = SimpleNamespace(
+        id=77, indent_no="IND/77", status=status,
+        requested_by_name="Requester", position_id=101,
+        position_name="Field Operator", created_at=timestamp,
+        approved_at=timestamp, remarks=None,
+    )
+    submitted = SimpleNamespace(
+        id=1, stage_sequence=0, actor_id=10, actor_name="Requester",
+        actor_position="Field Operator", action=ApprovalAction.SUBMITTED.value,
+        stage_name="Submitted", comments=None, acted_at=timestamp,
+    )
+    approved = SimpleNamespace(
+        id=2, stage_sequence=1, actor_id=20, actor_name="Controller",
+        actor_position="Regional Controller", action=ApprovalAction.APPROVED.value,
+        stage_name="Regional Controller", comments=None, acted_at=timestamp,
+    )
+    instance = SimpleNamespace(
+        id=1, status=InstanceStatus.APPROVED.value, current_sequence=1,
+        current_stage_name=None,
+        resolved_chain=[{
+            "sequence": 1, "position_name": "Regional Controller",
+            "role_name": "Regional Controller", "approver_ids": [20],
+            "approver_names": ["Controller"],
+        }],
+    )
+    monkeypatch.setattr(service, "_get_indent_for_journey", AsyncMock(return_value=indent))
+    monkeypatch.setattr(
+        service, "_workflow_rows",
+        AsyncMock(return_value=(instance, [submitted, approved], [])),
+    )
+    monkeypatch.setattr(
+        service, "_journey_operational_evidence", AsyncMock(return_value={
+            "stages": [], "events": [], "missing_sources": [],
+            # The allocation exists and is APPROVED; it gave nothing.
+            "has_allocation": True, "allocation_complete": False,
+            "allocation_settled": False, "awaiting_procurement": True,
+            "has_material_request": True,
+            "has_issue": False, "issue_complete": False,
+            "has_dispatch": False, "has_delivery": False, "delivery_complete": False,
+            "has_receipt": False, "receipt_complete": False,
+            "has_warehouse_acknowledgement": False, "is_complete": False,
+        }),
+    )
+    db = SimpleNamespace(execute=AsyncMock(return_value=EmptyAuditResult()))
+
+    journey = await service.indent_journey(db, 77, user())
+    phases = {row["title"]: row for row in journey["phases"]}
+
+    assert [row["title"] for row in journey["phases"] if row["is_current"]] == ["Allocation"]
+    assert phases["Allocation"]["status"] == "PENDING"
+    assert phases["Warehouse"]["is_current"] is False
+    assert phases["Warehouse"]["status"] == "PENDING"
+    assert journey["current_stage_message"] == message
+    # The caption the stepper renders on the phase itself.
+    assert phases["Allocation"]["approver_name"] == message
+
+
 @pytest.mark.parametrize(
     ("evidence", "current_title", "message", "completed_titles"),
     [
         (
-            {"has_allocation": True},
+            {"has_allocation": True, "allocation_settled": True},
             "Warehouse",
             "Waiting for warehouse issue",
             {"Draft", "Submitted", "Approvals", "Allocation"},
         ),
         (
-            {"has_allocation": True, "has_issue": True, "issue_complete": True},
+            {
+                "has_allocation": True, "allocation_settled": True,
+                "has_issue": True, "issue_complete": True,
+            },
             "Delivery",
             "Waiting for dispatch",
             {"Draft", "Submitted", "Approvals", "Allocation", "Warehouse"},
@@ -2519,6 +2639,7 @@ async def test_journey_projects_chronological_batches_without_future_cards(monke
         (
             {
                 "has_allocation": True,
+                "allocation_settled": True,
                 "has_issue": True,
                 "issue_complete": True,
                 "has_dispatch": True,
@@ -2535,6 +2656,7 @@ async def test_journey_projects_chronological_batches_without_future_cards(monke
         (
             {
                 "has_allocation": True,
+                "allocation_settled": True,
                 "has_issue": True,
                 "issue_complete": True,
                 "has_dispatch": True,
@@ -2554,6 +2676,7 @@ async def test_journey_projects_chronological_batches_without_future_cards(monke
         (
             {
                 "has_allocation": True,
+                "allocation_settled": True,
                 "has_issue": True,
                 "issue_complete": True,
                 "has_dispatch": True,
@@ -2573,6 +2696,7 @@ async def test_journey_projects_chronological_batches_without_future_cards(monke
         (
             {
                 "has_allocation": True,
+                "allocation_settled": True,
                 "has_issue": True,
                 "issue_complete": True,
                 "has_receipt": True,
@@ -2643,6 +2767,8 @@ async def test_seven_phase_precedence_uses_only_operational_evidence(
         "events": [],
         "missing_sources": [],
         "has_allocation": False,
+        "allocation_settled": False,
+        "awaiting_procurement": False,
         "has_issue": False,
         "issue_complete": False,
         "has_dispatch": False,

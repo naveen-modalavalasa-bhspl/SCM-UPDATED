@@ -3,7 +3,7 @@ import type { Paginated } from "@/shared/types";
 import type {
   ApprovalPost, ApprovalPostMember,
   AppLog, AuditRow, Conflict, CustomLadder, CustomLadderStep, DocSeries,
-  FlowOverview, FlowRungs, FlowVersion, JobProfileOption, Ladder,
+  FlowMoveResult, FlowOverview, FlowRungs, FlowVersion, JobProfileOption, Ladder,
   LadderDepartment, LadderOptions, LadderPolicy, LadderPosition, LadderPost,
   LadderPreview, LadderRank,
   LadderRung, NotificationRule, ReminderConfig, ReminderRunResult, ReminderStatus,
@@ -240,6 +240,13 @@ export const adminApi = {
           ...(raiserRoleId != null ? { raiser_role_id: raiserRoleId } : {}),
         } },
       ).then((r) => r.data),
+    /** Re-points ONE document already in approval at another version and re-resolves
+     *  its approvers. The freeze that stops a saved chain moving in-flight documents
+     *  is deliberate; this is the admin's one door through it. */
+    moveDocument: (instanceId: number, workflowId: number, reason?: string) =>
+      api.post<FlowMoveResult>("/api/workflow/flow/move-document", {
+        instance_id: instanceId, workflow_id: workflowId, reason: reason || null,
+      }).then((r) => r.data),
     save: (projectId: number | null, docType: string, steps: CustomLadderStep[],
            policy?: Partial<LadderPolicy>, raiserRoleId: number | null = null) =>
       api.post<CustomLadder>("/api/workflow/flow", {

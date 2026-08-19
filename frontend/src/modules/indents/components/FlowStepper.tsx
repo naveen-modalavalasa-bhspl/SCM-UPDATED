@@ -79,8 +79,16 @@ function stateFromStage(stage?: IndentJourneyStage): StepState {
   return "unknown";
 }
 
+/**
+ * The backend puts a phase's explanatory message on `approver_name` (see the
+ * `phase()` helper it is built with). Approvals uses it for who holds the document;
+ * Allocation uses it to say the shortfall went to procurement rather than leaving a
+ * bare "Current" that reads the same as an indent nobody has looked at yet.
+ */
+const CAPTIONED_PHASE_KEYS = ["approvals", "allocation"];
+
 function stageCaption(phaseKey: string, stage: IndentJourneyStage, state: StepState) {
-  if (phaseKey === "approvals" && state === "current" && stage.approver_name) {
+  if (CAPTIONED_PHASE_KEYS.includes(phaseKey) && state === "current" && stage.approver_name) {
     return stage.approver_name;
   }
   return statusCaption(state);
