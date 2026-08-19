@@ -57,7 +57,11 @@ def _range_start(value: DateRange) -> datetime:
         return now.replace(
             month=first_month, day=1, hour=0, minute=0, second=0, microsecond=0,
         )
-    return (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+    # The label on the picker says "This Week", so the week is the calendar one —
+    # Monday to now — not a rolling seven days. Month and quarter already read that
+    # way and a mixed reading is what makes a filter feel broken.
+    return (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0)
 
 
 async def _count(db: AsyncSession, model, *conditions) -> int:
@@ -273,12 +277,14 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
         # it drifted: the tile read 79 while the Indents screen read 2. Sharing the
         # helper is what stops that happening again.
         indent_scope = await indent_service._indent_visibility(db, user)
-        # All-time, not date-ranged: the tile has to read the same as "Total indents"
-        # on the indent dashboard, which is unfiltered until the user filters it.
-        # The date range picker scopes recent activity only.
-        indent_count = await _count(db, Indent, indent_scope)
+        # Date-ranged, like every other document tile: the picker at the top of the
+        # screen says "Date range", and a control that changes nothing on the screen
+        # is worse than no control. Scope still comes first — the tile can never
+        # count a document the Indents list would hide.
+        indent_range = and_(indent_scope, Indent.created_at >= since)
+        indent_count = await _count(db, Indent, indent_range)
         pending_indents = await _count(
-            db, Indent, indent_scope,
+            db, Indent, indent_range,
             Indent.status == IndentStatus.PENDING_APPROVAL.value,
         )
         kpis.append(_kpi(
@@ -350,9 +356,10 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
             owner_col=PurchaseOrder.created_by_id,
             office_col=PurchaseOrder.office_id,
         )
-        po_count = await _count(db, PurchaseOrder, po_scope)
+        po_range = and_(po_scope, PurchaseOrder.created_at >= since)
+        po_count = await _count(db, PurchaseOrder, po_range)
         awaiting_po = await _count(
-            db, PurchaseOrder, po_scope, PurchaseOrder.status.in_([
+            db, PurchaseOrder, po_range, PurchaseOrder.status.in_([
                 POStatus.APPROVED.value,
                 POStatus.SENT_TO_VENDOR.value,
                 POStatus.PARTIALLY_RECEIVED.value,
@@ -384,9 +391,10 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
             owner_col=Receipt.created_by_id,
             project_col=Receipt.project_id,
         ))
-        receipt_count = await _count(db, Receipt, receipt_scope)
+        receipt_range = and_(receipt_scope, Receipt.created_at >= since)
+        receipt_count = await _count(db, Receipt, receipt_range)
         pending_receipts = await _count(
-            db, Receipt, receipt_scope,
+            db, Receipt, receipt_range,
             Receipt.status.in_([
                 ReceiptStatus.DRAFT.value,
                 ReceiptStatus.PENDING_QC.value,
@@ -404,6 +412,10 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
             ))
 
     if perms.STOCK_VIEW in permissions:
+        # Not date-ranged, and deliberately: a stock level is a fact about now, not a
+        # count of things that happened in a period. "Low stock items last quarter"
+        # is not a number anyone can act on. Same for the approvals tile above — a
+        # pending queue is whatever is waiting today.
         low_stock, out_of_stock = await _stock_counts(db, user)
         kpis.extend([
             _kpi(

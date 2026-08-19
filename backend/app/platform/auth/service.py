@@ -3,8 +3,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.core.exceptions import AuthenticationError, PermissionError_
-from app.core.security import create_access_token, verify_password
+from app.core.exceptions import (
+    AuthenticationError,
+    PermissionError_,
+    ValidationError,
+)
+from app.core.security import create_access_token, hash_password, verify_password
 from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment,
@@ -16,7 +20,9 @@ from app.platform.hcm.models import (
     HcmSection,
 )
 from app.platform.rbac import service as rbac_service
+from app.platform.settings import service as settings_service
 from app.platform.settings.models import UserCredential
+from app.shared.enums import AuditAction
 from app.shared.models.base import utcnow
 
 async def authenticate(db: AsyncSession, username: str, password: str) -> tuple[HcmEmployee, str]:
@@ -167,3 +173,40 @@ async def switch_position(db: AsyncSession, user: HcmEmployee, position_id: int)
     if position is None:
         raise PermissionError_("That position is not assigned to you")
     return create_access_token(subject=user.id, extra={"position_id": position_id})
+
+
+MIN_PASSWORD_LENGTH = 8
+
+
+async def change_password(db: AsyncSession, user: HcmEmployee,
+                          current: str, new: str) -> None:
+    """Replace the caller's own local login secret.
+
+    No permission code guards this and none should: the subject is always
+    `get_current_user`, so the only account it can ever reach is the reader's own.
+    An employee with no `sys_local_credentials` row signs in some other way and has
+    nothing here to change — that reads as a bad current password, not as an
+    invitation to mint one.
+    """
+    cred = await db.get(UserCredential, user.id)
+    if cred is None or not verify_password(current, cred.password_hash):
+        raise AuthenticationError("Current password is incorrect")
+    if len(new) < MIN_PASSWORD_LENGTH:
+        raise ValidationError(
+            f"Use at least {MIN_PASSWORD_LENGTH} characters for the new password")
+    if verify_password(new, cred.password_hash):
+        raise ValidationError("The new password must differ from the current one")
+
+    cred.password_hash = hash_password(new)
+    cred.must_change = False
+    # A password the owner just proved they know clears the failed-attempt lock;
+    # leaving it set would lock them out of the credential they had just replaced.
+    cred.failed_attempts = 0
+    cred.locked_until = None
+    # The hash never enters the audit row — only the fact that it moved.
+    await settings_service.write_audit(
+        db, entity="sys_local_credentials", action=AuditAction.UPDATE,
+        entity_id=user.id, actor=user, entity_no=user.emp_code or str(user.id),
+        before={"password": "set"}, after={"password": "changed"},
+    )
+    await db.commit()
