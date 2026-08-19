@@ -306,7 +306,8 @@ async def unbookmark(indent_id: int, db: AsyncSession = Depends(get_db),
 
 
 @indent_router.post("/{indent_id}/approve", response_model=IndentOut)
-# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity`nasync def approve(indent_id: int, body: ActionIn,
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def approve(indent_id: int, body: ActionIn,
                   db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.act_on_indent(
@@ -315,7 +316,8 @@ async def unbookmark(indent_id: int, db: AsyncSession = Depends(get_db),
 
 
 @indent_router.post("/{indent_id}/reject", response_model=IndentOut)
-# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity`nasync def reject(indent_id: int, body: ActionIn,
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def reject(indent_id: int, body: ActionIn,
                  db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission(perms.INDENT_REJECT))):
     return await service.act_on_indent(

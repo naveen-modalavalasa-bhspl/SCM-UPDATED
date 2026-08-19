@@ -4,8 +4,9 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/shared/api/client";
 import { poApi } from "../api";
 import { fmtDate } from "@/shared/datetime";
+import { formatPONo } from "@/shared/format";
 
-const money = (value: number) =>
+const money = (value: number | null | undefined) =>
   new Intl.NumberFormat("en-IN", {
     minimumFractionDigits: 2, maximumFractionDigits: 2,
   }).format(value ?? 0);
@@ -86,118 +87,135 @@ export function POPrintPage() {
         </button>
       </div>
 
-      <header className="flex items-start justify-between border-b-2 border-black pb-3">
+      <header className="flex items-start justify-between border-b-2 border-neutral-800 pb-6">
         <div>
-          <h1 className="text-lg font-bold uppercase">
+          <h1 className="text-xl font-black uppercase tracking-tight text-neutral-900">
             {company?.name || "Purchase order"}
           </h1>
-          {company?.legal_name && <p className="text-[12px]">{company.legal_name}</p>}
-          {company?.address && <p className="max-w-[380px] text-[12px]">{company.address}</p>}
-          <p className="text-[12px]">
-            {company?.gstin ? `GSTIN ${company.gstin}` : ""}
+          {company?.legal_name && <p className="mt-1 text-[12px] font-medium text-neutral-700">{company.legal_name}</p>}
+          {company?.address && <p className="mt-1 max-w-[380px] text-[12px] leading-relaxed text-neutral-600">{company.address}</p>}
+          <p className="mt-2 text-[12px] text-neutral-500">
+            {company?.gstin ? <span className="font-medium">GSTIN {company.gstin}</span> : ""}
             {company?.phone ? ` · ${company.phone}` : ""}
           </p>
         </div>
         <div className="text-right">
-          <p className="text-base font-bold uppercase tracking-wide">Purchase Order</p>
-          <p className="font-mono text-[14px]">{order.po_no}</p>
-          <p className="text-[12px]">Date {fmtDate(order.po_date)}</p>
-          {(order.revision_no ?? 0) > 0 && (
-            <p className="text-[12px] font-semibold">Revision {order.revision_no}</p>
-          )}
-          <p className="text-[12px]">Status {order.status}</p>
-          {order.vendor_status && (
-            <p className="text-[12px]">Vendor: {order.vendor_status}</p>
-          )}
+          <p className="text-lg font-black uppercase tracking-widest text-neutral-800">Purchase Order</p>
+          <p className="mt-1 font-mono text-[15px] font-bold text-neutral-900">{formatPONo(order.po_no, order.revision_no)}</p>
+          <p className="mt-1 text-[12px] text-neutral-600">Date: <span className="font-medium text-neutral-900">{fmtDate(order.po_date)}</span></p>
+          <div className="mt-2 inline-block rounded border border-neutral-200 bg-neutral-50 px-2 py-1">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-neutral-600">Status</p>
+            <p className="text-[12px] font-medium text-neutral-900">{order.status}</p>
+          </div>
         </div>
       </header>
 
-      <section className="mt-4 grid grid-cols-2 gap-6">
-        <div>
-          <p className="mb-1 text-[11px] font-bold uppercase tracking-wide">Vendor</p>
-          <p className="font-semibold">{order.vendor_name ?? "—"}</p>
-        </div>
-        <div>
-          <p className="mb-1 text-[11px] font-bold uppercase tracking-wide">Order details</p>
-          <table className="w-full text-[12px]">
-            <tbody>
-              <tr><td className="pr-3 text-neutral-600">Project</td><td>{order.project_name || "—"}</td></tr>
-              <tr><td className="pr-3 text-neutral-600">Expected date</td><td>{fmtDate(order.expected_date)}</td></tr>
-              <tr><td className="pr-3 text-neutral-600">Indent</td><td className="font-mono">{order.indent_no || "—"}</td></tr>
-              <tr><td className="pr-3 text-neutral-600">Requisition</td><td className="font-mono">{order.requisition_no || "—"}</td></tr>
-              <tr><td className="pr-3 text-neutral-600">RFQ</td><td className="font-mono">{order.rfq_no || "—"}</td></tr>
-              <tr><td className="pr-3 text-neutral-600">Quotation</td><td className="font-mono">{order.quotation_no || "—"}</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
+      <div className="mt-8 flex flex-col gap-8">
+        {/* Vendor Section */}
+        <section className="rounded-lg border border-neutral-200 bg-neutral-50/50 p-6 shadow-sm">
+          <p className="mb-3 text-[11px] font-bold uppercase tracking-widest text-neutral-500">Vendor</p>
+          <p className="text-[15px] font-bold text-neutral-900">{order.vendor_name ?? "—"}</p>
+        </section>
 
-      <section className="mt-4 grid grid-cols-2 gap-6">
-        <div>
-          <p className="mb-1 text-[11px] font-bold uppercase tracking-wide">Bill to</p>
-          <p className="whitespace-pre-line">{order.billing_address || "—"}</p>
-        </div>
-        <div>
-          <p className="mb-1 text-[11px] font-bold uppercase tracking-wide">Ship to</p>
-          <p className="whitespace-pre-line">{order.shipping_address || "—"}</p>
-        </div>
-      </section>
+        {/* Order Details Section */}
+        <section className="rounded-lg border border-neutral-200 bg-white p-6 shadow-sm">
+          <p className="mb-4 text-[11px] font-bold uppercase tracking-widest text-neutral-500">Order details</p>
+          <div className="grid grid-cols-2 gap-y-4 gap-x-8 text-[13px]">
+            <div className="flex flex-col border-b border-neutral-100 pb-2">
+              <span className="mb-1 text-[11px] font-semibold uppercase text-neutral-400">Project</span>
+              <span className="font-medium text-neutral-800">{order.project_name || "—"}</span>
+            </div>
+            <div className="flex flex-col border-b border-neutral-100 pb-2">
+              <span className="mb-1 text-[11px] font-semibold uppercase text-neutral-400">Expected date</span>
+              <span className="font-medium text-neutral-800">{fmtDate(order.expected_date)}</span>
+            </div>
+            <div className="flex flex-col border-b border-neutral-100 pb-2">
+              <span className="mb-1 text-[11px] font-semibold uppercase text-neutral-400">Indent</span>
+              <span className="font-mono text-neutral-800">{order.indent_no || "—"}</span>
+            </div>
+            <div className="flex flex-col border-b border-neutral-100 pb-2">
+              <span className="mb-1 text-[11px] font-semibold uppercase text-neutral-400">Requisition</span>
+              <span className="font-mono text-neutral-800">{order.requisition_no || "—"}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="mb-1 text-[11px] font-semibold uppercase text-neutral-400">RFQ</span>
+              <span className="font-mono text-neutral-800">{order.rfq_no || "—"}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="mb-1 text-[11px] font-semibold uppercase text-neutral-400">Quotation</span>
+              <span className="font-mono text-neutral-800">{order.quotation_no || "—"}</span>
+            </div>
+          </div>
+        </section>
 
-      <table className="mt-5 w-full border-collapse text-[12px]">
+        {/* Addresses Section */}
+        <section className="flex flex-col gap-6 rounded-lg border border-neutral-200 bg-neutral-50 p-6 shadow-sm">
+          <div className="border-b border-neutral-200 pb-4">
+            <p className="mb-2 text-[11px] font-bold uppercase tracking-widest text-brand-600">Bill to</p>
+            <p className="break-words whitespace-pre-line text-[13px] leading-relaxed text-neutral-800">{order.billing_address || "—"}</p>
+          </div>
+          <div>
+            <p className="mb-2 text-[11px] font-bold uppercase tracking-widest text-brand-600">Ship to</p>
+            <p className="break-words whitespace-pre-line text-[13px] leading-relaxed text-neutral-800">{order.shipping_address || "—"}</p>
+          </div>
+        </section>
+      </div>
+
+      <table className="mt-8 w-full border-collapse text-[12px]">
         <thead>
-          <tr className="border-y border-black text-left">
-            <th className="py-1.5 pr-2">#</th>
-            <th className="py-1.5 pr-2">Item</th>
-            <th className="py-1.5 pr-2 text-right">Qty</th>
-            <th className="py-1.5 pr-2 text-right">Rate</th>
-            <th className="py-1.5 pr-2 text-right">Tax %</th>
-            <th className="py-1.5 text-right">Amount</th>
+          <tr className="border-y-2 border-neutral-800 bg-neutral-50/50 text-left text-[11px] uppercase tracking-wider text-neutral-600">
+            <th className="py-2.5 pl-2 pr-2">#</th>
+            <th className="py-2.5 pr-2">Item</th>
+            <th className="py-2.5 pr-2 text-right">Qty</th>
+            <th className="py-2.5 pr-2 text-right">Rate</th>
+            <th className="py-2.5 pr-2 text-right">Tax %</th>
+            <th className="py-2.5 pr-2 text-right">Amount</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody className="divide-y divide-neutral-200">
           {order.items.map((line, index) => (
-            <tr key={line.id} className="border-b border-neutral-300 align-top">
-              <td className="py-1.5 pr-2">{index + 1}</td>
-              <td className="py-1.5 pr-2">
-                <div className="font-medium">{line.item_name ?? "—"}</div>
-                <div className="font-mono text-[11px] text-neutral-600">
+            <tr key={line.id} className="align-top">
+              <td className="py-3 pl-2 pr-2 text-neutral-500">{index + 1}</td>
+              <td className="py-3 pr-2">
+                <div className="font-bold text-neutral-900">{line.item_name ?? "—"}</div>
+                <div className="mt-0.5 font-mono text-[11px] text-neutral-500">
                   {line.item_code ?? `#${line.item_id}`}
                 </div>
               </td>
-              <td className="py-1.5 pr-2 text-right">{line.quantity} {line.uom_code ?? ""}</td>
-              <td className="py-1.5 pr-2 text-right">{money(line.rate)}</td>
-              <td className="py-1.5 pr-2 text-right">{line.tax_percent}%</td>
-              <td className="py-1.5 text-right">{money(line.amount)}</td>
+              <td className="py-3 pr-2 text-right font-medium text-neutral-900">{line.quantity} <span className="text-neutral-500">{line.uom_code ?? ""}</span></td>
+              <td className="py-3 pr-2 text-right text-neutral-800">{money(line.rate)}</td>
+              <td className="py-3 pr-2 text-right text-neutral-800">{line.tax_percent}%</td>
+              <td className="py-3 pr-2 text-right font-bold text-neutral-900">{money(line.amount)}</td>
             </tr>
           ))}
         </tbody>
       </table>
 
-      <section className="mt-3 flex justify-end">
-        <table className="w-[280px] text-[12px]">
-          <tbody>
-            <tr><td className="py-0.5 text-neutral-600">Subtotal</td><td className="py-0.5 text-right">{money(order.sub_total)}</td></tr>
-            <tr><td className="py-0.5 text-neutral-600">Discount</td><td className="py-0.5 text-right">{money(order.discount_amount)}</td></tr>
-            <tr><td className="py-0.5 text-neutral-600">Tax</td><td className="py-0.5 text-right">{money(order.tax_amount)}</td></tr>
-            <tr><td className="py-0.5 text-neutral-600">Freight</td><td className="py-0.5 text-right">{money(order.freight_amount)}</td></tr>
-            <tr className="border-t border-black">
-              <td className="py-1 font-bold">Total</td>
-              <td className="py-1 text-right font-bold">{money(order.total_amount)}</td>
+      <section className="mt-4 flex justify-end border-b border-neutral-300 pb-4">
+        <table className="w-[320px] text-[13px]">
+          <tbody className="divide-y divide-neutral-100">
+            <tr><td className="py-1.5 pr-4 text-neutral-500">Subtotal</td><td className="py-1.5 text-right font-medium text-neutral-900">{money(order.sub_total)}</td></tr>
+            <tr><td className="py-1.5 pr-4 text-neutral-500">Discount</td><td className="py-1.5 text-right font-medium text-neutral-900">{money(order.discount_amount)}</td></tr>
+            <tr><td className="py-1.5 pr-4 text-neutral-500">Tax</td><td className="py-1.5 text-right font-medium text-neutral-900">{money(order.tax_amount)}</td></tr>
+            <tr><td className="py-1.5 pr-4 text-neutral-500">Freight</td><td className="py-1.5 text-right font-medium text-neutral-900">{money(order.freight_amount)}</td></tr>
+            <tr className="border-t-2 border-neutral-800 bg-neutral-50/50">
+              <td className="py-2.5 pr-4 font-bold uppercase tracking-wider text-neutral-900">Total</td>
+              <td className="py-2.5 text-right text-[15px] font-black text-neutral-900">{money(order.total_amount)}</td>
             </tr>
           </tbody>
         </table>
       </section>
 
-      <section className="mt-5">
-        <p className="mb-1 text-[11px] font-bold uppercase tracking-wide">
+      <section className="mt-8">
+        <p className="mb-3 text-[11px] font-bold uppercase tracking-widest text-neutral-500">
           Terms and conditions
         </p>
         <table className="w-full text-[12px]">
-          <tbody>
+          <tbody className="divide-y divide-neutral-100">
             {terms.map(([label, text]) => (
               <tr key={label} className="align-top">
-                <td className="w-[130px] py-1 pr-3 text-neutral-600">{label}</td>
-                <td className="py-1 whitespace-pre-line">{text || "—"}</td>
+                <td className="w-[140px] py-2.5 pr-4 font-medium text-neutral-700">{label}</td>
+                <td className="py-2.5 whitespace-pre-line leading-relaxed text-neutral-800">{text || "—"}</td>
               </tr>
             ))}
           </tbody>
@@ -205,36 +223,36 @@ export function POPrintPage() {
       </section>
 
       {order.remarks && (
-        <section className="mt-4">
-          <p className="mb-1 text-[11px] font-bold uppercase tracking-wide">Remarks</p>
-          <p className="whitespace-pre-line text-[12px]">{order.remarks}</p>
+        <section className="mt-6 rounded border border-neutral-200 bg-neutral-50/50 p-4">
+          <p className="mb-1 text-[11px] font-bold uppercase tracking-widest text-neutral-500">Remarks</p>
+          <p className="whitespace-pre-line text-[12px] leading-relaxed text-neutral-800">{order.remarks}</p>
         </section>
       )}
 
       {order.amendment_reason && (
-        <section className="mt-4">
-          <p className="mb-1 text-[11px] font-bold uppercase tracking-wide">
+        <section className="mt-6 rounded border border-amber-200 bg-amber-50 p-4">
+          <p className="mb-1 text-[11px] font-bold uppercase tracking-widest text-amber-700">
             Amendment {order.revision_no}
           </p>
-          <p className="text-[12px]">
-            {order.amendment_reason}
+          <p className="text-[12px] text-amber-900">
+            <span className="font-medium">{order.amendment_reason}</span>
             {order.amended_at ? ` · ${fmtDate(order.amended_at)}` : ""}
           </p>
         </section>
       )}
 
-      <footer className="mt-12 flex justify-between text-[12px]">
-        <div>
-          <div className="h-12" />
-          <p className="border-t border-black pt-1">Prepared by</p>
+      <footer className="mt-16 flex justify-between text-[12px]">
+        <div className="w-[200px]">
+          <div className="h-16" />
+          <p className="border-t border-neutral-300 pt-2 font-bold uppercase tracking-wider text-neutral-600">Prepared by</p>
         </div>
-        <div>
-          <div className="h-12" />
-          <p className="border-t border-black pt-1">Authorised signatory</p>
+        <div className="w-[200px]">
+          <div className="h-16" />
+          <p className="border-t border-neutral-300 pt-2 font-bold uppercase tracking-wider text-neutral-600">Authorised signatory</p>
         </div>
-        <div>
-          <div className="h-12" />
-          <p className="border-t border-black pt-1">Vendor acknowledgement</p>
+        <div className="w-[200px]">
+          <div className="h-16" />
+          <p className="border-t border-neutral-300 pt-2 font-bold uppercase tracking-wider text-neutral-600">Vendor acknowledgement</p>
         </div>
       </footer>
     </div>

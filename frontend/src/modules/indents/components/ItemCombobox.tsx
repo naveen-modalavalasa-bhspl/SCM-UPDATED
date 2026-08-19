@@ -22,6 +22,7 @@ export function ItemCombobox({
   onDisabledSelect,
   isLoading = false,
   isInvalid = false,
+  isDisabled = false,
   errorId,
   placeholder = "Type or select an item…",
 }: {
@@ -32,6 +33,7 @@ export function ItemCombobox({
   onDisabledSelect?: (value: number) => void;
   isLoading?: boolean;
   isInvalid?: boolean;
+  isDisabled?: boolean;
   errorId?: string;
   placeholder?: string;
 }) {
@@ -81,25 +83,28 @@ export function ItemCombobox({
           aria-describedby={isInvalid ? errorId : undefined}
           value={query}
           placeholder={placeholder}
-          onFocus={() => setOpen(true)}
+          disabled={isDisabled}
+          onFocus={() => { if (!isDisabled) setOpen(true); }}
           onBlur={() => window.setTimeout(() => {
             setOpen(false);
             if (query !== selectedLabel) setQuery(selectedLabel);
           }, 100)}
           onChange={(event) => {
+            if (isDisabled) return;
             const nextQuery = event.target.value;
             setQuery(nextQuery);
             if (nextQuery === "" && value !== "") onChange("");
             setOpen(true);
           }}
-          className="h-11 min-w-0 flex-1 rounded-l-xl bg-transparent px-3 text-sm text-ink outline-none placeholder:text-muted"
+          className="h-11 min-w-0 flex-1 rounded-l-xl bg-transparent px-3 text-sm text-ink outline-none placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-50"
         />
         <button
           type="button"
           aria-label="Toggle item options"
+          disabled={isDisabled}
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => setOpen((current) => !current)}
-          className="grid h-11 w-11 place-items-center rounded-r-xl text-muted hover:text-body"
+          className="grid h-11 w-11 place-items-center rounded-r-xl text-muted hover:text-body disabled:cursor-not-allowed disabled:opacity-50"
         >
           <ChevronDown className={`h-4 w-4 transition ${open ? "rotate-180" : ""}`} />
         </button>

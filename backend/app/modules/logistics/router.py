@@ -218,21 +218,24 @@ async def submit_transport(tr_id: int, db: AsyncSession = Depends(get_db),
 
 
 @transport_router.post("/{tr_id}/approve", response_model=TROut)
-# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity`nasync def approve_transport(tr_id: int, body: ActionIn,
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def approve_transport(tr_id: int, body: ActionIn,
                             db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.TRANSPORT_APPROVE))):
     return await service.act_on_tr(db, tr_id, "APPROVED", user, body.comments)
 
 
 @transport_router.post("/{tr_id}/reject", response_model=TROut)
-# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity`nasync def reject_transport(tr_id: int, body: ActionIn,
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def reject_transport(tr_id: int, body: ActionIn,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(perms.TRANSPORT_APPROVE))):
     return await service.act_on_tr(db, tr_id, "REJECTED", user, body.comments)
 
 
 @transport_router.post("/{tr_id}/cancel", response_model=TROut)
-# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity`nasync def cancel_transport(tr_id: int, body: ActionIn,
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def cancel_transport(tr_id: int, body: ActionIn,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(perms.TRANSPORT_CREATE))):
     return await service.cancel_tr(db, tr_id, user, body.comments)
@@ -281,14 +284,16 @@ async def ask_revised_quote(tr_id: int, body: ReviseQuoteIn,
 
 
 @transport_router.post("/{tr_id}/award/approve", response_model=TROut)
-# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity`nasync def approve_award(tr_id: int, body: ActionIn,
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def approve_award(tr_id: int, body: ActionIn,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.TRANSPORT_APPROVE))):
     return await service.act_on_award(db, tr_id, "APPROVED", user, body.comments)
 
 
 @transport_router.post("/{tr_id}/award/reject", response_model=TROut)
-# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity`nasync def reject_award(tr_id: int, body: ActionIn,
+# FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
+async def reject_award(tr_id: int, body: ActionIn,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.TRANSPORT_APPROVE))):
     return await service.act_on_award(db, tr_id, "REJECTED", user, body.comments)

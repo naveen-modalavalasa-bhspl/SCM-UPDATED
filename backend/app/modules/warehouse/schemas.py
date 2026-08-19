@@ -357,6 +357,7 @@ class ReceiptDetail(ReceiptRead):
 class PoLineOption(BaseModel):
     """An open PO line, so the GRN form fills itself from the order."""
     po_item_id: int
+    indent_id: int | None = None
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
@@ -365,6 +366,15 @@ class PoLineOption(BaseModel):
     received_qty: Decimal
     pending_qty: Decimal
     rate: Decimal | None = None
+
+
+class PoPrefill(BaseModel):
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    vendor_gstin: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    lines: list[PoLineOption] = Field(default_factory=list)
 
 
 class TransferReceiptSource(BaseModel):

@@ -14,6 +14,7 @@ import {
   getPoLines, getReceipt, incomingDispatchOptions, itemOptions, poOptions,
   submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
 } from "../api";
+import { poApi } from "@/modules/procurement/api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
@@ -223,11 +224,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
    */
   const fillFromPo = useMutation({
     mutationFn: (poId: number) => getPoLines(poId),
-    onSuccess: (lines) => {
+    onSuccess: (prefill) => {
       const already = new Set(
         form.items.map((line) => line.po_item_id).filter(Boolean) as number[],
       );
-      const added = lines.filter((line) => !already.has(line.po_item_id)).map((line) => ({
+      const added = prefill.lines.filter((line) => !already.has(line.po_item_id)).map((line) => ({
         ...emptyLine(),
         po_item_id: line.po_item_id,
         indent_id: line.indent_id ?? undefined,
@@ -244,11 +245,26 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       }));
       if (!added.length) {
         void alerts.info("receipt.po_nothing_pending");
-        return;
       }
-      setForm((current) => ({ ...current, items: [...current.items, ...added] }));
+      setForm((current) => ({
+        ...current,
+        vendor_id: current.vendor_id || prefill.vendor_id || undefined,
+        project_id: current.project_id || prefill.project_id || undefined,
+        items: [...current.items, ...added],
+      }));
       setTouched(true);
     },
+  });
+
+  const fillPoDetails = useMutation({
+    mutationFn: (poId: number) => poApi.get(poId),
+    onSuccess: (po) => {
+      setForm((current) => ({
+        ...current,
+        vendor_id: po.vendor_id ?? current.vendor_id,
+        project_id: po.project_id ?? current.project_id,
+      }));
+    }
   });
 
   /** The vendor is left to the server, which reads it off the order itself rather
@@ -284,11 +300,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       return notes.length ? { noteId: Number(notes[0].id) } : { noteId: null };
     },
     onSuccess: ({ noteId }, poId) => {
+      fillPoDetails.mutate(poId);
       if (noteId) fillFromDespatch.mutate(noteId);
       else fillFromPo.mutate(poId);
     },
     // A lookup that fails must not cost the storekeeper the order they just picked.
-    onError: (_error, poId) => fillFromPo.mutate(poId),
+    onError: (_error, poId) => {
+      fillPoDetails.mutate(poId);
+      fillFromPo.mutate(poId);
+    },
   });
 
   /**
@@ -1099,7 +1119,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               >
                 <Lookup
                   name="purchase-orders"
-                  load={poOptions}
+                  load={(s) => poOptions(s, form.warehouse_id)}
+                  key={form.warehouse_id || 'no-wh'}
                   value={form.po_id ?? ""}
                   isDisabled={locked || fillFromPo.isPending || fillFromOrder.isPending
                     || fillFromDespatch.isPending}

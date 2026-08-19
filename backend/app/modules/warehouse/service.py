@@ -9281,23 +9281,82 @@ async def batch_options(
     return [{"id": row.id, "code": row.batch_no, "name": row.batch_no} for row in rows]
 
 
-async def po_options(db: AsyncSession, search: str | None = None) -> list[dict]:
+async def po_options(db: AsyncSession, search: str | None = None, warehouse_id: int | None = None) -> list[dict]:
     # Three columns, not the whole row: see _po_number for why selecting the mapped
     # PurchaseOrder is a 1054 against the live schema.
     from app.modules.procurement.models import PurchaseOrder
+    from app.shared.enums import POStatus
     stmt = select(PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.vendor_name)
     # Only orders the vendor has actually been told about. Listing every PO offered a
     # storekeeper drafts nobody has approved and orders already cancelled — and the
     # receipt would then post stock against a commitment that was never made. Mirrors
     # the GRN guard, which has always required an order to have been sent.
     stmt = stmt.where(PurchaseOrder.status.in_((
-        POStatus.SENT_TO_VENDOR.value, POStatus.PARTIALLY_RECEIVED.value)))
+        POStatus.SENT_TO_VENDOR.value, 
+        POStatus.PARTIALLY_RECEIVED.value,
+        POStatus.ACCEPTED_BY_SUPPLIER.value)))
+    
+    # Only orders that the supplier has explicitly accepted.
+    from app.shared.enums import POVendorStatus
+    from sqlalchemy import or_
+    stmt = stmt.where(PurchaseOrder.vendor_status == POVendorStatus.ACCEPTED.value)
+
+    if warehouse_id:
+        from app.shared.models.warehouse import Warehouse
+        wh = await db.get(Warehouse, warehouse_id)
+        if wh:
+            conditions = []
+            if wh.office_id:
+                conditions.append(PurchaseOrder.office_id == wh.office_id)
+            if wh.facility_id:
+                conditions.append(PurchaseOrder.facility_id == wh.facility_id)
+            conditions.append(PurchaseOrder.facility_id == warehouse_id)
+            if conditions:
+                stmt = stmt.where(or_(*conditions))
+
     if search:
         stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
     rows = (await db.execute(
         stmt.order_by(PurchaseOrder.id.desc()).limit(LOOKUP_LIMIT))).all()
     return [{"id": po_id, "code": po_no, "name": vendor_name or po_no}
             for po_id, po_no, vendor_name in rows]
+
+
+async def po_lines(db: AsyncSession, po_id: int) -> dict:
+    from app.modules.procurement.models import PurchaseOrder, POItem
+    
+    stmt = select(PurchaseOrder).where(PurchaseOrder.id == po_id)
+    po = (await db.execute(stmt)).scalars().first()
+    if not po:
+        return {"lines": []}
+        
+    stmt_lines = select(POItem).where(POItem.po_id == po_id)
+    rows = (await db.execute(stmt_lines.order_by(POItem.id))).scalars().all()
+    
+    lines = [
+        {
+            "po_item_id": row.id,
+            "indent_id": getattr(row, "indent_id", None),
+            "item_id": row.item_id,
+            "item_code": row.item_code,
+            "item_name": row.item_name,
+            "uom_code": row.uom_code,
+            "ordered_qty": row.quantity,
+            "received_qty": row.received_quantity,
+            "pending_qty": row.quantity - row.received_quantity,
+            "rate": row.rate,
+        }
+        for row in rows
+    ]
+    
+    return {
+        "vendor_id": po.vendor_id,
+        "vendor_name": po.vendor_name,
+        "vendor_gstin": po.vendor_gstin,
+        "project_id": po.project_id,
+        "project_name": po.project_name,
+        "lines": lines
+    }
 
 
 async def receipt_options(

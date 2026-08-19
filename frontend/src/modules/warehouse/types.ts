@@ -1282,6 +1282,7 @@ export interface DespatchPrefill {
 
 export interface PoLineOption {
   po_item_id: number;
+  indent_id?: number;
   item_id: number;
   item_code?: string | null;
   item_name?: string | null;
@@ -1292,6 +1293,15 @@ export interface PoLineOption {
   rate?: number | null;
   indent_id?: number | null;
   indent_no?: string | null;
+}
+
+export interface PoPrefill {
+  vendor_id?: number;
+  vendor_name?: string;
+  vendor_gstin?: string;
+  project_id?: number;
+  project_name?: string;
+  lines: PoLineOption[];
 }
 
 export interface StockMovementOrderItem {

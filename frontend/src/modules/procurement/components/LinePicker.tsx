@@ -8,12 +8,12 @@ import { api } from "@/shared/api/client";
 /** One editable line. `rate` is optional — an RFQ asks for a price rather than
  *  stating one, so the same editor serves both with the column switched off. */
 export interface DraftLine {
+  id?: number | null;
   item_id: number | "";
   quantity: string;
+  original_quantity?: string;
   uom_code?: string | null;
   rate?: string;
-  /** Only a purchase order states one: an RFQ asks for the tax, a requisition has no
-   *  business guessing it, and an order is where it is finally agreed. */
   tax_percent?: string;
   required_date?: string;
   description?: string;
@@ -38,6 +38,7 @@ interface MasterItem {
 export function LinePicker({
   lines, onChange, showRate = false, showTax = false, showDate = true,
   disabled = false,
+  freezeRateAndTax = false,
 }: {
   lines: DraftLine[];
   onChange: (lines: DraftLine[]) => void;
@@ -45,6 +46,7 @@ export function LinePicker({
   showTax?: boolean;
   showDate?: boolean;
   disabled?: boolean;
+  freezeRateAndTax?: boolean;
 }) {
   const [search, setSearch] = useState("");
 
@@ -81,6 +83,7 @@ export function LinePicker({
                 options={options}
                 isLoading={isLoading}
                 onQueryChange={setSearch}
+                isDisabled={disabled || !!line.id}
                 onChange={(value) => {
                   const chosen = items.find((item) => item.id === value);
                   set(index, { item_id: value, uom_code: chosen?.uom_code ?? null });
@@ -111,7 +114,7 @@ export function LinePicker({
                   min="0"
                   step="0.01"
                   value={line.rate ?? ""}
-                  disabled={disabled}
+                  disabled={disabled || !!line.id || freezeRateAndTax}
                   onChange={(e) => set(index, { rate: e.target.value })}
                 />
               </Field>
@@ -125,7 +128,7 @@ export function LinePicker({
                   min="0"
                   step="0.01"
                   value={line.tax_percent ?? ""}
-                  disabled={disabled}
+                  disabled={disabled || !!line.id || freezeRateAndTax}
                   onChange={(e) => set(index, { tax_percent: e.target.value })}
                 />
               </Field>
@@ -137,7 +140,7 @@ export function LinePicker({
                 <Input
                   type="date"
                   value={line.required_date ?? ""}
-                  disabled={disabled}
+                  disabled={disabled || !!line.id}
                   onChange={(e) => set(index, { required_date: e.target.value })}
                 />
               </Field>
@@ -147,7 +150,7 @@ export function LinePicker({
             <button
               type="button"
               onClick={() => remove(index)}
-              disabled={disabled}
+              disabled={disabled || !!line.id}
               aria-label={`Remove line ${index + 1}`}
               className="flex h-11 w-11 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-danger disabled:opacity-40"
             >

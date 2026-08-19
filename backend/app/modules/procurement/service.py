@@ -12,7 +12,8 @@ import secrets
 from decimal import Decimal
 from types import SimpleNamespace
 
-from sqlalchemy import func, select, true
+from datetime import date
+from sqlalchemy import func, select, true, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -695,8 +696,17 @@ async def update_po_header(db: AsyncSession, po_id: int,
     return await get_po(db, po_id, user)
 
 
-async def list_pos(db: AsyncSession, params: PageParams, status: str | None = None,
-                   vendor_id: int | None = None, user=None) -> dict:
+async def list_pos(
+    db: AsyncSession,
+    params: PageParams,
+    search: str | None = None,
+    status: str | None = None,
+    vendor_id: int | None = None,
+    project_id: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    user=None
+) -> dict:
     stmt = select(PurchaseOrder)
     if user is not None:
         stmt = stmt.where(await scope_condition(
@@ -704,12 +714,100 @@ async def list_pos(db: AsyncSession, params: PageParams, status: str | None = No
             owner_col=PurchaseOrder.created_by_id,
             office_col=PurchaseOrder.office_id,
         ))
+    if search:
+        search_term = f"%{search}%"
+        stmt = stmt.where(
+            or_(
+                PurchaseOrder.po_no.ilike(search_term),
+                PurchaseOrder.rfq_no.ilike(search_term),
+                PurchaseOrder.quotation_no.ilike(search_term),
+                PurchaseOrder.indent_no.ilike(search_term), # Fallback, still helpful
+            )
+        )
     if status:
         stmt = stmt.where(PurchaseOrder.status == status)
     if vendor_id is not None:
         stmt = stmt.where(PurchaseOrder.vendor_id == vendor_id)
+    if project_id is not None:
+        stmt = stmt.where(PurchaseOrder.project_id == project_id)
+    if date_from:
+        stmt = stmt.where(PurchaseOrder.po_date >= date_from)
+    if date_to:
+        stmt = stmt.where(PurchaseOrder.po_date <= date_to)
+
     return await _attach_pending_with(db, DocType.PO.value, await paginate(
         db, stmt.order_by(PurchaseOrder.created_at.desc()), params))
+
+async def export_pos(
+    db: AsyncSession,
+    search: str | None = None,
+    status: str | None = None,
+    vendor_id: int | None = None,
+    project_id: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    user=None
+) -> str:
+    import csv
+    import io
+
+    stmt = select(PurchaseOrder)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            owner_col=PurchaseOrder.created_by_id,
+            office_col=PurchaseOrder.office_id,
+        ))
+    if search:
+        search_term = f"%{search}%"
+        stmt = stmt.where(
+            or_(
+                PurchaseOrder.po_no.ilike(search_term),
+                PurchaseOrder.rfq_no.ilike(search_term),
+                PurchaseOrder.quotation_no.ilike(search_term),
+                PurchaseOrder.indent_no.ilike(search_term),
+            )
+        )
+    if status:
+        stmt = stmt.where(PurchaseOrder.status == status)
+    if vendor_id is not None:
+        stmt = stmt.where(PurchaseOrder.vendor_id == vendor_id)
+    if project_id is not None:
+        stmt = stmt.where(PurchaseOrder.project_id == project_id)
+    if date_from:
+        stmt = stmt.where(PurchaseOrder.po_date >= date_from)
+    if date_to:
+        stmt = stmt.where(PurchaseOrder.po_date <= date_to)
+
+    result = await db.execute(stmt.order_by(PurchaseOrder.created_at.desc()))
+    pos = result.scalars().all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "PO No", "PO Date", "Vendor", "Project", "Status", "Vendor Status", 
+        "Subtotal", "Tax", "Freight", "Discount", "Total Amount", 
+        "RFQ No", "Quotation No", "Indent No"
+    ])
+
+    for po in pos:
+        writer.writerow([
+            po.po_no,
+            po.po_date.isoformat() if po.po_date else "",
+            po.vendor_name or "",
+            po.project_name or "",
+            po.status,
+            po.vendor_status or "",
+            float(po.sub_total),
+            float(po.tax_amount),
+            float(po.freight_amount),
+            float(po.discount_amount),
+            float(po.total_amount),
+            po.rfq_no or "",
+            po.quotation_no or "",
+            po.indent_no or "",
+        ])
+    return output.getvalue()
 
 
 async def submit_po(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
@@ -941,7 +1039,7 @@ async def po_revisions(db: AsyncSession, po_id: int, user=None) -> list:
 async def open_for_grn(db: AsyncSession, params: PageParams) -> dict:
     stmt = (
         select(PurchaseOrder)
-        .where(PurchaseOrder.status.in_([POStatus.SENT_TO_VENDOR.value,
+        .where(PurchaseOrder.status.in_([POStatus.ACCEPTED_BY_SUPPLIER.value,
                                          POStatus.PARTIALLY_RECEIVED.value]))
         .order_by(PurchaseOrder.created_at.desc())
     )
@@ -2577,7 +2675,11 @@ submit_consolidation = consolidation.submit_consolidation
 #: An order a vendor may still despatch against. Not DRAFT or PENDING_APPROVAL — the
 #: vendor has not been told about those and must not see them — and not RECEIVED, which
 #: is finished.
-_DESPATCHABLE = (POStatus.SENT_TO_VENDOR.value, POStatus.PARTIALLY_RECEIVED.value)
+_DESPATCHABLE = (
+    POStatus.SENT_TO_VENDOR.value,
+    POStatus.ACCEPTED_BY_SUPPLIER.value,
+    POStatus.PARTIALLY_RECEIVED.value,
+)
 
 
 async def _vendor_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOrder:
@@ -2620,6 +2722,8 @@ async def vendor_respond_to_po(db: AsyncSession, vendor_id: int, po_id: int,
                         else POVendorStatus.REJECTED.value)
     po.vendor_responded_at = utcnow()
     po.vendor_response_note = (note or "").strip() or None
+    if accept:
+        po.status = POStatus.ACCEPTED_BY_SUPPLIER.value
     await db.commit()
     await db.refresh(po)
     logger.info("%s %s by vendor %s", po.po_no, po.vendor_status, vendor_id)
@@ -2700,6 +2804,15 @@ async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> Purchas
         .order_by(DespatchNote.id.desc())
     )).scalars().all())
     return po
+
+
+async def vendor_po_revisions(db: AsyncSession, vendor_id: int, po_id: int) -> list:
+    """The vendor gets to see the revisions for an order sent to them."""
+    await _vendor_po(db, vendor_id, po_id)  # Auth check
+    return list((await db.execute(
+        select(PORevision).where(PORevision.po_id == po_id)
+        .order_by(PORevision.revision_no.desc(), PORevision.id.desc())
+    )).scalars().all())
 
 
 async def vendor_get_despatch_note(db: AsyncSession, vendor_id: int,

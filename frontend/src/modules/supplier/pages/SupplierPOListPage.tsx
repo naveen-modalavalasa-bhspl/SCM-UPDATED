@@ -7,12 +7,13 @@ import {
 import { fmtDate } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type { VendorPOListRow } from "@/modules/procurement/types";
+import { formatPONo } from "@/shared/format";
 
 const SIZE = 20;
 
-const money = (value: number) => new Intl.NumberFormat(undefined, {
+const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
-}).format(value);
+}).format(value ?? 0);
 
 /**
  * The orders this vendor has been sent.
@@ -36,8 +37,8 @@ export function SupplierPOListPage() {
       header: "Order",
       render: (r) => (
         <div className="min-w-0">
-          <div className="font-mono text-xs font-semibold text-ink">{r.po_no}</div>
-          <div className="text-xs text-muted">{fmtDate(r.po_date)}</div>
+          <div className="font-mono text-xs font-semibold text-ink">{formatPONo(r.po_no, r.revision_no)}</div>
+          <div className="text-[11px] text-muted">{fmtDate(r.po_date)}</div>
         </div>
       ),
     },
@@ -83,7 +84,7 @@ export function SupplierPOListPage() {
           renderCard={(r) => (
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">
-                <span className="font-mono text-sm font-semibold text-ink">{r.po_no}</span>
+                <span className="font-mono text-sm font-semibold text-ink">{formatPONo(r.po_no, r.revision_no)}</span>
                 <StatusPill status={r.status} />
               </div>
               <div className="text-xs text-muted">

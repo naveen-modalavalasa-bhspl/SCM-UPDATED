@@ -1,19 +1,22 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, Send, Truck, X } from "lucide-react";
+import { ArrowLeft, Check, Send, Truck, X, CreditCard, Package, Route, Building, MapPin } from "lucide-react";
 import {
   Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
+import { Stepper, type Step } from "@/shared/components/Stepper";
 import { fmtDate } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type {
   DespatchLineWrite, DespatchNote, DespatchNoteWrite, VendorPOLine,
 } from "@/modules/procurement/types";
+import { LinePicker } from "@/modules/procurement/components/LinePicker";
+import { formatPONo } from "@/shared/format";
 
-const money = (value: number) => new Intl.NumberFormat(undefined, {
+const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
-}).format(value);
+}).format(value ?? 0);
 
 const today = () => new Date().toISOString().slice(0, 10);
 const num = (value: unknown) => (Number.isFinite(Number(value)) ? Number(value) : 0);
@@ -49,6 +52,12 @@ export function SupplierPODetailPage() {
     queryKey: ["supplier-po", poId],
     queryFn: () => supplierApi.po(poId),
     enabled: Number.isFinite(poId) && poId > 0,
+  });
+
+  const revisions = useQuery({
+    queryKey: ["supplier-po-revisions", poId],
+    queryFn: () => supplierApi.revisions(poId),
+    enabled: !!po?.revision_no,
   });
 
   const [header, setHeader] = useState<Omit<DespatchNoteWrite, "lines">>({
@@ -182,6 +191,32 @@ export function SupplierPODetailPage() {
   const awaitingAnswer = po.vendor_status === "PENDING";
   const declined = po.vendor_status === "REJECTED";
 
+  const steps: Step[] = (() => {
+    const vs = po.vendor_status;
+    const s = po.status;
+    const baseSteps: Step[] = [
+      { id: "sent", label: "Sent to you", status: "complete" },
+      { id: "accepted", label: "Accepted", status: "upcoming" },
+      { id: "fulfilled", label: "Fulfilled", status: "upcoming" },
+    ];
+    if (vs === "PENDING") {
+      baseSteps[1].status = "current";
+    } else if (vs === "REJECTED") {
+      baseSteps[1] = { id: "accepted", label: "Rejected", status: "error" };
+    } else if (vs === "ACCEPTED") {
+      baseSteps[1].status = "complete";
+      if (s === "RECEIVED" || s === "CLOSED") {
+        baseSteps[2].status = "complete";
+      } else if (s === "PARTIALLY_RECEIVED") {
+        baseSteps[2].status = "current";
+        baseSteps[2].description = "Partially received";
+      } else {
+        baseSteps[2].status = "current";
+      }
+    }
+    return baseSteps;
+  })();
+
   return (
     <>
       <Button variant="ghost" onClick={() => nav("/supplier/pos")}>
@@ -189,27 +224,27 @@ export function SupplierPODetailPage() {
       </Button>
       <PageHeader
         eyebrow="Purchase order"
-        title={po.po_no}
+        title={formatPONo(po.po_no, po.revision_no)}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <StatusPill status={po.status} />
             {po.vendor_status && <StatusPill status={po.vendor_status} />}
-            {(po.revision_no ?? 0) > 0 && (
-              <span className="rounded-full bg-surface-2 px-2.5 py-1 text-xs text-body">
-                Rev {po.revision_no}
-              </span>
-            )}
             {/* Not offered until the order has been accepted: a despatch note is a
               * claim against an agreement, so there has to be one. The server refuses
               * it too — this only stops the vendor filling in a form for nothing. */}
             {!composing && !nothingLeft && !awaitingAnswer && !declined && (
               <Button onClick={startNew}>
-                <Truck className="h-4 w-4" /> File a despatch note
+                <Truck className="h-4 w-4" /> File a dispatch note
               </Button>
             )}
           </div>
         }
       />
+      
+      <div className="mb-6 -mx-2 sm:mx-0">
+        <Stepper steps={steps} className="bg-surface-2/50 rounded-xl" />
+      </div>
+
       <ErrorBanner error={save.error ?? submit.error ?? cancel.error} />
 
       <Card className="mb-4 p-5">
@@ -248,7 +283,7 @@ export function SupplierPODetailPage() {
             </h2>
             <p className="mt-1 text-xs text-muted">
               Check the quantities, rates and terms below. Accepting confirms you will
-              supply them; you cannot despatch against the order until you do.
+              supply them; you cannot dispatch against the order until you do.
               {(po.revision_no ?? 0) > 0 && po.amendment_reason
                 ? ` The buyer amended it: ${po.amendment_reason}`
                 : ""}
@@ -286,7 +321,7 @@ export function SupplierPODetailPage() {
             {po.vendor_response_note ? ` Reason given: ${po.vendor_response_note}` : ""}
           </p>
           <p className="mt-1 text-xs text-muted">
-            Nothing can be despatched against it. The buyer can amend the order and
+            Nothing can be dispatched against it. The buyer can amend the order and
             send it back to you.
           </p>
         </Card>
@@ -300,27 +335,51 @@ export function SupplierPODetailPage() {
         </p>
       )}
 
-      {/* What was agreed in words. The vendor is bound by these too, so they belong on
-        * the vendor's copy and not only on ours. */}
-      {(po.payment_terms || po.delivery_terms || po.material_terms
-        || po.logistics_terms || po.billing_address || po.shipping_address) && (
-        <Card className="mb-5 p-5">
-          <h2 className="mb-3 text-sm font-semibold text-ink">Terms and addresses</h2>
-          <dl className="grid gap-3 text-sm sm:grid-cols-2">
+      {(po.payment_terms || po.delivery_terms || po.material_terms || po.logistics_terms) && (
+        <Card className="mb-5 p-6">
+          <h2 className="mb-4 text-base font-semibold text-ink">Terms and Conditions</h2>
+          <div className="flex flex-col gap-4">
             {([
-              ["Payment terms", po.payment_terms],
-              ["Delivery terms", po.delivery_terms],
-              ["Material terms", po.material_terms],
-              ["Logistics terms", po.logistics_terms],
-              ["Bill to", po.billing_address],
-              ["Ship to", po.shipping_address],
-            ] as const).filter(([, text]) => text).map(([label, text]) => (
-              <div key={label}>
-                <dt className="text-xs text-muted">{label}</dt>
-                <dd className="mt-1 whitespace-pre-line text-body">{text}</dd>
+              ["Payment terms", po.payment_terms, CreditCard],
+              ["Delivery terms", po.delivery_terms, Truck],
+              ["Material terms", po.material_terms, Package],
+              ["Logistics terms", po.logistics_terms, Route],
+            ] as const).filter(([, text]) => text).map(([label, text, Icon]) => (
+              <div 
+                key={label} 
+                className="group flex flex-col rounded-xl border border-line/50 bg-surface-2/30 p-4 transition-all hover:bg-surface-2 hover:shadow-sm"
+              >
+                <div className="mb-3 flex items-center gap-2 text-muted transition-colors group-hover:text-ink">
+                  <Icon className="h-4 w-4" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider">{label}</h3>
+                </div>
+                <div className="flex-1 whitespace-pre-line break-words text-sm leading-relaxed text-body">{text}</div>
               </div>
             ))}
-          </dl>
+          </div>
+        </Card>
+      )}
+
+      {(po.billing_address || po.shipping_address) && (
+        <Card className="mb-5 p-6">
+          <h2 className="mb-4 text-base font-semibold text-ink">Addresses</h2>
+          <div className="flex flex-col gap-4">
+            {([
+              ["Bill to", po.billing_address, Building],
+              ["Ship to", po.shipping_address, MapPin],
+            ] as const).filter(([, text]) => text).map(([label, text, Icon]) => (
+              <div 
+                key={label} 
+                className="group flex flex-col rounded-xl border border-line/50 bg-surface-2/30 p-4 transition-all hover:bg-surface-2 hover:shadow-sm"
+              >
+                <div className="mb-3 flex items-center gap-2 text-muted transition-colors group-hover:text-ink">
+                  <Icon className="h-4 w-4" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider">{label}</h3>
+                </div>
+                <div className="flex-1 whitespace-pre-line break-words text-sm leading-relaxed text-body">{text}</div>
+              </div>
+            ))}
+          </div>
         </Card>
       )}
 
@@ -331,22 +390,36 @@ export function SupplierPODetailPage() {
             <tr>
               <th className="p-3">Item</th>
               <th className="p-3 text-right">Ordered</th>
-              <th className="p-3 text-right">Despatched</th>
+              <th className="p-3 text-right">Dispatched</th>
               <th className="p-3 text-right">Still owed</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
-            {po.lines.map((line) => (
-              <tr key={line.po_item_id}>
-                <td className="p-3">
-                  <strong className="text-ink">{line.item_name ?? "—"}</strong>
-                  <p className="font-mono text-xs text-muted">{line.item_code}</p>
-                </td>
-                <td className="tabular p-3 text-right">{line.ordered_qty} {line.uom_code ?? ""}</td>
-                <td className="tabular p-3 text-right text-muted">{line.despatched_qty}</td>
-                <td className="tabular p-3 text-right font-semibold">{line.pending_qty}</td>
-              </tr>
-            ))}
+            {po.lines.map((line) => {
+              const prev = (po.revision_no > 0 && revisions.data?.[0]?.snapshot?.items)
+                ? revisions.data[0].snapshot.items.find((i: any) => i.item_id === line.item_id)
+                : line; // If no previous snapshot, treat as matching
+                
+              const isNew = po.revision_no > 0 && revisions.data && !prev;
+
+              return (
+                <tr key={line.po_item_id} className={isNew ? "bg-primary/5" : ""}>
+                  <td className="p-3">
+                    <strong className="text-ink">{line.item_name ?? "—"}</strong>
+                    {isNew && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">New Item</span>}
+                    <p className="font-mono text-xs text-muted">{line.item_code}</p>
+                  </td>
+                  <td className="tabular p-3 text-right">
+                    {prev && prev.quantity !== line.ordered_qty && (
+                      <span className="line-through text-muted mr-1 text-xs">{prev.quantity}</span>
+                    )}
+                    {line.ordered_qty} {line.uom_code ?? ""}
+                  </td>
+                  <td className="tabular p-3 text-right text-muted">{line.despatched_qty}</td>
+                  <td className="tabular p-3 text-right font-semibold">{line.pending_qty}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </Card>
@@ -355,7 +428,7 @@ export function SupplierPODetailPage() {
         <Card className="mb-5 space-y-5 p-5">
           <div>
             <h2 className="text-sm font-semibold text-ink">
-              {editing ? `Despatch note ${editing.dn_no}` : "New despatch note"}
+              {editing ? `Dispatch note ${editing.dn_no}` : "New dispatch note"}
             </h2>
             <p className="text-xs text-muted">
               The invoice number and e-way bill are required before you can submit.
@@ -481,13 +554,13 @@ export function SupplierPODetailPage() {
               {save.isPending ? "Saving…" : "Save draft"}
             </Button>
             <Button disabled={busy} onClick={() => submit.mutate()}>
-              <Send className="h-4 w-4" /> {submit.isPending ? "Submitting…" : "Submit despatch"}
+              <Send className="h-4 w-4" /> {submit.isPending ? "Submitting…" : "Submit dispatch"}
             </Button>
           </div>
         </Card>
       )}
 
-      <h2 className="mb-2 text-sm font-semibold text-ink">Despatch notes</h2>
+      <h2 className="mb-2 text-sm font-semibold text-ink">Dispatch notes</h2>
       <Card className="p-0">
         {po.despatch_notes.length === 0 ? (
           <p className="p-6 text-center text-sm text-muted">

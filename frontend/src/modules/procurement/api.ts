@@ -13,8 +13,43 @@ import type {
 } from "./types";
 
 export const poApi = {
-  list: (params: { status?: string; vendor_id?: number; page?: number; size?: number }) =>
+  list: (params: { 
+    search?: string;
+    status?: string; 
+    vendor_id?: number; 
+    project_id?: number;
+    date_from?: string;
+    date_to?: string;
+    page?: number; 
+    size?: number 
+  }) =>
     api.get<Paginated<POListRow>>("/api/pos", { params }).then((r) => r.data),
+  export: (params: {
+    search?: string;
+    status?: string;
+    vendor_id?: number;
+    project_id?: number;
+    date_from?: string;
+    date_to?: string;
+  }) => {
+    // Generate query string
+    const qs = new URLSearchParams();
+    if (params.search) qs.append("search", params.search);
+    if (params.vendor_id) qs.append("vendor_id", params.vendor_id.toString());
+    if (params.project_id) qs.append("project_id", params.project_id.toString());
+    if (params.date_from) qs.append("date_from", params.date_from);
+    if (params.date_to) qs.append("date_to", params.date_to);
+    if (params.status) qs.append("status", params.status);
+    
+    // Trigger download
+    const url = `/api/pos/export?${qs.toString()}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "purchase_orders.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  },
   openForGrn: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<POListRow>>("/api/pos/open-for-grn", { params }).then((r) => r.data),
   get: (id: number) => api.get<PurchaseOrder>(`/api/pos/${id}`).then((r) => r.data),
@@ -181,6 +216,8 @@ export const supplierApi = {
   pos: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<VendorPOListRow>>("/api/supplier/pos", { params }).then((r) => r.data),
   po: (id: number) => api.get<VendorPO>(`/api/supplier/pos/${id}`).then((r) => r.data),
+  revisions: (poId: number) =>
+    api.get<PORevision[]>(`/api/supplier/pos/${poId}/revisions`).then((r) => r.data),
   /** Accept the order, or decline it with a reason. Nothing may be despatched against
    *  an order that has not been accepted. */
   respondToPo: (id: number, accept: boolean, note = "") =>
