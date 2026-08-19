@@ -7,6 +7,8 @@ carries no `require_permission`: a carrier holds no RBAC role, so `get_current_v
 is the whole guard and every function filters on the carrier id taken from the token.
 Same arrangement the supplier portal already uses.
 """
+from datetime import date
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +18,7 @@ from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.logistics import partners, service
 from app.modules.logistics.schemas import (
-    AcceptQuoteIn, ActionIn, AwardIn, CarrierAcceptIn, CarrierConfirmIn,
+    AcceptQuoteIn, ActionIn, ActivityRow, AwardIn, CarrierAcceptIn, CarrierConfirmIn,
     CarrierDeclineIn, CarrierTrackIn, ConsignmentLink, DeliverIn, DispatchIn, EventIn,
     EventOut, GRNCreate, GRNListRow, GRNOut, InviteIn, IssueCreate, IssueOut, Option,
     PartnerCreate, PartnerLoginIn, PartnerOut, PartnerUpdate, ProviderBoardRow,
@@ -173,6 +175,31 @@ async def transport_exceptions(
         params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.open_exceptions(db, params)
+
+
+# The activity ledger: what happened, to which shipment, in the order it happened.
+# `dispatch_id` is how the Dispatch screen asks for one consignment's own trail
+# without the desk having to know its transport request number.
+@transport_router.get("/activity", response_model=Page[ActivityRow])
+async def transport_activity(
+        params: PageParams = Depends(), search: str | None = None,
+        date_from: date | None = None, date_to: date | None = None,
+        event_type: str | None = None, only_exceptions: bool = False,
+        tr_id: int | None = None, dispatch_id: int | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return await service.activity_ledger(
+        db, params, search=search, date_from=date_from, date_to=date_to,
+        event_type=event_type, only_exceptions=only_exceptions, tr_id=tr_id,
+        dispatch_id=dispatch_id)
+
+
+# Served, never a constant in the screen: a filter offering an event the ledger
+# cannot return is a dropdown that silently empties the page.
+@transport_router.get("/activity-types", response_model=list[dict])
+async def transport_activity_types(
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return service.activity_catalogue()
 
 
 @transport_router.get("", response_model=Page[TRListRow])

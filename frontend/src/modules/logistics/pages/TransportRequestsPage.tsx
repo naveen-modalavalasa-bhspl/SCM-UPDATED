@@ -237,7 +237,10 @@ export function TransportRequestsPage() {
               ? `, and ${summary.untracked} shipment(s) the field has never been told about`
               : ""}.
           </p>
-          <Button variant="ghost" onClick={() => nav("/logistics/tracking")}>
+          {/* The ledger, filtered to the claims — the Exceptions desk's list, on the
+              register that now holds it. The event filter is served, so DAMAGED is a
+              value the backend really returns rather than a guess made here. */}
+          <Button variant="ghost" onClick={() => nav("/logistics/activity?claims=1")}>
             Open claims
           </Button>
         </Card>

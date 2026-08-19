@@ -127,11 +127,22 @@ class ShipmentEventType(str, Enum):
     IN_TRANSIT = "IN_TRANSIT"
     OUT_FOR_DELIVERY = "OUT_FOR_DELIVERY"
     DELIVERED = "DELIVERED"
+    # The receiving end signed for it. Delivered is the carrier's word and this is the
+    # site's, and the tracking panel has to show both: a leg the indent requester has
+    # confirmed used to read "out for delivery" forever, because the signature moved
+    # the STATUS and left no scan behind it. Never entered by hand — it is stamped by
+    # the acknowledgement itself, which is why it is out of `add_event`.
+    ACKNOWLEDGED = "ACKNOWLEDGED"
     # Exceptions. Same table because they arrive on the same timeline and an
     # "it reached short" call is answered by reading the events in order.
     DAMAGED = "DAMAGED"
     MISSING = "MISSING"
     DELAYED = "DELAYED"
+
+
+#: Stamped by the acknowledgement, never posted as a scan. A carrier can no more
+#: write this event than it can set the status behind it — the site signs, nobody else.
+SIGNATURE_EVENT_TYPES = frozenset({ShipmentEventType.ACKNOWLEDGED.value})
 
 
 #: Event types that open a claim against the provider rather than record progress.
@@ -369,3 +380,107 @@ AWAITING_ACK_STATUSES = (
 #: back and close the leg carrying the rest of it — least of all a live tender with
 #: carriers still bidding on it.
 SIGNABLE_STATUSES = (TransportStatus.READY.value, *AWAITING_ACK_STATUSES)
+
+
+# --------------------------------------------------------------------------- #
+#  The activity ledger
+# --------------------------------------------------------------------------- #
+# One vocabulary for "what happened to this shipment", spanning the four places a
+# logistics event is actually recorded: the request header, the approval engine, the
+# quote rows and the shipment timeline. The ledger unions those four; this enum is
+# what makes the result one list instead of four dialects.
+#
+# Module-owned, like `IndentActivityType` in indents and for the same reason:
+# `shared/enums.py` holds the statuses every module must agree on, and nothing outside
+# logistics branches on these. The scan values deliberately repeat `ShipmentEventType`
+# — a timeline row carries its own type through the union unchanged, so the two
+# vocabularies have to agree on those eight strings rather than translate between them.
+
+class LogisticsActivityType(str, Enum):
+    RAISED = "RAISED"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    RETURNED = "RETURNED"
+    ROUTED_AUTOMATICALLY = "ROUTED_AUTOMATICALLY"
+    CARRIER_INVITED = "CARRIER_INVITED"
+    QUOTE_RECEIVED = "QUOTE_RECEIVED"
+    AWARDED = "AWARDED"
+    AWARD_APPROVED = "AWARD_APPROVED"
+    AWARD_REJECTED = "AWARD_REJECTED"
+    CARRIER_ACCEPTED = "CARRIER_ACCEPTED"
+    CARRIER_DECLINED = "CARRIER_DECLINED"
+    # The custody trail, carried through from `ShipmentEventType` unchanged.
+    PICKED_UP = "PICKED_UP"
+    IN_TRANSIT = "IN_TRANSIT"
+    OUT_FOR_DELIVERY = "OUT_FOR_DELIVERY"
+    DELIVERED = "DELIVERED"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    DAMAGED = "DAMAGED"
+    MISSING = "MISSING"
+    DELAYED = "DELAYED"
+    CLAIM_SETTLED = "CLAIM_SETTLED"
+    TRACKING_SHARED = "TRACKING_SHARED"
+
+
+#: What each event is called on screen, and what the shipment READ AS once it
+#: happened. The second half is the ledger's Result column: not the document's status
+#: today — that would repaint history every time the shipment moved on — but the rung
+#: this particular event put it on.
+#:
+#: Held here rather than in the page so the ledger and its filter cannot drift: the
+#: screen renders the label the backend sends and offers exactly the types it can
+#: return (`GET /api/transport/activity-types`), the same rule the mode rules and the
+#: stepper already follow.
+ACTIVITY_META: dict[str, tuple[str, str]] = {
+    LogisticsActivityType.RAISED.value: ("Transport request raised", "DRAFT"),
+    LogisticsActivityType.SUBMITTED.value: ("Sent for approval", "PENDING_APPROVAL"),
+    LogisticsActivityType.APPROVED.value: ("Approved", "APPROVED"),
+    LogisticsActivityType.REJECTED.value: ("Rejected", "REJECTED"),
+    LogisticsActivityType.RETURNED.value: ("Returned for correction", "RETURNED"),
+    LogisticsActivityType.ROUTED_AUTOMATICALLY.value: (
+        "Approval routed automatically", "PENDING_APPROVAL"),
+    LogisticsActivityType.CARRIER_INVITED.value: ("Carrier invited to quote", "QUOTING"),
+    LogisticsActivityType.QUOTE_RECEIVED.value: ("Price received", "QUOTING"),
+    LogisticsActivityType.AWARDED.value: ("Awarded to carrier", "AWAITING_CARRIER"),
+    LogisticsActivityType.AWARD_APPROVED.value: ("Award approved", "AWAITING_CARRIER"),
+    LogisticsActivityType.AWARD_REJECTED.value: ("Award rejected", "QUOTING"),
+    LogisticsActivityType.CARRIER_ACCEPTED.value: ("Carrier accepted the job", "READY"),
+    LogisticsActivityType.CARRIER_DECLINED.value: ("Carrier declined the job", "QUOTING"),
+    LogisticsActivityType.PICKED_UP.value: ("Picked up", "IN_TRANSIT"),
+    LogisticsActivityType.IN_TRANSIT.value: ("In transit", "IN_TRANSIT"),
+    LogisticsActivityType.OUT_FOR_DELIVERY.value: ("Out for delivery", "IN_TRANSIT"),
+    LogisticsActivityType.DELIVERED.value: ("Delivered", "DELIVERED"),
+    LogisticsActivityType.ACKNOWLEDGED.value: ("Signed for by the site", "ACKNOWLEDGED"),
+    LogisticsActivityType.DAMAGED.value: ("Damage claim raised", "CLAIM_OPEN"),
+    LogisticsActivityType.MISSING.value: ("Shortage claim raised", "CLAIM_OPEN"),
+    LogisticsActivityType.DELAYED.value: ("Delay claim raised", "CLAIM_OPEN"),
+    LogisticsActivityType.CLAIM_SETTLED.value: ("Claim settled", "CLAIM_SETTLED"),
+    LogisticsActivityType.TRACKING_SHARED.value: (
+        "Tracking shared with the field", "IN_TRANSIT"),
+}
+
+
+def activity_label(event_type: str) -> str:
+    """The screen's name for an event. Falls back to the code made readable rather
+    than to nothing, so an event type added later still lists."""
+    meta = ACTIVITY_META.get(event_type)
+    return meta[0] if meta else event_type.replace("_", " ").capitalize()
+
+
+def activity_result(event_type: str) -> str:
+    """The rung the event put the shipment on."""
+    meta = ACTIVITY_META.get(event_type)
+    return meta[1] if meta else event_type
+
+
+def activity_catalogue() -> list[dict]:
+    """The filter's options, in the order the events happen. Served, never a constant
+    in the screen — a dropdown offering a type the ledger cannot return is a filter
+    that silently empties the page."""
+    return [
+        {"value": kind.value,
+         "label": activity_label(kind.value),
+         "is_exception": kind.value in EXCEPTION_EVENT_TYPES}
+        for kind in LogisticsActivityType
+    ]

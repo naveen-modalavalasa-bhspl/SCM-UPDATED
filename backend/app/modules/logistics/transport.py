@@ -16,11 +16,14 @@ sanctions the movement, CARRIER_AWARD sanctions the spend — and the second onl
 on a mode that actually hires somebody.
 """
 import logging
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import (
+    BigInteger, Integer, String, and_, case, cast, func, literal, or_, select,
+    union_all,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -29,12 +32,18 @@ from app.modules.indents.models import Indent
 from app.modules.indents import service as indent_service
 from app.modules.logistics.enums import (
     ACK_CLAIM_EVENT,
+    ACTIVITY_META,
+    activity_catalogue as _activity_catalogue,
+    activity_label,
+    activity_result,
     AWAITING_ACK_STATUSES,
     CARRIER_VENDOR_TYPES,
     EXCEPTION_EVENT_TYPES,
+    LogisticsActivityType,
     MODE_RULES,
     AckCondition,
     QuoteStatus,
+    SIGNATURE_EVENT_TYPES,
     ShipmentEventType,
     TERMINAL_STATUSES,
     TransportMode,
@@ -46,12 +55,15 @@ from app.modules.logistics.enums import (
 )
 from app.modules.logistics import hooks
 from app.modules.logistics.models import (
-    CarrierQuote, ShipmentEvent, TransportRequest, TransportRequestItem,
+    MONEY, CarrierQuote, ShipmentEvent, TransportRequest, TransportRequestItem,
 )
-from app.modules.logistics.schemas import TROut
+from app.modules.logistics.schemas import TRListRow, TROut
 from app.platform.settings.service import write_audit
 from app.platform.settings import attachments
 from app.platform.workflow import engine, ladder
+# Read-only, and only for the activity ledger: the trail of who decided what is
+# the engine's to WRITE (rule 8) and every module's to read.
+from app.platform.workflow.models import Action, Instance
 from app.shared import evaluation
 from app.shared.enums import ApprovalAction, AuditAction, DocType, InstanceStatus
 from app.shared.models.base import utcnow
@@ -451,6 +463,341 @@ async def open_exceptions(db: AsyncSession, params: PageParams) -> dict:
                    ShipmentEvent.resolved_at.is_(None))
             .order_by(ShipmentEvent.event_at.desc()))
     return await paginate(db, stmt, params)
+
+
+# --------------------------------------------------------------------------- #
+#  The activity ledger
+# --------------------------------------------------------------------------- #
+# What happened, to which shipment, in the order it happened — the outward leg's
+# answer to the indent module's Activity Ledger, and the screen that replaced the
+# Shipment Tracking board and the Exceptions desk. Those two each drew ONE slice of
+# the same trail (where is it now / what went wrong), so a desk chasing a consignment
+# read half the story on one tab and half on another, and neither showed who awarded
+# it, at what price, or when the carrier said yes.
+#
+# Read-only and derived: nothing is written for the ledger. It unions the four places
+# a logistics event is ALREADY recorded —
+#
+#   the request header   raised, awarded, the carrier's yes or no, tracking shared
+#   wf_actions           submitted, approved, rejected, returned (both doc types)
+#   lgs_carrier_quotes   invited to quote, price came back
+#   lgs_shipment_events  the custody scans and the claims
+#
+# — so the screen cannot show an event the documents do not carry, and no writer has
+# to remember to log a second time.
+
+#: The columns every branch of the union contributes, in this exact order. MySQL
+#: matches UNION branches by position, so one branch out of order silently files a
+#: carrier name under "location" instead of failing.
+_ACTIVITY_FIELDS = (
+    "event_id", "tr_id", "tr_no", "consignment_no", "indent_no", "mode",
+    "event_type", "occurred_at", "actor_name", "carrier_name", "location_name",
+    "detail", "amount", "is_exception", "from_name", "to_name",
+)
+
+
+def _act_value(value, sql_type):
+    """A literal, a NULL of a known type, or an expression — whichever was passed."""
+    if value is None:
+        return cast(literal(None), sql_type)
+    if isinstance(value, (str, int, float)):
+        return literal(value)
+    return value
+
+
+def _activity_columns(visible, *, event_id, event_type, occurred_at, event_key,
+                      source_rank, actor_name=None, carrier_name=None,
+                      location_name=None, detail=None, amount=None,
+                      is_exception=0):
+    type_expr = _act_value(event_type, String)
+    return (
+        _act_value(event_id, String).label("event_id"),
+        visible.c.tr_id,
+        visible.c.tr_no,
+        visible.c.consignment_no,
+        visible.c.indent_no,
+        visible.c.mode,
+        type_expr.label("event_type"),
+        occurred_at.label("occurred_at"),
+        _act_value(actor_name, String).label("actor_name"),
+        _act_value(carrier_name, String).label("carrier_name"),
+        _act_value(location_name, String).label("location_name"),
+        _act_value(detail, String).label("detail"),
+        _act_value(amount, MONEY).label("amount"),
+        _act_value(is_exception, Integer).label("is_exception"),
+        visible.c.from_name,
+        visible.c.to_name,
+        # Ordering only, never returned: two events stamped in the same second — an
+        # award and the approval it starts — must still read in the order they
+        # happened rather than in whatever order the rows come back.
+        _act_value(source_rank, Integer).label("_rank"),
+        _act_value(event_key, BigInteger).label("_key"),
+    )
+
+
+def activity_catalogue() -> list[dict]:
+    """The ledger's filter options, in the order the events happen. The vocabulary
+    lives in `enums.py`; the router reaches it through the service like everything
+    else (rule 2), rather than importing the module's enums itself."""
+    return _activity_catalogue()
+
+
+async def activity_ledger(db: AsyncSession, params: PageParams, *,
+                          search: str | None = None,
+                          date_from: date | None = None,
+                          date_to: date | None = None,
+                          event_type: str | None = None,
+                          only_exceptions: bool = False,
+                          tr_id: int | None = None,
+                          dispatch_id: int | None = None) -> dict:
+    """Every logistics event, newest first. Read-only; writes nothing."""
+    visible_stmt = select(
+        TransportRequest.id.label("tr_id"),
+        TransportRequest.tr_no,
+        TransportRequest.consignment_no,
+        TransportRequest.indent_no,
+        TransportRequest.mode,
+        TransportRequest.from_warehouse_name.label("from_name"),
+        TransportRequest.to_location_name.label("to_name"),
+        TransportRequest.carrier_name.label("doc_carrier_name"),
+        TransportRequest.created_at,
+        TransportRequest.requested_by_name,
+        TransportRequest.awarded_at,
+        TransportRequest.awarded_by_name,
+        TransportRequest.freight_amount,
+        TransportRequest.carrier_accepted_at,
+        TransportRequest.carrier_confirmed_by_name,
+        TransportRequest.carrier_declined_at,
+        TransportRequest.carrier_decline_reason,
+        TransportRequest.tracking_shared_at,
+    )
+    # Narrowed HERE rather than after the union: every branch fans one shipment out
+    # into many rows, so filtering the source keeps nine joins off the shipments the
+    # caller never asked about.
+    if tr_id is not None:
+        visible_stmt = visible_stmt.where(TransportRequest.id == tr_id)
+    if dispatch_id is not None:
+        visible_stmt = visible_stmt.where(TransportRequest.dispatch_id == dispatch_id)
+    visible = visible_stmt.cte("visible_shipments")
+
+    key = func.concat(literal("tr:"), cast(visible.c.tr_id, String))
+
+    raised = select(*_activity_columns(
+        visible,
+        event_id=func.concat(key, literal(":raised")),
+        event_type=LogisticsActivityType.RAISED.value,
+        occurred_at=visible.c.created_at,
+        actor_name=visible.c.requested_by_name,
+        event_key=visible.c.tr_id, source_rank=10,
+    )).select_from(visible)
+
+    # Both ladders on one branch. TRANSPORT_REQUEST sanctions the movement,
+    # CARRIER_AWARD sanctions the spend, and telling them apart is the difference
+    # between "approved" and "the freight was approved".
+    is_award = Instance.doc_type == DocType.CARRIER_AWARD.value
+    wf_type = case(
+        (and_(is_award, Action.action == ApprovalAction.APPROVED.value),
+         literal(LogisticsActivityType.AWARD_APPROVED.value)),
+        (and_(is_award, Action.action == ApprovalAction.REJECTED.value),
+         literal(LogisticsActivityType.AWARD_REJECTED.value)),
+        (Action.action == ApprovalAction.SUBMITTED.value,
+         literal(LogisticsActivityType.SUBMITTED.value)),
+        (Action.action == ApprovalAction.APPROVED.value,
+         literal(LogisticsActivityType.APPROVED.value)),
+        (Action.action == ApprovalAction.REJECTED.value,
+         literal(LogisticsActivityType.REJECTED.value)),
+        (Action.action == ApprovalAction.RETURNED.value,
+         literal(LogisticsActivityType.RETURNED.value)),
+        (Action.action == ApprovalAction.FALLBACK.value,
+         literal(LogisticsActivityType.ROUTED_AUTOMATICALLY.value)),
+        else_=Action.action,
+    )
+    workflow = select(*_activity_columns(
+        visible,
+        event_id=func.concat(literal("wf:"), cast(Action.id, String)),
+        event_type=wf_type,
+        occurred_at=Action.acted_at,
+        actor_name=Action.actor_name,
+        detail=func.nullif(func.trim(func.concat(
+            func.coalesce(Action.actor_position, literal("")),
+            literal(" "),
+            func.coalesce(Action.comments, literal("")),
+        )), literal("")),
+        event_key=Action.id, source_rank=20,
+    )).select_from(visible).join(
+        Instance, and_(Instance.doc_id == visible.c.tr_id,
+                       Instance.doc_type.in_((DocType.TRANSPORT_REQUEST.value,
+                                              DocType.CARRIER_AWARD.value))),
+    ).join(Action, Action.instance_id == Instance.id).where(
+        # The award ladder's own SUBMITTED row IS the award press, which the header
+        # branch below already reports with the carrier and the price on it.
+        ~and_(is_award, Action.action == ApprovalAction.SUBMITTED.value),
+    )
+
+    invited = select(*_activity_columns(
+        visible,
+        event_id=func.concat(literal("inv:"), cast(CarrierQuote.id, String)),
+        event_type=LogisticsActivityType.CARRIER_INVITED.value,
+        occurred_at=CarrierQuote.invited_at,
+        carrier_name=CarrierQuote.carrier_name,
+        event_key=CarrierQuote.id, source_rank=30,
+    )).select_from(visible).join(
+        CarrierQuote, CarrierQuote.tr_id == visible.c.tr_id,
+    ).where(CarrierQuote.invited_at.is_not(None))
+
+    quoted = select(*_activity_columns(
+        visible,
+        event_id=func.concat(literal("quo:"), cast(CarrierQuote.id, String)),
+        event_type=LogisticsActivityType.QUOTE_RECEIVED.value,
+        occurred_at=CarrierQuote.submitted_at,
+        carrier_name=CarrierQuote.carrier_name,
+        amount=(func.coalesce(CarrierQuote.freight_amount, 0)
+                + func.coalesce(CarrierQuote.other_charges, 0)),
+        detail=CarrierQuote.remarks,
+        event_key=CarrierQuote.id, source_rank=40,
+    )).select_from(visible).join(
+        CarrierQuote, CarrierQuote.tr_id == visible.c.tr_id,
+    ).where(CarrierQuote.submitted_at.is_not(None))
+
+    awarded = select(*_activity_columns(
+        visible,
+        event_id=func.concat(key, literal(":awarded")),
+        event_type=LogisticsActivityType.AWARDED.value,
+        occurred_at=visible.c.awarded_at,
+        actor_name=visible.c.awarded_by_name,
+        carrier_name=visible.c.doc_carrier_name,
+        amount=visible.c.freight_amount,
+        event_key=visible.c.tr_id, source_rank=50,
+    )).select_from(visible).where(visible.c.awarded_at.is_not(None))
+
+    # The carrier's own answer. `carrier_confirmed_by_name` is set only where the desk
+    # recorded it on their behalf, and the ledger says which it was — an acceptance
+    # nobody in the portal ever made must not read as one.
+    accepted = select(*_activity_columns(
+        visible,
+        event_id=func.concat(key, literal(":accepted")),
+        event_type=LogisticsActivityType.CARRIER_ACCEPTED.value,
+        occurred_at=visible.c.carrier_accepted_at,
+        actor_name=func.coalesce(visible.c.carrier_confirmed_by_name,
+                                 visible.c.doc_carrier_name),
+        carrier_name=visible.c.doc_carrier_name,
+        detail=case((visible.c.carrier_confirmed_by_name.is_not(None),
+                     literal("Confirmed by the desk")),
+                    else_=cast(literal(None), String)),
+        event_key=visible.c.tr_id, source_rank=60,
+    )).select_from(visible).where(visible.c.carrier_accepted_at.is_not(None))
+
+    declined = select(*_activity_columns(
+        visible,
+        event_id=func.concat(key, literal(":declined")),
+        event_type=LogisticsActivityType.CARRIER_DECLINED.value,
+        occurred_at=visible.c.carrier_declined_at,
+        actor_name=visible.c.doc_carrier_name,
+        carrier_name=visible.c.doc_carrier_name,
+        detail=visible.c.carrier_decline_reason,
+        event_key=visible.c.tr_id, source_rank=70,
+    )).select_from(visible).where(visible.c.carrier_declined_at.is_not(None))
+
+    shared = select(*_activity_columns(
+        visible,
+        event_id=func.concat(key, literal(":shared")),
+        event_type=LogisticsActivityType.TRACKING_SHARED.value,
+        occurred_at=visible.c.tracking_shared_at,
+        carrier_name=visible.c.doc_carrier_name,
+        event_key=visible.c.tr_id, source_rank=80,
+    )).select_from(visible).where(visible.c.tracking_shared_at.is_not(None))
+
+    # The scans and the claims, their types carried through unchanged — which is why
+    # `LogisticsActivityType` repeats `ShipmentEventType`'s eight values.
+    scans = select(*_activity_columns(
+        visible,
+        event_id=func.concat(literal("evt:"), cast(ShipmentEvent.id, String)),
+        event_type=ShipmentEvent.event_type,
+        occurred_at=ShipmentEvent.event_at,
+        actor_name=ShipmentEvent.recorded_by_name,
+        carrier_name=visible.c.doc_carrier_name,
+        location_name=ShipmentEvent.location_name,
+        detail=func.coalesce(ShipmentEvent.description,
+                             ShipmentEvent.affected_item_name),
+        amount=ShipmentEvent.claim_amount,
+        is_exception=cast(ShipmentEvent.is_exception, Integer),
+        event_key=ShipmentEvent.id, source_rank=90,
+    )).select_from(visible).join(
+        ShipmentEvent, ShipmentEvent.tr_id == visible.c.tr_id)
+
+    # Closing a claim is an event in its own right: "who settled it, and how" is the
+    # question the Exceptions desk existed to answer.
+    settled = select(*_activity_columns(
+        visible,
+        event_id=func.concat(literal("res:"), cast(ShipmentEvent.id, String)),
+        event_type=LogisticsActivityType.CLAIM_SETTLED.value,
+        occurred_at=ShipmentEvent.resolved_at,
+        actor_name=ShipmentEvent.resolved_by_name,
+        carrier_name=visible.c.doc_carrier_name,
+        detail=ShipmentEvent.resolution,
+        amount=ShipmentEvent.claim_amount,
+        event_key=ShipmentEvent.id, source_rank=100,
+    )).select_from(visible).join(
+        ShipmentEvent, ShipmentEvent.tr_id == visible.c.tr_id,
+    ).where(ShipmentEvent.resolved_at.is_not(None))
+
+    events = union_all(raised, workflow, invited, quoted, awarded, accepted,
+                       declined, shared, scans, settled).subquery("activity_events")
+    filtered = select(events)
+
+    term = (search or "").strip()
+    if term:
+        like = f"%{term}%"
+        # "delivered" and "carrier declined" are what a person types, and neither is
+        # stored anywhere — the label is derived. So the term is resolved against the
+        # vocabulary first and matched as a TYPE, which also keeps the union's SQL to
+        # the columns that really exist rather than inlining the label table ten times.
+        named = [kind for kind, meta in ACTIVITY_META.items()
+                 if term.lower() in meta[0].lower()]
+        filtered = filtered.where(or_(
+            events.c.event_type.in_(named or ["__none__"]),
+            events.c.tr_no.ilike(like),
+            events.c.consignment_no.ilike(like),
+            events.c.indent_no.ilike(like),
+            events.c.actor_name.ilike(like),
+            events.c.carrier_name.ilike(like),
+            events.c.location_name.ilike(like),
+            events.c.detail.ilike(like),
+            events.c.to_name.ilike(like),
+        ))
+    if date_from:
+        filtered = filtered.where(
+            events.c.occurred_at >= datetime.combine(date_from, time.min))
+    if date_to:
+        # < the day AFTER, so an event stamped at 16:40 on the closing date is in.
+        filtered = filtered.where(
+            events.c.occurred_at
+            < datetime.combine(date_to + timedelta(days=1), time.min))
+    if event_type:
+        filtered = filtered.where(events.c.event_type == event_type)
+    if only_exceptions:
+        # The Exceptions desk's own list, as a filter on the register rather than as a
+        # second screen: the claim rows carry the flag the desk indexed on.
+        filtered = filtered.where(events.c.is_exception == 1)
+
+    rows = filtered.subquery("filtered_activity")
+    stmt = (select(*(rows.c[field] for field in _ACTIVITY_FIELDS))
+            .order_by(rows.c.occurred_at.desc(), rows.c._rank.desc(),
+                      rows.c.tr_id.desc(), rows.c._key.desc()))
+    total = await db.scalar(select(func.count()).select_from(rows))
+    page = (await db.execute(
+        stmt.offset(params.offset).limit(params.size))).mappings().all()
+    # The wording is applied to the twenty rows on the page, not to every row in the
+    # union: `ACTIVITY_META` is a lookup, and a lookup inlined into ten UNION branches
+    # is a 30KB query to answer a 20-row question.
+    items = []
+    for row in page:
+        item = dict(row)
+        item["event_label"] = activity_label(item["event_type"])
+        item["result"] = activity_result(item["event_type"])
+        items.append(item)
+    return {"items": items, "total": total or 0,
+            "page": params.page, "size": params.size}
 
 
 # --------------------------------------------------------------------------- #
@@ -1638,6 +1985,11 @@ async def add_event(db: AsyncSession, tr_id: int, data, user) -> ShipmentEvent:
     event_type = (data.event_type or "").upper()
     if event_type not in {e.value for e in ShipmentEventType}:
         raise ValidationError(f"{data.event_type!r} is not a shipment event")
+    # A signature is stamped by the acknowledgement, never typed in as a scan — least
+    # of all by the carrier, whose scan endpoint lands here too.
+    if event_type in SIGNATURE_EVENT_TYPES:
+        raise ValidationError(
+            "Only the receiving site acknowledging the consignment records that")
     if doc.status in TERMINAL_STATUSES:
         raise ValidationError(f"{doc.tr_no} is closed; no further events")
 
@@ -1808,6 +2160,19 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
     if data.pod_url:
         doc.pod_url = data.pod_url
 
+    # The signature belongs on the tracking timeline, not only in the header. Tracking
+    # is read from the events alone, so a leg somebody had already signed for went on
+    # showing "Out for delivery" as its last scan.
+    doc.events.append(ShipmentEvent(
+        event_type=ShipmentEventType.ACKNOWLEDGED.value, event_at=doc.acknowledged_at,
+        location_name=doc.to_location_name,
+        description=(f"Signed for by {doc.acknowledged_by_name or 'the site'}"
+                     + (f" — reported {condition.lower()}"
+                        if condition != AckCondition.GOOD.value else "")),
+        recorded_by_id=getattr(user, "id", None),
+        recorded_by_name=doc.acknowledged_by_name,
+    ))
+
     claim_type = ACK_CLAIM_EVENT.get(condition)
     if claim_type:
         doc.events.append(ShipmentEvent(
@@ -1892,20 +2257,92 @@ CARRIER_VISIBLE_STATUSES = (
 )
 
 
-def _carrier_scope(carrier_id: int, statuses: list[str]):
+#: The statuses the OUTCOME queue reads over, and the one place it differs from the
+#: live board: a shipment that has been CLOSED. Closing is the end of the winner's
+#: work, which is why it drops off every queue above — but for the carrier who did not
+#: get it, closed is not "no longer relevant", it is the final answer. Dropping it
+#: there put them straight back to watching the tender they priced disappear with
+#: nothing said, which is the whole thing this queue exists to stop.
+CARRIER_OUTCOME_STATUSES = CARRIER_VISIBLE_STATUSES + (TransportStatus.CLOSED.value,)
+
+#: The queue that is not a status. A carrier who was outbid still has to be TOLD: the
+#: last thing they saw was their own price going in, and a shipment that simply drops
+#: off their board reads as a portal that lost it — which is exactly what "the other
+#: one just disappeared" means. So the outcome is a queue of its own, keyed on THEIR
+#: quote rather than on the shipment's status, because the shipment itself is somebody
+#: else's job now and must never turn up under "collect".
+CARRIER_LOST_QUEUE = "NOT_AWARDED"
+
+#: Everything on a shipment that belongs to whoever WON it. A carrier who was outbid is
+#: told the outcome and nothing further: not the price it went for, not who is driving
+#: it, not where it has reached. They keep the lane, the load and their own quote —
+#: precisely what they were shown when they were asked to price it. Blanked on a
+#: detached Pydantic model, never on the mapped row, so a redaction can never be
+#: flushed back onto the document.
+WINNER_ONLY_FIELDS = (
+    "carrier_id", "carrier_name", "freight_amount", "awarded_by_name",
+    "carrier_accepted_at", "carrier_declined_at", "carrier_decline_reason",
+    "carrier_reference", "carrier_confirmed_by_name", "vehicle_number", "driver_name",
+    "driver_phone", "trip_reference", "handed_over_by_name", "received_by_name",
+    "lr_no", "docket_no", "tracking_url", "eway_bill_no", "gate_pass_no",
+    "dispatched_at", "dispatched_by_name", "delivered_at", "delivered_to_name",
+    "pod_url", "tracking_shared_at", "acknowledged_at", "acknowledged_by_name",
+    "ack_condition", "ack_remarks",
+)
+
+
+def _my_quote_exists(carrier_id: int):
+    """EXISTS a quote row of mine — an invitation — on this request."""
+    return (select(CarrierQuote.id)
+            .where(CarrierQuote.tr_id == TransportRequest.id,
+                   CarrierQuote.carrier_id == carrier_id)
+            .exists())
+
+
+def _carrier_scope(carrier_id: int, statuses: list[str], *, lost: bool = False):
     """The one WHERE clause that decides what a carrier may see.
 
     Being invited buys visibility of the TENDER, and nothing else. Past the award, the
     shipment belongs to whoever won it: a carrier who was outbid must not keep watching
     somebody else's truck run, and must certainly not be shown it in a queue labelled
-    "collect". Both halves are needed — the invitation join alone showed every invited
+    "collect". Both halves are needed — the invitation alone showed every invited
     carrier the winner's job, and `carrier_id` alone would hide the tender from
     everyone still bidding, because no carrier is set yet.
+
+    The invitation is an EXISTS, not a join, and it guards only the tender half. A
+    single-provider dispatch names its carrier on the request and never opens a
+    quoting round, so those shipments carry NO `lgs_carrier_quotes` row at all — an
+    inner join dropped every one of them, and the carrier who was actually driving the
+    load saw an empty "collect" queue and a zero on every badge but the tender's. The
+    EXISTS also keeps one row per request whatever the tender's size, so a count is a
+    count of shipments rather than of invitations.
+
+    `lost=True` is the mirror of all that, and the ONLY other thing a carrier may see:
+    requests they answered and did not get. It is deliberately a separate scope rather
+    than a widening of this one — the live queues stay exactly as narrow as they were,
+    so an unawarded shipment can never leak into "accept the job" or "collect". It is
+    read-only by construction too: every write below re-checks `doc.carrier_id`
+    against the signed-in carrier, and on these rows that check is what fails.
     """
+    if lost:
+        return (
+            TransportRequest.status.in_(statuses or ["__none__"]),
+            # The tender is over. While it is still QUOTING there is nothing to tell
+            # them — a request that came back round after a decline is an OPEN ask
+            # again, and it belongs on "quote for it" where it already is.
+            TransportRequest.status != TransportStatus.QUOTING.value,
+            # Any quote of theirs will do: on a request that has left the tender, the
+            # only quote status that means "yours" is AWARDED, and an awarded quote
+            # carries its carrier on the request itself — which the next clause
+            # excludes. An invitation they never answered is a lost tender too.
+            _my_quote_exists(carrier_id),
+            or_(TransportRequest.carrier_id.is_(None),
+                TransportRequest.carrier_id != carrier_id),
+        )
     return (
-        CarrierQuote.carrier_id == carrier_id,
         TransportRequest.status.in_(statuses or ["__none__"]),
-        or_(TransportRequest.status == TransportStatus.QUOTING.value,
+        or_(and_(TransportRequest.status == TransportStatus.QUOTING.value,
+                 _my_quote_exists(carrier_id)),
             TransportRequest.carrier_id == carrier_id),
     )
 
@@ -1913,36 +2350,65 @@ def _carrier_scope(carrier_id: int, statuses: list[str]):
 async def carrier_open_requests(db: AsyncSession, carrier_id: int,
                                 params: PageParams,
                                 status: str | None = None) -> dict:
-    """What this carrier has been invited to, and nothing else."""
-    wanted = ([s.strip().upper() for s in status.split(",") if s.strip()]
-              if status else list(CARRIER_VISIBLE_STATUSES))
-    # Intersected, never replaced: a carrier asking for DRAFT must not widen what the
-    # portal shows. The filter narrows their own board; it cannot open somebody's.
-    wanted = [s for s in wanted if s in CARRIER_VISIBLE_STATUSES]
+    """What this carrier has been invited to, and nothing else.
+
+    `status=NOT_AWARDED` asks for the outcome queue rather than a status: the tenders
+    they were invited to and did not get. Serialised here rather than by the router,
+    because a row on that queue has to be redacted before it leaves — see
+    `_redact_row`.
+    """
+    lost = (status or "").strip().upper() == CARRIER_LOST_QUEUE
+    if lost:
+        wanted = list(CARRIER_OUTCOME_STATUSES)
+    else:
+        wanted = ([s.strip().upper() for s in status.split(",") if s.strip()]
+                  if status else list(CARRIER_VISIBLE_STATUSES))
+        # Intersected, never replaced: a carrier asking for DRAFT must not widen what
+        # the portal shows. The filter narrows their own board; it cannot open
+        # somebody's.
+        wanted = [s for s in wanted if s in CARRIER_VISIBLE_STATUSES]
     stmt = (select(TransportRequest)
-            .join(CarrierQuote, CarrierQuote.tr_id == TransportRequest.id)
-            .where(*_carrier_scope(carrier_id, wanted))
+            .where(*_carrier_scope(carrier_id, wanted, lost=lost))
             .order_by(TransportRequest.id.desc()))
     page = await paginate(db, stmt, params)
 
     # Their own answer, stamped onto every row. A tender stays on the "quote for it"
     # queue after it has been priced — the desk may ask again and the carrier may
     # revise — so the row itself has to carry whether they have answered, or the board
-    # reads as untouched work the moment they leave the job screen.
-    for row in page["items"]:
-        mine = next((q for q in row.quotes if q.carrier_id == carrier_id), None)
+    # reads as untouched work the moment they leave the job screen. On the outcome
+    # queue it IS the row: their quote status is the only thing that separates outbid
+    # from declined from never answered, and the portal says which.
+    rows = []
+    for doc in page["items"]:
+        row = TRListRow.model_validate(doc)
+        mine = next((q for q in doc.quotes if q.carrier_id == carrier_id), None)
         row.my_quote_status = mine.status if mine else None
         row.my_quote_amount = float(mine.freight_amount) if (
             mine and mine.freight_amount is not None) else None
         row.my_quote_submitted_at = mine.submitted_at if mine else None
+        if lost:
+            _redact_row(row)
+        rows.append(row)
+    page["items"] = rows
     return page
+
+
+def _redact_row(row: TRListRow) -> None:
+    """Strip the winner's half off a list row before an outbid carrier reads it.
+
+    The same rule `_carrier_view` applies to the detail, applied to the summary: they
+    are told the lane and their own price, never what it went for or where it is now.
+    Safe to assign because `row` is a detached `TRListRow`, not the mapped request.
+    """
+    for field in WINNER_ONLY_FIELDS:
+        if field in TRListRow.model_fields:
+            setattr(row, field, None)
 
 
 async def carrier_summary(db: AsyncSession, carrier_id: int) -> dict:
     """The five numbers a carrier's board leads with."""
     rows = (await db.execute(
         select(TransportRequest.status, func.count(TransportRequest.id))
-        .join(CarrierQuote, CarrierQuote.tr_id == TransportRequest.id)
         .where(*_carrier_scope(carrier_id, list(CARRIER_VISIBLE_STATUSES)))
         .group_by(TransportRequest.status)
     )).all()
@@ -1958,6 +2424,14 @@ async def carrier_summary(db: AsyncSession, carrier_id: int) -> dict:
                TransportRequest.status == TransportStatus.QUOTING.value)
     )).scalar_one()
 
+    # Counted off the LOST scope, not off `by_status`: those rows are not in the scope
+    # the five numbers above are grouped over, and they never should be — a shipment
+    # somebody else is driving must not add to "on the road".
+    not_awarded = (await db.execute(
+        select(func.count(TransportRequest.id))
+        .where(*_carrier_scope(carrier_id, list(CARRIER_OUTCOME_STATUSES), lost=True))
+    )).scalar_one()
+
     return {
         "to_quote": to_quote,
         "to_confirm": by_status.get(TransportStatus.AWAITING_CARRIER.value, 0),
@@ -1965,6 +2439,7 @@ async def carrier_summary(db: AsyncSession, carrier_id: int) -> dict:
         "on_the_road": by_status.get(TransportStatus.IN_TRANSIT.value, 0),
         "delivered": (by_status.get(TransportStatus.DELIVERED.value, 0)
                       + by_status.get(TransportStatus.ACKNOWLEDGED.value, 0)),
+        "not_awarded": not_awarded,
     }
 
 
@@ -1973,15 +2448,25 @@ async def carrier_get_request(db: AsyncSession, carrier_id: int,
     """One request, if this carrier is entitled to it — the same rule as the board.
 
     Every write a carrier can make goes through here first, so the scope is enforced
-    once: an outbid carrier cannot read the winner's shipment, and therefore cannot
-    accept, track or deliver against it either.
+    once: an outbid carrier cannot act on the winner's shipment — they cannot accept,
+    track or deliver against it, because each of those re-checks `doc.carrier_id`
+    against the signed-in carrier and a request they lost fails that check.
+
+    The lost scope is tried SECOND and only as a fallback, so a request that is live
+    work for this carrier is always found as live work. What it buys them is the
+    outcome of their own quote, redacted by `_carrier_view` on the way out.
     """
-    doc = (await db.execute(
-        select(TransportRequest)
-        .join(CarrierQuote, CarrierQuote.tr_id == TransportRequest.id)
-        .where(TransportRequest.id == tr_id,
-               *_carrier_scope(carrier_id, list(CARRIER_VISIBLE_STATUSES)))
-    )).scalars().first()
+    async def _find(statuses, **kwargs):
+        return (await db.execute(
+            select(TransportRequest)
+            .where(TransportRequest.id == tr_id,
+                   *_carrier_scope(carrier_id, list(statuses), **kwargs))
+        )).scalars().first()
+
+    # The same two scopes the board is built from, and the same status sets — a card
+    # they can see on a queue has to open, closed shipments included.
+    doc = (await _find(CARRIER_VISIBLE_STATUSES)
+           or await _find(CARRIER_OUTCOME_STATUSES, lost=True))
     if doc is None:
         # Same message whether it does not exist or belongs to somebody else — telling
         # them apart tells an outsider which shipments are real.
@@ -1990,15 +2475,27 @@ async def carrier_get_request(db: AsyncSession, carrier_id: int,
 
 
 def _carrier_view(doc: TransportRequest, carrier_id: int) -> TROut:
-    """The shipment as its carrier may see it: their own quote, nobody else's.
+    """The shipment as this carrier may see it: their own quote, nobody else's.
 
     Serialised here rather than by the router because the narrowing IS the rule — a
     tender where every bidder can read what the others bid is not a tender. Built as a
-    detached `TROut` so the filtered list can never be written back onto the mapped
-    relationship and delete the other carriers' rows.
+    detached `TROut` so neither the filtered list nor the redaction below can ever be
+    written back onto the mapped relationship.
+
+    A request that went to somebody else is redacted down to the outcome: the lane,
+    the load and their own quote — everything they were shown when they were asked to
+    price it, and not one field more. Their quote's own status (`NOT_AWARDED`, or
+    `DECLINED` if they dropped it) is what tells the portal which of the two happened,
+    so the answer is served rather than inferred from a shipment status that is now
+    describing another carrier's truck.
     """
     out = TROut.model_validate(doc)
     out.quotes = [q for q in out.quotes if q.carrier_id == carrier_id]
+    if doc.carrier_id != carrier_id:
+        for field in WINNER_ONLY_FIELDS:
+            setattr(out, field, None)
+        # The scans on it are the winner's movements, one per line.
+        out.events = []
     return out
 
 
@@ -2007,8 +2504,36 @@ async def carrier_view_request(db: AsyncSession, carrier_id: int,
     return _carrier_view(await carrier_get_request(db, carrier_id, tr_id), carrier_id)
 
 
+#: What a carrier must state before their price can be compared with anybody else's,
+#: as (payload field, what the portal calls it).
+QUOTE_REQUIRED_FIELDS = (
+    ("freight_amount", "Transport charge"),
+    ("other_charges", "Other charges"),
+    ("tax_percent", "Tax %"),
+    ("transit_days", "Transit days"),
+    ("vehicle_type", "Vehicle type"),
+)
+
+
 async def carrier_quote(db: AsyncSession, carrier_id: int, tr_id: int,
                         data) -> CarrierQuote:
+    """A price sent in by the carrier themselves, complete or not at all.
+
+    The five numbers are checked HERE rather than on `QuoteIn`, because the schema is
+    shared with the desk recording a quote that arrived by phone and a partial one
+    taken down over a call is still worth having. What cannot be partial is a quote
+    the carrier typed at leisure into a form that asked for all five: the comparison
+    scores landed cost and lead time, so a blank tax or transit day is not a keener
+    bid, it is an unrankable one that reads as zero.
+    """
+    missing = [label for field, label in QUOTE_REQUIRED_FIELDS
+               if getattr(data, field, None) is None
+               or (isinstance(getattr(data, field), str)
+                   and not getattr(data, field).strip())
+               or field not in getattr(data, "model_fields_set", {field})]
+    if missing:
+        raise ValidationError("Fill in " + ", ".join(missing) + " before sending "
+                              "the quote — put 0 where nothing applies")
     await carrier_get_request(db, carrier_id, tr_id)
     return await record_quote(db, tr_id, carrier_id, data, user=None)
 

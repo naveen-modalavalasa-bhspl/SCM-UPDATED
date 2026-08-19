@@ -214,9 +214,9 @@ export function IndentDetailPage() {
   const delivery = splitDeliveryOffice(indent.office_name, indent.vehicle_number);
   const officeSac = nonEmptyText(indent.office_sac)
     ?? (indent.office_id === me?.active_position?.office_id
-      ? nonEmptyText(me.active_position.office_sac) : null)
+      ? nonEmptyText(me?.active_position?.office_sac) : null)
     ?? (indent.office_id === me?.employee.office_id
-      ? nonEmptyText(me.employee.office_sac) : null)
+      ? nonEmptyText(me?.employee.office_sac) : null)
     ?? nonEmptyText(me?.positions.find((position) => position.office_id === indent.office_id)?.office_sac);
   const returnedBy = returnedByFromJourney(journey);
   const correctionOwner = nonEmptyText(indent.correction_owner?.employee_name)

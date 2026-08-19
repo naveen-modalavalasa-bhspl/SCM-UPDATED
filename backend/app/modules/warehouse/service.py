@@ -4770,6 +4770,36 @@ def _vehicle_from_office_name(office_name: str | None) -> str | None:
     return found.group(1) if found else None
 
 
+def _consignment_vehicle(issue, destination_office_name: str | None) -> str | None:
+    """The registration number a consignment travels on.
+
+    Derived, never picked: `trn_vehicles` is empty, so the Vehicle box on the
+    consignment form was a lookup with nothing in it. The number is already recorded
+    twice over — the material issue carries whatever the store typed, and an MMU
+    office is named for the vehicle that serves it (`AP-104-MMU-Badangi-AP39UH4792`),
+    which is the same string the delivery address is filled from. Read it here so the
+    consignment shows the vehicle the goods are actually going out on.
+    """
+    return (
+        getattr(issue, "vehicle_number", None)
+        or _vehicle_from_office_name(destination_office_name)
+    )
+
+
+def _address_without_vehicle(office_name: str | None) -> str | None:
+    """An MMU office's name with the registration number it ends in taken off.
+
+    The name doubles as the delivery address (`AP-104-MMU-Badangi-AP39UH4792`), so
+    the address carried the vehicle number too — printed twice on every consignment
+    now that the Vehicle box shows it. The number is on the document in its own
+    column; the address is where the goods go.
+    """
+    if not office_name or not _vehicle_from_office_name(office_name):
+        return office_name
+    head, _, _tail = office_name.rpartition("-")
+    return head.strip(" -") or office_name
+
+
 async def _issue_destination(
     db: AsyncSession,
     issue: m.MaterialIssue | None,
@@ -6504,6 +6534,7 @@ async def _sign_transport_for_indent(db: AsyncSession, indent_id: int, user, *,
     reported = (condition or AckCondition.GOOD.value).strip().upper()
 
     now = utcnow()
+    who = _name(user) or "the requester"
     for leg in legs:
         # A leg signed for straight out of READY never had its departure recorded —
         # nobody pressed "it has left". The goods are in the requester's hands, so it
@@ -6522,6 +6553,7 @@ async def _sign_transport_for_indent(db: AsyncSession, indent_id: int, user, *,
         for line in leg.items:
             if not line.delivered_qty:
                 line.delivered_qty = line.quantity
+        _stamp_receipt_scans(leg, who, now)
         await write_audit(db, entity="lgs_transport_requests", entity_id=leg.id,
                           entity_no=leg.tr_no, action=AuditAction.UPDATE, actor=user,
                           after={"status": leg.status},
@@ -6529,7 +6561,80 @@ async def _sign_transport_for_indent(db: AsyncSession, indent_id: int, user, *,
                                    f"{leg.tr_no} on the indent"))
 
     await _raise_receipt_claim(db, legs, reported, remarks, user)
+    await _close_signed_legs(db, legs, user)
     return [leg.tr_no for leg in legs]
+
+
+async def _close_signed_legs(db: AsyncSession, legs: list, user) -> None:
+    """Take the acknowledged leg its last rung, to CLOSED.
+
+    ACKNOWLEDGED was where the requester's receipt left every leg, whatever the mode,
+    and the cycle then waited on a logistics desk pressing "Close shipment" — a
+    keystroke that adds no fact. The signature IS the end of the leg: the goods are in
+    the requester's hands, the consignment and the issue behind it are settled and the
+    indent has closed. Nothing was left for that press to decide, and a queue of
+    shipments needing it is a queue nobody works.
+
+    The one thing it DID decide is kept, and it is the same rule `transport.close_tr`
+    has always run on: an open claim holds the leg. A receipt reporting SHORT or
+    DAMAGED raises one just above (`_raise_receipt_claim`), so those legs stay
+    ACKNOWLEDGED with the desk's Close button still on them — the claim is settled
+    with the provider before the shipment is done with. Closing around an unsettled
+    claim would file the only document it is investigated from.
+
+    Stamped rather than routed through `close_tr`: that call commits, and this runs
+    inside the acknowledgement's transaction (rule 9 — the receipt and everything it
+    settles land together or not at all).
+    """
+    from app.modules.logistics.enums import TransportStatus
+
+    for leg in legs:
+        if any(event.is_exception and event.resolved_at is None
+               for event in leg.events):
+            continue
+        leg.status = TransportStatus.CLOSED.value
+        await write_audit(db, entity="lgs_transport_requests", entity_id=leg.id,
+                          entity_no=leg.tr_no, action=AuditAction.UPDATE, actor=user,
+                          after={"status": leg.status},
+                          summary=(f"{leg.tr_no} closed — "
+                                   f"{_name(user) or 'the requester'} signed for it "
+                                   f"on {leg.indent_no or 'the indent'}"))
+
+
+def _stamp_receipt_scans(leg, who: str, now) -> None:
+    """Put the requester's receipt on the shipment's own tracking timeline.
+
+    The signature already moved the STATUS to ACKNOWLEDGED, but Tracking is read from
+    `lgs_shipment_events` alone, so a leg whose goods were in someone's hands still
+    showed "Out for delivery" as its last scan — the panel disagreeing with the header
+    above it. The receipt is the arrival, so it is recorded as one.
+
+    Two rows, not one: DELIVERED is stamped only when nothing ever recorded the
+    arrival (a leg signed straight out of READY or IN_TRANSIT, where nobody pressed
+    "it landed"), and ACKNOWLEDGED always, because who signed and when is the fact the
+    Exceptions desk reads back. A leg the carrier already marked delivered keeps its
+    own scan with its own timestamp; this never overwrites custody evidence.
+    """
+    from app.modules.logistics.enums import ShipmentEventType
+    from app.modules.logistics.models import ShipmentEvent
+
+    types = {event.event_type for event in leg.events}
+    if ShipmentEventType.DELIVERED.value not in types:
+        leg.events.append(ShipmentEvent(
+            event_type=ShipmentEventType.DELIVERED.value,
+            event_at=leg.delivered_at or now,
+            location_name=leg.to_location_name,
+            description=f"Reached {who}",
+        ))
+    if ShipmentEventType.ACKNOWLEDGED.value not in types:
+        leg.events.append(ShipmentEvent(
+            event_type=ShipmentEventType.ACKNOWLEDGED.value, event_at=now,
+            location_name=leg.to_location_name,
+            description=(f"{who} confirmed receipt on "
+                         f"{leg.indent_no or 'the indent'}"),
+            recorded_by_id=leg.acknowledged_by_id,
+            recorded_by_name=leg.acknowledged_by_name,
+        ))
 
 
 async def _raise_receipt_claim(db: AsyncSession, legs: list, condition: str,
@@ -7051,7 +7156,8 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         # (rule 10). Live consignments carry project_id 4 with project_name NULL, so
         # the dispatch board and its printouts show a blank where the project goes.
         project_name=await _project_name(db, data.project_id or issue.project_id),
-        delivery_address=data.delivery_address or destination_office_name,
+        delivery_address=(data.delivery_address
+                          or _address_without_vehicle(destination_office_name)),
         contact_person=data.contact_person,
         contact_phone=data.contact_phone,
         ref_type=InventoryRefType.WH_ISSUE.value,
@@ -7060,6 +7166,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         transport_mode=data.transport_mode,
         carrier_id=data.carrier_id,
         vehicle_id=data.vehicle_id,
+        vehicle_number=_consignment_vehicle(issue, destination_office_name),
         driver_name=data.driver_name,
         driver_phone=data.driver_phone,
         lr_no=data.lr_no,
@@ -7119,7 +7226,8 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch.vendor_id = data.vendor_id
     dispatch.vendor_name = vendor.name if vendor else None
     dispatch.project_id = data.project_id or issue.project_id
-    dispatch.delivery_address = data.delivery_address or destination_office_name
+    dispatch.delivery_address = (data.delivery_address
+                                 or _address_without_vehicle(destination_office_name))
     dispatch.contact_person = data.contact_person
     dispatch.contact_phone = data.contact_phone
     dispatch.ref_type = WarehouseDocType.WH_ISSUE.value
@@ -7128,6 +7236,7 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch.transport_mode = data.transport_mode
     dispatch.carrier_id = data.carrier_id
     dispatch.vehicle_id = data.vehicle_id
+    dispatch.vehicle_number = _consignment_vehicle(issue, destination_office_name)
     dispatch.driver_name = data.driver_name
     dispatch.driver_phone = data.driver_phone
     dispatch.lr_no = data.lr_no
@@ -9978,6 +10087,9 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         "destination_office_id": getattr(issue, "destination_office_id", None),
         "destination_office_name": getattr(issue, "destination_office_name", None),
         "destination_office_sac": getattr(issue, "destination_office_sac", None),
+        # Shown read-only on the consignment form: see _consignment_vehicle.
+        "vehicle_number": _consignment_vehicle(
+            issue, getattr(issue, "destination_office_name", None)),
         "destination_warehouse_id": (
             requesting.id if requesting and requesting.id != issue.warehouse_id else None
         ),

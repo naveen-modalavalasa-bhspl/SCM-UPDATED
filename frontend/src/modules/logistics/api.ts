@@ -2,6 +2,7 @@ import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type { GRN, GRNCreate, GRNListRow, Issue, MovementRow, StockRow } from "./types";
 import type {
+  ActivityRow, ActivityType,
   CarrierOption, CarrierQuote, Comparison, Consignment, ConsignmentDetail,
   ConsignmentLink, DispatchInput, EvaluationMethod, FlowStage, LogisticsVendor,
   LogisticsVendorInput, LogisticsVendorSummary, ModeRule, ModeSuggestion,
@@ -196,6 +197,18 @@ export const transportApi = {
   history: (id: number) =>
     api.get<unknown[]>(`/api/transport/${id}/history`).then((r) => r.data),
 
+  /** The activity ledger. `dispatch_id` scopes it to one consignment's own trail,
+   *  which is how the Dispatch queue opens it for a single row. */
+  activity: (params: {
+    search?: string; date_from?: string; date_to?: string; event_type?: string;
+    only_exceptions?: boolean; tr_id?: number; dispatch_id?: number;
+    page?: number; size?: number;
+  } = {}) =>
+    api.get<Paginated<ActivityRow>>("/api/transport/activity", { params })
+      .then((r) => r.data),
+  activityTypes: () =>
+    api.get<ActivityType[]>("/api/transport/activity-types").then((r) => r.data),
+
   exceptions: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<ShipmentEvent>>("/api/transport/exceptions", { params })
       .then((r) => r.data),
@@ -270,6 +283,10 @@ export const carrierPortalApi = {
     api.get<{
       to_quote: number; to_confirm: number; to_pick_up: number;
       on_the_road: number; delivered: number;
+      /** Priced and not won. Its queue is asked for as `status=NOT_AWARDED`, which is
+       *  an outcome rather than a shipment status — the shipment itself is somebody
+       *  else's job by then, and the portal must never show it as this carrier's. */
+      not_awarded: number;
     }>(`${PORTAL}/transport-summary`).then((r) => r.data),
   list: (params: { status?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<TRListRow>>(`${PORTAL}/transport`, { params })

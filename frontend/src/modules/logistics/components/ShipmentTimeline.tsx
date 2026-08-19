@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
-  AlertTriangle, CheckCircle2, Clock, MapPin, Navigation, PackageCheck,
-  PackageX, Plus, Radar, Truck, X,
+  AlertTriangle, CheckCircle2, ClipboardCheck, Clock, MapPin, Navigation,
+  PackageCheck, PackageX, Plus, Radar, Truck, X,
 } from "lucide-react";
 import {
   Button, Can, Card, ErrorBanner, Field, Input, Select, useAction,
@@ -31,6 +31,9 @@ const LOOK: Record<string, { icon: typeof Truck; dot: string; text: string }> = 
   IN_TRANSIT: { icon: Truck, dot: "bg-sky-500", text: "text-sky-600" },
   OUT_FOR_DELIVERY: { icon: Navigation, dot: "bg-indigo-500", text: "text-indigo-600" },
   DELIVERED: { icon: CheckCircle2, dot: "bg-emerald-500", text: "text-emerald-600" },
+  // The receiving end's signature, stamped by the acknowledgement itself — which is
+  // why it is not in EVENT_TYPES above: nobody types this one in.
+  ACKNOWLEDGED: { icon: ClipboardCheck, dot: "bg-emerald-600", text: "text-emerald-700" },
   DAMAGED: { icon: AlertTriangle, dot: "bg-rose-500", text: "text-rose-600" },
   MISSING: { icon: PackageX, dot: "bg-rose-500", text: "text-rose-600" },
   DELAYED: { icon: Clock, dot: "bg-amber-500", text: "text-amber-600" },
@@ -54,6 +57,12 @@ export function ShipmentTimeline({
   status: string;
 }) {
   const [adding, setAdding] = useState(false);
+  // Closing a claim lives here, on the claim itself, because the Exceptions desk that
+  // used to own it is gone: its list is a filter on the Activity Ledger now, and a
+  // ledger is a record — you read it, you do not work from it. The claim is raised on
+  // this timeline and settled on the same one.
+  const [settling, setSettling] = useState<number | null>(null);
+  const [resolution, setResolution] = useState("");
   const [form, setForm] = useState({
     event_type: "IN_TRANSIT", location_name: "", description: "",
     affected_item_name: "", affected_qty: "", claim_amount: "",
@@ -73,6 +82,14 @@ export function ShipmentTimeline({
     onDone: () => setAdding(false),
   });
 
+  const settle = useAction({
+    run: () => transportApi.resolveException(settling!, resolution.trim()),
+    success: "Claim settled",
+    invalidates: [["transport", String(trId)], ["transport-exceptions"],
+      ["transport-activity"]],
+    onDone: () => { setSettling(null); setResolution(""); },
+  });
+
   const isClaim = ["DAMAGED", "MISSING", "DELAYED"].includes(form.event_type);
   const trackable = !["DRAFT", "PENDING_APPROVAL", "CLOSED", "CANCELLED", "REJECTED"]
     .includes(status);
@@ -81,7 +98,7 @@ export function ShipmentTimeline({
   // A shipment still on the road gets a live marker; one that has landed or been
   // closed does not, because a pulsing dot on a finished job reads as an alarm.
   const live = latest != null && trackable
-    && !["DELIVERED", "DAMAGED", "MISSING"].includes(latest.event_type);
+    && !["DELIVERED", "ACKNOWLEDGED", "DAMAGED", "MISSING"].includes(latest.event_type);
 
   return (
     <Card className="p-5">
@@ -112,7 +129,7 @@ export function ShipmentTimeline({
       </div>
 
       <div className="mt-3 empty:mt-0">
-        <ErrorBanner error={add.error} />
+        <ErrorBanner error={add.error ?? settle.error} />
       </div>
 
       {adding && (
@@ -210,12 +227,45 @@ export function ShipmentTimeline({
                           {event.claim_amount ? ` · ${money(event.claim_amount)}` : ""}
                         </div>
                       )}
-                      <div className={`mt-0.5 flex items-center gap-1 font-medium ${
+                      <div className={`mt-0.5 flex flex-wrap items-center gap-1 font-medium ${
                         event.resolved_at ? "text-emerald-600" : "text-rose-600"}`}>
                         {event.resolved_at
                           ? <><CheckCircle2 size={12} aria-hidden />Settled: {event.resolution}</>
                           : <><AlertTriangle size={12} aria-hidden />Open claim</>}
+                        {!event.resolved_at && settling !== event.id && (
+                          <Can do="transport.exception">
+                            <button
+                              type="button"
+                              onClick={() => { setSettling(event.id); setResolution(""); }}
+                              className="ml-1 rounded-md border border-line px-2 py-0.5 text-[11px] font-semibold text-body"
+                            >
+                              Settle
+                            </button>
+                          </Can>
+                        )}
                       </div>
+                      {settling === event.id && (
+                        <div className="mt-2 space-y-2">
+                          <Field label="How was it settled">
+                            <Input
+                              value={resolution}
+                              placeholder="Credit note 4,500 received from the carrier"
+                              onChange={(e) => setResolution(e.target.value)}
+                            />
+                          </Field>
+                          <div className="flex gap-2">
+                            <Button
+                              onClick={() => settle.mutate()}
+                              disabled={settle.isPending || !resolution.trim()}
+                            >
+                              Close the claim
+                            </Button>
+                            <Button variant="ghost" onClick={() => setSettling(null)}>
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

@@ -13,7 +13,6 @@ import { fmtDate, fmtDateTime } from "@/shared/datetime";
 import { transportApi } from "../api";
 import { FlowStepper } from "../components/FlowStepper";
 import { load, modeLabel, modeTint, money, nextMove } from "../components/modeCopy";
-import { CarrierComparison } from "../components/CarrierComparison";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
 
 /**
@@ -222,7 +221,7 @@ export function TransportDetailPage() {
                   Carrier declined
                 </Button>
                 <Button onClick={() => setConfirming(true)}>
-                  Confirm on the phone
+                  Approve
                 </Button>
               </Can>
             )}
@@ -505,9 +504,12 @@ export function TransportDetailPage() {
               ["Delivered", fmtDateTime(doc.delivered_at, "")],
               ["Tracking shared", fmtDateTime(doc.tracking_shared_at, "")],
             ]} />
+            {/* Nobody entered a weight on the packing list, so the total came out
+              * zero — that is "not stated", not "weighs nothing". Printing 0 kg reads
+              * as a measurement the desk never took. */}
             <Section title="Load" rows={[
-              ["Weight", `${Number(doc.total_weight_kg ?? 0)} kg`],
-              ["Volume", `${Number(doc.total_volume_cbm ?? 0)} m³`],
+              ["Weight", measure(doc.total_weight_kg, "kg")],
+              ["Volume", measure(doc.total_volume_cbm, "m³")],
             ]} />
           </div>
 
@@ -565,14 +567,6 @@ export function TransportDetailPage() {
           <ShipmentTimeline trId={doc.id} events={doc.events} status={doc.status} />
         </div>
       </div>
-
-      {/* The tender only exists for a mode that is actually quoted. */}
-      {doc.mode === "THIRD_PARTY" && (
-        <div className="mt-4">
-          <CarrierComparison trId={doc.id} status={doc.status} quotes={doc.quotes}
-            awardPending={awardPending} />
-        </div>
-      )}
 
       <ConfirmModal
         isOpen={reject}
@@ -706,6 +700,11 @@ export function TransportDetailPage() {
 /** One labelled block of the consignment. An empty row is dropped rather than
  *  printed as an em-dash, and a block with every row empty draws nothing at all —
  *  a screen of placeholders reads as a screen full of data that is not there. */
+const measure = (value: number | null | undefined, unit: string) =>
+  value == null || Number(value) === 0
+    ? "—"
+    : `${Number(value).toLocaleString("en-IN")} ${unit}`;
+
 function Section({
   title, rows,
 }: {

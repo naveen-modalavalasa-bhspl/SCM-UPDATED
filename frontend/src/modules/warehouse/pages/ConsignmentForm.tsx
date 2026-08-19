@@ -17,8 +17,6 @@ import {
   getIssueDispatchSource,
   issueOptions,
   updateConsignment,
-  vehicleOptions,
-  vendorOptions,
   allWarehouseOptions,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
@@ -102,6 +100,36 @@ const destinationOf = (doc?: Dispatch | null, source?: IssueDispatchSource | nul
  *  showing a code that belongs to somewhere else. */
 const destinationSacOf = (doc?: Dispatch | null, source?: IssueDispatchSource | null) =>
   source?.destination_office_sac ?? doc?.destination_office_sac ?? null;
+
+const VEHICLE_IN_NAME = /([A-Z]{2}\d{1,2}[A-Z]{1,3}\d{3,4})$/;
+
+/** The registration number an MMU office carries at the end of its own name
+ *  (`AP-104-MMU-Badangi-AP39UH4792`) — the same string the delivery address is
+ *  filled from. Mirrors `warehouse.service._vehicle_from_office_name`. */
+const vehicleFromName = (name?: string | null) => {
+  const tail = (name ?? "").replace(/\s/g, "").toUpperCase().split("-").pop() ?? "";
+  return VEHICLE_IN_NAME.exec(tail)?.[1] ?? null;
+};
+
+/** The vehicle the consignment travels on. Derived, never picked: `trn_vehicles` is
+ *  empty, so the lookup that used to sit in this box offered "No results found" and
+ *  every consignment went out with no vehicle at all. The server derives and stores
+ *  the same value (`_consignment_vehicle`); this only shows it before the save. */
+const vehicleOf = (
+  doc?: Dispatch | null,
+  source?: IssueDispatchSource | null,
+  destination?: string | null,
+) => doc?.vehicle_number ?? source?.vehicle_number ?? vehicleFromName(destination) ?? "";
+
+/** The same office name with that registration number taken off, which is what the
+ *  delivery address wants: the number is its own field now, and printing it twice
+ *  on one consignment only invites the two to disagree. Mirrors
+ *  `warehouse.service._address_without_vehicle`. */
+const addressWithoutVehicle = (name?: string | null) => {
+  if (!name || !vehicleFromName(name)) return name ?? "";
+  const cut = name.lastIndexOf("-");
+  return (cut < 0 ? name : name.slice(0, cut)).replace(/[\s-]+$/, "") || name;
+};
 
 type ScanCardSpec = {
   code: string;
@@ -250,7 +278,7 @@ export default function ConsignmentForm() {
       customer_id: doc.customer_id ?? null,
       vendor_id: doc.vendor_id ?? null,
       project_id: doc.project_id ?? null,
-      delivery_address: doc.delivery_address ?? "",
+      delivery_address: addressWithoutVehicle(doc.delivery_address),
       contact_person: doc.contact_person ?? "",
       contact_phone: doc.contact_phone ?? "",
       transport_mode: doc.transport_mode ?? "ROAD",
@@ -345,6 +373,7 @@ export default function ConsignmentForm() {
       destination_office_id: doc.destination_office_id ?? null,
       destination_office_name: doc.destination_office_name ?? doc.delivery_address ?? null,
       destination_office_sac: doc.destination_office_sac ?? null,
+      vehicle_number: doc.vehicle_number ?? null,
       items: Array.from(byLine.values()),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -364,7 +393,8 @@ export default function ConsignmentForm() {
         // for the receiving point to raise a GRN against. Still editable: the packer
         // can route it to any other point he holds.
         to_warehouse_id: current.to_warehouse_id ?? result.destination_warehouse_id ?? null,
-        delivery_address: current.delivery_address || result.destination_office_name || "",
+        delivery_address: current.delivery_address
+          || addressWithoutVehicle(result.destination_office_name),
       }));
     },
   });
@@ -397,6 +427,7 @@ export default function ConsignmentForm() {
   const locked = !!doc && !["DRAFT", "PACKED"].includes(doc.status);
   const destination = destinationOf(doc, source);
   const destinationSac = destinationSacOf(doc, source);
+  const vehicleNumber = vehicleOf(doc, source, destination || form.delivery_address);
 
   // Origin: the material issue's warehouse on a new consignment, the saved one on an
   // existing doc. The server derives the same value, so this is a display of its
@@ -750,11 +781,6 @@ export default function ConsignmentForm() {
               disabled
             />
           </Field>
-          <Field label="Vendor">
-            <Lookup name="vendors" load={vendorOptions} value={form.vendor_id ?? ""} isDisabled={locked}
-                    onChange={(value) => setForm((f) => ({ ...f, vendor_id: value === "" ? null : value }))}
-                    placeholder="Vendor" />
-          </Field>
           <Field label="Expected delivery">
             {/* Goods cannot arrive before they leave. `min` is the dispatch date, not
                 today: a consignment can be back-dated, and its delivery date has to
@@ -772,10 +798,10 @@ export default function ConsignmentForm() {
                     onChange={(value) => setForm((f) => ({ ...f, carrier_id: value === "" ? null : value }))}
                     placeholder="Carrier" />
           </Field>
+          {/* Not editable: nothing on this screen chooses a vehicle — the number is
+              read off the issue or the destination office's name. See `vehicleOf`. */}
           <Field label="Vehicle">
-            <Lookup name="vehicles" load={vehicleOptions} value={form.vehicle_id ?? ""} isDisabled={locked}
-                    onChange={(value) => setForm((f) => ({ ...f, vehicle_id: value === "" ? null : value }))}
-                    placeholder="Vehicle" />
+            <Input value={vehicleNumber || "—"} disabled />
           </Field>
           <Field label="Driver">
             <Input value={form.driver_name ?? ""} disabled={locked}

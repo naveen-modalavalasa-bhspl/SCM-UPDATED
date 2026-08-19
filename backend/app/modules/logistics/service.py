@@ -199,6 +199,8 @@ from app.modules.logistics.transport import (  # noqa: E402
     acknowledge_tr,
     act_on_award,
     act_on_tr,
+    activity_catalogue,
+    activity_ledger,
     add_event,
     ask_revised_quote,
     award_carrier,
@@ -250,7 +252,8 @@ from app.modules.logistics.transport import summary as transport_summary  # noqa
 __all__ = [
     "accept_award", "accept_quote", "acknowledge_tr",
     "act_on_award", "act_on_tr",
-    "add_event", "ask_revised_quote", "award_carrier", "cancel_tr", "carrier_accept",
+    "activity_catalogue", "activity_ledger", "add_event", "ask_revised_quote",
+    "award_carrier", "cancel_tr", "carrier_accept",
     "carrier_decline", "carrier_deliver", "carrier_get_request",
     "carrier_open_requests", "carrier_options", "carrier_quote", "carrier_summary",
     "carrier_view_request",

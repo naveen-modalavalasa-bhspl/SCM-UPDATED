@@ -254,6 +254,36 @@ class EventOut(BaseModel):
     recorded_by_name: str | None = None
 
 
+class ActivityRow(BaseModel):
+    """One line of the activity ledger.
+
+    Not `from_attributes`: the rows come off a UNION of four sources, not off a model,
+    and the whole point of the ledger is that they arrive already normalised — one
+    vocabulary, one label, one result, whichever table the event was recorded in.
+    """
+    #: Unique across the whole union ("evt:12", "wf:9", "tr:5:awarded"). The table
+    #: key alone is not: a quote row contributes both an invite and a price.
+    event_id: str
+    tr_id: int
+    tr_no: str
+    consignment_no: str | None = None
+    indent_no: str | None = None
+    mode: str
+    event_type: str
+    #: Both SERVED rather than mapped in the screen — see `enums.ACTIVITY_META`.
+    event_label: str
+    result: str
+    occurred_at: datetime
+    actor_name: str | None = None
+    carrier_name: str | None = None
+    location_name: str | None = None
+    detail: str | None = None
+    amount: float | None = None
+    is_exception: bool = False
+    from_name: str | None = None
+    to_name: str | None = None
+
+
 class TROut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

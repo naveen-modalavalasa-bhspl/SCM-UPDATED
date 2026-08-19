@@ -842,6 +842,7 @@ class IssueRead(_Read):
     issued_to_name: str | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None
+    destination_office_sac: str | None = None
     direction: str
     original_issue_id: int | None = None
     original_issue_no: str | None = None
@@ -1081,6 +1082,7 @@ class DispatchRead(_Read):
     project_name: str | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None
+    destination_office_sac: str | None = None
     # Set on the detail read only: this consignment landed at a relay point that put it
     # straight on the shelf, so the way on from here is the consignment, not a GRN.
     can_forward: bool = False
@@ -1363,6 +1365,7 @@ class IndentIssueSource(BaseModel):
     vehicle_number: str | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None
+    destination_office_sac: str | None = None
     items: list[IssueItemWrite] = []
 
 
@@ -1404,6 +1407,10 @@ class IssueDispatchSource(BaseModel):
     project_id: int | None = None
     destination_office_id: int | None = None
     destination_office_name: str | None = None
+    destination_office_sac: str | None = None
+    # The vehicle the goods go out on, derived from the issue or the destination
+    # office's own name. Read-only on the form — nothing here picks a vehicle.
+    vehicle_number: str | None = None
     # The stocking point serving the requesting office — what "To warehouse" defaults
     # to. Blank when that point IS the origin, which `destination_is_origin` explains.
     destination_warehouse_id: int | None = None

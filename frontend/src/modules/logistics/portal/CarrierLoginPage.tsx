@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Truck } from "lucide-react";
 import { Button, Card, ErrorBanner, Field, Input } from "@/shared/components";
 import { api, setVendorPortal, setVendorToken } from "@/shared/api/client";
@@ -20,6 +20,7 @@ interface VendorToken {
  */
 export function CarrierLoginPage() {
   const nav = useNavigate();
+  const qc = useQueryClient();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
@@ -27,6 +28,9 @@ export function CarrierLoginPage() {
     mutationFn: () => api.post<VendorToken>("/api/supplier/login",
       { username, password }).then((r) => r.data),
     onSuccess: (token) => {
+      // Whoever was here before does not come with us. Sign-out clears this too, but
+      // a tab that was simply left open and signed into as somebody else never ran it.
+      qc.clear();
       setVendorToken(token.access_token);
       // They came in the carrier door: remember it, so the screens both portals share
       // send them back HERE and not to the supplier's RFQ list.

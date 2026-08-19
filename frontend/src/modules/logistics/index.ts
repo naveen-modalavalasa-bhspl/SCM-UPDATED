@@ -1,8 +1,8 @@
 /** The logistics module's public face — one import site for `App.tsx`.
  *
  * The screens follow the flow the material takes: the packed consignment, the
- * dispatch that releases it, the transport that carries it, the tracking board, the
- * signature at the far end, and the claims.
+ * dispatch that releases it, the transport that carries it, and the ledger of
+ * everything that happened to it.
  *
  * Consignments and Dispatch are the WAREHOUSE's screens, re-exported here and mounted
  * under `/logistics/*` — the same document, the same forms, the same flow (draft →
@@ -32,8 +32,12 @@ export { TransportRequestsPage } from "./pages/TransportRequestsPage";
 export { TransportFormPage } from "./pages/TransportFormPage";
 export { TransportDetailPage } from "./pages/TransportDetailPage";
 export { ProviderSelectionPage } from "./pages/ProviderSelectionPage";
-export { ShipmentTrackingPage } from "./pages/ShipmentTrackingPage";
-export { LogisticsExceptionsPage } from "./pages/LogisticsExceptionsPage";
+/** What happened, to which shipment, in the order it happened. One register in place
+ *  of the Shipment Tracking board and the Exceptions desk: those two each drew a
+ *  slice of the same trail — where is it now, what went wrong — and neither said who
+ *  awarded the job, at what price, or when the carrier agreed to it. Derived from the
+ *  documents, so it can only show events the module actually recorded. */
+export { LogisticsActivityPage } from "./pages/LogisticsActivityPage";
 
 /** The register behind the Dispatch dropdown: the third-party providers we ship with
  *  and the portal logins they answer with. Lives in the Logistics tabs

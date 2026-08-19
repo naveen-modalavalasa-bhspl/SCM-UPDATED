@@ -1015,6 +1015,9 @@ export interface IssueDispatchSource {
   destination_office_id?: number | null;
   destination_office_name?: string | null;
   destination_office_sac?: string | null;
+  /** The vehicle the goods go out on, derived by the server from the issue or from
+   *  the destination office's own name. Read-only on the form. */
+  vehicle_number?: string | null;
   /** The stocking point serving the requesting office — what "To warehouse"
    *  defaults to. Null when that point is the origin (`destination_is_origin`). */
   destination_warehouse_id?: number | null;
