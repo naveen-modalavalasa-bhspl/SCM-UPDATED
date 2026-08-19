@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Search } from "lucide-react";
 import {
-  Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, type Column,
+  Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, Input, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type { RFQListRow } from "@/modules/procurement/types";
+import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 
 const SIZE = 20;
 
@@ -14,11 +16,19 @@ const SIZE = 20;
  *  server-side to their own invitations — there is no "all RFQs" to fall back to. */
 export function SupplierRFQListPage() {
   const nav = useNavigate();
+  const [search, setSearch] = useState("");
+  // Debounce the search input to avoid spamming the API on every keystroke
+  const debouncedSearch = useDebouncedValue(search);
   const [page, setPage] = useState(1);
 
+  // Automatically reset to the first page whenever the search query changes
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ["supplier-rfqs", page],
-    queryFn: () => supplierApi.rfqs({ page, size: SIZE }),
+    queryKey: ["supplier-rfqs", debouncedSearch, page],
+    queryFn: () => supplierApi.rfqs({ search: debouncedSearch || undefined, page, size: SIZE }),
   });
 
   const columns: Column<RFQListRow>[] = [
@@ -44,6 +54,18 @@ export function SupplierRFQListPage() {
   return (
     <div>
       <PageHeader eyebrow="Supplier" title="Requests for Quotation" />
+
+      <div className="mb-4 max-w-sm">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search RFQs, titles..."
+            className="pl-9"
+          />
+        </div>
+      </div>
 
       <ErrorBanner error={error} />
 

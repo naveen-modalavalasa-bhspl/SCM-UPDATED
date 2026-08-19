@@ -64,6 +64,10 @@ function Cell({ cell }: { cell: ComparisonCell }) {
       </div>
       <div className="mt-1.5 space-y-0.5 border-t border-line pt-1.5">
         <div className="flex justify-between gap-2 text-[11px] text-muted">
+          <span>Qty</span>
+          <span className="font-mono text-body">{cell.quantity}</span>
+        </div>
+        <div className="flex justify-between gap-2 text-[11px] text-muted">
           <span>Rate</span>
           <span className="font-mono text-body">{money(cell.rate)}</span>
         </div>

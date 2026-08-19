@@ -181,16 +181,78 @@ async def test_another_carrier_cannot_touch_the_job_once_it_is_awarded(db):
     w = await _world(db)
     doc = await _awarded(db, w)
 
-    # `fast` was invited to the tender, so it could read this request while it was out
-    # to quote. The award ends that: past it the shipment belongs to whoever won it,
-    # and the refusal is the same "does not exist to you" an uninvited carrier gets —
-    # telling them apart tells an outsider whose truck is running which lane.
+    # `fast` was outbid. Every write against the shipment is refused — past the award
+    # it belongs to whoever won it, and the loser can no more accept it than deliver
+    # it. The message names the reason, because by this point they are being TOLD the
+    # outcome rather than being kept from knowing the request exists.
     for act in (
         transport.carrier_accept(db, w.fast.id, doc.id, CarrierAcceptIn()),
         transport.carrier_deliver(db, w.fast.id, doc.id, DeliverIn()),
+        transport.carrier_quote(db, w.fast.id, doc.id,
+                                QuoteIn(freight_amount=1, other_charges=0,
+                                        tax_percent=0, transit_days=1,
+                                        vehicle_type="LCV")),
     ):
-        with pytest.raises(NotFoundError, match="not open to you"):
+        with pytest.raises(ValidationError):
             await act
+
+
+async def test_the_outbid_carrier_is_told_the_outcome_and_no_more(db):
+    """Losing a tender is an ANSWER, and the portal has to give it.
+
+    The shipment used to vanish off the loser's board the moment it was awarded —
+    every queue empty, nothing said — which reads as a portal that dropped it. It now
+    lands on its own queue, keyed on THEIR quote rather than on a status that is by
+    then describing somebody else's truck.
+    """
+    from app.core.pagination import PageParams
+
+    w = await _world(db)
+    doc = await _awarded(db, w)
+    await transport.carrier_accept(db, w.cheap.id, doc.id, CarrierAcceptIn())
+    await transport.dispatch_tr(db, doc.id, DispatchIn(lr_no="LR-9"), w.desk)
+
+    page = await transport.carrier_open_requests(
+        db, w.fast.id, PageParams(page=1, size=20), status="NOT_AWARDED")
+    assert [row.id for row in page["items"]] == [doc.id]
+    row = page["items"][0]
+    assert row.my_quote_status == QuoteStatus.NOT_AWARDED.value
+    assert row.my_quote_amount == 9000
+    # Their own price, and not one field of the winner's: not what it went for, not
+    # who is driving it, not where it has reached.
+    assert row.carrier_name is None and row.freight_amount is None
+    assert row.lr_no is None and row.dispatched_at is None
+
+    # It stays off every live queue — a lost shipment in a queue labelled "collect" is
+    # exactly the confusion this replaced.
+    board = await transport.carrier_open_requests(db, w.fast.id,
+                                                  PageParams(page=1, size=20))
+    assert board["total"] == 0
+    summary = await transport.carrier_summary(db, w.fast.id)
+    assert summary["not_awarded"] == 1
+    assert summary["to_pick_up"] == summary["on_the_road"] == 0
+
+    # The detail reads the same way: their quote, redacted shipment, no scans.
+    view = await transport.carrier_view_request(db, w.fast.id, doc.id)
+    assert [q.carrier_id for q in view.quotes] == [w.fast.id]
+    assert view.carrier_id is None and view.freight_amount is None
+    assert view.lr_no is None and view.events == []
+
+    # And it survives the shipment being CLOSED. Closing ends the WINNER's work, which
+    # is why a closed job drops off every live queue — but to the carrier who did not
+    # get it, closed is the final answer rather than an expiry, and dropping it here
+    # put them straight back to watching the tender they priced vanish with nothing
+    # said. Most tenders end closed, so this is the normal case, not an edge one.
+    await transport.deliver_tr(db, doc.id, DeliverIn(), w.desk)
+    await transport.acknowledge_tr(db, doc.id, AcknowledgeIn(), w.desk)
+    await transport.close_tr(db, doc.id, w.desk)
+
+    closed = await transport.carrier_open_requests(
+        db, w.fast.id, PageParams(page=1, size=20), status="NOT_AWARDED")
+    assert [row.id for row in closed["items"]] == [doc.id]
+    assert (await transport.carrier_summary(db, w.fast.id))["not_awarded"] == 1
+    # A card they can see has to open, or the queue is a list of dead ends.
+    assert (await transport.carrier_view_request(db, w.fast.id, doc.id)).id == doc.id
 
 
 async def test_a_carrier_never_invited_cannot_see_the_job_at_all(db):
@@ -205,15 +267,26 @@ async def test_a_carrier_never_invited_cannot_see_the_job_at_all(db):
 async def test_declining_puts_it_back_out_to_the_others(db):
     w = await _world(db)
     doc = await _awarded(db, w)
+    tr_id = doc.id
 
-    doc = await transport.carrier_decline(
-        db, w.cheap.id, doc.id, CarrierDeclineIn(reason="No vehicle on that lane"))
+    view = await transport.carrier_decline(
+        db, w.cheap.id, tr_id, CarrierDeclineIn(reason="No vehicle on that lane"))
 
-    assert doc.status == TransportStatus.QUOTING.value
-    assert doc.carrier_id is None and doc.freight_amount is None
-    assert doc.carrier_decline_reason == "No vehicle on that lane"
-    # The loser's price survives — it is still on the comparison sheet — while the
+    assert view.status == TransportStatus.QUOTING.value
+    assert view.carrier_id is None and view.freight_amount is None
+    assert view.carrier_decline_reason == "No vehicle on that lane"
+    # What the PORTAL hands back is narrowed to the caller's own quote and nobody
+    # else's (`_carrier_view`): a tender where every bidder can read what the others
+    # bid is not a tender. So the decliner sees their row marked DECLINED and no more.
+    assert [q.carrier_id for q in view.quotes] == [w.cheap.id]
+    assert view.quotes[0].status == QuoteStatus.DECLINED.value
+
+    # The DESK's read is the one that carries the whole sheet, and it is the one that
+    # matters here: the loser's price survives as SUBMITTED — awarding requires a
+    # SUBMITTED quote, so leaving it NOT_AWARDED would drop the shipment back into a
+    # tender where not one price on file could be awarded to anybody — while the
     # decliner's is marked as what it is, so the next award does not hand it back.
+    doc = await transport.get_tr(db, tr_id)
     by_carrier = {q.carrier_id: q.status for q in doc.quotes}
     assert by_carrier[w.cheap.id] == QuoteStatus.DECLINED.value
     assert by_carrier[w.fast.id] == QuoteStatus.SUBMITTED.value

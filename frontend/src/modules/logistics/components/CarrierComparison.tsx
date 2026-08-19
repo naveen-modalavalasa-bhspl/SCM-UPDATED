@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Award, Clock, IndianRupee, Trophy } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, Field, Input, Select, StatusPill, useAction,
+  Button, Can, Card, ErrorBanner, Field, Select, StatusPill, useAction,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { transportApi } from "../api";
@@ -53,11 +53,6 @@ export function CarrierComparison({
   const [method, setMethod] = useState("");
   const [inviting, setInviting] = useState(false);
   const [chosen, setChosen] = useState<number[]>([]);
-  const [quoting, setQuoting] = useState<{ carrier_id: number; carrier_name?: string | null } | null>(null);
-  const [form, setForm] = useState({
-    freight_amount: "", other_charges: "", tax_percent: "", transit_days: "",
-    vehicle_type: "",
-  });
 
   const { data: methods } = useQuery({
     queryKey: ["transport-eval-methods"],
@@ -83,18 +78,6 @@ export function CarrierComparison({
     invalidates,
     onDone: () => { setInviting(false); setChosen([]); },
   });
-  const record = useAction({
-    run: () => transportApi.recordQuote(trId, quoting!.carrier_id, {
-      freight_amount: Number(form.freight_amount || 0),
-      other_charges: Number(form.other_charges || 0),
-      tax_percent: form.tax_percent ? Number(form.tax_percent) : null,
-      transit_days: form.transit_days ? Number(form.transit_days) : null,
-      vehicle_type: form.vehicle_type || null,
-    }),
-    success: "Quote recorded",
-    invalidates,
-    onDone: () => setQuoting(null),
-  });
   const award = useAction({
     run: (quoteId: number) => transportApi.award(trId, quoteId),
     success: "Shipment awarded — waiting for the carrier to confirm",
@@ -104,7 +87,6 @@ export function CarrierComparison({
 
   const canTender = status === "QUOTING" && !awardPending;
   const rows = comparison?.rows ?? [];
-  const pending = comparison?.pending ?? [];
   const rec = comparison?.recommendation ?? null;
   const methodLabel = methods?.find(
     (m) => m.value === (method || comparison?.evaluation_method))?.label
@@ -145,7 +127,7 @@ export function CarrierComparison({
         </div>
       </div>
 
-      <ErrorBanner error={error ?? invite.error ?? record.error ?? award.error} />
+      <ErrorBanner error={error ?? invite.error ?? award.error} />
 
       {rec && <RecommendationBanner rec={rec} methodLabel={methodLabel} />}
 
@@ -179,41 +161,6 @@ export function CarrierComparison({
             onAward={(quoteId) => award.mutate(quoteId)}
           />
         </>
-      )}
-
-      {/* Invited and silent. Kept visible so "who has not replied" is one glance
-          rather than a diff against the invite list — and so the desk can type in a
-          price that arrived by phone without waiting for the portal. */}
-      {pending.length > 0 && (
-        <div className="rounded-lg border border-line px-4 py-3">
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
-            Waiting on {pending.length} {pending.length === 1 ? "partner" : "partners"}
-          </h3>
-          <div className="space-y-1.5">
-            {pending.map((quote) => (
-              <div key={quote.quote_id}
-                className="flex flex-wrap items-center justify-between gap-2 text-sm">
-                <span className="text-body">{quote.carrier_name ?? `Carrier ${quote.carrier_id}`}</span>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-muted">
-                    Invited {fmtDate(quote.invited_at)}
-                  </span>
-                  {canTender && (
-                    <Can do="transport.award">
-                      <Button variant="ghost"
-                        onClick={() => setQuoting({
-                          carrier_id: quote.carrier_id,
-                          carrier_name: quote.carrier_name,
-                        })}>
-                        Enter their price
-                      </Button>
-                    </Can>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
       )}
 
       {inviting && (
@@ -255,46 +202,6 @@ export function CarrierComparison({
               disabled={!chosen.length || invite.isPending}
             >
               Invite {chosen.length || ""}
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {quoting && (
-        <div className="rounded-lg border border-line p-4">
-          <h3 className="mb-1 text-sm font-semibold text-ink">
-            Price from {quoting.carrier_name}
-          </h3>
-          <p className="mb-3 text-xs text-muted">
-            Typed in by the desk. It lands in exactly the same shape as a price sent
-            through their portal — the comparison must not be able to tell them apart.
-          </p>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <Field label="Freight">
-              <Input type="number" value={form.freight_amount}
-                onChange={(e) => setForm({ ...form, freight_amount: e.target.value })} />
-            </Field>
-            <Field label="Other charges">
-              <Input type="number" value={form.other_charges}
-                onChange={(e) => setForm({ ...form, other_charges: e.target.value })} />
-            </Field>
-            <Field label="Tax %">
-              <Input type="number" value={form.tax_percent}
-                onChange={(e) => setForm({ ...form, tax_percent: e.target.value })} />
-            </Field>
-            <Field label="Transit days">
-              <Input type="number" value={form.transit_days}
-                onChange={(e) => setForm({ ...form, transit_days: e.target.value })} />
-            </Field>
-            <Field label="Vehicle type">
-              <Input value={form.vehicle_type}
-                onChange={(e) => setForm({ ...form, vehicle_type: e.target.value })} />
-            </Field>
-          </div>
-          <div className="mt-3 flex gap-2">
-            <Button variant="ghost" onClick={() => setQuoting(null)}>Cancel</Button>
-            <Button onClick={() => record.mutate()} disabled={record.isPending}>
-              Save price
             </Button>
           </div>
         </div>

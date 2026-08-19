@@ -406,8 +406,8 @@ describe("complete indent journey screen", () => {
     const timeline = await screen.findByRole("list", { name: "Complete indent journey timeline" });
     expect(within(timeline).getByText("Inventory allocation")).toBeInTheDocument();
     expect(within(timeline).getByText("Warehouse")).toBeInTheDocument();
-    expect(within(timeline).getByText("Dispatch and delivery")).toBeInTheDocument();
-    expect(within(timeline).getByText("Receipt and closure")).toBeInTheDocument();
+    expect(within(timeline).getByText("Logistics and delivery")).toBeInTheDocument();
+    expect(within(timeline).getByText("Raiser receipt and closure")).toBeInTheDocument();
 
     // The allocation ladder is as dynamic as the indent's own: two assistant
     // managers and an inventory manager here, because that is what was recorded.

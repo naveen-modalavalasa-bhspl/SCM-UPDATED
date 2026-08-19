@@ -14,6 +14,57 @@ import type { ProviderBoardRow } from "../transportTypes";
 
 const SIZE = 20;
 
+/** The three views of this desk.
+ *
+ * `Open` is the working queue and stays the default — it is what the desk has to act
+ * on today. The other two exist because awarding used to be the last time anyone ever
+ * saw a shipment here: the moment a provider was fixed and the shipment moved on to
+ * IN_TRANSIT it fell off the board, and "who did we award that to, and at what price"
+ * had no screen left to answer it. An award is a purchasing decision; a decision you
+ * cannot look up afterwards is not a record.
+ *
+ * The board is asked for its statuses explicitly rather than "everything" because the
+ * endpoint falls back to the open three when nothing is named. */
+const ALL_STATUSES = [
+  "DRAFT", "PENDING_APPROVAL", "QUOTING", "AWAITING_CARRIER", "READY",
+  "IN_TRANSIT", "DELIVERED", "ACKNOWLEDGED", "CLOSED", "REJECTED", "CANCELLED",
+].join(",");
+
+const VIEWS = [
+  {
+    key: "open",
+    label: "Needs a decision",
+    status: "QUOTING,AWAITING_CARRIER,READY",
+    blurb: "Everything still waiting on a provider. Open a shipment to compare what "
+      + "the partners quoted and award one.",
+    empty: "Nothing waiting for a provider.",
+  },
+  {
+    key: "awarded",
+    // Every shipment whose provider is settled, right through to CLOSED — the record
+    // of what this desk decided, not a second queue to work.
+    label: "Awarded",
+    status: "AWAITING_CARRIER,READY,IN_TRANSIT,DELIVERED,ACKNOWLEDGED,CLOSED",
+    blurb: "Shipments with a provider fixed, including the ones already on the road "
+      + "or delivered. Open one to see the quotes it was awarded against.",
+    empty: "Nothing has been awarded yet.",
+  },
+  {
+    key: "all",
+    label: "All",
+    status: ALL_STATUSES,
+    blurb: "Every transport request the desk has seen, whatever became of it.",
+    empty: "No transport requests.",
+  },
+] as const;
+
+type ViewKey = (typeof VIEWS)[number]["key"];
+
+/** Statuses at or past READY — the provider question has an answer. */
+const SETTLED_STATUSES = new Set([
+  "READY", "IN_TRANSIT", "DELIVERED", "ACKNOWLEDGED", "CLOSED",
+]);
+
 /**
  * Provider Selection — the RFQ desk. "Who is taking this, and at what price?"
  *
@@ -22,6 +73,10 @@ const SIZE = 20;
  * "settled, not yet gone". A desk works down all three, and a decline drops a shipment
  * straight back from the second to the first, so splitting them would mean watching
  * three places for one consignment.
+ *
+ * Awarding does not erase the row. The board opens on the working queue, and the
+ * Awarded and All views keep every past decision reachable from the screen that made
+ * it — see VIEWS.
  *
  * The RFQ lives HERE rather than on a screen of its own. Dispatch asks two or three
  * partners to price the same consignment; those prices are the answer to the question
@@ -37,13 +92,15 @@ export function ProviderSelectionPage() {
   const [params, setParams] = useSearchParams();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [viewKey, setViewKey] = useState<ViewKey>("open");
 
+  const view = VIEWS.find((v) => v.key === viewKey) ?? VIEWS[0];
   const openId = Number(params.get("tr") ?? 0);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["transport-provider-board", page, search],
+    queryKey: ["transport-provider-board", viewKey, page, search],
     queryFn: () => transportApi.providerBoard({
-      page, size: SIZE, search: search.trim() || undefined,
+      page, size: SIZE, status: view.status, search: search.trim() || undefined,
     }),
     refetchInterval: 5_000,
   });
@@ -52,7 +109,9 @@ export function ProviderSelectionPage() {
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
   const quoting = rows.filter((r) => r.status === "QUOTING").length;
   const awaiting = rows.filter((r) => r.status === "AWAITING_CARRIER").length;
-  const ready = rows.filter((r) => r.status === "READY").length;
+  // READY and everything past it: the provider question is answered. Counted this way
+  // rather than as READY alone so the card means the same thing on every view.
+  const settled = rows.filter((r) => SETTLED_STATUSES.has(r.status)).length;
 
   const open = (trId: number) => setParams({ tr: String(trId) });
   const closeSheet = () => setParams({});
@@ -119,8 +178,13 @@ export function ProviderSelectionPage() {
     {
       key: "carrier",
       header: "Awarded to",
+      // "Not chosen" is a prompt to act, so it is only shown while the decision is
+      // still open. A delivered hand-over never had a carrier to name and is not a
+      // gap on this desk.
       render: (r) => r.carrier_name ?? (
-        <span className="text-amber-600">Not chosen</span>
+        SETTLED_STATUSES.has(r.status)
+          ? <span className="text-muted">—</span>
+          : <span className="text-amber-600">Not chosen</span>
       ),
     },
     {
@@ -138,10 +202,7 @@ export function ProviderSelectionPage() {
   return (
     <div>
       <PageHeader eyebrow="Logistics" title="Provider Selection" />
-      <p className="-mt-2 mb-4 text-sm text-muted">
-        Everything still waiting on a provider. Open a shipment to compare what the
-        partners quoted and award one.
-      </p>
+      <p className="-mt-2 mb-4 text-sm text-muted">{view.blurb}</p>
 
       <div className="mb-4 grid gap-3 sm:grid-cols-3">
         <StatCard label="Out to partners" value={quoting} />
@@ -150,18 +211,35 @@ export function ProviderSelectionPage() {
           value={awaiting}
           tone={awaiting ? "text-amber-600" : "text-ink"}
         />
-        <StatCard label="Confirmed, awaiting dispatch" value={ready} />
+        <StatCard label="Provider fixed" value={settled} />
       </div>
 
       <ErrorBanner error={error} />
 
       <Card className="p-2">
-        <div className="px-2 pb-2 pt-1 sm:max-w-xs">
-          <Input
-            value={search}
-            placeholder="Request, consignment, indent or destination"
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-          />
+        <div className="flex flex-wrap items-center gap-2 px-2 pb-2 pt-1">
+          <div className="flex gap-1 rounded-lg bg-surface p-1">
+            {VIEWS.map((v) => (
+              <button
+                key={v.key}
+                type="button"
+                onClick={() => { setViewKey(v.key); setPage(1); }}
+                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                  v.key === viewKey
+                    ? "bg-content1 text-ink shadow-sm"
+                    : "text-muted hover:text-ink"}`}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+          <div className="min-w-0 flex-1 sm:max-w-xs">
+            <Input
+              value={search}
+              placeholder="Request, consignment, indent or destination"
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            />
+          </div>
         </div>
         <ResponsiveList
           data={rows}
@@ -172,7 +250,7 @@ export function ProviderSelectionPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
-          empty="Nothing waiting for a provider."
+          empty={view.empty}
           renderCard={(r) => (
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">

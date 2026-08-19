@@ -214,6 +214,43 @@ export interface ShipmentTrack {
   acknowledged_at?: string | null;
 }
 
+/**
+ * The raiser's view of one shipment carrying their indent.
+ *
+ * This is deliberately owned by the indents module even though it is served by the
+ * transport API. Importing logistics types here would reverse the module dependency.
+ */
+export interface RaiserShipmentEvent {
+  event_type: string;
+  event_at: string;
+  location_name?: string | null;
+  description?: string | null;
+  is_exception: boolean;
+}
+
+export interface RaiserTracking {
+  tr_id: number;
+  tr_no: string;
+  status: string;
+  mode: string;
+  consignment_no?: string | null;
+  carrier_name?: string | null;
+  lr_no?: string | null;
+  docket_no?: string | null;
+  tracking_url?: string | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  handed_over_by_name?: string | null;
+  expected_delivery?: string | null;
+  dispatched_at?: string | null;
+  delivered_at?: string | null;
+  tracking_shared_at?: string | null;
+  acknowledged_at?: string | null;
+  ack_condition?: string | null;
+  events: RaiserShipmentEvent[];
+}
+
 export interface Acknowledgement {
   indent_id: number;
   indent_no: string;

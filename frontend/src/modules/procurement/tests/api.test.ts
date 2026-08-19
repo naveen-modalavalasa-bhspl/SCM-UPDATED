@@ -5,8 +5,9 @@ import { poApi, requisitionApi } from "../api";
 describe("procurement api", () => {
   it("exposes the PO operations", () => {
     expect(Object.keys(poApi).sort()).toEqual(
-      ["approve", "create", "createFromIndent", "createFromQuotation", "get", "list",
-       "openForGrn", "reject", "sendToVendor", "submit"].sort(),
+      ["amend", "approve", "create", "createFromIndent", "createFromQuotation",
+       "export", "get", "list", "openForGrn", "reject", "revisions", "sendToVendor",
+       "submit", "update"].sort(),
     );
     expect(typeof poApi.createFromIndent).toBe("function");
     // Raised by hand, alongside the two derived paths: an order that begins as a

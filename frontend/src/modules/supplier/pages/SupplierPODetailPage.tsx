@@ -11,7 +11,7 @@ import { supplierApi } from "@/modules/procurement/api";
 import type {
   DespatchLineWrite, DespatchNote, DespatchNoteWrite, VendorPOLine,
 } from "@/modules/procurement/types";
-import { LinePicker } from "@/modules/procurement/components/LinePicker";
+import { revisionLines } from "@/modules/procurement/types";
 import { formatPONo } from "@/shared/format";
 
 const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
@@ -396,11 +396,11 @@ export function SupplierPODetailPage() {
           </thead>
           <tbody className="divide-y divide-line">
             {po.lines.map((line) => {
-              const prev = (po.revision_no > 0 && revisions.data?.[0]?.snapshot?.items)
-                ? revisions.data[0].snapshot.items.find((i: any) => i.item_id === line.item_id)
-                : line; // If no previous snapshot, treat as matching
-                
-              const isNew = po.revision_no > 0 && revisions.data && !prev;
+              const previous = revisionLines(revisions.data?.[0]);
+              const prev = previous.find((old: any) => old.item_id === line.item_id);
+              // A line the last filed revision does not mention is one this
+              // amendment added. No revision on file means nothing has changed.
+              const isNew = previous.length > 0 && !prev;
 
               return (
                 <tr key={line.po_item_id} className={isNew ? "bg-primary/5" : ""}>

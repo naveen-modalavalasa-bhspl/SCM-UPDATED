@@ -38,6 +38,9 @@ class POStatus(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     SENT_TO_VENDOR = "SENT_TO_VENDOR"
+    #: The vendor answered yes. A rung of its own, not just `vendor_status`,
+    #: so the receiving desk can be shown orders somebody has actually agreed
+    #: to deliver without reading a second column to find out.
     ACCEPTED_BY_SUPPLIER = "ACCEPTED_BY_SUPPLIER"
     PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED"
     RECEIVED = "RECEIVED"
@@ -89,6 +92,10 @@ class ApprovalAction(str, Enum):
     # Written when configuration failed to produce an approver and the hardcoded
     # reporting-manager ladder took over. Never an action a person performs.
     FALLBACK = "FALLBACK"
+    # Written when an admin re-pointed a document already in approval at a different
+    # ladder (or a different version of the same one) and the chain was re-resolved.
+    # Not a decision either — see workflow.engine.move_to_workflow().
+    MOVED = "MOVED"
 
 
 class StockDirection(str, Enum):
@@ -626,3 +633,11 @@ class ScopeRung(str, Enum):
     SUBTREE = "SUBTREE"      # own position and everything reporting under it
     PROJECT = "PROJECT"      # own hcm_employees.project_id
     ALL = "ALL"              # the whole network
+
+
+#: The `mst_vendors.vendor_type` values that mark a row as a transport provider
+#: rather than a material supplier. Lives here, not in logistics, because the vendor
+#: master has to be able to leave carriers out of procurement's pickers — an RFQ that
+#: offers a courier alongside three bandage suppliers invites a tender nobody can fill
+#: — and shared may not import a module (rule 5). `logistics.enums` re-exports it.
+CARRIER_VENDOR_TYPES = ("TRANSPORT", "LOGISTICS", "COURIER")

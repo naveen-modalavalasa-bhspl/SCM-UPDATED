@@ -118,10 +118,24 @@ export function StatCard({
   );
 }
 
-export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
+export function Field(
+  { label, children, hint, required }:
+  { label: string; children: ReactNode; hint?: string; required?: boolean },
+) {
   return (
     <label className="block">
-      <span className="mb-1.5 block text-sm font-medium text-body">{label}</span>
+      <span className="mb-1.5 block text-sm font-medium text-body">
+        {label}
+        {/* The asterisk is the only thing on the form that says "you cannot save
+            without this". aria-hidden with a text equivalent beside it, because a
+            screen reader announcing "star" tells nobody anything. */}
+        {required && (
+          <>
+            <span aria-hidden="true" className="ml-0.5 text-danger">*</span>
+            <span className="sr-only"> (required)</span>
+          </>
+        )}
+      </span>
       {children}
       {hint && <span className="mt-1 block text-xs text-muted">{hint}</span>}
     </label>

@@ -374,7 +374,7 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     )
     await db.commit()
     await db.refresh(indent)
-    return indent
+    return await _attach_office_sac(db, indent)
 
 
 def _values(values) -> list[str]:
@@ -1183,28 +1183,37 @@ async def list_indents(
             .correlate(IndentItem)
             .scalar_subquery()
         )
+        # A shortage already handed to procurement is not fulfilment work either. The
+        # allocation that gave nothing is APPROVED — deliberately left visible above so
+        # the rung ABOVE can still serve what it did not cover — but once that remainder
+        # has become a live material request, nobody in inventory can act on it and the
+        # row only invites an allocation the backend will refuse. Counted like
+        # `committed`, so a partly-ordered line still shows what is genuinely owed.
+        on_order = (
+            select(func.coalesce(func.sum(MaterialRequestItem.quantity), 0))
+            .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+            .where(
+                MaterialRequestItem.indent_item_id == IndentItem.id,
+                MaterialRequest.status.notin_([
+                    MRStatus.REJECTED.value, MRStatus.CANCELLED.value,
+                ]),
+            )
+            .correlate(IndentItem)
+            .scalar_subquery()
+        )
+        # The SQL twin of `owed_quantity`: what the approver granted, falling back to
+        # what was asked for. Reading `approved_quantity` raw hid every line that
+        # predates the approval flow and carries 0 there — 69 of the live ones — so the
+        # queue refused to offer indents `create_allocation_for_indent` would have
+        # accepted an allocation for. The two must agree; this is the half that was
+        # wrong.
+        owed_qty = func.coalesce(
+            func.nullif(IndentItem.approved_quantity, 0), IndentItem.quantity,
+        )
         stmt = stmt.where(exists(
             select(IndentItem.id).where(
                 IndentItem.indent_id == Indent.id,
-                IndentItem.approved_quantity
-                > IndentItem.allocated_quantity + committed,
-            ).correlate(Indent)
-        ))
-        # Quantity alone cannot express "already claimed, nothing given". An allocation
-        # that gives ZERO — the whole line is going to procurement, nothing is on the
-        # shelf — sums to the same 0 as no allocation at all, so the arithmetic above
-        # reads the indent as untouched and every allocator keeps seeing it. It is not
-        # work anybody can do: `allocations.ensure_no_active` refuses a second
-        # allocation while an unsigned one exists, so the row only invites a form to be
-        # filled in and rejected at submit.
-        #
-        # Same statuses as that guard, and deliberately not APPROVED: the cascade
-        # depends on an approved allocation leaving the indent visible so the rung above
-        # can serve the remainder it did not cover.
-        stmt = stmt.where(~exists(
-            select(Allocation.id).where(
-                Allocation.indent_id == Indent.id,
-                Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES),
+                owed_qty > IndentItem.allocated_quantity + committed + on_order,
             ).correlate(Indent)
         ))
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
@@ -1497,8 +1506,47 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
         upload=upload, doc_category=doc_category, user=user)
 
 
+#: What the requester may say about the state of what arrived.
+#:
+#: GOOD and DAMAGED, and deliberately NOT SHORT. A shortage is already stated by the
+#: quantities — someone who types 6 against 10 has reported it, and the indent stays
+#: open for the rest of its own accord. Offering SHORT here as well would let one form
+#: say "all ten arrived" and "it was short" at the same time.
+#:
+#: Nor is SHORT derived from those numbers, which was the other tempting option: this
+#: path accepts PARTIAL receipts by design (six today, four next week), so "received
+#: less than was dispatched" is the normal shape of a first instalment and flagging it
+#: as a shortage would raise a claim against a carrier who is still mid-delivery.
+#: Damage is the one fact the quantities genuinely cannot carry, so it is the one fact
+#: this asks for.
+ACK_CONDITION_GOOD = "GOOD"
+ACK_CONDITION_DAMAGED = "DAMAGED"
+ACK_CONDITIONS = (ACK_CONDITION_GOOD, ACK_CONDITION_DAMAGED)
+
+
+def _delivery_condition(condition: str | None, remarks: str | None) -> str:
+    """Validate what the requester said about the goods, defaulting to GOOD.
+
+    Values are plain strings rather than logistics' `AckCondition`: logistics sits
+    AFTER indents in the import chain (rule 5), so this module may not import it. The
+    warehouse maps them onto the enum on the way to the transport leg.
+    """
+    value = (condition or ACK_CONDITION_GOOD).strip().upper()
+    if value not in ACK_CONDITIONS:
+        raise ValidationError(
+            f"{condition!r} is not a delivery condition. Say whether the goods "
+            "arrived GOOD or DAMAGED.")
+    if value != ACK_CONDITION_GOOD and not (remarks or "").strip():
+        raise ValidationError(
+            "Describe the damage — it is what the claim against the carrier is "
+            "investigated from.")
+    return value
+
+
 async def acknowledge_receipt(db: AsyncSession, indent_id: int,
-                              lines: dict[int, Decimal], user) -> Indent:
+                              lines: dict[int, Decimal], user, *,
+                              condition: str | None = None,
+                              remarks: str | None = None) -> Indent:
     """The requester confirms what physically reached them.
 
     This is the only thing that closes an indent. The warehouse issuing and dispatching
@@ -1553,6 +1601,8 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
 
     indent.status = _fulfilment_status(indent.items)
 
+    ack_condition = _delivery_condition(condition, remarks)
+
     # Imported here, not at module load: warehouse sits after indents in the import
     # chain, so a top-level import would run it backwards.
     from app.modules.warehouse import service as warehouse_service
@@ -1561,7 +1611,14 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     # to sign the same delivery again afterwards recorded nothing new and left indents
     # open on a forgotten second click, so the issues settle here instead. Same
     # transaction as the receipt that made them settleable.
-    signed = await warehouse_service.auto_acknowledge_for_indent(db, indent.id, user)
+    signed = await warehouse_service.auto_acknowledge_for_indent(
+        db, indent.id, user, condition=ack_condition, remarks=remarks,
+        # Whether anything is still owed on this indent, which decides how far back the
+        # receipt is allowed to reach into the outward legs. A partial receipt settles
+        # only what has actually left; a complete one may also settle a leg still
+        # reading READY, because nothing can be sitting in a yard for an indent whose
+        # every line has now arrived. See `_sign_transport_for_indent`.
+        fully_received=indent.status == IndentStatus.CLOSED.value)
 
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
@@ -1821,6 +1878,17 @@ _POST_APPROVAL_STATUSES = {
     IndentStatus.PARTIALLY_ORDERED.value,
     IndentStatus.ORDERED.value,
     IndentStatus.CLOSED.value,
+}
+
+# The one wording for "this is with procurement, not with the warehouse". The Journey
+# serves it and `FlowStepper`'s offline fallback repeats it verbatim; the two used to
+# disagree because only the frontend had a procurement leg at all, and the frontend's
+# copy never rendered (the backend always serves seven valid phases, so the fallback
+# it lives in is unreachable for a real indent).
+_PROCUREMENT_STAGE_MESSAGES = {
+    IndentStatus.PENDING_PROCUREMENT.value: "Not in stock — with procurement",
+    IndentStatus.PARTIALLY_ORDERED.value: "Partly ordered — with procurement",
+    IndentStatus.ORDERED.value: "Ordered — waiting for goods receipt",
 }
 
 
@@ -2922,10 +2990,39 @@ async def _journey_operational_evidence(
             allocation_completed_by = row
     allocated_total = sum(allocation_by_line.values(), Decimal("0"))
     allocation_complete = lines_complete(allocation_by_line)
+    # What the shortfall on each line was handed to procurement as. A material request
+    # is the only record that says "this quantity is not coming off a shelf", and
+    # without reading it the journey took a signed zero-quantity allocation for stock
+    # set aside and marched the document on to the warehouse.
+    on_order_by_line: dict[int, Decimal] = defaultdict(Decimal)
+    for row in material_requests:
+        for item in row.items:
+            if item.indent_item_id in target_item_ids:
+                on_order_by_line[item.indent_item_id] += _d(item.quantity)
+    # Still short on the line, and the shortfall is with procurement. Nothing can reach
+    # the warehouse until a purchase lands, so no downstream leg may claim to be live.
+    awaiting_procurement = any(
+        on_order_by_line.get(line_id, Decimal("0")) > Decimal("0")
+        and (
+            allocation_by_line.get(line_id, Decimal("0"))
+            + received_by_line.get(line_id, Decimal("0"))
+        ) < required
+        for line_id, required in required_by_line.items()
+    )
+    # The allocation leg is settled when stock was actually set aside and nothing is
+    # still on order. A signed allocation that gave ZERO is a decision somebody made,
+    # not a settlement — reading `has_allocation` alone let an indent sitting with
+    # procurement report "Waiting for warehouse issue".
+    allocation_settled = (
+        allocation_complete or allocated_total > Decimal("0")
+    ) and not awaiting_procurement
     if allocations_found:
         latest = allocations_found[-1]
         stage(
-            "Stock allocated",
+            # Naming a zero allocation "Stock allocated" is the same lie one rung down:
+            # the quantity summary said 0, the title said otherwise.
+            "Stock allocated" if allocated_total > Decimal("0")
+            else "No stock available to allocate",
             "COMPLETED",
             "allocation",
             actor=latest.allocated_by_name,
@@ -3259,6 +3356,12 @@ async def _journey_operational_evidence(
     is_complete = has_genuine_closure
     if not allocations_found:
         missing_sources.append("inv_allocations.status=APPROVED and approved_at")
+    elif awaiting_procurement:
+        # Not a gap in the evidence: the shortfall is a live material request and no
+        # warehouse document can exist until procurement delivers against it. Listing
+        # `out_issues` here fired the "missing evidence" banner on every indent that
+        # is simply out of stock, and named the wrong document as the next step.
+        pass
     elif not issues:
         missing_sources.append("out_issues.is_stock_posted=true and posted_at")
     elif not issue_complete:
@@ -3286,6 +3389,8 @@ async def _journey_operational_evidence(
         "missing_sources": missing_sources,
         "has_allocation": bool(allocations_found),
         "allocation_complete": allocation_complete,
+        "allocation_settled": allocation_settled,
+        "awaiting_procurement": awaiting_procurement,
         "has_material_request": bool(material_requests),
         "has_issue": bool(issues),
         "issue_complete": issue_complete,
@@ -3708,6 +3813,7 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
     operational = {
         "stages": [], "events": [], "missing_sources": [],
         "has_allocation": False, "allocation_complete": False,
+        "allocation_settled": False, "awaiting_procurement": False,
         "has_material_request": False, "has_issue": False, "issue_complete": False,
         "has_dispatch": False, "has_delivery": False, "delivery_complete": False,
         "has_acknowledgement": False, "has_warehouse_acknowledgement": False,
@@ -3796,7 +3902,11 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
     )
     stages[0]["is_current"] = draft_current
 
-    allocation_done = bool(operational["has_allocation"])
+    # NOT `has_allocation`. An allocation row existing is not stock set aside: a
+    # decision to give nothing is signed and APPROVED like any other, and the whole
+    # requirement then goes to procurement. `allocation_settled` is the same fact the
+    # Fulfilment Queue already computes — allocated, less whatever is on order.
+    allocation_done = bool(operational["allocation_settled"])
     warehouse_done = bool(operational["issue_complete"])
     # The two final phases are separate signatures, taken from opposite ends of the
     # handover. Delivery is the warehouse's: recording the DELIVERED event on the
@@ -3829,8 +3939,19 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
             3, "Approvals", approval_status, current=approval_is_current,
             message=(approval_current or {}).get("title") if approval_current else None,
         ),
-        phase(4, "Allocation", "APPROVED" if allocation_done else "PENDING",
-              current=allocation_current),
+        phase(
+            4, "Allocation", "APPROVED" if allocation_done else "PENDING",
+            current=allocation_current,
+            # Why the leg is still open, for the stepper caption. Without it the step
+            # reads a bare "Current" and the requester has no way to tell an indent
+            # nobody has looked at from one that is out of stock and on order.
+            message=(
+                _PROCUREMENT_STAGE_MESSAGES.get(
+                    indent.status, "Sourcing from procurement")
+                if allocation_current and operational["awaiting_procurement"]
+                else None
+            ),
+        ),
         phase(5, "Warehouse", "APPROVED" if warehouse_done else "PENDING",
               current=warehouse_current),
         phase(6, "Delivery", "APPROVED" if delivery_done else "PENDING",
@@ -3850,7 +3971,14 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
     elif approval_is_current and approval_current:
         current_stage = _waiting_for_stage(approval_current["title"])
     elif allocation_current:
-        current_stage = "Waiting for allocation"
+        # Procurement sits inside the allocation leg rather than after it: the goods
+        # were not on a shelf, so the requirement is being bought. Saying "waiting for
+        # allocation" sends the requester to an inventory desk that cannot act.
+        current_stage = (
+            _PROCUREMENT_STAGE_MESSAGES.get(indent.status, "Sourcing from procurement")
+            if operational["awaiting_procurement"]
+            else "Waiting for allocation"
+        )
     elif warehouse_current:
         current_stage = "Waiting for warehouse issue"
     elif delivery_current:
@@ -5145,16 +5273,15 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "project_id": indent.project_id,
     } for line in indent.items]
 
-    # The points this person actually holds or that report under them, WIDENED by
-    # their job profile's data scope. The narrowing exists so an OE is offered his own
-    # MDP and LIP rather than every store in the company; reading the tagging alone
-    # meant a login given "All" in Settings > Job Profiles was still shown 0 available
-    # for stock outside his own reporting tree. None means every warehouse.
-    my_points = (await inventory_service.drawable_warehouse_ids(db, user)
-                 if user is not None else None)
+    # Only points this person actually holds, or that report under them. Inventory and
+    # anyone with a company-wide scope has no subtree, and sees every warehouse as
+    # before — the narrowing exists so an OE is offered their own MDP and LIP rather
+    # than every store in the company.
+    my_points = (await locations.location_ids_for_user(db, user)
+                 if user is not None else set())
 
     proposal = await allocations.propose(
-        db, indent_id, lines, warehouse_ids=sorted(my_points) if my_points else None)
+        db, indent_id, lines, warehouse_ids=sorted(my_points) or None)
     return {
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
@@ -5184,7 +5311,7 @@ async def item_claims(db: AsyncSession, item_id: int, indent_id: int, user=None)
     is not: an allocator has to know a claim exists even when it was raised somewhere
     they cannot see stock.
     """
-    warehouse_ids = (await inventory_service.drawable_warehouse_ids(db, user)
+    warehouse_ids = (await inventory_service.warehouse_ids_for_user(db, user)
                      if user is not None else None)
     return await allocations.competing_claims(
         db, item_id, indent_id, warehouse_ids=warehouse_ids)
@@ -5255,7 +5382,38 @@ async def decide_allocations_batch(db: AsyncSession, body, user) -> dict:
             "sealed_consolidations": sealed, "failed": failed}
 
 
-def _reject_over_allocation(indent: Indent, decisions: list[dict]) -> None:
+async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
+    """Quantity per indent line already handed to procurement as a material request.
+
+    The Fulfilment Queue subtracts this before it offers an indent for allocation
+    (`on_order`, in `list_fulfilment_queue`); the allocation guards below did not, and
+    the comment claiming the two agreed was simply wrong. That gap is how one line was
+    signed off with a ZERO allocation, sent to procurement as a material request, and
+    then had a SECOND allocation raised against it for the same quantity — the line
+    would have been bought and issued.
+
+    Same status filter as the queue: a rejected or cancelled request is not on order.
+    """
+    rows = (await db.execute(
+        select(
+            MaterialRequestItem.indent_item_id,
+            func.coalesce(func.sum(MaterialRequestItem.quantity), 0),
+        )
+        .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+        .join(IndentItem, IndentItem.id == MaterialRequestItem.indent_item_id)
+        .where(
+            IndentItem.indent_id == indent_id,
+            MaterialRequest.status.notin_([
+                MRStatus.REJECTED.value, MRStatus.CANCELLED.value,
+            ]),
+        )
+        .group_by(MaterialRequestItem.indent_item_id)
+    )).all()
+    return {int(line_id): _d(quantity) for line_id, quantity in rows if line_id}
+
+
+def _reject_over_allocation(indent: Indent, decisions: list[dict],
+                            on_order: dict[int, Decimal] | None = None) -> None:
     """Nobody may be given more than they asked for.
 
     `allocations.create` already refuses to promise stock that is not on the shelf, but
@@ -5266,9 +5424,21 @@ def _reject_over_allocation(indent: Indent, decisions: list[dict]) -> None:
 
     Summed per line, because one line legitimately arrives as several decisions when it
     is served from more than one point.
+
+    `on_order` is what procurement is already sourcing for the line (see
+    `_on_order_by_line`). It is owed to the requester exactly once: allocating it a
+    second time off a shelf double-counts the demand and leaves a live purchase behind
+    for goods that were issued from stock.
     """
-    owed = {line.id: owed_quantity(line) - _d(line.allocated_quantity)
-            for line in indent.items}
+    on_order = on_order or {}
+    owed = {
+        line.id: (
+            owed_quantity(line)
+            - _d(line.allocated_quantity)
+            - on_order.get(line.id, Decimal("0"))
+        )
+        for line in indent.items
+    }
     names = {line.id: line.item_name or line.item_code or line.item_id
              for line in indent.items}
 
@@ -5280,11 +5450,17 @@ def _reject_over_allocation(indent: Indent, decisions: list[dict]) -> None:
         if line_id not in owed:
             raise ValidationError(
                 f"Line {line_id} is not on {indent.indent_no}")
-        remaining = owed[line_id]
+        remaining = max(owed[line_id], Decimal("0"))
         if quantity > remaining:
+            ordered = on_order.get(line_id, Decimal("0"))
+            detail = (
+                f" ({ordered} of it is already on a material request with procurement)"
+                if ordered > 0 else ""
+            )
             raise ValidationError(
                 f"{names[line_id]}: cannot allocate {quantity} against "
-                f"{indent.indent_no} — only {remaining} is still owed on that line."
+                f"{indent.indent_no} — only {remaining} is still owed on that "
+                f"line{detail}."
             )
 
 
@@ -5312,11 +5488,18 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # nothing" and let an already-approved allocation block the cascade forever. The
     # fulfilment queue computes its remainder the same way — the two must agree or the
     # queue offers an indent whose submit can never pass.
+    # Less whatever is already on order. Without this the guard was looser than the
+    # queue that feeds it: the queue correctly hid an indent whose shortfall had gone
+    # to procurement, but any other door into the allocation form — a saved URL, the
+    # own-stock path, the batch screen — still passed, and `allow_additional` then let
+    # `ensure_no_active` wave a second allocation through for quantity already bought.
+    on_order = await _on_order_by_line(db, indent.id)
     still_owed = any(
-        owed_quantity(line) > Decimal(str(line.allocated_quantity or 0))
+        owed_quantity(line)
+        > _d(line.allocated_quantity) + on_order.get(line.id, Decimal("0"))
         for line in indent.items
     )
-    _reject_over_allocation(indent, decisions)
+    _reject_over_allocation(indent, decisions, on_order)
 
     # Which approval event this is. Every source point inside the raiser's own
     # reporting subtree means he is serving his own stock, and the point owner — not

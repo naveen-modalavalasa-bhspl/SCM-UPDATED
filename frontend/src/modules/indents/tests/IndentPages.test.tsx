@@ -102,6 +102,7 @@ vi.mock("../api", async () => {
     notifications: (scope: { employeeId: number | null; activePositionId: number | null }, filters: unknown = {}) => [...scoped(scope), "notifications", filters] as const,
     detail: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "detail", id] as const,
     journey: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "journey", 4, id] as const,
+    shipments: (scope: { employeeId: number | null; activePositionId: number | null }, id: number) => [...scoped(scope), "shipments", id] as const,
     items: (scope: { employeeId: number | null; activePositionId: number | null }, context = "default") => [...scoped(scope), "items", context] as const,
     regions: (scope: { employeeId: number | null; activePositionId: number | null }) => [...scoped(scope), "regions"] as const,
   };

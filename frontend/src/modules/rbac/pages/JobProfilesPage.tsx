@@ -23,9 +23,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, BarChart3, Boxes, Check, CheckCircle, ChevronRight, Database,
-  FileText, Home, Package, RotateCcw, Settings as SettingsIcon, Shield,
-  ShoppingCart, Truck, Undo2, Users,
+  AlertTriangle, BarChart3, Boxes, Check, CheckCircle, ChevronRight, ClipboardPaste,
+  Copy, Database, FileText, Home, Package, RotateCcw, Settings as SettingsIcon,
+  Shield, ShoppingCart, Truck, Undo2, Users,
 } from "lucide-react";
 import {
   Button, Card, EmptyState, ErrorBanner, Field, Input, PageHeader, Select,
@@ -52,6 +52,47 @@ const SCOPE_LABEL: Record<ScopeRung, string> = {
   PROJECT: "Own project",
   ALL: "Everything",
 };
+
+/* ---- Copy / paste a profile's access -------------------------------------
+ * A grant is a set of codes, so it travels as one: copy Store Keeper, paste onto
+ * the next profile, choose whether it ADDS to what is there or REPLACES it. The
+ * clipboard string is versioned JSON so a stale one from an older build is
+ * refused rather than half-applied. Nothing is saved by pasting — it only fills
+ * the draft, and the existing Save button (and the backend check behind it) is
+ * still the one thing that writes. Unknown codes are dropped and counted, so a
+ * profile copied from a project that has a screen this one does not cannot smuggle
+ * a code past the matrix.
+ */
+type AccessClip = {
+  v: 1; kind: "scm-job-profile-access";
+  from: string; scope: ScopeRung; pages: string[]; features: string[];
+};
+
+export const buildClip = (
+  from: string, scope: ScopeRung, pages: string[], features: string[],
+): string => JSON.stringify({
+  v: 1, kind: "scm-job-profile-access", from, scope,
+  pages: [...pages].sort(), features: [...features].sort(),
+} satisfies AccessClip, null, 2);
+
+/** Returns the clip, or a plain-English reason it cannot be used. */
+export function parseClip(text: string): { clip: AccessClip } | { error: string } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text.trim());
+  } catch {
+    return { error: "That is not a copied permission set." };
+  }
+  const clip = raw as Partial<AccessClip>;
+  if (!clip || clip.kind !== "scm-job-profile-access") {
+    return { error: "That is not a copied permission set." };
+  }
+  if (clip.v !== 1) return { error: "That was copied by a different version." };
+  if (!Array.isArray(clip.pages) || !Array.isArray(clip.features)) {
+    return { error: "That copied permission set is incomplete." };
+  }
+  return { clip: clip as AccessClip };
+}
 
 /** Compared on letters alone: the menu says "Warehouse", the permission catalogue
  *  says "warehouse". */
@@ -190,9 +231,6 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   },
   approval_decisions: {
     hint: "Review requests that you have already approved or rejected.",
-  },
-  approval_team: {
-    hint: "See requests that are waiting with other approvers in your team.",
   },
   grp_purchasing: {
     hint: "Open the Procurement module: requisitions, RFQs, quotations and POs.",
@@ -658,6 +696,9 @@ export function JobProfilesPage() {
   const [showHolders, setShowHolders] = useState(false);
   const [matrixSearch, setMatrixSearch] = useState("");
   const [open, setOpen] = useState<Set<string>>(new Set());
+  // The paste box: closed until asked for, and cleared whenever the selection moves.
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
 
   const profiles = data?.items ?? [];
   const selected = useMemo(
@@ -685,6 +726,8 @@ export function JobProfilesPage() {
     setScope(selected.scope);
     setShowHolders(false);
     setOpen(new Set());
+    setPasteOpen(false);
+    setPasteText("");
   }, [selected]);
 
   const holders = useQuery({
@@ -832,6 +875,53 @@ export function JobProfilesPage() {
       featuresOn: featureCodes.size,
     };
   }, [data?.pages, data?.features, pageCodes, featureCodes]);
+
+  /** Copy fills the box AND the OS clipboard: the box is what makes this work on a
+   *  plain-http LAN host, where navigator.clipboard is not available at all. */
+  const copyAccess = () => {
+    if (!selected) return;
+    const text = buildClip(selected.name, scope, [...pageCodes], [...featureCodes]);
+    setPasteText(text);
+    setPasteOpen(true);
+    navigator.clipboard?.writeText(text).then(
+      () => toast.success(`${selected.name}'s permissions copied`),
+      () => toast.success("Copied into the box below — select it and copy"),
+    );
+  };
+
+  /** APPEND adds the copied codes to what this profile already has; REPLACE makes it
+   *  exactly the copied set (and takes its scope with it, because a grant read at a
+   *  different reach is a different grant). Neither saves. */
+  const applyClip = (mode: "append" | "replace") => {
+    const parsed = parseClip(pasteText);
+    if ("error" in parsed) { toast.error(parsed.error); return; }
+    const { clip } = parsed;
+    // always_on pages are granted to everyone and are not selectable here, so a clip
+    // carrying one must not put a code in the draft the matrix cannot show or clear.
+    const knownPages = new Set((data?.pages ?? [])
+      .filter((page) => !page.always_on).map((page) => page.code));
+    const knownFeatures = new Set((data?.features ?? []).map((f) => f.code));
+    const pages = clip.pages.filter((code) => knownPages.has(code));
+    const features = clip.features.filter((code) => knownFeatures.has(code));
+    const skipped = (clip.pages.length - pages.length)
+      + (clip.features.length - features.length);
+
+    if (mode === "replace") {
+      setPageCodes(new Set(pages));
+      setFeatureCodes(new Set(features));
+      if (clip.scope) setScope(clip.scope);
+    } else {
+      setPageCodes(new Set([...pageCodes, ...pages]));
+      setFeatureCodes(new Set([...featureCodes, ...features]));
+    }
+    setPasteOpen(false);
+    toast.success(
+      `${mode === "replace" ? "Replaced with" : "Added"} ${clip.from}'s access`
+      + ` — ${pages.length} screens, ${features.length} actions`
+      + (skipped ? `, ${skipped} unknown code${skipped > 1 ? "s" : ""} skipped` : "")
+      + ". Not saved yet.",
+    );
+  };
 
   const dirty = !!selected && (
     scope !== selected.scope
@@ -1319,7 +1409,59 @@ export function JobProfilesPage() {
                   >
                     Take everything away
                   </Button>
+                  {/* Copy one profile's access, paste it onto the next. Nothing here
+                   *  writes: it fills the draft and Save is still the only write. */}
+                  <Button variant="ghost" onClick={copyAccess}>
+                    <Copy className="h-4 w-4" /> Copy permissions
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => { setPasteOpen(!pasteOpen); }}
+                  >
+                    <ClipboardPaste className="h-4 w-4" /> Paste permissions
+                  </Button>
                 </div>
+
+                {pasteOpen && (
+                  <div className="mt-3 space-y-2 rounded-xl border border-brand/40
+                                  bg-content2/50 p-3">
+                    <p className="text-sm font-semibold text-ink">
+                      Permission set for {selected.name}
+                    </p>
+                    <textarea
+                      value={pasteText}
+                      onChange={(event) => setPasteText(event.target.value)}
+                      placeholder="Paste a copied permission set here"
+                      spellCheck={false}
+                      className="min-h-28 w-full rounded-lg border border-line
+                                 bg-content1 p-3 font-mono text-xs text-ink"
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        disabled={!pasteText.trim()}
+                        onClick={() => applyClip("append")}
+                      >
+                        Add to this profile
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={!pasteText.trim()}
+                        onClick={() => applyClip("replace")}
+                      >
+                        Replace this profile
+                      </Button>
+                      <Button variant="ghost" onClick={() => setPasteOpen(false)}>
+                        Cancel
+                      </Button>
+                      <span className="text-xs text-muted">
+                        Add keeps what {selected.name} already has. Replace makes it
+                        exactly the copied set, scope included. Neither saves until you
+                        press Save changes.
+                      </span>
+                    </div>
+                  </div>
+                )}
               </Card>
 
               {/* The list above runs long, so Save follows you down it. Cleared of the

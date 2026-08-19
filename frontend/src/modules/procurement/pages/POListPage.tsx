@@ -18,6 +18,7 @@ const STATUSES = [
   { value: "PENDING_APPROVAL", label: "Pending approval" },
   { value: "APPROVED", label: "Approved" },
   { value: "SENT_TO_VENDOR", label: "Sent to vendor" },
+  { value: "ACCEPTED_BY_SUPPLIER", label: "Accepted by supplier" },
   { value: "PARTIALLY_RECEIVED", label: "Partially received" },
   { value: "RECEIVED", label: "Received" },
   { value: "REJECTED", label: "Rejected" },

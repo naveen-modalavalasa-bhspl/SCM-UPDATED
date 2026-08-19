@@ -226,6 +226,51 @@ def _rescuable(position_id: int, known: dict) -> bool:
     return isinstance(raw, dict) and "employee" in raw
 
 
+def _stale_position_ids(live_ids: set[int], existing: dict) -> list[int]:
+    """Positions the mirror still calls active that the feed has stopped serving.
+
+    A sync only ever upserts, so until now a post HCM deleted stayed active here for
+    good: its role kept showing on the holder's profile and the ladder kept resolving
+    to it. Two FLOOR INCHARGE posts carrying a role HCM had already dropped outlived it
+    that way, and only a hand-run of scripts/hcm_cutover.py would have cleared them.
+
+    Rows the employee feed rescued are left alone. The positions feed never lists them
+    (see _rescuable), so their absence from it says nothing about them at all.
+
+    An empty id set means the fetch came back empty, not that HCM has no posts —
+    retiring the whole mirror on that would strand every ladder, so it retires nothing.
+    """
+    if not live_ids:
+        return []
+    return [pid for pid, row in existing.items()
+            if pid not in live_ids and row.is_active and not _rescuable(pid, existing)]
+
+
+async def _retire_positions(db: AsyncSession, stale: list[int]) -> int:
+    """Deactivate the listed posts and the seats on them.
+
+    Retire, not delete: `wf_instances.resolved_chain` and every historical approval
+    name a position id and must still resolve to a name. `is_active = 0` is exactly
+    the flag the ladder and the resolver already filter on.
+    """
+    if not stale:
+        return 0
+    await db.execute(
+        update(HcmPosition)
+        .where(HcmPosition.id.in_(stale))
+        .values(is_active=False)
+        .execution_options(synchronize_session=False)
+    )
+    await db.execute(
+        update(HcmPositionAssignment)
+        .where(HcmPositionAssignment.position_id.in_(stale),
+               HcmPositionAssignment.is_active.is_(True))
+        .values(is_active=False)
+        .execution_options(synchronize_session=False)
+    )
+    return len(stale)
+
+
 async def _issue_missing_logins(db: AsyncSession) -> int:
     """Give every active employee without one a login, on the configured password.
 
@@ -381,6 +426,16 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
                 "hcm sync: %s positions were missing from the positions feed and were "
                 "taken from the employee records instead", rescued,
             )
+        if entity_key == "positions":
+            retired = await _retire_positions(db, _stale_position_ids(
+                {r.get("id") for r in rows if r.get("id") is not None},
+                existing_by_id,
+            ))
+            if retired:
+                logger.warning(
+                    "hcm sync: retired %s positions the feed no longer serves, and "
+                    "their assignments", retired,
+                )
         log.records_fetched = len(rows)
         log.records_upserted = upserted
         log.status = "SUCCESS"

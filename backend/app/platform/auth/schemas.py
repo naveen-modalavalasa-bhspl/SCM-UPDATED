@@ -140,3 +140,10 @@ class ProfileOut(BaseModel):
     permissions: list[str] = []
     warehouse_label: str = "Warehouse"
     account: ProfileAccount | None = None
+
+
+class PasswordChangeIn(BaseModel):
+    """Self-service password change. The caller is always the subject, so there is
+    no employee id here — it comes from the token."""
+    current_password: str
+    new_password: str

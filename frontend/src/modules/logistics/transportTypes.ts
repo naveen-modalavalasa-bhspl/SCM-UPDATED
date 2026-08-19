@@ -17,6 +17,50 @@ export interface ModeRule {
   required_fields: string[];
 }
 
+/** What the leg is carrying, which is also WHICH WAY it runs. RETURN is the same
+ *  document run backwards — field to warehouse (doc E7). */
+export type TransportSource = "CONSIGNMENT" | "ISSUE" | "RETURN";
+
+/** Served by `GET /api/transport/suggest-mode`. Null when the consignment carried no
+ *  distance and no weight — advice off no evidence reads as an answer, so the backend
+ *  says nothing instead of guessing. */
+export interface ModeSuggestion {
+  mode: TransportMode;
+  label: string;
+  reason: string;
+}
+
+/** What the RAISER of an indent is shown about the leg carrying it — enough to answer
+ *  "where is my material", and nothing about freight or who else quoted. */
+export interface RaiserTracking {
+  tr_id: number;
+  tr_no: string;
+  status: string;
+  mode: TransportMode;
+  consignment_no?: string | null;
+  carrier_name?: string | null;
+  lr_no?: string | null;
+  docket_no?: string | null;
+  tracking_url?: string | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  handed_over_by_name?: string | null;
+  expected_delivery?: string | null;
+  dispatched_at?: string | null;
+  delivered_at?: string | null;
+  tracking_shared_at?: string | null;
+  acknowledged_at?: string | null;
+  ack_condition?: string | null;
+  events: {
+    event_type: string;
+    event_at: string;
+    location_name?: string | null;
+    description?: string | null;
+    is_exception: boolean;
+  }[];
+}
+
 export interface EvaluationMethod {
   value: string;
   label: string;
@@ -262,6 +306,16 @@ export interface TransportRequest {
   events: ShipmentEvent[];
 }
 
+export interface ReceiptEvidence {
+  id: number;
+  file_name: string;
+  file_size?: number | null;
+  mime_type?: string | null;
+  doc_category?: string | null;
+  uploaded_by_name?: string | null;
+  created_at?: string | null;
+}
+
 export interface TRListRow {
   id: number;
   tr_no: string;
@@ -454,7 +508,6 @@ export interface TRInput {
   driver_phone?: string | null;
   trip_reference?: string | null;
   handed_over_by_name?: string | null;
-  received_by_name?: string | null;
   lines?: TRLineInput[];
 }
 
@@ -532,4 +585,44 @@ export interface LogisticsVendorSummary {
 export interface PartnerType {
   value: string;
   label: string;
+}
+
+// --------------------------------------------------------------------------- //
+//  The activity ledger
+// --------------------------------------------------------------------------- //
+// `GET /api/transport/activity` — one normalised row per event, unioned from the
+// request header, the approval actions, the carrier quotes and the shipment
+// timeline. The screen renders what it is sent: `event_label` and `result` are
+// SERVED, never mapped here, so the ledger and the backend cannot drift.
+
+export interface ActivityRow {
+  /** Unique across the union ("evt:12", "wf:9", "tr:5:awarded"). */
+  event_id: string;
+  tr_id: number;
+  tr_no: string;
+  consignment_no?: string | null;
+  indent_no?: string | null;
+  mode: TransportMode;
+  event_type: string;
+  event_label: string;
+  /** The rung this event put the shipment on — not its status today. */
+  result: string;
+  occurred_at: string;
+  actor_name?: string | null;
+  carrier_name?: string | null;
+  location_name?: string | null;
+  detail?: string | null;
+  /** Freight quoted, freight awarded, or the value of a claim. */
+  amount?: number | null;
+  is_exception: boolean;
+  from_name?: string | null;
+  to_name?: string | null;
+}
+
+/** `GET /api/transport/activity-types` — the filter's options, in the order the
+ *  events happen. Served for the same reason the mode rules are. */
+export interface ActivityType {
+  value: string;
+  label: string;
+  is_exception: boolean;
 }

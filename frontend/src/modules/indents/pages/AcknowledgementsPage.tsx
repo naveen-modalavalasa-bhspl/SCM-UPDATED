@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Camera, CheckCircle2, Circle, ExternalLink, FileText, ListFilter, PackageCheck,
-  Trash2, Truck,
+  Trash2, TriangleAlert, Truck,
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, EmptyState, ErrorBanner, Input, ResponsiveList, Select,
@@ -11,10 +11,10 @@ import {
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
 import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge";
 import { INDENT_STATUS } from "../constants";
-import { indentApi, useIndentAccountScope } from "../api";
+import { indentApi, indentKeys, useIndentAccountScope } from "../api";
 import { cancelIndentReceiptReads, commitConfirmedIndentReceipt } from "../receiptRefresh";
 import type {
-  Acknowledgement, AcknowledgementLine, ReceiptAttachment, ShipmentTrack,
+  Acknowledgement, AcknowledgementLine, RaiserTracking, ReceiptAttachment,
 } from "../types";
 
 /**
@@ -195,7 +195,8 @@ function LineCard({ line, value, onChange }: {
 }
 
 /** The handle a requester actually chases a parcel with, whichever the mode issued. */
-const trackingHandle = (leg: ShipmentTrack) => leg.lr_no ?? leg.docket_no ?? null;
+const trackingHandle = (leg: { lr_no?: string | null; docket_no?: string | null }) =>
+  leg.lr_no ?? leg.docket_no ?? null;
 
 /**
  * How this delivery is travelling — the answer to "where is my stuff".
@@ -205,11 +206,14 @@ const trackingHandle = (leg: ShipmentTrack) => leg.lr_no ?? leg.docket_no ?? nul
  * it on. It rides on this row instead: told once, on the same card as the button that
  * says it arrived.
  */
-function ShipmentCard({ leg }: { leg: ShipmentTrack }) {
+function ShipmentCard({ leg }: { leg: RaiserTracking }) {
   const handle = trackingHandle(leg);
   const who = leg.carrier_name
     || [leg.vehicle_number, leg.driver_name].filter(Boolean).join(" · ");
   const landed = leg.acknowledged_at ?? leg.delivered_at;
+  const latest = [...(leg.events ?? [])].sort(
+    (left, right) => Date.parse(right.event_at) - Date.parse(left.event_at),
+  )[0];
   return (
     <li className="rounded-xl border border-line bg-content1 p-3">
       <div className="flex items-start gap-2.5">
@@ -237,6 +241,19 @@ function ShipmentCard({ leg }: { leg: ShipmentTrack }) {
                   leg.expected_delivery ? ` · due ${leg.expected_delivery}` : ""}`
                 : "Not yet sent"}
           </div>
+          {latest && (
+            <div className={`mt-2 rounded-lg px-2.5 py-2 text-xs ${
+              latest.is_exception ? "bg-bad-bg text-bad" : "bg-content2 text-body"
+            }`}>
+              <span className="font-semibold capitalize">
+                {latest.event_type.replace(/_/g, " ").toLowerCase()}
+              </span>
+              {latest.location_name ? ` · ${latest.location_name}` : ""}
+              {latest.description && (
+                <span className="mt-0.5 block text-[11px] text-muted">{latest.description}</span>
+              )}
+            </div>
+          )}
         </div>
         {leg.tracking_url && (
           <a
@@ -282,10 +299,23 @@ function AcknowledgementModal({ row, onClose }: {
         .filter((line) => receivable(line) > 0)
         .map((line) => [line.indent_item_id, String(receivable(line))]),
     ));
+  // Damage is the ONE thing the quantities above cannot say. A shortage needs no
+  // control here — typing a smaller number is the report — so there is no SHORT
+  // option to contradict what was entered.
+  const [damaged, setDamaged] = useState(false);
+  const [remarks, setRemarks] = useState("");
 
   const attachments = useQuery({
     queryKey: ["indent-receipt-attachments", row.indent_id],
     queryFn: () => indentApi.receiptAttachments(row.indent_id),
+  });
+
+  // Tracking is an extra read-only answer to "where is it?". It does not replace or
+  // submit the existing indent receipt form below.
+  const tracking = useQuery({
+    queryKey: indentKeys.shipments(accountScope, row.indent_id),
+    queryFn: ({ signal }) => indentApi.shipmentsForIndent(row.indent_id, signal),
+    refetchOnWindowFocus: true,
   });
 
   const upload = useMutation({
@@ -309,6 +339,9 @@ function AcknowledgementModal({ row, onClose }: {
             received_quantity: Number(value),
           }))
           .filter((line) => line.received_quantity > 0),
+        damaged
+          ? { condition: "DAMAGED", remarks: remarks.trim() }
+          : { condition: "GOOD" },
       ),
     onMutate: () => cancelIndentReceiptReads(qc, accountScope, row.indent_id),
     onSuccess: async (updated) => {
@@ -323,7 +356,14 @@ function AcknowledgementModal({ row, onClose }: {
   const entered = Object.values(received).some((value) => Number(value) > 0);
   const anythingToConfirm = row.lines.some((line) => receivable(line) > 0);
   const waiting = row.lines.reduce((sum, line) => sum + receivable(line), 0);
-  const ready = entered && photos.length > 0;
+  // Two very different reasons there is no button, and one message used to cover both:
+  // "already acknowledged" told a requester whose goods had not left the warehouse
+  // that they had signed for them. Nothing dispatched at all is the other case, and
+  // the honest thing to say is that there is nothing here yet.
+  const nothingSentYet = row.lines.every((line) => line.dispatched_quantity <= 0);
+  // Reporting damage without saying what was damaged gives the claim nothing to be
+  // investigated from, and the backend refuses it — so the button waits here too.
+  const ready = entered && photos.length > 0 && (!damaged || remarks.trim().length > 0);
 
   return (
     <ConfirmModal
@@ -345,22 +385,31 @@ function AcknowledgementModal({ row, onClose }: {
           className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${
             anythingToConfirm
               ? "border-brand/25 bg-brand-050"
-              : "border-ok/25 bg-ok-bg"
+              : nothingSentYet
+                ? "border-line bg-content2"
+                : "border-ok/25 bg-ok-bg"
           }`}
         >
           {anythingToConfirm
             ? <PackageCheck className="h-5 w-5 shrink-0 text-brand" />
-            : <CheckCircle2 className="h-5 w-5 shrink-0 text-ok" />}
+            : nothingSentYet
+              ? <Truck className="h-5 w-5 shrink-0 text-muted" />
+              : <CheckCircle2 className="h-5 w-5 shrink-0 text-ok" />}
           <div className="min-w-0 text-sm">
             <div className="font-semibold text-ink">
               {anythingToConfirm
                 ? `${qty(waiting)} waiting for you to acknowledge`
-                : "Nothing left to acknowledge"}
+                : nothingSentYet
+                  ? "Nothing has reached you yet"
+                  : "Nothing left to acknowledge"}
             </div>
             <div className="text-xs text-muted">
               {anythingToConfirm
                 ? "Check the quantity on each item, then attach a photo of the goods."
-                : "Everything sent to you has already been acknowledged."}
+                : nothingSentYet
+                  ? "Nothing on this indent has been dispatched to you yet. "
+                    + "Follow it below; the confirm box opens once it is on its way."
+                  : "Everything sent to you has already been acknowledged."}
             </div>
           </div>
           {row.project_name && (
@@ -370,16 +419,31 @@ function AcknowledgementModal({ row, onClose }: {
           )}
         </div>
 
-        {row.shipments.length > 0 && (
-          <div>
-            <div className="mb-2 text-sm font-semibold text-ink">On its way to you</div>
+        <div>
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div className="text-sm font-semibold text-ink">Material tracking</div>
+            {tracking.isFetching && <span className="text-[11px] text-muted">Refreshing…</span>}
+          </div>
+          {tracking.isLoading ? (
+            <div className="rounded-xl border border-line bg-content2 px-3 py-4 text-xs text-muted">
+              Checking with logistics…
+            </div>
+          ) : tracking.error ? (
+            <div className="rounded-xl border border-warn/30 bg-warn-bg px-3 py-3 text-xs text-warn">
+              Tracking is temporarily unavailable. You can still acknowledge the receipt below.
+            </div>
+          ) : (tracking.data ?? []).length > 0 ? (
             <ul className="space-y-2">
-              {row.shipments.map((leg) => (
+              {(tracking.data ?? []).map((leg) => (
                 <ShipmentCard key={leg.tr_id} leg={leg} />
               ))}
             </ul>
-          </div>
-        )}
+          ) : (
+            <div className="rounded-xl border border-dashed border-line bg-content2/60 px-3 py-4 text-xs text-muted">
+              No logistics shipment has been created for this indent yet.
+            </div>
+          )}
+        </div>
 
         <ul className="space-y-2.5">
           {row.lines.map((line) => (
@@ -450,11 +514,66 @@ function AcknowledgementModal({ row, onClose }: {
               </ul>
             )}
 
+            {/* The state the goods arrived in. Asked here, on the same card as the
+                photo, because the person answering it is holding the box. Two choices
+                and not three: a shortage is the quantity field's job above, and a
+                SHORT option here could contradict what was typed there. */}
+            <div className="mt-4 border-t border-line pt-3">
+              <div className="text-sm font-semibold text-ink">How did it arrive?</div>
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                <button
+                  type="button"
+                  aria-pressed={!damaged}
+                  onClick={() => setDamaged(false)}
+                  className={`flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-medium transition ${
+                    !damaged
+                      ? "border-ok bg-ok-bg text-ok"
+                      : "border-line bg-content1 text-body hover:border-ok/40"
+                  }`}
+                >
+                  <CheckCircle2 className="h-4 w-4" /> Good condition
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={damaged}
+                  onClick={() => setDamaged(true)}
+                  className={`flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-medium transition ${
+                    damaged
+                      ? "border-bad bg-bad-bg text-bad"
+                      : "border-line bg-content1 text-body hover:border-bad/40"
+                  }`}
+                >
+                  <TriangleAlert className="h-4 w-4" /> Something was damaged
+                </button>
+              </div>
+              {damaged && (
+                <div className="mt-2">
+                  <textarea
+                    aria-label="What was damaged"
+                    value={remarks}
+                    onChange={(event) => setRemarks(event.target.value)}
+                    rows={3}
+                    placeholder="What was damaged, and how much of it?"
+                    className="w-full rounded-xl border border-line bg-content1 px-3 py-2 text-sm text-ink outline-none transition placeholder:text-muted focus:border-brand"
+                  />
+                  <p className="mt-1 text-[11px] text-muted">
+                    This opens a claim on the shipment for the logistics desk to chase.
+                  </p>
+                </div>
+              )}
+            </div>
+
             {/* Two red sentences read as errors for something you have not done yet.
                 A checklist reads as what is left, and goes green as you do it. */}
             <ul className="mt-3 space-y-1.5 border-t border-line pt-3">
               <Requirement met={entered} label="A quantity entered on at least one item" />
               <Requirement met={photos.length > 0} label="A photo of the goods attached" />
+              {damaged && (
+                <Requirement
+                  met={remarks.trim().length > 0}
+                  label="A description of the damage"
+                />
+              )}
             </ul>
           </div>
         )}

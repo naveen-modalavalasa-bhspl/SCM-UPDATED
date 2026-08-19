@@ -9,17 +9,26 @@ job in 28 districts, and must NOT be split. One role, two opposite needs.
 
 A job profile is the real job, and it is DERIVED, never typed:
 
-    key = position.code before "@"    "IVM@MALLAVALLI-1-AP-104-MMUS" -> "IVM"
-          else hcm job_name           (populated on 3,729 of 3,733 live posts)
-          else position.name          (last resort)
+    key = hcm role_name               "FLOOR INCHARGE" -> "FLOOR INCHARGE"
+          else hcm job_name           (empty on all 4,023 live posts)
+          else position.code          (fallbacks, for an HCM with no role)
+          else position.name
           minus a trailing serial     SE1 SE2 SE3 -> SE
 
-That chain is a fallback over fields every HCM carries, not a rule tuned to
-this project. On the live data it turns 3,733 positions into ~45 profiles:
-DEO's 956 collapse to one, District Manager's 28 collapse to one, and MANAGER
-splits into the twelve jobs it always was. A project whose HCM has no "@"
-convention simply falls through to job_name; the worst case is more profiles
-than needed, which an admin MERGES — always safer than having to split.
+The ROLE is the job. It is the one field in the mirror that states what a
+person does, and the same field the approval ladder ranks on (rule 8). A
+position NAME is only a label and is allowed to disagree with it — the live
+mirror has posts named "FLOOR INCHARGE-001" whose role is Inventory manager.
+On the live data this turns 4,023 positions into 20 profiles: Store Keeper's
+2,001 collapse to one, DEO's 948 collapse to one, District Manager's 28
+collapse to one.
+
+Until 2026-08-18 the chain led with the position CODE before "@"
+("IVM@MALLAVALLI-1-AP-104-MMUS" -> "IVM"), written for the pre-cutover HCM
+whose codes carried a job prefix. The rebuilt HCM carries none, so that rule
+fired on 5 of 4,023 posts and every hit was a stray "@" rather than a job —
+"WH-01@-SCM" put one FLOOR INCHARGE post in a profile of its own, called "WH".
+Restoring it means restoring two lines in `derive_key`; see git history.
 
 No new tables. A profile's grants live on an ordinary rbac_roles row tagged in
 its description ("PROFILE:IVM"), the same trick that already marks HCM-mirrored
@@ -64,19 +73,28 @@ def derive_key(code: str | None, job_name: str | None, name: str | None,
                role_name: str | None = None) -> str:
     """The profile key for one position. Pure function — no DB, no config.
 
-    `role_name` sits between job_name and code because a position code is only a job
-    when the HCM writes one in ("IVM@..."). The rebuilt HCM writes none — its codes
-    are per-post ("POS-SK-LIP-DRV-104-0299-AP-104-MMU") and its job_name is empty on
-    all 4002 positions — so falling straight through to the code turned every single
-    post into its own profile and the screen listed 4002 of them. The org role is the
-    coarsest thing that is still a job, and it is the same field the approval ladder
-    treats as a rank.
+    THE ROLE IS THE JOB. `role_name` is HCM's org role — the same field the approval
+    ladder treats as a rank (CLAUDE.md rule 8) — and it is the only field in the mirror
+    that actually states what somebody does. Everything else is a label: a position is
+    NAMED "FLOOR INCHARGE-001" while its role says Inventory manager, and the two are
+    allowed to disagree.
+
+    The old chain tried the position CODE before "@" first, then job_name, then the
+    role. That was written for the pre-cutover HCM, where codes carried a job prefix
+    ("IVM@MALLAVALLI-1-AP-104-MMUS"). The rebuilt HCM writes no job prefix and no
+    job_name at all, so on the live mirror the code rule fires on exactly 5 of 4,023
+    positions — and every one of those five is a stray "@" rather than a job:
+    "WH-01@-SCM" split one FLOOR INCHARGE post into its own "WH" profile, away from the
+    two it does the same job as. Reverting is a matter of restoring the two lines below
+    (see git history for this file); the fallbacks under the role are kept for exactly
+    that reason, and because a future HCM row with no role must still land somewhere.
+
+    Known cost, accepted: role 'MANAGER' covers both WM@SCM ("Ware House Manager") and
+    WSK@SCM ("Inventory Manager"), so those two become one grant unit. Both posts are
+    held by the same person today. If they ever diverge, the answer is a separate role
+    in HCM, not a job encoded in a position code.
     """
-    raw = ""
-    if code and "@" in code:
-        raw = code.split("@")[0]
-    if not raw.strip():
-        raw = job_name or role_name or code or name or ""
+    raw = role_name or job_name or code or name or ""
     key = re.sub(r"[^A-Z0-9 ]+", " ", raw.upper())
     key = re.sub(r"\s+", " ", key).strip()
     # "SE1"/"SE2"/"SE3" are three people doing one job, not three jobs. A trailing

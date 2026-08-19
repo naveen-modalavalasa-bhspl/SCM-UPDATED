@@ -27,7 +27,7 @@ describe("indents api", () => {
         "acknowledge", "activity", "approve", "bookmark", "create",
         "delete", "deleteReceiptAttachment", "fulfilment", "get", "journey", "list",
         "myAcknowledgements", "notifications", "offices", "receiptAttachments", "regions",
-        "reject", "resubmitCorrection", "returnForCorrection", "stats",
+        "reject", "resubmitCorrection", "returnForCorrection", "shipmentsForIndent", "stats",
         "submit", "unbookmark", "update", "uploadReceiptAttachment", "vehicles",
       ].sort(),
     );

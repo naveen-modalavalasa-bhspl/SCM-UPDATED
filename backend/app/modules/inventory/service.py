@@ -608,7 +608,12 @@ async def _stock_query(db: AsyncSession, item_id: int | None = None,
     if batch_no:
         stmt = stmt.where(Stock.batch_no.like(f"%{batch_no}%"))
     if not include_zero:
-        stmt = stmt.where(Stock.total_qty > 0)
+        # "Zero stock" is zero AVAILABLE, not zero on hand. A lot whose 40 units are
+        # all reserved against an allocation is nothing anybody can draw on, so it read
+        # as stock on a screen whose only question is what can be given out — and
+        # toggling the filter changed nothing, because total_qty alone is almost never
+        # zero in the live data. Both tests, so an emptied lot still goes too.
+        stmt = stmt.where(Stock.total_qty > 0, Stock.available_qty > 0)
     if expiring_in_days is not None:
         today_date = utcnow().date()
         cutoff = today_date + timedelta(days=expiring_in_days)

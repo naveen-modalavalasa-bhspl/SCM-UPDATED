@@ -1,19 +1,4 @@
-import { useEffect, useState } from "react";
-
-/**
- * A barcode scanner types a whole code in tens of ms and lands Enter — but a
- * per-keystroke `search` state fires one server query per character, so a long
- * code queues dozens of requests that race each other and can resolve after the
- * scanner has moved on. Debouncing the value sent to the query fixes that
- * without changing how the input itself behaves.
- */
-export function useDebouncedValue<T>(value: T, delayMs = 300): T {
-  const [debounced, setDebounced] = useState(value);
-
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(timer);
-  }, [value, delayMs]);
-
-  return debounced;
-}
+/** Moved to `@/shared/hooks` when procurement's list screens wanted it too — a
+ *  module may not reach into another module's hooks. Re-exported so inventory's
+ *  own components keep their relative import. */
+export { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";

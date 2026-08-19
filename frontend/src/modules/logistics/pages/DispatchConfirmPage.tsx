@@ -12,16 +12,34 @@ import {
   headerFromConsignment, linesFromConsignment,
 } from "../components/consignmentToLines";
 import { load, modeLabel, modeTint } from "../components/modeCopy";
+import {
+  numberError, phoneError, PHONE_HINT, problems, sanitizePhone,
+} from "../components/validate";
 import type {
   Consignment, DispatchInput, ModeRule, TransportMode,
 } from "../transportTypes";
 
 const BLANK = {
   freight_amount: "", vehicle_number: "", driver_name: "",
-  driver_phone: "", handed_over_by_name: "", received_by_name: "",
+  // The other job the vehicle was already doing — the whole reason an own-vehicle leg
+  // costs the shipment nothing. Asked here as well as on the manual form, so a
+  // one-press dispatch does not lose it.
+  driver_phone: "", trip_reference: "",
+  handed_over_by_name: "",
   // The handle the receiving site chases the parcel with. Written here, on the slip
   // the counter just gave you — a docket typed in tomorrow is a docket nobody has.
   docket_no: "", tracking_url: "", eway_bill_no: "",
+};
+
+/** What the desk is asked to type, by the name the service checks it under. Read only
+ *  to say WHICH field is still blank when the press is held back — the list of what a
+ *  mode requires is the backend's (`/api/transport/modes`), never this screen's. */
+const FIELD_LABELS: Record<string, string> = {
+  carrier_id: "a provider",
+  vehicle_number: "the vehicle number",
+  driver_name: "the driver",
+  handed_over_by_name: "who hands it over",
+  docket_no: "the docket / LR number",
 };
 
 const destinationOf = (row?: Consignment | null) =>
@@ -110,6 +128,37 @@ export function DispatchConfirmPage() {
 
   const chosen = (ready?.items ?? []).find((row) => row.id === id) ?? doc ?? null;
 
+  // What this mode still has blank. The MODE says which fields it needs — that list is
+  // the backend's — and this only reads them off the form, so a hand-over and an
+  // own-vehicle leg are each held back for their own missing answers instead of being
+  // sent and refused by the service.
+  const missing = useMemo(() => {
+    const gaps = (rule?.required_fields ?? []).filter((field) => (
+      field === "carrier_id"
+        ? carrierIds.length === 0
+        : !String(form[field as keyof typeof form] ?? "").trim()
+    ));
+    // Released on this press, so the number it travels with is needed on this press.
+    // The service refuses a hired leg with no LR or docket on it, and this is the same
+    // rule read forward — the desk is told before the press, not after.
+    if (rule?.needs_carrier && !rule.needs_quotes && !form.docket_no.trim()) {
+      gaps.push("docket_no");
+    }
+    return gaps;
+  }, [rule, form, carrierIds]);
+
+  // "Provider identified based on distance, weight, items" (doc E3). The backend owns
+  // the thresholds and answers null when the consignment carried neither a distance
+  // nor a weight — advice off no evidence reads as an answer.
+  const { data: suggestion } = useQuery({
+    queryKey: ["transport-suggest", chosen?.total_weight_kg, chosen?.total_packages],
+    queryFn: () => transportApi.suggestMode({
+      weight_kg: chosen?.total_weight_kg ?? null,
+      packages: chosen?.total_packages ?? null,
+    }),
+    enabled: Boolean(chosen),
+  });
+
   const send = useAction({
     run: async () => {
       const detail = doc ?? await consignmentApi.get(id);
@@ -124,8 +173,8 @@ export function DispatchConfirmPage() {
         vehicle_number: form.vehicle_number || null,
         driver_name: form.driver_name || null,
         driver_phone: form.driver_phone || null,
+        trip_reference: form.trip_reference || null,
         handed_over_by_name: form.handed_over_by_name || null,
-        received_by_name: form.received_by_name || null,
         docket_no: form.docket_no || null,
         tracking_url: form.tracking_url || null,
         eway_bill_no: form.eway_bill_no || null,
@@ -152,11 +201,18 @@ export function DispatchConfirmPage() {
       : `/logistics/transport/${tr.id}`),
   });
 
+  /** Values that are WRONG rather than merely absent. `missing` says what has not been
+   *  answered; this says what has been answered badly, and either one holds the press.
+   *  The service checks all of it again — this only saves the round trip. */
+  const badValues = problems(
+    phoneError(form.driver_phone, "Driver phone"),
+    numberError(form.freight_amount, "Freight", { min: 0 }),
+  );
+
   const blocked = !id
     || Boolean(already)
-    || (Boolean(rule?.needs_carrier) && carrierIds.length === 0)
-    // Released on this press, so the number it travels with is needed on this press.
-    || (Boolean(rule?.needs_carrier) && !rule?.needs_quotes && !form.docket_no.trim())
+    || missing.length > 0
+    || badValues.length > 0
     || send.isPending;
 
   return (
@@ -279,6 +335,25 @@ export function DispatchConfirmPage() {
                 }))}
                 ariaLabel="Transport mode"
               />
+              {/* Advice, never a decision — whatever is picked is validated the same
+                  way. Hidden once it agrees with the pick, so it stops being noise. */}
+              {suggestion && suggestion.mode !== mode && (
+                <p className="mt-2 text-xs text-muted">
+                  This load looks like{" "}
+                  <button
+                    type="button"
+                    className="font-semibold text-brand underline"
+                    onClick={() => {
+                      setMode(suggestion.mode);
+                      setForm({ ...BLANK });
+                      setCarrierIds([]);
+                    }}
+                  >
+                    {suggestion.label}
+                  </button>
+                  {" "}— {suggestion.reason}.
+                </p>
+              )}
             </Field>
 
             {/* The provider list is the carrier vendors — whoever is on the master.
@@ -355,9 +430,9 @@ export function DispatchConfirmPage() {
                   <p className="mt-2 text-xs text-muted">
                     Register the providers you ship with — Amazon, Flipkart, Alibaba,
                     Misaba, a truck operator — in{" "}
-                    <Link to="/settings/logistics-vendors"
+                    <Link to="/logistics/vendors"
                       className="font-semibold text-brand underline">
-                      Settings › Logistics Vendors
+                      Logistics › Logistics Vendors
                     </Link>
                     . They appear here as soon as they are added.
                   </p>
@@ -367,8 +442,10 @@ export function DispatchConfirmPage() {
 
             {rule?.needs_carrier && !rule.needs_quotes && (
               <>
-                <Field label="Agreed freight" hint="Their published rate">
-                  <Input type="number" value={form.freight_amount}
+                <Field label="Agreed freight"
+                  hint={numberError(form.freight_amount, "Freight", { min: 0 })
+                    ?? "Their published rate"}>
+                  <Input type="number" min={0} value={form.freight_amount}
                     onChange={(e) => setForm({ ...form, freight_amount: e.target.value })} />
                 </Field>
                 {/* The service refuses to release a hired leg with no number on it:
@@ -401,26 +478,50 @@ export function DispatchConfirmPage() {
                   <Input value={form.driver_name}
                     onChange={(e) => setForm({ ...form, driver_name: e.target.value })} />
                 </Field>
-                <Field label="Driver phone">
-                  <Input value={form.driver_phone}
-                    onChange={(e) => setForm({ ...form, driver_phone: e.target.value })} />
+                <Field label="Driver phone"
+                  hint={phoneError(form.driver_phone, "Driver phone") ?? PHONE_HINT}>
+                  <Input value={form.driver_phone} inputMode="numeric" maxLength={18}
+                    onChange={(e) => setForm({
+                      ...form, driver_phone: sanitizePhone(e.target.value),
+                    })} />
+                </Field>
+                {/* The other job the vehicle was already doing — the whole reason this
+                    mode costs the shipment nothing. Asked here as well as on the manual
+                    form, so a one-press dispatch does not lose it. */}
+                <Field label="Trip reference"
+                  hint="The other job the vehicle was already doing">
+                  <Input value={form.trip_reference}
+                    onChange={(e) => setForm({ ...form, trip_reference: e.target.value })} />
                 </Field>
               </>
             )}
 
             {needs("handed_over_by_name") && (
-              <>
-                <Field label="Handed over by">
-                  <Input value={form.handed_over_by_name}
-                    onChange={(e) => setForm({ ...form, handed_over_by_name: e.target.value })} />
-                </Field>
-                <Field label="Received by">
-                  <Input value={form.received_by_name}
-                    onChange={(e) => setForm({ ...form, received_by_name: e.target.value })} />
-                </Field>
-              </>
+              <Field label="Handed over by"
+                hint="The indent requester records receipt, photos and bills after it reaches them.">
+                <Input value={form.handed_over_by_name}
+                  onChange={(e) => setForm({ ...form, handed_over_by_name: e.target.value })} />
+              </Field>
             )}
           </div>
+
+          {/* Why the press is held back. A disabled button with no reason beside it
+              reads as a broken screen. */}
+          {id > 0 && !already && (missing.length > 0 || badValues.length > 0) && (
+            <p className="mt-4 text-xs text-muted">
+              {missing.length > 0 && (
+                <>
+                  {modeLabel(mode)} still needs{" "}
+                  {missing.map((field) => FIELD_LABELS[field] ?? field).join(", ")}.
+                </>
+              )}
+              {badValues.length > 0 && (
+                <span className="text-danger">
+                  {missing.length > 0 ? " " : ""}{badValues.join(" · ")}.
+                </span>
+              )}
+            </p>
+          )}
         </Card>
       </div>
     </div>

@@ -7,6 +7,7 @@ import {
 } from "@/shared/components";
 import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
+import { revisionLines } from "../types";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import {
   blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue,
@@ -247,8 +248,12 @@ export function PODetailPage() {
         <Button variant="subtle" onClick={() => window.open(`/pos/${poId}/print`, "_blank")}>
           <Printer className="h-4 w-4" /> PDF
         </Button>
-        {/* Amend is only allowed after the supplier has accepted it and it is not fully received. */}
-        {["ACCEPTED_BY_SUPPLIER", "PARTIALLY_RECEIVED"].includes(po.data.status) && <Can do="po.edit">
+        {/* Amend is for an order that has left the building. A draft is simply edited,
+          * and a finished order can no longer be changed at all — the same line the
+          * server draws in `_UNAMENDABLE`, so the button never offers what the API
+          * would refuse. SENT_TO_VENDOR stays in: every order raised before the
+          * acceptance rung existed sits on it. */}
+        {!isDraft && !isFinished && <Can do="po.edit">
           <Button variant="subtle" onClick={startAmending}>
             <FilePen className="h-4 w-4" /> Amend
           </Button>
@@ -301,11 +306,11 @@ export function PODetailPage() {
       <table className="w-full text-left text-sm">
         <thead className="bg-content2 text-xs text-muted"><tr><th className="p-3">Item</th><th className="p-3 text-right">Quantity</th><th className="p-3 text-right">Rate</th><th className="p-3 text-right">Tax</th><th className="p-3 text-right">Amount</th></tr></thead>
         <tbody className="divide-y divide-line">{po.data.items.map((item) => {
-          const prev = (po.data.revision_no > 0 && revisions.data?.[0]?.snapshot?.items)
-            ? revisions.data[0].snapshot.items.find((i: any) => i.item_id === item.item_id)
-            : item; // If no previous snapshot, or not a revision, treat it as matching
-            
-          const isNew = po.data.revision_no > 0 && revisions.data && !prev;
+          const previous = revisionLines(revisions.data?.[0]);
+          const prev = previous.find((line: any) => line.item_id === item.item_id);
+          // A line the last filed revision does not mention is one this amendment
+          // added. No revision on file means nothing has changed.
+          const isNew = previous.length > 0 && !prev;
           
           return (
             <tr key={item.id} className={isNew ? "bg-primary/5" : ""}>

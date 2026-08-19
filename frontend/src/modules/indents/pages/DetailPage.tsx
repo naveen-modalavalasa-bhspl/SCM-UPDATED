@@ -100,6 +100,16 @@ export function IndentDetailPage() {
     refetchOnWindowFocus: true,
   });
 
+  const isRaiser = Boolean(indent && indent.requested_by_id === me?.employee.id);
+  const { data: shipments } = useQuery({
+    queryKey: indentKeys.shipments(accountScope, indentId),
+    queryFn: ({ signal }) => indentApi.shipmentsForIndent(indentId, signal),
+    enabled: Number.isFinite(indentId) && isRaiser,
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
+    refetchOnWindowFocus: true,
+  });
+
   const prefetchJourney = useCallback(() => {
     if (!Number.isFinite(indentId)) return;
     qc.prefetchQuery({
@@ -202,6 +212,16 @@ export function IndentDetailPage() {
   const showActions = !decisionView && !isReturnedForCorrection && indent.can_submit;
   const actionPending = submit.isPending || deleteDraft.isPending || resubmitCorrection.isPending;
   const delivery = splitDeliveryOffice(indent.office_name, indent.vehicle_number);
+  const officeSac = nonEmptyText(indent.office_sac)
+    ?? (indent.office_id === me?.active_position?.office_id
+      ? nonEmptyText(me?.active_position?.office_sac) : null)
+    ?? (indent.office_id === me?.employee.office_id
+      ? nonEmptyText(me?.employee.office_sac) : null)
+    // `me?.positions?.` and not `me?.positions.` — the optional chain has to cover the
+    // array too. A session with no positions list took the whole detail page down with
+    // it, and this is the last of four fallbacks: an SAC nobody can find is a blank
+    // field, never a blank screen.
+    ?? nonEmptyText(me?.positions?.find((position) => position.office_id === indent.office_id)?.office_sac);
   const returnedBy = returnedByFromJourney(journey);
   const correctionOwner = nonEmptyText(indent.correction_owner?.employee_name)
     ?? (indent.correction_owner?.employee_id ? `Employee #${indent.correction_owner.employee_id}` : null);
@@ -304,6 +324,7 @@ export function IndentDetailPage() {
             <FlowStepper
               status={indent.status}
               journey={journey}
+              shipments={isRaiser ? shipments : undefined}
               isLoading={isJourneyLoading}
             />
             <div className="mt-4 flex min-h-11 items-center justify-between gap-3 border-t border-line pt-3 text-sm font-semibold text-brand">
@@ -352,7 +373,7 @@ export function IndentDetailPage() {
               <Detail label="Vehicle" value={delivery.vehicleNumber} />
               {/* The delivery office's code, not the viewer's: an approver reading
                   someone else's indent sees the SAC it will be delivered against. */}
-              <Detail label="Service area code (SAC)" value={indent.office_sac} />
+              <Detail label="Service area code (SAC)" value={officeSac} />
               <Detail label="Priority" value={indent.priority} />
               {indent.current_approver_name && (
                 <Detail label="With" value={indent.current_approver_name} />

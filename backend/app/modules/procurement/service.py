@@ -35,6 +35,8 @@ from app.modules.procurement.schemas import (
 )
 from app.modules.procurement import consolidation
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
+from app.platform.rbac import permissions as perms
+from app.platform.rbac.service import get_user_permissions
 from app.platform.settings.service import get_setting, write_audit
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance as WorkflowInstance
@@ -1039,7 +1041,8 @@ async def po_revisions(db: AsyncSession, po_id: int, user=None) -> list:
 async def open_for_grn(db: AsyncSession, params: PageParams) -> dict:
     stmt = (
         select(PurchaseOrder)
-        .where(PurchaseOrder.status.in_([POStatus.ACCEPTED_BY_SUPPLIER.value,
+        .where(PurchaseOrder.status.in_([POStatus.SENT_TO_VENDOR.value,
+                                         POStatus.ACCEPTED_BY_SUPPLIER.value,
                                          POStatus.PARTIALLY_RECEIVED.value]))
         .order_by(PurchaseOrder.created_at.desc())
     )
@@ -1532,10 +1535,17 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
     indent_nos = dict((await db.execute(
         select(Indent.id, Indent.indent_no).where(Indent.id.in_(indent_ids))
     )).all()) if indent_ids else {}
+    seen_items = set()
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
         if item is None:
             raise ValidationError(f"Item {line.item_id} does not exist")
+        if line.item_id in seen_items:
+            raise ValidationError(
+                f"Item '{item.name or item.code}' is already added. "
+                "An item cannot be added more than once in the same requisition."
+            )
+        seen_items.add(line.item_id)
         rate = _d(line.estimated_rate) or fallback.get(line.item_id, Decimal(0))
         amount = _d(line.quantity) * rate
         total += amount
@@ -1577,17 +1587,83 @@ async def get_requisition(db: AsyncSession, req_id: int, user=None) -> Requisiti
     )).scalars().all())
     req.source_mr_nos = ([row.mr_no for row in sources if row.mr_no]
                          or ([req.source_mr_no] if req.source_mr_no else []))
+
+    existing_rfq = await db.scalar(
+        select(RFQ.id)
+        .where(RFQ.requisition_id == req.id,
+               RFQ.status != RFQStatus.CANCELLED.value)
+        .limit(1)
+    )
+    req.has_rfq = bool(existing_rfq)
     return req
 
 
+async def ensure_mr_drafts(db: AsyncSession, user) -> int:
+    """Give every approved, unclaimed material request a DRAFT requisition.
+
+    §3.3 step 2-3 says Purchase picks the approved MR up; until now "picks up" meant
+    remembering that the demand exists, walking to a second screen and consolidating it
+    by hand. A buyer who opened the requisition list saw their own material requests
+    sitting there with nothing to press, because the only thing that turned one into a
+    requisition was a button on another page. The draft is now waiting for them: fill
+    in the stocking point and the estimated rates, then submit it up the ladder like
+    any other requisition.
+
+    Lazy rather than a hook on MR approval: inventory sits BEFORE procurement in the
+    import chain (rule 5) and may not reach forward to raise this document. Idempotent
+    — `create_requisition_from_mr` refuses an MR that already has a live requisition,
+    which is exactly the guard this needs, and `_consolidated_mr_ids` keeps the
+    consolidated route's MRs out too.
+
+    One bad MR never blocks the list: a request whose lines are all already ordered is
+    logged and skipped, and the buyer still gets their screen.
+    """
+    # Reading the list needs REQUISITION_VIEW; raising a document needs
+    # REQUISITION_CREATE (rule 6). An auditor who may only look must not leave a trail
+    # of drafts behind them just by opening the screen.
+    if perms.REQUISITION_CREATE not in await get_user_permissions(db, user):
+        return 0
+    claimed = await _consolidated_mr_ids(db)
+    stmt = select(MaterialRequest.id).where(
+        MaterialRequest.status == MRStatus.APPROVED.value)
+    if claimed:
+        stmt = stmt.where(MaterialRequest.id.notin_(claimed))
+    made = 0
+    for mr_id in (await db.execute(stmt)).scalars().all():
+        try:
+            await create_requisition_from_mr(db, mr_id, user)
+            made += 1
+        except (ValidationError, NotFoundError) as exc:
+            await db.rollback()
+            logger.info("no draft requisition for MR %s: %s", mr_id, exc)
+    if made:
+        logger.info("raised %d draft requisition(s) from approved material requests",
+                    made)
+    return made
+
+
 async def list_requisitions(db: AsyncSession, params: PageParams,
-                            status: str | None = None, user=None) -> dict:
+                            status: str | None = None, search: str | None = None,
+                            user=None) -> dict:
+    if user is not None:
+        await ensure_mr_drafts(db, user)
     stmt = select(Requisition)
     if user is not None:
         stmt = stmt.where(await scope_condition(
             db, user, owner_col=Requisition.created_by_id))
     if status:
         stmt = stmt.where(Requisition.status == status)
+    
+    # Apply real-time search filtering if a search query is provided.
+    # We search across requisition number, project name, and warehouse name.
+    if search:
+        stmt = stmt.where(
+            or_(
+                Requisition.req_no.ilike(f"%{search}%"),
+                Requisition.project_name.ilike(f"%{search}%"),
+                Requisition.warehouse_name.ilike(f"%{search}%")
+            )
+        )
     return await _attach_pending_with(db, DocType.REQUISITION.value, await paginate(
         db, stmt.order_by(Requisition.created_at.desc()), params))
 
@@ -1688,6 +1764,17 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
             raise ValidationError(
                 "Only an approved requisition can go out for quotation "
                 f"(status {requisition.status})")
+
+        existing_rfq = await db.scalar(
+            select(RFQ.id)
+            .where(RFQ.requisition_id == requisition.id,
+                   RFQ.status != RFQStatus.CANCELLED.value)
+            .limit(1)
+        )
+        if existing_rfq:
+            raise ValidationError(
+                f"Requisition {requisition.req_no} has already been converted to an RFQ"
+            )
 
     sheet = None
     if data.consolidation_id:
@@ -1848,12 +1935,24 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None) -> RFQ:
 
 
 async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = None,
-                    user=None) -> dict:
+                    search: str | None = None, user=None) -> dict:
     stmt = select(RFQ)
     if user is not None:
         stmt = stmt.where(await scope_condition(db, user, owner_col=RFQ.created_by_id))
     if status:
         stmt = stmt.where(RFQ.status == status)
+    
+    # Apply real-time search filtering if a search query is provided.
+    # We search across RFQ number, title, project name, and warehouse name.
+    if search:
+        stmt = stmt.where(
+            or_(
+                RFQ.rfq_no.ilike(f"%{search}%"),
+                RFQ.title.ilike(f"%{search}%"),
+                RFQ.project_name.ilike(f"%{search}%"),
+                RFQ.warehouse_name.ilike(f"%{search}%")
+            )
+        )
     return await _attach_pending_with(db, DocType.RFQ.value, await paginate(
         db, stmt.order_by(RFQ.created_at.desc()), params))
 
@@ -2068,12 +2167,23 @@ async def get_quotation(db: AsyncSession, quote_id: int) -> Quotation:
 
 async def list_quotations(db: AsyncSession, params: PageParams,
                           rfq_id: int | None = None,
-                          vendor_id: int | None = None) -> dict:
+                          vendor_id: int | None = None,
+                          search: str | None = None) -> dict:
     stmt = select(Quotation)
     if rfq_id is not None:
         stmt = stmt.where(Quotation.rfq_id == rfq_id)
     if vendor_id is not None:
         stmt = stmt.where(Quotation.vendor_id == vendor_id)
+        
+    # Apply real-time search filtering if a search query is provided.
+    # We search across quotation number and vendor name.
+    if search:
+        stmt = stmt.where(
+            or_(
+                Quotation.quotation_no.ilike(f"%{search}%"),
+                Quotation.vendor_name.ilike(f"%{search}%")
+            )
+        )
     return await paginate(db, stmt.order_by(Quotation.created_at.desc()), params)
 
 
@@ -2142,9 +2252,12 @@ def _comparison_grid(rfq: RFQ, quotes) -> list[dict]:
                 continue
             cells.append({"quotation_id": quote.id, "vendor_id": quote.vendor_id,
                           "vendor_name": quote.vendor_name, **_line_breakup(line)})
-        best = min(cells, key=lambda cell: cell["line_total"], default=None)
+        def _unit_cost(c):
+            return c["line_total"] / c["quantity"] if c["quantity"] else c["line_total"]
+
+        best = min(cells, key=_unit_cost, default=None)
         for cell in cells:
-            cell["is_best"] = best is not None and cell["line_total"] == best["line_total"]
+            cell["is_best"] = best is not None and _unit_cost(cell) == _unit_cost(best)
         rows.append({
             "rfq_item_id": item.id,
             "item_id": item.item_id,
@@ -2186,16 +2299,37 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
         .order_by(Quotation.grand_total.asc())
     )).scalars().all()
 
-    ranked = evaluation.rank([
-        evaluation.Candidate(
-            ref=quote.id,
-            # `sub_total` is the headline the vendor named; `grand_total` is that plus
-            # discount, tax and freight — which is exactly the landed/price split.
-            price=_d(quote.sub_total) or _d(quote.grand_total),
-            landed_cost=_d(quote.grand_total),
-            lead_days=quote.delivery_days,
-        ) for quote in quotes
-    ], chosen)
+    candidates = []
+    for quote in quotes:
+        normalized_price = Decimal("0")
+        normalized_landed_cost = Decimal("0")
+        for item in rfq.items:
+            line = next(
+                (l for l in quote.items
+                 if (l.rfq_item_id and l.rfq_item_id == item.id)
+                 or (not l.rfq_item_id and l.item_id == item.item_id)),
+                None,
+            )
+            if line and _d(line.quantity) > 0:
+                breakup = _line_breakup(line)
+                unit_price = Decimal(str(breakup["taxable_amount"])) / _d(line.quantity)
+                unit_landed = Decimal(str(breakup["line_total"])) / _d(line.quantity)
+                normalized_price += unit_price * _d(item.quantity)
+                normalized_landed_cost += unit_landed * _d(item.quantity)
+        
+        # Add freight only once, as it is a document-level charge
+        normalized_landed_cost += _d(quote.freight_amount)
+
+        candidates.append(
+            evaluation.Candidate(
+                ref=quote.id,
+                price=normalized_price or _d(quote.sub_total) or _d(quote.grand_total),
+                landed_cost=normalized_landed_cost or _d(quote.grand_total),
+                lead_days=quote.delivery_days,
+            )
+        )
+
+    ranked = evaluation.rank(candidates, chosen)
 
     by_id = {quote.id: quote for quote in quotes}
     placed = set()
@@ -2424,13 +2558,23 @@ def _vendor_visible():
 
 
 async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
-                           params: PageParams) -> dict:
+                           params: PageParams, search: str | None = None) -> dict:
     stmt = (
         select(RFQ)
         .join(RFQVendor, RFQVendor.rfq_id == RFQ.id)
         .where(RFQVendor.vendor_id == vendor_id, _vendor_visible())
-        .order_by(RFQ.created_at.desc())
     )
+    
+    # Apply real-time search filtering for the supplier portal if a search query is provided.
+    # We search across RFQ number and title.
+    if search:
+        stmt = stmt.where(
+            or_(
+                RFQ.rfq_no.ilike(f"%{search}%"),
+                RFQ.title.ilike(f"%{search}%")
+            )
+        )
+    stmt = stmt.order_by(RFQ.created_at.desc())
     return await paginate(db, stmt, params)
 
 
@@ -2763,12 +2907,17 @@ async def _despatched_by_po_item(db: AsyncSession, po_id: int) -> dict[int, Deci
     return {row[0]: _d(row[1]) for row in rows if row[0]}
 
 
-async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams) -> dict:
+async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams, search: str | None = None) -> dict:
     """The orders this vendor has been sent. Never anyone else's, never a draft."""
     stmt = (select(PurchaseOrder)
             .where(PurchaseOrder.vendor_id == vendor_id,
-                   PurchaseOrder.status.in_(_DESPATCHABLE))
-            .order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc()))
+                   PurchaseOrder.status.in_(_DESPATCHABLE)))
+                   
+    # Apply real-time search filtering for the supplier portal if a search query is provided.
+    # We search by Purchase Order number.
+    if search:
+        stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
+    stmt = stmt.order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc())
     page = await paginate(db, stmt, params)
     counts = dict((await db.execute(
         select(DespatchNote.po_id, func.count(DespatchNote.id))

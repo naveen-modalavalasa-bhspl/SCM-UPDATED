@@ -56,6 +56,12 @@ function IconBadge({
   );
 }
 
+const RANGE_LABELS: Record<HomeDateRange, string> = {
+  week: "this week",
+  month: "this month",
+  quarter: "this quarter",
+};
+
 function SectionLabel({ children }: { children: string }) {
   return (
     <h2 className="mb-3 text-xs font-semibold uppercase tracking-[0.08em] text-muted">
@@ -229,7 +235,10 @@ export function HomePage() {
 
       {!!data?.kpis.length && (
         <section>
-          <SectionLabel>Overview</SectionLabel>
+          {/* The range is named here as well as in the picker: the counts under it
+              are period counts, and a tile that says only "INDENTS" reads as a
+              company total. */}
+          <SectionLabel>{`Overview · ${RANGE_LABELS[dateRange]}`}</SectionLabel>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
             {data.kpis.map((item) => <KpiCard key={item.key} item={item} />)}
           </div>

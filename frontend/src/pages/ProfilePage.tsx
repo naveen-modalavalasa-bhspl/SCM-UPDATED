@@ -1,10 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Avatar, Chip, Spinner } from "@heroui/react";
 import { LogOut } from "lucide-react";
 import { CardBody } from "@heroui/react";
 import { api } from "@/shared/api/client";
 import { useAuth } from "@/shared/auth/AuthContext";
-import { Button, Card, ErrorBanner, PageHeader, StatusPill } from "@/shared/components";
+import {
+  Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
+} from "@/shared/components";
 import { fmtDate, fmtDateTime } from "@/shared/datetime";
 
 /** Everything `/api/auth/profile` returns. Read-only: hcm_* is a mirror. */
@@ -95,6 +98,109 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     </Card>
   );
 }
+
+const MIN_PASSWORD_LENGTH = 8;
+
+/** The one thing on this screen that writes. Everything else is an HCM mirror and is
+ *  read-only by rule; the local login secret is SCM's own, so its owner may replace
+ *  it. No `<Can>` around it: the endpoint takes the subject from the token, so there
+ *  is no permission code to gate — every login owns exactly one password, its own. */
+function ChangePassword({ mustChange }: { mustChange: boolean }) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const change = useMutation({
+    mutationFn: () => api.post("/api/auth/change-password", {
+      current_password: current,
+      new_password: next,
+    }),
+    onSuccess: () => {
+      toast.success("Password changed");
+      setCurrent("");
+      setNext("");
+      setConfirm("");
+      setProblem(null);
+      // `must_change_password` and nothing else moved — refetch rather than patch,
+      // so the Account section cannot disagree with the server about it.
+      queryClient.invalidateQueries({ queryKey: ["auth", "profile"] });
+    },
+  });
+
+  const submit = () => {
+    if (next.length < MIN_PASSWORD_LENGTH) {
+      setProblem(`Use at least ${MIN_PASSWORD_LENGTH} characters.`);
+      return;
+    }
+    if (next !== confirm) {
+      setProblem("The two new passwords do not match.");
+      return;
+    }
+    if (next === current) {
+      setProblem("Choose something other than your current password.");
+      return;
+    }
+    setProblem(null);
+    change.mutate();
+  };
+
+  return (
+    <Card>
+      <CardBody className="p-4 sm:p-5">
+        <h2 className="mb-1 font-display text-base font-bold text-ink">Change password</h2>
+        <p className="mb-3 text-sm text-muted">
+          {mustChange
+            ? "You are still on the password you were issued. Replace it now."
+            : "Only you can change this. Sign-ins elsewhere keep working until they expire."}
+        </p>
+
+        <ErrorBanner error={change.error} />
+        {problem && <ErrorBanner error={problem} />}
+
+        <form
+          className="mt-3 grid max-w-xl gap-4 sm:grid-cols-2"
+          onSubmit={(e) => { e.preventDefault(); submit(); }}
+        >
+          <div className="sm:col-span-2">
+            <Field label="Current password">
+              <Input
+                type="password"
+                value={current}
+                autoComplete="current-password"
+                onChange={(e) => setCurrent(e.target.value)}
+              />
+            </Field>
+          </div>
+          <Field label="New password" hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}>
+            <Input
+              type="password"
+              value={next}
+              autoComplete="new-password"
+              onChange={(e) => setNext(e.target.value)}
+            />
+          </Field>
+          <Field label="New password again">
+            <Input
+              type="password"
+              value={confirm}
+              autoComplete="new-password"
+              onChange={(e) => setConfirm(e.target.value)}
+            />
+          </Field>
+          <div className="sm:col-span-2">
+            <Button type="submit" disabled={change.isPending}>
+              {change.isPending ? "Saving…" : "Update password"}
+            </Button>
+          </div>
+        </form>
+      </CardBody>
+    </Card>
+  );
+}
+
 
 export function ProfilePage() {
   const { logout } = useAuth();
@@ -227,19 +333,8 @@ export function ProfilePage() {
           <Row label="Last HCM sync" value={when(data.synced_at)} />
         </Section>
 
-        <Section title={`Permissions (${data.permissions.length})`}>
-          <div className="flex flex-wrap gap-1.5 pt-1">
-            {data.permissions.length === 0 ? (
-              <span className="text-sm text-muted">None granted.</span>
-            ) : (
-              data.permissions.map((code) => (
-                <Chip key={code} size="sm" variant="flat" className="font-mono text-[11px]">
-                  {code}
-                </Chip>
-              ))
-            )}
-          </div>
-        </Section>
+        <ChangePassword mustChange={!!data.account?.must_change_password} />
+
       </div>
     </>
   );

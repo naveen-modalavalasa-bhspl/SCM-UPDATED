@@ -49,8 +49,11 @@ export function POFormPage() {
   const { data: vendors = [] } = useQuery({
     queryKey: ["po-vendors"],
     queryFn: () =>
+      // Material suppliers only. The vendor master holds the logistics partners too —
+      // a carrier IS a vendor — but a purchase order for goods is never placed on a
+      // courier, and the transport leg has its own document.
       api.get<{ items: MasterVendor[] }>("/api/vendors", {
-        params: { size: 200, is_active: true },
+        params: { size: 200, is_active: true, kind: "MATERIAL" },
       }).then((r) => r.data.items),
   });
 
@@ -129,7 +132,7 @@ export function POFormPage() {
         </p>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <Field label="Vendor">
+          <Field label="Vendor" required>
             <Select
               value={vendorId}
               placeholder="Search vendors…"

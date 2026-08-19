@@ -116,7 +116,7 @@ export function RequisitionDetailPage() {
             {/* Explicit, never automatic: approving a requisition does not send it
               * out. A buyer decides who is asked and when, and the form opens
               * pre-filled with everything this document already says. */}
-            {isApproved && (
+            {isApproved && !req?.has_rfq && (
               <Can do="rfq.create">
                 <Button onClick={() => nav(`/procurement/rfqs/new?requisition=${reqId}`)}>
                   Create RFQ

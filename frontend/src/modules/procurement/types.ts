@@ -268,6 +268,7 @@ export interface Requisition extends ReqListRow {
    *  company). Neither is a column on `pro_requisitions` and neither is editable. */
   department_id?: number | null;
   department_name?: string | null;
+  has_rfq?: boolean;
   company_name?: string | null;
   /** One "needed by" for the whole document. A line may still carry its own. */
   required_date?: string | null;
@@ -780,3 +781,16 @@ export interface ApprovalTrail {
   pending_with: ApprovalPendingRow[];
   history: ApprovalEventRow[];
 }
+
+/** One order line as it stood in a filed revision, read back out of the snapshot. */
+export interface PORevisionLine {
+  item_id: number;
+  quantity?: number;
+  rate?: number;
+  tax_percent?: number;
+}
+
+/** The lines of a filed revision. Empty when there is no revision to compare against,
+ *  which is every order still on its original version. */
+export const revisionLines = (revision?: PORevision | null): PORevisionLine[] =>
+  (revision?.snapshot?.items as PORevisionLine[] | undefined) ?? [];

@@ -353,6 +353,7 @@ class ReqOut(ReqListRow):
     source_indent_nos: list[str] = []
     # Every material request folded in, not just `source_mr_no`.
     source_mr_nos: list[str] = []
+    has_rfq: bool = False
     items: list[ReqItemOut] = []
 
 

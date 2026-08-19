@@ -24,7 +24,9 @@ export const poApi = {
     size?: number 
   }) =>
     api.get<Paginated<POListRow>>("/api/pos", { params }).then((r) => r.data),
-  export: (params: {
+  /** The CSV comes back through axios so it carries the bearer token — a plain
+   *  <a href> download hits the endpoint unauthenticated and 401s. */
+  export: async (params: {
     search?: string;
     status?: string;
     vendor_id?: number;
@@ -32,23 +34,17 @@ export const poApi = {
     date_from?: string;
     date_to?: string;
   }) => {
-    // Generate query string
-    const qs = new URLSearchParams();
-    if (params.search) qs.append("search", params.search);
-    if (params.vendor_id) qs.append("vendor_id", params.vendor_id.toString());
-    if (params.project_id) qs.append("project_id", params.project_id.toString());
-    if (params.date_from) qs.append("date_from", params.date_from);
-    if (params.date_to) qs.append("date_to", params.date_to);
-    if (params.status) qs.append("status", params.status);
-    
-    // Trigger download
-    const url = `/api/pos/export?${qs.toString()}`;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "purchase_orders.csv";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    const response = await api.get("/api/pos/export", {
+      params, responseType: "blob",
+    });
+    const url = URL.createObjectURL(response.data as Blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "purchase_orders.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   },
   openForGrn: (params: { page?: number; size?: number } = {}) =>
     api.get<Paginated<POListRow>>("/api/pos/open-for-grn", { params }).then((r) => r.data),
@@ -83,7 +79,7 @@ export const poApi = {
 };
 
 export const requisitionApi = {
-  list: (params: { status?: string; page?: number; size?: number } = {}) =>
+  list: (params: { status?: string; search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<ReqListRow>>("/api/requisitions", { params }).then((r) => r.data),
   get: (id: number) =>
     api.get<Requisition>(`/api/requisitions/${id}`).then((r) => r.data),
@@ -154,7 +150,7 @@ export const consolidationApi = {
 };
 
 export const rfqApi = {
-  list: (params: { status?: string; page?: number; size?: number } = {}) =>
+  list: (params: { status?: string; search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<RFQListRow>>("/api/rfqs", { params }).then((r) => r.data),
   get: (id: number) => api.get<RFQ>(`/api/rfqs/${id}`).then((r) => r.data),
   create: (data: RFQCreate) => api.post<RFQ>("/api/rfqs", data).then((r) => r.data),
@@ -181,7 +177,7 @@ export const rfqApi = {
       .then((r) => r.data),
   award: (id: number, quotation_id: number, comments = "") =>
     api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_id, comments }).then((r) => r.data),
-  quotations: (params: { rfq_id?: number; vendor_id?: number; page?: number; size?: number } = {}) =>
+  quotations: (params: { rfq_id?: number; vendor_id?: number; search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<QuoteListRow>>("/api/rfqs/quotations", { params }).then((r) => r.data),
   quotation: (id: number) =>
     api.get<Quotation>(`/api/rfqs/quotations/${id}`).then((r) => r.data),
@@ -209,11 +205,11 @@ export const supplierApi = {
   me: () => api.get<VendorProfile>("/api/supplier/me").then((r) => r.data),
   changePassword: (current_password: string, new_password: string) =>
     api.post("/api/supplier/change-password", { current_password, new_password }),
-  rfqs: (params: { page?: number; size?: number } = {}) =>
+  rfqs: (params: { search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<RFQListRow>>("/api/supplier/rfqs", { params }).then((r) => r.data),
   rfq: (id: number) => api.get<RFQ>(`/api/supplier/rfqs/${id}`).then((r) => r.data),
   /* --- orders, and what the vendor says they have sent against them --- */
-  pos: (params: { page?: number; size?: number } = {}) =>
+  pos: (params: { search?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<VendorPOListRow>>("/api/supplier/pos", { params }).then((r) => r.data),
   po: (id: number) => api.get<VendorPO>(`/api/supplier/pos/${id}`).then((r) => r.data),
   revisions: (poId: number) =>

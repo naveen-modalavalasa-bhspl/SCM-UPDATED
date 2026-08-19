@@ -10,6 +10,8 @@ what each mode must carry and how far through the flow it goes.
 """
 from enum import Enum
 
+from app.shared.enums import CARRIER_VENDOR_TYPES
+
 
 class TransportMode(str, Enum):
     """How the consignment actually travels."""
@@ -26,6 +28,34 @@ class TransportMode(str, Enum):
     # A hired truck. Quoted, compared, awarded — the only mode where the carrier award
     # workflow runs, because it is the only one that commits negotiated freight.
     THIRD_PARTY = "THIRD_PARTY"
+
+
+class TransportSource(str, Enum):
+    """What the leg is carrying, which is also WHICH WAY it runs.
+
+    Outward legs are the whole of doc Phase E up to E6 and they all start at a
+    warehouse. E7 — "return items from field tracked, returned back to the warehouse" —
+    is the same document run backwards, and it is the source that says so: the trip
+    from a site to a warehouse is planned, priced, tracked and closed exactly like the
+    trip out, so it is one table and one flow rather than a second half-copy of both.
+    """
+    #: A packed warehouse consignment going out to the field (E1-E6).
+    CONSIGNMENT = "CONSIGNMENT"
+    #: A material issue going out.
+    ISSUE = "ISSUE"
+    #: Coming BACK: the field is sending material to a warehouse (E7). The return
+    #: DECISION is the returns module's; this is only the trip it needs to travel.
+    RETURN = "RETURN"
+
+
+#: Sources whose leg runs field -> warehouse rather than warehouse -> field. Read
+#: wherever a screen has to label the two ends, so "from" and "to" never have to be
+#: guessed from which columns happen to be filled.
+INBOUND_SOURCES = frozenset({TransportSource.RETURN.value})
+
+
+def is_inbound(source_type: str | None) -> bool:
+    return (source_type or "").upper() in INBOUND_SOURCES
 
 
 class TransportStatus(str, Enum):
@@ -97,11 +127,22 @@ class ShipmentEventType(str, Enum):
     IN_TRANSIT = "IN_TRANSIT"
     OUT_FOR_DELIVERY = "OUT_FOR_DELIVERY"
     DELIVERED = "DELIVERED"
+    # The receiving end signed for it. Delivered is the carrier's word and this is the
+    # site's, and the tracking panel has to show both: a leg the indent requester has
+    # confirmed used to read "out for delivery" forever, because the signature moved
+    # the STATUS and left no scan behind it. Never entered by hand — it is stamped by
+    # the acknowledgement itself, which is why it is out of `add_event`.
+    ACKNOWLEDGED = "ACKNOWLEDGED"
     # Exceptions. Same table because they arrive on the same timeline and an
     # "it reached short" call is answered by reading the events in order.
     DAMAGED = "DAMAGED"
     MISSING = "MISSING"
     DELAYED = "DELAYED"
+
+
+#: Stamped by the acknowledgement, never posted as a scan. A carrier can no more
+#: write this event than it can set the status behind it — the site signs, nobody else.
+SIGNATURE_EVENT_TYPES = frozenset({ShipmentEventType.ACKNOWLEDGED.value})
 
 
 #: Event types that open a claim against the provider rather than record progress.
@@ -136,9 +177,11 @@ MODE_RULES: dict[str, ModeRule] = {
     TransportMode.DIRECT.value: ModeRule(
         label="Direct hand-over",
         help="A warehouse person delivers it, or the indenter collects it. "
-             "No carrier and no freight.",
+             "No carrier and no freight. The indent requester confirms receipt.",
         needs_carrier=False, needs_quotes=False,
-        required_fields=("handed_over_by_name", "received_by_name"),
+        # Logistics records who released custody. The receiver is stamped later from
+        # the indent requester's receipt with its quantity, photo and optional bill.
+        required_fields=("handed_over_by_name",),
     ),
     TransportMode.COURIER.value: ModeRule(
         label="Courier",
@@ -168,10 +211,73 @@ def mode_rule(mode: str) -> ModeRule:
     return rule
 
 
+# --------------------------------------------------------------------------- #
+#  Which mode SUITS this load (doc E3)
+# --------------------------------------------------------------------------- #
+# "Logistics provider identified — based on distance, weight, items." The desk still
+# chooses; this only answers first, so the choice starts from the load rather than from
+# whatever the last dispatch used. Held as thresholds rather than as branches for the
+# same reason MODE_RULES is: the numbers are a business rule somebody will want to
+# change, and they must change in ONE place, not in a service and again in a screen.
+#
+# The numbers below are a starting position, not a policy anybody signed off:
+#   * 30 km — inside this a company vehicle can do the round trip and be back the same
+#     day, so hiring anybody is a cost with nothing bought.
+#   * 5 km / 10 kg — small enough and near enough that a person carries it.
+#   * 25 kg — a courier's parcel ceiling. Past it a courier is priced as freight, and
+#     freight is worth tendering.
+
+#: Distance under which the warehouse's own vehicle is the sensible leg.
+LOCAL_KM = 30
+#: A load a person can reasonably walk or ride over.
+HANDOVER_KM = 5
+HANDOVER_KG = 10
+#: The heaviest a courier will still treat as a parcel.
+PARCEL_KG = 25
+
+
+def suggest_mode(distance_km: float | None = None,
+                 weight_kg: float | None = None,
+                 packages: int | None = None) -> dict | None:
+    """The mode this load looks like, and WHY — or None when nothing is known.
+
+    Returning None rather than a default matters: a consignment whose distance and
+    weight were never captured has told us nothing, and advising THIRD_PARTY off no
+    evidence is worse than staying quiet, because a suggestion reads as an answer.
+    """
+    if distance_km is None and weight_kg is None:
+        return None
+
+    near = distance_km is not None and distance_km <= HANDOVER_KM
+    local = distance_km is not None and distance_km <= LOCAL_KM
+    light = weight_kg is not None and weight_kg <= HANDOVER_KG
+    parcel = weight_kg is not None and weight_kg <= PARCEL_KG
+    few = packages is None or packages <= 2
+
+    if near and light and few:
+        mode, why = (TransportMode.DIRECT.value,
+                     f"{distance_km:g} km and {weight_kg:g} kg — somebody can carry it")
+    elif local:
+        mode, why = (TransportMode.OWN_VEHICLE.value,
+                     f"{distance_km:g} km — inside {LOCAL_KM} km a company vehicle can "
+                     "do the round trip")
+    elif parcel:
+        mode, why = (TransportMode.COURIER.value,
+                     f"{weight_kg:g} kg — a courier still prices this as a parcel")
+    else:
+        mode, why = (TransportMode.THIRD_PARTY.value,
+                     "too heavy or too far to book at a published rate — worth asking "
+                     "several providers for a price")
+
+    return {"mode": mode, "label": MODE_RULES[mode].label, "reason": why}
+
+
 #: The vendor_type on `mst_vendors` that marks a row as a transport provider. A
 #: carrier is a vendor — same master, same portal login, same rate history — so
-#: nothing here creates a second supplier table.
-CARRIER_VENDOR_TYPES = ("TRANSPORT", "LOGISTICS", "COURIER")
+#: nothing here creates a second supplier table. Defined in shared/enums.py and
+#: re-exported here: the vendor master itself has to know which rows are carriers so
+#: procurement's pickers can leave them out, and shared may not import a module.
+CARRIER_VENDOR_TYPES = CARRIER_VENDOR_TYPES  # noqa: PLW0127 - re-export
 
 
 # --------------------------------------------------------------------------- #
@@ -191,8 +297,8 @@ class Stage:
 
 
 _PLAN = Stage(
-    "PLAN", "Plan",
-    "Pick the packed consignment and say how it travels.",
+    "PLAN", "Transport request",
+    "Items, quantity, weight and dimensions, taken off the packing list (E2).",
     (TransportStatus.DRAFT.value,),
 )
 _APPROVE = Stage(
@@ -201,33 +307,33 @@ _APPROVE = Stage(
     (TransportStatus.PENDING_APPROVAL.value,),
 )
 _TENDER = Stage(
-    "TENDER", "Quotes",
-    "Invite carriers, compare what they quoted and award the job.",
+    "TENDER", "Provider identified",
+    "Invite providers, compare what they quoted and award the job (E3).",
     (TransportStatus.QUOTING.value,),
 )
 _CONFIRM = Stage(
-    "CONFIRM", "Carrier confirms",
-    "The awarded carrier accepts the job in their portal.",
+    "CONFIRM", "Provider confirms",
+    "The awarded provider accepts the job in their portal.",
     (TransportStatus.AWAITING_CARRIER.value,),
 )
 _DISPATCH = Stage(
-    "DISPATCH", "Dispatch",
-    "Gate pass, LR / docket and e-way bill — then it leaves the yard.",
+    "DISPATCH", "Sent to provider",
+    "Gate pass, LR / docket and e-way bill — then it leaves the yard (E4).",
     (TransportStatus.READY.value,),
 )
 _TRANSIT = Stage(
-    "TRANSIT", "In transit",
-    "Scans, delays and damage, tracked to the destination.",
+    "TRANSIT", "Tracked to destination",
+    "Scans, delays and damage, tracked to the final destination (E5).",
     (TransportStatus.IN_TRANSIT.value,),
 )
 _DELIVERED = Stage(
     "DELIVERED", "Delivered",
-    "The carrier says it arrived and hands over the proof of delivery.",
+    "The provider says it arrived and hands over the proof of delivery.",
     (TransportStatus.DELIVERED.value,),
 )
 _ACK = Stage(
-    "ACKNOWLEDGE", "Acknowledged",
-    "The receiving site signs for it. Short or damaged raises a claim.",
+    "ACKNOWLEDGE", "Cycle closed",
+    "The indent's raiser signs for what reached them, and the leg is closed (E8).",
     (TransportStatus.ACKNOWLEDGED.value, TransportStatus.CLOSED.value),
 )
 
@@ -254,3 +360,127 @@ AWAITING_ACK_STATUSES = (
     TransportStatus.IN_TRANSIT.value,
     TransportStatus.DELIVERED.value,
 )
+
+
+#: Legs the REQUESTER's own receipt may reconcile — wider than the queue above, and
+#: used only there (`warehouse._sign_transport_for_indent`).
+#:
+#: READY is here and is deliberately NOT in `AWAITING_ACK_STATUSES`, because the two
+#: answer different questions and only one of them is the logistics desk's. "Is this on
+#: my desk to chase?" must not count a shipment that has not left, or the queue and the
+#: KPI beside it fill up with loads still sitting in the yard — and `acknowledge_tr`,
+#: the desk's own door, still refuses anything that has not been released. "Has the
+#: person who asked for this got it?" is the other question, and someone holding the
+#: goods has settled whether it left whatever anybody remembered to press. That receipt
+#: reconciles the leg behind it rather than stranding it in READY forever.
+#:
+#: Everything earlier stays out, and that is the point of naming the set rather than
+#: testing "not terminal": DRAFT, PENDING_APPROVAL, QUOTING and AWAITING_CARRIER are
+#: shipments nobody has released, and a partial receipt on an indent must never reach
+#: back and close the leg carrying the rest of it — least of all a live tender with
+#: carriers still bidding on it.
+SIGNABLE_STATUSES = (TransportStatus.READY.value, *AWAITING_ACK_STATUSES)
+
+
+# --------------------------------------------------------------------------- #
+#  The activity ledger
+# --------------------------------------------------------------------------- #
+# One vocabulary for "what happened to this shipment", spanning the four places a
+# logistics event is actually recorded: the request header, the approval engine, the
+# quote rows and the shipment timeline. The ledger unions those four; this enum is
+# what makes the result one list instead of four dialects.
+#
+# Module-owned, like `IndentActivityType` in indents and for the same reason:
+# `shared/enums.py` holds the statuses every module must agree on, and nothing outside
+# logistics branches on these. The scan values deliberately repeat `ShipmentEventType`
+# — a timeline row carries its own type through the union unchanged, so the two
+# vocabularies have to agree on those eight strings rather than translate between them.
+
+class LogisticsActivityType(str, Enum):
+    RAISED = "RAISED"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    RETURNED = "RETURNED"
+    ROUTED_AUTOMATICALLY = "ROUTED_AUTOMATICALLY"
+    CARRIER_INVITED = "CARRIER_INVITED"
+    QUOTE_RECEIVED = "QUOTE_RECEIVED"
+    AWARDED = "AWARDED"
+    AWARD_APPROVED = "AWARD_APPROVED"
+    AWARD_REJECTED = "AWARD_REJECTED"
+    CARRIER_ACCEPTED = "CARRIER_ACCEPTED"
+    CARRIER_DECLINED = "CARRIER_DECLINED"
+    # The custody trail, carried through from `ShipmentEventType` unchanged.
+    PICKED_UP = "PICKED_UP"
+    IN_TRANSIT = "IN_TRANSIT"
+    OUT_FOR_DELIVERY = "OUT_FOR_DELIVERY"
+    DELIVERED = "DELIVERED"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    DAMAGED = "DAMAGED"
+    MISSING = "MISSING"
+    DELAYED = "DELAYED"
+    CLAIM_SETTLED = "CLAIM_SETTLED"
+    TRACKING_SHARED = "TRACKING_SHARED"
+
+
+#: What each event is called on screen, and what the shipment READ AS once it
+#: happened. The second half is the ledger's Result column: not the document's status
+#: today — that would repaint history every time the shipment moved on — but the rung
+#: this particular event put it on.
+#:
+#: Held here rather than in the page so the ledger and its filter cannot drift: the
+#: screen renders the label the backend sends and offers exactly the types it can
+#: return (`GET /api/transport/activity-types`), the same rule the mode rules and the
+#: stepper already follow.
+ACTIVITY_META: dict[str, tuple[str, str]] = {
+    LogisticsActivityType.RAISED.value: ("Transport request raised", "DRAFT"),
+    LogisticsActivityType.SUBMITTED.value: ("Sent for approval", "PENDING_APPROVAL"),
+    LogisticsActivityType.APPROVED.value: ("Approved", "APPROVED"),
+    LogisticsActivityType.REJECTED.value: ("Rejected", "REJECTED"),
+    LogisticsActivityType.RETURNED.value: ("Returned for correction", "RETURNED"),
+    LogisticsActivityType.ROUTED_AUTOMATICALLY.value: (
+        "Approval routed automatically", "PENDING_APPROVAL"),
+    LogisticsActivityType.CARRIER_INVITED.value: ("Carrier invited to quote", "QUOTING"),
+    LogisticsActivityType.QUOTE_RECEIVED.value: ("Price received", "QUOTING"),
+    LogisticsActivityType.AWARDED.value: ("Awarded to carrier", "AWAITING_CARRIER"),
+    LogisticsActivityType.AWARD_APPROVED.value: ("Award approved", "AWAITING_CARRIER"),
+    LogisticsActivityType.AWARD_REJECTED.value: ("Award rejected", "QUOTING"),
+    LogisticsActivityType.CARRIER_ACCEPTED.value: ("Carrier accepted the job", "READY"),
+    LogisticsActivityType.CARRIER_DECLINED.value: ("Carrier declined the job", "QUOTING"),
+    LogisticsActivityType.PICKED_UP.value: ("Picked up", "IN_TRANSIT"),
+    LogisticsActivityType.IN_TRANSIT.value: ("In transit", "IN_TRANSIT"),
+    LogisticsActivityType.OUT_FOR_DELIVERY.value: ("Out for delivery", "IN_TRANSIT"),
+    LogisticsActivityType.DELIVERED.value: ("Delivered", "DELIVERED"),
+    LogisticsActivityType.ACKNOWLEDGED.value: ("Signed for by the site", "ACKNOWLEDGED"),
+    LogisticsActivityType.DAMAGED.value: ("Damage claim raised", "CLAIM_OPEN"),
+    LogisticsActivityType.MISSING.value: ("Shortage claim raised", "CLAIM_OPEN"),
+    LogisticsActivityType.DELAYED.value: ("Delay claim raised", "CLAIM_OPEN"),
+    LogisticsActivityType.CLAIM_SETTLED.value: ("Claim settled", "CLAIM_SETTLED"),
+    LogisticsActivityType.TRACKING_SHARED.value: (
+        "Tracking shared with the field", "IN_TRANSIT"),
+}
+
+
+def activity_label(event_type: str) -> str:
+    """The screen's name for an event. Falls back to the code made readable rather
+    than to nothing, so an event type added later still lists."""
+    meta = ACTIVITY_META.get(event_type)
+    return meta[0] if meta else event_type.replace("_", " ").capitalize()
+
+
+def activity_result(event_type: str) -> str:
+    """The rung the event put the shipment on."""
+    meta = ACTIVITY_META.get(event_type)
+    return meta[1] if meta else event_type
+
+
+def activity_catalogue() -> list[dict]:
+    """The filter's options, in the order the events happen. Served, never a constant
+    in the screen — a dropdown offering a type the ledger cannot return is a filter
+    that silently empties the page."""
+    return [
+        {"value": kind.value,
+         "label": activity_label(kind.value),
+         "is_exception": kind.value in EXCEPTION_EVENT_TYPES}
+        for kind in LogisticsActivityType
+    ]

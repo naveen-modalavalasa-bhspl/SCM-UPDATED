@@ -79,7 +79,7 @@ export function LinePicker({
           className="grid grid-cols-1 gap-3 rounded-xl border border-line p-3 sm:grid-cols-12"
         >
           <div className={showTax ? "sm:col-span-4" : showRate ? "sm:col-span-5" : "sm:col-span-6"}>
-            <Field label={index === 0 ? "Item" : ""}>
+            <Field label={index === 0 ? "Item" : ""} required={index === 0}>
               <ItemCombobox
                 value={line.item_id}
                 options={options}
@@ -98,7 +98,7 @@ export function LinePicker({
             </Field>
           </div>
           <div className="sm:col-span-2">
-            <Field label={index === 0 ? "Quantity" : ""}>
+            <Field label={index === 0 ? "Quantity" : ""} required={index === 0}>
               <Input
                 type="number"
                 min="0"

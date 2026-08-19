@@ -51,7 +51,9 @@ async def list_grn(db: AsyncSession, params: PageParams, status: str | None = No
 
 async def create_grn_from_po(db: AsyncSession, po_id: int, data: GRNCreate, user) -> GRN:
     po = await po_service.get_po(db, po_id)
-    if po.status not in (POStatus.SENT_TO_VENDOR.value, POStatus.PARTIALLY_RECEIVED.value):
+    if po.status not in (POStatus.SENT_TO_VENDOR.value,
+                         POStatus.ACCEPTED_BY_SUPPLIER.value,
+                         POStatus.PARTIALLY_RECEIVED.value):
         raise ValidationError("PO is not open for receipt")
     if not data.lines:
         raise ValidationError("GRN must have at least one line")
@@ -199,6 +201,8 @@ from app.modules.logistics.transport import (  # noqa: E402
     acknowledge_tr,
     act_on_award,
     act_on_tr,
+    activity_catalogue,
+    activity_ledger,
     add_event,
     ask_revised_quote,
     award_carrier,
@@ -224,14 +228,18 @@ from app.modules.logistics.transport import (  # noqa: E402
     evaluation_methods,
     flow_catalogue,
     for_consignments,
+    for_indent,
     get_tr,
     history,
     invite_carriers,
     list_trs,
     mode_catalogue,
+    mode_suggestion,
     open_exceptions,
     provider_board,
     record_quote,
+    receipt_evidence,
+    receipt_evidence_file,
     resolve_exception,
     set_provider,
     share_tracking,
@@ -244,16 +252,20 @@ from app.modules.logistics.transport import (  # noqa: E402
 from app.modules.logistics.transport import summary as transport_summary  # noqa: E402
 
 __all__ = [
-    "accept_award", "accept_quote", "acknowledge_tr", "act_on_award", "act_on_tr",
-    "add_event", "ask_revised_quote", "award_carrier", "cancel_tr", "carrier_accept",
+    "accept_award", "accept_quote", "acknowledge_tr",
+    "act_on_award", "act_on_tr",
+    "activity_catalogue", "activity_ledger", "add_event", "ask_revised_quote",
+    "award_carrier", "cancel_tr", "carrier_accept",
     "carrier_decline", "carrier_deliver", "carrier_get_request",
     "carrier_open_requests", "carrier_options", "carrier_quote", "carrier_summary",
     "carrier_view_request",
     "carrier_track", "close_tr", "comparison", "create_grn_from_po", "create_issue",
     "create_tr", "decline_award", "delete_tr", "deliver_tr", "dispatch_consignment",
     "dispatch_tr", "evaluation_methods", "flow_catalogue", "for_consignments",
+    "for_indent",
     "get_grn", "get_tr", "history", "invite_carriers", "issue_stock", "list_grn",
-    "list_issues", "list_trs", "mode_catalogue", "open_exceptions", "provider_board",
+    "list_issues", "list_trs", "mode_catalogue", "mode_suggestion", "open_exceptions",
+    "provider_board", "receipt_evidence", "receipt_evidence_file",
     "qc_fail", "qc_pass", "record_quote", "resolve_exception", "set_provider",
     "share_tracking", "submit_tr", "transport_summary", "update_tr",
 ]
