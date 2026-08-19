@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
 import { Button, Field, Input } from "@/shared/components";
+import { useToast } from "@/shared/components/Toast";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
 import { api } from "@/shared/api/client";
 
@@ -49,6 +50,7 @@ export function LinePicker({
   freezeRateAndTax?: boolean;
 }) {
   const [search, setSearch] = useState("");
+  const toast = useToast();
 
   const { data: items = [], isLoading } = useQuery({
     queryKey: ["procurement-items", search],
@@ -85,6 +87,10 @@ export function LinePicker({
                 onQueryChange={setSearch}
                 isDisabled={disabled || !!line.id}
                 onChange={(value) => {
+                  if (lines.some((l, i) => i !== index && l.item_id === value)) {
+                    toast.error("Item already exists, just update the quantity.");
+                    return;
+                  }
                   const chosen = items.find((item) => item.id === value);
                   set(index, { item_id: value, uom_code: chosen?.uom_code ?? null });
                 }}
