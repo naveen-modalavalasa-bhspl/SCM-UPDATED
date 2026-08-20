@@ -819,14 +819,27 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             raise ValidationError(
                 f"Line {index}: IMEI-tracked quantity must be a whole number"
             )
-        if item.is_imei_tracked and at_gate and len(imeis) > int(received):
+        # FIXED 2026-08-20 — this demanded EXACTLY one IMEI per unit once the receipt
+        # left the gate, and a GRN could not be saved without them. Vendors routinely
+        # deliver without an IMEI list, and the numbers are on the handsets inside
+        # sealed cartons, so the storekeeper physically cannot supply them at the
+        # goods-in desk. WITHOUT this relaxation a real delivery is stuck at the gate
+        # over paperwork the vendor never sent.
+        #
+        # Now the same rule serial numbers have always had: more than received is
+        # always wrong, FEWER is not. Whatever was actually read is kept.
+        #
+        # Deliberately NOT minted the way missing serials are. A serial is ours to
+        # issue, so `codeformat.mint_serials` gives an unlabelled unit one. An IMEI is
+        # assigned by the manufacturer and burned into the handset — inventing one
+        # would put a number in that field which matches no device on earth, and it
+        # would be indistinguishable from a real one downstream. The units keep their
+        # minted SERIAL for identity and their IMEI stays blank until somebody reads
+        # it off the device, which is put-away's job.
+        if item.is_imei_tracked and len(imeis) > int(received):
             raise ValidationError(
                 f"Line {index}: {len(imeis)} IMEI numbers for {int(received)} "
                 f"received units of {item.code}"
-            )
-        if item.is_imei_tracked and not at_gate and len(imeis) != int(received):
-            raise ValidationError(
-                f"Line {index}: enter exactly {int(received)} IMEI numbers for {item.code}"
             )
         if imeis:
             seen_for_item = seen_imeis_by_item.setdefault(item.id, set())

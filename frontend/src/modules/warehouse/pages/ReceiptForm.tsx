@@ -549,19 +549,22 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       }
     }
 
-    // Same three rules for IMEIs. The backend enforces them too; this only saves the
-    // storekeeper a round-trip once the lines are already on screen.
+    // Same rules for IMEIs, minus the count floor. The backend enforces them too;
+    // this only saves the storekeeper a round-trip once the lines are on screen.
     for (const [index, line] of form.items.entries()) {
       if (!line.is_imei_tracked) continue;
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
         throw new Error(`Line ${index + 1}: IMEI-tracked received quantity must be a whole number.`);
       }
+      // FIXED 2026-08-20 — the GRN demanded exactly one IMEI per unit and would not
+      // save without them. Vendors routinely deliver with no IMEI list, and the
+      // numbers are on handsets inside sealed cartons, so the goods-in desk cannot
+      // supply them. WITHOUT this a real delivery is stuck at the gate over paperwork
+      // the vendor never sent. Same rule as serials now: more than received is wrong,
+      // fewer is fine, and the missing ones are read off the devices at put-away.
       const actual = line.imei_numbers?.length ?? 0;
-      if (isGrn && actual !== required) {
-        throw new Error(`Line ${index + 1}: enter exactly ${required} IMEI numbers before saving.`);
-      }
-      if (!isGrn && actual > required) {
+      if (actual > required) {
         throw new Error(`Line ${index + 1}: ${actual} IMEI numbers for ${required} received units.`);
       }
     }
