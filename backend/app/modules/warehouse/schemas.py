@@ -550,6 +550,10 @@ class OutboundInspectionRead(_Read):
     inspector_id: int | None = None
     inspector_name: str | None = None
     remarks: str | None = None
+    # Only ever filled where a QC_OUTWARD ladder is configured.
+    current_approver_name: str | None = None
+    approved_by_name: str | None = None
+    approved_at: datetime | None = None
     created_at: datetime | None = None
 
 
@@ -1320,6 +1324,7 @@ class SerialRead(_Read):
     warehouse_name: str | None = None
     bin_id: int | None = None
     bin_code: str | None = None
+    bin_floor_level: int | None = None
     asset_code: str | None = None
     consumable_code: str | None = None
     status: str
@@ -1362,6 +1367,12 @@ class ScanLine(BaseModel):
     batch_no: str | None = None
     serial_no: str | None = None
     package_no: str | None = None
+    # What the floor asked a scan to read out: the batch's expiry and the code minted
+    # for the physical unit. Both are already carried by the consignment line
+    # (`unit_code` is looked up beside it), so nothing new is stored for this.
+    imei_no: str | None = None
+    expiry_date: date | None = None
+    unit_code: str | None = None
 
 
 class ScanPackage(BaseModel):

@@ -1,9 +1,9 @@
 from datetime import date, datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from app.modules.indents.enums import IndentType
-from app.shared.time import iso as ist_iso
+from app.shared.time import iso as ist_iso, not_in_past
 
 
 def _utc_iso(value: datetime | None) -> str | None:
@@ -19,6 +19,9 @@ class IndentItemIn(BaseModel):
 
 class IndentCreate(BaseModel):
     required_date: date | None = None
+
+    _no_past_required_date = field_validator("required_date")(
+        lambda cls, v: not_in_past(v, "Required date"))
     priority: str = "NORMAL"
     # Defaulted, not required: a caller that predates the field keeps working and
     # lands on exactly the value the database would have given it anyway.

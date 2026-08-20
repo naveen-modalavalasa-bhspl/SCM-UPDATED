@@ -32,6 +32,23 @@ def today() -> date:
     return now().date()
 
 
+def not_in_past(value: date | None, label: str = "date") -> date | None:
+    """Reject a date already gone, in IST. Returns the value so it can be a validator.
+
+    Asking for delivery yesterday is not a request anybody can serve, and the browser
+    guard (`min=` on the input) is a courtesy, not a control — the API takes whatever
+    is posted to it.
+
+    Deliberately used on CREATE schemas only. An existing document may legitimately
+    carry a date that has since passed, and enforcing this on update would make every
+    such document uneditable — a new rule cannot invalidate rows that were valid when
+    they were written.
+    """
+    if value is not None and value < today():
+        raise ValueError(f"{label} cannot be in the past")
+    return value
+
+
 def to_ist(value: datetime | None) -> datetime | None:
     """Normalises a timestamp for comparison against a stored one.
 

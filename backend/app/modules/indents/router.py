@@ -430,7 +430,7 @@ async def allocation_availability(allocation_id: int, db: AsyncSession = Depends
 @alloc_router.get("/{allocation_id}", response_model=AllocationOut)
 async def get_allocation(allocation_id: int, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.ALLOCATION_VIEW))):
-    return await service.get_allocation(db, allocation_id)
+    return await service.get_allocation(db, allocation_id, user=user)
 
 
 @alloc_router.post("/approve-batch")

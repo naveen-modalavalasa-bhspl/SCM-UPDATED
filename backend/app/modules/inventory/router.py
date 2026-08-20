@@ -9,7 +9,8 @@ from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.inventory import locations, service
 from app.modules.inventory.schemas import (
-    ActionIn, MovementRow, MRClaimsOut, MRListRow, MROut, MRReviseIn, StockRow,
+    ActionIn, MovementRow, MRClaimsOut, MRCreateIn, MRListRow, MROut, MRReviseIn,
+    StockRow,
     TransferIn,
     AdjustmentIn, AdjustmentOut, AdjustmentListRow, AdjustmentRejectIn, ReplenishmentRow,
     ReservationRow, ReservationReleaseOut, ItemAvailabilityOut,
@@ -297,6 +298,15 @@ async def list_mrs(params: PageParams = Depends(), status: str | None = None,
                    indent_id: int | None = None, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission(perms.MR_VIEW))):
     return await service.list_mrs(db, params, status, indent_id, user=user)
+
+
+@mr_router.post("", response_model=MROut, status_code=201)
+async def create_mr(body: MRCreateIn, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.MR_CREATE))):
+    """Raise a request by hand — the allocation screen's per-line button, and the
+    Create button on the Material Requests screen."""
+    return await service.get_mr(
+        db, (await service.create_mr_manual(db, body.model_dump(), user)).id, user=user)
 
 
 @mr_router.get("/{mr_id}", response_model=MROut)

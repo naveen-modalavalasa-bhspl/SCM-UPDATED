@@ -60,13 +60,13 @@ async def dashboard(warehouse_id: int | None = None, db: AsyncSession = Depends(
 @router.get("/warehouses", response_model=Page[s.WarehouseRead])
 async def list_warehouses(params: PageParams = Depends(), search: str | None = None,
                           is_active: bool | None = None, db: AsyncSession = Depends(get_db),
-                          _=Depends(require_permission(STOCK_VIEW))):
+                          user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_warehouses(db, params, search=search, is_active=is_active)
 
 
 @router.get("/warehouses/{warehouse_id}", response_model=s.WarehouseRead)
 async def get_warehouse(warehouse_id: int, db: AsyncSession = Depends(get_db),
-                        _=Depends(require_permission(STOCK_VIEW))):
+                        user=Depends(require_permission(STOCK_VIEW))):
     return await service.get_warehouse(db, warehouse_id)
 
 
@@ -85,13 +85,13 @@ async def update_warehouse(warehouse_id: int, data: s.WarehouseWrite,
 
 @router.get("/warehouses/{warehouse_id}/bins", response_model=list[s.BinRead])
 async def bin_tree(warehouse_id: int, db: AsyncSession = Depends(get_db),
-                   _=Depends(require_permission(STOCK_VIEW))):
+                   user=Depends(require_permission(STOCK_VIEW))):
     return await service.bin_tree(db, warehouse_id)
 
 
 @router.get("/warehouses/{warehouse_id}/locations", response_model=list[s.LocationRead])
 async def list_locations(warehouse_id: int, db: AsyncSession = Depends(get_db),
-                         _=Depends(require_permission(STOCK_VIEW))):
+                         user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_locations(db, warehouse_id)
 
 
@@ -115,7 +115,7 @@ async def delete_bin(bin_id: int, db: AsyncSession = Depends(get_db),
 
 @router.get("/storage-types", response_model=list[s.StorageTypeRead])
 async def list_storage_types(db: AsyncSession = Depends(get_db),
-                             _=Depends(require_permission(STOCK_VIEW))):
+                             user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_storage_types(db)
 
 
@@ -152,8 +152,8 @@ async def list_receipts(params: PageParams = Depends(), receipt_type: str | None
 
 @router.get("/receipts/{receipt_id}", response_model=s.ReceiptDetail)
 async def get_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
-                      _=Depends(require_permission(RECEIPT_VIEW))):
-    return await service.get_receipt(db, receipt_id)
+                      user=Depends(require_permission(RECEIPT_VIEW))):
+    return await service.get_receipt(db, receipt_id, user=user)
 
 
 @router.post("/receipts", response_model=s.ReceiptDetail, status_code=201)
@@ -229,8 +229,8 @@ async def list_inspections(params: PageParams = Depends(), inspection_type: str 
 
 @router.get("/inspections/{inspection_id}", response_model=s.InspectionDetail)
 async def get_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
-                         _=Depends(require_permission(INSPECTION_VIEW))):
-    return await service.get_inspection(db, inspection_id)
+                         user=Depends(require_permission(INSPECTION_VIEW))):
+    return await service.get_inspection(db, inspection_id, user=user)
 
 
 @router.post("/inspections", response_model=s.InspectionDetail, status_code=201)
@@ -276,7 +276,7 @@ async def list_putaways(params: PageParams = Depends(), status: str | None = Non
 # 422 against it rather than falling through.
 @router.get("/putaways/candidates", response_model=list[s.PutawayCandidate])
 async def putaway_candidates(grn_id: int, db: AsyncSession = Depends(get_db),
-                             _=Depends(require_permission(PUTAWAY_VIEW))):
+                             user=Depends(require_permission(PUTAWAY_VIEW))):
     return await service.putaway_candidates(db, grn_id)
 
 
@@ -288,13 +288,13 @@ async def create_putaway(data: s.PutawayCreate, db: AsyncSession = Depends(get_d
 
 @router.get("/putaways/{task_id}", response_model=s.PutawayRead)
 async def get_putaway(task_id: int, db: AsyncSession = Depends(get_db),
-                      _=Depends(require_permission(PUTAWAY_VIEW))):
-    return await service.get_putaway(db, task_id)
+                      user=Depends(require_permission(PUTAWAY_VIEW))):
+    return await service.get_putaway(db, task_id, user=user)
 
 
 @router.get("/putaways/{task_id}/suggested-bins", response_model=list[s.BinRead])
 async def suggested_bins(task_id: int, db: AsyncSession = Depends(get_db),
-                         _=Depends(require_permission(PUTAWAY_VIEW))):
+                         user=Depends(require_permission(PUTAWAY_VIEW))):
     return await service.suggested_bins(db, task_id)
 
 
@@ -320,8 +320,8 @@ async def skip_putaway(task_id: int, body: s.ReasonIn, db: AsyncSession = Depend
 @router.get("/stock-movements", response_model=Page[s.StockMovementRead])
 async def list_stock_movements(params: PageParams = Depends(),
                                db: AsyncSession = Depends(get_db),
-                               _=Depends(require_permission(MOVEMENT_VIEW))):
-    return await service.list_stock_movements(db, params)
+                               user=Depends(require_permission(MOVEMENT_VIEW))):
+    return await service.list_stock_movements(db, params, user=user)
 
 
 @router.post("/stock-movements", response_model=s.StockMovementRead, status_code=201)
@@ -335,14 +335,14 @@ async def create_stock_movement(data: s.StockMovementWrite,
 async def list_stock_movement_orders(params: PageParams = Depends(),
                                      search: str | None = None,
                                      db: AsyncSession = Depends(get_db),
-                                     _=Depends(require_permission(MOVEMENT_VIEW))):
-    return await service.list_stock_movement_orders(db, params, search=search)
+                                     user=Depends(require_permission(MOVEMENT_VIEW))):
+    return await service.list_stock_movement_orders(db, params, search=search, user=user)
 
 
 @router.get("/stock-movement-orders/{order_no:path}", response_model=s.StockMovementOrderRead)
 async def get_stock_movement_order(order_no: str,
                                    db: AsyncSession = Depends(get_db),
-                                   _=Depends(require_permission(MOVEMENT_VIEW))):
+                                   user=Depends(require_permission(MOVEMENT_VIEW))):
     return await service.get_stock_movement_order(db, order_no)
 
 
@@ -357,7 +357,7 @@ async def create_stock_movement_order(data: s.StockMovementOrderWrite,
 async def stock_availability(warehouse_id: int, source_bin_id: int, item_id: int,
                              batch_id: int | None = None,
                              db: AsyncSession = Depends(get_db),
-                             _=Depends(require_permission(STOCK_VIEW))):
+                             user=Depends(require_permission(STOCK_VIEW))):
     return await service.stock_availability(
         db,
         warehouse_id=warehouse_id,
@@ -382,8 +382,8 @@ async def list_pickings(params: PageParams = Depends(), status: str | None = Non
 
 @router.get("/pickings/{picking_id}", response_model=s.PickingDetail)
 async def get_picking(picking_id: int, db: AsyncSession = Depends(get_db),
-                      _=Depends(require_permission(PICKING_VIEW))):
-    return await service.get_picking(db, picking_id)
+                      user=Depends(require_permission(PICKING_VIEW))):
+    return await service.get_picking(db, picking_id, user=user)
 
 
 @router.post("/receipts/{receipt_id}/forward", response_model=list[s.IssueRead],
@@ -767,9 +767,10 @@ async def serial_summary(item_ids: str, warehouse_ids: str | None = None,
 async def list_batches(params: PageParams = Depends(), item_id: int | None = None,
                        expiring_days: int | None = None, search: str | None = None,
                        db: AsyncSession = Depends(get_db),
-                       _=Depends(require_permission(STOCK_VIEW))):
+                       user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_batches(db, params, item_id=item_id,
-                                      expiring_days=expiring_days, search=search)
+                                      expiring_days=expiring_days, search=search,
+                                      user=user)
 
 
 @router.get("/scan/{code:path}", response_model=s.ScanResult)
@@ -811,7 +812,9 @@ async def indent_fulfilment(indent_id: int, db: AsyncSession = Depends(get_db),
 @router.get("/attachments", response_model=list[s.AttachmentRead])
 async def list_attachments(entity_type: str, entity_id: int,
                            db: AsyncSession = Depends(get_db),
-                           _=Depends(require_permission(STOCK_VIEW))):
+                           user=Depends(require_permission(STOCK_VIEW))):
+    # FIXED — see `service.assert_attachment_scope`.
+    await service.assert_attachment_scope(db, user, entity_type, entity_id)
     return await service.list_attachments(db, entity_type, entity_id)
 
 
@@ -827,7 +830,10 @@ async def add_attachment(entity_type: str = Form(...), entity_id: int = Form(...
 
 @router.get("/attachments/{attachment_id}/download")
 async def download_attachment(attachment_id: int, db: AsyncSession = Depends(get_db),
-                              _=Depends(require_permission(STOCK_VIEW))):
+                              user=Depends(require_permission(STOCK_VIEW))):
+    # FIXED — see `service.assert_attachment_scope`. Checked before the bytes are
+    # opened, so an out-of-scope id never reaches the filesystem.
+    await service.assert_attachment_readable(db, user, attachment_id)
     path, file_name, mime_type = await service.attachment_file(db, attachment_id)
     return FileResponse(path, filename=file_name, media_type=mime_type)
 
@@ -1003,6 +1009,13 @@ async def issue_options(search: str | None = None, db: AsyncSession = Depends(ge
     return await service.issue_options(db, search)
 
 
+@router.get("/options/inspectable-issues", response_model=list[s.Option])
+async def inspectable_issue_options(search: str | None = None,
+                                    db: AsyncSession = Depends(get_db),
+                                    _=Depends(require_permission(QC_OUTWARD_VIEW))):
+    return await service.inspectable_issue_options(db, search)
+
+
 @router.get("/options/returnable-issues", response_model=list[s.Option])
 async def returnable_issue_options(search: str | None = None,
                                    db: AsyncSession = Depends(get_db),
@@ -1108,7 +1121,8 @@ async def list_outbound_inspections(params: PageParams = Depends(),
                                     search: str | None = None, db: AsyncSession = Depends(get_db),
                                     user=Depends(require_permission(QC_OUTWARD_VIEW))):
     return await service.list_outbound_inspections(db, params, status=status,
-                                                   warehouse_id=warehouse_id, search=search)
+                                                   warehouse_id=warehouse_id, search=search,
+                                                   user=user)
 
 @router.get("/outbound-inspections/{inspection_id}", response_model=s.OutboundInspectionDetail)
 async def get_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
@@ -1130,6 +1144,26 @@ async def update_outbound_inspection(inspection_id: int, data: s.OutboundInspect
 async def complete_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
                                        user=Depends(require_permission(QC_OUTWARD_APPROVE))):
     return await service.complete_outbound_inspection(db, inspection_id, user)
+
+@router.post("/outbound-inspections/{inspection_id}/approve",
+             response_model=s.OutboundInspectionDetail)
+async def approve_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+    return await service.act_on_outbound_inspection(
+        db, inspection_id, ApprovalAction.APPROVED.value, body.comments, user
+    )
+
+
+@router.post("/outbound-inspections/{inspection_id}/reject",
+             response_model=s.OutboundInspectionDetail)
+async def reject_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
+                                     db: AsyncSession = Depends(get_db),
+                                     user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+    return await service.act_on_outbound_inspection(
+        db, inspection_id, ApprovalAction.REJECTED.value, body.comments, user
+    )
+
 
 @router.delete("/outbound-inspections/{inspection_id}", status_code=204)
 async def delete_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),

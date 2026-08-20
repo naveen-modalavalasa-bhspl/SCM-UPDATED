@@ -1,6 +1,8 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.shared.time import not_in_past
 
 
 class POLineIn(BaseModel):
@@ -37,6 +39,9 @@ class POCreate(POHeaderIn):
     vendor_id: int
     expected_date: date | None = None
     lines: list[POLineIn]
+
+    _no_past_expected_date = field_validator("expected_date")(
+        lambda cls, v: not_in_past(v, "Expected date"))
 
 
 class POHeaderUpdate(POHeaderIn):

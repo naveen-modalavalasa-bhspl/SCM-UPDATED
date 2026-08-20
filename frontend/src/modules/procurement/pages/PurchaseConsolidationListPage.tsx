@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Search } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, Select, StatCard,
+  Button, Can, Card, ErrorBanner, FilterMenu, Input, PageHeader, ResponsiveList, StatCard,
   StatusPill, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
@@ -33,6 +34,12 @@ const STATUSES = [
 export function PurchaseConsolidationListPage() {
   const nav = useNavigate();
   const [status, setStatus] = useState("");
+  // The register had a status dropdown and NO search box at all, so finding one sheet
+  // among a period's worth meant paging. Search and project are filtered in the
+  // browser over the page already in hand — the endpoint takes neither, and adding
+  // them server-side is a backend change this screen does not need at 20 rows a page.
+  const [search, setSearch] = useState("");
+  const [project, setProject] = useState("");
   const [page, setPage] = useState(1);
 
   const { data, isLoading, error } = useQuery({
@@ -47,7 +54,15 @@ export function PurchaseConsolidationListPage() {
     queryFn: () => consolidationApi.candidates({ size: 1 }),
   });
 
-  const rows = data?.items ?? [];
+  const all = data?.items ?? [];
+  const projectOptions = [...new Set(all.map((r) => r.project_name).filter(Boolean))]
+    .map((v) => ({ value: v as string, label: v as string }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const q = search.trim().toLowerCase();
+  const rows = all.filter((r) =>
+    (!project || r.project_name === project)
+    && (!q || [r.cons_no, r.title, r.project_name, r.period_label, r.created_by_name]
+      .some((f) => String(f ?? "").toLowerCase().includes(q))));
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
 
   const columns: Column<ConsolidationListRow>[] = [
@@ -128,12 +143,32 @@ export function PurchaseConsolidationListPage() {
         <StatCard label="Sheets on the register" value={data?.total ?? 0} />
       </div>
 
-      <div className="mb-4 max-w-xs">
-        <Select
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
+        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search sheet no., title, project or period..."
+            className="pl-9"
+          />
+        </div>
+        <FilterMenu
+          label="Status"
           value={status}
-          options={STATUSES}
-          onChange={(value) => { setStatus(String(value)); setPage(1); }}
+          onChange={(value) => { setStatus(value); setPage(1); }}
+          options={STATUSES.filter((o) => o.value)}
         />
+        <FilterMenu label="Project" value={project} onChange={setProject}
+                    options={projectOptions} />
+        {(search || status || project) && (
+          <button
+            onClick={() => { setSearch(""); setStatus(""); setProject(""); setPage(1); }}
+            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
+          >
+            Clear
+          </button>
+        )}
       </div>
 
       <ErrorBanner error={error} />
@@ -149,8 +184,8 @@ export function PurchaseConsolidationListPage() {
           totalPages={totalPages}
           onPageChange={setPage}
           empty={
-            status
-              ? "No sheets in this status."
+            status || project || search
+              ? "No sheets match these filters."
               : "No consolidated sheets yet. Roll approved requisitions into one to tender them together."
           }
           renderCard={(r) => (

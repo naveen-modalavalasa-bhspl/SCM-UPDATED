@@ -73,6 +73,9 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     # were missing here — so they never appeared on the config screen and always fell
     # through to the reporting line, however the admin configured the rest.
     DocType.DISPATCH.value: "Warehouse",
+    # The outward quality check that stands between a posted material issue and
+    # the consignment raised against it.
+    DocType.QC_OUTWARD.value: "Warehouse",
     # Filed under Returns, not Warehouse. The table is `pro_returns` and the service
     # that runs it is the warehouse's, but the admin configuring "who signs a return"
     # looks under Returns and found only the two stock-return rows there — so a
@@ -103,6 +106,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # The outward leg: transport is arranged and the consignment leaves the warehouse.
     # This is where Logistics signs.
     DocType.DISPATCH.value: "Dispatch",
+    DocType.QC_OUTWARD.value: "Outward QC (before a consignment may be raised)",
     DocType.PURCHASE_RETURN.value: "Purchase Return (sending material back to a vendor)",
     DocType.REQUISITION.value: "Purchase Requisition",
     DocType.CONSOLIDATION.value: "Consolidated Purchase Sheet",

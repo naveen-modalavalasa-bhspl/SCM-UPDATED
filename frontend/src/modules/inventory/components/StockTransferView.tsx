@@ -1,83 +1,105 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { ArrowRight, Plus, Trash2 } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { ArrowRight, Calendar, MapPin } from "lucide-react";
 import {
-  Button, Can, Card, Field, Input, PageHeader, ResponsiveList, Select, StatCard, StatusPill, type Column,
+  Button, Card, PageHeader, ResponsiveList, StatCard, StatusPill, type Column,
   ResponsiveGrid,
 } from "@/shared/components";
-import { FilterBar, FilterSelect } from "./FilterBar";
+import { FilterBar, FilterMenu } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { MovementKindStrip } from "../pages/StockingPointsPage";
-import {
-  listSTOs, getSTO, createSTO, approveSTO, dispatchSTO, receiveSTO,
-  getWarehouses, getCatalogItems, getStockBalances,
-} from "../api";
-import { alerts } from "@/modules/alerts";
+import { listSTOs, getSTO, getWarehouses } from "../api";
 import { fmtDate } from "@/shared/datetime";
 
 /**
- * Stock transfer orders between warehouses.
+ * Stock transfer / movement RECORDS — read only.
  *
- * A transfer is a four-step document (raise → approve → dispatch → receive), not a
- * one-shot move, so the list is the screen and the form is a dialog on top of it. The
- * previous layout put a full creation panel beside the list on a tinted background,
- * which made it unclear which half you were meant to be looking at.
+ * This screen used to raise transfers and walk them through approve -> dispatch ->
+ * receive. It no longer does (2026-08-20, business request): a stock transfer is
+ * raised and worked in the WAREHOUSE module, where the physical document, its
+ * approval and its picking live. Two front doors onto the same state change meant a
+ * transfer could be advanced from a screen that showed none of the warehouse checks,
+ * and an approval given here bypassed the desk that actually holds the stock.
+ *
+ * So what is left is the register: every STO/SMO the login is allowed to see, with
+ * search and filters over it, and a read-only detail sheet. No create, no approve,
+ * no dispatch, no receive. Scope is unchanged — `listSTOs` is the same endpoint
+ * behind the same permission, so a login sees exactly the rows it saw before and no
+ * more.
  */
 
 type STO = Record<string, any>;
 
-const STATUSES = ["PENDING_APPROVAL", "APPROVED", "DISPATCHED", "RECEIVED"];
+const STATUS_OPTIONS = [
+  { value: "PENDING_APPROVAL", label: "Pending approval" },
+  { value: "APPROVED", label: "Approved" },
+  { value: "DISPATCHED", label: "Dispatched" },
+  { value: "RECEIVED", label: "Received" },
+];
 
-/** The single action a transfer is waiting for, given where it is in the chain. */
-const nextStep = (status: string) =>
-  status === "PENDING_APPROVAL" ? { label: "Approve", run: approveSTO }
-  : status === "APPROVED" ? { label: "Dispatch", run: dispatchSTO }
-  : status === "DISPATCHED" ? { label: "Receive", run: receiveSTO }
-  : null;
+const DATE_OPTIONS = [
+  { value: "today", label: "Today" },
+  { value: "week", label: "Last 7 days" },
+  { value: "month", label: "Last 30 days" },
+];
 
-const BLANK_LINE = { item_id: "", requested_qty: "" };
+/** Start of the window a date filter means, or null for "all time". */
+function windowStart(preset: string): Date | null {
+  if (!preset) return null;
+  const from = new Date();
+  from.setHours(0, 0, 0, 0);
+  if (preset === "week") from.setDate(from.getDate() - 7);
+  if (preset === "month") from.setDate(from.getDate() - 30);
+  return from;
+}
 
 export function StockTransferView() {
   const [status, setStatus] = useState("");
+  const [fromWarehouse, setFromWarehouse] = useState("");
+  const [toWarehouse, setToWarehouse] = useState("");
+  const [raised, setRaised] = useState("");
   const [search, setSearch] = useState("");
-  const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<STO | null>(null);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ from_warehouse_id: "", to_warehouse_id: "", remarks: "" });
-  const [lines, setLines] = useState([{ ...BLANK_LINE }]);
-  const qc = useQueryClient();
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
-  const { data: catalog = [] } = useQuery({ queryKey: ["catalog-items"], queryFn: getCatalogItems });
 
   const { data, isLoading } = useQuery({
     queryKey: ["stos", status],
     queryFn: () => listSTOs({ status: status || undefined, size: 100 }),
   });
 
-  // Stock at the source warehouse, so a line cannot be raised for something not there.
-  const { data: sourceStock } = useQuery({
-    queryKey: ["stock-at", form.from_warehouse_id],
-    queryFn: () => getStockBalances({ warehouse_id: form.from_warehouse_id, size: 200 }),
-    enabled: !!form.from_warehouse_id,
-  });
-  const available = useMemo(() => {
-    const map = new Map<number, number>();
-    (sourceStock?.items ?? []).forEach((s) =>
-      map.set(s.item_id, (map.get(s.item_id) ?? 0) + s.available_qty));
-    return map;
-  }, [sourceStock]);
+  // Only the warehouses that actually appear on a row: filtering by a point that
+  // never sent or received anything is a dropdown of 900 dead options.
+  const warehouseOptions = useMemo(() => {
+    const all: STO[] = data?.items ?? [];
+    const seen = new Map<string, string>();
+    all.forEach((r) => {
+      if (r.from_warehouse_name) seen.set(String(r.from_warehouse_id), r.from_warehouse_name);
+      if (r.to_warehouse_name) seen.set(String(r.to_warehouse_id), r.to_warehouse_name);
+    });
+    const named = [...seen].map(([value, label]) => ({ value, label }));
+    return named.length
+      ? named.sort((a, b) => a.label.localeCompare(b.label))
+      : (warehouses as any[]).map((w) => ({ value: String(w.id), label: w.name }));
+  }, [data, warehouses]);
 
   const rows: STO[] = useMemo(() => {
     const all: STO[] = data?.items ?? [];
     const q = search.trim().toLowerCase();
-    if (!q) return all;
-    return all.filter((r) =>
-      r.sto_no?.toLowerCase().includes(q) ||
-      r.from_warehouse_name?.toLowerCase().includes(q) ||
-      r.to_warehouse_name?.toLowerCase().includes(q));
-  }, [data, search]);
+    const from = windowStart(raised);
+    return all.filter((r) => {
+      if (fromWarehouse && String(r.from_warehouse_id) !== fromWarehouse) return false;
+      if (toWarehouse && String(r.to_warehouse_id) !== toWarehouse) return false;
+      if (from && (!r.created_at || new Date(r.created_at) < from)) return false;
+      if (!q) return true;
+      // Every text on the row, so the one search box answers "find that number",
+      // "everything out of Vijayawada" and "what did Ramesh raise" alike.
+      return [r.sto_no, r.from_warehouse_name, r.to_warehouse_name,
+              r.requested_by_name, r.status]
+        .some((field) => String(field ?? "").toLowerCase().includes(q));
+    });
+  }, [data, search, fromWarehouse, toWarehouse, raised]);
 
   const counts = useMemo(() => {
     const all: STO[] = data?.items ?? [];
@@ -88,89 +110,13 @@ export function StockTransferView() {
     };
   }, [data]);
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["stos"] });
-  const fail = (e: any) => setError(e?.response?.data?.error ?? "The action failed");
-  /** Alerts name things, not ids: "Bolt M8 from Main Store", never "17 from 3". */
-  const itemName = (id: string | number) =>
-    catalog.find((i) => String(i.id) === String(id))?.name ?? "the item";
-  const warehouseName = (id: string | number) =>
-    warehouses.find((w) => String(w.id) === String(id))?.name ?? "the warehouse";
-
-  const advance = useMutation({
-    mutationFn: (
-      { id, run }: { id: number; run: (id: number) => Promise<unknown>; row: STO; label: string },
-    ) => run(id),
-    onSuccess: (_result, { row, label }) => {
-      // Receiving is the only step that actually lands the stock, so it gets the
-      // "now at" wording; approve and dispatch only move the paperwork along.
-      if (label === "Receive") {
-        void alerts.success("stock.transferred", {
-          qty: row.total_qty ?? row.items?.[0]?.requested_qty ?? "The stock",
-          item: row.items?.[0]?.item_name ?? "the transferred items",
-          destination: row.to_warehouse_name ?? "the destination",
-        });
-      } else {
-        void alerts.success("stock.transfer_advanced", {
-          number: row.sto_no ?? "The transfer",
-          status: label === "Approve" ? "approved" : "dispatched",
-        });
-      }
-      setError(""); setSelected(null); refresh();
-    },
-    onError: fail,
-  });
-
   const openDetail = useMutation({
     mutationFn: getSTO,
     onSuccess: (d: STO) => { setSelected(d); setError(""); },
-    onError: fail,
+    onError: (e: any) => setError(e?.response?.data?.error ?? "Could not open that record"),
   });
 
-  const create = useMutation({
-    mutationFn: () =>
-      createSTO({
-        from_warehouse_id: Number(form.from_warehouse_id),
-        to_warehouse_id: Number(form.to_warehouse_id),
-        remarks: form.remarks || undefined,
-        items: lines
-          .filter((l) => l.item_id && Number(l.requested_qty) > 0)
-          .map((l) => ({ item_id: Number(l.item_id), requested_qty: Number(l.requested_qty) })),
-      }),
-    onSuccess: (created: STO) => {
-      void alerts.success("stock.transfer_raised", { number: created?.sto_no ?? "The transfer" });
-      setOpen(false);
-      setForm({ from_warehouse_id: "", to_warehouse_id: "", remarks: "" });
-      setLines([{ ...BLANK_LINE }]);
-      setError("");
-      refresh();
-    },
-    onError: fail,
-  });
-
-  const askThenCreate = async () => {
-    const first = validLines[0];
-    if (!(await alerts.confirm("stock.transfer", {
-      qty: first?.requested_qty ?? "",
-      item: itemName(first?.item_id ?? ""),
-      source: warehouseName(form.from_warehouse_id),
-      destination: warehouseName(form.to_warehouse_id),
-    }))) return;
-    create.mutate();
-  };
-
-  const validLines = lines.filter((l) => l.item_id && Number(l.requested_qty) > 0);
-  const sameWarehouse = !!form.from_warehouse_id && form.from_warehouse_id === form.to_warehouse_id;
-  const canSubmit = !!form.from_warehouse_id && !!form.to_warehouse_id && !sameWarehouse && validLines.length > 0;
-
-  const stepButton = (r: STO) => {
-    const step = nextStep(r.status);
-    if (!step) return null;
-    return (
-      <Can do="stock.transfer">
-        <Button onClick={() => advance.mutate({ id: r.id, run: step.run, row: r, label: step.label })}>{step.label}</Button>
-      </Can>
-    );
-  };
+  const activeFilters = [search, status, fromWarehouse, toWarehouse, raised].filter(Boolean).length;
 
   const columns: Column<STO>[] = [
     {
@@ -195,20 +141,21 @@ export function StockTransferView() {
       key: "created_at", header: "Raised On", hideOnNarrow: true,
       render: (r) => fmtDate(r.created_at),
     },
-    { key: "action", header: "", render: stepButton },
   ];
 
   return (
     <div>
       <PageHeader
         eyebrow="Inventory"
-        title="Stock Transfers"
-        actions={
-          <Can do="stock.transfer">
-            <Button onClick={() => setOpen(true)}><Plus size={14} /> New Transfer</Button>
-          </Can>
-        }
+        title="Transfer & Movement Records"
       />
+
+      <p className="mb-4 text-sm text-muted">
+        A read-only register of stock transfers between points. Raise and work a
+        transfer in Warehouse.
+      </p>
+
+      <MovementKindStrip />
 
       <ResponsiveGrid cols={3} className="mb-4">
         <StatCard label="Awaiting Approval" value={counts.pending} tone={counts.pending ? "text-warning" : "text-muted"} />
@@ -223,16 +170,19 @@ export function StockTransferView() {
       <FilterBar
         search={search}
         onSearch={setSearch}
-        searchPlaceholder="Search transfer number or warehouse…"
-        onClear={() => { setSearch(""); setStatus(""); }}
-        active={[search, status].filter(Boolean).length}
+        searchPlaceholder="Search transfer no., warehouse, raiser or status…"
+        onClear={() => {
+          setSearch(""); setStatus(""); setFromWarehouse(""); setToWarehouse(""); setRaised("");
+        }}
+        active={activeFilters}
       >
-        <FilterSelect
-          value={status}
-          onChange={setStatus}
-          placeholder="All statuses"
-          options={STATUSES.map((s) => ({ value: s, label: s.replace(/_/g, " ") }))}
-        />
+        <FilterMenu label="Raised" value={raised} onChange={setRaised}
+                    options={DATE_OPTIONS} icon={<Calendar className="h-4 w-4 opacity-70" />} />
+        <FilterMenu label="Status" value={status} onChange={setStatus} options={STATUS_OPTIONS} />
+        <FilterMenu label="From" value={fromWarehouse} onChange={setFromWarehouse}
+                    options={warehouseOptions} icon={<MapPin className="h-4 w-4 opacity-70" />} />
+        <FilterMenu label="To" value={toWarehouse} onChange={setToWarehouse}
+                    options={warehouseOptions} icon={<MapPin className="h-4 w-4 opacity-70" />} />
       </FilterBar>
 
       <Card className="p-2">
@@ -242,7 +192,7 @@ export function StockTransferView() {
           keyOf={(r) => r.id}
           loading={isLoading}
           onRowClick={(r) => openDetail.mutate(r.id)}
-          empty="No transfers raised yet."
+          empty={activeFilters ? "No transfers match these filters." : "No transfers on record."}
           renderCard={(r) => (
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">
@@ -250,115 +200,11 @@ export function StockTransferView() {
                 <StatusPill status={r.status} />
               </div>
               <div className="text-sm text-body">{r.from_warehouse_name} → {r.to_warehouse_name}</div>
-              {stepButton(r)}
+              <div className="text-xs text-muted">{r.requested_by_name ?? "—"} · {fmtDate(r.created_at)}</div>
             </div>
           )}
         />
       </Card>
-
-      <Modal isOpen={open} onClose={() => setOpen(false)} size="2xl" scrollBehavior="inside">
-        <ModalContent>
-          <ModalHeader>New Stock Transfer</ModalHeader>
-          <ModalBody className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label="From warehouse">
-                <Select
-                  value={form.from_warehouse_id}
-                  onChange={(v) => setForm({ ...form, from_warehouse_id: v })}
-                  options={warehouses.map((w) => ({ value: w.id, label: w.name }))}
-                  placeholder="Source"
-                />
-              </Field>
-              <Field label="To warehouse">
-                <Select
-                  value={form.to_warehouse_id}
-                  onChange={(v) => setForm({ ...form, to_warehouse_id: v })}
-                  options={warehouses.map((w) => ({ value: w.id, label: w.name }))}
-                  placeholder="Destination"
-                />
-              </Field>
-            </div>
-            {sameWarehouse && (
-              <p className="text-sm text-danger">Source and destination must be different warehouses.</p>
-            )}
-
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-sm font-semibold text-ink">Items</span>
-                <button
-                  onClick={() => setLines([...lines, { ...BLANK_LINE }])}
-                  className="text-sm font-medium text-brand hover:underline"
-                >
-                  + Add line
-                </button>
-              </div>
-              <div className="space-y-2">
-                {lines.map((line, i) => {
-                  const stock = line.item_id ? available.get(Number(line.item_id)) ?? 0 : null;
-                  const over = stock !== null && Number(line.requested_qty) > stock;
-                  return (
-                    <div key={i} className="flex items-end gap-2">
-                      <div className="flex-1">
-                        <Select
-                          value={line.item_id}
-                          onChange={(v) => setLines(lines.map((l, j) => (j === i ? { ...l, item_id: v } : l)))}
-                          options={catalog.map((c) => ({ value: c.id, label: `${c.code} — ${c.name}` }))}
-                          placeholder="Select item"
-                        />
-                        {stock !== null && (
-                          <span className={`mt-1 block text-xs ${over ? "text-danger" : "text-muted"}`}>
-                            {over ? `Only ${stock} available at source` : `${stock} available at source`}
-                          </span>
-                        )}
-                      </div>
-                      <div className="w-32">
-                        <Input
-                          type="number" min="0.001" step="0.001" placeholder="Qty"
-                          value={line.requested_qty}
-                          onChange={(e) =>
-                            setLines(lines.map((l, j) => (j === i ? { ...l, requested_qty: e.target.value } : l)))
-                          }
-                        />
-                      </div>
-                      {lines.length > 1 && (
-                        <button
-                          onClick={() => setLines(lines.filter((_, j) => j !== i))}
-                          aria-label="Remove line"
-                          className="flex h-11 w-11 items-center justify-center rounded-lg text-muted hover:bg-content2 hover:text-danger"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* What this move IS comes from the two points, never from a dropdown —
-                letting a user pick would make "Movement" a one-click way past the
-                Inventory Manager on a cross-project transfer. They say WHY. */}
-            <MovementKindStrip
-              fromWarehouseId={form.from_warehouse_id ? Number(form.from_warehouse_id) : null}
-              toWarehouseId={form.to_warehouse_id ? Number(form.to_warehouse_id) : null}
-            />
-
-            <Field label="Reason">
-              <Input
-                value={form.remarks}
-                onChange={(e) => setForm({ ...form, remarks: e.target.value })}
-                placeholder="Why the stock is moving — e.g. camp restock, rebalancing"
-              />
-            </Field>
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="subtle" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button disabled={!canSubmit || create.isPending} onClick={() => void askThenCreate()}>
-              {create.isPending ? "Raising…" : "Raise Transfer"}
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
 
       <DetailSheet
         open={!!selected}
@@ -366,12 +212,7 @@ export function StockTransferView() {
         title={selected?.sto_no ?? ""}
         subtitle={selected ? `${selected.from_warehouse_name} → ${selected.to_warehouse_name}` : undefined}
         badge={selected && <StatusPill status={selected.status} />}
-        footer={
-          <>
-            <Button variant="subtle" onClick={() => setSelected(null)}>Close</Button>
-            {selected && stepButton(selected)}
-          </>
-        }
+        footer={<Button variant="subtle" onClick={() => setSelected(null)}>Close</Button>}
       >
         {selected && (
           <>

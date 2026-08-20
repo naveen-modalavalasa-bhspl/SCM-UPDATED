@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill,
+  Button, Can, Card, ErrorBanner, FilterMenu, PageHeader, ResponsiveList, StatusPill,
   Input, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
@@ -39,6 +39,10 @@ const SIZE = 20;
 export function RequisitionListPage() {
   const nav = useNavigate();
   const [status, setStatus] = useState("");
+  // Project and raiser, filtered in the browser over the page in hand — the endpoint
+  // takes neither, and these are the two things a buyer narrows by after status.
+  const [project, setProject] = useState("");
+  const [raiser, setRaiser] = useState("");
   const [search, setSearch] = useState("");
   // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
@@ -54,7 +58,16 @@ export function RequisitionListPage() {
     queryFn: () => requisitionApi.list({ status: status || undefined, search: debouncedSearch || undefined, page, size: SIZE }),
   });
 
-  const rows = data?.items ?? [];
+  const all = data?.items ?? [];
+  const optionsOf = (pick: (r: typeof all[number]) => string | null | undefined) =>
+    [...new Set(all.map(pick).filter(Boolean))]
+      .map((v) => ({ value: v as string, label: v as string }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  const projectOptions = optionsOf((r) => r.project_name);
+  const raiserOptions = optionsOf((r) => r.created_by_name);
+  const rows = all.filter((r) =>
+    (!project || r.project_name === project)
+    && (!raiser || r.created_by_name === raiser));
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
 
   const columns: Column<ReqListRow>[] = [
@@ -119,23 +132,30 @@ export function RequisitionListPage() {
         }
       />
 
-      <div className="mb-4 flex max-w-2xl flex-col gap-4 sm:flex-row">
-        <div className="relative flex-1">
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
+        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search requisitions, projects..."
+            placeholder="Search requisition, project or raiser..."
             className="pl-9"
           />
         </div>
-        <div className="w-full sm:w-64">
-          <Select
-            value={status}
-            options={STATUSES}
-            onChange={(value) => { setStatus(String(value)); }}
-          />
-        </div>
+        <FilterMenu label="Status" value={status} onChange={setStatus}
+                    options={STATUSES.filter((o) => o.value)} />
+        <FilterMenu label="Project" value={project} onChange={setProject}
+                    options={projectOptions} />
+        <FilterMenu label="Raised by" value={raiser} onChange={setRaiser}
+                    options={raiserOptions} />
+        {(search || status || project || raiser) && (
+          <button
+            onClick={() => { setSearch(""); setStatus(""); setProject(""); setRaiser(""); }}
+            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
+          >
+            Clear
+          </button>
+        )}
       </div>
 
       <ErrorBanner error={error} />

@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { PageHeader, Card, ResponsiveGrid, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
+import { Plus } from "lucide-react";
+import { Button, Can, PageHeader, Card, ResponsiveGrid, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { listMaterialRequests } from "../api";
 import type { MaterialRequestListRow } from "../types";
@@ -10,8 +11,12 @@ import { fmtDate } from "@/shared/datetime";
 
 /**
  * Material requests raised when an approved indent could not be filled from stock.
- * Nobody types these: the availability check creates them, so the list is a queue for
- * procurement rather than a place to add a row.
+ *
+ * Most are still written by the availability check rather than by a person, so this
+ * reads as a queue for procurement. It is no longer only that: the shortfall fires on
+ * stock ANYWHERE, so a line the warehouse cannot serve but an LIP point can was never
+ * short and never reached here. Create raises that request by hand, and so does the
+ * per-line button on the allocation screen.
  */
 const STATUSES = [
   { value: "PENDING_APPROVAL", label: "In approval" },
@@ -118,10 +123,21 @@ export function MaterialRequestsPage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Inventory" title="Material Requests" />
+      <PageHeader
+        eyebrow="Inventory"
+        title="Material Requests"
+        actions={
+          <Can do="mr.create">
+            <Button onClick={() => nav("/inventory/material-requests/new")}>
+              <Plus size={16} /> Create MR
+            </Button>
+          </Can>
+        }
+      />
 
       <p className="mb-4 text-sm text-muted">
-        Raised automatically when an approved indent runs short of stock. Procurement picks them up from here.
+        Raised automatically when an approved indent runs short of stock, or by hand for
+        anything the warehouse cannot serve. Procurement picks them up from here.
       </p>
 
       <ResponsiveGrid cols={3} className="mb-4">

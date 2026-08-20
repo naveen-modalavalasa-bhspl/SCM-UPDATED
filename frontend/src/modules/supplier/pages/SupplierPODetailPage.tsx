@@ -13,6 +13,7 @@ import type {
 } from "@/modules/procurement/types";
 import { revisionLines } from "@/modules/procurement/types";
 import { formatPONo } from "@/shared/format";
+import { vendorPoLabel } from "../status";
 
 const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
@@ -227,7 +228,8 @@ export function SupplierPODetailPage() {
         title={formatPONo(po.po_no, po.revision_no)}
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <StatusPill status={po.status} />
+            {/* Vendor-facing wording; the status itself is untouched. */}
+            <StatusPill status={po.status} label={vendorPoLabel(po.status)} />
             {po.vendor_status && <StatusPill status={po.vendor_status} />}
             {/* Not offered until the order has been accepted: a despatch note is a
               * claim against an agreement, so there has to be one. The server refuses

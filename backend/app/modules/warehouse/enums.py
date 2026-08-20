@@ -55,10 +55,15 @@ class InspectionType(str, Enum):
 
 
 class InspectionStatus(str, Enum):
-    """`inb_inspections.status`."""
+    """`inb_inspections.status` and `whs_inspections.status`."""
     DRAFT = "DRAFT"
     IN_PROGRESS = "IN_PROGRESS"
+    # Outward QC only, and only where a QC_OUTWARD ladder is configured: the result is
+    # recorded and waiting on a signature before it may release the material issue.
+    # Inbound inspections never reach this rung.
+    PENDING_APPROVAL = "PENDING_APPROVAL"
     COMPLETED = "COMPLETED"
+    REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
 
 
@@ -232,6 +237,10 @@ class WarehouseDocType(str, Enum):
     DISPATCH = "DISPATCH"
     PURCHASE_RETURN = "PURCHASE_RETURN"
     STOCK_MOVEMENT = "STOCK_MOVEMENT"
+    # The outward check on a posted issue. Same string as
+    # `shared.enums.DocType.QC_OUTWARD`, which is what puts it on Approvals
+    # Config; INSPECTION stays the NUMBERING series for both directions.
+    QC_OUTWARD = "QC_OUTWARD"
     # Not a document — a series, so a lot number is numbered like everything else.
     LOT = "lot"
 

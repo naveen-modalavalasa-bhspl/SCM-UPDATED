@@ -189,6 +189,12 @@ class DocType(str, Enum):
     # at this price". Only ever raised for THIRD_PARTY and COURIER — an own-vehicle or
     # hand-over leg awards nobody and never starts this workflow.
     CARRIER_AWARD = "CARRIER_AWARD"
+    # The outward quality check, after a material issue is posted and before the
+    # consignment may be raised against it. Its own doc type rather than reusing the
+    # issue's: passing QC is a different decision, made by a different desk, on a
+    # document (`whs_inspections`) the issue does not own. Without a row of its own it
+    # could never be configured on Approvals Config at all.
+    QC_OUTWARD = "QC_OUTWARD"
     # Procurement. Many requisitions rolled into one buying sheet, item-wise, so the
     # CPO and the SCM Head see the whole month's demand as one document instead of
     # forty. Approved once; the RFQs that follow point back at it.

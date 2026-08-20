@@ -200,6 +200,16 @@ async def _bin_code(db: AsyncSession, bin_id: int | None) -> str | None:
     return row.code if row else None
 
 
+async def _bin_floor(db: AsyncSession, bin_id: int | None) -> int | None:
+    """Which floor a bin stands on. Already on the bin master and drawn on the floor
+    plan; Stock Segregation showed only the bin code, so "where is this unit" was
+    answered with a code you had to go and look up."""
+    if not bin_id:
+        return None
+    row = await db.get(Bin, bin_id)
+    return getattr(row, "floor_level", None) if row else None
+
+
 async def _warehouse_code(db: AsyncSession, warehouse_id: int | None) -> str | None:
     """For the {warehouse} token in a generated serial or unit code."""
     if not warehouse_id:
@@ -297,6 +307,54 @@ async def _next_lot_no(db: AsyncSession, warehouse: Warehouse, target: Bin) -> s
 # ---------------------------------------------------------------------------
 # Warehouse master
 # ---------------------------------------------------------------------------
+
+
+# FIXED 2026-08-20 — attachments were readable by document id with no visibility check
+# at all: `GET /warehouse/attachments?entity_type=RECEIPT&entity_id=<any>` and
+# `/attachments/{id}/download` took an ARBITRARY entity and served whatever was filed
+# against it, behind `stock.view` alone. That is every scanned invoice, gate pass,
+# damage photo and QC report in the company, reachable by walking ids — and the list
+# endpoints they hang off are all scoped, so the files were the one way around the rung.
+#
+# WITHOUT this, scoping a document's list is decorative: the paperwork attached to it
+# still comes out.
+#
+# The entity types are the four the screens actually use. An unknown type is REFUSED
+# rather than allowed, because a type nobody can map is a document nobody can bound.
+_ATTACHMENT_PARENTS = {
+    "RECEIPT": (lambda: m.Receipt, lambda: m.Receipt.warehouse_id),
+    "INSPECTION": (lambda: m.Inspection, lambda: m.Inspection.warehouse_id),
+    "ISSUE": (lambda: m.MaterialIssue, lambda: m.MaterialIssue.warehouse_id),
+    "DISPATCH": (lambda: m.Dispatch, lambda: m.Dispatch.warehouse_id),
+}
+
+
+async def assert_attachment_scope(db: AsyncSession, user, entity_type: str,
+                                  entity_id: int) -> None:
+    """May this login read the document these files are filed against?"""
+    if user is None:
+        return
+    parent = _ATTACHMENT_PARENTS.get((entity_type or "").upper())
+    if parent is None:
+        raise ValidationError(
+            f"{entity_type!r} is not a document attachments can be read for")
+    model, warehouse_col = parent[0](), parent[1]()
+    allowed = await warehouse_ids_for_user(db, user)
+    stmt = select(model.id).where(model.id == entity_id)
+    if allowed is not None:
+        stmt = stmt.where(warehouse_col.in_(allowed or {0}))
+    if await db.scalar(stmt) is None:
+        # 404, not 403 — an id that is not yours must not confirm it exists.
+        raise NotFoundError(f"{entity_type} {entity_id} not found")
+
+
+async def assert_attachment_readable(db: AsyncSession, user, attachment_id: int) -> None:
+    """Same check, reached from the attachment row rather than the document."""
+    row = await db.get(attachments.Attachment, attachment_id)
+    if row is None:
+        raise NotFoundError(f"Attachment {attachment_id} not found")
+    await assert_attachment_scope(db, user, row.entity_type, row.entity_id)
+
 
 async def list_warehouses(db: AsyncSession, params: PageParams, *, search: str | None = None,
                           is_active: bool | None = None, user=None) -> dict:
@@ -918,8 +976,37 @@ async def list_receipts(db: AsyncSession, params: PageParams, *, receipt_type: s
     return await paginate(db, stmt.order_by(m.Receipt.id.desc()), params)
 
 
-async def get_receipt(db: AsyncSession, receipt_id: int) -> m.Receipt:
+
+# FIXED 2026-08-20 — the warehouse LISTS were all scoped and the DETAIL endpoints were
+# not, which is the whole point of scoping a list away again: a login could not see a
+# receipt on the register and could still open it by putting its id in the URL. Every
+# `GET /{id}` on a warehouse document now runs the same rung its list runs, and answers
+# 404 — not 403 — for a document out of scope, so an id that is not yours does not even
+# confirm it exists.
+#
+# WITHOUT this, `warehouse_ids_for_user` bounds what people BROWSE and nothing at all
+# about what they can READ.
+async def _assert_in_scope(db: AsyncSession, user, model, obj, *,
+                           warehouse_col=None, owner_col=None, label: str = "Document"):
+    if user is None or obj is None:
+        return obj
+    stmt = select(model.id).where(model.id == obj.id)
+    stmt = stmt.where(await scope_condition(
+        db, user,
+        warehouse_col=warehouse_col,
+        warehouse_ids=await warehouse_ids_for_user(db, user),
+        owner_col=owner_col,
+    ))
+    if await db.scalar(stmt) is None:
+        raise NotFoundError(f"{label} {obj.id} not found")
+    return obj
+
+
+async def get_receipt(db: AsyncSession, receipt_id: int, user=None) -> m.Receipt:
     receipt = await _load(db, m.Receipt, receipt_id, "Receipt", m.Receipt.items)
+    await _assert_in_scope(db, user, m.Receipt, receipt,
+                           warehouse_col=m.Receipt.warehouse_id,
+                           owner_col=m.Receipt.created_by_id, label="Receipt")
     item_ids = {line.item_id for line in receipt.items}
     if item_ids:
         rows = (await db.execute(
@@ -2341,8 +2428,14 @@ async def list_inspections(db: AsyncSession, params: PageParams, *,
     return await paginate(db, stmt.order_by(m.Inspection.id.desc()), params)
 
 
-async def get_inspection(db: AsyncSession, inspection_id: int) -> m.Inspection:
-    return await _load(db, m.Inspection, inspection_id, "Inspection", m.Inspection.items)
+async def get_inspection(db: AsyncSession, inspection_id: int, user=None) -> m.Inspection:
+    inspection = await _load(db, m.Inspection, inspection_id, "Inspection",
+                             m.Inspection.items)
+    # FIXED — see `_assert_in_scope`. `whs_inspections` has no owner column, so the
+    # warehouse is the only dimension; that is the same one `list_inspections` uses.
+    return await _assert_in_scope(db, user, m.Inspection, inspection,
+                                  warehouse_col=m.Inspection.warehouse_id,
+                                  label="Inspection")
 
 
 async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
@@ -2772,8 +2865,12 @@ async def list_putaways(db: AsyncSession, params: PageParams, *, status: str | N
     return page
 
 
-async def get_putaway(db: AsyncSession, task_id: int) -> dict:
+async def get_putaway(db: AsyncSession, task_id: int, user=None) -> dict:
     task = await _get(db, m.PutawayTask, task_id, "Putaway task")
+    # FIXED — see `_assert_in_scope`.
+    await _assert_in_scope(db, user, m.PutawayTask, task,
+                           warehouse_col=m.PutawayTask.warehouse_id,
+                           label="Putaway task")
     return await _decorate_putaway(db, task)
 
 
@@ -3591,7 +3688,7 @@ async def get_stock_movement_order(db: AsyncSession, order_no: str) -> dict:
 
 
 async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
-                                     search: str | None = None) -> dict:
+                                     search: str | None = None, user=None) -> dict:
     """Multi-line bin-to-bin movements, rebuilt from the ledger.
 
     There is no header table. `whs_stock_movement_orders` and its items table were
@@ -3619,6 +3716,17 @@ async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
                StockMovement.direction == StockDirection.OUT.value)
         .group_by(StockMovement.ref_no)
     )
+    # FIXED 2026-08-20 — same leak as `list_stock_movements`, and it has to be applied
+    # BEFORE the GROUP BY: filtering afterwards would still count another warehouse's
+    # lines into this login's totals even where the row itself was hidden.
+    if user is not None:
+        grouped = grouped.where(await scope_condition(
+            db, user,
+            warehouse_col=StockMovement.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            project_col=StockMovement.project_id,
+            owner_col=StockMovement.created_by_id,
+        ))
     if search:
         like = f"%{search}%"
         grouped = grouped.having(or_(
@@ -3797,13 +3905,27 @@ async def create_stock_movement_order(
     }
 
 
-async def list_stock_movements(db: AsyncSession, params: PageParams) -> dict:
+async def list_stock_movements(db: AsyncSession, params: PageParams, user=None) -> dict:
+    """FIXED 2026-08-20 — was unscoped while every other warehouse list on this screen
+    obeys a rung. A stock movement is a fact about a WAREHOUSE, so with no rung the
+    Stock Movements register showed bin-to-bin moves at all 983 stocking points to
+    anyone holding `stock.view`. WITHOUT this a storekeeper reads what every other
+    branch shifted, and the warehouse rung on Job Profiles is silently ignored on one
+    screen out of a dozen."""
     from app.modules.inventory.models import StockMovement
 
     stmt = select(StockMovement).where(
         StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
         StockMovement.direction == StockDirection.OUT.value,
     )
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=StockMovement.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            project_col=StockMovement.project_id,
+            owner_col=StockMovement.created_by_id,
+        ))
     page = await paginate(db, stmt.order_by(StockMovement.id.desc()), params)
     rows: list[dict] = []
     for outward in page["items"]:
@@ -3898,8 +4020,13 @@ async def list_pickings(db: AsyncSession, params: PageParams, *, status: str | N
     return await paginate(db, stmt.order_by(m.Picking.id.desc()), params)
 
 
-async def get_picking(db: AsyncSession, picking_id: int) -> m.Picking:
-    return await _load(db, m.Picking, picking_id, "Material fulfilment", m.Picking.items)
+async def get_picking(db: AsyncSession, picking_id: int, user=None) -> m.Picking:
+    picking = await _load(db, m.Picking, picking_id, "Material fulfilment",
+                          m.Picking.items)
+    # FIXED — see `_assert_in_scope`.
+    return await _assert_in_scope(db, user, m.Picking, picking,
+                                  warehouse_col=m.Picking.warehouse_id,
+                                  label="Material fulfilment")
 
 
 # ---------------------------------------------------------------------------
@@ -8692,6 +8819,10 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
             "item_id": item_id, "warehouse_id": warehouse_id,
             "bin_id": bin_id, "batch_id": batch_id,
             "count": 0, "serials": [], "imeis": [], "codes": [],
+            # Split by kind as well as merged: the stock ledger gives an asset code and
+            # a consumable code a column each, and one unit is only ever one of the two.
+            "asset_codes": [], "consumable_codes": [],
+            "asset_count": 0, "consumable_count": 0,
         })
         bucket["count"] += 1
         # Five is enough to recognise the lot; the rest are behind the detail panel.
@@ -8702,6 +8833,14 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
         code = asset or consumable
         if code and len(bucket["codes"]) < 5:
             bucket["codes"].append(code)
+        if asset:
+            bucket["asset_count"] += 1
+            if len(bucket["asset_codes"]) < 5:
+                bucket["asset_codes"].append(asset)
+        elif consumable:
+            bucket["consumable_count"] += 1
+            if len(bucket["consumable_codes"]) < 5:
+                bucket["consumable_codes"].append(consumable)
     return list(grouped.values())
 
 
@@ -8760,14 +8899,28 @@ async def _decorate_serial(db: AsyncSession, row: m.SerialNumber) -> dict:
         "expiry_date": batch.expiry_date if batch else None,
         "warehouse_id": row.warehouse_id, "warehouse_name": wh.name if wh else None,
         "bin_id": row.bin_id, "bin_code": await _bin_code(db, row.bin_id),
+        "bin_floor_level": await _bin_floor(db, row.bin_id),
         "asset_code": row.asset_code, "consumable_code": row.consumable_code,
         "status": row.status, "remarks": row.remarks, "is_active": row.is_active,
     }
 
 
 async def list_batches(db: AsyncSession, params: PageParams, *, item_id: int | None = None,
-                       expiring_days: int | None = None, search: str | None = None) -> dict:
+                       expiring_days: int | None = None, search: str | None = None,
+                       user=None) -> dict:
+    """FIXED 2026-08-20 — was unscoped. `whs_batches` carries the VENDOR a batch came
+    from and the GRN it landed on, so an unscoped register told every stock viewer who
+    supplies which branch. It has no warehouse column of its own, so it is bounded
+    through the stock that actually holds the batch — the same warehouse rung the
+    balance grid uses, which keeps the two screens agreeing about which shelves a login
+    owns."""
     stmt = select(m.Batch)
+    if user is not None:
+        allowed = await warehouse_ids_for_user(db, user)
+        if allowed is not None:
+            from app.modules.inventory.models import Stock
+            stmt = stmt.where(m.Batch.id.in_(
+                select(Stock.batch_id).where(Stock.warehouse_id.in_(allowed or {0}))))
     if item_id:
         stmt = stmt.where(m.Batch.item_id == item_id)
     if expiring_days is not None:
@@ -8806,12 +8959,46 @@ async def _dispatch_lines(db: AsyncSession, dispatch_id: int) -> list[m.Dispatch
     )).all())
 
 
-def _scan_line(line: m.DispatchItem, package_no: str | None = None) -> s.ScanLine:
+def _scan_line(line: m.DispatchItem, package_no: str | None = None,
+               unit_code: str | None = None) -> s.ScanLine:
     return s.ScanLine(
         item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
         quantity=line.quantity or Decimal(0), batch_no=line.batch_no,
         serial_no=line.serial_no, package_no=package_no,
+        imei_no=line.imei_no, expiry_date=line.expiry_date, unit_code=unit_code,
     )
+
+
+async def _unit_codes(db: AsyncSession,
+                      lines: list[m.DispatchItem]) -> dict[tuple[int, int | None], str]:
+    """The asset / consumable code for each (item, batch) a scan is about to show.
+
+    One query for the whole scan, not one per line. The codes live on `stk_balance`
+    (put-away mints them there), and warehouse may not import inventory's service —
+    rule 5 — so this reads the model directly and writes nothing.
+    """
+    # Imported here, as elsewhere in this file: the model is inventory's and a
+    # module-level import of it is not worth widening for one lookup.
+    from app.modules.inventory.models import Stock
+
+    keys = {(line.item_id, line.batch_id) for line in lines if line.item_id}
+    if not keys:
+        return {}
+    rows = (await db.execute(
+        select(Stock.item_id, Stock.batch_id, Stock.asset_code, Stock.consumable_code)
+        .where(Stock.item_id.in_({item_id for item_id, _ in keys}))
+    )).all()
+    found: dict[tuple[int, int | None], str] = {}
+    for item_id, batch_id, asset_code, consumable_code in rows:
+        code = asset_code or consumable_code
+        if code:
+            found.setdefault((item_id, batch_id), code)
+    # Fall back to any code held for the item when the batch does not line up: an
+    # allocation-drafted issue carries no batch_id, and "no code at all" is a worse
+    # answer than the code the item's stock actually holds.
+    by_item = {item_id: code for (item_id, _), code in found.items()}
+    return {key: found.get(key) or by_item.get(key[0]) for key in keys
+            if found.get(key) or by_item.get(key[0])}
 
 
 async def _scanned_dispatch(db: AsyncSession, dispatch: m.Dispatch) -> s.ScanResult:
@@ -8824,6 +9011,7 @@ async def _scanned_dispatch(db: AsyncSession, dispatch: m.Dispatch) -> s.ScanRes
     by_package: dict[int | None, list[m.DispatchItem]] = defaultdict(list)
     for line in lines:
         by_package[line.package_id].append(line)
+    unit_codes = await _unit_codes(db, lines)
 
     return s.ScanResult(
         kind="DISPATCH", id=dispatch.id, doc_no=dispatch.dispatch_no,
@@ -8851,7 +9039,8 @@ async def _scanned_dispatch(db: AsyncSession, dispatch: m.Dispatch) -> s.ScanRes
         ],
         # Unpacked lines included: a consignment scanned mid-packing must still say
         # what it is carrying, not report an empty load.
-        items=[_scan_line(line) for line in lines],
+        items=[_scan_line(line, unit_code=unit_codes.get((line.item_id, line.batch_id)))
+               for line in lines],
         package_count=len(packages),
         item_count=len(lines),
         total_qty=sum((line.quantity or Decimal(0) for line in lines), Decimal(0)),
@@ -8879,6 +9068,7 @@ async def _scanned_package(db: AsyncSession, value: str) -> s.ScanResult | None:
     dispatch = await db.get(m.Dispatch, pkg.dispatch_id)
     lines = [line for line in await _dispatch_lines(db, pkg.dispatch_id)
              if line.package_id == pkg.id]
+    unit_codes = await _unit_codes(db, lines)
     return s.ScanResult(
         kind="PACKAGE", id=pkg.id, doc_no=pkg.barcode or pkg.package_no,
         deep_link=f"/warehouse/dispatch/consignments/{pkg.dispatch_id}",
@@ -8891,7 +9081,9 @@ async def _scanned_package(db: AsyncSession, value: str) -> s.ScanResult | None:
             {"label": "Consignment", "value": dispatch.dispatch_no if dispatch else None},
             {"label": "Destination", "value": _dispatch_destination(dispatch) if dispatch else None},
         ],
-        items=[_scan_line(line, pkg.package_no) for line in lines],
+        items=[_scan_line(line, pkg.package_no,
+                          unit_codes.get((line.item_id, line.batch_id)))
+               for line in lines],
         item_count=len(lines),
         total_qty=sum((line.quantity or Decimal(0) for line in lines), Decimal(0)),
     )
@@ -9238,12 +9430,26 @@ async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str 
     from app.modules.indents.service import _RECEIVABLE_STATUSES
 
     visible_statuses = tuple(_RECEIVABLE_STATUSES | {IndentStatus.CLOSED.value})
+    # The person AND the hat they are wearing. `requested_by_id` alone identifies the
+    # employee, and an employee holds more than one position — a storekeeper who also
+    # drives read both sets of indents here from either session, because this endpoint
+    # is the one indent list that does not go through `indent_access_condition` (which
+    # ANDs exactly this predicate for exactly this reason). Nothing in RBAC could fix
+    # it: no scope rung was ever consulted.
+    #
+    # A NULL `position_id` stays visible. Those are indents raised before the column
+    # was written, they belong to no hat, and dropping them would take a requester's
+    # own delivery off the only screen that confirms it.
+    position_id = getattr(user, "active_position_id", None)
     stmt = (
         select(Indent)
         .options(selectinload(Indent.items))
         .where(Indent.requested_by_id == getattr(user, "id", 0),
                Indent.status.in_(visible_statuses))
     )
+    if position_id is not None:
+        stmt = stmt.where(or_(Indent.position_id == position_id,
+                              Indent.position_id.is_(None)))
     if status:
         stmt = stmt.where(Indent.status == status)
     if search:
@@ -10410,6 +10616,50 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
     }
 
 
+async def inspectable_issue_options(db: AsyncSession,
+                                    search: str | None = None) -> list[dict]:
+    """Posted outward issues that still owe an outward QC.
+
+    Deliberately NOT `issue_options`. That one lists what may be DISPATCHED, so it
+    excludes exactly the issues this screen exists to inspect (`qc_status` PENDING or
+    FAILED) — pointing the Outward QC lookup at it would have offered a list of issues
+    the create guard then refuses one by one.
+
+    The pair it does share with `create_outbound_inspection` is the guard itself: an
+    issue already carrying a live inspection is off the list, because raising a second
+    one against it is refused there.
+    """
+    inspected = set((await db.execute(
+        select(m.OutboundInspection.issue_id).where(
+            m.OutboundInspection.status.notin_([
+                InspectionStatus.CANCELLED.value,
+                InspectionStatus.REJECTED.value,
+            ]),
+            m.OutboundInspection.issue_id.isnot(None),
+        )
+    )).scalars().all())
+    stmt = select(m.MaterialIssue).where(
+        m.MaterialIssue.direction == IssueDirection.OUT.value,
+        m.MaterialIssue.is_stock_posted.is_(True),
+        m.MaterialIssue.qc_status.in_([QcStatus.PENDING.value, QcStatus.FAILED.value]),
+    )
+    if inspected:
+        stmt = stmt.where(m.MaterialIssue.id.notin_(inspected))
+    if search:
+        stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
+    rows = (await db.execute(
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+    )).scalars().all()
+    return [
+        {
+            "id": row.id,
+            "code": row.issue_no,
+            "name": row.issued_to_name or row.department_name or row.issue_no,
+        }
+        for row in rows
+    ]
+
+
 async def issue_options(db: AsyncSession, search: str | None = None) -> list[dict]:
     """Posted outward issues that have not already become a dispatch."""
     used = set((await db.execute(
@@ -11252,7 +11502,13 @@ async def create_outbound_inspection(db: AsyncSession, data: s.OutboundInspectio
         existing = await db.scalar(
             select(m.OutboundInspection).where(
                 m.OutboundInspection.issue_id == issue.id,
-                m.OutboundInspection.status != InspectionStatus.CANCELLED.value,
+                # REJECTED counts as gone, like CANCELLED: an approver who sent the
+                # check back has ended it, and refusing a fresh one would leave the
+                # issue stuck at PENDING QC with no way to inspect it again.
+                m.OutboundInspection.status.notin_([
+                    InspectionStatus.CANCELLED.value,
+                    InspectionStatus.REJECTED.value,
+                ]),
             ).limit(1)
         )
         if existing is not None:
@@ -11312,15 +11568,97 @@ async def update_outbound_inspection(db: AsyncSession, inspection_id: int, data:
     await db.commit()
     return await get_outbound_inspection(db, inspection_id)
 
+def _outbound_inspection_context(inspection: m.OutboundInspection, user) -> dict:
+    return {
+        "doc_no": inspection.inspection_no,
+        "doc_summary": f"Outward QC {inspection.inspection_no}",
+        "warehouse_id": inspection.warehouse_id,
+        "issue_no": inspection.issue_no,
+        "failed_items": inspection.failed_items,
+        "requester_position_id": getattr(user, "active_position_id", None),
+    }
+
+
+async def _apply_outbound_inspection_result(db: AsyncSession,
+                                            inspection: m.OutboundInspection) -> str:
+    """Complete the check and hand the verdict to the material issue.
+
+    Split out of `complete_outbound_inspection` so approval can reach it too: where a
+    ladder is configured the verdict is applied when the last approver signs, not when
+    the inspector saves. Neither commits nor audits; the caller owns both.
+    """
+    inspection.status = InspectionStatus.COMPLETED.value
+
+    issue = await get_issue(db, inspection.issue_id)
+    if inspection.passed_items == len(inspection.items):
+        issue.qc_status = QcStatus.PASSED.value
+    elif inspection.failed_items == len(inspection.items):
+        issue.qc_status = QcStatus.FAILED.value
+    else:
+        issue.qc_status = QcStatus.PARTIAL.value
+    return issue.qc_status
+
+
+async def _outbound_inspection_approval_pending(db: AsyncSession,
+                                                inspection: m.OutboundInspection,
+                                                user) -> bool:
+    """Does this check owe a signature before it may release the issue?
+
+    Deliberately conditional on a QC_OUTWARD ladder EXISTING for this project, the
+    same contract `_dispatch_approval_pending` keeps. Where nobody has configured one
+    - every project today - this returns False and the inspector's Complete finishes
+    the check on the spot, exactly as before. Configuring a chain on Approvals Config
+    is what turns the step on, which is the whole point of that screen.
+
+    Returns True when the caller should stop and leave the document in approval.
+    """
+    project_id, _project_name = await wf_ladder.project_for(
+        db, getattr(user, "active_position_id", None), user)
+    if await wf_ladder.find_ladder(
+            db, project_id, WarehouseDocType.QC_OUTWARD.value) is None:
+        return False
+
+    instance = (await db.execute(
+        select(WfInstance)
+        .where(WfInstance.doc_type == WarehouseDocType.QC_OUTWARD.value,
+               WfInstance.doc_id == inspection.id)
+        .order_by(WfInstance.id.desc()).limit(1)
+    )).scalars().first()
+    if instance is not None and instance.status == InstanceStatus.APPROVED.value:
+        return False
+    if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
+        raise ValidationError(
+            f"{inspection.inspection_no} is waiting on "
+            f"{inspection.current_approver_name or 'approval'}"
+        )
+
+    # Never submitted. Start the chain rather than refusing: to the inspector,
+    # Complete means "I am done with this check", and where the project asks for a
+    # signature that means sending it, not an error pointing at another button. A
+    # chain that resolves to NO_APPROVAL comes back approved immediately and the
+    # verdict is applied by the caller.
+    started = await engine.start(
+        db, WarehouseDocType.QC_OUTWARD.value, inspection.id,
+        _outbound_inspection_context(inspection, user), user)
+    if started.status == InstanceStatus.APPROVED.value:
+        inspection.current_approver_name = None
+        return False
+    inspection.status = InspectionStatus.PENDING_APPROVAL.value
+    inspection.current_approver_name = _approver_label(
+        await engine.current_approvers(
+            db, WarehouseDocType.QC_OUTWARD.value, inspection.id))
+    return True
+
+
 async def complete_outbound_inspection(db: AsyncSession, inspection_id: int, user) -> m.OutboundInspection:
     inspection = await get_outbound_inspection(db, inspection_id)
     _guard(inspection.status,
            {InspectionStatus.DRAFT.value, InspectionStatus.IN_PROGRESS.value},
            "complete", "outbound inspection")
-           
+
     if not inspection.items:
         raise ValidationError("Cannot complete an empty inspection")
-        
+
     for line in inspection.items:
         if line.result == InspectionResult.PENDING.value:
             raise ValidationError(
@@ -11328,29 +11666,83 @@ async def complete_outbound_inspection(db: AsyncSession, inspection_id: int, use
                 "Record a result for every item before completing the inspection."
             )
 
-    inspection.status = InspectionStatus.COMPLETED.value
-    
-    # Update Material Issue qc_status
-    issue = await get_issue(db, inspection.issue_id)
-    if inspection.passed_items == len(inspection.items):
-         issue.qc_status = QcStatus.PASSED.value
-    elif inspection.failed_items == len(inspection.items):
-         issue.qc_status = QcStatus.FAILED.value
-    else:
-         issue.qc_status = QcStatus.PARTIAL.value
+    before = inspection.status
+    if await _outbound_inspection_approval_pending(db, inspection, user):
+        # Now with its approvers. The issue keeps its PENDING qc_status until they sign.
+        await write_audit(db, entity="whs_inspections", entity_id=inspection.id,
+                          entity_no=inspection.inspection_no, action=AuditAction.UPDATE,
+                          actor=user, before={"status": before},
+                          after={"status": inspection.status,
+                                 "current_approver_name": inspection.current_approver_name})
+        await db.commit()
+        return await get_outbound_inspection(db, inspection_id)
+
+    qc_status = await _apply_outbound_inspection_result(db, inspection)
 
     await write_audit(db, entity="whs_inspections", entity_id=inspection.id,
                       entity_no=inspection.inspection_no, action=AuditAction.UPDATE, actor=user,
-                      before={"status": InspectionStatus.IN_PROGRESS.value},
-                      after={"status": inspection.status, "issue_qc_status": issue.qc_status})
+                      before={"status": before},
+                      after={"status": inspection.status, "issue_qc_status": qc_status})
     await db.commit()
-    return inspection
+    return await get_outbound_inspection(db, inspection_id)
+
+
+async def act_on_outbound_inspection(db: AsyncSession, inspection_id: int, action: str,
+                                     comments: str, user) -> m.OutboundInspection:
+    """Approve or reject an outward check that is waiting on a signature.
+
+    The engine owns the chain; this owns the document status and the verdict it
+    releases. A rejection stops the material issue moving on at all rather than
+    passing it with a note - the consignment guard reads `qc_status`, and it cannot
+    tell the difference between the two.
+    """
+    inspection = await get_outbound_inspection(db, inspection_id)
+    _guard(inspection.status, {InspectionStatus.PENDING_APPROVAL.value},
+           action.lower(), "outbound inspection")
+
+    before = inspection.status
+    instance = await engine.act(
+        db, WarehouseDocType.QC_OUTWARD.value, inspection.id, action, user, comments,
+        context=_outbound_inspection_context(inspection, user),
+    )
+    after: dict = {}
+    if instance.status == InstanceStatus.APPROVED.value:
+        after["issue_qc_status"] = await _apply_outbound_inspection_result(db, inspection)
+        inspection.approved_by_name = _name(user)
+        inspection.approved_at = utcnow()
+        inspection.current_approver_name = None
+    elif instance.status == InstanceStatus.REJECTED.value:
+        inspection.status = InspectionStatus.REJECTED.value
+        inspection.current_approver_name = None
+    else:
+        inspection.current_approver_name = _approver_label(
+            await engine.current_approvers(
+                db, WarehouseDocType.QC_OUTWARD.value, inspection.id))
+
+    after["status"] = inspection.status
+    await write_audit(db, entity="whs_inspections", entity_id=inspection.id,
+                      entity_no=inspection.inspection_no, action=AuditAction.UPDATE,
+                      actor=user, before={"status": before}, after=after)
+    await db.commit()
+    return await get_outbound_inspection(db, inspection_id)
+
 
 async def list_outbound_inspections(db: AsyncSession, params: PageParams,
                                     status: str | None = None,
                                     warehouse_id: int | None = None,
-                                    search: str | None = None) -> dict:
+                                    search: str | None = None, user=None) -> dict:
     stmt = select(m.OutboundInspection).where(m.OutboundInspection.status != InspectionStatus.CANCELLED.value)
+    if user is not None:
+        # The same rung every other warehouse list obeys - this one read the whole
+        # network, so an Outward QC screen showed checks run at points the login has
+        # never held. Falls back to the inspector's own rows for the reason
+        # `list_inspections` does: their signature is on the document.
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.OutboundInspection.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+            owner_col=m.OutboundInspection.inspector_id,
+        ))
     if status:
         stmt = stmt.where(m.OutboundInspection.status == status)
     if warehouse_id:

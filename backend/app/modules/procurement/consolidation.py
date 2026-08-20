@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.shared.scope import scope_condition
 from app.modules.procurement.models import (
     PurchaseConsolidation, PurchaseConsolidationItem, PurchaseConsolidationSource,
     Requisition, RequisitionItem,
@@ -65,8 +66,26 @@ def _d(value) -> Decimal:
 #  Reads
 # --------------------------------------------------------------------------- #
 
-async def get_consolidation(db: AsyncSession, cons_id: int) -> PurchaseConsolidation:
-    doc = await db.get(PurchaseConsolidation, cons_id)
+async def get_consolidation(db: AsyncSession, cons_id: int,
+                            user=None) -> PurchaseConsolidation:
+    """FIXED 2026-08-20 — detail ignored the rung the register now obeys, so a sheet
+    hidden from the list opened by id with every source requisition and its value on it.
+    WITHOUT this the rung on `list_consolidations` is a display filter. 404, not 403 —
+    an id that is not yours must not confirm it exists.
+
+    Every reader of a sheet goes through here (`sources`, `history`, `approvals` all
+    load it first), so one check covers the family.
+    """
+    stmt = select(PurchaseConsolidation).where(PurchaseConsolidation.id == cons_id)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            owner_col=PurchaseConsolidation.created_by_id,
+            position_col=PurchaseConsolidation.created_position_id,
+            project_col=PurchaseConsolidation.project_id,
+            warehouse_col=PurchaseConsolidation.warehouse_id,
+        ))
+    doc = (await db.execute(stmt)).scalar_one_or_none()
     if doc is None:
         raise NotFoundError(f"Consolidated sheet {cons_id} not found")
     return doc
@@ -74,8 +93,26 @@ async def get_consolidation(db: AsyncSession, cons_id: int) -> PurchaseConsolida
 
 async def list_consolidations(db: AsyncSession, params: PageParams,
                               status: str | None = None,
-                              project_id: int | None = None) -> dict:
+                              project_id: int | None = None,
+                              user=None) -> dict:
+    """FIXED 2026-08-20 — was unscoped. A consolidation sheet gathers many requisitions
+    and carries the estimated spend for all of them, so with no rung the register put
+    every project's buying plan and its value in front of anyone holding
+    `consolidation.view`. WITHOUT this the project and office rungs on Job Profiles had
+    no effect on the one screen that aggregates everything.
+
+    The table carries `created_by_id`, `created_position_id`, `project_id` and
+    `warehouse_id`, so every rung has a real column to land on.
+    """
     stmt = select(PurchaseConsolidation)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            owner_col=PurchaseConsolidation.created_by_id,
+            position_col=PurchaseConsolidation.created_position_id,
+            project_col=PurchaseConsolidation.project_id,
+            warehouse_col=PurchaseConsolidation.warehouse_id,
+        ))
     if status:
         wanted = [s.strip().upper() for s in status.split(",") if s.strip()]
         stmt = stmt.where(PurchaseConsolidation.status.in_(wanted))
@@ -94,7 +131,11 @@ async def list_consolidations(db: AsyncSession, params: PageParams,
     return page
 
 
-async def sources_of(db: AsyncSession, cons_id: int) -> list[PurchaseConsolidationSource]:
+async def sources_of(db: AsyncSession, cons_id: int,
+                     user=None) -> list[PurchaseConsolidationSource]:
+    # FIXED — the sheet's own rung, applied by loading it first. Without this the
+    # source requisitions of a sheet the login may not see were readable by id.
+    await get_consolidation(db, cons_id, user=user)
     return list((await db.execute(
         select(PurchaseConsolidationSource)
         .where(PurchaseConsolidationSource.consolidation_id == cons_id)
@@ -516,6 +557,6 @@ async def cancel_consolidation(db: AsyncSession, cons_id: int, user,
     return doc
 
 
-async def history(db: AsyncSession, cons_id: int) -> list:
-    doc = await get_consolidation(db, cons_id)
+async def history(db: AsyncSession, cons_id: int, user=None) -> list:
+    doc = await get_consolidation(db, cons_id, user=user)
     return await engine.history(db, DocType.CONSOLIDATION.value, doc.id)

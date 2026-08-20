@@ -20,6 +20,24 @@ import type { Receipt } from "../types";
  * — still at the gate (draft), or turned into a GRN (done).
  */
 
+/** `inb_receipts.status` — the same column and the same values the GRN screen filters
+ *  on, because it is the same table. NOT the DRAFT/DONE the rows display: that is
+ *  derived from `receipt_type` (has this entry become a GRN yet) and filtering on it
+ *  would need a parameter the list endpoint does not take. Live gate-register rows
+ *  carry SUBMITTED and COMPLETED, so a GATE_ENTRY/DRAFT dropdown would have narrowed
+ *  every search to nothing. */
+const STATUSES = [
+  { value: "DRAFT", label: "Draft" },
+  { value: "GATE_ENTRY", label: "At the gate" },
+  { value: "SUBMITTED", label: "Submitted" },
+  { value: "PENDING_QC", label: "Awaiting QC" },
+  { value: "QC_PASSED", label: "QC passed" },
+  { value: "QC_FAILED", label: "QC failed" },
+  { value: "PARTIALLY_RECEIVED", label: "Partially received" },
+  { value: "COMPLETED", label: "Completed" },
+  { value: "CANCELLED", label: "Cancelled" },
+];
+
 /** Draft while the row is still typed as a gate entry; done once it became a GRN. */
 const isDraft = (r: Receipt) => r.receipt_type === "GATE_ENTRY";
 
@@ -87,6 +105,11 @@ export default function MaterialInward() {
       keyOf={(r) => r.id}
       searchIn={(r) => [r.gate_entry_no, r.grn_no, r.vendor_name, r.vehicle_no, r.invoice_no, r.lr_no, r.po_no]}
       searchPlaceholder="Search gate entry, vehicle, invoice or LR…"
+      // The gate register had a search box and nothing else, so narrowing it to
+      // "what is still open" or "what came into this point" meant reading the whole
+      // list. Both filters are served by `listReceipts` already — the list was simply
+      // not asking for them.
+      statuses={STATUSES}
       createTo="new"
       createLabel="New gate entry"
       createPermission="grn.create"

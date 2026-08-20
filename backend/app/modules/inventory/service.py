@@ -18,7 +18,7 @@ from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation, availability, locations
 from app.modules.inventory.enums import AdjustmentStatus, CycleCountStatus, STOStatus
 from app.modules.inventory.models import (
-    NO_BATCH, NO_BIN, NO_PROJECT, MaterialRequest, MaterialRequestItem, Stock,
+    NO_BATCH, NO_BIN, NO_PROJECT, Allocation, MaterialRequest, MaterialRequestItem, Stock,
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
     StockTransferOrderItem, CycleCount, CycleCountItem, Reservation,
 )
@@ -853,6 +853,20 @@ async def list_movements(db: AsyncSession, params: PageParams,
                    Stock.warehouse_id.in_({k[1] for k in keys}))
         )).all()
         codes = {(l[0], l[1], l[2], l[3], l[4]): (l[5], l[6], l[7]) for l in lots}
+    # Which of these items actually carries a serial. `whs_serial_numbers.serial_number`
+    # is NOT NULL and UNIQUE, so putaway writes the minted asset / consumable code into
+    # it for an item that has no real serial of its own — and that same string then
+    # travelled into `stk_ledger.serial_numbers` and surfaced under "Serial / IMEI".
+    # Same rule the warehouse applies in `serial_summary`: only a serial-tracked item
+    # has serials; for every other item the string IS the unit code and belongs in the
+    # asset or the consumable column, which is where it is put below.
+    flags = {}
+    if keys:
+        flags = {r[0]: (bool(r[1]), bool(r[2])) for r in (await db.execute(
+            select(Item.id, Item.is_serial_tracked, Item.is_asset)
+            .where(Item.id.in_({k[0] for k in keys}))
+        )).all()}
+
     for row in page["items"]:
         asset, consumable, serial = codes.get(
             (row.item_id, row.warehouse_id, row.bin_id, row.batch_id, row.project_id),
@@ -861,7 +875,19 @@ async def list_movements(db: AsyncSession, params: PageParams,
         row.consumable_code = consumable
         # Ledger rows written before serial_numbers was mapped carry NULL; the lot's
         # own serial is the best answer available for those.
-        row.serial_numbers = row.serial_numbers or serial
+        units = row.serial_numbers or serial
+        # Unknown item (deleted master) keeps the old behaviour rather than silently
+        # re-filing somebody's serials as consumable codes.
+        serial_tracked, is_asset = flags.get(row.item_id, (True, False))
+        if serial_tracked:
+            row.serial_numbers = units
+        else:
+            row.serial_numbers = None
+            code = ", ".join(units) if units else None
+            if is_asset:
+                row.asset_code = asset or code
+            else:
+                row.consumable_code = consumable or code
     return page
 
 
@@ -1016,6 +1042,19 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
             # not create two purchase demands for the same shortage.
             return existing
 
+    return await _raise_mr(db, indent_id, indent_no, shortfalls, user, ctx)
+
+
+async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | None,
+                    lines: list[dict], user, ctx: dict) -> MaterialRequest:
+    """Write one material request and put it into approval.
+
+    The single writer, shared by the automatic shortfall path above and the manual
+    one below. Both doors have to produce the SAME document — same numbering, same
+    `engine.start` on DocType.MR, same status arithmetic, same audit row — or
+    `act_on_mr` is approving two different shapes and the ladder only governs one
+    of them.
+    """
     mr = MaterialRequest(
         mr_no=await next_number(db, "mr", project=ctx.get("project_name")),
         mr_date=utcnow().date(),
@@ -1030,12 +1069,13 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
         status=MRStatus.DRAFT.value,
         priority=ctx.get("priority") or Priority.NORMAL.value,
         required_by=ctx.get("required_by"),
-        remarks=f"Raised automatically for {indent_no}" if indent_no else None,
+        remarks=ctx.get("remarks") or (
+            f"Raised automatically for {indent_no}" if indent_no else None),
     )
     db.add(mr)
     await db.flush()
 
-    for line_no, line in enumerate(shortfalls, start=1):
+    for line_no, line in enumerate(lines, start=1):
         db.add(MaterialRequestItem(
             mr_id=mr.id, line_no=line_no, item_id=line["item_id"],
             item_code=line.get("item_code"), item_name=line.get("item_name"),
@@ -1057,7 +1097,7 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
             # allocation that raised it.
             "project_id": mr.project_id,
             "requester_position_id": ctx.get("requester_position_id"),
-            "total_quantity": float(sum(_d(s["quantity"]) for s in shortfalls)),
+            "total_quantity": float(sum(_d(s["quantity"]) for s in lines)),
         },
         user=user,
     )
@@ -1074,7 +1114,7 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
     await write_audit(
         db, entity="inv_material_requests", entity_id=mr.id, entity_no=mr.mr_no,
         action=AuditAction.CREATE, actor=user,
-        after={"status": mr.status, "indent_no": indent_no, "lines": len(shortfalls)},
+        after={"status": mr.status, "indent_no": indent_no, "lines": len(lines)},
         summary=f"Material request raised for {indent_no or 'manual entry'}",
     )
     await rules.safe_fire(
@@ -1083,13 +1123,106 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
         {
             "mr_id": mr.id,
             "indent_id": indent_id,
-            "quantity": float(sum(_d(s["quantity"]) for s in shortfalls)),
+            "quantity": float(sum(_d(s["quantity"]) for s in lines)),
             "department_id": mr.department_id,
         },
         doc_type=DocType.MR.value,
         doc_id=mr.id,
     )
     await db.flush()
+    return mr
+
+
+async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialRequest:
+    """Raise a material request by hand — the allocation screen's per-line button and
+    the Create button on the Material Requests screen both land here.
+
+    Exists because the only way to raise an MR used to be the automatic shortfall on
+    an allocation, and that fires on what is on the shelf ANYWHERE. Stock sitting in
+    LIP points counts as available, so a line the warehouse cannot actually serve was
+    never short and never reached procurement, and there was no other door to knock on.
+
+    Deduped per ITEM rather than per indent. The automatic path keeps one MR per
+    indent because it writes every short line at once; a person raising one line at a
+    time is not replaying that, so the rule that matters here is the one that stops
+    the same material being bought twice. Raising against an item already sitting on
+    an open request is refused, and named, so the answer is the existing document
+    rather than a second RFQ for the same delivery.
+
+    A new document every time, never an append: the first request is already in front
+    of an approver, and adding lines underneath them would change what they are
+    signing after they were asked. Quantities on a pending MR are changed by the
+    approver, through `revise_mr_items`, which is gated on approve for that reason.
+    """
+    lines = data.get("items") or []
+    if not lines:
+        raise ValidationError("A material request needs at least one line")
+
+    indent_id = data.get("indent_id")
+    indent_no = data.get("indent_no")
+
+    # The indent belongs to another module, so its header is never read from here
+    # (rule 5). Everything an MR needs about it is already mirrored on inventory's own
+    # allocation row, which is written when the indent reaches this module.
+    allocation = None
+    if indent_id is not None:
+        allocation = (await db.execute(
+            select(Allocation)
+            .where(Allocation.indent_id == indent_id)
+            .order_by(Allocation.id.desc())
+        )).scalars().first()
+        if allocation is not None:
+            indent_no = indent_no or allocation.indent_no
+
+        claimed = (await db.execute(
+            select(MaterialRequest.mr_no, MaterialRequestItem.item_id)
+            .join(MaterialRequestItem,
+                  MaterialRequestItem.mr_id == MaterialRequest.id)
+            .where(MaterialRequest.indent_id == indent_id,
+                   MaterialRequest.status != MRStatus.REJECTED.value)
+        )).all()
+        already = {item_id: mr_no for mr_no, item_id in claimed}
+        clash = [already[line["item_id"]] for line in lines
+                 if line["item_id"] in already]
+        if clash:
+            raise ValidationError(
+                f"Already requested on {', '.join(sorted(set(clash)))}. "
+                "Change the quantity there rather than raising a second request."
+            )
+
+    project_id = getattr(user, "project_id", None)
+    resolved = []
+    for line in lines:
+        quantity = _d(line.get("quantity"))
+        if quantity <= 0:
+            raise ValidationError("Every line needs a quantity above zero")
+        item = await db.get(Item, line["item_id"])
+        if item is None:
+            raise NotFoundError(f"Item {line['item_id']} not found")
+        resolved.append({
+            "item_id": item.id, "item_code": item.item_code,
+            "item_name": item.item_name, "uom_code": item.uom_code,
+            "quantity": quantity,
+            "project_id": line.get("project_id") or project_id or NO_PROJECT,
+            "indent_item_id": line.get("indent_item_id"),
+        })
+
+    mr = await _raise_mr(db, indent_id, indent_no, resolved, user, {
+        "department_id": (getattr(allocation, "department_id", None)
+                          or getattr(user, "department_id", None)),
+        "department_name": getattr(user, "department_name", None),
+        "project_id": project_id,
+        "project_name": getattr(user, "project_name", None),
+        "priority": data.get("priority"),
+        "required_by": data.get("required_by"),
+        "remarks": data.get("remarks"),
+        # Same key the automatic path passes, so the ladder resolves the raiser's
+        # reporting line identically whichever door the request came through.
+        "requester_position_id": getattr(user, "active_position_id", None),
+    })
+    # `_raise_mr` only flushes: on the automatic path it is one step inside the
+    # allocation's transaction. This door is the whole transaction.
+    await db.commit()
     return mr
 
 

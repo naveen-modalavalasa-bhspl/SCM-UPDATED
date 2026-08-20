@@ -110,14 +110,21 @@ PAGES: list[PageDef] = [
     # Procurement's buying chain, under the group that already carries the PO screens.
     # `grp_purchasing`, not `grp_procurement` — the menu row predates the module name
     # and `sync_pages` can add a page but never move one, so the code follows the row.
-    # Sorted AFTER po_list (31) so Purchase Orders stays the module's front door: the
-    # left rail opens a module on its FIRST child.
+    # Sorted the way the work actually happens (2026-08-20, business request):
+    # Requisitions -> Consolidation -> RFQs -> Quotations -> Purchase Orders. Reading
+    # the rail top to bottom now walks the buying chain forwards; before it opened on
+    # the Purchase Order, which is the LAST document in that chain, so a buyer met the
+    # answer before the question.
+    #
+    # These sort BELOW po_list's existing 31 rather than renumbering po_list, which is
+    # a seed.py row this file does not manage. Requisitions becomes the module's front
+    # door, which is the intent — the left rail opens a module on its FIRST child.
     PageDef("pro_requisitions", "/procurement/requisitions", "Requisitions",
-            parent="grp_purchasing", module="procurement", sort_order=32),
+            parent="grp_purchasing", module="procurement", sort_order=25),
     PageDef("pro_rfqs", "/procurement/rfqs", "RFQs",
-            parent="grp_purchasing", module="procurement", sort_order=33),
+            parent="grp_purchasing", module="procurement", sort_order=27),
     PageDef("pro_quotations", "/procurement/quotations", "Quotations",
-            parent="grp_purchasing", module="procurement", sort_order=34),
+            parent="grp_purchasing", module="procurement", sort_order=28),
     # Who outside the company can sign in. Under Settings, not Procurement: it mints
     # an identity, which is an administrator's act rather than a buyer's. Carriers
     # ride on this screen too — a transport provider is a vendor row, so it is the
@@ -125,10 +132,19 @@ PAGES: list[PageDef] = [
     PageDef("admin_supplier_accounts", "/admin/supplier-accounts",
             "Supplier & Carrier Logins", parent="grp_settings",
             module="procurement", icon="key", sort_order=104),
-    # The consolidated buying sheet. Last in Procurement so Purchase Orders stays the
-    # module's front door — the left rail opens a module on its FIRST child.
+    # The consolidated buying sheet — between the requisitions it gathers and the RFQ
+    # it feeds, which is where it sits in the flow.
     PageDef("pro_consolidations", "/procurement/consolidations", "Consolidation",
-            parent="grp_purchasing", module="procurement", sort_order=35),
+            parent="grp_purchasing", module="procurement", sort_order=26),
+
+    # Renames the live Transfers row. The screen is a read-only STO/SMO register now,
+    # and "Transfers" read like somewhere you could raise one. `always_on` so the
+    # refresh leaves `required_permission` exactly as the row already carries it —
+    # this is a rename and nothing else. sort_order matches the live row (55), because
+    # sync_pages refreshes that field and a different number would move the screen.
+    PageDef("inv_transfers", "/inventory/transfers", "Transfer Records",
+            parent="grp_inventory", module="inventory", icon="arrow-left-right",
+            sort_order=55, always_on=True),
 
     # ------------------------------------------------------------------ #
     #  Logistics — the outward transport leg

@@ -26,7 +26,7 @@ const TYPE_LABELS: Record<string, string> = {
   PO: "Purchase order", GRN: "Goods receipt", ISSUE: "Material issue",
   WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
   OWN_STOCK_ALLOCATION: "Allocation from my point", DISPATCH: "Dispatch",
-  PURCHASE_RETURN: "Purchase return",
+  PURCHASE_RETURN: "Purchase return", QC_OUTWARD: "Outward QC",
 };
 const typeLabel = (value: string) => TYPE_LABELS[value] ?? value.replace(/_/g, " ");
 const RANGE_OPTIONS: Array<{ value: RaisedRange; label: string }> = [

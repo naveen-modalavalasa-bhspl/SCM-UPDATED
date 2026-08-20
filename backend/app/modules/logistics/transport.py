@@ -69,6 +69,7 @@ from app.shared.enums import ApprovalAction, AuditAction, DocType, InstanceStatu
 from app.shared.models.base import utcnow
 from app.shared.models.master import Vendor
 from app.shared.numbering import next_number
+from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +121,43 @@ async def receipt_evidence_file(db: AsyncSession, tr_id: int,
     return await attachments.attachment_file(db, attachment_id)
 
 
+
+# FIXED 2026-08-20 — the whole transport register was unscoped.
+#
+# Why this exists: every reader here (`list_trs`, `provider_board`, `open_exceptions`,
+# the activity ledger) selected straight off the table with no `user` at all, so
+# `transport.view` alone showed one desk every shipment in the company — other regions'
+# lanes, other projects' consignments, and the freight prices on all of them. WITHOUT
+# this, a single logistics permission is a network-wide read, and the job-profile rung
+# an admin sets on Job Profiles does nothing on this module.
+#
+# `from_warehouse_id` is the location dimension (a transport request is a fact about a
+# lane leaving a point), `requested_by_id`/`requested_position_id` are the raiser, and
+# `project_id` covers the PROJECT rung. A login with no profile still resolves to
+# ScopeRung.ALL in `rung_for`, so nothing that works today stops working.
+async def _tr_scope(db: AsyncSession, user):
+    return await scope_condition(
+        db, user,
+        owner_col=TransportRequest.requested_by_id,
+        position_col=TransportRequest.requested_position_id,
+        project_col=TransportRequest.project_id,
+        warehouse_col=TransportRequest.from_warehouse_id,
+    )
+
+
 async def list_trs(db: AsyncSession, params: PageParams, status: str | None = None,
                    mode: str | None = None, carrier_id: int | None = None,
                    indent_id: int | None = None,
                    search: str | None = None,
                    dispatch_id: int | None = None,
                    source_type: str | None = None,
-                   awaiting_ack: bool = False) -> dict:
+                   awaiting_ack: bool = False,
+                   user=None) -> dict:
     stmt = select(TransportRequest)
+    # FIXED — see `_tr_scope`. Optional so an internal caller that already knows what
+    # it is reading (a hook, a handoff) is unaffected; every ROUTE passes the user.
+    if user is not None:
+        stmt = stmt.where(await _tr_scope(db, user))
     if source_type:
         # The one filter that separates the outward leg from the return one (doc E7).
         # Same register, same statuses, opposite direction.
@@ -393,7 +423,8 @@ async def acknowledge_as_raiser(db: AsyncSession, tr_id: int, data,
 
 async def provider_board(db: AsyncSession, params: PageParams,
                          status: str | None = None,
-                         search: str | None = None) -> dict:
+                         search: str | None = None,
+                         user=None) -> dict:
     """Every shipment still waiting on "who is taking this", with its tender attached.
 
     The transport register answers "where is this consignment"; this answers the only
@@ -411,6 +442,11 @@ async def provider_board(db: AsyncSession, params: PageParams,
     stmt = (select(TransportRequest)
             .where(TransportRequest.status.in_(
                 wanted or list(PROVIDER_BOARD_STATUSES))))
+    # FIXED — same rung as the register. The provider board carries the QUOTED PRICES,
+    # so leaving it unscoped published every carrier's rates for every lane to anyone
+    # holding transport.view.
+    if user is not None:
+        stmt = stmt.where(await _tr_scope(db, user))
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.where(or_(
@@ -456,12 +492,21 @@ async def carrier_options(db: AsyncSession, search: str | None = None) -> list[d
     return [{"id": v.id, "code": v.code, "name": v.name} for v in rows]
 
 
-async def open_exceptions(db: AsyncSession, params: PageParams) -> dict:
-    """Damage, shortage and delay claims nobody has closed yet."""
+async def open_exceptions(db: AsyncSession, params: PageParams, user=None) -> dict:
+    """Damage, shortage and delay claims nobody has closed yet.
+
+    FIXED 2026-08-20 — was unscoped. A claim names a shipment, a lane and a carrier, so
+    an open claims board with no rung told every logistics login what had gone wrong on
+    every other region's freight. `ShipmentEvent` carries no location of its own, so it
+    is bounded through its shipment — the same rung `list_trs` applies.
+    """
     stmt = (select(ShipmentEvent)
             .where(ShipmentEvent.is_exception.is_(True),
                    ShipmentEvent.resolved_at.is_(None))
             .order_by(ShipmentEvent.event_at.desc()))
+    if user is not None:
+        stmt = stmt.where(ShipmentEvent.tr_id.in_(
+            select(TransportRequest.id).where(await _tr_scope(db, user))))
     return await paginate(db, stmt, params)
 
 
@@ -549,7 +594,8 @@ async def activity_ledger(db: AsyncSession, params: PageParams, *,
                           event_type: str | None = None,
                           only_exceptions: bool = False,
                           tr_id: int | None = None,
-                          dispatch_id: int | None = None) -> dict:
+                          dispatch_id: int | None = None,
+                          user=None) -> dict:
     """Every logistics event, newest first. Read-only; writes nothing."""
     visible_stmt = select(
         TransportRequest.id.label("tr_id"),
@@ -578,6 +624,13 @@ async def activity_ledger(db: AsyncSession, params: PageParams, *,
         visible_stmt = visible_stmt.where(TransportRequest.id == tr_id)
     if dispatch_id is not None:
         visible_stmt = visible_stmt.where(TransportRequest.dispatch_id == dispatch_id)
+    # FIXED 2026-08-20 — the ledger read every shipment in the company. It unions four
+    # sources, and every one of them hangs off this statement, so bounding it here
+    # bounds the whole ledger. WITHOUT this the retired Tracking and Exceptions boards
+    # were replaced by a screen that showed strictly MORE than they did — who awarded
+    # a job, at what freight, to which carrier — to anyone holding transport.view.
+    if user is not None:
+        visible_stmt = visible_stmt.where(await _tr_scope(db, user))
     visible = visible_stmt.cte("visible_shipments")
 
     key = func.concat(literal("tr:"), cast(visible.c.tr_id, String))

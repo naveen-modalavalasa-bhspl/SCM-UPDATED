@@ -5,6 +5,7 @@ import {
   Button, Card, ErrorBanner, Field, FormActions, Input, PageHeader, Select, useToast,
 } from "@/shared/components";
 import { api } from "@/shared/api/client";
+import { todayIst } from "@/shared/datetime";
 import { poApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import {
@@ -145,6 +146,8 @@ export function POFormPage() {
           <Field label="Expected delivery">
             <Input
               type="date"
+              /* Matches the server guard on POCreate.expected_date. */
+              min={todayIst()}
               value={expectedDate}
               onChange={(e) => setExpectedDate(e.target.value)}
             />

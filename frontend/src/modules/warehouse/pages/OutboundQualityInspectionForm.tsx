@@ -10,8 +10,9 @@ import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
+  approveOutboundInspection, rejectOutboundInspection,
   completeOutboundInspection, createOutboundInspection, employeeOptions, getOutboundInspection,
-  getIssue,
+  getIssue, inspectableIssueOptions,
   updateOutboundInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
@@ -128,6 +129,26 @@ export default function OutboundQualityInspectionForm({
     queryFn: () => getIssue(Number(doc?.issue_id)),
     enabled: !!doc?.issue_id,
   });
+
+  const issueFallback = useMemo(
+    () => (doc?.issue_id
+      ? [{ id: doc.issue_id, code: doc.issue_no ?? String(doc.issue_id),
+           name: doc.issue_no ?? String(doc.issue_id) }]
+      : []),
+    [doc?.issue_id, doc?.issue_no],
+  );
+
+  /* A saved inspection that carries an issue but no lines. It should not exist —
+   * picking the issue seeds the lines — but one was raised before this screen had a
+   * working issue lookup, and an inspection with an empty grid can never be completed
+   * or corrected. Seeding from the issue is what picking it would have done, and the
+   * guard on `items.length` means a real inspection is never overwritten. */
+  useEffect(() => {
+    if (!doc || !doc.issue_id) return;
+    if ((doc.items ?? []).length > 0 || pulled) return;
+    if (doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS") return;
+    pullIssue.mutate(doc.issue_id);
+  }, [doc, pulled]);
 
   const issueSerials = useMemo(() => {
     const byLine = new Map<number, string[]>();
@@ -264,6 +285,21 @@ export default function OutboundQualityInspectionForm({
       qc.invalidateQueries({ queryKey: ["wh-inspection", id] });
       qc.invalidateQueries({ queryKey: ["wh-issues"] });
       setConfirming(false);
+    },
+  });
+
+  /* Only ever reachable where an admin configured a QC_OUTWARD ladder on Approvals
+   * Config. With none — every project today — Complete finishes the check outright and
+   * the document never stops at PENDING_APPROVAL, so these buttons never draw. */
+  const decide = useMutation({
+    mutationFn: (action: "APPROVE" | "REJECT") =>
+      action === "APPROVE"
+        ? approveOutboundInspection(Number(id))
+        : rejectOutboundInspection(Number(id), "Rejected on the Outward QC screen"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["wh-inspection", id] });
+      qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
+      qc.invalidateQueries({ queryKey: ["wh-issues"] });
     },
   });
 
@@ -438,6 +474,17 @@ export default function OutboundQualityInspectionForm({
                 </Button>
               </Can>
             )}
+            {editing && doc?.status === "PENDING_APPROVAL" && (
+              <Can do="qc_outward.approve">
+                <Button variant="dangerSoft" onClick={() => decide.mutate("REJECT")}
+                        disabled={decide.isPending}>
+                  Reject
+                </Button>
+                <Button onClick={() => decide.mutate("APPROVE")} disabled={decide.isPending}>
+                  {decide.isPending ? "Working…" : "Approve"}
+                </Button>
+              </Can>
+            )}
           </>
         }
       />
@@ -448,6 +495,9 @@ export default function OutboundQualityInspectionForm({
         <MetaCard title="Document">
           <MetaRow label="Number" value={<span className="font-mono">{doc.inspection_no}</span>} />
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
+          {doc.current_approver_name && (
+            <MetaRow label="With" value={doc.current_approver_name} />
+          )}
           <MetaRow
             label="Pass rate"
             value={<span className="tabular">{percent(doc.passed_items, doc.total_items)}%</span>}
@@ -467,8 +517,14 @@ export default function OutboundQualityInspectionForm({
           </Field>
           <Field label="Against Material Issue" hint="Pulls the issued lines in.">
             <Lookup
-              name="issues"
-              load={() => Promise.resolve([])}
+              name="inspectable-issues"
+              load={inspectableIssueOptions}
+              /* The loader lists issues that still owe a check, so an issue already
+                 inspected by THIS document is not on it. Without the fallback the
+                 Select finds no option matching the id and draws its placeholder over
+                 a field that plainly has a value — which is why a saved inspection
+                 showed "Material Issue" instead of the number it was raised against. */
+              fallback={issueFallback}
               value={form.issue_id || ""}
               isDisabled={locked}
               onChange={(v) => {
@@ -635,7 +691,7 @@ export default function OutboundQualityInspectionForm({
         message={
           <>
             The result is written back onto the Material Issue lines: {totals.passed} pass, {totals.failed} fail
-            {totals.partial > 0 && <>, {totals.partial} partial</>}, <b>{fmtQty(totals.rejected)}</b>{" "}
+            {totals.partial > 0 && <>, {totals.partial} partial</>}, {fmtQty(totals.rejected)}{" "}
             rejected. The inspection can no longer be edited.
             {totals.failed > 0 && (
               <Chip size="sm" variant="flat" color="danger" className="ml-2">

@@ -1,4 +1,4 @@
-import { Button, Card, Select, selectOnFocus } from "@/shared/components";
+import { Button, Card, FilterMenu, selectOnFocus } from "@/shared/components";
 import type { ReactNode } from "react";
 import { Search, X } from "lucide-react";
 
@@ -73,15 +73,15 @@ export function FilterSelect({
   allLabel?: string;
   className?: string;
 }) {
+  // The Indents pill, not a bare <Select>: a warehouse list carries four or five of
+  // these and a row of unlabelled dropdowns gives no clue which ones are narrowing the
+  // page. The pill reads "Status" until something is picked and then reads the pick,
+  // and its icon comes from the label. `allLabel` is kept in the signature so no caller
+  // breaks; the pill writes its own "<label> — all" row.
+  void allLabel;
   return (
     <div className={className}>
-      <Select
-        value={value}
-        onChange={onChange}
-        ariaLabel={label}
-        placeholder={label}
-        options={[{ value: "", label: allLabel }, ...options]}
-      />
+      <FilterMenu label={label} value={value} onChange={onChange} options={options} />
     </div>
   );
 }

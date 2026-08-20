@@ -52,7 +52,7 @@ export function IndentsNav({ embedded = false }: { embedded?: boolean }) {
   return (
     <nav
       aria-label="Indent"
-      className={`${embedded ? "" : "mb-5"} overflow-x-auto`}
+      className={`${embedded ? "" : "mb-5"} nav-scroll overflow-x-auto pb-1`}
     >
       <LayoutGroup id="indent-navigation">
         <div className="flex min-w-max items-stretch gap-5">

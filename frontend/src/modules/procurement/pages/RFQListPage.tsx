@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill,
+  Button, Can, Card, ErrorBanner, FilterMenu, PageHeader, ResponsiveList, StatusPill,
   Input, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
@@ -22,11 +22,22 @@ const STATUSES = [
   { value: "CANCELLED", label: "Cancelled" },
 ];
 
+/** How soon an RFQ shuts. Overdue is its own row: a tender past its date with no
+ *  quotes in is the one a buyer has to act on today. */
+const CLOSING = [
+  { value: "overdue", label: "Past due" },
+  { value: "7", label: "Next 7 days" },
+  { value: "30", label: "Next 30 days" },
+];
+
 const SIZE = 20;
 
 export function RFQListPage() {
   const nav = useNavigate();
   const [status, setStatus] = useState("");
+  // Closing window, filtered in the browser: the endpoint takes no date parameter, and
+  // "what shuts this week" is the question a buyer actually asks of this register.
+  const [closing, setClosing] = useState("");
   const [search, setSearch] = useState("");
   // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
@@ -42,7 +53,17 @@ export function RFQListPage() {
     queryFn: () => rfqApi.list({ status: status || undefined, search: debouncedSearch || undefined, page, size: SIZE }),
   });
 
-  const rows = data?.items ?? [];
+  const all = data?.items ?? [];
+  const rows = all.filter((r) => {
+    if (!closing) return true;
+    if (!r.due_date) return false;
+    const due = new Date(r.due_date);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    if (closing === "overdue") return due < today;
+    const limit = new Date(today);
+    limit.setDate(limit.getDate() + Number(closing));
+    return due >= today && due <= limit;
+  });
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
 
   const columns: Column<RFQListRow>[] = [
@@ -105,23 +126,27 @@ export function RFQListPage() {
         }
       />
 
-      <div className="mb-4 flex max-w-2xl flex-col gap-4 sm:flex-row">
-        <div className="relative flex-1">
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
+        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search RFQs, titles..."
+            placeholder="Search RFQ no. or title..."
             className="pl-9"
           />
         </div>
-        <div className="w-full sm:w-64">
-          <Select
-            value={status}
-            options={STATUSES}
-            onChange={(value) => { setStatus(String(value)); }}
-          />
-        </div>
+        <FilterMenu label="Status" value={status} onChange={setStatus}
+                    options={STATUSES.filter((o) => o.value)} />
+        <FilterMenu label="Closes" value={closing} onChange={setClosing} options={CLOSING} />
+        {(search || status || closing) && (
+          <button
+            onClick={() => { setSearch(""); setStatus(""); setClosing(""); }}
+            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
+          >
+            Clear
+          </button>
+        )}
       </div>
 
       <ErrorBanner error={error} />

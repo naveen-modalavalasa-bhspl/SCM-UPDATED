@@ -211,6 +211,15 @@ export const updateOutboundInspection = (id: number, body: OutboundInspectionWri
 export const completeOutboundInspection = (id: number) =>
   post<OutboundInspection>(`${BASE}/outbound-inspections/${id}/complete`);
 
+/* Only reachable where a QC_OUTWARD ladder is configured on Approvals Config —
+   without one, `complete` finishes the check and the document never sits at
+   PENDING_APPROVAL for anyone to sign. */
+export const approveOutboundInspection = (id: number, comments = "") =>
+  post<OutboundInspection>(`${BASE}/outbound-inspections/${id}/approve`, { comments });
+
+export const rejectOutboundInspection = (id: number, comments: string) =>
+  post<OutboundInspection>(`${BASE}/outbound-inspections/${id}/reject`, { comments });
+
 /* ----------------------------------------------------------------- putaway -- */
 
 export const listPutaways = (params: ListParams = {}) =>
@@ -443,6 +452,9 @@ export interface ScanLine {
   batch_no?: string | null;
   serial_no?: string | null;
   package_no?: string | null;
+  imei_no?: string | null;
+  expiry_date?: string | null;
+  unit_code?: string | null;
 }
 
 export interface ScanPackage {
@@ -641,6 +653,11 @@ export const getPickingIssueSource = (picking_id: number) =>
 
 export const issueOptions = (search?: string) =>
   get<Option[]>(`${BASE}/options/issues`, { search });
+
+/* Issues that still owe an outward check. Deliberately not `issueOptions`, which
+   lists what may be DISPATCHED and so excludes every issue this screen inspects. */
+export const inspectableIssueOptions = (search?: string) =>
+  get<Option[]>(`${BASE}/options/inspectable-issues`, { search });
 
 export const returnableIssueOptions = (search?: string) =>
   get<Option[]>(`${BASE}/options/returnable-issues`, { search });

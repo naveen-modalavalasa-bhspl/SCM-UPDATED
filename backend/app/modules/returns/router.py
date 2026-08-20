@@ -50,7 +50,7 @@ async def purchase_returns(params: PageParams = Depends(), status: str = "",
     """The other family of return, read only — `pro_returns` is the warehouse module's
     table and this only lists it so the register can show both families in one place."""
     return await service.list_purchase_returns(db, params, status=status or None,
-                                              search=search or None)
+                                              search=search or None, user=user)
 
 
 @router.get("/summary", response_model=SummaryOut)

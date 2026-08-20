@@ -204,8 +204,11 @@ PAGE_TREE = [
      P.STOCK_VIEW, 53, "grp_inventory"),
     ("inv_replenishment", "/inventory/replenishment", "Replenishment", "refresh-cw",
      P.STOCK_VIEW, 54, "grp_inventory"),
-    ("inv_transfers", "/inventory/transfers", "Transfers", "arrow-left-right",
-     P.STOCK_ADJUST, 55, "grp_inventory"),
+    # Read-only since 2026-08-20 — the screen shows STO/SMO records and can no longer
+    # raise or advance one, so it is gated on STOCK_VIEW rather than STOCK_ADJUST: a
+    # register nobody can write to should not need the write permission to open.
+    ("inv_transfers", "/inventory/transfers", "Transfer Records", "arrow-left-right",
+     P.STOCK_VIEW, 55, "grp_inventory"),
     ("inv_fulfillment", "/inventory/fulfillment", "Fulfilment Queue", "check-circle",
      P.STOCK_RESERVE, 56, "grp_inventory"),
     ("inv_allocation_approvals", "/inventory/allocation-approvals",

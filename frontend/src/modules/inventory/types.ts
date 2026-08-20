@@ -116,6 +116,13 @@ export interface SerialSummaryRow {
   serials: string[];
   imeis: string[];
   codes: string[];
+  /** The same codes split by kind — a unit is an asset OR a consumable, never both —
+   *  so the stock ledger can give each its own column. Optional: an older backend (or
+   *  a test fixture) that only sends `codes` still renders, just without the split. */
+  asset_codes?: string[];
+  consumable_codes?: string[];
+  asset_count?: number;
+  consumable_count?: number;
 }
 
 /** One physical unit: GET /api/warehouse/serials (list) and .../serials/lookup (one). */
@@ -419,6 +426,9 @@ export interface MRClaims {
 export interface AllocationWarehouseOption {
   warehouse_id: number;
   warehouse_name: string | null;
+  /** `whs_warehouses.warehouse_type` — LIP and MDP are rungs on the distribution
+   *  chain, everything else is the warehouse itself. */
+  warehouse_type: string | null;
   available_qty: number;
 }
 
@@ -432,6 +442,9 @@ export interface AllocationProposalLine {
   requested_qty: number;
   already_allocated: number;
   available_total: number;
+  /** `available_total` less LIP and MDP. Zero while `available_total` is not means the
+   *  stock exists but not in the warehouse — the case Raise MR is offered for. */
+  main_available_qty: number;
   competing_demand: number;
   warehouses: AllocationWarehouseOption[];
 }

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Award, Check, Trophy } from "lucide-react";
+import { Award, Check, Search, Trophy } from "lucide-react";
 import { Button, Can, Card, ScrollBox, StatusPill } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { money } from "../pages/RequisitionListPage";
@@ -150,6 +150,17 @@ export function QuotationComparison({
   // Which columns are open. Empty state means "the default window" rather than
   // "nothing", so the sheet is never blank on arrival.
   const [shown, setShown] = useState<number[] | null>(null);
+  // Two text filters, because on a real RFQ neither list is short: forty lines down
+  // the sheet and twelve suppliers across it. `itemQuery` narrows the ROWS, so a buyer
+  // arguing about one item is not scrolling past thirty-nine others; `vendorQuery`
+  // narrows the switchboard CHIPS, not the columns — hiding a chip must never hide a
+  // column the buyer has already switched on, or a quote silently leaves the
+  // comparison they are deciding from.
+  const [itemQuery, setItemQuery] = useState("");
+  const [vendorQuery, setVendorQuery] = useState("");
+  // Rows this vendor did not quote at all. Off by default: "did not quote" is itself
+  // an answer a buyer needs to see.
+  const [quotedOnly, setQuotedOnly] = useState(false);
 
   const columns = useMemo(() => {
     if (shown === null) return totals.slice(0, VISIBLE);
@@ -173,16 +184,79 @@ export function QuotationComparison({
 
   const hidden = totals.length - columns.length;
 
+  const chips = useMemo(() => {
+    const q = vendorQuery.trim().toLowerCase();
+    if (!q) return totals;
+    return totals.filter((t) =>
+      String(t.vendor_name ?? `Vendor ${t.vendor_id}`).toLowerCase().includes(q));
+  }, [totals, vendorQuery]);
+
+  const rows = useMemo(() => {
+    const all = comparison.items ?? [];
+    const q = itemQuery.trim().toLowerCase();
+    return all.filter((row) => {
+      if (quotedOnly && !columns.some((t) =>
+        row.cells.some((c) => c.quotation_id === t.quotation_id))) return false;
+      if (!q) return true;
+      return [row.item_name, row.item_code]
+        .some((field) => String(field ?? "").toLowerCase().includes(q));
+    });
+  }, [comparison.items, itemQuery, quotedOnly, columns]);
+
   return (
     <Card className="p-0">
       {/* The vendor switchboard. Only earns its place past the default window, but
         * once an RFQ went to twelve suppliers it is the only way to read the sheet. */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-line p-3">
+        <div className="relative min-w-[200px] flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <input
+            value={itemQuery}
+            onChange={(e) => setItemQuery(e.target.value)}
+            placeholder="Find an item on this sheet…"
+            className="h-10 w-full rounded-lg border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
+          />
+        </div>
+        {totals.length > VISIBLE && (
+          <div className="relative min-w-[200px] flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+            <input
+              value={vendorQuery}
+              onChange={(e) => setVendorQuery(e.target.value)}
+              placeholder="Find a vendor…"
+              className="h-10 w-full rounded-lg border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
+            />
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => setQuotedOnly(!quotedOnly)}
+          aria-pressed={quotedOnly}
+          className={`h-10 rounded-lg border px-3 text-xs font-medium ${
+            quotedOnly
+              ? "border-brand bg-brand/10 text-brand"
+              : "border-line bg-content1 text-body hover:bg-surface-2"
+          }`}
+        >
+          Quoted lines only
+        </button>
+        {(itemQuery || vendorQuery || quotedOnly) && (
+          <button
+            type="button"
+            onClick={() => { setItemQuery(""); setVendorQuery(""); setQuotedOnly(false); }}
+            className="h-10 rounded-lg px-3 text-xs text-muted hover:bg-surface-2 hover:text-ink"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
       {totals.length > VISIBLE && (
         <div className="flex flex-wrap items-center gap-1.5 border-b border-line p-3">
           <span className="mr-1 text-xs text-muted">
             {columns.length} of {totals.length} vendors shown
           </span>
-          {totals.map((total) => {
+          {chips.map((total) => {
             const on = columns.some((c) => c.quotation_id === total.quotation_id);
             return (
               <button
@@ -201,6 +275,9 @@ export function QuotationComparison({
               </button>
             );
           })}
+          {chips.length === 0 && (
+            <span className="text-xs text-muted">No vendor matches that name.</span>
+          )}
           <button
             type="button"
             onClick={() => setShown(hidden ? totals.map((t) => t.quotation_id) : [])}
@@ -244,7 +321,7 @@ export function QuotationComparison({
           </thead>
 
           <tbody>
-            {(comparison.items ?? []).map((row) => (
+            {rows.map((row) => (
               <tr key={row.rfq_item_id} className="align-top">
                 <th scope="row" className={`${PINNED} border-t border-line px-3 py-3 text-left`}>
                   <div className="text-sm font-medium text-ink">
@@ -267,6 +344,14 @@ export function QuotationComparison({
                 })}
               </tr>
             ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={columns.length + 1}
+                    className="border-t border-line px-3 py-6 text-center text-sm text-muted">
+                  No items match this search.
+                </td>
+              </tr>
+            )}
           </tbody>
 
           <tfoot>

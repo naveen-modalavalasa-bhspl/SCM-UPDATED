@@ -1,10 +1,10 @@
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Download, Search, Filter } from "lucide-react";
+import { Calendar, Download, Search } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill, Select,
-  type Column,
+  Button, Can, Card, ErrorBanner, FilterMenu, Input, PageHeader, ResponsiveList,
+  StatusPill, type Column,
 } from "@/shared/components";
 import { poApi } from "../api";
 import type { POListRow } from "../types";
@@ -45,6 +45,7 @@ export function POListPage() {
   // Filter state
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
+  const [vendor, setVendor] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [page, setPage] = useState(1);
@@ -82,7 +83,13 @@ export function POListPage() {
     });
   };
 
-  const rows = data?.items ?? [];
+  const all = data?.items ?? [];
+  // Built from the rows on screen: a vendor with no order on this page is not a filter
+  // anybody can usefully pick.
+  const vendorOptions = [...new Set(all.map((r) => r.vendor_name).filter(Boolean))]
+    .map((v) => ({ value: v as string, label: v as string }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const rows = all.filter((r) => !vendor || r.vendor_name === vendor);
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
 
   const columns: Column<POListRow>[] = [
@@ -146,51 +153,58 @@ export function POListPage() {
         }
       />
 
-      <div className="mb-6 rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-        <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-neutral-700">
-          <Filter size={16} /> Filters
+      {/* One pill row, the shape the Indents filter bar uses. It was a bordered panel
+        * of raw <input>s with hardcoded neutral-* colours — off the design tokens, so
+        * it did not follow the theme, and it took a third of the screen above the
+        * table. Vendor is filtered in the browser over the page in hand; the endpoint
+        * takes no vendor parameter and at 20 rows a page it does not need one. */}
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
+        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <Input
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search PO, RFQ, or Quotation no..."
+            className="pl-9"
+          />
         </div>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
-          <div className="md:col-span-5">
-            <label className="mb-1 block text-xs font-medium text-neutral-600">Search</label>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" size={16} />
-              <input
-                type="text"
-                placeholder="Search PO, RFQ, or Quotation no..."
-                className="w-full rounded-md border border-neutral-300 py-1.5 pl-9 pr-3 text-sm placeholder:text-neutral-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                value={search}
-                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-              />
-            </div>
-          </div>
-          <div className="md:col-span-3">
-            <label className="mb-1 block text-xs font-medium text-neutral-600">Status</label>
-            <Select
-              value={status}
-              options={STATUSES}
-              onChange={(value) => { setStatus(String(value)); setPage(1); }}
-            />
-          </div>
-          <div className="md:col-span-4">
-            <label className="mb-1.5 block text-xs font-semibold text-neutral-600 uppercase tracking-wider">Date Range</label>
-            <div className="flex w-full items-center gap-2">
-              <input 
-                type="date" 
-                className="w-full rounded-md border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 shadow-sm outline-none transition-all focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
-                value={dateFrom}
-                onChange={(e) => { setDateFrom(e.target.value); setPage(1); }}
-              />
-              <span className="text-xs font-medium text-neutral-400">to</span>
-              <input 
-                type="date" 
-                className="w-full rounded-md border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 shadow-sm outline-none transition-all focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
-                value={dateTo}
-                onChange={(e) => { setDateTo(e.target.value); setPage(1); }}
-              />
-            </div>
-          </div>
+        <FilterMenu
+          label="Status"
+          value={status}
+          onChange={(value) => { setStatus(value); setPage(1); }}
+          options={STATUSES.filter((o) => o.value)}
+        />
+        <FilterMenu label="Vendor" value={vendor} onChange={setVendor}
+                    options={vendorOptions} />
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-content1 px-2">
+          <Calendar className="h-4 w-4 text-muted" />
+          <input
+            type="date"
+            aria-label="Ordered from"
+            value={dateFrom}
+            onChange={(e) => { setDateFrom(e.target.value); setPage(1); }}
+            className="h-11 bg-transparent text-sm text-ink outline-none"
+          />
+          <span className="text-xs text-muted">to</span>
+          <input
+            type="date"
+            aria-label="Ordered to"
+            value={dateTo}
+            onChange={(e) => { setDateTo(e.target.value); setPage(1); }}
+            className="h-11 bg-transparent text-sm text-ink outline-none"
+          />
         </div>
+        {(search || status || vendor || dateFrom || dateTo) && (
+          <button
+            onClick={() => {
+              setSearch(""); setStatus(""); setVendor("");
+              setDateFrom(""); setDateTo(""); setPage(1);
+            }}
+            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
+          >
+            Clear
+          </button>
+        )}
       </div>
 
       <ErrorBanner error={error} />
@@ -206,8 +220,8 @@ export function POListPage() {
           totalPages={totalPages}
           onPageChange={setPage}
           empty={
-            status
-              ? "No purchase orders in this status."
+            status || vendor || search
+              ? "No purchase orders match these filters."
               : "No purchase orders yet. Raise one here, or award a tender and create it from the winning quote."
           }
           renderCard={(r) => (

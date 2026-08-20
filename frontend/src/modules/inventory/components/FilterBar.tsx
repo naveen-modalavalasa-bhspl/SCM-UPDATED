@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, Search, X } from "lucide-react";
-import { selectOnFocus } from "@/shared/components";
+import type { ReactNode } from "react";
+import { Search, X } from "lucide-react";
+import { FilterMenu } from "@/shared/components";
+
+// Re-exported so inventory screens keep their single filter import.
+export { FilterMenu };
 
 /**
  * One filter row, same shape on every inventory screen.
@@ -46,15 +49,17 @@ export function FilterBar({
   );
 }
 
-/** Compact select sized to sit in the filter bar — typable.
+/** Compact filter, sized to sit in the filter bar.
  *
- * A native `<select>` only jumps to the first letter, which is no help against a
- * warehouse list of 900 stocking points. This is a combobox: type to narrow, click
- * or Enter to pick. Same props as before, so every caller gained it without a change.
+ * Now the same pill the Indents filter row uses — a labelled button that opens a
+ * searchable list, with an icon chosen from its own label. It was a bare combobox
+ * input, so a screen with four filters read as four empty text boxes and you could not
+ * tell at a glance which of them were narrowing the list. Same props as before, so
+ * every caller gained the design without a change.
  *
- * It filters the `options` it was handed and fetches nothing of its own, so what a
- * login can see is still decided by the endpoint that built that list. There is no
- * path here to a row the server did not already return.
+ * `allowEmpty` is honoured by keeping the "all" row off: some fields (a label size a
+ * render depends on) must always hold a value, and a blank option let a caller land on
+ * "" and crash on a lookup that assumed one of `options` was selected.
  */
 export function FilterSelect({
   value, onChange, options, placeholder, allowEmpty = true,
@@ -63,96 +68,16 @@ export function FilterSelect({
   onChange: (v: string) => void;
   options: { value: string | number; label: string }[];
   placeholder: string;
-  /** False for fields that always need a value (e.g. a label size a render depends
-   * on) — the blank option let a caller land on "" and crash on a lookup that
-   * assumed one of `options` was always selected. */
   allowEmpty?: boolean;
 }) {
-  // null means "showing the selection", not "typed an empty string" — the difference
-  // between an untouched box and one the user cleared to see every option again.
-  const [typed, setTyped] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
-  const box = useRef<HTMLDivElement>(null);
-
-  const selected = options.find((o) => String(o.value) === String(value));
-  const matches = typed
-    ? options.filter((o) => o.label.toLowerCase().includes(typed.toLowerCase()))
-    : options;
-
-  useEffect(() => {
-    if (!open) return;
-    const away = (e: MouseEvent) => {
-      if (!box.current?.contains(e.target as Node)) { setOpen(false); setTyped(null); }
-    };
-    document.addEventListener("mousedown", away);
-    return () => document.removeEventListener("mousedown", away);
-  }, [open]);
-
-  const pick = (v: string) => { onChange(v); setTyped(null); setOpen(false); };
-
   return (
-    <div ref={box} className="relative min-w-[150px]">
-      <input
-        role="combobox"
-        aria-expanded={open}
-        aria-label={placeholder}
-        value={typed ?? selected?.label ?? ""}
-        placeholder={placeholder}
-        onChange={(e) => { setTyped(e.target.value); setOpen(true); }}
-        // Typing REPLACES the current choice instead of editing it. Without the
-        // select, clicking a filter that reads "Main Warehouse" and typing "lip"
-        // leaves "Main Warehouselip" and matches nothing.
-        onFocus={(e) => { setOpen(true); selectOnFocus(e); }}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") { setOpen(false); setTyped(null); }
-          if (e.key === "Enter" && open && matches.length) {
-            e.preventDefault();
-            pick(String(matches[0].value));
-          }
-        }}
-        className="h-11 w-full rounded-lg border border-line bg-content1 pl-3 pr-8 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
-      />
-      <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-      {open && (
-        // mousedown is prevented on each row: the input's blur would otherwise close
-        // the list before the click landed, and the pick would be lost.
-        <ul className="absolute z-30 mt-1 max-h-64 w-full min-w-full overflow-auto rounded-lg border border-line bg-content1 py-1 shadow-lg">
-          {allowEmpty && (
-            <li>
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => pick("")}
-                className="flex min-h-[44px] w-full items-center px-3 text-left text-sm text-muted hover:bg-content2"
-              >
-                {placeholder}
-              </button>
-            </li>
-          )}
-          {matches.map((o) => (
-            <li key={o.value}>
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => pick(String(o.value))}
-                className={`flex min-h-[44px] w-full items-center px-3 text-left text-sm hover:bg-content2 ${
-                  String(o.value) === String(value)
-                    ? "font-semibold text-brand"
-                    : "text-ink"
-                }`}
-              >
-                {o.label}
-              </button>
-            </li>
-          ))}
-          {matches.length === 0 && (
-            <li className="flex min-h-[44px] items-center px-3 text-sm text-muted">
-              No match
-            </li>
-          )}
-        </ul>
-      )}
-    </div>
+    <FilterMenu
+      label={placeholder}
+      value={value}
+      onChange={onChange}
+      options={options}
+      allowEmpty={allowEmpty}
+    />
   );
 }
 

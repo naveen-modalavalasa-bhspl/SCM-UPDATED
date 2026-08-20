@@ -27,6 +27,7 @@ const LABELS: Record<string, string> = {
   WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
   OWN_STOCK_ALLOCATION: "Allocation from my point",
   DISPATCH: "Dispatch", PURCHASE_RETURN: "Purchase return",
+  QC_OUTWARD: "Outward QC",
   REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
   RFQ: "Request for quotation", CARRIER_AWARD: "Carrier award",
 };
@@ -40,6 +41,10 @@ const LABELS: Record<string, string> = {
  */
 const BULK_SIGNABLE = new Set([
   "REQUISITION", "CONSOLIDATION", "RFQ", "PO", "MR", "GRN", "PURCHASE_RETURN",
+  // Outward QC belongs here: the inspector already recorded a result per line, so
+  // what is left for the approver really is yes or no — there is no default hiding
+  // behind the checkbox for them to accept without looking.
+  "QC_OUTWARD",
 ]);
 
 /**
@@ -62,6 +67,7 @@ const FAMILY: Record<string, { icon: LucideIcon; tint: string }> = {
   OWN_STOCK_ISSUE: { icon: Package, tint: "bg-ok-bg text-ok" },
   GRN: { icon: Package, tint: "bg-ok-bg text-ok" },
   PURCHASE_RETURN: { icon: Package, tint: "bg-ok-bg text-ok" },
+  QC_OUTWARD: { icon: Package, tint: "bg-ok-bg text-ok" },
   DISPATCH: { icon: Truck, tint: "bg-warn-bg text-warn" },
   CARRIER_AWARD: { icon: Truck, tint: "bg-warn-bg text-warn" },
 };

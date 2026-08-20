@@ -311,13 +311,13 @@ async def list_quotations(params: PageParams = Depends(), rfq_id: int | None = N
                           search: str | None = None,  # Real-time search filter for quotation number and vendor name
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(perms.RFQ_COMPARE))):
-    return await service.list_quotations(db, params, rfq_id, vendor_id, search)
+    return await service.list_quotations(db, params, rfq_id, vendor_id, search, user=user)
 
 
 @rfqs.get("/quotations/{quote_id}", response_model=QuoteOut)
 async def get_quotation(quote_id: int, db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.RFQ_COMPARE))):
-    return await service.get_quotation(db, quote_id)
+    return await service.get_quotation(db, quote_id, user=user)
 
 
 # Declared BEFORE `/{rfq_id}`, which is int-typed: a literal segment registered after
@@ -485,9 +485,10 @@ async def vendor_change_password(body: VendorPasswordIn,
 @supplier.get("/rfqs", response_model=Page[RFQListRow])
 async def vendor_list_rfqs(params: PageParams = Depends(),
                            search: str | None = None,  # Real-time search filter for RFQ number and title in supplier portal
+                           status: str | None = None,  # Narrows within what this vendor may already see
                            db: AsyncSession = Depends(get_db),
                            account=Depends(get_current_vendor)):
-    return await service.vendor_list_rfqs(db, account.vendor_id, params, search)
+    return await service.vendor_list_rfqs(db, account.vendor_id, params, search, status)
 
 
 @supplier.get("/rfqs/{rfq_id}", response_model=RFQOut)
@@ -509,9 +510,10 @@ async def vendor_get_quotation(rfq_id: int, db: AsyncSession = Depends(get_db),
 @supplier.get("/pos", response_model=Page[VendorPOListRow])
 async def vendor_list_pos(params: PageParams = Depends(),
                           search: str | None = None,  # Real-time search filter for PO number in supplier portal
+                          status: str | None = None,  # Narrows within what this vendor may already see
                           db: AsyncSession = Depends(get_db),
                           account=Depends(get_current_vendor)):
-    return await service.vendor_list_pos(db, account.vendor_id, params, search)
+    return await service.vendor_list_pos(db, account.vendor_id, params, search, status)
 
 
 @supplier.get("/pos/{po_id}", response_model=VendorPOOut)
@@ -600,7 +602,7 @@ async def list_consolidations(params: PageParams = Depends(),
                               project_id: int | None = None,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
-    return await service.list_consolidations(db, params, status, project_id)
+    return await service.list_consolidations(db, params, status, project_id, user=user)
 
 
 @consolidations.post("", response_model=ConsolidationOut, status_code=201)
@@ -613,7 +615,7 @@ async def create_consolidation(body: ConsolidationCreate,
 @consolidations.get("/{cons_id}", response_model=ConsolidationOut)
 async def get_consolidation(cons_id: int, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
-    return await service.get_consolidation_detail(db, cons_id)
+    return await service.get_consolidation_detail(db, cons_id, user=user)
 
 
 @consolidations.put("/{cons_id}", response_model=ConsolidationOut)
@@ -639,20 +641,20 @@ async def delete_consolidation(cons_id: int, db: AsyncSession = Depends(get_db),
 @consolidations.get("/{cons_id}/sources", response_model=list[ConsolidationSourceOut])
 async def consolidation_sources(cons_id: int, db: AsyncSession = Depends(get_db),
                                 user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
-    return await service.consolidation_sources(db, cons_id)
+    return await service.consolidation_sources(db, cons_id, user=user)
 
 
 @consolidations.get("/{cons_id}/history", response_model=list)
 async def consolidation_history(cons_id: int, db: AsyncSession = Depends(get_db),
                                 user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
-    return await service.consolidation_history(db, cons_id)
+    return await service.consolidation_history(db, cons_id, user=user)
 
 
 @consolidations.get("/{cons_id}/approvals", response_model=ApprovalTrailOut)
 async def consolidation_approvals(
         cons_id: int, db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
-    return await service.consolidation_approval_trail(db, cons_id)
+    return await service.consolidation_approval_trail(db, cons_id, user=user)
 
 
 @consolidations.post("/{cons_id}/submit", response_model=ConsolidationOut)

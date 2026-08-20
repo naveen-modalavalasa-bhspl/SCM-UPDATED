@@ -97,3 +97,41 @@ h3,
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Horizontal navigation strips (the module tab bar, the indents sub-nav).
+   A module with a dozen pages overflows on a laptop, and the browser's default
+   overlay scrollbar never appears for a mouse user, so the last tabs were
+   unreachable without a touchpad. Draw a thin bar on hover — the track keeps its
+   space at all times, so revealing the thumb never shifts the tabs. */
+.nav-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.15s ease;
+}
+
+.nav-scroll:hover,
+.nav-scroll:focus-within {
+  scrollbar-color: var(--color-line) transparent;
+}
+
+.nav-scroll::-webkit-scrollbar {
+  height: 6px;
+}
+
+.nav-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.nav-scroll::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: transparent;
+}
+
+.nav-scroll:hover::-webkit-scrollbar-thumb,
+.nav-scroll:focus-within::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+}
+
+.nav-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}

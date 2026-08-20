@@ -347,6 +347,10 @@ const DEFINITIONS: AlertDef[] = [
     "It goes back to the store to be allocated again. Nothing was reserved.",
   ),
   alert(
+    "material_request.raised", "success", "Material request raised",
+    "{number} is with its approver. Procurement can buy against it once it is signed.",
+  ),
+  alert(
     "material_request.approved", "success", "Request approved",
     "{number} is cleared for purchase. Raise a requisition from it to start buying.",
   ),

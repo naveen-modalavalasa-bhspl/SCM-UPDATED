@@ -171,6 +171,24 @@ class Delegation(Base):
 
 
 class Pending(Base):
+    """Who owes a decision on a document right now.
+
+    NOT FIXED, and it cannot be fixed in a query — recorded here because this is where
+    the answer would have to live.
+
+    There is no position column. The resolver picks an approver BY POSITION and then
+    writes only `approver_id`, so an employee holding two positions sees their approvals
+    from either session: the driver hat shows the storekeeper hat's queue. Every other
+    reader in the app can hat-scope because its table carries a position (`ind_indents`)
+    or a position-name snapshot (`wf_actions.actor_position`, which is what "My
+    Decisions" now matches on). This one carries neither.
+
+    WITHOUT a `position_id` written here at resolve time, the approval inbox is
+    permanently person-scoped and no RBAC setting can change that. Adding it is a
+    migration plus one line in the resolver — deliberately not done as part of the
+    2026-08-20 scoping pass, because it changes an approval path and that needs its own
+    test run.
+    """
     __tablename__ = "wf_pending"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     instance_id = Column(BigInteger, index=True, nullable=False)

@@ -185,6 +185,11 @@ export const indexSerials = (rows: SerialSummaryRow[]) => {
     seen.serials = seen.serials.concat(row.serials).slice(0, 5);
     seen.imeis = seen.imeis.concat(row.imeis).slice(0, 5);
     seen.codes = seen.codes.concat(row.codes).slice(0, 5);
+    seen.asset_codes = (seen.asset_codes ?? []).concat(row.asset_codes ?? []).slice(0, 5);
+    seen.consumable_codes = (seen.consumable_codes ?? [])
+      .concat(row.consumable_codes ?? []).slice(0, 5);
+    seen.asset_count = (seen.asset_count ?? 0) + (row.asset_count ?? 0);
+    seen.consumable_count = (seen.consumable_count ?? 0) + (row.consumable_count ?? 0);
   };
   for (const r of rows) {
     const bin = unplaced(r.bin_id), batch = unplaced(r.batch_id);
@@ -330,6 +335,21 @@ export const listMaterialRequests = (params?: { status?: string; indent_id?: num
       params: { ...params, size: 100 },
     })
     .then((r) => r.data);
+
+export interface MaterialRequestCreate {
+  items: { item_id: number; quantity: number; project_id?: number | null;
+           indent_item_id?: number | null }[];
+  indent_id?: number | null;
+  indent_no?: string | null;
+  priority?: string | null;
+  required_by?: string | null;
+  remarks?: string | null;
+}
+
+/** Raise a request by hand. `indent_id` set when the allocation screen raised it for a
+ *  line the warehouse cannot serve; absent for a free-standing buy. */
+export const createMaterialRequest = (body: MaterialRequestCreate) =>
+  api.post<MaterialRequest>("/api/material-requests", body).then((r) => r.data);
 
 export const getMaterialRequest = (id: number) =>
   api.get<MaterialRequest>(`/api/material-requests/${id}`).then((r) => r.data);
@@ -623,6 +643,7 @@ export const inventoryApi = {
   createStockTransfer,
   createTransfer: createStockTransfer,
   listMaterialRequests,
+  createMaterialRequest,
   getMaterialRequest,
   approveMaterialRequest,
   rejectMaterialRequest,

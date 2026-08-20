@@ -10,7 +10,7 @@ import { UnitCell } from "./UnitsPanel";
 import {
   getSerialSummary, getStockLedger, getStockLedgerSummary, getWarehouses, indexSerials,
 } from "../api";
-import type { StockLedgerItem } from "../types";
+import type { SerialSummaryRow, StockLedgerItem } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { fmtDate, fmtTime } from "@/shared/datetime";
 
@@ -164,14 +164,15 @@ export function StockLedgerView() {
 
   const exportCsv = () => {
     const header = ["Date", "Reference", "Type", "Item Code", "Item", "Warehouse", "Batch",
-                    "Serial / IMEI", "Asset / Consumable code",
+                    "Serial / IMEI", "Asset Code", "Consumable Code",
                     "In", "Out", "Balance", "Rate", "Value", "By"];
     const body = rows.map((r) => [
       r.transaction_date, r.transaction_no, r.transaction_type, r.item_code, r.item_name,
       // A column each, and every value in it — not the one the cell has room for.
       r.warehouse_name, r.batch_number,
       serialOf(r) || unitsOf(r)?.serials.join(" | ") || unitsOf(r)?.imeis.join(" | "),
-      r.asset_code || r.consumable_code || unitsOf(r)?.codes.join(" | "),
+      r.asset_code || unitsOf(r)?.asset_codes?.join(" | "),
+      r.consumable_code || unitsOf(r)?.consumable_codes?.join(" | "),
       r.in_qty, r.out_qty, r.balance_qty, r.unit_rate, r.total_value, r.performed_by,
     ]);
     const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
@@ -182,6 +183,34 @@ export function StockLedgerView() {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  /** One of the two unit-code columns. The value comes off the ledger row when the
+   *  movement recorded it; otherwise from the units standing at that item + point,
+   *  filtered to this kind, with the popover listing the whole lot. */
+  const codeColumn = (
+    key: string,
+    header: string,
+    ownOf: (r: StockLedgerItem) => string | undefined,
+    listOf: (u: SerialSummaryRow) => string[] | undefined,
+    countOf: (u: SerialSummaryRow) => number | undefined,
+  ): Column<StockLedgerItem> => ({
+    key,
+    header,
+    hideOnNarrow: true,
+    render: (r) => {
+      const units = unitsOf(r);
+      const own = ownOf(r);
+      const codes = (units && listOf(units)) || [];
+      return (
+        <UnitCell
+          text={own || codes[0]}
+          extra={own || !codes.length ? 0 : ((units && countOf(units)) || codes.length) - 1}
+          lot={!own && codes.length ? lotOf(r) : undefined}
+          title={r.item_name}
+        />
+      );
+    },
+  });
 
   const columns: Column<StockLedgerItem>[] = [
     {
@@ -245,23 +274,15 @@ export function StockLedgerView() {
         );
       },
     },
-    {
-      key: "unit_code",
-      header: "Asset / Consumable code",
-      hideOnNarrow: true,
-      render: (r) => {
-        const units = unitsOf(r);
-        const own = r.asset_code || r.consumable_code;
-        return (
-          <UnitCell
-            text={own || units?.codes[0]}
-            extra={own || !units?.codes.length ? 0 : units.count - 1}
-            lot={!own && units?.codes.length ? lotOf(r) : undefined}
-            title={r.item_name}
-          />
-        );
-      },
-    },
+    // A unit is an asset OR a consumable, never both, so the two codes get a column
+    // each and a row only ever fills one of them. One shared column read as a single
+    // identity that could be either kind, which is exactly what the ledger is opened
+    // to tell apart.
+    codeColumn("asset_code", "Asset Code",
+               (r) => r.asset_code, (u) => u.asset_codes, (u) => u.asset_count),
+    codeColumn("consumable_code", "Consumable Code",
+               (r) => r.consumable_code,
+               (u) => u.consumable_codes, (u) => u.consumable_count),
     {
       key: "in",
       header: "In",

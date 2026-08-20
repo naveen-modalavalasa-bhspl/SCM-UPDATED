@@ -1159,10 +1159,12 @@ async def get_rfq_detail(db: AsyncSession, rfq_id: int, user=None):
         db, DocType.RFQ.value, await get_rfq(db, rfq_id, user))
 
 
-async def get_consolidation_detail(db: AsyncSession, cons_id: int):
+async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
+    # FIXED — the rung is enforced inside `consolidation.get_consolidation`; this only
+    # has to hand the user down. Same for `consolidation_approval_trail` below.
     return await _attach_pending_one(
         db, DocType.CONSOLIDATION.value,
-        await consolidation.get_consolidation(db, cons_id))
+        await consolidation.get_consolidation(db, cons_id, user=user))
 
 
 async def po_approval_trail(db: AsyncSession, po_id: int, user=None) -> dict:
@@ -1180,8 +1182,8 @@ async def rfq_approval_trail(db: AsyncSession, rfq_id: int, user=None) -> dict:
     return await _approval_trail(db, DocType.RFQ.value, rfq.id)
 
 
-async def consolidation_approval_trail(db: AsyncSession, cons_id: int) -> dict:
-    doc = await consolidation.get_consolidation(db, cons_id)
+async def consolidation_approval_trail(db: AsyncSession, cons_id: int, user=None) -> dict:
+    doc = await consolidation.get_consolidation(db, cons_id, user=user)
     return await _approval_trail(db, DocType.CONSOLIDATION.value, doc.id)
 
 
@@ -2171,8 +2173,19 @@ def _quote_totals(quote: Quotation) -> None:
                          + _d(quote.freight_amount) - _d(quote.discount_amount))
 
 
-async def get_quotation(db: AsyncSession, quote_id: int) -> Quotation:
-    quote = await db.get(Quotation, quote_id)
+async def get_quotation(db: AsyncSession, quote_id: int, user=None) -> Quotation:
+    """FIXED 2026-08-20 — the list is bounded by the RFQ's rung and this was not, so a
+    quotation hidden from the register opened by id and gave up the vendor's price.
+    WITHOUT this, scoping `list_quotations` only hides the row from the grid.
+
+    Bounded exactly as the list is — through the RFQ it answers. 404, not 403.
+    """
+    stmt = select(Quotation).where(Quotation.id == quote_id)
+    if user is not None:
+        stmt = stmt.where(Quotation.rfq_id.in_(
+            select(RFQ.id).where(
+                await scope_condition(db, user, owner_col=RFQ.created_by_id))))
+    quote = (await db.execute(stmt)).scalar_one_or_none()
     if quote is None:
         raise NotFoundError(f"Quotation {quote_id} not found")
     return quote
@@ -2181,8 +2194,25 @@ async def get_quotation(db: AsyncSession, quote_id: int) -> Quotation:
 async def list_quotations(db: AsyncSession, params: PageParams,
                           rfq_id: int | None = None,
                           vendor_id: int | None = None,
-                          search: str | None = None) -> dict:
+                          search: str | None = None,
+                          user=None) -> dict:
+    """FIXED 2026-08-20 — the quotation register was the one procurement list with no
+    rung on it, while `list_rfqs`, `list_pos` and `list_requisitions` all carry one.
+
+    A quotation is a vendor's PRICE. Unscoped, `rfq.compare` handed every buyer in the
+    company every supplier's rates on every tender — including tenders raised by
+    another region, for projects they have nothing to do with. WITHOUT this, commercial
+    terms are readable network-wide from a permission meant to compare one RFQ.
+
+    Bounded through the RFQ it answers, because `pro_quotations` carries no project or
+    warehouse of its own: if the login may see the tender, they may see its replies.
+    That keeps this list and the comparison sheet on the same rung by construction.
+    """
     stmt = select(Quotation)
+    if user is not None:
+        stmt = stmt.where(Quotation.rfq_id.in_(
+            select(RFQ.id).where(
+                await scope_condition(db, user, owner_col=RFQ.created_by_id))))
     if rfq_id is not None:
         stmt = stmt.where(Quotation.rfq_id == rfq_id)
     if vendor_id is not None:
@@ -2571,7 +2601,8 @@ def _vendor_visible():
 
 
 async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
-                           params: PageParams, search: str | None = None) -> dict:
+                           params: PageParams, search: str | None = None,
+                           status: str | None = None) -> dict:
     stmt = (
         select(RFQ)
         .join(RFQVendor, RFQVendor.rfq_id == RFQ.id)
@@ -2587,6 +2618,10 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
                 RFQ.title.ilike(f"%{search}%")
             )
         )
+    # Narrowing only, and only within `_vendor_visible()` — a vendor asking for DRAFT
+    # gets an empty page, never an internal RFQ.
+    if status:
+        stmt = stmt.where(RFQ.status == status, _vendor_visible())
     stmt = stmt.order_by(RFQ.created_at.desc())
     return await paginate(db, stmt, params)
 
@@ -2838,6 +2873,21 @@ _DESPATCHABLE = (
     POStatus.PARTIALLY_RECEIVED.value,
 )
 
+# What a vendor may READ, which is wider than what they may still despatch against.
+# An order they filled and we closed used to vanish off their portal the moment the
+# last GRN landed, so a supplier could not look up what they had delivered, on which
+# order, at what price — the record of their own completed work. Closing an order ends
+# the WORK, not the vendor's right to see it.
+#
+# Kept separate from `_DESPATCHABLE` deliberately: the despatch-note guard still tests
+# that tuple, so a vendor can read a CLOSED order and still cannot file against it.
+# Nothing before SENT_TO_VENDOR is here — a draft or an unapproved PO is internal.
+_VENDOR_READABLE = _DESPATCHABLE + (
+    POStatus.RECEIVED.value,
+    POStatus.CLOSED.value,
+    POStatus.CANCELLED.value,
+)
+
 
 async def _vendor_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOrder:
     """One order, only if it belongs to this vendor and they have been sent it."""
@@ -2845,7 +2895,7 @@ async def _vendor_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOr
         select(PurchaseOrder).where(
             PurchaseOrder.id == po_id,
             PurchaseOrder.vendor_id == vendor_id,
-            PurchaseOrder.status.in_(_DESPATCHABLE),
+            PurchaseOrder.status.in_(_VENDOR_READABLE),
         )
     )).scalars().first()
     if po is None:
@@ -2920,16 +2970,27 @@ async def _despatched_by_po_item(db: AsyncSession, po_id: int) -> dict[int, Deci
     return {row[0]: _d(row[1]) for row in rows if row[0]}
 
 
-async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams, search: str | None = None) -> dict:
+async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams,
+                          search: str | None = None,
+                          status: str | None = None) -> dict:
     """The orders this vendor has been sent. Never anyone else's, never a draft."""
     stmt = (select(PurchaseOrder)
             .where(PurchaseOrder.vendor_id == vendor_id,
-                   PurchaseOrder.status.in_(_DESPATCHABLE)))
-                   
-    # Apply real-time search filtering for the supplier portal if a search query is provided.
-    # We search by Purchase Order number.
+                   PurchaseOrder.status.in_(_VENDOR_READABLE)))
+
+    # Apply real-time search filtering for the supplier portal if a search query is
+    # provided. Over the order number and the RFQ/quotation numbers snapshotted on it
+    # — the references a supplier actually has written on their own paperwork.
     if search:
-        stmt = stmt.where(PurchaseOrder.po_no.ilike(f"%{search}%"))
+        like = f"%{search}%"
+        stmt = stmt.where(or_(PurchaseOrder.po_no.ilike(like),
+                              PurchaseOrder.rfq_no.ilike(like),
+                              PurchaseOrder.quotation_no.ilike(like)))
+    # Narrowing only, and only WITHIN what this vendor may already read: an unknown or
+    # internal status filters to nothing rather than widening the scope.
+    if status:
+        stmt = stmt.where(PurchaseOrder.status == status,
+                          PurchaseOrder.status.in_(_VENDOR_READABLE))
     stmt = stmt.order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc())
     page = await paginate(db, stmt, params)
     counts = dict((await db.execute(

@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.shared.scope import scope_condition
 from app.modules.inventory import allocation, locations
 from app.modules.inventory import service as inventory
 from app.modules.inventory.enums import LocationTier
@@ -644,6 +645,26 @@ async def get_return(db: AsyncSession, return_id: int, user=None) -> dict:
     return await _out(db, await _load(db, return_id), user)
 
 
+
+# NOT FIXED, and it cannot be here — recorded so the next person does not go looking.
+#
+# The owner half of this rule matches the PERSON (`requested_by_id`), so an employee who
+# holds two positions sees returns they raised under the other hat from either session —
+# the same cross-hat leak that was fixed on the indent acknowledgements screen
+# (`warehouse.acknowledgements_for_requester`) on 2026-08-20.
+#
+# It cannot be closed the same way: `inv_stock_transfer_orders` has NO position column,
+# so there is nothing to match the active position against. Closing it needs a
+# `position_id` on the table, written at create from `user.active_position_id`, and a
+# migration to add it — a schema change, not a query change.
+#
+# The LOCATION half below (`location_ids_for_user`) is already position-derived, so a
+# return raised at a point the login no longer holds is bounded correctly. Only the
+# "I raised it" branch is person-wide.
+def _raised_by_me(user):
+    return StockTransferOrder.requested_by_id == getattr(user, "id", None)
+
+
 async def list_returns(db: AsyncSession, params: PageParams, user, *,
                        status: str | None = None, search: str | None = None,
                        mine_only: bool = False, queue: str | None = None) -> dict:
@@ -663,7 +684,7 @@ async def list_returns(db: AsyncSession, params: PageParams, user, *,
         return await _queue_page(db, params, user, queue, desk)
 
     visible = await locations.location_ids_for_user(db, user)
-    owner = StockTransferOrder.requested_by_id == getattr(user, "id", None)
+    owner = _raised_by_me(user)
     if mine_only:
         stmt = stmt.where(owner)
     elif visible:
@@ -741,7 +762,7 @@ async def summary(db: AsyncSession, user) -> dict:
     tiles and the grid cannot disagree — the numbers are not summed in the browser
     over whichever page happened to be fetched."""
     visible = await locations.location_ids_for_user(db, user)
-    owner = StockTransferOrder.requested_by_id == getattr(user, "id", None)
+    owner = _raised_by_me(user)
     scope = or_(
         owner,
         StockTransferOrder.from_warehouse_id.in_(visible),
@@ -1986,7 +2007,8 @@ async def delete_file(db: AsyncSession, return_id: int, attachment_id: int,
 
 async def list_purchase_returns(db: AsyncSession, params: PageParams, *,
                                 status: str | None = None,
-                                search: str | None = None) -> dict:
+                                search: str | None = None,
+                                user=None) -> dict:
     """The other family of return, listed beside this module's own.
 
     `pro_returns` is the warehouse module's table and stays that way: this reads it so the
@@ -1998,6 +2020,17 @@ async def list_purchase_returns(db: AsyncSession, params: PageParams, *,
     one table renders both without the screen branching per row.
     """
     stmt = select(PurchaseReturn)
+    # FIXED 2026-08-20 — was unscoped while this module's OWN register
+    # (`list_returns`) is bounded by the login's stocking points. Half of one screen
+    # obeying the rung and the other half ignoring it is worse than either: a login saw
+    # their own branch's field returns beside every branch's purchase returns, vendor
+    # named. Bounded on the warehouse that raised it, with the raiser as the fallback.
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=PurchaseReturn.warehouse_id,
+            owner_col=PurchaseReturn.created_by_id,
+        ))
     if status:
         stmt = stmt.where(PurchaseReturn.status == status)
     term = (search or "").strip()

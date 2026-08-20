@@ -35,7 +35,10 @@ export type ReceiptStatus =
   | "DRAFT" | "GATE_ENTRY" | "SUBMITTED" | "PENDING_QC" | "QC_PASSED" | "QC_FAILED"
   | "PARTIALLY_RECEIVED" | "RECEIVED" | "COMPLETED" | "CANCELLED";
 
-export type InspectionStatus = "DRAFT" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
+// PENDING_APPROVAL and REJECTED are outward QC only, and only where a QC_OUTWARD
+// ladder is configured. An inbound inspection never reaches either.
+export type InspectionStatus =
+  | "DRAFT" | "IN_PROGRESS" | "PENDING_APPROVAL" | "COMPLETED" | "REJECTED" | "CANCELLED";
 export type InspectionResult = "PENDING" | "PASSED" | "FAILED" | "PARTIAL";
 
 export type PutawayStatus =
@@ -442,6 +445,9 @@ export interface OutboundInspection {
   remarks?: string | null;
   created_at?: string;
   items?: OutboundInspectionItem[];
+  current_approver_name?: string | null;
+  approved_by_name?: string | null;
+  approved_at?: string | null;
 }
 
 export interface OutboundInspectionItem {
@@ -1198,6 +1204,7 @@ export interface SerialNumber {
   warehouse_name?: string | null;
   bin_id?: number | null;
   bin_code?: string | null;
+  bin_floor_level?: number | null;
   asset_code?: string | null;
   consumable_code?: string | null;
   status: "available" | "issued" | "consumed" | "returned" | "maintenance" | "scrapped";

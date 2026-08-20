@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.shared.scope import scope_condition
 from app.modules.inventory import service as inventory_service
 from app.modules.logistics.models import GRN, GRNItem, Issue, IssueItem
 from app.modules.logistics.schemas import GRNCreate, IssueCreate
@@ -40,8 +41,15 @@ async def get_grn(db: AsyncSession, grn_id: int) -> GRN:
 
 
 async def list_grn(db: AsyncSession, params: PageParams, status: str | None = None,
-                   po_id: int | None = None) -> dict:
+                   po_id: int | None = None, user=None) -> dict:
+    """FIXED 2026-08-20 — was unscoped: `grn.view` returned every goods receipt in the
+    company, with its vendor and its values. `lgs_grn` carries no warehouse or project
+    column, so the only rung it can honour is the receiver's own; SELF therefore means
+    "the ones I booked in". WITHOUT this the job-profile rung an admin sets did nothing
+    here and one permission was a network-wide read."""
     stmt = select(GRN)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(db, user, owner_col=GRN.received_by_id))
     if status:
         stmt = stmt.where(GRN.status == status)
     if po_id is not None:
@@ -172,8 +180,13 @@ async def get_issue(db: AsyncSession, issue_id: int) -> Issue:
     return issue
 
 
-async def list_issues(db: AsyncSession, params: PageParams) -> dict:
-    return await paginate(db, select(Issue).order_by(Issue.created_at.desc()), params)
+async def list_issues(db: AsyncSession, params: PageParams, user=None) -> dict:
+    """FIXED 2026-08-20 — was unscoped, same reason as `list_grn`. Bounded by the
+    issuer, the only person dimension `lgs_issues` carries."""
+    stmt = select(Issue)
+    if user is not None:
+        stmt = stmt.where(await scope_condition(db, user, owner_col=Issue.issued_by_id))
+    return await paginate(db, stmt.order_by(Issue.created_at.desc()), params)
 
 
 async def create_issue(db: AsyncSession, data: IssueCreate, user) -> Issue:

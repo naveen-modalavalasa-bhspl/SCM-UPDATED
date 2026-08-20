@@ -5,7 +5,7 @@ user's permissions, so a requester and a plant head naturally see different cont
 """
 from datetime import date, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.indents.models import Indent
@@ -29,6 +29,12 @@ async def _count(db: AsyncSession, stmt) -> int:
 
 
 async def _open_indents(db: AsyncSession, user) -> list[dict]:
+    # FIXED 2026-08-20 — filtered on the PERSON alone, so a two-hat login saw the other
+    # hat's indents on their home tile while every list screen showed only the hat they
+    # were wearing. WITHOUT this the tile and the Indents list disagree about what "my
+    # open requests" means. NULL position stays visible: those rows predate the column
+    # and belong to no hat.
+    position_id = getattr(user, "active_position_id", None)
     stmt = (
         select(Indent)
         .where(Indent.requested_by_id == user.id)
@@ -36,6 +42,9 @@ async def _open_indents(db: AsyncSession, user) -> list[dict]:
         .order_by(Indent.updated_at.desc())
         .limit(6)
     )
+    if position_id is not None:
+        stmt = stmt.where(or_(Indent.position_id == position_id,
+                              Indent.position_id.is_(None)))
     rows = (await db.execute(stmt)).scalars().all()
     return [
         _item(

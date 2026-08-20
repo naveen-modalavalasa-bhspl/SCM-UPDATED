@@ -61,6 +61,7 @@ import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjust
 import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
 import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
 import { FulfilmentBatchPage } from "@/modules/inventory/pages/FulfilmentBatchPage";
+import { MaterialRequestFormPage } from "@/modules/inventory/pages/MaterialRequestFormPage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
 import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
 import { AllocationApprovalsPage } from "@/modules/inventory/pages/AllocationApprovalsPage";
@@ -369,6 +370,8 @@ function AppRoutes() {
             so every monthly cycle landed on "No screen at this address". */}
         <Route path="inventory/fulfillment/:cycle" element={<FulfilmentBatchPage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
+        {/* Before the `:id` route below, or "new" is read as a material request id. */}
+        <Route path="inventory/material-requests/new" element={<MaterialRequestFormPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
         {/* Where the MDP/LIP chain is declared — everything downstream reads it. */}
         <Route path="inventory/stocking-points" element={<StockingPointsPage />} />

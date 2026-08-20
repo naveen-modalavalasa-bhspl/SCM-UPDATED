@@ -19,6 +19,7 @@ from app.platform.settings.models import AuditLog
 from app.platform.settings.service import write_audit
 from app.platform.notifications import service as notification_service
 from app.platform.workflow import engine, service as workflow_service
+from app.platform.hcm.models import HcmPosition
 from app.platform.workflow.models import Action, Instance, Pending
 from app.shared.enums import AuditAction, DocType, InstanceStatus
 from app.shared.time import now as ist_now, today as ist_today
@@ -237,17 +238,46 @@ def _decision_output(action: Action, instance: Instance, user) -> dict:
     }
 
 
-def _decision_query(user):
+
+# FIXED 2026-08-20 — "My Decisions" filtered on the PERSON alone (`Action.actor_id`),
+# so an employee who holds two positions read both hats' decisions from either session.
+# Everywhere else in the app a hat change changes the data — `indent_access_condition`
+# matches `wf_actions.actor_position` for exactly this reason — and this screen was the
+# exception. WITHOUT it, switching position moves the menu and not the history.
+#
+# `actor_position` is a NAME snapshot, which is what the engine writes, so the match is
+# by name. A row with no position recorded stays visible: those predate the snapshot and
+# belong to no hat, and hiding them would silently shorten somebody's own history.
+async def _acting_position_name(db: AsyncSession, user) -> str | None:
+    position_id = getattr(user, "active_position_id", None)
+    if position_id is None:
+        return None
+    return await db.scalar(
+        select(HcmPosition.name).where(HcmPosition.id == position_id))
+
+
+async def _acted_by_me(db: AsyncSession, user):
+    """The decisions this login made IN THE CAPACITY THEY ARE WEARING."""
+    conditions = [Action.actor_id == user.id]
+    name = await _acting_position_name(db, user)
+    if name is not None:
+        conditions.append(or_(Action.actor_position == name,
+                              Action.actor_position.is_(None)))
+    return and_(*conditions)
+
+
+async def _decision_query(db: AsyncSession, user):
+    # FIXED — was `Action.actor_id == user.id`. See `_acted_by_me`.
     return (
         select(Action, Instance)
         .join(Instance, Instance.id == Action.instance_id)
-        .where(Action.actor_id == user.id, Action.action.in_(DECISION_VALUES))
+        .where(await _acted_by_me(db, user), Action.action.in_(DECISION_VALUES))
         .order_by(Action.acted_at.desc(), Action.id.desc())
     )
 
 
 async def decisions_for_user(db: AsyncSession, user) -> list[dict]:
-    rows = (await db.execute(_decision_query(user))).all()
+    rows = (await db.execute(await _decision_query(db, user))).all()
     return [_decision_output(action, instance, user) for action, instance in rows]
 
 
@@ -255,7 +285,8 @@ async def decisions_page(
     db: AsyncSession, user, page: int, size: int, *, search: str = "",
     decision: str = "",
 ) -> dict:
-    conditions = [Action.actor_id == user.id, Action.action.in_(DECISION_VALUES)]
+    # FIXED — hat-scoped, same as `_decision_query`. See `_acted_by_me`.
+    conditions = [await _acted_by_me(db, user), Action.action.in_(DECISION_VALUES)]
     if decision:
         conditions.append(Action.action == decision)
     term = search.strip()
@@ -369,6 +400,10 @@ async def act_on_document(
     elif normalized == "DISPATCH":
         from app.modules.warehouse import service as warehouse_service
         await warehouse_service.act_on_dispatch(db, doc_id, action, comments, user)
+    elif normalized == DocType.QC_OUTWARD.value:
+        from app.modules.warehouse import service as warehouse_service
+        await warehouse_service.act_on_outbound_inspection(
+            db, doc_id, action, comments, user)
     elif normalized == "PURCHASE_RETURN":
         from app.modules.warehouse import service as warehouse_service
         await warehouse_service.act_on_return(db, doc_id, action, comments, user)

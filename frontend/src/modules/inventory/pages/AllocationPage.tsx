@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, ShoppingCart, Trash2 } from "lucide-react";
 import { Can, PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
-import { createAllocation, getAllocationProposal } from "../api";
+import { createAllocation, createMaterialRequest, getAllocationProposal } from "../api";
 import { ClaimsPanel } from "../components/ClaimsPanel";
 import { alerts } from "@/modules/alerts";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
@@ -30,6 +30,10 @@ export function AllocationPage() {
   const qc = useQueryClient();
   const [decisions, setDecisions] = useState<Record<number, Split[]>>({});
   const [remarks, setRemarks] = useState("");
+  // MR numbers raised from this screen, keyed by indent line. The proposal is not
+  // refetched after raising one — nothing about the stock changed — so the button has
+  // to remember its own answer or it offers to raise the same request again.
+  const [raised, setRaised] = useState<Record<number, string>>({});
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["allocation-proposal", id],
@@ -108,6 +112,26 @@ export function AllocationPage() {
    *  the submit button has no business being live while one is on screen. */
   const overSplits = (data?.lines ?? []).filter((line: AllocationProposalLine) =>
     splitsOf(line.indent_item_id).some((s) => Number(s.qty || 0) > shelfAt(line, s.wh)));
+
+  // Raising is per LINE, so one line's request cannot fail the whole screen and the
+  // mutation carries the line it was fired for.
+  const raise = useMutation({
+    mutationFn: ({ line, quantity }: { line: AllocationProposalLine; quantity: number }) =>
+      createMaterialRequest({
+        indent_id: id,
+        indent_no: data?.indent_no,
+        items: [{
+          item_id: line.item_id,
+          quantity,
+          indent_item_id: line.indent_item_id,
+        }],
+      }),
+    onSuccess: (mr, { line }) => {
+      setRaised((prev) => ({ ...prev, [line.indent_item_id]: mr.mr_no }));
+      void alerts.success("material_request.raised", { number: mr.mr_no });
+      void qc.invalidateQueries({ queryKey: ["material-requests"] });
+    },
+  });
 
   const save = useMutation({
     mutationFn: () => {
@@ -338,6 +362,38 @@ export function AllocationPage() {
                   </span>
                 )}
               </p>
+
+              {/* The warehouse holds none of this, whatever the LIP and MDP points are
+                  showing. The automatic shortfall never fires here — it reads
+                  `available_total`, which counts chain stock — so procurement would
+                  never hear about the line unless somebody says so. Drawing from a
+                  distribution point is still allowed and still on the screen above;
+                  this is the other answer, made available rather than assumed. */}
+              {line.main_available_qty === 0 && short > 0 && (
+                <Can do="mr.create">
+                  <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
+                    <span className="text-sm text-muted">
+                      No warehouse stock
+                      {line.available_total > 0
+                        ? " — what is showing sits at LIP/MDP points."
+                        : "."}
+                    </span>
+                    {raised[line.indent_item_id] ? (
+                      <span className="mono text-sm font-semibold text-ink">
+                        Requested on {raised[line.indent_item_id]}
+                      </span>
+                    ) : (
+                      <Button
+                        variant="secondary"
+                        disabled={raise.isPending}
+                        onClick={() => raise.mutate({ line, quantity: short })}
+                      >
+                        <ShoppingCart size={14} /> Raise MR for {short} {line.uom_code}
+                      </Button>
+                    )}
+                  </div>
+                </Can>
+              )}
             </Card>
           );
         })}

@@ -14,3 +14,4 @@ export { ErrorBanner, EmptyState, ConfirmModal } from "./Feedback";
 export { ToastProvider, useToast } from "./Toast";
 export { useAction } from "./useAction";
 export { PrintTemplate } from "./PrintTemplate";
+export { FilterMenu } from "./FilterMenu";

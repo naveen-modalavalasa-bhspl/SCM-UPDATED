@@ -38,7 +38,7 @@ grn_router = APIRouter(prefix="/api/grn")
 async def list_grn(params: PageParams = Depends(), status: str | None = None,
                    po_id: int | None = None, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission(perms.GRN_VIEW))):
-    return await service.list_grn(db, params, status, po_id)
+    return await service.list_grn(db, params, status, po_id, user=user)
 
 
 @grn_router.post("/from-po/{po_id}", response_model=GRNOut)
@@ -72,7 +72,7 @@ issue_router = APIRouter(prefix="/api/issues")
 @issue_router.get("", response_model=Page[IssueOut])
 async def list_issues(params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
                       user=Depends(require_permission(perms.ISSUE_VIEW))):
-    return await service.list_issues(db, params)
+    return await service.list_issues(db, params, user=user)
 
 
 @issue_router.post("", response_model=IssueOut)
@@ -160,7 +160,7 @@ async def transport_provider_board(
         params: PageParams = Depends(), status: str | None = None,
         search: str | None = None, db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
-    return await service.provider_board(db, params, status, search)
+    return await service.provider_board(db, params, status, search, user=user)
 
 
 @transport_router.get("/carriers", response_model=list[Option])
@@ -174,7 +174,7 @@ async def transport_carriers(search: str | None = None,
 async def transport_exceptions(
         params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
-    return await service.open_exceptions(db, params)
+    return await service.open_exceptions(db, params, user=user)
 
 
 # The activity ledger: what happened, to which shipment, in the order it happened.
@@ -191,7 +191,7 @@ async def transport_activity(
     return await service.activity_ledger(
         db, params, search=search, date_from=date_from, date_to=date_to,
         event_type=event_type, only_exceptions=only_exceptions, tr_id=tr_id,
-        dispatch_id=dispatch_id)
+        dispatch_id=dispatch_id, user=user)
 
 
 # Served, never a constant in the screen: a filter offering an event the ledger
@@ -211,7 +211,8 @@ async def list_transport(params: PageParams = Depends(), status: str | None = No
                          db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.list_trs(db, params, status, mode, carrier_id,
-                                  indent_id, search, dispatch_id, source_type)
+                                  indent_id, search, dispatch_id, source_type,
+                                  user=user)
 
 
 @transport_router.post("", response_model=TROut)

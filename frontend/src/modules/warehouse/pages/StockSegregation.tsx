@@ -9,6 +9,14 @@ import { daysUntil, fmtDate, fmtQty, normaliseStatus } from "../format";
 import type { Batch, SerialNumber } from "../types";
 import { usePointLabel } from "../usePointLabel";
 
+/** Where a unit physically is. The floor comes off the bin master (`floor_level`,
+ *  the same value the Floor plan draws), so "which floor is this on" is answered
+ *  here instead of by looking the bin code up on another screen. A unit in bulk
+ *  storage has no bin and therefore no floor. */
+const placeOf = (s: SerialNumber) =>
+  [s.bin_floor_level != null ? `Floor ${s.bin_floor_level}` : null, s.bin_code ?? "bulk"]
+    .filter(Boolean).join(" · ");
+
 /**
  * Stock segregation — which individual units and batches you are holding, and which
  * of them you should stop selling.
@@ -173,7 +181,7 @@ export default function StockSegregation() {
       render: (s) => (
         <div className="min-w-0">
           <div className="truncate text-sm text-ink">{s.warehouse_name ?? "—"}</div>
-          <div className="truncate text-[11px] text-muted">{s.bin_code ?? "bulk"}</div>
+          <div className="truncate text-[11px] text-muted">{placeOf(s)}</div>
         </div>
       ),
     },
@@ -188,7 +196,7 @@ export default function StockSegregation() {
     meta: [
       { label: "Serial", value: s.serial_number },
       { label: "Batch", value: s.batch_no ?? "—" },
-      { label: "Bin", value: s.bin_code ?? "bulk" },
+      { label: "Bin", value: placeOf(s) },
     ],
   }));
 

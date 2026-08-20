@@ -5340,6 +5340,10 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "allocations": [{"id": row.id, "allocation_no": row.allocation_no,
                          "status": row.status} for row in live],
         "lines": [{**p, "available_total": float(p["available_total"]),
+                   # What the WAREHOUSE can serve, LIP and MDP points excluded. Zero
+                   # here with stock still showing in `available_total` is the case the
+                   # Raise MR button exists for: servable, but not from the warehouse.
+                   "main_available_qty": float(p["main_available_qty"]),
                    "competing_demand": float(p["competing_demand"]),
                    "warehouses": [{**w, "available_qty": float(w["available_qty"])}
                                   for w in p["warehouses"]]}
@@ -5577,7 +5581,15 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # Approved the moment it was raised, so the indent has to move here too — the
     # act_on_allocation path is never reached and the indent would sit in
     # AWAITING_ALLOCATION forever with its stock already reserved.
-    if alloc.status == AllocationStatus.APPROVED.value:
+    #
+    # Every SIGNED status, not APPROVED alone. An allocation whose short lines went to
+    # procurement is signed as AWAITING_PROCUREMENT (`allocations._settle_approved`),
+    # and testing APPROVED here skipped the indent update for exactly the case that
+    # needs it most: a two-line indent with one line on the shelf stayed
+    # AWAITING_ALLOCATION with allocated_qty 0, which is not a receivable status — so
+    # the goods that WERE issued and dispatched could never be acknowledged, and the
+    # destination stocking point was never credited for them.
+    if alloc.status in allocations.SETTLED_ALLOCATION_STATUSES:
         was_in_approval = indent.status == IndentStatus.PENDING_APPROVAL.value
         await _recalculate_indent_allocation_state(db, indent)
         await _settle_indent_approval(db, indent, user, was_in_approval)
@@ -5596,8 +5608,9 @@ async def list_allocations(
     return await allocations.list_allocations(db, params, status, indent_id, user=user)
 
 
-async def get_allocation(db: AsyncSession, allocation_id: int):
-    return await allocations.get(db, allocation_id)
+async def get_allocation(db: AsyncSession, allocation_id: int, user=None):
+    # FIXED — the detail endpoint ignored the rung its list obeys. See `allocations.get`.
+    return await allocations.get(db, allocation_id, user=user)
 
 
 async def allocation_approval_batches(db: AsyncSession, user,
@@ -5823,7 +5836,9 @@ async def act_on_allocation(db: AsyncSession, allocation_id: int, action: str, u
         revisions=revisions,
     )
 
-    if alloc.status == AllocationStatus.APPROVED.value:
+    # Signed either way — see create_allocation_for_indent. AWAITING_PROCUREMENT is an
+    # approval that also raised a material request, not a decision still pending.
+    if alloc.status in allocations.SETTLED_ALLOCATION_STATUSES:
         indent = await db.get(Indent, alloc.indent_id)
         if indent is not None:
             # Same reason as in create_allocation_for_indent: an allocation raised by

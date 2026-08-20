@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type React from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LogOut, Boxes, PanelLeftClose, PanelLeftOpen, UserRound } from "lucide-react";
 import {
@@ -112,6 +113,16 @@ function owningPage(pathname: string, known: string[]): string | null {
     }
   }
   return best;
+}
+
+/* A mouse wheel only emits deltaY, so a module whose tab strip overflows had no
+   mouse-reachable last tab. Translate the vertical wheel onto the strip; the page
+   keeps its own scroll because a touchpad's horizontal gesture (deltaX) is left
+   alone and a strip that fits is not touched at all. */
+function wheelToScroll(e: React.WheelEvent<HTMLDivElement>) {
+  const strip = e.currentTarget.querySelector<HTMLElement>(".nav-scroll") ?? e.currentTarget;
+  if (e.deltaX !== 0 || strip.scrollWidth <= strip.clientWidth) return;
+  strip.scrollLeft += e.deltaY;
 }
 
 function Brand({ compact = false }: { compact?: boolean }) {
@@ -355,12 +366,12 @@ export function AppLayout() {
 
           {/* Module options surface here as tabs */}
           {activeRoot?.code === "grp_indents" && (
-            <div className="px-2 md:px-6">
+            <div className="px-2 md:px-6" onWheel={wheelToScroll}>
               <IndentsNav embedded />
             </div>
           )}
           {tabs.length > 0 && activeRoot?.code !== "grp_indents" && (
-            <div className="min-w-0 px-2 md:px-6">
+            <div className="min-w-0 px-2 md:px-6" onWheel={wheelToScroll}>
               <Tabs
                 aria-label="Module sections"
                 variant="underlined"
@@ -373,7 +384,7 @@ export function AppLayout() {
                   // first one off-screen. Keep the base constrained to the header,
                   // let the list own overflow, and size each tab to its label.
                   base: "block w-full min-w-0",
-                  tabList: "w-full justify-start gap-4 overflow-x-auto",
+                  tabList: "nav-scroll w-full justify-start gap-4 overflow-x-auto pb-1",
                   cursor: "bg-brand",
                   tab: "h-11 w-auto min-w-max shrink-0 px-1",
                 }}

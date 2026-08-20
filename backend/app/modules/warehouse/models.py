@@ -811,6 +811,14 @@ class OutboundInspection(Base):
     inspector_id = soft_fk()
     inspector_name = Column(String(200), nullable=True)
     remarks = Column(Text, nullable=True)
+
+    # Approval, and only where a QC_OUTWARD ladder is configured. Snapshot columns of
+    # the same shape the dispatch carries: the engine owns the chain, the document
+    # owns the label the screen shows.
+    current_approver_name = Column(String(300), nullable=True)
+    approved_by_name = Column(String(200), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+
     created_at = created_at_col()
 
     items = relationship(

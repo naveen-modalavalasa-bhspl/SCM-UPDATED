@@ -125,6 +125,35 @@ export default function ScanView() {
             </Section>
           )}
 
+          {/* The plain-text readout. A scan is done one-handed on a phone at a
+           *  pallet, and the answer the floor asked for is a short labelled list per
+           *  unit — material, item, batch, code, expiry — not a six-column grid they
+           *  have to scroll sideways. The table below stays for the desk. */}
+          {items.length > 0 && (
+            <Section title="Scanned" hint="What the label says, line by line.">
+              <div className="space-y-2">
+                {items.map((line, index) => (
+                  <pre
+                    key={`text-${line.item_code}-${line.serial_no ?? index}`}
+                    className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-line bg-content2 p-3 font-mono text-xs leading-relaxed text-ink"
+                  >
+{[
+  ["Material", line.item_code],
+  ["Item", line.item_name],
+  ["Batch", line.batch_no],
+  ["Code", line.unit_code],
+  ["Serial", line.serial_no],
+  ["IMEI", line.imei_no],
+  ["Expiry", line.expiry_date],
+  ["Qty", `${fmtQty(line.quantity)} ${line.uom_code ?? ""}`.trim()],
+  ["Package", line.package_no],
+].filter(([, value]) => value).map(([label, value]) => `${label}: ${value}`).join(String.fromCharCode(10))}
+                  </pre>
+                ))}
+              </div>
+            </Section>
+          )}
+
           {items.length > 0 && (
             <Section title="Contents" hint="Item codes, names and counts.">
               <div className="overflow-x-auto rounded-lg border border-line">

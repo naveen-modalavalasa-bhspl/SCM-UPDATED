@@ -6,7 +6,9 @@ DB team's tables do not have — they would have 500'd the moment a row existed.
 """
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.shared.time import not_in_past
 
 
 class StockRow(BaseModel):
@@ -157,6 +159,34 @@ class MROut(MRListRow):
     remarks: str | None = None
     approved_at: datetime | None = None
     items: list[MRItemOut] = Field(default_factory=list)
+
+
+class MRLineIn(BaseModel):
+    """One line of a hand-raised request."""
+    item_id: int
+    quantity: float = Field(gt=0)
+    project_id: int | None = None
+    # Set when the line came from the allocation screen, so procurement can trace the
+    # buy back to the indent line that could not be served off the shelf.
+    indent_item_id: int | None = None
+
+
+class MRCreateIn(BaseModel):
+    """Raise a material request by hand.
+
+    `indent_id` is optional on purpose: the allocation screen raises against the
+    indent it is working, and the Material Requests screen raises a free-standing
+    buy that no indent asked for. Same document either way.
+    """
+    items: list[MRLineIn] = Field(min_length=1)
+    indent_id: int | None = None
+    indent_no: str | None = None
+    priority: str | None = None
+    required_by: date | None = None
+    remarks: str | None = None
+
+    _no_past_required_by = field_validator("required_by")(
+        lambda cls, v: not_in_past(v, "Required by"))
 
 
 class MRLineReviseIn(BaseModel):

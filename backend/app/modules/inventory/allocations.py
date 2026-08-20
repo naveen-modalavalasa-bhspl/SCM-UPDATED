@@ -28,7 +28,7 @@ from app.platform.workflow import engine
 from app.platform.workflow.models import Instance
 from app.shared.enums import (
     AllocationStatus, ApprovalAction, AuditAction, DocType, IndentStatus,
-    InstanceStatus, RefType,
+    InstanceStatus, RefType, WarehouseType,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
@@ -112,6 +112,12 @@ async def ensure_no_active(db: AsyncSession, indent_id: int,
         )
 
 
+# The two warehouse types that are rungs on the distribution chain rather than the
+# warehouse itself (`locations._TIER_BY_TYPE` draws the same line). Stock at these
+# points is real and can be given, but it is not stock the warehouse holds.
+_CHAIN_TYPES = frozenset({WarehouseType.LIP.value, WarehouseType.MDP.value})
+
+
 # ---------------- propose: read-only ----------------
 
 async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
@@ -138,9 +144,20 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
             entry = by_warehouse.setdefault(stock.warehouse_id, {
                 "warehouse_id": stock.warehouse_id,
                 "warehouse_name": stock.warehouse_name,
+                "warehouse_type": None,
                 "available_qty": ZERO,
             })
             entry["available_qty"] += stock.available_qty or ZERO
+
+        # The type of each point, so the screen can tell warehouse stock from stock
+        # sitting out on the distribution chain. `candidate_stock` filters on this
+        # column but returns `stk_balance` rows, which only carry the point's name.
+        if by_warehouse:
+            for warehouse_id, warehouse_type in (await db.execute(
+                select(Warehouse.id, Warehouse.warehouse_type)
+                .where(Warehouse.id.in_(by_warehouse))
+            )).all():
+                by_warehouse[warehouse_id]["warehouse_type"] = warehouse_type
 
         # Less what un-approved allocations against OTHER indents have already
         # promised out of each point — nothing is reserved until approval, so the
@@ -158,6 +175,14 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
             **line,
             "available_total": sum(
                 (w["available_qty"] for w in by_warehouse.values()), ZERO),
+            # Everything that is NOT a rung on the distribution chain. LIP and MDP hold
+            # real stock and an approver may still draw from them, but a line the
+            # warehouse itself cannot serve is a line procurement should hear about —
+            # and `available_total` counts LIP stock, so it never said so. This is what
+            # the Raise MR button on the allocation screen reads.
+            "main_available_qty": sum(
+                (w["available_qty"] for w in by_warehouse.values()
+                 if w["warehouse_type"] not in _CHAIN_TYPES), ZERO),
             "warehouses": list(by_warehouse.values()),
             "competing_demand": await competing_demand(db, line["item_id"], indent_id),
         })
@@ -659,10 +684,29 @@ async def _refresh_approver(db: AsyncSession, alloc: Allocation,
     alloc.current_approver_name = ", ".join(a.full_name for a in approvers) or None
 
 
-async def get(db: AsyncSession, allocation_id: int) -> Allocation:
-    alloc = (await db.execute(
-        select(Allocation).where(Allocation.id == allocation_id)
-    )).scalar_one_or_none()
+async def get(db: AsyncSession, allocation_id: int, user=None) -> Allocation:
+    """FIXED 2026-08-20 — `list_allocations` is bounded by the stocking points the
+    login's rung reaches and this took no `user` at all, so an allocation hidden from
+    Allocation Approvals opened fine by id. An allocation names an indent, its items and
+    the quantities somebody committed off a shelf. WITHOUT this the list's rung is a
+    display filter rather than a permission.
+
+    Same bound as the list: the points the login reaches, or one they raised themselves.
+    404, not 403 — an id that is not yours must not confirm it exists.
+    """
+    stmt = select(Allocation).where(Allocation.id == allocation_id)
+    if user is not None:
+        from app.modules.inventory.service import warehouse_ids_for_user
+
+        allowed = await warehouse_ids_for_user(db, user)
+        if allowed is not None:
+            stmt = stmt.where(or_(
+                Allocation.allocated_by_id == user.id,
+                Allocation.id.in_(
+                    select(AllocationItem.allocation_id).where(
+                        AllocationItem.warehouse_id.in_(allowed or {0}))),
+            ))
+    alloc = (await db.execute(stmt)).scalar_one_or_none()
     if not alloc:
         raise NotFoundError(f"Allocation {allocation_id} not found")
     return alloc
@@ -678,6 +722,11 @@ async def list_allocations(db: AsyncSession, params: PageParams,
         # the login's rung reaches, plus the ones they raised themselves.
         from app.modules.inventory.service import warehouse_ids_for_user
 
+        # NOTE (2026-08-20): `allocated_by_id` is the PERSON, so a two-hat login sees
+        # allocations they raised under the other hat. `inv_allocations` carries no
+        # position column, so this cannot be hat-scoped without a migration — same
+        # situation as returns. The WAREHOUSE half below is position-derived and is the
+        # branch that actually bounds the list.
         allowed = await warehouse_ids_for_user(db, user)
         if allowed is not None:
             stmt = stmt.where(or_(

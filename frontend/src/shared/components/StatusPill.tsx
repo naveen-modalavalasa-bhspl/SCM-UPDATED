@@ -23,7 +23,16 @@ const TONE: Record<string, Tone> = {
   IN_PROGRESS: "warning",
 };
 
-export function StatusPill({ status }: { status: string }) {
+/**
+ * `label` overrides the words WITHOUT touching the status.
+ *
+ * The supplier portal needs it: our internal "SENT_TO_VENDOR" reads as nonsense on the
+ * vendor's own screen — from where they are sitting that order is simply new. The
+ * status itself must not be renamed for them, because it is the same document our desk
+ * is looking at, so only the wording moves and the tone still comes from the real
+ * status.
+ */
+export function StatusPill({ status, label }: { status: string; label?: string }) {
   return (
     <Chip
       size="sm"
@@ -32,7 +41,7 @@ export function StatusPill({ status }: { status: string }) {
       color={TONE[status] ?? "default"}
       classNames={{ content: "text-[11px] font-semibold uppercase tracking-wide" }}
     >
-      {status.replace(/_/g, " ")}
+      {label ?? status.replace(/_/g, " ")}
     </Chip>
   );
 }
