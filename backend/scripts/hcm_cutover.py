@@ -11,6 +11,11 @@ parent chain that no longer exists.
 So, in order:
 
 1. Sync the entities SCM needs (sync.NEEDED_ENTITIES), parents first.
+   Roles ride along: `sync_needed` calls `rbac.service.sync_hcm_roles`, which since
+   2026-08-20 also RETIRES the HCM-sourced roles the feed no longer returns. Before
+   that it only added, so this script retired the old generation's positions and left
+   its roles live beside the new ones — which is how one job ended up on the ladder
+   twice under two role ids.
 2. Retire every position the feed did NOT return, and the assignment that seats
    someone on it. Retire, not delete: `wf_instances.resolved_chain` and every
    historical approval name a position id, and those must still resolve to a name.

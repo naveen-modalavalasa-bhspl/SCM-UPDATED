@@ -1,4 +1,5 @@
 """Position-aware RBAC read logic: effective roles, permissions, and menu."""
+import logging
 import re
 
 from sqlalchemy import event, func, or_, select, text
@@ -19,6 +20,8 @@ from app.platform.settings.service import write_audit
 from app.platform.rbac.permissions import PAGE_RESOURCE
 from app.platform.rbac.profiles import PROFILE_PREFIX
 from app.shared.enums import AuditAction, GroupType
+
+log = logging.getLogger(__name__)
 
 MAX_GROUP_DEPTH = 10
 
@@ -53,7 +56,24 @@ def hcm_role_code(name: str, role_id: int) -> str:
 
 
 async def sync_hcm_roles(db: AsyncSession) -> int:
-    """Mirror HCM identities into RBAC so page permissions can target them."""
+    """Mirror HCM identities into RBAC so page permissions can target them.
+
+    FIXED 2026-08-20 — this only ever ADDED. It walks the role ids the feed returned,
+    inserts the new ones and re-activates the known ones, and a role that has since
+    disappeared from HCM was never visited at all: its `rbac_roles` row stayed
+    `is_active = 1` for ever. `scripts/hcm_cutover.py` retires stale POSITIONS and
+    ASSIGNMENTS exactly this way and never touched roles, so the 2026-08-10 cutover left
+    the previous generation of roles live beside the new one.
+
+    WITHOUT the retirement pass below, the role list only grows: every HCM rename or
+    re-key leaves its old row behind, and an admin choosing a ladder rung or a job
+    profile picks from a list where the dead entries look exactly like the live ones —
+    and a rung pointed at a role nobody holds resolves to nobody.
+
+    Retired, never deleted. `wf_instances.resolved_chain`, `rbac_user_roles` and every
+    historical grant name a role id and must still resolve to a name; `is_active` is
+    already the flag every reader filters on.
+    """
     hcm_rows = (await db.execute(
         select(HcmPosition.role_id, HcmPosition.role_name)
         .where(
@@ -67,7 +87,7 @@ async def sync_hcm_roles(db: AsyncSession) -> int:
     existing = (await db.execute(select(Role))).scalars().all()
     by_description = {r.description: r for r in existing if r.description}
     used_codes = {r.code.lower() for r in existing}
-    added = 0
+    added = retired = 0
     for hcm_role_id, name in hcm_rows:
         description = hcm_role_description(hcm_role_id)
         role = by_description.get(description)
@@ -84,7 +104,31 @@ async def sync_hcm_roles(db: AsyncSession) -> int:
                     is_system=True, is_active=True))
         used_codes.add(code.lower())
         added += 1
+
+    # The retirement pass. Scoped to HCM-SOURCED rows by their description prefix, so
+    # the locally seeded roles (ADMIN, SCM Head, …) and the per-profile roles
+    # (`PROFILE:<id>:<name>`) are never touched — neither comes from this feed and
+    # neither would ever appear in `live_ids`.
+    live_ids = {role_id for role_id, _ in hcm_rows}
+    for role in existing:
+        description = role.description or ""
+        if not description.startswith(HCM_ROLE_DESCRIPTION_PREFIX):
+            continue
+        if not role.is_active:
+            continue
+        try:
+            role_id = int(description[len(HCM_ROLE_DESCRIPTION_PREFIX):].strip())
+        except ValueError:
+            # A description we cannot parse is one we did not write. Leave it alone
+            # rather than retire a row on a guess.
+            continue
+        if role_id not in live_ids:
+            role.is_active = False
+            retired += 1
+
     await db.flush()
+    if retired:
+        log.info("sync_hcm_roles retired %s role(s) HCM no longer returns", retired)
     return added
 
 
