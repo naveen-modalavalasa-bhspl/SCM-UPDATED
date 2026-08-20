@@ -1405,6 +1405,48 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
     return await get_receipt(db, receipt_id)
 
 
+async def _name_received_units(db: AsyncSession, receipt: m.Receipt) -> None:
+    """Give every received unit a serial, before the GRN goes anywhere.
+
+    FIXED 2026-08-20 — this ran inside `_process_submitted_receipt`, which only
+    executes once the GRN's approval chain is FINISHED. On a project that configured a
+    GRN chain the receipt parked at its first rung with zero serials on the line, and
+    QC — which is not gated on that approval, and should not be, the goods are
+    physically on the floor — then asked the inspector to "select exactly 30 accepted
+    serial numbers" out of a list that was empty. The document was unfinishable from
+    the moment it was submitted.
+
+    Minting is not a decision anybody approves. It is naming units that have already
+    arrived, so it belongs at SUBMIT, on both paths, before the branch. A typed serial
+    is never replaced, so a part-scanned lorry keeps every number the storekeeper
+    actually read.
+    """
+    # Read once for the whole GRN: the formula cannot change between two lines of one
+    # lorry, and it is five queries every time it is read.
+    code_config = await codeformat.code_settings(db)
+    for line in receipt.items:
+        item = await _item_snapshot(db, line.item_id)
+        if not item.is_serial_tracked:
+            continue
+        captured = [str(v).strip() for v in (line.serial_numbers or []) if str(v).strip()]
+        received = _d(line.received_qty)
+        if received != received.to_integral_value():
+            raise ValidationError(
+                f"{item.code}: serialized quantity must be a whole number")
+        if len(captured) > int(received):
+            raise ValidationError(
+                f"{item.code}: {len(captured)} serial numbers for "
+                f"{int(received)} received units")
+        if len(captured) < int(received):
+            minted = await codeformat.mint_serials(
+                db, item=item, count=int(received) - len(captured),
+                warehouse_code=await _warehouse_code(db, receipt.warehouse_id),
+                config=code_config,
+                taken=await _serials_in_use(db, item.id) | set(captured),
+            )
+            line.serial_numbers = captured + minted
+
+
 async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
     """Freeze the GRN — through approval first, if this project configured one.
 
@@ -1423,6 +1465,10 @@ async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
            "submit", "receipt")
     if not receipt.items:
         raise ValidationError("A receipt with no lines has nothing to inspect")
+
+    # Before the branch, so an approved GRN and an unapproved one both leave here with
+    # every unit named. See `_name_received_units`.
+    await _name_received_units(db, receipt)
 
     if await _grn_needs_approval(db, receipt, user):
         return await _send_receipt_for_approval(db, receipt, user)
@@ -1525,38 +1571,8 @@ async def _process_submitted_receipt(db: AsyncSession, receipt: m.Receipt,
     """
     qc_lines: list[m.ReceiptItem] = []
     direct_lines: list[m.ReceiptItem] = []
-    # Read once for the whole GRN: the formula cannot change between two lines of one
-    # lorry, and it is five queries every time it is read.
-    code_config = await codeformat.code_settings(db)
     for line in receipt.items:
         item = await _item_snapshot(db, line.item_id)
-        # The last gate: the partial list a gate entry is allowed to carry must be
-        # finished before the document moves on, because QC selects the units it is
-        # keeping from this list and putaway names each one from what QC passed.
-        if item.is_serial_tracked:
-            captured = [str(v).strip() for v in (line.serial_numbers or []) if str(v).strip()]
-            received = _d(line.received_qty)
-            if received != received.to_integral_value():
-                raise ValidationError(
-                    f"{item.code}: serialized quantity must be a whole number"
-                )
-            if len(captured) > int(received):
-                raise ValidationError(
-                    f"{item.code}: {len(captured)} serial numbers for "
-                    f"{int(received)} received units"
-                )
-            # Goods that arrive unlabelled used to stop the GRN here. The units that
-            # have no vendor serial are given one from the Serial format in
-            # Settings > Code Formats — a typed serial is never replaced, so a part-
-            # scanned lorry keeps every serial the storekeeper actually read.
-            if len(captured) < int(received):
-                minted = await codeformat.mint_serials(
-                    db, item=item, count=int(received) - len(captured),
-                    warehouse_code=await _warehouse_code(db, receipt.warehouse_id),
-                    config=code_config,
-                    taken=await _serials_in_use(db, item.id) | set(captured),
-                )
-                line.serial_numbers = captured + minted
         if item.requires_qi:
             line.qc_status = QcStatus.PENDING.value
             qc_lines.append(line)
