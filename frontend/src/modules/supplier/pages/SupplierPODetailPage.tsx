@@ -6,7 +6,7 @@ import {
   Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
 import { Stepper, type Step } from "@/shared/components/Stepper";
-import { fmtDate } from "@/shared/datetime";
+import { fmtDate, todayIst } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type {
   DespatchLineWrite, DespatchNote, DespatchNoteWrite, VendorPOLine,
@@ -445,8 +445,11 @@ export function SupplierPODetailPage() {
               />
             </Field>
             <Field label="Invoice date">
+              {/* An invoice cannot be raised in the future — same class of bug, other
+                * direction, so it is capped rather than floored. */}
               <Input
                 type="date"
+                max={todayIst()}
                 value={header.invoice_date ?? ""}
                 onChange={(e) => setHeader((h) => ({ ...h, invoice_date: e.target.value || null }))}
               />
@@ -485,8 +488,14 @@ export function SupplierPODetailPage() {
               />
             </Field>
             <Field label="Expected delivery">
+              {/* FIXED 2026-08-20 — the picker accepted past dates, so a vendor could
+                * file a note promising delivery before the day they wrote it. The
+                * receiving desk chases against this date, so a date already gone reads
+                * as an overdue shipment the moment it is saved. `min` today; the server
+                * refuses one anyway (procurement.service._check_despatch_dates). */}
               <Input
                 type="date"
+                min={todayIst()}
                 value={header.expected_date ?? ""}
                 onChange={(e) => setHeader((h) => ({ ...h, expected_date: e.target.value || null }))}
               />
@@ -531,6 +540,8 @@ export function SupplierPODetailPage() {
                     <td className="p-2">
                       <Input
                         type="date"
+                        // Nothing is manufactured tomorrow.
+                        max={todayIst()}
                         value={line.mfg_date ?? ""}
                         onChange={(e) => setLine(index, { mfg_date: e.target.value || null })}
                       />
@@ -538,6 +549,9 @@ export function SupplierPODetailPage() {
                     <td className="p-2">
                       <Input
                         type="date"
+                        // Already-expired stock must not be dispatched at all, so the
+                        // floor is today rather than the manufacture date.
+                        min={todayIst()}
                         value={line.expiry_date ?? ""}
                         onChange={(e) => setLine(index, { expiry_date: e.target.value || null })}
                       />

@@ -51,6 +51,7 @@ from app.shared.enums import (
     RequisitionStatus, RFQStatus,
 )
 from app.shared.models.base import utcnow
+from app.shared.time import today as ist_today
 from app.shared.models.master import HsnCode, Item, Project, Vendor, VendorItem
 from app.shared.numbering import next_number
 
@@ -3113,6 +3114,18 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
     if not lines:
         raise ValidationError("A despatch note needs at least one quantity")
 
+    today = ist_today()
+    # WITHOUT this a vendor could promise delivery before the day they wrote the note.
+    # The receiving desk chases against `expected_date`, so a date already gone reads
+    # as an overdue shipment the moment it is filed — the document arrives late.
+    if data.expected_date and data.expected_date < today:
+        raise ValidationError(
+            f"Expected delivery {data.expected_date} is in the past")
+    # The other direction, and the same class of error: an invoice cannot be raised
+    # for a day that has not happened.
+    if data.invoice_date and data.invoice_date > today:
+        raise ValidationError(f"Invoice date {data.invoice_date} is in the future")
+
     for line in lines:
         po_line = po_items.get(line.po_item_id)
         if po_line is None:
@@ -3126,6 +3139,18 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
             raise ValidationError(
                 f"{po_line.item_code or po_line.item_name}: expiry must be after "
                 "the manufacture date")
+        # FIXED 2026-08-20 — the dates were unbounded in both directions. The form now
+        # sets min/max on the pickers, but an attribute on an <input> stops a mouse and
+        # nothing else: the same payload posted by hand went straight in. Checked here
+        # too, which is the only place it is actually enforced.
+        if line.mfg_date and line.mfg_date > today:
+            raise ValidationError(
+                f"{po_line.item_code or po_line.item_name}: nothing is manufactured "
+                "in the future")
+        if line.expiry_date and line.expiry_date < today:
+            raise ValidationError(
+                f"{po_line.item_code or po_line.item_name}: that stock expired on "
+                f"{line.expiry_date} and cannot be despatched")
 
     if note is None:
         note = DespatchNote(
