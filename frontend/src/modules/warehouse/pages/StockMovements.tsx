@@ -84,7 +84,12 @@ export default function StockMovements() {
       createTo="new"
       createLabel="New order"
       createPermission="movement.create"
-      onRowClick={(row) => nav("view?order_no=" + encodeURIComponent(row.order_no))}
+      onRowClick={(row) => {
+        // Use window.location.pathname to dynamically support both
+        // /warehouse/transactions/stock-movements and /warehouse/stock-movements
+        const base = window.location.pathname.replace(/\/$/, "");
+        nav(`${base}/view?order_no=${encodeURIComponent(row.order_no)}`);
+      }}
       empty="No stock movement orders recorded."
       onDelete={(row) => deleteStockMovement(row.id)}
       canDelete={(row) => row.status === "DRAFT"}

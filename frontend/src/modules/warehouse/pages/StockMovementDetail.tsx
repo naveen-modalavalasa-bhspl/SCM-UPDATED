@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, FileText } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button, Card, ErrorBanner, PageHeader, StatusPill, Table } from "@/shared/components";
+import { Button, Card, ErrorBanner, PageHeader, StatusPill, ResponsiveList } from "@/shared/components";
 import { getStockMovementOrder } from "../api";
 import { Section } from "../components/DocumentMeta";
 import { fmtDateTime, fmtQty } from "../format";
@@ -80,7 +80,7 @@ export default function StockMovementDetail() {
       </Section>
 
       <Section title="Movement Lines">
-        <Table<StockMovementOrderItem>
+        <ResponsiveList<StockMovementOrderItem>
           columns={[
             {
               key: "item",
@@ -123,8 +123,23 @@ export default function StockMovementDetail() {
             },
           ]}
           data={data.items || []}
-          keyOf={(row) => row.id}
+          keyOf={(row) => row.id ?? `${row.item_id}-${row.source_bin_id}-${row.destination_bin_id}`}
           empty="No items moved."
+          renderCard={(row) => (
+            <div className="space-y-2">
+              <div className="flex justify-between font-semibold">
+                <span>{row.item_name}</span>
+                <span>{fmtQty(row.quantity)} <span className="text-xs text-muted">{row.uom_code}</span></span>
+              </div>
+              <div className="text-sm">
+                <span className="text-muted">From:</span> {row.source_bin_code ?? "—"}
+                {row.batch_id ? ` (Batch: ${row.batch_id})` : ""}
+              </div>
+              <div className="text-sm">
+                <span className="text-muted">To:</span> {row.destination_bin_code ?? "—"}
+              </div>
+            </div>
+          )}
         />
       </Section>
     </div>
