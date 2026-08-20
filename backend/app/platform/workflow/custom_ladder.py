@@ -360,6 +360,12 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
         if stage.approver_type == ApproverType.ROLE_ANY.value and stage.position_role_id:
             people = await ladder.rank_any_holders(
                 db, stage.position_role_id, exclude_id)
+            # FIXED 2026-08-20 — see `ladder.positions_of_rank`. The rung is gated on
+            # the positions that CARRY the rank, so an approver holding several hats has
+            # to be wearing this one. Left empty when the lookup finds nothing, which
+            # keeps the old "no hat restriction" behaviour rather than stranding a
+            # document on a mirror that has drifted.
+            allowed = await ladder.positions_of_rank(db, stage.position_role_id)
             if not people:
                 logger.info("Rung %r skipped: nobody holds rank %s",
                             stage.name, stage.position_role_id)
@@ -372,8 +378,9 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
                 "role_name": stage.name or f"Rank {stage.position_role_id}",
                 "approver_ids": [person["id"] for person in people],
                 "approver_names": [person["name"] for person in people],
-                # No hat restriction: the chair IS the rank, so holding it is the gate.
-                "allowed_position_ids": [],
+                # The positions that carry this rank. Holding the rank is still the
+                # authority; wearing it is now also required. See `positions_of_rank`.
+                "allowed_position_ids": allowed,
             })
             continue
 

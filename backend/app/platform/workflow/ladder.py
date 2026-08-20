@@ -581,6 +581,28 @@ async def rank_any_holders(db: AsyncSession, role_id: int,
     return [person for person in people if person["id"] != exclude_employee_id]
 
 
+async def positions_of_rank(db: AsyncSession, role_id: int) -> list[int]:
+    """The live positions that carry a rank.
+
+    FIXED 2026-08-20 — a ROLE_ANY rung recorded `allowed_position_ids: []`, which the
+    engine reads as "no hat restriction". For a LOCAL POST that is right (the seat is
+    the person), but for a RANK it is not: a rank IS a position attribute, and someone
+    can hold three positions of which only one carries it.
+
+    WITHOUT this, a person who is both the Inventory Manager and the SCM Head approves
+    the SCM Head rung while still wearing the Inventory Manager hat — the Approve button
+    never goes away between the two rungs, no switch is ever demanded, and `wf_actions`
+    records "APPROVED · INVENTORY MANAGER" against the SCM HEAD stage. The audit trail
+    then states something that did not happen.
+    """
+    return list((await db.scalars(
+        select(HcmPosition.id).where(
+            HcmPosition.role_id == role_id,
+            HcmPosition.is_active.is_(True),
+        )
+    )).all())
+
+
 async def _rank_holders(db: AsyncSession,
                         project_id: int | None) -> dict[int, list[dict]]:
     """rank -> the people who fill it, deduplicated (someone can hold two posts at one).
