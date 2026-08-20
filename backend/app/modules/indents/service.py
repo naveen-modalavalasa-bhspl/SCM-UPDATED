@@ -5315,15 +5315,18 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "project_id": indent.project_id,
     } for line in indent.items]
 
-    # Only points this person actually holds, or that report under them. Inventory and
-    # anyone with a company-wide scope has no subtree, and sees every warehouse as
-    # before — the narrowing exists so an OE is offered their own MDP and LIP rather
-    # than every store in the company.
-    my_points = (await locations.location_ids_for_user(db, user)
-                 if user is not None else set())
+    # Points this person may DRAW FROM: the stocking points they hold or that report
+    # under them, UNION whatever their job profile's data scope opens up. The subtree
+    # alone was the whole rule, so an inventory manager granted `stock.view_all` — who
+    # sees every point on Stock Balance — was offered only the one warehouse tagged to
+    # his own post here, and every other line fell through to procurement. None means
+    # unrestricted (admin, `stock.view_all`, ALL rung) and drops the filter entirely.
+    my_points = (await inventory_service.drawable_warehouse_ids(db, user)
+                 if user is not None else None)
 
     proposal = await allocations.propose(
-        db, indent_id, lines, warehouse_ids=sorted(my_points) or None)
+        db, indent_id, lines,
+        warehouse_ids=sorted(my_points) if my_points else None)
     return {
         "indent_id": indent.id,
         "indent_no": indent.indent_no,

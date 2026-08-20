@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Input, PageHeader, ResponsiveList, Select, type Column } from "@/shared/components";
+import { Input, PageHeader, ResponsiveList, Select, type Column, selectOnFocus } from "@/shared/components";
 import { adminApi } from "../api";
 import type { AuditRow } from "../types";
 import { fmtDateTime } from "@/shared/datetime";
@@ -98,6 +98,7 @@ export function AuditPage() {
         <div className="w-64">
           <Input
             value={searchInput}
+            onFocus={selectOnFocus}
             onChange={(event) => setSearchInput(event.target.value)}
             placeholder="Search who, document or table…"
             aria-label="Search the audit log"

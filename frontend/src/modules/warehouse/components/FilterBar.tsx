@@ -1,4 +1,4 @@
-import { Button, Card, Select } from "@/shared/components";
+import { Button, Card, Select, selectOnFocus } from "@/shared/components";
 import type { ReactNode } from "react";
 import { Search, X } from "lucide-react";
 
@@ -38,6 +38,7 @@ export function FilterBar({
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
             <input
               value={search ?? ""}
+              onFocus={selectOnFocus}
               onChange={(e) => onSearch(e.target.value)}
               placeholder={placeholder}
               aria-label={placeholder}

@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import {
   Button, Card, EmptyState, ErrorBanner, Field, Input, PageHeader, Select,
-  ScrollBox, useToast,
+  ScrollBox, selectOnFocus, useToast,
 } from "@/shared/components";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 import { rbacApi } from "../api";
@@ -969,6 +969,7 @@ export function JobProfilesPage() {
               aria-label="Search job profiles"
               placeholder="Search job, project, HCM role, position…"
               value={search}
+              onFocus={selectOnFocus}
               onChange={(e) => setSearch(e.target.value)}
             />
             {/* The same list, asked from the other side. The search above matches what

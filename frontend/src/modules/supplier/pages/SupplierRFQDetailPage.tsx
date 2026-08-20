@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
-import { fmtDate } from "@/shared/datetime";
+import { fmtDate, todayIst } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type { QuoteSubmit } from "@/modules/procurement/types";
 
@@ -359,13 +359,13 @@ export function SupplierRFQDetailPage() {
           </Field>
           <Field label="Valid until">
             <Input
-              type="date" value={header.valid_till} disabled={!open}
+              type="date" min={todayIst()} value={header.valid_till} disabled={!open}
               onChange={(e) => setHeader({ ...header, valid_till: e.target.value })}
             />
           </Field>
           <Field label="Can deliver by">
             <Input
-              type="date" value={header.expected_delivery_date} disabled={!open}
+              type="date" min={todayIst()} value={header.expected_delivery_date} disabled={!open}
               onChange={(e) => setHeader({ ...header, expected_delivery_date: e.target.value })}
             />
           </Field>

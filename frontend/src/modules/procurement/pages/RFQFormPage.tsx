@@ -9,6 +9,7 @@ import { api } from "@/shared/api/client";
 import { requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import { OrgFields, type OrgValue } from "../components/OrgFields";
+import { todayIst } from "@/shared/datetime";
 
 interface MasterVendor {
   id: number;
@@ -224,7 +225,9 @@ export function RFQFormPage() {
                    placeholder="What is being bought" />
           </Field>
           <Field label="Closes on" hint="After this date vendors can read but not quote.">
-            <Input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+            {/* A closing date behind us shuts the RFQ the moment it is raised. */}
+            <Input type="date" min={todayIst()} value={dueDate}
+                   onChange={(e) => setDueDate(e.target.value)} />
           </Field>
           <Field label="Terms">
             <Input value={terms} onChange={(e) => setTerms(e.target.value)}

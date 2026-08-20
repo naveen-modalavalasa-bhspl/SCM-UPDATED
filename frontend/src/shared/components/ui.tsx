@@ -6,6 +6,8 @@ import {
   Button as HButton,
   Card as HCard,
   Input as HInput,
+  Select as HSelect,
+  SelectItem as HSelectItem,
 } from "@heroui/react";
 
 /* ---------------------------------------------------------------------------
@@ -159,17 +161,57 @@ export function Input({ className, ...props }: InputProps) {
   );
 }
 
+/** Focus handler for a SEARCH or filter box: it selects whatever is already in the
+ *  field, so the next thing typed REPLACES the old term instead of being appended to
+ *  it. Filter boxes are the one place that is always what the user meant — the value
+ *  is a single term, not prose.
+ *
+ *  Only for those. Never put it on an ordinary form field: selecting a quantity or a
+ *  remark somebody came back to amend means their first keystroke wipes it. */
+export const selectOnFocus = (event: { target: { select?: () => void } }) =>
+  event.target.select?.();
+
 export interface SelectOption {
   value: string | number;
   label: string;
 }
 
-/** Searchable single-select. Typing filters the list, which is what makes a
- *  300-row master usable; masters routinely feed this that many options.
+/** How many options it takes before the box is worth SEARCHING.
  *
- *  Built on HeroUI's Autocomplete rather than its Select, but the props are
- *  unchanged so every existing call site keeps working. `allowsCustomValue` stays
- *  off: the value is always an id from `options`, never whatever was typed. */
+ *  Under this it renders as an ordinary dropdown: one click, the whole list on
+ *  screen, nothing to type. Over it, a plain dropdown means scrolling a 300-row
+ *  master to find one line, so the box filters as you type instead. Masters
+ *  routinely feed this that many options and modes/statuses/priorities feed it five.
+ *
+ *  One number, not a decision retyped at 150 call sites — and `searchable` overrides
+ *  it either way for a screen that knows better than the count does. */
+const SEARCHABLE_FROM = 10;
+
+interface SelectProps {
+  value?: string | number | "";
+  onChange: (value: string) => void;
+  options: SelectOption[];
+  placeholder?: string;
+  label?: string;
+  ariaLabel?: string;
+  isDisabled?: boolean;
+  className?: string;
+  isInvalid?: boolean;
+  errorMessage?: string;
+  /** Force the searchable box on or off. Omitted, the option count decides. */
+  searchable?: boolean;
+}
+
+/** Single-select, shared by every module.
+ *
+ *  Two renderings behind one set of props, chosen by how long the list is (see
+ *  `SEARCHABLE_FROM`). Both report the option's own `value` through `onChange`, both
+ *  take "" as "nothing chosen", and neither ever emits a value that is not in
+ *  `options` — a call site cannot tell which one it got, which is the point.
+ *
+ *  Until 2026-08-20 every one of these was the searchable box. That is right for a
+ *  masters dropdown and wrong for a five-item one, where "Type to search…" asked the
+ *  user to type in order to pick from a list they could already see. */
 export function Select({
   value,
   onChange,
@@ -181,30 +223,51 @@ export function Select({
   className,
   isInvalid,
   errorMessage,
-}: {
-  value?: string | number | "";
-  onChange: (value: string) => void;
-  options: SelectOption[];
-  placeholder?: string;
-  label?: string;
-  ariaLabel?: string;
-  isDisabled?: boolean;
-  className?: string;
-  isInvalid?: boolean;
-  errorMessage?: string;
-}) {
+  searchable,
+}: SelectProps) {
   const selected = value === "" || value === undefined || value === null
     ? null : String(value);
+  const common = {
+    variant: "bordered" as const,
+    radius: "md" as const,
+    label,
+    "aria-label": ariaLabel ?? label ?? placeholder ?? "Select an option",
+    isDisabled,
+    isInvalid,
+    errorMessage,
+  };
+
+  if (!(searchable ?? options.length >= SEARCHABLE_FROM)) {
+    return (
+      <HSelect
+        {...common}
+        placeholder={placeholder ?? "Select an option"}
+        items={options}
+        // Only a key the collection actually holds. An edit form sets its value
+        // before the options query lands, and HeroUI warns on every such render —
+        // the field fills itself in the moment the list arrives either way, so this
+        // is the same behaviour with a quiet console.
+        selectedKeys={
+          selected !== null && options.some((o) => String(o.value) === selected)
+            ? [selected] : []
+        }
+        onSelectionChange={(keys) => {
+          const key = Array.from(keys as Set<string | number>)[0];
+          onChange(key == null ? "" : String(key));
+        }}
+        classNames={{ trigger: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
+      >
+        {(option: SelectOption) => (
+          <HSelectItem key={String(option.value)}>{option.label}</HSelectItem>
+        )}
+      </HSelect>
+    );
+  }
+
   return (
     <Autocomplete
-      variant="bordered"
-      radius="md"
-      label={label}
-      aria-label={ariaLabel ?? label ?? placeholder ?? "Select an option"}
+      {...common}
       placeholder={placeholder ?? "Type to search…"}
-      isDisabled={isDisabled}
-      isInvalid={isInvalid}
-      errorMessage={errorMessage}
       defaultItems={options}
       selectedKey={selected}
       // Clearing the box gives null, which must reach the caller as "" — the same

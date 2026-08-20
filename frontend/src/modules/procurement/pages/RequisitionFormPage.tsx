@@ -8,6 +8,7 @@ import { requisitionApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import { OrgFields, type OrgValue } from "../components/OrgFields";
 import type { ReqCreate } from "../types";
+import { todayIst } from "@/shared/datetime";
 
 const PRIORITIES = [
   { value: "NORMAL", label: "Normal" },
@@ -130,6 +131,10 @@ export function RequisitionFormPage() {
           <Field label="Needed by" hint="Applies to every line on this requisition.">
             <Input
               type="date"
+              // A requisition is a request for the future. Blocked in the picker as
+              // well as in the service, so the calendar never offers a day that the
+              // save is going to refuse.
+              min={todayIst()}
               value={requiredDate}
               onChange={(e) => setRequiredDate(e.target.value)}
             />

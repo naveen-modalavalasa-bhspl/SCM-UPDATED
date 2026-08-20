@@ -4,7 +4,7 @@ import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader,
 } from "@heroui/react";
 import { Check, Copy, Plus, Search, Trash2 } from "lucide-react";
-import { Button, Can, ConfirmModal, Field, Input, useAction } from "@/shared/components";
+import { Button, Can, ConfirmModal, Field, Input, useAction, selectOnFocus } from "@/shared/components";
 import { rbacApi } from "../api";
 import type { PermissionDef, RoleWithPermissions } from "../types";
 
@@ -178,6 +178,7 @@ export function PermissionMatrix() {
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
             value={search}
+            onFocus={selectOnFocus}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search permission or module…"
             className="h-10 w-full rounded-xl border border-line bg-content1 pl-9 pr-3 text-sm outline-none focus:border-brand"

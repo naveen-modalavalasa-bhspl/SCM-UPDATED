@@ -16,6 +16,7 @@ import {
   getConsignment,
   getIssueDispatchSource,
   issueOptions,
+  submitDispatch,
   updateConsignment,
   allWarehouseOptions,
 } from "../api";
@@ -424,6 +425,20 @@ export default function ConsignmentForm() {
     },
   });
 
+  // The release step. `transport_release_blocked` refuses a dispatch while the project's
+  // DISPATCH ladder still owes a signature and tells the user to send it for release
+  // here — this is the press it names. Where no ladder is configured the chain resolves
+  // to NO_APPROVAL and the consignment comes straight back APPROVED, which gate-out has
+  // always accepted, so nothing changes for a site that never asked for a signature.
+  const sendForRelease = useMutation({
+    mutationFn: () => submitDispatch(Number(id)),
+    onSuccess: (saved: Dispatch) => {
+      qc.invalidateQueries({ queryKey: ["wh-consignments"] });
+      qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
+      qc.invalidateQueries({ queryKey: ["wh-consignment", String(saved.id)] });
+    },
+  });
+
   const locked = !!doc && !["DRAFT", "PACKED"].includes(doc.status);
   const destination = destinationOf(doc, source);
   const destinationSac = destinationSacOf(doc, source);
@@ -672,6 +687,15 @@ export default function ConsignmentForm() {
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {doc?.status === "PACKED" && (
+              <Can do="dispatch.create">
+                <Button variant="soft" onClick={() => sendForRelease.mutate()}
+                        disabled={sendForRelease.isPending}>
+                  <CheckCircle2 className="h-4 w-4" />
+                  {sendForRelease.isPending ? "Sending..." : "Send for release"}
+                </Button>
+              </Can>
+            )}
+            {doc?.status === "PACKED" && (
               <Can do={inLogistics ? "transport.create" : "dispatch.gate_out"}>
                 <Button variant="soft" onClick={() => nav(dispatchPath(doc.id))}>
                   <Truck className="h-4 w-4" /> Confirm dispatch
@@ -689,7 +713,7 @@ export default function ConsignmentForm() {
         }
       />
 
-      <ErrorBanner error={save.error ?? loadIssue.error} />
+      <ErrorBanner error={save.error ?? sendForRelease.error ?? loadIssue.error} />
 
       {/* The issue came out of the point that raised the indent, so there is no
           journey to record. Saying nothing left a blank destination on screen, a

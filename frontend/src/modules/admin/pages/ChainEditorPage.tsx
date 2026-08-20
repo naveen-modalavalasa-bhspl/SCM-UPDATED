@@ -12,7 +12,7 @@ import {
 import { ArrowRight, ChevronLeft, Copy, History, Plus, Users } from "lucide-react";
 
 import {
-  Button, Card, ConfirmModal, ErrorBanner, PageHeader, Select, useToast,
+  Button, Card, ConfirmModal, ErrorBanner, PageHeader, Select, selectOnFocus, useToast,
 } from "@/shared/components";
 import { adminApi } from "../api";
 import { StepList, stepKey, stepKind } from "../components/StepList";
@@ -319,6 +319,7 @@ export function ChainEditorPage() {
             <input
               placeholder="Search HCM posts…"
               value={search}
+              onFocus={selectOnFocus}
               onChange={(e) => setSearch(e.target.value)}
               className="mb-2 min-h-11 w-full rounded-md border border-line/70 bg-content1 px-2.5 text-sm outline-none focus:border-primary"
             />

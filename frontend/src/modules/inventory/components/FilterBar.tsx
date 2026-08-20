@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, Search, X } from "lucide-react";
+import { selectOnFocus } from "@/shared/components";
 
 /**
  * One filter row, same shape on every inventory screen.
@@ -98,7 +99,10 @@ export function FilterSelect({
         value={typed ?? selected?.label ?? ""}
         placeholder={placeholder}
         onChange={(e) => { setTyped(e.target.value); setOpen(true); }}
-        onFocus={() => setOpen(true)}
+        // Typing REPLACES the current choice instead of editing it. Without the
+        // select, clicking a filter that reads "Main Warehouse" and typing "lip"
+        // leaves "Main Warehouselip" and matches nothing.
+        onFocus={(e) => { setOpen(true); selectOnFocus(e); }}
         onKeyDown={(e) => {
           if (e.key === "Escape") { setOpen(false); setTyped(null); }
           if (e.key === "Enter" && open && matches.length) {

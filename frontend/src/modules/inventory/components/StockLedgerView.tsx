@@ -132,6 +132,18 @@ export function StockLedgerView() {
   const unitsOf = (r: StockLedgerItem) =>
     serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
 
+  /** The serial to show for a row, or nothing.
+   *
+   *  A row that already carries an asset or consumable code is identified by THAT —
+   *  it is the code putaway minted for the physical unit — and the serial beside it
+   *  is the same unit named twice. Two identity columns saying one thing read as two
+   *  different units, which is the opposite of what the ledger is opened for.
+   *
+   *  Returning undefined rather than "" so the callers below fall through to the
+   *  serial summary in the usual way. */
+  const serialOf = (r: StockLedgerItem) =>
+    (r.asset_code || r.consumable_code) ? undefined : r.serial_number;
+
   /** Which lot a cell's popover should list the units of. A ledger row names an item
    *  at a point, not a bin, so the popover shows everything standing there. */
   const lotOf = (r: StockLedgerItem) => ({
@@ -158,7 +170,7 @@ export function StockLedgerView() {
       r.transaction_date, r.transaction_no, r.transaction_type, r.item_code, r.item_name,
       // A column each, and every value in it — not the one the cell has room for.
       r.warehouse_name, r.batch_number,
-      r.serial_number || unitsOf(r)?.serials.join(" | ") || unitsOf(r)?.imeis.join(" | "),
+      serialOf(r) || unitsOf(r)?.serials.join(" | ") || unitsOf(r)?.imeis.join(" | "),
       r.asset_code || r.consumable_code || unitsOf(r)?.codes.join(" | "),
       r.in_qty, r.out_qty, r.balance_qty, r.unit_rate, r.total_value, r.performed_by,
     ]);
@@ -222,11 +234,12 @@ export function StockLedgerView() {
       hideOnNarrow: true,
       render: (r) => {
         const units = unitsOf(r);
+        const serial = serialOf(r);
         return (
           <UnitCell
-            text={r.serial_number || units?.serials[0] || units?.imeis[0]}
-            extra={r.serial_number ? 0 : (units ? units.count - 1 : 0)}
-            lot={units && !r.serial_number ? lotOf(r) : undefined}
+            text={serial || units?.serials[0] || units?.imeis[0]}
+            extra={serial ? 0 : (units ? units.count - 1 : 0)}
+            lot={units && !serial ? lotOf(r) : undefined}
             title={r.item_name}
           />
         );

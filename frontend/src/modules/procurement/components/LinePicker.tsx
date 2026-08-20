@@ -4,6 +4,7 @@ import { Trash2 } from "lucide-react";
 import { Button, Field, Input } from "@/shared/components";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
 import { api } from "@/shared/api/client";
+import { todayIst } from "@/shared/datetime";
 
 /** One editable line. `rate` is optional — an RFQ asks for a price rather than
  *  stating one, so the same editor serves both with the column switched off. */
@@ -139,6 +140,10 @@ export function LinePicker({
               <Field label={index === 0 ? "Needed by" : ""}>
                 <Input
                   type="date"
+                  // Only on a line still being drafted: an existing line is disabled
+                  // anyway, and a saved date that has since passed must keep showing
+                  // the date it was given rather than being cleared by the picker.
+                  min={line.id ? undefined : todayIst()}
                   value={line.required_date ?? ""}
                   disabled={disabled || !!line.id}
                   onChange={(e) => set(index, { required_date: e.target.value })}

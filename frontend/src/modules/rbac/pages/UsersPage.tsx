@@ -6,8 +6,8 @@ import {
 } from "@heroui/react";
 import { Check, Copy, KeyRound, Search, ShieldOff, UserPlus } from "lucide-react";
 import {
-  Button, Can, ConfirmModal, PageHeader, ResponsiveList, Select, StatCard,
-  useAction, type Column,
+  Button, Can, ConfirmModal, PageHeader, ResponsiveList, Select, selectOnFocus,
+  StatCard, useAction, type Column,
 } from "@/shared/components";
 import { rbacApi } from "../api";
 import { PermissionMatrix } from "../components/PermissionMatrix";
@@ -196,6 +196,7 @@ export function UsersPage() {
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
             value={search}
+            onFocus={selectOnFocus}
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
             placeholder="Search name, code or email…"
             className="h-11 w-full rounded-xl border border-line bg-content1 pl-9 pr-3 text-sm outline-none focus:border-brand"
@@ -685,6 +686,7 @@ function FeatureAccessMatrix() {
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
             value={search}
+            onFocus={selectOnFocus}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Search feature, e.g. Create indents"
             className="h-10 w-full rounded-xl border border-line bg-content1 pl-9 pr-3 text-sm outline-none focus:border-brand"

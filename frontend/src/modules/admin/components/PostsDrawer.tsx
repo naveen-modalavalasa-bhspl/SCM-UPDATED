@@ -7,7 +7,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, Plus, X } from "lucide-react";
 
-import { Button, ErrorBanner, Field, Input, Select, useToast } from "@/shared/components";
+import { Button, ErrorBanner, Field, Input, Select, useToast, selectOnFocus } from "@/shared/components";
 import { adminApi } from "../api";
 import type { ApprovalPost, ApprovalPostMember } from "../types";
 
@@ -299,6 +299,7 @@ function PostForm({ post, onDone }: { post: ApprovalPost | null; onDone: () => v
         <Input
           placeholder="Search name or employee code…"
           value={search}
+          onFocus={selectOnFocus}
           onChange={(e) => setSearch(e.target.value)}
         />
         {unseated.length > 0 && (

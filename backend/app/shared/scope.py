@@ -195,6 +195,18 @@ async def scope_condition(
         return or_(mine, and_(condition, warehouse_clause))
 
     if rung is ScopeRung.SELF:
+        # A warehouse document is a fact about a LOCATION, so the storekeeper at a
+        # point must see what was drafted FOR that point, whoever raised it. An
+        # auto-drafted material issue carries the allocation APPROVER as its raiser,
+        # so at SELF it was invisible to the store it belongs to — while the
+        # duplicate guard, which is not scoped, still refused a new one. The list
+        # said nothing existed and the form said one did.
+        #
+        # Only widens where the caller actually passed a warehouse bound, and only
+        # to the points this login already reaches. A SELF login with no warehouses
+        # (warehouse_clause is None) is untouched.
+        if warehouse_clause is not None:
+            return or_(mine, warehouse_clause)
         return mine
 
     if rung is ScopeRung.PROJECT and project_col is not None:
