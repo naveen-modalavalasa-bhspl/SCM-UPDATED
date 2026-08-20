@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Field, Select } from "@/shared/components";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
 import { api } from "@/shared/api/client";
+import { useAuth } from "@/shared/auth/AuthContext";
 
 /**
  * Department, warehouse, project and company — the four things that say who is buying,
@@ -36,18 +37,17 @@ export interface OrgValue {
 interface NamedRow { id: number; code?: string | null; name: string }
 
 export function useCompanyName() {
-  // Settings is admin-only; the value we need also rides on any requisition the user
-  // can already read, so it is asked for once here and simply left blank if refused.
-  const { data } = useQuery({
-    queryKey: ["company-name"],
-    queryFn: () =>
-      api.get<{ company?: { name?: string } }>("/api/settings")
-        .then((r) => r.data.company?.name ?? "")
-        .catch(() => ""),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  });
-  return data ?? "";
+  // FIXED 2026-08-20 — this used to fetch /api/settings, which is gated on
+  // `admin.settings.manage`: the permission to EDIT the settings screen. A buyer
+  // opening an RFQ, PO or requisition form got a 403 for one string, the catch
+  // swallowed it, and the Company field rendered "Not configured" and disabled
+  // itself — indistinguishable from the setting never having been saved.
+  //
+  // WITHOUT this the field can only ever be filled by an administrator, on forms
+  // administrators do not raise. /me carries the name for every login and costs no
+  // request of its own.
+  const { me } = useAuth();
+  return me?.company_name ?? "";
 }
 
 export function OrgFields({
@@ -139,6 +139,9 @@ export function OrgFields({
         />
       </Field>
 
+      {/* The name comes from /me now (see useCompanyName), so a buyer sees it too.
+        * Still disabled when Settings holds no company at all — there is nothing to
+        * pick, and an empty dropdown that opens is worse than one that says so. */}
       <Field label="Company" hint="From Settings. One today; the field is here to say so.">
         <Select
           value={value.companyName || company}

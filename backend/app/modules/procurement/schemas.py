@@ -207,6 +207,11 @@ class POOut(BaseModel):
     # or the post under a rung is retired. Both are served: the snapshot stays for
     # every existing reader, this is the one a screen should trust.
     pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
     # What the vendor said, and which revision they said it about. Both null on an
     # order that has never been sent, which is how a reader tells "not asked yet" from
     # "asked and waiting".
@@ -238,6 +243,11 @@ class POListRow(BaseModel):
     # or the post under a rung is retired. Both are served: the snapshot stays for
     # every existing reader, this is the one a screen should trust.
     pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
     created_at: datetime
 
 
@@ -334,6 +344,11 @@ class ReqListRow(BaseModel):
     # or the post under a rung is retired. Both are served: the snapshot stays for
     # every existing reader, this is the one a screen should trust.
     pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
     created_by_name: str | None = None
     created_at: datetime
 
@@ -473,6 +488,11 @@ class RFQListRow(BaseModel):
     # or the post under a rung is retired. Both are served: the snapshot stays for
     # every existing reader, this is the one a screen should trust.
     pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
     created_at: datetime
 
 
@@ -580,6 +600,11 @@ class ConsolidationListRow(BaseModel):
     # or the post under a rung is retired. Both are served: the snapshot stays for
     # every existing reader, this is the one a screen should trust.
     pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
     created_by_name: str | None = None
     created_at: datetime
 

@@ -82,6 +82,18 @@ async def build_me(db: AsyncSession, user: HcmEmployee) -> dict:
         # given" (/indents/reports — bounce to Home). With only `menu`, the client
         # cannot distinguish the two and either blocks detail screens or nothing.
         "page_paths": await rbac_service.all_page_paths(db),
+        # FIXED 2026-08-20 — the company name is served here rather than fetched from
+        # /api/settings. That route is gated on `admin.settings.manage`, the permission
+        # to EDIT the whole settings screen, so a buyer opening an RFQ, PO or
+        # requisition form got a 403 for one string and the Company field rendered
+        # "Not configured" and disabled itself — which reads exactly like the setting
+        # was never saved. WITHOUT this a buyer can never fill Company on a document.
+        #
+        # Nothing is exposed that was not already public to a login: the company name
+        # is printed on every purchase order, gate pass and print page these same
+        # people raise. Carried on /me for the reason `warehouse_label` is — one
+        # request, so every screen says the same word at the same moment.
+        "company_name": await settings_service.get_setting(db, "company.name", "") or "",
     }
 
 

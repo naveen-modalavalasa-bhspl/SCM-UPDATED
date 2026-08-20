@@ -61,6 +61,10 @@ class MeOut(BaseModel):
     # ungranted ones to tell a detail screen (/indents/42, no rbac_pages row) from a
     # page it was not given (/indents/reports).
     page_paths: list[str] = []
+    # The company this ERP belongs to. Served here so a form can name it without
+    # asking /api/settings, which requires the permission to EDIT settings. Defaults
+    # to "" so an older client and an unconfigured install both behave as before.
+    company_name: str = ""
 
 
 MenuItem.model_rebuild()

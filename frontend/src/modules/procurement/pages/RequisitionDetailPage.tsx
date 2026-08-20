@@ -65,6 +65,9 @@ export function RequisitionDetailPage() {
   const busy = submit.isPending || approve.isPending || reject.isPending || cancel.isPending;
   const isDraft = req?.status === "DRAFT";
   const isPending = req?.status === "PENDING_APPROVAL";
+  // FIXED 2026-08-20 — awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you. `isPending` still drives the wording ("With ..."), which is
+  // a statement about the document; only the DECISION buttons move to this one.
+  const canDecide = !!req?.awaiting_me;
   const isApproved = req?.status === "APPROVED";
 
   const columns: Column<ReqItem>[] = [
@@ -123,7 +126,7 @@ export function RequisitionDetailPage() {
                 </Button>
               </Can>
             )}
-            {isPending && (
+            {canDecide && (
               <Can do="requisition.approve">
                 <Button variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
                   Reject

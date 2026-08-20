@@ -50,6 +50,10 @@ export interface PurchaseOrder {
    *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
    *  and goes stale when a ladder is edited or a delegation is added. */
   pending_with?: string[];
+  /** Can this login sign it right now — on the current stage's pending list AND
+   *  wearing a position the ladder named. Served by the backend because a screen can
+   *  only see the status and its own permissions, and neither answers "is it with me". */
+  awaiting_me?: boolean;
   /** What the vendor said about the order we sent them. Null means never sent. */
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
@@ -102,6 +106,10 @@ export interface POListRow {
    *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
    *  and goes stale when a ladder is edited or a delegation is added. */
   pending_with?: string[];
+  /** Can this login sign it right now — on the current stage's pending list AND
+   *  wearing a position the ladder named. Served by the backend because a screen can
+   *  only see the status and its own permissions, and neither answers "is it with me". */
+  awaiting_me?: boolean;
   created_at: string;
 }
 
@@ -172,6 +180,10 @@ export interface ReqListRow {
    *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
    *  and goes stale when a ladder is edited or a delegation is added. */
   pending_with?: string[];
+  /** Can this login sign it right now — on the current stage's pending list AND
+   *  wearing a position the ladder named. Served by the backend because a screen can
+   *  only see the status and its own permissions, and neither answers "is it with me". */
+  awaiting_me?: boolean;
   created_by_name?: string | null;
   created_at: string;
 }
@@ -225,6 +237,10 @@ export interface ConsolidationListRow {
    *  On a consolidation this is the ONLY working source: `current_approver_name` is
    *  never written on this document, only cleared, so the column read blank forever. */
   pending_with?: string[];
+  /** Can this login sign it right now — on the current stage's pending list AND
+   *  wearing a position the ladder named. Served by the backend because a screen can
+   *  only see the status and its own permissions, and neither answers "is it with me". */
+  awaiting_me?: boolean;
   created_by_name?: string | null;
   created_at: string;
 }
@@ -362,6 +378,10 @@ export interface RFQListRow {
    *  Prefer this over `current_approver_name`, which is a snapshot taken at submit
    *  and goes stale when a ladder is edited or a delegation is added. */
   pending_with?: string[];
+  /** Can this login sign it right now — on the current stage's pending list AND
+   *  wearing a position the ladder named. Served by the backend because a screen can
+   *  only see the status and its own permissions, and neither answers "is it with me". */
+  awaiting_me?: boolean;
   created_at: string;
 }
 

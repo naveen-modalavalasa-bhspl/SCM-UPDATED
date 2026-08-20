@@ -183,7 +183,10 @@ export function PODetailPage() {
   // their inbox: a PO opened from the register showed no way to sign it at all. The
   // status is the real gate — and the engine still refuses anyone who is not the
   // current approver, so this widens the doorway, never the authority.
-  const canDecide = po.data.status === "PENDING_APPROVAL";
+  // FIXED 2026-08-20 — was `status === "PENDING_APPROVAL"`, which is true for every
+  // holder of po.approve on every pending order in the company, including ones with
+  // somebody else entirely. awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you.
+  const canDecide = !!po.data.awaiting_me;
   const isDraft = po.data.status === "DRAFT";
   // Nothing left to change: the goods are in and the paperwork is closed, or the order
   // never became one. The server refuses an amendment on these too.

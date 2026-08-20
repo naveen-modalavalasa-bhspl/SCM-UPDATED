@@ -1136,27 +1136,51 @@ async def _approval_trail(db: AsyncSession, doc_type: str, doc_id: int) -> dict:
     }
 
 
-async def _attach_pending_one(db: AsyncSession, doc_type: str, doc):
+async def _attach_pending_one(db: AsyncSession, doc_type: str, doc, user=None):
     """The list helper, for a single document, so a detail response never carries an
-    empty `pending_with` that a reader would mistake for "nobody is holding it"."""
+    empty `pending_with` that a reader would mistake for "nobody is holding it".
+
+    FIXED 2026-08-20 — also answers whether THIS login can sign it right now.
+    `pending_with` is names, and a screen cannot derive permission from a name: every
+    procurement detail page gated its Approve/Reject buttons on the document being
+    PENDING_APPROVAL plus the caller holding `rfq.approve` / `po.approve`, which is a
+    statement about the person and not about the document. So the PO clerk who raised
+    RFQ/2026-27/00028 was shown "Approve & publish" on a document sitting with the CPO,
+    and the only thing that stopped him was a 403 after the press.
+
+    WITHOUT this the buttons are decoration: they appear for every holder of the
+    approve permission on every pending document in the company, including ones that
+    belong to somebody else entirely, and they also fail to disappear between two rungs
+    held by the SAME person under two different hats.
+
+    `actionable_doc_ids` is the answer because it mirrors `_act_ladder`'s own two
+    checks — on the current stage's pending list, and wearing a position the ladder
+    named. So the button appears exactly when the press would succeed. The backend
+    check is unchanged and remains the real gate; this only stops offering a button
+    that cannot work.
+    """
     waiting = await engine.pending_approver_names(db, doc_type, [doc.id])
     doc.pending_with = waiting.get(doc.id, [])
+    doc.awaiting_me = bool(
+        user is not None
+        and doc.id in await engine.actionable_doc_ids(db, doc_type, [doc.id], user)
+    )
     return doc
 
 
 async def get_po_detail(db: AsyncSession, po_id: int, user=None):
     return await _attach_pending_one(
-        db, DocType.PO.value, await get_po(db, po_id, user))
+        db, DocType.PO.value, await get_po(db, po_id, user), user)
 
 
 async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):
     return await _attach_pending_one(
-        db, DocType.REQUISITION.value, await get_requisition(db, req_id, user))
+        db, DocType.REQUISITION.value, await get_requisition(db, req_id, user), user)
 
 
 async def get_rfq_detail(db: AsyncSession, rfq_id: int, user=None):
     return await _attach_pending_one(
-        db, DocType.RFQ.value, await get_rfq(db, rfq_id, user))
+        db, DocType.RFQ.value, await get_rfq(db, rfq_id, user), user)
 
 
 async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
@@ -1164,7 +1188,7 @@ async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
     # has to hand the user down. Same for `consolidation_approval_trail` below.
     return await _attach_pending_one(
         db, DocType.CONSOLIDATION.value,
-        await consolidation.get_consolidation(db, cons_id, user=user))
+        await consolidation.get_consolidation(db, cons_id, user=user), user)
 
 
 async def po_approval_trail(db: AsyncSession, po_id: int, user=None) -> dict:

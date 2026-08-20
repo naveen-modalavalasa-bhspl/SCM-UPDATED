@@ -39,6 +39,10 @@ export interface Me {
   /** Every page path that exists, granted or not. Lets the route guard tell an
    *  ungranted page from a detail screen that has no rbac_pages row at all. */
   page_paths?: string[];
+  /** The company this ERP belongs to, from Settings. Served on /me because
+   *  /api/settings needs the permission to EDIT settings, which a buyer filling in
+   *  an RFQ does not hold. */
+  company_name?: string;
 }
 
 export interface Option {

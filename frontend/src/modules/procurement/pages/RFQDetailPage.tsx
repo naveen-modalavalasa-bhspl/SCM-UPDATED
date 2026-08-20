@@ -47,7 +47,9 @@ export function RFQDetailPage() {
   // Editable only while nobody outside has seen it, and only for the person who signs
   // it. The endpoint enforces both again — hiding the boxes is courtesy, not the guard.
   const { can } = useAuth();
-  const editableQty = rfq?.status === "PENDING_APPROVAL" && can("rfq.approve");
+  // Editing the asked-for quantity is part of approving it, so it follows the
+  // same gate — an approver who cannot sign must not be able to change the ask.
+  const editableQty = !!rfq?.awaiting_me && can("rfq.approve");
 
   // Previewing a different ranking is a query parameter, not a save: looking at the
   // quotes another way is not choosing one, so the RFQ's own method is untouched
@@ -223,7 +225,14 @@ export function RFQDetailPage() {
                 </Button>
               </Can>
             )}
-            {rfq?.status === "PENDING_APPROVAL" && (
+            {/* FIXED 2026-08-20 — awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you. The PO clerk who raised the RFQ was shown
+              * "Approve & publish" on one sitting with the CPO; the only thing that
+              * stopped him was a 403 after the press. `awaiting_me` is computed by
+              * engine.actionable_doc_ids, which makes the same two checks the approval
+              * itself makes, so the button appears exactly when the press would work.
+              * <Can> stays: the permission is still required, it was just never
+              * sufficient. */}
+            {rfq?.awaiting_me && (
               <Can do="rfq.approve">
                 <Button variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
                   Reject
