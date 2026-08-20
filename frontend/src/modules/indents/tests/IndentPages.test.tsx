@@ -3432,11 +3432,11 @@ describe("indent UI shell", () => {
     [{ title: "OE Review" }, "Pending at OE"],
     [{ title: "Custom Budget Approval" }, "Pending at Custom Budget"],
     [{ title: "Final Approval - SPH/COO" }, "Pending at Final Approval - SPH/COO"],
-    // A recorded owner always wins, and is shown exactly as HCM supplies it.
-    [{ title: "Final Approval", position_name: "AREA COORDINATOR-AP-104" },
-      "Pending at AREA COORDINATOR-AP-104"],
-    [{ title: "Final Approval", position_name: "COO", approver_name: "C Ramakrishna" },
-      "Pending at C Ramakrishna"],
+    // The rung wins over the person holding it.
+    [{ title: "", position_name: "AREA COORDINATOR-AP-104" }, "Pending at AREA COORDINATOR-AP-104"],
+    [{ title: "COO Approval", position_name: "COO", approver_name: "C Ramakrishna" },
+      "Pending at COO"],
+    [{ title: "", approver_name: "C Ramakrishna" }, "Pending at C Ramakrishna"],
   ])("names the current ladder rung %o in the pending detail badge", async (stage, badgeLabel) => {
     vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
       status: "PENDING_APPROVAL",

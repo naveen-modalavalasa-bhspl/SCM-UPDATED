@@ -216,8 +216,12 @@ _DEFINITIONS: list[AlertDef] = [
     _confirm(
         "material_request.approve", AlertVariant.WARNING,
         "Approve this material request?",
-        "Approving {number} reserves {qty} of {item} against it, so that stock stops "
-        "being available to anyone else.",
+        # {qty}/{item} were never passed by the screen, so the dialog printed the
+        # placeholders raw — and the sentence was wrong twice over: approving an MR
+        # reserves nothing, because the material does not exist yet. Same wording as
+        # the bundled catalog, which this one overlays.
+        "Approving {number} clears {lines} to be bought. It reserves no stock — this "
+        "material has to be purchased before anyone can be issued it.",
         confirm="Approve",
     ),
     _confirm(
@@ -428,7 +432,8 @@ _DEFINITIONS: list[AlertDef] = [
     ),
     _alert(
         "material_request.approved", AlertVariant.SUCCESS, "Request approved",
-        "{number} is approved and stock is reserved.",
+        "{number} is cleared for purchase. Raise a requisition from it to start "
+        "buying.",
     ),
     _alert(
         "material_request.rejected", AlertVariant.SUCCESS, "Request rejected",

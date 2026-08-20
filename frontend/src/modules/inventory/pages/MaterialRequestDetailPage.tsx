@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ShoppingCart } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -13,7 +14,12 @@ import { MRClaimsPanel } from "../components/MRClaimsPanel";
 // Reaching across into procurement for one call, the same direction the chain already
 // runs on the backend: inventory raises the request, procurement picks it up.
 import { requisitionApi } from "@/modules/procurement/api";
+// The approval trail and the component that draws it, from the module that owns
+// approvals. One timeline, drawn the same way on every document that has a ladder.
+import { approvalsApi } from "@/modules/approvals/api";
+import { HistoryTimeline } from "@/modules/approvals/components/HistoryTimeline";
 import { alerts } from "@/modules/alerts";
+import { useAuth } from "@/shared/auth/AuthContext";
 import type { MaterialRequestItem } from "../types";
 
 /**
@@ -30,6 +36,7 @@ export function MaterialRequestDetailPage() {
   const mrId = Number(id);
   const nav = useNavigate();
   const qc = useQueryClient();
+  const { can } = useAuth();
   const [comments, setComments] = useState("");
   // Only the lines actually touched, keyed by line id. Absent means "unchanged" —
   // seeding this from the server would send every line back on every save and make an
@@ -39,6 +46,15 @@ export function MaterialRequestDetailPage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["material-request", mrId],
     queryFn: () => getMaterialRequest(mrId),
+    enabled: Number.isFinite(mrId),
+  });
+
+  // Who signed what, in order. Unpermissioned (the endpoint scopes itself to the
+  // raiser, the pending approver and past actors), so a reader who is none of those
+  // simply gets an empty trail rather than an error.
+  const history = useQuery({
+    queryKey: ["approvals", "history", "MR", mrId],
+    queryFn: () => approvalsApi.history("MR", mrId),
     enabled: Number.isFinite(mrId),
   });
 
@@ -96,17 +112,33 @@ export function MaterialRequestDetailPage() {
   });
 
   const decide = async (approve: boolean) => {
-    if (act.isPending || !data) return;
+    if (act.isPending || save.isPending || !data) return;
     const first = data.items[0];
     // One line: name it. More: count them — quoting only the first line's quantity
     // described a five-line request by one of its lines.
+    // The number ON SCREEN, not the stored one: the edit is saved as part of this
+    // press, so quoting the old quantity would ask the approver to confirm a figure
+    // that is about to be replaced.
     const lines = data.items.length === 1 && first
-      ? `${first.quantity} ${first.uom_code ?? ""} of ${first.item_name ?? first.item_code}`.replace(/\s+/g, " ")
+      ? `${shown(first)} ${first.uom_code ?? ""} of ${first.item_name ?? first.item_code}`.replace(/\s+/g, " ")
       : `${data.items.length} lines`;
     const asked = approve
       ? await alerts.confirm("material_request.approve", { number: data.mr_no, lines })
       : await alerts.confirm("material_request.reject", { number: data.mr_no });
-    if (asked) act.mutate(approve);
+    if (!asked) return;
+    // Approving IS the save. A separate "Save quantities" press before it was a second
+    // button for one decision — and the only thing standing between the two was a
+    // warning saying the approval would sign the old number. The edit is written
+    // first, so what gets signed is what is on screen; if the write is refused the
+    // approval never runs and the error stands where it happened.
+    if (approve && dirty) {
+      try {
+        await save.mutateAsync();
+      } catch {
+        return;
+      }
+    }
+    act.mutate(approve);
   };
 
   if (isLoading) return <p className="p-6 text-muted">Loading…</p>;
@@ -217,7 +249,12 @@ export function MaterialRequestDetailPage() {
       <PageHeader
         eyebrow="Material request"
         title={data.mr_no}
-        actions={<StatusPill status={data.status} />}
+        // The rung, not the person: "Pending at Regional Manager" is what tells a
+        // reader where the request is, and the name behind that post changes with a
+        // transfer. Falls back to the plain status when nothing is resolved.
+        actions={data.status === "PENDING_APPROVAL" && data.current_stage_name
+          ? <StatusPill status={`Pending at ${data.current_stage_name}`} />
+          : <StatusPill status={data.status} />}
       />
 
       <Card className="mb-4 p-4">
@@ -247,23 +284,40 @@ export function MaterialRequestDetailPage() {
         * on this screen. The backend refuses a second one, so a request that already
         * crossed says so rather than raising a duplicate demand. */}
       {data.status === "APPROVED" && (
-        <Card className="mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
-          <div>
-            <p className="font-semibold text-ink">Ready for Purchase</p>
-            <p className="text-sm text-muted">
-              Raise a purchase requisition carrying what is still owed on {data.mr_no}.
-            </p>
+        // A one-line handoff strip, not a hero panel: the decision on this screen is
+        // already made, and the next step is somebody else's document. Left-aligned
+        // beside the rest of the page — a centred block in the middle of a left-aligned
+        // form read as an empty state rather than as an action.
+        <Card className="mb-4 border border-ok/30 bg-ok-bg/40 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ok-bg text-ok">
+                <ShoppingCart size={16} />
+              </span>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-ink">Ready for purchase</p>
+                <p className="text-xs text-muted">
+                  Carries what is still owed on {data.mr_no} onto a requisition.
+                </p>
+              </div>
+            </div>
+            {/* Permission-gated exactly as before, but read with `can` rather than
+              * <Can>: without `requisition.create` the strip still says where the
+              * request has got to, and a hidden button left an approved MR looking
+              * unfinished to everyone who cannot buy. */}
+            {can("requisition.create") ? (
+              <Button
+                onClick={() => raiseRequisition.mutate()}
+                disabled={raiseRequisition.isPending}
+              >
+                {raiseRequisition.isPending ? "Raising…" : "Raise requisition"}
+              </Button>
+            ) : (
+              <span className="text-xs text-muted">Procurement raises the requisition.</span>
+            )}
           </div>
-          <Can do="requisition.create">
-            <Button
-              onClick={() => raiseRequisition.mutate()}
-              disabled={raiseRequisition.isPending}
-            >
-              {raiseRequisition.isPending ? "Raising…" : "Raise purchase requisition"}
-            </Button>
-          </Can>
           {raiseRequisition.error && (
-            <p className="w-full text-sm text-danger">
+            <p className="mt-2 text-sm text-danger">
               {(raiseRequisition.error as Error).message}
             </p>
           )}
@@ -328,6 +382,15 @@ export function MaterialRequestDetailPage() {
         />
       )}
 
+      {(history.data ?? []).length > 0 && (
+        <Card className="mt-4 p-0">
+          <h2 className="px-4 pt-4 text-sm font-semibold text-ink sm:px-5">
+            Approval history
+          </h2>
+          <HistoryTimeline rows={history.data!} />
+        </Card>
+      )}
+
       {open && (
         <div className="mt-4 space-y-3">
           <Field label="Comments">
@@ -339,25 +402,13 @@ export function MaterialRequestDetailPage() {
           </Field>
           {act.error && <p className="text-danger">{(act.error as Error).message}</p>}
           {save.error && <p className="text-danger">{(save.error as Error).message}</p>}
-          {dirty && (
-            <p className="text-sm text-warning">
-              Unsaved quantity changes. Save them before approving — approval signs what
-              is stored, not what is on screen.
-            </p>
-          )}
           <div className="flex flex-wrap gap-2">
             <Can do="mr.approve">
               <Button
-                variant="subtle"
-                onClick={() => save.mutate()}
-                disabled={!dirty || problems.length > 0 || save.isPending}
+                onClick={() => void decide(true)}
+                disabled={act.isPending || save.isPending || problems.length > 0}
               >
-                {save.isPending ? "Saving…" : "Save quantities"}
-              </Button>
-            </Can>
-            <Can do="mr.approve">
-              <Button onClick={() => void decide(true)} disabled={act.isPending || dirty}>
-                Approve
+                {save.isPending ? "Saving…" : "Approve"}
               </Button>
             </Can>
             <Can do="mr.reject">

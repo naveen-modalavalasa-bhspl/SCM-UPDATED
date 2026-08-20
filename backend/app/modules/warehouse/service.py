@@ -51,7 +51,8 @@ from app.platform.workflow.models import Instance as WfInstance
 from app.modules.inventory.service import warehouse_ids_for_user
 from app.shared.scope import scope_condition
 from app.shared.enums import (
-    AuditAction, DespatchNoteStatus, DocType, IndentStatus, InstanceStatus, POStatus,
+    ApprovalAction, AuditAction, DespatchNoteStatus, DocType, IndentStatus,
+    InstanceStatus, POStatus,
     ReservationStatus,
     RefType as InventoryRefType, StockDirection, UomClass,
 )
@@ -1305,13 +1306,123 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
 
 
 async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
-    """Freeze the GRN and branch each line by the item's QC requirement."""
+    """Freeze the GRN — through approval first, if this project configured one.
+
+    A goods receipt was the one document on the Approval Flow screen that could be
+    configured and then ignored: nothing ever called the engine for `GRN`, so a chain
+    saved against it was written and never read.
+
+    The guard is the same one `dispatch_consignment` uses: ask whether a chain exists
+    BEFORE starting anything. With none configured — which is every project today —
+    `_process_submitted_receipt` runs exactly as this function always did, in the same
+    transaction, and the GRN never learns that approvals happened. Only a project that
+    has deliberately built a chain gets the extra rung.
+    """
     receipt = await get_receipt(db, receipt_id)
     _guard(receipt.status, {ReceiptStatus.DRAFT.value, ReceiptStatus.GATE_ENTRY.value},
            "submit", "receipt")
     if not receipt.items:
         raise ValidationError("A receipt with no lines has nothing to inspect")
 
+    if await _grn_needs_approval(db, receipt, user):
+        return await _send_receipt_for_approval(db, receipt, user)
+    return await _process_submitted_receipt(db, receipt, user)
+
+
+async def _grn_needs_approval(db: AsyncSession, receipt: m.Receipt, user) -> bool:
+    """Is a GRN chain configured for this receipt's project?
+
+    Read through `find_ladder`, which is what the engine itself would consult, so the
+    answer here and the routing there can never disagree.
+    """
+    position_id = getattr(user, "active_position_id", None)
+    project_id = receipt.project_id
+    if project_id is None:
+        project_id, _name = await wf_ladder.project_for(db, position_id, user)
+    raiser_role_id = await wf_ladder.role_of_position(db, position_id)
+    found = await wf_ladder.find_ladder(
+        db, project_id, DocType.GRN.value, raiser_role_id)
+    return found is not None
+
+
+async def _send_receipt_for_approval(db: AsyncSession, receipt: m.Receipt,
+                                     user) -> m.Receipt:
+    """Park the GRN on SUBMITTED and hand it to the engine.
+
+    Nothing is inspected, nothing is posted and no putaway is raised until somebody
+    signs — the whole point of asking. `SUBMITTED` is an existing ReceiptStatus that
+    nothing else sets, and `cancel_receipt` already accepts it, so a GRN waiting on a
+    signature can still be withdrawn.
+    """
+    position_id = getattr(user, "active_position_id", None)
+    project_id = receipt.project_id
+    if project_id is None:
+        project_id, _name = await wf_ladder.project_for(db, position_id, user)
+    context = {
+        "doc_no": receipt.grn_no,
+        "doc_summary": f"Goods receipt {receipt.grn_no}",
+        "requester_position_id": position_id,
+        "project_id": project_id,
+        "warehouse_id": receipt.warehouse_id,
+    }
+    instance = await engine.start(db, DocType.GRN.value, receipt.id, context, user)
+    if instance.status == InstanceStatus.APPROVED.value:
+        # A chain the raiser sits at the top of (or one set to "no approval needed")
+        # comes back already approved. Carry straight on rather than parking a GRN
+        # nobody will ever be asked to sign.
+        return await _process_submitted_receipt(db, receipt, user)
+
+    receipt.status = ReceiptStatus.SUBMITTED.value
+    await write_audit(db, entity="inb_receipts", entity_id=receipt.id,
+                      entity_no=receipt.grn_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": ReceiptStatus.DRAFT.value},
+                      after={"status": receipt.status, "sent_for_approval": True})
+    await db.commit()
+    return await get_receipt(db, receipt.id)
+
+
+async def approve_receipt(db: AsyncSession, receipt_id: int, user, *,
+                          approve: bool = True, comments: str = "") -> m.Receipt:
+    """Record one decision on a GRN waiting for approval.
+
+    The engine decides whether this caller may act and whether the chain is finished;
+    this only reacts to what it says. On the last approval the GRN carries on into
+    exactly the path an unapproved one takes — one implementation of "what a submitted
+    receipt does", reached two ways.
+    """
+    receipt = await get_receipt(db, receipt_id)
+    _guard(receipt.status, {ReceiptStatus.SUBMITTED.value}, "approve", "receipt")
+    instance = await engine.act(
+        db, DocType.GRN.value, receipt.id,
+        (ApprovalAction.APPROVED if approve else ApprovalAction.REJECTED).value,
+        user, comments,
+        {"requester_position_id": getattr(user, "active_position_id", None)},
+    )
+    if instance.status == InstanceStatus.REJECTED.value:
+        receipt.status = ReceiptStatus.CANCELLED.value
+        note = comments or "no reason given"
+        receipt.remarks = (
+            f"{receipt.remarks or ''}\nRejected in approval: {note}"
+        ).strip()
+        await write_audit(db, entity="inb_receipts", entity_id=receipt.id,
+                          entity_no=receipt.grn_no, action=AuditAction.UPDATE,
+                          actor=user, after={"status": receipt.status})
+        await db.commit()
+        return await get_receipt(db, receipt.id)
+    if instance.status != InstanceStatus.APPROVED.value:
+        # More rungs to climb; the GRN stays parked.
+        await db.commit()
+        return await get_receipt(db, receipt.id)
+    return await _process_submitted_receipt(db, receipt, user)
+
+
+async def _process_submitted_receipt(db: AsyncSession, receipt: m.Receipt,
+                                     user) -> m.Receipt:
+    """Everything submitting a GRN does once it is allowed to proceed.
+
+    Lifted out of `submit_receipt` unchanged so the approved path and the
+    nobody-configured-a-chain path are the same code, not two that drift.
+    """
     qc_lines: list[m.ReceiptItem] = []
     direct_lines: list[m.ReceiptItem] = []
     # Read once for the whole GRN: the formula cannot change between two lines of one
@@ -1384,7 +1495,7 @@ async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
                           "direct_putaway_lines": len(direct_lines),
                       })
     await db.commit()
-    return await get_receipt(db, receipt_id)
+    return await get_receipt(db, receipt.id)
 
 
 async def complete_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
@@ -1518,6 +1629,69 @@ async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
     po.status = (
         POStatus.RECEIVED.value if complete else POStatus.PARTIALLY_RECEIVED.value
     )
+
+    # The receipt also settles the material requests this order was raised for. Without
+    # it "on order" never stops counting: the goods reach the shelf, and the indent
+    # whose shortfall bought them is refused an allocation because the system still
+    # believes they are coming. Keyed by INDENT LINE — the only id an MR line and a PO
+    # line share — and cumulative, so a part delivery leaves the request open.
+    #
+    # Here rather than in `logistics.qc_pass`: this is the path a live receipt takes
+    # (`whs_receipts`), and `lgs_grn` carries no rows on this install.
+    from app.modules.inventory import service as inventory_service
+
+    await inventory_service.mark_mrs_received(
+        db, await _receipts_by_indent_line(db, po, lines, received))
+
+
+async def _receipts_by_indent_line(db: AsyncSession, po, lines,
+                                   received: dict[int, Decimal]) -> dict[int, Decimal]:
+    """Received quantity per INDENT LINE — the only id a PO line and an MR line share.
+
+    Two ways there, because the direct one is not always populated. A PO line raised
+    from an indent carries `indent_item_id`; one raised through the buying chain does
+    not always, and PO/2026-27/00010 is the live proof — its requisition line lost the
+    pointer, so the receipt had nothing to settle. The fallback walks the trail the
+    documents DO keep: PO -> `requisition_id` -> `source_mr_id` -> that request's lines,
+    matched on item. Same item, same request, same order — there is no second candidate
+    to confuse it with.
+    """
+    from app.modules.inventory.models import MaterialRequestItem
+    from app.modules.procurement.models import Requisition
+
+    by_indent_line: dict[int, Decimal] = {}
+    unlinked: dict[int, Decimal] = {}
+    for line in lines:
+        quantity = received.get(line.id, ZERO)
+        indent_line_id = getattr(line, "indent_item_id", None)
+        if indent_line_id:
+            by_indent_line[int(indent_line_id)] = (
+                by_indent_line.get(int(indent_line_id), ZERO) + quantity
+            )
+        elif quantity > ZERO:
+            unlinked[int(line.item_id)] = unlinked.get(int(line.item_id), ZERO) + quantity
+
+    requisition_id = getattr(po, "requisition_id", None)
+    if not unlinked or not requisition_id:
+        return by_indent_line
+
+    source_mr_id = await db.scalar(
+        select(Requisition.source_mr_id).where(Requisition.id == requisition_id)
+    )
+    if not source_mr_id:
+        return by_indent_line
+
+    for item_id, indent_line_id in (await db.execute(
+        select(MaterialRequestItem.item_id, MaterialRequestItem.indent_item_id)
+        .where(MaterialRequestItem.mr_id == source_mr_id,
+               MaterialRequestItem.indent_item_id.isnot(None))
+    )).all():
+        quantity = unlinked.get(int(item_id))
+        if quantity:
+            by_indent_line[int(indent_line_id)] = (
+                by_indent_line.get(int(indent_line_id), ZERO) + quantity
+            )
+    return by_indent_line
 
 
 async def _sync_receipt_source(db: AsyncSession, receipt: m.Receipt) -> None:

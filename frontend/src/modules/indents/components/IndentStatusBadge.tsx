@@ -17,17 +17,21 @@ const TOP_ALLOCATION_STATUS_TONE: Partial<Record<string, string>> = {
  * A hardcoded RM/DM/OE/SPH/COO lookup was tried here and taken back out. The rungs
  * are HCM role ids and an admin picks them per project on Approvals Config, so a map
  * in the frontend is wrong twice: a rank nobody listed renders as a bare abbreviation,
- * and the next HCM cutover re-keys the roles without touching this file. It also hid
- * the approver's NAME behind their rank, which is the one thing the badge is for.
+ * and the next HCM cutover re-keys the roles without touching this file. The rung is
+ * READ from the configured stage, never abbreviated.
  */
 function stageOwner(stage?: IndentJourneyStage) {
-  const approver = stage?.approver_name?.trim().replace(/\s+/g, " ");
-  if (approver) return approver;
-  const position = stage?.position_name?.trim().replace(/\s+/g, " ");
-  if (position) return position;
+  // The badge names the RUNG, not the person sitting on it: "Pending at OE", not
+  // "Pending at C Ramakrishna". Who exactly holds the rung today is already on the
+  // stage card below ("Approval 1 of 3 · <name>"), and a list of indents reads as a
+  // queue of ranks, not of colleagues. The approver's name stays as the last resort
+  // for a stage that carries no title and no position.
   const title = stage?.title?.trim().replace(/\s+/g, " ")
     .replace(/\s+(Review|Approval)$/i, "").trim();
-  return title || null;
+  if (title) return title;
+  const position = stage?.position_name?.trim().replace(/\s+/g, " ");
+  if (position) return position;
+  return stage?.approver_name?.trim().replace(/\s+/g, " ") || null;
 }
 
 function pendingStageLabel(journey?: IndentJourney) {

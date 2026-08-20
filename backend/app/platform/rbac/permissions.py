@@ -505,6 +505,10 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("ind_reports", "indents", "Indents · Activity Ledger"),
     ("ind_notifications", "indents", "Indents · Notifications"),
     ("approvals", "approvals", "Approvals"),
+    # Rode on `indent.approve` because it was never catalogued: unticking the screen
+    # revoked the approve BUTTON on every indent screen, and ticking it handed the
+    # button back. Same split as the rest.
+    ("approval_consolidation", "approvals", "Approvals · Consolidation"),
     ("approval_waiting", "approvals", "Approvals · Waiting for Me"),
     ("approval_decisions", "approvals", "Approvals · My Decisions"),
     # `approval_team` is gone with the Team Queue screen. Dropped from the catalogue
@@ -551,6 +555,8 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("inv_allocation_approvals", "inventory", "Inventory · Allocation Approvals"),
     ("inv_mr", "inventory", "Inventory · Material Requests"),
     ("inv_labels", "inventory", "Inventory · Labels & Printing"),
+    # Rode on `stock.points.manage`, which is the action that RE-TAGS a stocking point.
+    ("inv_stocking_points", "inventory", "Inventory · Stocking Points"),
     # Logistics — the outward leg, in the order the material moves. Catalogued rather
     # than left to `sync_pages` to invent: an auto-created page permission is never
     # revisited by `sync_permission_labels` (it is not in ALL_PERMISSIONS), so it can
@@ -584,6 +590,13 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("admin_policies", "admin", "Settings · Approval & Automation"),
     ("admin_workflows", "admin", "Settings · Approval Workflows"),
     ("admin_approvals_config", "admin", "Settings · Approvals Config"),
+    # The one approval-configuration screen (Settings > Approval Flow). It has been a
+    # live rbac_pages row for a while but was never catalogued here, so it had no
+    # `page.*.view` of its own and fell back to `admin.workflow.manage` — the ACTION
+    # that lets you rewrite every chain in the company. Unticking the screen on a job
+    # profile therefore took the ability to configure approvals away with it, and vice
+    # versa. Its own code separates "may open this screen" from "may change a chain".
+    ("admin_approval_flow", "admin", "Settings · Approval Flow"),
     ("admin_rules", "admin", "Settings · Rules Engine"),
     ("admin_numbering", "admin", "Settings · Document Numbering"),
     ("admin_notifications", "admin", "Settings · Notifications"),
@@ -635,4 +648,12 @@ INHERITS_GRANTS_FROM.update({
     # permission fail-closed would silently retire a screen people work every day.
     page_view_code("wh_material_returns"): ISSUE_VIEW,
     page_view_code("wh_ack"): DISPATCH_ACKNOWLEDGE,
+    # The three screens that had no page permission of their own until 2026-08-19 and
+    # were therefore gated on a business ACTION. Minting them fail-closed would retire
+    # three screens people work every day, so each inherits from exactly the code that
+    # used to gate it — everybody who can open the screen today still can, and from
+    # now on the screen and the action can be granted apart.
+    page_view_code("admin_approval_flow"): ADMIN_WORKFLOW_MANAGE,
+    page_view_code("approval_consolidation"): INDENT_APPROVE,
+    page_view_code("inv_stocking_points"): STOCK_POINTS_MANAGE,
 })

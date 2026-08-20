@@ -2,7 +2,7 @@ import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
   AccessSummary, AdminUserRow, FeatureAccessMatrix, GrantResult, GroupMember,
-  JobProfileHolders, JobProfileMatrix,
+  JobProfileHolders, JobProfileMatrix, JobProfilePeople,
   OrgTree, PageAccessMatrix, PermissionDef, PermissionHolders, Region,
   Reporting, RoleWithPermissions, SetPermissionsResult, UserFilters, UserGroup, ViewAs,
 } from "./types";
@@ -62,6 +62,14 @@ export const rbacApi = {
   jobProfiles: {
     matrix: () =>
       api.get<JobProfileMatrix>("/api/rbac/job-profiles").then((r) => r.data),
+    /** Which profile a PERSON resolves through, searched by employee code or name.
+     *  The profile list can only be searched by what a profile is MADE of — job,
+     *  project, HCM role, position — which is the wrong end of the telescope when the
+     *  question is "where is EMP1043 configured?". Server-side: the answer needs the
+     *  derivation rules, and 2,787 people are not shipped to the browser to filter. */
+    findPeople: (search: string) =>
+      api.get<JobProfilePeople>("/api/rbac/job-profiles/find", { params: { search } })
+        .then((r) => r.data),
     holders: (key: string) =>
       api.get<JobProfileHolders>(
         `/api/rbac/job-profiles/${encodeURIComponent(key)}/holders`,

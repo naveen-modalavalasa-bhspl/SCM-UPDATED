@@ -33,7 +33,8 @@ from app.platform.settings.service import get_setting, set_setting, write_audit
 from app.platform.workflow import engine
 from app.shared.scope import rung_for, scope_condition
 from app.shared.enums import (
-    AdjustmentReason, AuditAction, DocType, IndentStatus, InstanceStatus, MRStatus,
+    AdjustmentReason, ApprovalAction, AuditAction, DocType, IndentStatus,
+    InstanceStatus, MRStatus,
     Priority, RefType, ScopeRung, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
@@ -902,7 +903,77 @@ async def get_mr(db: AsyncSession, mr_id: int, user=None) -> MaterialRequest:
     )).scalar_one_or_none()
     if not mr:
         raise NotFoundError(f"Material request {mr_id} not found")
+    # The RUNG the request is sitting on, not the person holding it. A name answers
+    # "who signs next"; the screen's badge asks "where is this", and the ladder rung is
+    # what an approver recognises across five regions holding the same post. Read off
+    # the frozen `resolved_chain` — the same link the indent journey names its stages
+    # from — so a ladder edited today never renames a document already in approval.
+    mr.current_stage_name = None
+    if mr.status == MRStatus.PENDING_APPROVAL.value:
+        instance = await engine_instance_for(db, DocType.MR.value, mr.id)
+        chain = (instance.resolved_chain or []) if instance is not None else []
+        index = ((instance.current_sequence or 1) - 1) if instance is not None else -1
+        link = chain[index] if 0 <= index < len(chain) else None
+        if isinstance(link, dict):
+            mr.current_stage_name = link.get("role_name") or link.get("position_name")
     return mr
+
+
+async def mark_mrs_received(db: AsyncSession,
+                            receipts: dict[int, Decimal]) -> list[int]:
+    """Close every material request whose goods have now reached stock.
+
+    `receipts` is the CUMULATIVE accepted quantity per INDENT LINE, worked out by the
+    module that owns the receipt — inventory cannot read a GRN (rule 5), and the caller
+    already holds the join. A request is only closed when every one of its lines is
+    covered: a part delivery leaves it open, because the rest is still on order.
+
+    Why it exists: "on order" is subtracted from what an indent still owes, so a
+    request that stays open forever makes its own shortfall unallocatable — the stock
+    arrives, and the indent that asked for it is refused a second allocation because
+    the system still believes the goods are coming.
+
+    No permission of its own: it is a consequence of the receipt the caller was already
+    entitled to record, and it changes no approval — the request was approved long ago
+    and RECEIVED is where an ORDERED one ends.
+    """
+    if not receipts:
+        return []
+    mr_ids = (await db.execute(
+        select(MaterialRequestItem.mr_id)
+        .where(MaterialRequestItem.indent_item_id.in_(list(receipts)))
+        .distinct()
+    )).scalars().all()
+    if not mr_ids:
+        return []
+    closed: list[int] = []
+    for mr in (await db.execute(
+        select(MaterialRequest)
+        .options(selectinload(MaterialRequest.items))
+        .where(
+            MaterialRequest.id.in_(mr_ids),
+            MaterialRequest.status.in_([
+                MRStatus.APPROVED.value, MRStatus.ORDERED.value,
+            ]),
+        )
+    )).scalars().unique().all():
+        covered = all(
+            _d(receipts.get(line.indent_item_id or 0, 0)) >= _d(line.quantity)
+            for line in mr.items
+        )
+        if covered and mr.items:
+            mr.status = MRStatus.RECEIVED.value
+            closed.append(mr.id)
+            # The allocation that raised this request has been sitting on
+            # AWAITING_PROCUREMENT waiting for exactly these goods. Hand it back to its
+            # approver rather than leaving the indent to raise a second one.
+            if mr.indent_id:
+                # Imported here, not at module load: `allocations` imports this file
+                # for its MR helper, and a top-level import would close the loop.
+                from app.modules.inventory import allocations
+
+                await allocations.reopen_for_receipt(db, mr.indent_id)
+    return closed
 
 
 async def list_mrs(db: AsyncSession, params: PageParams, status: str | None = None,
@@ -2076,9 +2147,54 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
             remarks=item_data.remarks,
         ))
 
+    await db.flush()
+    # Ask the engine, if — and only if — this project configured a Stock Transfer
+    # chain on Settings > Approval Flow. `STOCK_TRANSFER` was configurable there and
+    # never submitted anywhere, so a chain saved against it was written and never read.
+    #
+    # Guarded the same way `dispatch_consignment` is: no chain configured (which is
+    # every project today) and this is a no-op, the STO stays PENDING_APPROVAL and
+    # `approve_sto` decides it exactly as it always has.
+    await _start_sto_approval(db, sto, user)
     await db.commit()
     await db.refresh(sto)
     return sto
+
+
+async def _sto_ladder(db: AsyncSession, sto: StockTransferOrder, user):
+    """The configured Stock Transfer chain for this STO, or None."""
+    from app.platform.workflow import ladder as wf_ladder
+
+    position_id = getattr(user, "active_position_id", None)
+    project_id = sto.from_project_id or None
+    if project_id is None:
+        project_id, _name = await wf_ladder.project_for(db, position_id, user)
+    raiser_role_id = await wf_ladder.role_of_position(db, position_id)
+    return await wf_ladder.find_ladder(
+        db, project_id, DocType.STOCK_TRANSFER.value, raiser_role_id)
+
+
+async def _start_sto_approval(db: AsyncSession, sto: StockTransferOrder, user) -> None:
+    if await _sto_ladder(db, sto, user) is None:
+        return
+    position_id = getattr(user, "active_position_id", None)
+    instance = await engine.start(
+        db, DocType.STOCK_TRANSFER.value, sto.id,
+        {
+            "doc_no": sto.sto_no,
+            "doc_summary": f"Stock transfer {sto.sto_no}",
+            "requester_position_id": position_id,
+            "project_id": sto.from_project_id or None,
+            "from_warehouse_id": sto.from_warehouse_id,
+            "to_warehouse_id": sto.to_warehouse_id,
+        },
+        user,
+    )
+    if instance.status == InstanceStatus.APPROVED.value:
+        # Top of the chain, or "no approval needed": approved the moment it is raised.
+        sto.status = STOStatus.APPROVED.value
+        sto.approved_by_name = getattr(user, "full_name", None)
+        sto.approved_at = utcnow()
 
 
 async def get_sto(db: AsyncSession, sto_id: int, user=None) -> StockTransferOrder:
@@ -2115,10 +2231,32 @@ async def list_stos(db: AsyncSession, params: PageParams, status: str | None = N
     return await paginate(db, stmt.order_by(StockTransferOrder.created_at.desc()), params)
 
 
-async def approve_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:
+async def approve_sto(db: AsyncSession, sto_id: int, user,
+                      comments: str = "") -> StockTransferOrder:
+    """Approve a transfer — through the engine when a chain governs it.
+
+    Without a configured chain this is what it always was: anyone holding the
+    permission signs, in one step. With one, the engine decides whether THIS caller is
+    on the current rung and whether any rungs remain, and the STO only becomes APPROVED
+    when the chain is finished (rule 8 — the engine owns the chain, the module owns the
+    document status).
+    """
     sto = await get_sto(db, sto_id)
     if sto.status != STOStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"STO is in status {sto.status}, cannot approve")
+
+    instance = await engine_instance_for(db, DocType.STOCK_TRANSFER.value, sto.id)
+    if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
+        instance = await engine.act(
+            db, DocType.STOCK_TRANSFER.value, sto.id,
+            ApprovalAction.APPROVED.value, user, comments,
+            {"requester_position_id": getattr(user, "active_position_id", None)},
+        )
+        if instance.status != InstanceStatus.APPROVED.value:
+            # More rungs above; the STO waits where it is.
+            await db.commit()
+            await db.refresh(sto)
+            return sto
 
     sto.status = STOStatus.APPROVED.value
     sto.approved_by_name = getattr(user, "full_name", None)
@@ -2126,6 +2264,17 @@ async def approve_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder
     await db.commit()
     await db.refresh(sto)
     return sto
+
+
+async def engine_instance_for(db: AsyncSession, doc_type: str, doc_id: int):
+    """The live approval on a document, or None. Read-only — never starts one."""
+    from app.platform.workflow.models import Instance as WfInstance
+
+    return (await db.execute(
+        select(WfInstance)
+        .where(WfInstance.doc_type == doc_type, WfInstance.doc_id == doc_id)
+        .order_by(WfInstance.id.desc())
+    )).scalars().first()
 
 
 async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:

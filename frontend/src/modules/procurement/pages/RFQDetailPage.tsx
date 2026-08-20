@@ -8,7 +8,7 @@ import {
 } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
-import { poApi, rfqApi } from "../api";
+import { approvalTrailApi, approvalTrailKey, poApi, rfqApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import { QuotationComparison } from "../components/QuotationComparison";
 import type { RFQItem, RFQVendor } from "../types";
@@ -31,6 +31,15 @@ export function RFQDetailPage() {
   const { data: rfq, isLoading, error } = useQuery({
     queryKey: ["rfq", id],
     queryFn: () => rfqApi.get(rfqId),
+  });
+
+  // The rung this RFQ is waiting on, off the engine's own trail — the same read the
+  // ApprovalTrail below makes, so badge and ladder can never disagree, and a rung
+  // renamed on Settings > Approvals Config renames both.
+  const trail = useQuery({
+    queryKey: approvalTrailKey("RFQ", rfqId),
+    queryFn: () => approvalTrailApi.get("RFQ", rfqId),
+    enabled: Number.isFinite(rfqId),
   });
 
   const published = ["PUBLISHED", "CLOSED", "AWARDED"].includes(rfq?.status ?? "");
@@ -196,6 +205,13 @@ export function RFQDetailPage() {
         title={rfq?.rfq_no ?? "RFQ"}
         actions={
           <>
+            {rfq && (
+              <StatusPill
+                status={rfq.status === "PENDING_APPROVAL" && trail.data?.stage_name
+                  ? `Pending at ${trail.data.stage_name}`
+                  : rfq.status}
+              />
+            )}
             <Button variant="subtle" onClick={() => nav("/procurement/rfqs")}>Back</Button>
             {rfq?.status === "DRAFT" && (
               <Can do="rfq.create">

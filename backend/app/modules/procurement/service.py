@@ -817,7 +817,13 @@ async def submit_po(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
     if po.status != POStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit a PO in {po.status} status")
     instance = await engine.start(db, DocType.PO.value, po.id,
-                                  context={"total_amount": float(po.total_amount)},
+                                  context={"total_amount": float(po.total_amount),
+                                           # The ORDER's project, not the buyer's. The
+                                           # procurement desk sits on its own project,
+                                           # so reading it off the raiser sent every
+                                           # order past its project's ladder.
+                                           "project_id": po.project_id or None,
+                                           "doc_no": po.po_no},
                                   user=user)
     # A ladder can finish AT submit — every rung switched off, NO_APPROVAL, or the
     # raiser is the top of it — and the engine hands back an already-approved
@@ -1698,7 +1704,10 @@ async def submit_requisition(db: AsyncSession, req_id: int, user) -> Requisition
         raise ValidationError(f"Cannot submit a requisition in {req.status} status")
     instance = await engine.start(
         db, DocType.REQUISITION.value, req.id,
-        context={"total_amount": float(req.estimated_value)}, user=user)
+        context={"total_amount": float(req.estimated_value),
+                 # The REQUISITION's project, not the raiser's — see submit_po.
+                 "project_id": req.project_id or None,
+                 "doc_no": req.req_no}, user=user)
     # See submit_po: a ladder that resolves to nobody comes back APPROVED, and
     # parking the requisition at PENDING_APPROVAL strands it for good.
     if instance.status == InstanceStatus.APPROVED.value:
@@ -2037,7 +2046,11 @@ async def submit_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
     if not rfq.vendors:
         raise ValidationError("Add at least one vendor before sending an RFQ out")
     instance = await engine.start(db, DocType.RFQ.value, rfq.id,
-                                  context={"vendor_count": rfq.vendor_count}, user=user)
+                                  context={"vendor_count": rfq.vendor_count,
+                                           # The RFQ's project, not the buyer's — see
+                                           # submit_po.
+                                           "project_id": rfq.project_id or None,
+                                           "doc_no": rfq.rfq_no}, user=user)
     # See submit_po: a ladder that resolves to nobody comes back APPROVED, and
     # parking the RFQ at PENDING_APPROVAL strands it for good. Approved means
     # PUBLISHED for an RFQ — `_publish_rfq` is the same call `act_on_rfq` makes, so a

@@ -5,7 +5,7 @@ import {
   useToast, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
-import { requisitionApi } from "../api";
+import { approvalTrailApi, approvalTrailKey, requisitionApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import { money } from "./RequisitionListPage";
 import type { ReqItem } from "../types";
@@ -27,6 +27,16 @@ export function RequisitionDetailPage() {
   const { data: req, isLoading, error } = useQuery({
     queryKey: ["requisition", id],
     queryFn: () => requisitionApi.get(reqId),
+  });
+
+  // The same read the trail below already makes, so the badge and the trail can never
+  // disagree about which rung the document is on. The RUNG, not the person holding it:
+  // "Pending at SCM HEAD" survives a transfer, and `current_approver_name` is a
+  // snapshot taken at submit that a ladder edit leaves out of date.
+  const trail = useQuery({
+    queryKey: approvalTrailKey("REQUISITION", reqId),
+    queryFn: () => approvalTrailApi.get("REQUISITION", reqId),
+    enabled: Number.isFinite(reqId),
   });
 
   const refresh = (message: string) => () => {
@@ -87,6 +97,16 @@ export function RequisitionDetailPage() {
         title={req?.req_no ?? "Requisition"}
         actions={
           <>
+            {/* Where the document is, said once, in the place every other screen says
+              * it. The rung comes off the engine's own trail, so a ladder renamed on
+              * Settings > Approvals Config renames this badge too. */}
+            {req && (
+              <StatusPill
+                status={isPending && trail.data?.stage_name
+                  ? `Pending at ${trail.data.stage_name}`
+                  : req.status}
+              />
+            )}
             <Button variant="subtle" onClick={() => nav("/procurement/requisitions")}>
               Back
             </Button>
@@ -137,93 +157,80 @@ export function RequisitionDetailPage() {
       <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? cancel.error} />
 
       {req && (
-        <Card className="mb-4 p-5">
-          <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-            <div>
-              <dt className="text-xs text-muted">Status</dt>
-              <dd className="mt-1"><StatusPill status={req.status} /></dd>
+        <>
+          {/* The three things a buyer reads first — who wants it, when, and what it is
+            * likely to cost — on one line, before the detail. The estimate sits apart
+            * because it is the figure the ladder routed on, not a fact about the
+            * request. */}
+          <Card className="mb-4 p-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-xs uppercase tracking-wide text-muted">Raised by</p>
+                <p className="text-lg font-semibold text-ink">{req.created_by_name ?? "—"}</p>
+                <p className="mt-1 text-sm text-muted">
+                  {req.status === "PENDING_APPROVAL" ? "With " : "Approved by "}
+                  <span className="text-body">
+                    {req.current_approver_name ?? req.approved_by_name ?? "—"}
+                  </span>
+                  {req.required_date ? ` · needed by ${fmtDate(req.required_date)}` : ""}
+                  {req.priority ? ` · ${req.priority.toLowerCase()} priority` : ""}
+                </p>
+              </div>
+              <div className="rounded-xl bg-content2 px-4 py-3 text-right">
+                <p className="text-xs uppercase tracking-wide text-muted">Estimated value</p>
+                <p className="text-xl font-bold text-ink">{money(req.estimated_value)}</p>
+                {/* Asked of every buyer who sees it, so the screen answers before they
+                  * ask. It is a routing figure, not a price — the approval ladder needs
+                  * a number and the vendors have not quoted yet. */}
+                <p className="mt-1 max-w-56 text-[11px] leading-snug text-muted">
+                  Preferred vendor's last rate, then any vendor's, then the item's
+                  purchase price. Not a quote.
+                </p>
+              </div>
             </div>
-            <div>
-              <dt className="text-xs text-muted">Raised by</dt>
-              <dd className="mt-1 text-body">{req.created_by_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">
-                {req.status === "PENDING_APPROVAL" ? "With" : "Approved by"}
-              </dt>
-              <dd className="mt-1 text-body">
-                {req.current_approver_name ?? req.approved_by_name ?? "—"}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Estimated value</dt>
-              <dd className="mt-1 font-semibold text-ink">{money(req.estimated_value)}</dd>
-              {/* Asked of every buyer who sees it, so the screen answers before they
-                * ask. It is a routing figure, not a price — the approval ladder needs
-                * a number and the vendors have not quoted yet. */}
-              <dd className="mt-1 text-[11px] leading-snug text-muted">
-                From the preferred vendor's last rate, then any vendor's last rate,
-                then the item's purchase price. Not a quote.
-              </dd>
-            </div>
-          </dl>
 
-          {/* Who is asking, for what, and on whose budget. None of it was on screen
-            * before, and an approver cannot place a requisition without it. Department
-            * and company are read off the raiser's HCM record and the install
-            * settings — they are not typed on the document. */}
-          <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-line pt-4 text-sm sm:grid-cols-4">
-            <div>
-              <dt className="text-xs text-muted">Department</dt>
-              <dd className="mt-1 text-body">{req.department_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Warehouse</dt>
-              <dd className="mt-1 text-body">{req.warehouse_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Project</dt>
-              <dd className="mt-1 text-body">{req.project_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Company</dt>
-              <dd className="mt-1 text-body">{req.company_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Priority</dt>
-              <dd className="mt-1 text-body">{req.priority ?? "Normal"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Needed by</dt>
-              <dd className="mt-1 text-body">
-                {req.required_date ? fmtDate(req.required_date) : "—"}
-              </dd>
-            </div>
+            {/* Who is asking, for what, and on whose budget. Department and company are
+              * read off the raiser's HCM record and the install settings — they are not
+              * typed on the document. */}
+            <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-line pt-4 text-sm sm:grid-cols-4">
+              {[
+                ["Department", req.department_name],
+                ["Warehouse", req.warehouse_name],
+                ["Project", req.project_name],
+                ["Company", req.company_name],
+              ].map(([label, value]) => (
+                <div key={label as string}>
+                  <dt className="text-[11px] uppercase tracking-wide text-muted">{label}</dt>
+                  <dd className="mt-0.5 truncate text-body" title={(value as string) ?? undefined}>
+                    {(value as string) ?? "—"}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+
             {/* Every material request folded in, not just the first. A consolidated
               * requisition serves several, and the header is where they are named. */}
-            <div className="col-span-2">
-              <dt className="text-xs text-muted">
+            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
+              <span className="text-[11px] uppercase tracking-wide text-muted">
                 From material request{(req.source_mr_nos ?? []).length > 1 ? "s" : ""}
-              </dt>
-              <dd className="mt-1 flex flex-wrap gap-1.5">
-                {(req.source_mr_nos ?? []).length
-                  ? req.source_mr_nos!.map((no) => (
-                      <span
-                        key={no}
-                        className="rounded-md bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-body"
-                      >
-                        {no}
-                      </span>
-                    ))
-                  : <span className="text-body">Raised directly</span>}
-              </dd>
+              </span>
+              {(req.source_mr_nos ?? []).length
+                ? req.source_mr_nos!.map((no) => (
+                    <span
+                      key={no}
+                      className="rounded-md bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-body"
+                    >
+                      {no}
+                    </span>
+                  ))
+                : <span className="text-sm text-body">Raised directly</span>}
             </div>
-          </dl>
 
-          {req.remarks && (
-            <p className="mt-4 border-t border-line pt-4 text-sm text-body">{req.remarks}</p>
-          )}
-        </Card>
+            {req.remarks && (
+              <p className="mt-4 border-t border-line pt-4 text-sm text-body">{req.remarks}</p>
+            )}
+          </Card>
+        </>
       )}
 
       <Card className="p-2">

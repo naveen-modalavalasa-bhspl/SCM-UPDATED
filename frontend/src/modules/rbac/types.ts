@@ -192,13 +192,6 @@ export interface JobProfile {
    *  profiles, which is what makes a grant project-specific. */
   key: string;
   job: string;
-  /** A default profile — what an unconfigured job in this project resolves to,
-   *  instead of falling through to its HCM role. Holds no positions of its own. */
-  is_default: boolean;
-  /** The company-wide default, which applies to every project that has not set its
-   *  own. Stays visible under a project filter, because it is that project's
-   *  fallback. */
-  is_company_default: boolean;
   /** An approval post — a chair this system owns because HCM has no position for
    *  it (SCM Head, Indent Team, Logistics). Configured here like any other profile;
    *  retires when HCM finally sends the real position. */
@@ -245,4 +238,24 @@ export interface JobProfileHolders {
     employee_id: number; name: string; emp_code?: string | null;
     office_name?: string | null; position_name?: string | null;
   }[];
+}
+
+/** One seat matched by the people search: who they are, and which profile their
+ *  position resolves through. `key` is what the list selects on. */
+export interface JobProfilePerson {
+  employee_id: number;
+  name: string | null;
+  emp_code: string | null;
+  position_id: number;
+  position_name: string | null;
+  project_name: string;
+  key: string;
+  job: string;
+  profile_name: string;
+  configured: boolean;
+}
+
+export interface JobProfilePeople {
+  items: JobProfilePerson[];
+  total: number;
 }

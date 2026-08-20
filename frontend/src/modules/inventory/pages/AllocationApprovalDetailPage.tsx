@@ -200,6 +200,13 @@ export function AllocationApprovalDetailPage() {
                     ? Number(item.quantity) : Number(typed);
                   const cap = live?.max_allowed;
                   const tooMuch = cap !== undefined && give > cap;
+                  // Nothing free at any point this login can draw from: there is no
+                  // number to type. The box stayed editable and accepted one, and the
+                  // server then refused the approval — the shelf is the answer, not a
+                  // matter of what the approver would like to give. Only once the live
+                  // re-check has actually come back (`live`), so a slow request never
+                  // greys out a line that does have stock.
+                  const nothingFree = live !== undefined && cap === 0;
                   return (
                     <tr key={item.id}>
                       <td className="p-3">
@@ -215,13 +222,18 @@ export function AllocationApprovalDetailPage() {
                               min={0}
                               max={cap}
                               step="any"
-                              value={typed ?? String(item.quantity)}
+                              disabled={nothingFree}
+                              value={nothingFree ? "0" : (typed ?? String(item.quantity))}
                               onChange={(event) => setEdits((prev) => ({
                                 ...prev, [item.id]: event.target.value,
                               }))}
                               aria-label={`Give quantity for ${item.item_name ?? item.item_code}`}
                             />
-                            {tooMuch && (
+                            {nothingFree ? (
+                              <p className="mt-1 text-[11px] text-muted">
+                                Nothing free — the whole line goes to procurement.
+                              </p>
+                            ) : tooMuch && (
                               <p className="mt-1 text-[11px] text-bad">
                                 Max {fmt(cap!)} {item.uom_code}
                               </p>

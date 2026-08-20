@@ -60,6 +60,13 @@ PAGES: list[PageDef] = [
     # the whole module then 404s. New screens go at the end of their group.
     PageDef("rbac_job_profiles", "/rbac/job-profiles", "Job Profiles",
             parent="grp_rbac", module="rbac", sort_order=83),
+    # The ONE approval-configuration screen. Catalogued so it gets a
+    # `page.admin_approval_flow.view` of its own instead of borrowing
+    # `admin.workflow.manage` — see permissions.INHERITS_GRANTS_FROM, which hands the
+    # new code to everyone who can reach the screen today.
+    PageDef("admin_approval_flow", "/admin/approval-flow", "Approval Flow",
+            parent="grp_settings", module="admin", icon="git-branch",
+            sort_order=91),
     # The asset / consumable code formula. Last in Settings for the reason above.
     PageDef("admin_code_formats", "/admin/code-formats", "Code Formats",
             parent="grp_settings", module="admin", icon="hash", sort_order=102),
@@ -276,8 +283,38 @@ async def sync_permission_labels(db: AsyncSession) -> list[str]:
     return changed
 
 
+# Screens that have been REPLACED and must stop appearing in the menu.
+#
+# `sync_pages` deliberately never deletes and never forces `is_active` back on, so a
+# retired screen stays retired. Retiring is the other half of that contract and needs
+# saying out loud somewhere: these three all wrote to `wf_workflows` beside Approval
+# Flow, with different rules about what a save retires, and one of them
+# (`admin_approvals_config`) deactivated every rank-scoped chain for the document it
+# saved. One screen, one writer.
+#
+# The rows and their permissions are LEFT IN PLACE, only parked — every grant on them
+# survives, so restoring a screen is flipping `is_active` back, not a migration.
+RETIRED_PAGES: list[str] = [
+    "admin_approvals_config",
+    "admin_workflows",
+]
+
+
+async def retire_pages(db: AsyncSession) -> list[str]:
+    """Park the replaced screens. Idempotent — a second run retires nothing."""
+    rows = (await db.execute(
+        select(Page).where(Page.code.in_(RETIRED_PAGES), Page.is_active.is_(True))
+    )).scalars().all()
+    for page in rows:
+        page.is_active = False
+    if rows:
+        await db.commit()
+    return [page.code for page in rows]
+
+
 async def sync_pages(db: AsyncSession) -> dict:
     """Insert missing pages, refresh known ones, delete nothing."""
+    retired = await retire_pages(db)
     existing = {
         page.code: page
         for page in (await db.execute(select(Page))).scalars().all()
@@ -354,4 +391,4 @@ async def sync_pages(db: AsyncSession) -> dict:
                                       permission_id=permission.id))
 
     await db.commit()
-    return {"added": added, "updated": updated}
+    return {"added": added, "updated": updated, "retired": retired}

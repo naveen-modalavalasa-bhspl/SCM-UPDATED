@@ -57,8 +57,12 @@ export function AllocationApprovalsPage() {
       }
       // A decided allocation is read from the allocation list, not the approval
       // inbox: the inbox only ever holds what is still owed a signature.
+      // AWAITING_PROCUREMENT is a signed allocation whose shortfall is being bought.
+      // It belongs in "every decision" — leaving it out made a document that is very
+      // much alive disappear from the screen it was signed on.
       const wanted = decision === "ALL"
-        ? ["PENDING_APPROVAL", "APPROVED", "REJECTED"] : [decision];
+        ? ["PENDING_APPROVAL", "AWAITING_PROCUREMENT", "APPROVED", "REJECTED"]
+        : [decision];
       const pages = await Promise.all(
         wanted.map((status) => listAllocations({ status })));
       const rows = pages.flatMap((p) => p.items ?? []);
@@ -225,6 +229,9 @@ export function AllocationApprovalsPage() {
             { value: "ALL", label: "All decisions" },
             { value: "WAITING", label: "Waiting for me" },
             { value: "APPROVED", label: "Approved" },
+            // Signed, but the shortfall is on order — it comes back for a top-up when
+            // the goods land, so it is worth being able to list on its own.
+            { value: "AWAITING_PROCUREMENT", label: "Waiting on procurement" },
             { value: "REJECTED", label: "Rejected" },
           ]}
           placeholder="All decisions"

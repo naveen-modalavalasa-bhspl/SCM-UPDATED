@@ -23,6 +23,7 @@ from app.modules.inventory.models import (
 )
 from app.platform.rules import evaluator as rules
 from app.platform.settings.service import write_audit
+from app.platform.hcm import service as hcm_service
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance
 from app.shared.enums import (
@@ -49,6 +50,14 @@ ACTIVE_ALLOCATION_STATUSES = (
     AllocationStatus.DRAFT.value,
     AllocationStatus.PENDING_APPROVAL.value,
     AllocationStatus.APPROVED.value,
+    AllocationStatus.AWAITING_PROCUREMENT.value,
+)
+# Signed off: the quantity is reserved and `ind_indent_items.allocated_qty` holds it.
+# AWAITING_PROCUREMENT belongs here for exactly that reason — it differs from APPROVED
+# only in having unfinished business with procurement, not in what it gave.
+SETTLED_ALLOCATION_STATUSES = (
+    AllocationStatus.APPROVED.value,
+    AllocationStatus.AWAITING_PROCUREMENT.value,
 )
 # The live claims `ind_indent_items.allocated_qty` does NOT already hold. That column
 # is recomputed as the sum of APPROVED allocation lines
@@ -609,10 +618,16 @@ async def _settle_approved(db: AsyncSession, alloc: Allocation, user,
     at submit when the ladder resolves to nobody but the raiser, or later when a real
     approver acts — and the document must end up in exactly the same state both times.
     """
-    alloc.status = AllocationStatus.APPROVED.value
     alloc.approved_at = utcnow()
     alloc.current_approver_name = None
-    implied_indent_status = await apply_to_stock(db, alloc, user, ctx)
+    implied_indent_status, went_to_procurement = await apply_to_stock(
+        db, alloc, user, ctx)
+    # Signed either way. APPROVED means finished; AWAITING_PROCUREMENT means the part
+    # the shelf could not cover is being bought, and this same document reopens when it
+    # arrives (`reopen_for_receipt`). Keeping it open is what stops a second allocation
+    # being raised against a requirement that already has one.
+    alloc.status = (AllocationStatus.AWAITING_PROCUREMENT.value if went_to_procurement
+                    else AllocationStatus.APPROVED.value)
     if on_approved is not None:
         # The owning business module supplies its downstream handoff. Keeping the
         # callback inside this transaction means approval, reservations and the
@@ -707,6 +722,61 @@ async def _attach_totals(db: AsyncSession, rows) -> None:
         row.requested_total = float(_d(requested))
 
 
+async def reopen_for_receipt(db: AsyncSession, indent_id: int) -> list[int]:
+    """Put an allocation waiting on procurement back in front of its approver.
+
+    Called when the goods bought for its shortfall reach stock. The SAME document is
+    reused — status back to PENDING_APPROVAL, so the review screen opens it editable
+    and the approver tops up the Give from what has arrived. That is the whole point:
+    no second allocation for one requirement, and no second row in the fulfilment
+    queue for an indent somebody already decided on.
+
+    The ladder decides again, through the engine: `engine.start` reopens the document's
+    existing instance in place (`_open_instance`), keeping every `wf_actions` row where
+    it is (rule 9) and resolving the chain from the CONFIGURED ladder — so whoever
+    Approvals Config names today gets the pending row, and the approvals inbox shows it
+    like any other waiting document. Without that the reopened allocation would be
+    editable but sit in nobody's queue.
+
+    Raised in the name of whoever decided the allocation, not the storekeeper who
+    happened to book the delivery: the ladder climbs the RAISER's reporting line, and
+    keying it to the receiving clerk would route this indent's decision through a
+    stranger. `_settle_approved` then reserves only the DIFFERENCE when it is signed.
+
+    Returns the allocation ids reopened.
+    """
+    rows = (await db.execute(
+        select(Allocation).where(
+            Allocation.indent_id == indent_id,
+            Allocation.status == AllocationStatus.AWAITING_PROCUREMENT.value,
+        )
+    )).scalars().all()
+    reopened: list[int] = []
+    for alloc in rows:
+        raiser = (await hcm_service.get_employee(db, alloc.allocated_by_id)
+                  if alloc.allocated_by_id else None)
+        if raiser is None:
+            # No raiser to climb from — leave it signed rather than parking it in a
+            # state nobody can act on.
+            continue
+        alloc.status = AllocationStatus.PENDING_APPROVAL.value
+        alloc.approved_at = None
+        await db.flush()
+        await engine.start(
+            db, doc_type=await doc_type_for(db, alloc.id), doc_id=alloc.id,
+            context={
+                "doc_no": alloc.allocation_no,
+                "doc_summary": f"Stock arrived for {alloc.indent_no} — top up the "
+                               f"allocation",
+                "department_id": alloc.department_id,
+            },
+            user=raiser,
+        )
+        await _refresh_approver(db, alloc, await doc_type_for(db, alloc.id))
+        reopened.append(alloc.id)
+    return reopened
+
+
 async def act(db: AsyncSession, allocation_id: int, action: str, user,
               comments: str = "", ctx: dict | None = None,
               on_approved=None, revisions: list[dict] | None = None) -> Allocation:
@@ -771,7 +841,11 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                          ctx: dict | None = None) -> str:
     """Turn an approved decision into reservations, then one MR for the remainder.
 
-    Returns the indent status this implies. Runs only on approval.
+    Returns (indent status this implies, whether a material request was raised). The
+    second half decides whether the allocation is FINISHED or merely waiting on
+    procurement — the caller cannot see the shortfalls from outside.
+
+    Runs only on approval.
     """
     # Import here rather than at module load: service imports nothing from this file,
     # but this file needs its MR helper, and a top-level import would close the loop.
@@ -783,9 +857,18 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
         requested_total += _d(line.requested_qty)
         given_total += _d(line.quantity)
 
-        if _d(line.quantity) > ZERO:
+        # What this line has ALREADY put aside. An allocation that went to procurement
+        # is signed and reopened later for the same lines, so approving it a second
+        # time must reserve the DIFFERENCE — reserving `quantity` again would hold the
+        # goods twice and starve every other indent of stock nobody is using.
+        held = await allocation.reserved_quantity(
+            db, RefType.RESERVATION.value, alloc.indent_id,
+            ref_line_id=line.indent_item_id, item_id=line.item_id,
+        )
+        to_reserve = _d(line.quantity) - _d(held)
+        if to_reserve > ZERO:
             await allocation.reserve(
-                db, line.item_id, line.quantity, RefType.RESERVATION.value,
+                db, line.item_id, to_reserve, RefType.RESERVATION.value,
                 alloc.indent_id, alloc.indent_no, user,
                 project_id=line.project_id or NO_PROJECT,
                 warehouse_ids=[line.warehouse_id] if line.warehouse_id else None,
@@ -827,7 +910,7 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
             })
 
     if given_total <= ZERO:
-        return IndentStatus.PENDING_PROCUREMENT.value
+        return IndentStatus.PENDING_PROCUREMENT.value, bool(shortfalls)
     if given_total >= requested_total:
-        return IndentStatus.ALLOCATED.value
-    return IndentStatus.PARTIALLY_FULFILLED.value
+        return IndentStatus.ALLOCATED.value, bool(shortfalls)
+    return IndentStatus.PARTIALLY_FULFILLED.value, bool(shortfalls)

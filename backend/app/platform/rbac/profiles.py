@@ -43,7 +43,7 @@ import json
 import re
 from collections import Counter
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ValidationError
@@ -114,35 +114,27 @@ def derive_key(code: str | None, job_name: str | None, name: str | None,
 # CLAUDE.md rule 8 already says it lives.
 UNASSIGNED_PROJECT = 0
 
-# A default profile: what a job gets when nobody has configured it yet.
+# There is deliberately NO default profile.
 #
-# Without one, an unconfigured position resolves through its HCM role — the exact
-# leak this screen exists to close, since role 29 "MANAGER" covers fifteen unrelated
-# jobs. A default is a normal profile row with a reserved job, so it saves, resets,
-# lists and audits through the same code as every other profile.
+# One existed until 2026-08-19: a reserved job ("*") per project plus a company-wide
+# row, which any unconfigured position fell through to. It was removed because its
+# blast radius could not be seen from the screen that offered it — a profile REPLACES
+# the personal grants on rbac_user_roles (see rbac.service.get_user_roles), and the
+# company-wide default matched EVERY position, so one Save revoked every hand-made
+# grant in the company at once. Nothing was ever saved against it on the live
+# database, so removing it changed no one's access.
 #
-# Resolution walks outward, the same order the approval ladders use (CLAUDE.md rule
-# 8): the project's own default, then the company-wide one, then — only if neither
-# has ever been configured — the old HCM behaviour, unchanged.
-DEFAULT_JOB = "*"
-COMPANY_DEFAULT_KEY = "ALL:*"   # deliberately not "0:*", which is Unassigned's own
+# A job nobody has configured therefore falls through to its HCM role, exactly as it
+# did before defaults existed. That is fail-safe rather than fail-closed on purpose:
+# an admin who has not reached a job yet must not have silently locked its people out.
 
 
 def profile_key(project_id: int | None, job: str) -> str:
     return f"{project_id or UNASSIGNED_PROJECT}:{job}"
 
 
-def is_default_key(key: str) -> bool:
-    return key == COMPANY_DEFAULT_KEY or key.endswith(f":{DEFAULT_JOB}")
-
-
 def default_profile_name(key: str, bucket: dict | None = None) -> str:
-    """Display name for an unsaved profile. A default reads as what it does."""
-    if key == COMPANY_DEFAULT_KEY:
-        return "Default — every project"
-    if is_default_key(key):
-        name = (bucket or {}).get("project_name") or "this project"
-        return f"Default — {name}"
+    """Display name for a profile nobody has saved yet — the job, title-cased."""
     return (bucket["job"] if bucket else split_key(key)[1]).title()
 
 
@@ -156,6 +148,29 @@ def split_key(key: str) -> tuple[int, str]:
 
 def profile_description(key: str, scope: str = ScopeRung.SELF.value) -> str:
     return f"{PROFILE_PREFIX}{key}|{SCOPE_PREFIX}{scope}"
+
+
+# An approval post's role is NOT a PROFILE: row — the post owns it, and `_profile_roles`
+# must not pick it up — but its scope still has to be stored somewhere and read back,
+# or the Data scope dropdown on those rows is decoration. Same `|SCOPE:` suffix, its
+# own prefix.
+POST_DESCRIPTION_PREFIX = "Approval post: "
+
+
+def post_description(post_name: str, scope: str) -> str:
+    return f"{POST_DESCRIPTION_PREFIX}{post_name}|{SCOPE_PREFIX}{scope}"
+
+
+def parse_post_scope(description: str | None) -> str | None:
+    """The scope saved on an approval post's role, or None for one saved before this.
+
+    None reads as ALL at the call site — that is what every post row reported before
+    the dropdown did anything, and a scope change must be something an admin asked for.
+    """
+    if not description or not description.startswith(POST_DESCRIPTION_PREFIX):
+        return None
+    _name, _, rest = description.partition("|")
+    return rest[len(SCOPE_PREFIX):] or None if rest.startswith(SCOPE_PREFIX) else None
 
 
 def parse_description(description: str | None) -> tuple[str | None, str | None]:
@@ -179,11 +194,18 @@ async def position_projects(db: AsyncSession) -> dict[int, tuple[int | None, str
     raw.project_name is matched back to an id through the employee mirror, so an
     empty post still lands in the right project instead of a limbo bucket.
     """
+    # ORDER BY, not incidental row order. A post held by people from two projects has
+    # two right answers, and MySQL is free to return either — so the list screen could
+    # bucket it under one project while `profile_role_for_position` (its own one-row
+    # lookup, ordered the same way below) resolved the grant under the other. Lowest
+    # employee id wins, which is arbitrary but STABLE, and stable is the whole point:
+    # a position must not change which profile grants it between two requests.
     rows = (await db.execute(
         select(HcmPositionAssignment.position_id, HcmEmployee.project_id,
                HcmEmployee.project_name)
         .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
         .where(HcmPositionAssignment.is_active.is_(True))
+        .order_by(HcmEmployee.id)
     )).all()
     out: dict[int, tuple[int | None, str | None]] = {}
     by_name: dict[str, int] = {}
@@ -300,34 +322,21 @@ async def _derive(db: AsyncSession) -> dict[str, dict]:
                 "holders": holders.get(row.id, 0),
             })
 
-    # One default bucket per project, plus the company-wide one. Synthetic: they hold
-    # no positions of their own, because they stand for the jobs that do not exist
-    # yet. Adding them here rather than only in list_profiles is what lets
-    # set_profile_access, reset_profile and preview_profile accept them without
-    # knowing defaults exist — they all validate against this dict.
-    seen = {(b["project_id"], b["project_name"]) for b in profiles.values()}
-    for project_id, project_name in sorted(seen, key=lambda pair: pair[0]):
-        key = profile_key(project_id, DEFAULT_JOB)
-        profiles.setdefault(key, _default_bucket(key, project_id, project_name))
-    profiles.setdefault(
-        COMPANY_DEFAULT_KEY,
-        _default_bucket(COMPANY_DEFAULT_KEY, UNASSIGNED_PROJECT, "Every project"),
-    )
     return profiles
 
 
-def _default_bucket(key: str, project_id: int, project_name: str) -> dict:
-    return {
-        "key": key, "job": DEFAULT_JOB,
-        "project_id": project_id, "project_name": project_name,
-        "positions": [], "position_ids": [],
-        "holders": 0, "hcm_roles": set(), "office_levels": Counter(),
-    }
-
-
 async def _profile_roles(db: AsyncSession) -> dict[str, Role]:
+    """The LIVE profile roles, keyed by profile key.
+
+    `is_active` matters. reset_profile deactivates the row rather than deleting it (the
+    grants have to stay auditable), and `profile_role_for_position` — which decides what
+    the person can actually do — has always filtered on it. Without the same filter here
+    the screen went on showing a reset profile as "Set up here" with a role behind it,
+    while its people were already back on their HCM role.
+    """
     roles = (await db.execute(
-        select(Role).where(Role.description.startswith(PROFILE_PREFIX))
+        select(Role).where(Role.description.startswith(PROFILE_PREFIX),
+                           Role.is_active.is_(True))
     )).scalars().all()
     out: dict[str, Role] = {}
     for role in roles:
@@ -360,6 +369,8 @@ async def profile_keys_for_position(db: AsyncSession, position_id: int) -> list[
         .where(HcmPositionAssignment.position_id == position_id,
                HcmPositionAssignment.is_active.is_(True),
                HcmEmployee.project_id.isnot(None))
+        # Same tie-break as position_projects(), so this agrees with the list screen.
+        .order_by(HcmEmployee.id)
         .limit(1)
     )
     if project_id is None:
@@ -369,11 +380,10 @@ async def profile_keys_for_position(db: AsyncSession, position_id: int) -> list[
                 select(HcmEmployee.project_id)
                 .where(HcmEmployee.project_name == raw_name,
                        HcmEmployee.project_id.isnot(None))
+                .order_by(HcmEmployee.id)
                 .limit(1)
             )
-    return [profile_key(project_id, job),
-            profile_key(project_id, DEFAULT_JOB),
-            COMPANY_DEFAULT_KEY]
+    return [profile_key(project_id, job)]
 
 
 async def profile_keys_for_user(db: AsyncSession, user) -> list[str]:
@@ -410,6 +420,8 @@ async def profile_role_for_position(db: AsyncSession, position_id: int) -> Role 
         .where(HcmPositionAssignment.position_id == position_id,
                HcmPositionAssignment.is_active.is_(True),
                HcmEmployee.project_id.isnot(None))
+        # Same tie-break as position_projects(), so this agrees with the list screen.
+        .order_by(HcmEmployee.id)
         .limit(1)
     )
     if project_id is None:
@@ -420,24 +432,18 @@ async def profile_role_for_position(db: AsyncSession, position_id: int) -> Role 
                 select(HcmEmployee.project_id)
                 .where(HcmEmployee.project_name == raw_name,
                        HcmEmployee.project_id.isnot(None))
+                .order_by(HcmEmployee.id)
                 .limit(1)
             )
-    # The job's own profile, then the project's default, then the company-wide one.
-    # First hit wins, so configuring a job always beats a default, and a project
-    # default always beats the company-wide one. All three miss -> None, and the
-    # caller falls through to the HCM role exactly as it did before defaults existed.
-    for key in (profile_key(project_id, job),
-                profile_key(project_id, DEFAULT_JOB),
-                COMPANY_DEFAULT_KEY):
-        role = (await db.execute(
-            select(Role).where(
-                Role.description.startswith(f"{PROFILE_PREFIX}{key}|"),
-                Role.is_active.is_(True),
-            )
-        )).scalars().first()
-        if role is not None:
-            return role
-    return None
+    # The job's own profile, and nothing else. A miss falls through to the HCM role,
+    # exactly as it did before job profiles existed — see the note on defaults above.
+    key = profile_key(project_id, job)
+    return (await db.execute(
+        select(Role).where(
+            Role.description.startswith(f"{PROFILE_PREFIX}{key}|"),
+            Role.is_active.is_(True),
+        )
+    )).scalars().first()
 
 
 # --------------------------------------------------------------------------- #
@@ -481,16 +487,22 @@ async def _post_profile_rows(db: AsyncSession, pages, held: dict,
     if not rows:
         return []
     seated = await approval_posts.members_of(db, [row.id for row in rows])
+    post_roles = {
+        role.id: role for role in (await db.execute(
+            select(Role).where(Role.id.in_(
+                [row.rbac_role_id for row in rows if row.rbac_role_id]))
+        )).scalars().all()
+    } if any(row.rbac_role_id for row in rows) else {}
 
     items = []
     for post in rows:
         codes = held.get(post.rbac_role_id, set()) if post.rbac_role_id else set()
         people = seated.get(post.id, [])
+        role = post_roles.get(post.rbac_role_id)
+        scope = parse_post_scope(role.description if role else None) or ScopeRung.ALL.value
         items.append({
             "key": post_key(post.id),
             "job": post.name,
-            "is_default": False,
-            "is_company_default": False,
             # Flagged so the screen can say where the row came from: this is a chair we
             # created, not a job derived from HCM.
             "is_approval_post": True,
@@ -499,7 +511,10 @@ async def _post_profile_rows(db: AsyncSession, pages, held: dict,
             "name": post.name,
             "role_id": post.rbac_role_id,
             "configured": post.rbac_role_id is not None,
-            "scope": ScopeRung.ALL.value,
+            "scope": scope,
+            # A chair this system owns serves every project by construction — SCM Head
+            # signs for all of them — so ALL is what it is suggested at, whatever the
+            # admin has since narrowed it to.
             "suggested_scope": ScopeRung.ALL.value,
             "position_count": 1,
             "holder_count": len(people),
@@ -519,7 +534,7 @@ async def _post_profile_rows(db: AsyncSession, pages, held: dict,
 
 
 async def _set_post_access(db: AsyncSession, key: str, page_codes: list[str],
-                           permission_codes: list[str], name: str | None,
+                           permission_codes: list[str], scope: str, name: str | None,
                            actor) -> dict:
     """Save ticks for an approval post, onto the role the post carries.
 
@@ -531,6 +546,8 @@ async def _set_post_access(db: AsyncSession, key: str, page_codes: list[str],
     post = await db.get(ApprovalPost, post_id_of(key))
     if post is None or not post.is_active:
         raise ValidationError(f"Unknown approval post: {key}")
+    if scope not in {r.value for r in ScopeRung}:
+        raise ValidationError(f"Unknown scope: {scope}")
 
     pages = (await db.execute(
         select(Page).where(Page.is_active.is_(True)))).scalars().all()
@@ -558,7 +575,7 @@ async def _set_post_access(db: AsyncSession, key: str, page_codes: list[str],
         role = Role(
             code=await _free_code(db, f"post_{post.code.lower()}"[:40]),
             name=name or post.name,
-            description=f"Approval post: {post.name}",
+            description=post_description(post.name, scope),
             is_system=True, is_active=True,
         )
         db.add(role)
@@ -566,6 +583,7 @@ async def _set_post_access(db: AsyncSession, key: str, page_codes: list[str],
         post.rbac_role_id = role.id
     else:
         role.name = name or role.name
+        role.description = post_description(post.name, scope)
         role.is_active = True
 
     permissions = (await db.execute(
@@ -598,8 +616,7 @@ async def _set_post_access(db: AsyncSession, key: str, page_codes: list[str],
         summary=f"Access updated for approval post {post.name}",
     )
     await db.commit()
-    return {"success": True, "key": key, "role_id": role.id,
-            "scope": ScopeRung.ALL.value,
+    return {"success": True, "key": key, "role_id": role.id, "scope": scope,
             "permission_codes": sorted(p.code for p in permissions)}
 
 
@@ -627,11 +644,7 @@ async def list_profiles(db: AsyncSession) -> dict:
     items = []
     for key, bucket in sorted(
         derived.items(),
-        # Defaults sort to the top of their project: they are the thing that decides
-        # every row below them, so burying them under 35 jobs would hide the setting
-        # that matters most.
-        key=lambda kv: (kv[1]["project_name"], not is_default_key(kv[0]),
-                        -len(kv[1]["position_ids"])),
+        key=lambda kv: (kv[1]["project_name"], -len(kv[1]["position_ids"])),
     ):
         role = saved.get(key)
         _, saved_scope = parse_description(role.description if role else None)
@@ -639,8 +652,6 @@ async def list_profiles(db: AsyncSession) -> dict:
         items.append({
             "key": key,
             "job": bucket["job"],
-            "is_default": is_default_key(key),
-            "is_company_default": key == COMPANY_DEFAULT_KEY,
             "project_id": bucket["project_id"],
             "project_name": bucket["project_name"],
             "name": role.name if role else default_profile_name(key, bucket),
@@ -674,14 +685,9 @@ async def list_profiles(db: AsyncSession) -> dict:
 
     return {
         "items": items,
-        # Real jobs only: the header reads "N real jobs derived from M positions",
-        # and a default is neither derived nor a job.
-        "total": sum(1 for i in items if not i["is_default"]),
-        # Real projects only. The company-wide default's bucket carries the label
-        # "Every project", which is not a project and must never reach the filter.
+        "total": len(items),
         "projects": sorted({
-            (b["project_id"], b["project_name"])
-            for k, b in derived.items() if not is_default_key(k)
+            (b["project_id"], b["project_name"]) for b in derived.values()
         }),
         "position_total": sum(len(b["position_ids"]) for b in derived.values()),
         "pages": [{
@@ -704,16 +710,64 @@ async def list_profiles(db: AsyncSession) -> dict:
     }
 
 
+async def find_people(db: AsyncSession, search: str, limit: int = 25) -> dict:
+    """Which profile a PERSON lands in — looked up by employee code or name.
+
+    The profile list can only be searched by what a profile is made of: the job, the
+    project, the HCM role, the position names. That is the wrong end of the telescope
+    when the question is "why can Ramesh see this?" or "where is EMP1043 configured?",
+    which is how an access question actually arrives.
+
+    Returns one row per active seat, naming the profile key the position resolves
+    through, so the screen can jump straight to it. Capped, and it refuses to run on a
+    fragment — an unbounded scan of 2,787 people is not a search box.
+    """
+    term = (search or "").strip()
+    if len(term) < 2:
+        return {"items": [], "total": 0}
+
+    like = f"%{term}%"
+    rows = (await db.execute(
+        select(HcmEmployee.id, HcmEmployee.full_name, HcmEmployee.emp_code,
+               HcmEmployee.project_id, HcmEmployee.project_name,
+               HcmPosition.id.label("position_id"), HcmPosition.name.label("position_name"),
+               HcmPosition.code.label("position_code"), HcmPosition.job_name,
+               HcmPosition.role_name)
+        .join(HcmPositionAssignment,
+              HcmPositionAssignment.employee_id == HcmEmployee.id)
+        .join(HcmPosition, HcmPosition.id == HcmPositionAssignment.position_id)
+        .where(HcmEmployee.is_active.is_(True),
+               HcmPositionAssignment.is_active.is_(True),
+               HcmPosition.is_active.is_(True),
+               or_(HcmEmployee.emp_code.like(like), HcmEmployee.full_name.like(like)))
+        .order_by(HcmEmployee.full_name, HcmPosition.id)
+        .limit(limit)
+    )).all()
+
+    saved = await _profile_roles(db)
+    items = []
+    for row in rows:
+        job = derive_key(row.position_code, row.job_name, row.position_name,
+                         row.role_name)
+        key = profile_key(row.project_id, job)
+        role = saved.get(key)
+        items.append({
+            "employee_id": row.id, "name": row.full_name, "emp_code": row.emp_code,
+            "position_id": row.position_id, "position_name": row.position_name,
+            "project_name": row.project_name or "Unassigned",
+            "key": key, "job": job,
+            "profile_name": role.name if role else job.title(),
+            "configured": role is not None,
+        })
+    return {"items": items, "total": len(items)}
+
+
 async def profile_options(db: AsyncSession, user=None) -> list[dict]:
     """Every job profile this caller may point AT, named — the lookup a screen needs.
 
     `list_profiles` above answers the RBAC editor's question (which pages, which
     actions, which scope) and reads the whole permission matrix to do it. A screen
     that only has to name the job — Masters > BOM Groups — should not pay for that.
-
-    Defaults ("*") are left out on purpose: they are the fallback grant for jobs
-    nobody has configured, not a job anyone holds, so they are not something a kit can
-    be handed to.
 
     Passing `user` narrows the list to that login's own scope rung, and every caller
     that serves a request MUST pass it. Naming a profile is a read of the org chart:
@@ -737,7 +791,7 @@ async def profile_options(db: AsyncSession, user=None) -> list[dict]:
             "holder_count": bucket["holders"],
             "configured": key in saved,
         }
-        for key, bucket in derived.items() if not is_default_key(key)
+        for key, bucket in derived.items()
     ]
     if user is not None and await rung_for(db, user) is not ScopeRung.ALL:
         # Mirrors shared.scope.project_condition, in Python because these rows are
@@ -758,7 +812,7 @@ async def set_profile_access(
 ) -> dict:
     if is_post_key(key):
         return await _set_post_access(
-            db, key, page_codes, permission_codes, name, actor)
+            db, key, page_codes, permission_codes, scope, name, actor)
     derived = await _derive(db)
     if key not in derived:
         raise ValidationError(f"Unknown job profile: {key}")
@@ -861,6 +915,8 @@ async def _free_code(db: AsyncSession, base: str) -> str:
 
 async def reset_profile(db: AsyncSession, key: str, actor) -> dict:
     """Drop a profile's grants entirely, so its positions fall back to the HCM role."""
+    if is_post_key(key):
+        return await _reset_post(db, key, actor)
     role = (await _profile_roles(db)).get(key)
     if role is None:
         return {"success": True, "key": key, "role_id": None}
@@ -879,8 +935,67 @@ async def reset_profile(db: AsyncSession, key: str, actor) -> dict:
     return {"success": True, "key": key, "role_id": role.id}
 
 
+async def _reset_post(db: AsyncSession, key: str, actor) -> dict:
+    """Take an approval post's chair back to granting nothing.
+
+    Its grants do NOT live on a `PROFILE:` role, so the ordinary reset above looked the
+    key up, found nothing, and returned success without touching anything — the screen
+    said the chair had been handed back while everyone seated in it kept every
+    permission. The post keeps its role (retiring it would unbind the chair from the
+    ladder); what is dropped is what the role grants.
+    """
+    from app.platform.workflow.models import ApprovalPost
+
+    post = await db.get(ApprovalPost, post_id_of(key))
+    if post is None:
+        raise ValidationError(f"Unknown approval post: {key}")
+    if not post.rbac_role_id:
+        return {"success": True, "key": key, "role_id": None}
+    role = await db.get(Role, post.rbac_role_id)
+    before = sorted(code for _rid, code in (await db.execute(
+        select(RolePermission.role_id, Permission.code)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(RolePermission.role_id == post.rbac_role_id)
+    )).all())
+    for row in (await db.execute(
+        select(RolePermission).where(RolePermission.role_id == post.rbac_role_id)
+    )).scalars().all():
+        await db.delete(row)
+    await write_audit(
+        db, entity="rbac_job_profile", entity_id=post.rbac_role_id,
+        action=AuditAction.ACCESS_REVOKED, actor=actor,
+        before={"permissions": before}, after={"permissions": []},
+        entity_no=key[:50],
+        summary=f"Approval post {post.name} reset — its chair now grants nothing",
+    )
+    await db.commit()
+    return {"success": True, "key": key,
+            "role_id": role.id if role else post.rbac_role_id}
+
+
+async def _post_holders(db: AsyncSession, key: str) -> dict:
+    """Who is seated in an approval post, in the same shape preview_profile returns."""
+    from app.platform.workflow import posts as approval_posts
+    from app.platform.workflow.models import ApprovalPost
+
+    post = await db.get(ApprovalPost, post_id_of(key))
+    if post is None:
+        raise ValidationError(f"Unknown approval post: {key}")
+    seated = (await approval_posts.members_of(db, [post.id])).get(post.id, [])
+    return {"key": key, "items": [{
+        "employee_id": person["id"], "name": person.get("name"),
+        "emp_code": person.get("code"), "office_name": None,
+        "position_name": post.name,
+    } for person in seated], "total": len(seated)}
+
+
 async def preview_profile(db: AsyncSession, key: str) -> dict:
     """Who actually lands on this profile, with their names — the 'view as' answer."""
+    # An approval post is a chair this system owns, not a bucket of HCM positions, so
+    # it is not in `_derive` and used to come back as "Unknown job profile" — which is
+    # what the "Who is this?" button showed on every SCM chair.
+    if is_post_key(key):
+        return await _post_holders(db, key)
     derived = await _derive(db)
     if key not in derived:
         raise ValidationError(f"Unknown job profile: {key}")

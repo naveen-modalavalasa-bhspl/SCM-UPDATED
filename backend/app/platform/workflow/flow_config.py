@@ -591,6 +591,18 @@ async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> d
         hcm = [{"id": row[0], "name": row[1], "role_name": row[2] or ""}
                for row in (await db.execute(stmt)).all()]
 
+    # A rank nobody fills cannot approve anything: `resolve_chain` skips a rung whose
+    # ancestor has no holder, so putting one on a chain silently shortens it. The live
+    # mirror is full of them — the HCM cutover left the old generation of role ids in
+    # place beside the new one, so "District Manager" appears twice (27 posts, and a
+    # leftover with one), "Store Keeper" appears beside "STOREKEEPER" with nobody in
+    # it, and the same for Driver and Inventory Manager. An admin picking the wrong
+    # one of a matched pair built a chain that could never resolve.
+    #
+    # Filtered, not flagged: there is no reason to offer a chair with nobody in it, and
+    # the empty twin is exactly the one that reads as correct in the dropdown.
+    climbable = [rank for rank in ranks if rank.get("holder_count")]
+
     return {
         "local": [{"id": row["id"], "name": row["name"],
                    "department": row["department"],
@@ -601,7 +613,7 @@ async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> d
         "ranks": [{"id": rank["role_id"], "name": rank["role_name"],
                    "position_count": rank.get("position_count", 0),
                    "people_count": rank.get("holder_count", 0),
-                   "depth": rank.get("depth", 0)} for rank in ranks],
+                   "depth": rank.get("depth", 0)} for rank in climbable],
         # Same shape, different bucket. `people` is who would actually sign, which the
         # admin needs to see: these rungs name a chair rather than a step up the line.
         "shared_ranks": [{"id": rank["role_id"], "name": rank["role_name"],

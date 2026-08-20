@@ -150,6 +150,9 @@ class MRListRow(BaseModel):
 
 
 class MROut(MRListRow):
+    # The ladder rung the request is waiting on ("Regional Manager"), computed on read
+    # from the frozen chain — not a column, and not the approver's name.
+    current_stage_name: str | None = None
     project_name: str | None = None
     remarks: str | None = None
     approved_at: datetime | None = None

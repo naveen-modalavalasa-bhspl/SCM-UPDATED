@@ -179,6 +179,26 @@ async def submit_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
     return await service.submit_receipt(db, receipt_id, user)
 
 
+# A GRN only reaches SUBMITTED when this project configured a Goods Receipt chain on
+# Settings > Approval Flow; with none configured nothing ever lands here. Gated on
+# RECEIPT_CREATE only as a floor — `engine.act` is what decides whether THIS caller is
+# on the current rung, exactly as everywhere else (rule 8).
+@router.post("/receipts/{receipt_id}/approve", response_model=s.ReceiptDetail)
+async def approve_receipt(receipt_id: int, body: s.ReasonIn = s.ReasonIn(),
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(RECEIPT_CREATE))):
+    return await service.approve_receipt(db, receipt_id, user, approve=True,
+                                         comments=body.reason or "")
+
+
+@router.post("/receipts/{receipt_id}/reject", response_model=s.ReceiptDetail)
+async def reject_receipt(receipt_id: int, body: s.ReasonIn,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(RECEIPT_CREATE))):
+    return await service.approve_receipt(db, receipt_id, user, approve=False,
+                                         comments=body.reason or "")
+
+
 @router.post("/receipts/{receipt_id}/complete", response_model=s.ReceiptDetail)
 async def complete_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(RECEIPT_POST))):

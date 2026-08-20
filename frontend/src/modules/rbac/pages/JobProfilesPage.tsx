@@ -31,6 +31,7 @@ import {
   Button, Card, EmptyState, ErrorBanner, Field, Input, PageHeader, Select,
   ScrollBox, useToast,
 } from "@/shared/components";
+import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 import { rbacApi } from "../api";
 import type { JobProfileMatrix, ScopeRung } from "../types";
 
@@ -691,6 +692,11 @@ export function JobProfilesPage() {
   // The paste box: closed until asked for, and cleared whenever the selection moves.
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
+  // "Who has this?" run backwards: type a person, get the profile that grants them.
+  const [peopleSearch, setPeopleSearch] = useState("");
+  // Narrows the holders panel. A Store Keeper profile seats nearly two thousand
+  // people, and a flat list of them answers no question anybody actually has.
+  const [holderSearch, setHolderSearch] = useState("");
 
   const profiles = data?.items ?? [];
   const selected = useMemo(
@@ -717,6 +723,7 @@ export function JobProfilesPage() {
     setFeatureCodes(new Set(selected.permission_codes));
     setScope(selected.scope);
     setShowHolders(false);
+    setHolderSearch("");
     setOpen(new Set());
     setPasteOpen(false);
     setPasteText("");
@@ -727,6 +734,24 @@ export function JobProfilesPage() {
     queryFn: () => rbacApi.jobProfiles.holders(selectedKey as string),
     enabled: showHolders && !!selectedKey,
   });
+
+  const debouncedPeople = useDebouncedValue(peopleSearch, 250);
+  const people = useQuery({
+    queryKey: ["rbac", "job-profiles", "find", debouncedPeople],
+    queryFn: () => rbacApi.jobProfiles.findPeople(debouncedPeople),
+    // Two characters is the server's own floor; asking below it just returns nothing.
+    enabled: debouncedPeople.trim().length >= 2,
+  });
+
+  /** The holders panel, narrowed by name or employee code. */
+  const visibleHolders = useMemo(() => {
+    const rows = holders.data?.items ?? [];
+    const needle = holderSearch.trim().toLowerCase();
+    if (!needle) return rows;
+    return rows.filter((h) => (h.name ?? "").toLowerCase().includes(needle)
+      || (h.emp_code ?? "").toLowerCase().includes(needle)
+      || (h.position_name ?? "").toLowerCase().includes(needle));
+  }, [holders.data, holderSearch]);
 
   const save = useMutation({
     mutationFn: () => rbacApi.jobProfiles.setAccess(selected!.key, {
@@ -754,13 +779,9 @@ export function JobProfilesPage() {
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return profiles.filter((p) => {
-      // The company-wide default survives a project filter: it is what the filtered
-      // project falls back to when it has no default of its own, so hiding it would
-      // hide the rule actually in force.
       // An approval post belongs to no HCM project, so a project filter must not
       // hide it — it is the one profile that applies everywhere.
-      if (project && !p.is_company_default && !p.is_approval_post
-          && String(p.project_id) !== project) {
+      if (project && !p.is_approval_post && String(p.project_id) !== project) {
         return false;
       }
       if (status === "live" && !p.configured) return false;
@@ -950,6 +971,55 @@ export function JobProfilesPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
+            {/* The same list, asked from the other side. The search above matches what
+             *  a profile is MADE of; this one matches a PERSON and answers which
+             *  profile grants them — which is the form an access question actually
+             *  arrives in ("why can Ramesh see this?", "where is EMP1043 set up?"). */}
+            <Input
+              aria-label="Find a person by employee code or name"
+              placeholder="Or find a person — employee code or name…"
+              value={peopleSearch}
+              onChange={(e) => setPeopleSearch(e.target.value)}
+            />
+            {peopleSearch.trim().length >= 2 && (
+              <div className="rounded-lg border border-line bg-content2/40">
+                {people.isLoading && (
+                  <div className="px-3 py-2 text-xs text-muted">Searching…</div>
+                )}
+                {!people.isLoading && !people.data?.items.length && (
+                  <div className="px-3 py-2 text-xs text-muted">
+                    Nobody active matches that code or name.
+                  </div>
+                )}
+                <ul className="divide-y divide-line">
+                  {(people.data?.items ?? []).map((person) => (
+                    <li key={`${person.employee_id}-${person.position_id}`}>
+                      <button
+                        type="button"
+                        className="flex w-full flex-col gap-0.5 px-3 py-2 text-left hover:bg-content2"
+                        onClick={() => {
+                          setSelectedKey(person.key);
+                          setPeopleSearch("");
+                        }}
+                      >
+                        <span className="truncate text-sm font-medium text-ink">
+                          {person.name}
+                          <span className="text-muted"> · {person.emp_code}</span>
+                        </span>
+                        <span className="truncate text-[11px] text-muted">
+                          {person.position_name} · {person.project_name}
+                        </span>
+                        <span className="truncate text-[11px] font-medium text-brand">
+                          {person.configured
+                            ? `Granted through ${person.profile_name}`
+                            : `${person.profile_name} — not set up, still on its HCM role`}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <Select
               ariaLabel="Project"
               value={project}
@@ -1017,13 +1087,9 @@ export function JobProfilesPage() {
                         ? <Badge tone={profile.configured ? "ok" : "warn"}>
                             {profile.configured ? "Post" : "Post · not set"}
                           </Badge>
-                        : profile.is_default
-                          ? <Badge tone={profile.configured ? "brand" : "warn"}>
-                              {profile.configured ? "Default" : "Not set"}
-                            </Badge>
-                          : profile.configured
-                            ? <Badge tone="ok">Set up</Badge>
-                            : <Badge tone="muted">HCM role</Badge>}
+                        : profile.configured
+                          ? <Badge tone="ok">Set up</Badge>
+                          : <Badge tone="muted">HCM role</Badge>}
                     </div>
                     {/* The project is half the profile's identity, not a detail:
                      *  "4:DEO" and "6:DEO" are two grant units, and the name alone
@@ -1034,10 +1100,6 @@ export function JobProfilesPage() {
                     {profile.is_approval_post ? (
                       <div className="mt-0.5 truncate text-xs text-muted">
                         {profile.holder_count} seated · created here, not from HCM
-                      </div>
-                    ) : profile.is_default ? (
-                      <div className="mt-0.5 text-xs text-muted">
-                        Used by any job here nobody has configured
                       </div>
                     ) : (
                       <>
@@ -1074,23 +1136,7 @@ export function JobProfilesPage() {
                         : <Badge tone="muted">On HCM role</Badge>}
                       <code className="mono text-[11px] text-muted">{selected.key}</code>
                     </div>
-                    {selected.is_default ? (
-                      <>
-                        <p className="mt-1 text-sm text-muted">
-                          <span className="font-semibold text-brand">
-                            {selected.project_name}
-                          </span>
-                          {" · "}the starting point for any job here that nobody has
-                          configured
-                        </p>
-                        <p className="mt-0.5 text-xs text-muted">
-                          {selected.configured
-                            ? "New and unconfigured jobs see this instead of their HCM role."
-                            : "Not set — unconfigured jobs still fall through to their "
-                              + "HCM role. Save once to take over."}
-                        </p>
-                      </>
-                    ) : (
+                    {(
                       <>
                         <p className="mt-1 text-sm text-muted">
                           <span className="font-semibold text-brand">
@@ -1176,8 +1222,24 @@ export function JobProfilesPage() {
                 {showHolders && (
                   <ScrollBox className="max-h-56 rounded-xl border border-line">
                     {holders.isLoading && <div className="p-3 text-sm">Loading…</div>}
+                    {!holders.isLoading && (holders.data?.items.length ?? 0) > 0 && (
+                      <div className="border-b border-line p-2">
+                        <Input
+                          aria-label="Find a person in this profile"
+                          placeholder="Find a person — name, code or position…"
+                          value={holderSearch}
+                          onChange={(e) => setHolderSearch(e.target.value)}
+                        />
+                        <div className="px-1 pt-1.5 text-[11px] text-muted">
+                          {visibleHolders.length} of {holders.data?.total ?? 0} shown
+                          {(holders.data?.total ?? 0) >= 200
+                            ? " · capped at 200 — narrow the search to find someone"
+                            : ""}
+                        </div>
+                      </div>
+                    )}
                     <ul className="divide-y divide-line">
-                      {(holders.data?.items ?? []).map((h) => (
+                      {visibleHolders.map((h) => (
                         <li key={`${h.employee_id}-${h.position_name}`}
                             className="flex justify-between gap-3 px-3 py-2 text-sm">
                           <span className="truncate text-body">{h.name}
@@ -1191,6 +1253,12 @@ export function JobProfilesPage() {
                     {!holders.isLoading && !holders.data?.items.length && (
                       <div className="p-3 text-sm text-muted">
                         No active holders — the positions exist but nobody is in them.
+                      </div>
+                    )}
+                    {!holders.isLoading && !!holders.data?.items.length
+                      && !visibleHolders.length && (
+                      <div className="p-3 text-sm text-muted">
+                        Nobody in this profile matches “{holderSearch}”.
                       </div>
                     )}
                   </ScrollBox>

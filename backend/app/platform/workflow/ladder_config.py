@@ -309,11 +309,21 @@ async def save_ladder(db: AsyncSession, data: LadderIn, user) -> dict:
         )).scalars().first()
         project_name = employee.project_name if employee else None
 
+    # Only the chain everybody uses is retired — `raiser_role_id IS NULL`.
+    #
+    # Without that clause this retired EVERY live workflow for the document, including
+    # the chains pinned to one raiser rank (`CUSTOM-INDENT-4-R163`). Saving the rank
+    # ladder for Indents therefore deleted the Store Keeper chain, the OE chain and
+    # every other per-rank chain in one press, with nothing on screen to say so — they
+    # are not shown here, so an admin could not even see what they had just lost.
+    # `custom_ladder.save_custom` has always scoped its retire this way; this is the
+    # same rule, not a new one.
     previous = list((await db.execute(
         select(Workflow).where(
             Workflow.doc_type == data.doc_type,
             (Workflow.project_id == data.project_id if data.project_id is not None
              else Workflow.project_id.is_(None)),
+            Workflow.raiser_role_id.is_(None),
             Workflow.is_active.is_(True),
         ).order_by(Workflow.version.desc(), Workflow.id.desc())
     )).scalars().all())

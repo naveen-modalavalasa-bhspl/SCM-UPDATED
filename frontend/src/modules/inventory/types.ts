@@ -377,6 +377,8 @@ export interface MaterialRequestListRow {
 }
 
 export interface MaterialRequest extends MaterialRequestListRow {
+  /** The ladder rung it is waiting on, not the person: "Regional Manager". */
+  current_stage_name?: string | null;
   project_name?: string | null;
   remarks?: string | null;
   approved_at?: string | null;

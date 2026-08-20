@@ -191,6 +191,14 @@ async def list_job_profiles(db: AsyncSession = Depends(get_db),
     return await profiles.list_profiles(db)
 
 
+# Declared above `/job-profiles/{key}/...` so "find" is never read as a profile key.
+@router.get("/job-profiles/find")
+async def find_job_profile_people(search: str = "", db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.ADMIN_ROLES_MANAGE))):
+    """Which profile a PERSON resolves through — searched by employee code or name."""
+    return await profiles.find_people(db, search)
+
+
 @router.get("/job-profiles/{key}/holders")
 async def job_profile_holders(key: str, db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.ADMIN_ROLES_MANAGE))):

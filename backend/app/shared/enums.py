@@ -352,6 +352,12 @@ class AllocationStatus(str, Enum):
     DRAFT = "DRAFT"
     PENDING_APPROVAL = "PENDING_APPROVAL"
     APPROVED = "APPROVED"          # only now is stock actually reserved
+    # Signed, and what it could give IS reserved — but part of it could not be served
+    # off the shelf and went to procurement as a material request. Not finished, so it
+    # stays the indent's ONE allocation: when the goods arrive the same document
+    # reopens for the shortfall lines instead of a second allocation being raised
+    # against the same requirement.
+    AWAITING_PROCUREMENT = "AWAITING_PROCUREMENT"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
 
@@ -363,6 +369,12 @@ class MRStatus(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     ORDERED = "ORDERED"
+    # The goods bought against it have reached stock (`logistics.qc_pass`). Terminal,
+    # and the reason it exists: "on order" must stop meaning "outstanding" the moment
+    # the delivery lands, or the shortfall it was raised for can never be allocated —
+    # the indent behind it counted the request as still-coming forever and refused a
+    # second allocation for stock that was by then sitting on the shelf.
+    RECEIVED = "RECEIVED"
     CANCELLED = "CANCELLED"
 
 

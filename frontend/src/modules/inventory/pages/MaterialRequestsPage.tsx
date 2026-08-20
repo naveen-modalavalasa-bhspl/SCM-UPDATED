@@ -18,6 +18,9 @@ const STATUSES = [
   { value: "APPROVED", label: "Approved" },
   { value: "REJECTED", label: "Rejected" },
   { value: "ORDERED", label: "Ordered" },
+  // The goods landed (GRN QC pass). Terminal, and filterable — a request that closes
+  // itself and cannot be looked up afterwards reads as one that went missing.
+  { value: "RECEIVED", label: "Received" },
 ];
 
 

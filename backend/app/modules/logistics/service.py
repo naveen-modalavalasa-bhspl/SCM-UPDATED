@@ -10,7 +10,7 @@ import site while the two surfaces stay separately readable.
 """
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -116,9 +116,41 @@ async def qc_pass(db: AsyncSession, grn_id: int, user) -> GRN:
                 qty=line.accepted_quantity, direction=StockDirection.IN.value,
                 ref_type=RefType.GRN.value, ref_id=grn.id, ref_no=grn.grn_no, user=user,
             )
+    # The receipt settles the material requests behind these PO lines. Without it "on
+    # order" never stops counting, and the indent whose shortfall was bought is refused
+    # the allocation of the very stock that just landed. Cumulative across every GRN on
+    # the line, so a part delivery leaves the request open.
+    await inventory_service.mark_mrs_received(db, await _accepted_by_indent_line(db, grn))
     await db.commit()
     await db.refresh(grn)
     return grn
+
+
+async def _accepted_by_indent_line(db: AsyncSession, grn: GRN) -> dict[int, Decimal]:
+    """Accepted quantity per indent line, counting every QC-passed GRN, not just this
+    one. The link is `lgs_grn_items.po_item_id -> pro_po_items.indent_item_id`; a PO
+    line raised cold carries no indent line and is skipped."""
+    indent_line_ids = [
+        row for row in (await db.execute(
+            select(POItem.indent_item_id).where(
+                POItem.id.in_([line.po_item_id for line in grn.items if line.po_item_id]),
+                POItem.indent_item_id.isnot(None),
+            )
+        )).scalars().all() if row
+    ]
+    if not indent_line_ids:
+        return {}
+    rows = (await db.execute(
+        select(POItem.indent_item_id, func.coalesce(func.sum(GRNItem.accepted_quantity), 0))
+        .join(GRNItem, GRNItem.po_item_id == POItem.id)
+        .join(GRN, GRN.id == GRNItem.grn_id)
+        .where(
+            POItem.indent_item_id.in_(indent_line_ids),
+            GRN.status == GRNStatus.QC_PASSED.value,
+        )
+        .group_by(POItem.indent_item_id)
+    )).all()
+    return {int(line_id): Decimal(str(quantity or 0)) for line_id, quantity in rows}
 
 
 async def qc_fail(db: AsyncSession, grn_id: int, user) -> GRN:

@@ -1194,9 +1194,7 @@ async def list_indents(
             .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
             .where(
                 MaterialRequestItem.indent_item_id == IndentItem.id,
-                MaterialRequest.status.notin_([
-                    MRStatus.REJECTED.value, MRStatus.CANCELLED.value,
-                ]),
+                MaterialRequest.status.notin_(_SETTLED_MR_STATUSES),
             )
             .correlate(IndentItem)
             .scalar_subquery()
@@ -1214,6 +1212,27 @@ async def list_indents(
             select(IndentItem.id).where(
                 IndentItem.indent_id == Indent.id,
                 owed_qty > IndentItem.allocated_quantity + committed + on_order,
+            ).correlate(Indent)
+        ))
+        # An allocation still awaiting approval takes the indent out of the queue
+        # whatever it GAVE. The arithmetic above measures a pending allocation by its
+        # quantity, so the one decision that gives nothing — every line short, the whole
+        # requirement handed to procurement — subtracted nothing and left the row
+        # sitting there as if it had never been raised: the material request that would
+        # have covered it is only written at approval (`allocations.apply_to_stock`).
+        # The desk pressed Submit, saw the row again and pressed again, and got the
+        # write guard's refusal.
+        #
+        # Existence, not quantity, and only the UNAPPROVED ones — an APPROVED
+        # allocation deliberately leaves the row for the rung above to serve the
+        # remainder (`ensure_no_active(allow_approved=True)`), which the arithmetic
+        # already handles. Nobody can allocate against an unapproved one anyway: the
+        # guard refuses every login, so hiding the row hides work that does not exist
+        # rather than work somebody else could do.
+        stmt = stmt.where(~exists(
+            select(Allocation.id).where(
+                Allocation.indent_id == Indent.id,
+                Allocation.status.in_(allocations.UNAPPROVED_ALLOCATION_STATUSES),
             ).correlate(Indent)
         ))
     id_tie_breaker = Indent.id.asc() if sort_dir.lower() == "asc" else Indent.id.desc()
@@ -5057,6 +5076,14 @@ async def list_notifications(
 # proposing, reserving, raising the MR -- live in modules/inventory/allocations.py.
 # Indents may import inventory (the base module); inventory must never import indents.
 
+# A material request that no longer holds demand: refused, withdrawn, or delivered.
+# The queue and the allocation guards both subtract what is "on order", and both must
+# read the same list — a delivered request counted as outstanding is stock nobody can
+# allocate, a rejected one counted as outstanding is a line nobody can serve.
+_SETTLED_MR_STATUSES = (
+    MRStatus.REJECTED.value, MRStatus.CANCELLED.value, MRStatus.RECEIVED.value,
+)
+
 _ALLOCATION_ELIGIBLE_STATUSES = {
     IndentStatus.AWAITING_ALLOCATION.value,
     IndentStatus.PARTIALLY_FULFILLED.value,
@@ -5219,6 +5246,18 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
     # that is the guard that matters, and no screen state can talk past it.
     recorded = _quantities_recorded(indent)
 
+    # What is already promising this indent something, so the screen can point at it
+    # instead of leaving the reader to go looking in Allocation Approvals. Read before
+    # `blocked_reason` because one of the reasons IS this list.
+    live = (await db.execute(
+        select(Allocation.id, Allocation.allocation_no, Allocation.status)
+        .where(Allocation.indent_id == indent_id,
+               Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES))
+        .order_by(Allocation.id.desc())
+    )).all()
+    unapproved = [row for row in live
+                  if row.status in allocations.UNAPPROVED_ALLOCATION_STATUSES]
+
     blocked_reason = None
     if indent.status not in _ALLOCATION_ELIGIBLE_STATUSES:
         blocked_reason = (
@@ -5231,6 +5270,18 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
     elif user is not None and (
             reason := await _in_approval_block_reason(db, indent, user)):
         blocked_reason = reason
+    # An allocation somebody already raised and nobody has signed. The arithmetic
+    # below only sees what it GAVE, so an allocation that gave nothing — the whole
+    # requirement sent to procurement — left this screen offering a Submit that
+    # `allocations.ensure_no_active` could only refuse. Said in words here, with the
+    # document itself linked beside it. Not RBAC-sensitive: it reports a document this
+    # indent already carries, and the read is the same one the screen renders.
+    elif unapproved:
+        blocked_reason = (
+            f"Allocation {unapproved[0].allocation_no} is awaiting approval — "
+            f"nothing can be allocated for this indent until it is approved, "
+            f"rejected or cancelled."
+        )
     elif indent.items and not any(
         _owed_quantity(line, recorded)
         - Decimal(str(line.allocated_quantity or 0))
@@ -5241,15 +5292,6 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
             "Every line is already covered by an allocation — an approver served this "
             "out of their own stock."
         )
-
-    # What is already promising this indent something, so the screen can point at it
-    # instead of leaving the reader to go looking in Allocation Approvals.
-    live = (await db.execute(
-        select(Allocation.id, Allocation.allocation_no, Allocation.status)
-        .where(Allocation.indent_id == indent_id,
-               Allocation.status.in_(allocations.ACTIVE_ALLOCATION_STATUSES))
-        .order_by(Allocation.id.desc())
-    )).all()
 
     lines = [{
         "indent_item_id": line.id,
@@ -5403,9 +5445,7 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
         .join(IndentItem, IndentItem.id == MaterialRequestItem.indent_item_id)
         .where(
             IndentItem.indent_id == indent_id,
-            MaterialRequest.status.notin_([
-                MRStatus.REJECTED.value, MRStatus.CANCELLED.value,
-            ]),
+            MaterialRequest.status.notin_(_SETTLED_MR_STATUSES),
         )
         .group_by(MaterialRequestItem.indent_item_id)
     )).all()
@@ -5831,7 +5871,7 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
         .join(Allocation, Allocation.id == AllocationItem.allocation_id)
         .where(
             Allocation.indent_id == indent.id,
-            Allocation.status == AllocationStatus.APPROVED.value,
+            Allocation.status.in_(allocations.SETTLED_ALLOCATION_STATUSES),
         )
         .group_by(AllocationItem.indent_item_id)
     )

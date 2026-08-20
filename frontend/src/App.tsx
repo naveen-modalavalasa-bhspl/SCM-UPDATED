@@ -35,9 +35,6 @@ import { UsersPage } from "@/modules/rbac/pages/UsersPage";
 import { GroupsPage } from "@/modules/rbac/pages/GroupsPage";
 import { JobProfilesPage } from "@/modules/rbac/pages/JobProfilesPage";
 import { RulesPage } from "@/modules/admin/pages/RulesPage";
-import { WorkflowsPage } from "@/modules/admin/pages/WorkflowsPage";
-import { ApprovalConfigPage } from "@/modules/admin/pages/ApprovalConfigPage";
-import { CustomLadderPage } from "@/modules/admin/pages/CustomLadderPage";
 import { ApprovalFlowPage } from "@/modules/admin/pages/ApprovalFlowPage";
 import { ChainEditorPage } from "@/modules/admin/pages/ChainEditorPage";
 import { PoliciesPage } from "@/modules/admin/pages/PoliciesPage";
@@ -361,11 +358,17 @@ function AppRoutes() {
             custom ladder route below has no menu entry. */}
         <Route path="rbac/job-profiles" element={<JobProfilesPage />} />
         <Route path="admin/rules" element={<RulesPage />} />
-        <Route path="admin/workflows" element={<WorkflowsPage />} />
-        <Route path="admin/approvals-config" element={<ApprovalConfigPage />} />
-        {/* Reached from the Approvals Config screen, not from the menu — adding it to
-            rbac_pages would mean reseeding, and seed prunes the live tree. */}
-        <Route path="admin/approvals-config/custom" element={<CustomLadderPage />} />
+        {/* Approvals Config, Custom Ladder and Workflows are gone. All three wrote to
+            wf_workflows beside Approval Flow with different rules about what a save
+            retires — Approvals Config deactivated every rank-scoped chain for the
+            document it saved, which is how a Store Keeper chain disappeared without
+            anything on screen saying so. One screen, one writer.
+
+            The paths redirect rather than 404: they are bookmarked, and landing on
+            "page not found" reads as the whole feature having been removed. */}
+        <Route path="admin/workflows" element={<Navigate to="/admin/approval-flow" replace />} />
+        <Route path="admin/approvals-config" element={<Navigate to="/admin/approval-flow" replace />} />
+        <Route path="admin/approvals-config/custom" element={<Navigate to="/admin/approval-flow" replace />} />
         <Route path="admin/approval-flow" element={<ApprovalFlowPage />} />
         <Route path="admin/approval-flow/:docType" element={<ChainEditorPage />} />
         <Route path="admin/policies" element={<PoliciesPage />} />
