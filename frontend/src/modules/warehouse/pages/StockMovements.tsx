@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router-dom";
+import { FileText } from "lucide-react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
 import { listStockMovementOrders, deleteStockMovement, DRAFT_DELETE_PERMISSION } from "../api";
@@ -42,6 +43,27 @@ const columns: Column<StockMovementOrder>[] = [
     header: "Created By",
     render: (row) => <div className="text-sm">{row.created_by_name ?? "—"}</div>,
   },
+  {
+    key: "actions",
+    header: "",
+    className: "w-12 text-right",
+    render: (r) => (
+      <div className="flex justify-end gap-1">
+        <button
+          type="button"
+          aria-label={`Print ${r.order_no || "Draft"}`}
+          title="Download PDF"
+          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-neutral-100 hover:text-ink"
+          onClick={(e) => {
+            e.stopPropagation();
+            window.open(`/warehouse/stock-movements/print?order_no=${encodeURIComponent(r.order_no)}`, "_blank");
+          }}
+        >
+          <FileText className="h-4 w-4" />
+        </button>
+      </div>
+    ),
+  },
 ];
 
 export default function StockMovements() {
@@ -61,8 +83,13 @@ export default function StockMovements() {
       searchPlaceholder="Search order no, reason, warehouse…"
       createTo="new"
       createLabel="New order"
-      createPermission="stock.transfer"
-      onRowClick={() => undefined}
+      createPermission="movement.create"
+      onRowClick={(row) => {
+        // Use window.location.pathname to dynamically support both
+        // /warehouse/transactions/stock-movements and /warehouse/stock-movements
+        const base = window.location.pathname.replace(/\/$/, "");
+        nav(`${base}/view?order_no=${encodeURIComponent(row.order_no)}`);
+      }}
       empty="No stock movement orders recorded."
       onDelete={(row) => deleteStockMovement(row.id)}
       canDelete={(row) => row.status === "DRAFT"}
@@ -70,20 +97,28 @@ export default function StockMovements() {
       deleteLabel="movement order"
       labelOf={(row) => row.order_no ?? `Order ${row.id}`}
       renderCard={(row) => (
-        <button
-          type="button"
-          className="w-full text-left"
-          onClick={() => nav("new")} // For now goes to new, can be linked to details later
-        >
-          <div className="flex items-center justify-between">
-            <span className="font-mono text-xs font-semibold">{row.order_no}</span>
-            <StatusPill status={row.status} />
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono text-xs font-semibold text-ink">{row.order_no}</span>
+            <div className="flex items-center gap-2">
+              <StatusPill status={row.status} />
+              <button
+                type="button"
+                className="text-muted hover:text-ink p-1"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(`/warehouse/stock-movements/print?order_no=${encodeURIComponent(row.order_no)}`, "_blank");
+                }}
+              >
+                <FileText className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div className="mt-1 text-sm">{row.warehouse_name}</div>
           <div className="text-xs text-muted">
             {row.items?.length ?? 0} lines · {row.reason ?? ""}
           </div>
-        </button>
+        </div>
       )}
     />
   );

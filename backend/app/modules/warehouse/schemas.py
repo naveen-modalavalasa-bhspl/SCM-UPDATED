@@ -493,6 +493,70 @@ class InspectionDetail(InspectionRead):
     items: list[InspectionItemRead] = []
 
 
+class OutboundInspectionItemWrite(BaseModel):
+    id: int | None = None
+    issue_item_id: int | None = None
+    item_id: int
+    batch_no: str | None = None
+    inspected_qty: Decimal = Decimal("0")
+    accepted_qty: Decimal = Decimal("0")
+    parameters: list[InspectionParameter] | None = None
+    result: InspectionResult = InspectionResult.PENDING
+    defect_type: str | None = None
+    rejection_reason: str | None = None
+    remarks: str | None = None
+    serial_numbers: dict[str, list[str]] | list[str] | None = None
+
+class OutboundInspectionWrite(BaseModel):
+    inspection_date: date
+    issue_id: int
+    warehouse_id: int | None = None
+    inspector_id: int | None = None
+    remarks: str | None = None
+    items: list[OutboundInspectionItemWrite] = []
+
+
+class OutboundInspectionItemRead(_Read):
+    id: int
+    inspection_id: int
+    issue_item_id: int | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    inspected_qty: Decimal
+    accepted_qty: Decimal
+    rejected_qty: Decimal
+    parameters: list[InspectionParameter] | None = None
+    result: str
+    defect_type: str | None = None
+    rejection_reason: str | None = None
+    remarks: str | None = None
+    serial_numbers: dict[str, list[str]] | list[str] | None = None
+
+class OutboundInspectionRead(_Read):
+    id: int
+    inspection_no: str
+    inspection_date: date
+    issue_id: int
+    issue_no: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    status: str
+    total_items: int
+    passed_items: int
+    failed_items: int
+    inspector_id: int | None = None
+    inspector_name: str | None = None
+    remarks: str | None = None
+    created_at: datetime | None = None
+
+
+class OutboundInspectionDetail(OutboundInspectionRead):
+    items: list[OutboundInspectionItemRead] = []
+
+
 # ---------------------------------------------------------------------------
 # Putaway
 # ---------------------------------------------------------------------------

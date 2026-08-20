@@ -256,16 +256,16 @@ class ConsolidationFilters:
         raised_from: date | None = Query(None),
         raised_to: date | None = Query(None),
     ):
-        self.search = (search or "").strip()
-        self.raised_from = raised_from
-        self.raised_to = raised_to
-        self.cycle = cycle or None
-        self.region_id = region_id
-        self.project_id = project_id
-        self.vehicle_id = vehicle_id
-        self.office_id = office_id
-        self.requester_id = requester_id
-        self.item_id = item_id
+        self.search = search.strip() if isinstance(search, str) else ""
+        self.raised_from = raised_from if isinstance(raised_from, date) else None
+        self.raised_to = raised_to if isinstance(raised_to, date) else None
+        self.cycle = cycle if isinstance(cycle, str) else None
+        self.region_id = region_id if isinstance(region_id, int) else None
+        self.project_id = project_id if isinstance(project_id, int) else None
+        self.vehicle_id = vehicle_id if isinstance(vehicle_id, int) else None
+        self.office_id = office_id if isinstance(office_id, int) else None
+        self.requester_id = requester_id if isinstance(requester_id, int) else None
+        self.item_id = item_id if isinstance(item_id, int) else None
 
     def as_dict(self) -> dict:
         return {

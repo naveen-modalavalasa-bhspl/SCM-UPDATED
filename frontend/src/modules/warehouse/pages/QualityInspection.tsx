@@ -1,8 +1,9 @@
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
+import { FileText } from "lucide-react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
-import { listInspections, deleteInspection, DRAFT_DELETE_PERMISSION } from "../api";
+import { listInspections, listOutboundInspections, deleteInspection, deleteOutboundInspection, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, percent } from "../format";
 import type { Inspection } from "../types";
 
@@ -47,7 +48,7 @@ export default function QualityInspection({
       header: "Against",
       render: (r) => (
         <div className="min-w-0">
-          <div className="truncate font-mono text-xs text-ink">{r.grn_no ?? "—"}</div>
+          <div className="truncate font-mono text-xs text-ink">{r.grn_no ?? (r as any).issue_no ?? "—"}</div>
           <div className="truncate text-[11px] text-muted">{r.vendor_name ?? "—"}</div>
         </div>
       ),
@@ -70,17 +71,38 @@ export default function QualityInspection({
     },
     { key: "inspector", header: "Inspector", hideOnNarrow: true, render: (r) => r.inspector_name ?? "—" },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "actions",
+      header: "",
+      className: "w-12 text-right",
+      render: (r) => (
+        <div className="flex justify-end gap-1">
+          <button
+            type="button"
+            aria-label={`Print ${r.inspection_no || "Draft"}`}
+            title="Download PDF"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-neutral-100 hover:text-ink"
+            onClick={(e) => {
+              e.stopPropagation();
+              window.open(`/warehouse/inspections/${r.id}/print?type=${type}`, "_blank");
+            }}
+          >
+            <FileText className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    },
   ];
 
   return (
     <DocumentList<Inspection>
       title={title}
       queryKey={`wh-inspections-${type}`}
-      fetch={(p) => listInspections({ ...p, ...({ inspection_type: type } as object) })}
+      fetch={(p) => type === "OUTGOING" ? listOutboundInspections(p) as any : listInspections({ ...p, inspection_type: type })}
       extraParams={{ inspection_type: type }}
       columns={columns}
       keyOf={(r) => r.id}
-      searchIn={(r) => [r.inspection_no, r.grn_no, r.vendor_name, r.inspector_name]}
+      searchIn={(r) => [r.inspection_no, r.grn_no, (r as any).issue_no, r.vendor_name, r.inspector_name]}
       searchPlaceholder="Search inspection, GRN or vendor…"
       statuses={STATUSES}
       createTo="new"
@@ -88,9 +110,9 @@ export default function QualityInspection({
       createPermission="grn.qc"
       onRowClick={(r) => nav(String(r.id))}
       empty="No inspections match these filters."
-      onDelete={(r) => deleteInspection(r.id)}
+      onDelete={(r) => type === "OUTGOING" ? deleteOutboundInspection(r.id) : deleteInspection(r.id)}
       canDelete={(r) => r.status === "DRAFT"}
-      deletePermission={DRAFT_DELETE_PERMISSION.inspection}
+      deletePermission={type === "OUTGOING" ? DRAFT_DELETE_PERMISSION.outbound_inspection : DRAFT_DELETE_PERMISSION.inspection}
       deleteLabel="inspection"
       labelOf={(r) => r.inspection_no ?? `Inspection ${r.id}`}
       kpiCounts={[
@@ -117,9 +139,21 @@ export default function QualityInspection({
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
             <span className="font-mono text-xs font-semibold text-ink">{r.inspection_no}</span>
-            <StatusPill status={r.status} />
+            <div className="flex items-center gap-2">
+              <StatusPill status={r.status} />
+              <button
+                type="button"
+                className="text-muted hover:text-ink p-1"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(`/warehouse/inspections/${r.id}/print?type=${type}`, "_blank");
+                }}
+              >
+                <FileText className="h-4 w-4" />
+              </button>
+            </div>
           </div>
-          <div className="truncate text-sm text-body">{r.grn_no ?? "—"} · {r.vendor_name ?? "—"}</div>
+          <div className="truncate text-sm text-body">{r.grn_no ?? (r as any).issue_no ?? "—"} {r.vendor_name ? `· ${r.vendor_name}` : ""}</div>
           <div className="text-[11px] text-muted">
             {r.passed_items}/{r.total_items} passed
             {r.failed_items > 0 && <span className="font-semibold text-bad"> · {r.failed_items} failed</span>}

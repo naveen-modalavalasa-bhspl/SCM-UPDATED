@@ -425,6 +425,72 @@ export interface InspectionWrite {
   items: InspectionItemWrite[];
 }
 
+export interface OutboundInspection {
+  id: number;
+  inspection_no: string;
+  inspection_date: string;
+  issue_id: number;
+  issue_no?: string | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  status: InspectionStatus;
+  total_items: number;
+  passed_items: number;
+  failed_items: number;
+  inspector_id?: number | null;
+  inspector_name?: string | null;
+  remarks?: string | null;
+  created_at?: string;
+  items?: OutboundInspectionItem[];
+}
+
+export interface OutboundInspectionItem {
+  id: number;
+  inspection_id: number;
+  issue_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  inspected_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  parameters?: InspectionParameter[] | null;
+  result: InspectionResult;
+  defect_type?: string | null;
+  rejection_reason?: string | null;
+  remarks?: string | null;
+  serial_numbers?: string[] | null;
+}
+
+export interface OutboundInspectionItemWrite {
+  id?: number;
+  issue_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  batch_no?: string | null;
+  inspected_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  parameters?: InspectionParameter[] | null;
+  result: InspectionResult;
+  defect_type?: string | null;
+  rejection_reason?: string | null;
+  remarks?: string | null;
+  serial_numbers?: string[] | null;
+}
+
+export interface OutboundInspectionWrite {
+  inspection_date: string;
+  issue_id: number;
+  warehouse_id?: number | null;
+  inspector_id?: number | null;
+  remarks?: string | null;
+  items: OutboundInspectionItemWrite[];
+}
+
 /** `whs_warehouse_items` — one putaway task per received line. */
 export interface Putaway {
   id: number;
@@ -601,6 +667,7 @@ export interface Issue {
   created_by_name?: string | null;
   created_at?: string;
   updated_at?: string;
+  qc_status?: string | null;
   items?: IssueItem[];
   /**
    * Is this document waiting on ME right now? Served only by the detail endpoint.

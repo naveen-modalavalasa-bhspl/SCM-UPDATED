@@ -383,6 +383,7 @@ class MaterialIssue(Base):
     original_issue_no = Column(String(50), nullable=True)
 
     status = Column(String(30), nullable=False, default=IssueStatus.DRAFT.value)
+    qc_status = Column(String(30), nullable=False, default=QcStatus.NOT_REQUIRED.value)
     total_items = Column(Integer, nullable=False, default=0)
     total_qty = Column(QTY, nullable=False, default=0)
     total_value = Column(MONEY, nullable=False, default=0)
@@ -782,3 +783,67 @@ from app.platform.settings.models import Notification  # noqa: E402,F401
 # number is what makes the lines one document. `stk_ledger` is the append-only record
 # (rule 7); a header table would be a second copy of the same fact, free to drift.
 # See `service.list_stock_movement_orders`, which rebuilds the document from it.
+
+
+# ---------------------------------------------------------------------------
+# Outbound QC
+# ---------------------------------------------------------------------------
+
+class OutboundInspection(Base):
+    """`whs_inspections`. Dedicated table for outbound QC (after Material Issue)."""
+    __tablename__ = "whs_inspections"
+
+    id = pk()
+    inspection_no = Column(String(50), nullable=False, unique=True)
+    inspection_date = Column(Date, nullable=False)
+
+    issue_id = Column(ForeignKey("out_issues.id", ondelete="CASCADE"), index=True, nullable=False)
+    issue_no = Column(String(50), nullable=True)
+    warehouse_id = Column(BigInteger, index=True, nullable=True)
+    warehouse_name = Column(String(200), nullable=True)
+
+    status = Column(String(30), nullable=False, default=InspectionStatus.DRAFT.value)
+
+    total_items = Column(Integer, nullable=False, default=0)
+    passed_items = Column(Integer, nullable=False, default=0)
+    failed_items = Column(Integer, nullable=False, default=0)
+
+    inspector_id = soft_fk()
+    inspector_name = Column(String(200), nullable=True)
+    remarks = Column(Text, nullable=True)
+    created_at = created_at_col()
+
+    items = relationship(
+        "OutboundInspectionItem", back_populates="inspection",
+        cascade="all, delete-orphan", order_by="OutboundInspectionItem.id",
+    )
+
+
+class OutboundInspectionItem(Base):
+    """`whs_inspection_items`. The specific items and quantities inspected for outbound QC."""
+    __tablename__ = "whs_inspection_items"
+
+    id = pk()
+    inspection_id = Column(ForeignKey("whs_inspections.id", ondelete="CASCADE"),
+                           index=True, nullable=False)
+    issue_item_id = Column(ForeignKey("out_issue_items.id", ondelete="CASCADE"),
+                           index=True, nullable=True)
+
+    item_id = Column(BigInteger, index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    uom_code = Column(String(20), nullable=True)
+    batch_no = Column(String(50), nullable=True)
+
+    inspected_qty = Column(QTY, nullable=False, default=0)
+    accepted_qty = Column(QTY, nullable=False, default=0)
+    rejected_qty = Column(QTY, nullable=False, default=0)
+
+    parameters = Column(JSON, nullable=True)
+    result = Column(String(20), nullable=False, default=InspectionResult.PENDING.value)
+    defect_type = Column(String(100), nullable=True)
+    rejection_reason = synonym("defect_type")
+    remarks = Column(String(500), nullable=True)
+    serial_numbers = Column(JSON, nullable=True)
+
+    inspection = relationship("OutboundInspection", back_populates="items")

@@ -189,7 +189,7 @@ export function QtyInput({
   ariaLabel,
 }: {
   value: number | string;
-  onChange: (value: number) => void;
+  onChange: (value: any) => void;
   max?: number;
   disabled?: boolean;
   invalid?: boolean;
@@ -205,7 +205,7 @@ export function QtyInput({
       value={value === 0 ? "0" : String(value ?? "")}
       disabled={disabled}
       aria-label={ariaLabel}
-      onChange={(e) => onChange(e.target.value === "" ? 0 : Number(e.target.value))}
+      onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
       className={`min-h-11 w-full rounded-md border bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand disabled:bg-content2 disabled:text-muted ${
         invalid ? "border-bad" : "border-line"
       }`}

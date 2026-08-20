@@ -13,6 +13,8 @@ import type {
   ConsignmentWrite,
   Inspection,
   InspectionWrite,
+  OutboundInspection,
+  OutboundInspectionWrite,
   Issue,
   IssueDispatchSource,
   IssueWrite,
@@ -25,6 +27,7 @@ import type {
   Picking,
   PickingWrite,
   DespatchPrefill,
+
   PoPrefill,
   PurchaseReturn,
   PurchaseReturnWrite,
@@ -171,7 +174,9 @@ export const getDespatchPrefill = (noteId: number) =>
 
 /* ----------------------------------------------------------- quality (in) -- */
 
-export const listInspections = (params: ListParams = {}) =>
+// `inspection_type` is this list's own filter (the endpoint takes it), not something
+// every warehouse list understands — so it widens here rather than in ListParams.
+export const listInspections = (params: ListParams & { inspection_type?: string } = {}) =>
   get<Page<Inspection>>(`${BASE}/inspections`, params);
 
 export const getInspection = (id: number) => get<Inspection>(`${BASE}/inspections/${id}`);
@@ -188,6 +193,23 @@ export const completeInspection = (id: number) =>
 
 export const cancelInspection = (id: number, reason?: string) =>
   post<Inspection>(`${BASE}/inspections/${id}/cancel`, { reason });
+
+/* ----------------------------------------------------------- qc outward -- */
+
+export const listOutboundInspections = (params: ListParams = {}) =>
+  get<Page<OutboundInspection>>(`${BASE}/outbound-inspections`, params);
+
+export const getOutboundInspection = (id: number) =>
+  get<OutboundInspection>(`${BASE}/outbound-inspections/${id}`);
+
+export const createOutboundInspection = (body: OutboundInspectionWrite) =>
+  post<OutboundInspection>(`${BASE}/outbound-inspections`, body);
+
+export const updateOutboundInspection = (id: number, body: OutboundInspectionWrite) =>
+  put<OutboundInspection>(`${BASE}/outbound-inspections/${id}`, body);
+
+export const completeOutboundInspection = (id: number) =>
+  post<OutboundInspection>(`${BASE}/outbound-inspections/${id}/complete`);
 
 /* ----------------------------------------------------------------- putaway -- */
 
@@ -222,6 +244,9 @@ export const createStockMovement = (body: StockMovementWrite) =>
 
 export const listStockMovementOrders = (params: ListParams = {}) =>
   get<Page<StockMovementOrder>>(`${BASE}/stock-movement-orders`, params);
+
+export const getStockMovementOrder = (order_no: string) =>
+  get<StockMovementOrder>(`${BASE}/stock-movement-orders/${encodeURIComponent(order_no)}`);
 
 export const createStockMovementOrder = (body: StockMovementOrderWrite) =>
   post<StockMovementOrder>(`${BASE}/stock-movement-orders`, body);
@@ -646,6 +671,7 @@ export const carrierOptions = (search?: string) => get<Option[]>(`${BASE}/option
 export const DRAFT_DELETE_PERMISSION = {
   receipt: "receipt.delete",
   inspection: "inspection.delete",
+  outbound_inspection: "qc_outward.delete",
   putaway: "putaway.delete",
   picking: "picking.delete",
   issue: "issue.delete",
@@ -656,6 +682,7 @@ export const DRAFT_DELETE_PERMISSION = {
 
 export const deleteReceipt = (id: number) => del(`${BASE}/receipts/${id}`);
 export const deleteInspection = (id: number) => del(`${BASE}/inspections/${id}`);
+export const deleteOutboundInspection = (id: number) => del(`${BASE}/outbound-inspections/${id}`);
 export const deletePutaway = (id: number) => del(`${BASE}/putaways/${id}`);
 export const deletePicking = (id: number) => del(`${BASE}/pickings/${id}`);
 export const deleteIssue = (id: number) => del(`${BASE}/issues/${id}`);

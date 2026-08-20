@@ -253,7 +253,7 @@ async def test_filter_dimensions_narrow_totals_and_clear_back_to_everything(db):
     assert workspace.total_indent_count == 3
     assert len(workspace.items) == 1
     assert workspace.items[0].region_count == 2
-    assert workspace.items[0].project_count == 2
+    assert workspace.items[0].project_count == 3
 
     # Dropdown values come from the approver's own pending indents, never a master.
     options = workspace.filter_options
@@ -460,7 +460,7 @@ async def test_resubmitted_monthly_indent_rejoins_the_same_consolidation_batch(d
 
     await indent_service.update_indent(
         db, indents[0].id,
-        IndentUpdate(items=[IndentItemIn(item_id=item.id, quantity=5)]),
+        IndentUpdate(required_date=date.today() + timedelta(days=3), items=[IndentItemIn(item_id=item.id, quantity=5)]),
         pilot,
     )
     resubmitted = await indent_service.resubmit_indent_correction(

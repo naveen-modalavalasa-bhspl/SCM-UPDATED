@@ -202,6 +202,24 @@ PAGES: list[PageDef] = [
     PageDef("settings_logistics_vendors", "/logistics/vendors",
             "Logistics Vendors", parent="grp_logistics", module="logistics",
             icon="truck", sort_order=8),
+
+    # ------------------------------------------------------------------ #
+    #  Warehouse — Outward QC
+    # ------------------------------------------------------------------ #
+    # The outward counterpart of Quality Inspection: a posted outward issue holding an
+    # item flagged `requires_qi` raises an inspection, and the consignment cannot be
+    # raised until it passes. The screen was dropped from the module on 2026-08-13 and
+    # comes back with endpoints and permissions of its own (`qc_outward.*`).
+    #
+    # Catalogued here as well as in migration `96dd19ed80c2`, which is what puts the
+    # row on a database that already exists. This entry is what puts it on a NEW one —
+    # `scripts/seed.py` PAGE_TREE cannot be run against anything live.
+    #
+    # sort_order 51 sits it just after Quality Inspection and well clear of 1, so it
+    # can never become the front door the left rail opens Warehouse on.
+    PageDef("wh_qc_outward", "/warehouse/qc-outward", "Outward QC",
+            parent="grp_warehouse", module="warehouse",
+            icon="check-circle", sort_order=51),
 ]
 
 

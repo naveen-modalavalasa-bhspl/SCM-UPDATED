@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { FileText } from "lucide-react";
 import { Chip } from "@heroui/react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
@@ -85,13 +86,29 @@ export default function Putaway() {
       hideOnNarrow: true,
       render: (r) => <span className="text-sm text-muted">{humanise(r.putaway_type)}</span>,
     },
-    {
-      key: "assignee",
-      header: "Assigned",
-      hideOnNarrow: true,
-      render: (r) => r.assigned_to_name ?? "—",
-    },
+    { key: "assignee", header: "Assigned", hideOnNarrow: true, render: (r) => r.assigned_to_name ?? "—" },
     { key: "status", header: "Status", render: (r) => <StatusPill status={normaliseStatus(r.status)} /> },
+    {
+      key: "actions",
+      header: "",
+      className: "w-12 text-right",
+      render: (r) => (
+        <div className="flex justify-end gap-1">
+          <button
+            type="button"
+            aria-label={`Print ${r.putaway_no || "Draft"}`}
+            title="Download PDF"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-neutral-100 hover:text-ink"
+            onClick={(e) => {
+              e.stopPropagation();
+              window.open(`/warehouse/putaway/${r.id}/print`, "_blank");
+            }}
+          >
+            <FileText className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    },
   ];
 
   return (
@@ -136,7 +153,19 @@ export default function Putaway() {
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
             <span className="font-mono text-xs font-semibold text-ink">{r.putaway_no}</span>
-            <StatusPill status={normaliseStatus(r.status)} />
+            <div className="flex items-center gap-2">
+              <StatusPill status={normaliseStatus(r.status)} />
+              <button
+                type="button"
+                className="text-muted hover:text-ink p-1"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(`/warehouse/putaway/${r.id}/print`, "_blank");
+                }}
+              >
+                <FileText className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div className="truncate text-sm text-body">{r.item_name ?? r.item_code ?? "—"}</div>
           <div className="text-[11px] text-muted">

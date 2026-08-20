@@ -55,8 +55,8 @@ const emptyLine = (): ReceiptItemWrite => ({
   is_serial_tracked: false,
   is_imei_tracked: false,
   ordered_qty: 0,
-  received_qty: 0,
-  accepted_qty: 0,
+  received_qty: "" as any,
+  accepted_qty: "" as any,
   rejected_qty: 0,
   rate: null,
   batch_no: null,
@@ -239,8 +239,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         ordered_qty: num(line.ordered_qty),
         // What is still owed, as the count to confirm rather than a figure to trust:
         // the storekeeper overwrites it with what actually turned up.
-        received_qty: num(line.pending_qty),
-        accepted_qty: isGrn ? num(line.pending_qty) : 0,
+        received_qty: "" as any,
+        accepted_qty: "" as any,
         rate: line.rate ?? null,
       }));
       if (!added.length) {
@@ -354,8 +354,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           // What the vendor says is on the vehicle, as the count to CONFIRM. The
           // storekeeper overwrites it with what is physically there, and the gap is
           // exactly the shortage the GRN exists to record.
-          received_qty: num(line.despatched_qty),
-          accepted_qty: isGrn ? num(line.despatched_qty) : 0,
+          received_qty: "" as any,
+          accepted_qty: "" as any,
           rate: line.rate ?? null,
           batch_no: line.batch_no,
           mfg_date: line.mfg_date,

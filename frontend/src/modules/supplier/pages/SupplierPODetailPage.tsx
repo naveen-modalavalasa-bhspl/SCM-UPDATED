@@ -397,7 +397,7 @@ export function SupplierPODetailPage() {
           <tbody className="divide-y divide-line">
             {po.lines.map((line) => {
               const previous = revisionLines(revisions.data?.[0]);
-              const prev = previous.find((old) => old.item_id === line.item_id);
+              const prev = previous.find((old: any) => old.item_id === line.item_id);
               // A line the last filed revision does not mention is one this
               // amendment added. No revision on file means nothing has changed.
               const isNew = previous.length > 0 && !prev;

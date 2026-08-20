@@ -254,6 +254,9 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   wh_qc: {
     hint: "Check received goods and record whether they pass inspection.",
   },
+  wh_qc_outward: {
+    hint: "Check and complete quality inspections for outward material issues.",
+  },
   wh_putaway: {
     hint: "See and complete tasks for placing received stock into storage bins.",
   },
@@ -547,6 +550,14 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
     "Delete an unfinished dispatch that is still a draft.",
   "return.delete":
     "Delete an unfinished purchase return that is still a draft.",
+  "movement.view":
+    "Open and review stock movement orders.",
+  "movement.create":
+    "Create a new stock movement order to move items between bins.",
+  "movement.update":
+    "Update an existing stock movement order.",
+  "movement.approve":
+    "Approve a pending stock movement order.",
   "movement.delete":
     "Delete an unfinished stock movement that is still a draft.",
   "master.item.manage":

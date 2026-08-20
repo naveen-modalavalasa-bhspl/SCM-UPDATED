@@ -307,7 +307,7 @@ export function PODetailPage() {
         <thead className="bg-content2 text-xs text-muted"><tr><th className="p-3">Item</th><th className="p-3 text-right">Quantity</th><th className="p-3 text-right">Rate</th><th className="p-3 text-right">Tax</th><th className="p-3 text-right">Amount</th></tr></thead>
         <tbody className="divide-y divide-line">{po.data.items.map((item) => {
           const previous = revisionLines(revisions.data?.[0]);
-          const prev = previous.find((line) => line.item_id === item.item_id);
+          const prev = previous.find((line: any) => line.item_id === item.item_id);
           // A line the last filed revision does not mention is one this amendment
           // added. No revision on file means nothing has changed.
           const isNew = previous.length > 0 && !prev;

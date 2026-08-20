@@ -170,9 +170,9 @@ const DEFINITIONS: AlertDef[] = [
     "Approving writes the counted quantity for {item} into the ledger. The ledger is append-only, so a mistake has to be corrected with a second adjustment.",
     "Approve",
   ),
-  confirm(
     // An MR reserves nothing — it exists because there was nothing on the shelf to
     // reserve. Approving releases the shortage to procurement to be bought.
+  confirm(
     "material_request.approve", "warning", "Approve this material request?",
     "Approving {number} clears {lines} to be bought. It reserves no stock — this material has to be purchased before anyone can be issued it.",
     "Approve",

@@ -29,12 +29,14 @@ from app.platform.rbac.permissions import INDENT_VIEW
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
     DISPATCH_GATE_OUT, DISPATCH_VIEW, INSPECTION_DELETE, ISSUE_DELETE, MOVEMENT_DELETE,
+    MOVEMENT_CREATE, MOVEMENT_VIEW,
     PICKING_DELETE, PUTAWAY_DELETE, RECEIPT_DELETE, RETURN_DELETE,
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_FORWARD, ISSUE_POST,
     ISSUE_VIEW,
     MASTER_LOCATION_MANAGE, PICKING_PICK, PICKING_VIEW, PUTAWAY_EXECUTE, PUTAWAY_VIEW,
+    QC_OUTWARD_VIEW, QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE, QC_OUTWARD_APPROVE, QC_OUTWARD_DELETE,
     RECEIPT_CREATE, RECEIPT_POST, RECEIPT_VIEW, RETURN_APPROVE, RETURN_CREATE, RETURN_VIEW,
-    STOCK_TRANSFER, STOCK_VIEW, WAREHOUSE_REPORT_VIEW,
+    STOCK_VIEW, WAREHOUSE_REPORT_VIEW,
 )
 from app.shared.enums import ApprovalAction
 
@@ -318,14 +320,14 @@ async def skip_putaway(task_id: int, body: s.ReasonIn, db: AsyncSession = Depend
 @router.get("/stock-movements", response_model=Page[s.StockMovementRead])
 async def list_stock_movements(params: PageParams = Depends(),
                                db: AsyncSession = Depends(get_db),
-                               _=Depends(require_permission(STOCK_VIEW))):
+                               _=Depends(require_permission(MOVEMENT_VIEW))):
     return await service.list_stock_movements(db, params)
 
 
 @router.post("/stock-movements", response_model=s.StockMovementRead, status_code=201)
 async def create_stock_movement(data: s.StockMovementWrite,
                                 db: AsyncSession = Depends(get_db),
-                                user=Depends(require_permission(STOCK_TRANSFER))):
+                                user=Depends(require_permission(MOVEMENT_CREATE))):
     return await service.create_stock_movement(db, data, user)
 
 
@@ -333,14 +335,21 @@ async def create_stock_movement(data: s.StockMovementWrite,
 async def list_stock_movement_orders(params: PageParams = Depends(),
                                      search: str | None = None,
                                      db: AsyncSession = Depends(get_db),
-                                     _=Depends(require_permission(STOCK_VIEW))):
+                                     _=Depends(require_permission(MOVEMENT_VIEW))):
     return await service.list_stock_movement_orders(db, params, search=search)
+
+
+@router.get("/stock-movement-orders/{order_no:path}", response_model=s.StockMovementOrderRead)
+async def get_stock_movement_order(order_no: str,
+                                   db: AsyncSession = Depends(get_db),
+                                   _=Depends(require_permission(MOVEMENT_VIEW))):
+    return await service.get_stock_movement_order(db, order_no)
 
 
 @router.post("/stock-movement-orders", response_model=s.StockMovementOrderRead, status_code=201)
 async def create_stock_movement_order(data: s.StockMovementOrderWrite,
                                       db: AsyncSession = Depends(get_db),
-                                      user=Depends(require_permission(STOCK_TRANSFER))):
+                                      user=Depends(require_permission(MOVEMENT_CREATE))):
     return await service.create_stock_movement_order(db, data, user)
 
 
@@ -1092,3 +1101,38 @@ async def delete_return(return_id: int, db: AsyncSession = Depends(get_db),
 async def delete_stock_movement(order_id: int, db: AsyncSession = Depends(get_db),
                                 user=Depends(require_permission(MOVEMENT_DELETE))):
     await service.delete_draft(db, "movement", order_id, user)
+
+@router.get("/outbound-inspections", response_model=Page[s.OutboundInspectionRead])
+async def list_outbound_inspections(params: PageParams = Depends(),
+                                    status: str | None = None, warehouse_id: int | None = None,
+                                    search: str | None = None, db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission(QC_OUTWARD_VIEW))):
+    return await service.list_outbound_inspections(db, params, status=status,
+                                                   warehouse_id=warehouse_id, search=search)
+
+@router.get("/outbound-inspections/{inspection_id}", response_model=s.OutboundInspectionDetail)
+async def get_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
+                                  _=Depends(require_permission(QC_OUTWARD_VIEW))):
+    return await service.get_outbound_inspection(db, inspection_id)
+
+@router.post("/outbound-inspections", response_model=s.OutboundInspectionDetail, status_code=201)
+async def create_outbound_inspection(data: s.OutboundInspectionWrite, db: AsyncSession = Depends(get_db),
+                                     user=Depends(require_permission(QC_OUTWARD_CREATE))):
+    return await service.create_outbound_inspection(db, data, user)
+
+@router.put("/outbound-inspections/{inspection_id}", response_model=s.OutboundInspectionDetail)
+async def update_outbound_inspection(inspection_id: int, data: s.OutboundInspectionWrite,
+                                     db: AsyncSession = Depends(get_db),
+                                     user=Depends(require_permission(QC_OUTWARD_UPDATE))):
+    return await service.update_outbound_inspection(db, inspection_id, data, user)
+
+@router.post("/outbound-inspections/{inspection_id}/complete", response_model=s.OutboundInspectionDetail)
+async def complete_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
+                                       user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+    return await service.complete_outbound_inspection(db, inspection_id, user)
+
+@router.delete("/outbound-inspections/{inspection_id}", status_code=204)
+async def delete_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
+                                     user=Depends(require_permission(QC_OUTWARD_DELETE))):
+    await service.delete_draft(db, "whs_inspections", inspection_id, user)
+    return None
