@@ -186,7 +186,12 @@ export function PODetailPage() {
   // FIXED 2026-08-20 — was `status === "PENDING_APPROVAL"`, which is true for every
   // holder of po.approve on every pending order in the company, including ones with
   // somebody else entirely. awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you.
-  const canDecide = !!po.data.awaiting_me;
+  // `?? status` on purpose: if the backend has not been restarted, or is an older
+  // build, `awaiting_me` is undefined — and a bare `&&` would then hide the button
+  // from the person who IS supposed to approve. Falling back to the old status check
+  // means the worst case is the pre-2026-08-20 behaviour (a button that 403s), never
+  // a document nobody can sign.
+  const canDecide = po.data.awaiting_me ?? (po.data.status === "PENDING_APPROVAL");
   const isDraft = po.data.status === "DRAFT";
   // Nothing left to change: the goods are in and the paperwork is closed, or the order
   // never became one. The server refuses an amendment on these too.

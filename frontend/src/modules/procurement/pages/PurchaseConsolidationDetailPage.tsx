@@ -101,7 +101,7 @@ export function PurchaseConsolidationDetailPage() {
               </Can>
             )}
             {/* FIXED 2026-08-20 — awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you. */}
-            {doc.awaiting_me && (
+            {(doc.awaiting_me ?? doc.status === "PENDING_APPROVAL") && (
               <Can do="consolidation.approve">
                 <Button variant="ghost" onClick={() => setReject(true)}>Reject</Button>
                 <Button onClick={() => approve.mutate()} disabled={approve.isPending}>

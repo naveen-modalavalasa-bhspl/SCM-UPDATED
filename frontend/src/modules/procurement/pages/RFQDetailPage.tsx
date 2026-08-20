@@ -49,7 +49,10 @@ export function RFQDetailPage() {
   const { can } = useAuth();
   // Editing the asked-for quantity is part of approving it, so it follows the
   // same gate — an approver who cannot sign must not be able to change the ask.
-  const editableQty = !!rfq?.awaiting_me && can("rfq.approve");
+  const canDecide = rfq?.awaiting_me ?? (rfq?.status === "PENDING_APPROVAL");
+  // Editing the asked-for quantity is part of approving it, so it follows the
+  // same gate — an approver who cannot sign must not change the ask.
+  const editableQty = !!canDecide && can("rfq.approve");
 
   // Previewing a different ranking is a query parameter, not a save: looking at the
   // quotes another way is not choosing one, so the RFQ's own method is untouched
@@ -232,7 +235,7 @@ export function RFQDetailPage() {
               * itself makes, so the button appears exactly when the press would work.
               * <Can> stays: the permission is still required, it was just never
               * sufficient. */}
-            {rfq?.awaiting_me && (
+            {canDecide && (
               <Can do="rfq.approve">
                 <Button variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
                   Reject

@@ -67,7 +67,12 @@ export function RequisitionDetailPage() {
   const isPending = req?.status === "PENDING_APPROVAL";
   // FIXED 2026-08-20 — awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you. `isPending` still drives the wording ("With ..."), which is
   // a statement about the document; only the DECISION buttons move to this one.
-  const canDecide = !!req?.awaiting_me;
+  // `?? status` on purpose: if the backend has not been restarted, or is an older
+  // build, `awaiting_me` is undefined — and a bare `&&` would then hide the button
+  // from the person who IS supposed to approve. Falling back to the old status check
+  // means the worst case is the pre-2026-08-20 behaviour (a button that 403s), never
+  // a document nobody can sign.
+  const canDecide = req?.awaiting_me ?? isPending;
   const isApproved = req?.status === "APPROVED";
 
   const columns: Column<ReqItem>[] = [
