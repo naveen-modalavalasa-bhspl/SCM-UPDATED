@@ -20,7 +20,7 @@ export function PrintTemplate({
   documentNo = "Draft",
   date,
   status,
-  companyName = "Material Document",
+  companyName = "Bavya Health Services",
   companyLegalName,
   companyAddress,
   metadata,

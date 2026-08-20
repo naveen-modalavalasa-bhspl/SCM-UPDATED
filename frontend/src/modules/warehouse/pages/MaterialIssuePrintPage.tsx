@@ -74,7 +74,7 @@ export function MaterialIssuePrintPage() {
         <header className="flex items-start justify-between rounded-t-xl bg-gradient-to-r from-orange-600 to-orange-500 px-8 py-6 text-white shadow-sm print:rounded-none">
           <div>
             <h1 className="text-2xl font-black uppercase tracking-tight text-white">
-              {company?.name || "Material Document"}
+              {company?.name || "Bavya Health Services"}
             </h1>
             {company?.legal_name && <p className="mt-1 text-[13px] font-medium text-orange-100">{company.legal_name}</p>}
             {company?.address && <p className="mt-1 max-w-[380px] text-[13px] leading-relaxed text-orange-100">{company.address}</p>}
