@@ -2,7 +2,7 @@ import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Selec
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Info, ScanLine } from "lucide-react";
+import { ArrowLeft, Info, ScanLine, FileText } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -673,6 +673,15 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
               <Can do="issue.create">
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
+            )}
+            {editing && doc && (
+              <Button 
+                variant="subtle" 
+                onClick={() => window.open(`/warehouse/material-issues/${doc.id}/print`, "_blank")}
+              >
+                <FileText className="mr-2 h-4 w-4" />
+                Print / Save PDF
+              </Button>
             )}
           </>
         }

@@ -108,6 +108,11 @@ RECEIPT_CREATE = "receipt.create"
 RECEIPT_POST = "receipt.post"
 INSPECTION_VIEW = "inspection.view"
 INSPECTION_EXECUTE = "inspection.execute"
+QC_OUTWARD_VIEW = "qc_outward.view"
+QC_OUTWARD_CREATE = "qc_outward.create"
+QC_OUTWARD_UPDATE = "qc_outward.update"
+QC_OUTWARD_APPROVE = "qc_outward.approve"
+QC_OUTWARD_EXPORT = "qc_outward.export"
 PUTAWAY_VIEW = "putaway.view"
 PUTAWAY_EXECUTE = "putaway.execute"
 PICKING_VIEW = "picking.view"
@@ -127,6 +132,7 @@ WAREHOUSE_REPORT_VIEW = "warehouse.report.view"
 # reverse is true for a supervisor tidying a queue.
 RECEIPT_DELETE = "receipt.delete"
 INSPECTION_DELETE = "inspection.delete"
+QC_OUTWARD_DELETE = "qc_outward.delete"
 PUTAWAY_DELETE = "putaway.delete"
 PICKING_DELETE = "picking.delete"
 ISSUE_DELETE = "issue.delete"
@@ -329,6 +335,11 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(INSPECTION_VIEW, "warehouse", "inspection", "view", "View quality inspections"),
     Perm(INSPECTION_EXECUTE, "warehouse", "inspection", "execute",
          "Record a quality inspection result"),
+    Perm(QC_OUTWARD_VIEW, "warehouse", "qc_outward", "view", "View Outward QC"),
+    Perm(QC_OUTWARD_CREATE, "warehouse", "qc_outward", "create", "Create Outward QC"),
+    Perm(QC_OUTWARD_UPDATE, "warehouse", "qc_outward", "update", "Update Outward QC draft"),
+    Perm(QC_OUTWARD_APPROVE, "warehouse", "qc_outward", "approve", "Approve/Complete Outward QC"),
+    Perm(QC_OUTWARD_EXPORT, "warehouse", "qc_outward", "export", "Export Outward QC"),
     Perm(PUTAWAY_VIEW, "warehouse", "putaway", "view", "View put-away tasks"),
     Perm(PUTAWAY_EXECUTE, "warehouse", "putaway", "execute", "Put stock away into bins"),
     Perm(PICKING_VIEW, "warehouse", "picking", "view", "View material fulfilments"),
@@ -348,6 +359,7 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(RECEIPT_DELETE, "warehouse", "receipt", "delete", "Delete a draft receipt"),
     Perm(INSPECTION_DELETE, "warehouse", "inspection", "delete",
          "Delete a draft inspection"),
+    Perm(QC_OUTWARD_DELETE, "warehouse", "qc_outward", "delete", "Delete a draft Outward QC"),
     Perm(PUTAWAY_DELETE, "warehouse", "putaway", "delete", "Delete a draft put-away"),
     Perm(PICKING_DELETE, "warehouse", "picking", "delete", "Delete a draft picklist"),
     Perm(ISSUE_DELETE, "warehouse", "issue", "delete", "Delete a draft issue"),
@@ -522,10 +534,11 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("po_list", "procurement", "Purchase Orders"),
     ("grp_warehouse", "warehouse", "Warehouse"),
     ("wh_dashboard", "warehouse", "Warehouse · Dashboard"),
-    ("wh_inward", "warehouse", "Warehouse · Material Inward"),
-    ("wh_grn", "warehouse", "Warehouse · Goods Receipt"),
-    ("wh_qc", "warehouse", "Warehouse · Quality Inspection"),
-    ("wh_putaway", "warehouse", "Warehouse · Put-away"),
+    ("wh_inward", "warehouse", "Warehouse » Material Inward"),
+    ("wh_grn", "warehouse", "Warehouse » Goods Receipt"),
+    ("wh_qc", "warehouse", "Warehouse » Quality Inspection"),
+    ("wh_qc_outward", "warehouse", "Warehouse » Outward QC"),
+    ("wh_putaway", "warehouse", "Warehouse » Put-away"),
     # Added late (migration d2e3f4a5b6c7 put them on the menu after this catalogue
     # was written), so both fell back to `stock.view` — a code twelve roles hold and
     # nine other pages share. Unticking them on Job Profiles did nothing.
@@ -643,4 +656,9 @@ INHERITS_GRANTS_FROM.update({
     # permission fail-closed would silently retire a screen people work every day.
     page_view_code("wh_material_returns"): ISSUE_VIEW,
     page_view_code("wh_ack"): DISPATCH_ACKNOWLEDGE,
+    page_view_code("wh_inward"): RECEIPT_VIEW,
+    page_view_code("wh_grn"): RECEIPT_VIEW,
+    page_view_code("wh_qc"): INSPECTION_VIEW,
+    page_view_code("wh_qc_outward"): QC_OUTWARD_VIEW,
+    page_view_code("wh_putaway"): PUTAWAY_VIEW,
 })

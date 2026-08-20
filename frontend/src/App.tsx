@@ -26,6 +26,14 @@ import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
 import { PODetailPage } from "@/modules/procurement/pages/PODetailPage";
 import { POPrintPage } from "@/modules/procurement/pages/POPrintPage";
+import { MaterialIssuePrintPage } from "@/modules/warehouse/pages/MaterialIssuePrintPage";
+import { GRNPrintPage } from "@/modules/warehouse/pages/GRNPrintPage";
+import { ConsignmentPrintPage } from "@/modules/warehouse/pages/ConsignmentPrintPage";
+import { PicklistPrintPage } from "@/modules/warehouse/pages/PicklistPrintPage";
+import { PutawayPrintPage } from "@/modules/warehouse/pages/PutawayPrintPage";
+import { InspectionPrintPage } from "@/modules/warehouse/pages/InspectionPrintPage";
+import { DispatchPrintPage } from "@/modules/warehouse/pages/DispatchPrintPage";
+import { StockMovementPrintPage } from "@/modules/warehouse/pages/StockMovementPrintPage";
 import { POFormPage } from "@/modules/procurement/pages/POFormPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
 // sub-pages, so these paths hand the whole subtree to it.
@@ -171,12 +179,44 @@ function AppRoutes() {
       {/* The order as a document, for paper and for "save as PDF". Outside the shell
           on purpose: what prints has to be the order, not a sidebar with an order next
           to it. Still signed-in only — it is the same data the detail page shows. */}
-      <Route
-        path="/pos/:id/print"
-        element={me ? <POPrintPage /> : <Navigate to="/login" replace />}
-      />
+        <Route
+          path="/pos/:id/print"
+          element={me ? <POPrintPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/warehouse/material-issues/:id/print"
+          element={me ? <MaterialIssuePrintPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/warehouse/grn/:id/print"
+          element={me ? <GRNPrintPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/warehouse/consignments/:id/print"
+          element={me ? <ConsignmentPrintPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/warehouse/dispatches/:id/print"
+          element={me ? <DispatchPrintPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/warehouse/picklists/:id/print"
+          element={me ? <PicklistPrintPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/warehouse/putaway/:id/print"
+          element={me ? <PutawayPrintPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/warehouse/inspections/:id/print"
+          element={me ? <InspectionPrintPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/warehouse/stock-movements/print"
+          element={me ? <StockMovementPrintPage /> : <Navigate to="/login" replace />}
+        />
 
-      <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
+        <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
         <Route index element={<HomePage />} />
         {/* Not in PAGE_TREE on purpose: everyone has a profile, so gating it behind an
             rbac_pages row would only mean a permission every role must be granted. */}

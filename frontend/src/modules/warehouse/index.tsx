@@ -6,6 +6,7 @@ import GRN from "./pages/GRN";
 import ReceiptForm from "./pages/ReceiptForm";
 import QualityInspection from "./pages/QualityInspection";
 import QualityInspectionForm from "./pages/QualityInspectionForm";
+import OutboundQualityInspectionForm from "./pages/OutboundQualityInspectionForm";
 import Putaway from "./pages/Putaway";
 import PutawayForm from "./pages/PutawayForm";
 import Picklist from "./pages/Picklist";
@@ -29,6 +30,7 @@ import StorageTypes from "./pages/masters/StorageTypes";
 import ScanView from "./pages/ScanView";
 import StockMovements from "./pages/StockMovements";
 import StockMovementForm from "./pages/StockMovementForm";
+import StockMovementDetail from "./pages/StockMovementDetail";
 
 /**
  * The warehouse module's own router.
@@ -67,10 +69,15 @@ export function WarehouseModule() {
         <Route path="quality-inspection/new" element={<QualityInspectionForm />} />
         <Route path="quality-inspection/:id" element={<QualityInspectionForm />} />
 
+        <Route path="qc-outward" element={<QualityInspection type="OUTGOING" title="Outward QC" />} />
+        <Route path="qc-outward/new" element={<OutboundQualityInspectionForm />} />
+        <Route path="qc-outward/:id" element={<OutboundQualityInspectionForm />} />
+
         <Route path="putaway" element={<Putaway />} />
         <Route path="putaway/:id" element={<PutawayForm />} />
         <Route path="stock-movements" element={<StockMovements />} />
         <Route path="stock-movements/new" element={<StockMovementForm />} />
+        <Route path="stock-movements/view" element={<StockMovementDetail />} />
 
         <Route path="fulfilment" element={<Picklist />} />
         <Route path="fulfilment/new" element={<PicklistForm />} />
@@ -115,10 +122,15 @@ export function WarehouseModule() {
       <Route path="quality-inspection/new" element={<QualityInspectionForm />} />
       <Route path="quality-inspection/:id" element={<QualityInspectionForm />} />
 
+      <Route path="qc-outward" element={<QualityInspection type="OUTGOING" title="Outward QC" />} />
+      <Route path="qc-outward/new" element={<OutboundQualityInspectionForm />} />
+      <Route path="qc-outward/:id" element={<OutboundQualityInspectionForm />} />
+
       <Route path="putaway" element={<Putaway />} />
       <Route path="putaway/:id" element={<PutawayForm />} />
       <Route path="stock-movements" element={<StockMovements />} />
       <Route path="stock-movements/new" element={<StockMovementForm />} />
+      <Route path="stock-movements/view" element={<StockMovementDetail />} />
 
       {/* The RBAC menu still points at /warehouse/picklist; without these the link
        * hit the catch-all below and bounced to the dashboard. */}

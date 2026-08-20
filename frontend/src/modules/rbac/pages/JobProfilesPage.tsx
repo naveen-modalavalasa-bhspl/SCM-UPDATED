@@ -253,6 +253,9 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   wh_qc: {
     hint: "Check received goods and record whether they pass inspection.",
   },
+  wh_qc_outward: {
+    hint: "Check and complete quality inspections for outward material issues.",
+  },
   wh_putaway: {
     hint: "See and complete tasks for placing received stock into storage bins.",
   },

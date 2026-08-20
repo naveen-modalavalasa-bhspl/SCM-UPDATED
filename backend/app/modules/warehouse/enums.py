@@ -39,11 +39,12 @@ class ReceiptStatus(str, Enum):
 
 
 class QcStatus(str, Enum):
-    """`inb_receipt_items.qc_status` — the line's own QC outcome."""
+    """`inb_receipt_items.qc_status` and `out_issues.qc_status` — the QC outcome."""
     PENDING = "PENDING"
     PASSED = "PASSED"
     FAILED = "FAILED"
     PARTIAL = "PARTIAL"
+    NOT_REQUIRED = "NOT_REQUIRED"
 
 
 class InspectionType(str, Enum):
@@ -283,6 +284,12 @@ from app.platform.rbac.permissions import (  # noqa: F401  (re-exported)
     PUTAWAY_DELETE,
     PUTAWAY_EXECUTE,
     PUTAWAY_VIEW,
+    QC_OUTWARD_VIEW,
+    QC_OUTWARD_CREATE,
+    QC_OUTWARD_UPDATE,
+    QC_OUTWARD_APPROVE,
+    QC_OUTWARD_EXPORT,
+    QC_OUTWARD_DELETE,
     RECEIPT_CREATE,
     RECEIPT_DELETE,
     RECEIPT_POST,

@@ -55,7 +55,7 @@ INVENTORY = ["grp_inventory", "inv_overview", "inv_balance", "inv_ledger",
              "inv_allocation_approvals", "inv_stocking_points", "inv_mr",
              "inv_labels"]
 WAREHOUSE = ["grp_warehouse", "wh_dashboard", "wh_inward", "wh_grn", "wh_qc",
-             "wh_putaway", "wh_segregation", "wh_stock_movements", "wh_picklist",
+             "wh_qc_outward", "wh_putaway", "wh_segregation", "wh_stock_movements", "wh_picklist",
              "wh_issues", "wh_material_returns", "wh_consignments", "wh_dispatch",
              "wh_ack", "wh_notifications", "wh_reports", "wh_masters"]
 

@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
+import { FileText } from "lucide-react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
 import { listConsignments, deleteDispatch, DRAFT_DELETE_PERMISSION } from "../api";
@@ -80,6 +81,27 @@ export default function Consignments() {
         </div>
       ),
     },
+    {
+      key: "actions",
+      header: "",
+      className: "w-12 text-right",
+      render: (r) => (
+        <div className="flex justify-end gap-1">
+          <button
+            type="button"
+            aria-label={`Print ${r.dispatch_no || "Draft"}`}
+            title="Download PDF"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-neutral-100 hover:text-ink"
+            onClick={(e) => {
+              e.stopPropagation();
+              window.open(`/warehouse/consignments/${r.id}/print`, "_blank");
+            }}
+          >
+            <FileText className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    },
   ];
 
   return (
@@ -124,7 +146,19 @@ export default function Consignments() {
           <div className="space-y-1">
             <div className="flex items-center justify-between gap-2">
               <span className="font-mono text-xs font-semibold text-ink">{row.dispatch_no}</span>
-              <StatusPill status={row.status} />
+              <div className="flex items-center gap-2">
+                <StatusPill status={row.status} />
+                <button
+                  type="button"
+                  className="text-muted hover:text-ink p-1"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    window.open(`/warehouse/consignments/${row.id}/print`, "_blank");
+                  }}
+                >
+                  <FileText className="h-4 w-4" />
+                </button>
+              </div>
             </div>
             <div className="font-mono text-xs text-muted">{row.ref_no ?? "No issue"}</div>
             <div className="truncate text-xs text-body">{destinationOf(row) || "No destination"}</div>

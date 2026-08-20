@@ -3366,6 +3366,56 @@ async def create_stock_movement(
     }
 
 
+async def get_stock_movement_order(db: AsyncSession, order_no: str) -> dict:
+    from app.modules.inventory.models import StockMovement
+
+    rows = (await db.execute(
+        select(StockMovement)
+        .where(StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
+               StockMovement.ref_no == order_no)
+        .order_by(StockMovement.id.asc())
+    )).scalars().all()
+
+    if not rows:
+        raise ValidationError("Stock movement order not found")
+
+    items = []
+    out_rows = [r for r in rows if r.direction == StockDirection.OUT.value]
+    in_rows = [r for r in rows if r.direction == StockDirection.IN.value]
+
+    for i in range(min(len(out_rows), len(in_rows))):
+        out_r = out_rows[i]
+        in_r = in_rows[i]
+        items.append({
+            "id": i + 1,
+            "order_id": 0,
+            "item_id": out_r.item_id,
+            "item_code": out_r.item_code,
+            "item_name": out_r.item_name,
+            "uom_code": out_r.uom_code,
+            "source_bin_id": out_r.bin_id,
+            "source_bin_code": out_r.bin_code,
+            "destination_bin_id": in_r.bin_id,
+            "destination_bin_code": in_r.bin_code,
+            "quantity": out_r.quantity,
+            "batch_id": out_r.batch_id,
+            "serial_numbers": []
+        })
+
+    first = rows[0]
+    return {
+        "id": 0,
+        "order_no": order_no,
+        "warehouse_id": first.warehouse_id,
+        "warehouse_name": first.warehouse_name,
+        "status": "COMPLETED",
+        "reason": first.remarks,
+        "created_by_name": first.created_by_name,
+        "created_at": first.created_at,
+        "items": items
+    }
+
+
 async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
                                      search: str | None = None) -> dict:
     """Multi-line bin-to-bin movements, rebuilt from the ledger.
@@ -5818,6 +5868,60 @@ async def _issue_slices(
     # location, rather than issuing a partial quantity nobody asked for.
     return slices if remaining <= ZERO else fallback
 
+async def _raise_outbound_inspection_for(
+    db: AsyncSession,
+    issue: m.MaterialIssue,
+    user,
+) -> m.OutboundInspection:
+    """The outbound inspection a posted issue creates for items requiring QC."""
+    inspection = m.OutboundInspection(
+        items=[],
+        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
+        inspection_date=ist_today(),
+        issue_id=issue.id,
+        issue_no=issue.issue_no,
+        warehouse_id=issue.warehouse_id,
+        warehouse_name=issue.warehouse_name,
+        status=InspectionStatus.DRAFT.value,
+        inspector_id=getattr(user, "id", None),
+        inspector_name=_name(user),
+    )
+    db.add(inspection)
+    await db.flush()
+
+    issued_serials = await _issued_serial_index(db, issue)
+    
+    for line in issue.items:
+        item = await _item_snapshot(db, line.item_id)
+        if not item.requires_qi:
+            continue
+            
+        # Collect serials for this line
+        line_serials = []
+        if item.is_serial_tracked:
+            # Match serials by item_id and batch_id
+            for sn, s_row in issued_serials.items():
+                if s_row.item_id == line.item_id and (not line.batch_id or s_row.batch_id == line.batch_id):
+                    line_serials.append({
+                        "serial_no": s_row.serial_number,
+                        "imei_no": s_row.imei,
+                        "asset_code": s_row.asset_code,
+                        "consumable_code": s_row.consumable_code
+                    })
+
+        inspection.items.append(m.OutboundInspectionItem(
+            issue_item_id=line.id, item_id=line.item_id,
+            item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
+            batch_no=line.batch_no,
+            inspected_qty=_d(line.issued_qty), accepted_qty=_d(line.issued_qty),
+            rejected_qty=ZERO, result=InspectionResult.PENDING.value,
+            serial_numbers=line_serials if line_serials else None,
+        ))
+        
+    _outbound_inspection_totals(inspection)
+    await db.flush()
+    return inspection
+
 
 async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Takes the stock off the shelf. The only step here that moves anything."""
@@ -5834,11 +5938,14 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     # has actually handled the units. Every line is reported at once so a picker
     # holding a trolley is not sent back for one item at a time.
     incomplete = []
+    needs_qc = False
     for line in issue.items:
         qty = _d(line.issued_qty)
         if qty <= ZERO:
             continue
         item = await _item_snapshot(db, line.item_id)
+        if item.requires_qi:
+            needs_qc = True
         if not item.is_serial_tracked:
             continue
         captured = len(getattr(line, "serial_numbers", None) or [])
@@ -5984,6 +6091,10 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     issue.issued_by_id = getattr(user, "id", None)
     issue.issued_by_name = _name(user)
     issue.status = IssueStatus.ISSUED.value
+    issue.qc_status = QcStatus.PENDING.value if needs_qc else QcStatus.NOT_REQUIRED.value
+
+    if needs_qc and outward:
+        await _raise_outbound_inspection_for(db, issue, user)
 
     if outward:
         await _raise_picking_for_issue(db, issue, user)
@@ -5992,6 +6103,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                       action=AuditAction.UPDATE, actor=user,
                       before={"is_stock_posted": False},
                       after={"is_stock_posted": True, "status": issue.status,
+                             "qc_status": issue.qc_status,
                              "total_qty": str(issue.total_qty)})
     await db.commit()
     return await get_issue(db, issue_id)
@@ -6846,7 +6958,65 @@ async def _issued_serial_index(
             m.SerialNumber.is_active.is_(True),
         )
     )).scalars().all()
-    return {row.serial_number.lower(): row for row in rows}
+    index = {}
+    for row in rows:
+        if row.serial_number:
+            index[row.serial_number.lower()] = row
+        if row.asset_code:
+            index[row.asset_code.lower()] = row
+        if row.consumable_code:
+            index[row.consumable_code.lower()] = row
+    return index
+
+
+async def _issue_available_qty_and_serials(
+    db: AsyncSession,
+    issue: m.MaterialIssue
+) -> tuple[dict[tuple[int, int], Decimal], dict[str, m.SerialNumber]]:
+    issued_qty = _issue_qty_by_item_batch(issue)
+    issued_serials = await _issued_serial_index(db, issue)
+    
+    if issue.qc_status in (QcStatus.PASSED.value, QcStatus.PARTIAL.value):
+        inspection = (await db.execute(
+            select(m.OutboundInspection).where(
+                m.OutboundInspection.issue_id == issue.id,
+                m.OutboundInspection.status == InspectionStatus.COMPLETED.value
+            ).order_by(m.OutboundInspection.id.desc()).limit(1)
+        )).scalar_one_or_none()
+        
+        if inspection:
+            accepted_qty: dict[tuple[int, int], Decimal] = {}
+            accepted_serials: set[str] = set()
+            
+            items = (await db.execute(
+                select(m.OutboundInspectionItem, m.MaterialIssueLine.batch_id)
+                .join(m.MaterialIssueLine, m.OutboundInspectionItem.issue_item_id == m.MaterialIssueLine.id)
+                .where(m.OutboundInspectionItem.inspection_id == inspection.id)
+            )).all()
+            
+            for insp_item, batch_id in items:
+                key = (insp_item.item_id, batch_id or m.NO_BATCH)
+                accepted_qty[key] = accepted_qty.get(key, ZERO) + _d(insp_item.accepted_qty)
+                
+                serials_data = insp_item.serial_numbers
+                if serials_data:
+                    if isinstance(serials_data, dict):
+                        passed_list = serials_data.get("accepted", [])
+                    elif isinstance(serials_data, list):
+                        passed_list = serials_data
+                    else:
+                        passed_list = []
+                    for s in passed_list:
+                        accepted_serials.add(s.lower())
+                else:
+                    for s_key, s_row in issued_serials.items():
+                        if s_row.item_id == insp_item.item_id and (not batch_id or s_row.batch_id == batch_id):
+                            accepted_serials.add(s_key.lower())
+                    
+            issued_qty = accepted_qty
+            issued_serials = {k: v for k, v in issued_serials.items() if k in accepted_serials}
+            
+    return issued_qty, issued_serials
 
 
 async def _apply_consignment_packages(
@@ -6863,8 +7033,7 @@ async def _apply_consignment_packages(
     barcodes: set[str] = set()
     packed_by_key: dict[tuple[int, int], Decimal] = {}
     used_serials: set[str] = set()
-    issued_by_key = _issue_qty_by_item_batch(issue)
-    issued_serials = await _issued_serial_index(db, issue)
+    issued_by_key, issued_serials = await _issue_available_qty_and_serials(db, issue)
 
     existing_barcode_stmt = select(m.DispatchPackage.barcode).join(m.Dispatch).where(
         m.DispatchPackage.barcode.isnot(None),
@@ -6941,15 +7110,14 @@ async def _apply_consignment_packages(
             if len(normalized_serials) != len(set(normalized_serials)):
                 raise ValidationError(f"{package_no}: duplicate serials for {item.code}")
 
-            if item.is_serial_tracked:
+            is_serialized = item.is_serial_tracked or bool(serials)
+            if is_serialized:
                 if qty != qty.to_integral_value():
                     raise ValidationError(f"{package_no}: {item.code} serial quantity must be whole")
                 if len(serials) != int(qty):
                     raise ValidationError(
                         f"{package_no}: select exactly {int(qty)} serials for {item.code}"
                     )
-            elif serials:
-                raise ValidationError(f"{package_no}: {item.code} is not serial tracked")
 
             key = (item.id, batch_id)
             packed_by_key[key] = packed_by_key.get(key, ZERO) + qty
@@ -6961,7 +7129,7 @@ async def _apply_consignment_packages(
 
             batch = await db.get(m.Batch, batch_id) if batch_id != m.NO_BATCH else None
             rate = _d(item_data.rate)
-            if item.is_serial_tracked:
+            if is_serialized:
                 for serial in serials:
                     lowered = serial.lower()
                     if lowered in used_serials:
@@ -7138,6 +7306,11 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
     issue = await get_issue(db, data.issue_id)
     if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
         raise ValidationError("Only a posted outward material issue can become a consignment")
+    if issue.qc_status == QcStatus.PENDING.value:
+        raise ValidationError(f"{issue.issue_no} is pending outward quality inspection")
+    if issue.qc_status == QcStatus.FAILED.value:
+        raise ValidationError(f"{issue.issue_no} failed outward quality inspection")
+
     existing = await db.scalar(
         select(m.Dispatch.id).where(
             m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
@@ -10075,6 +10248,7 @@ async def issue_options(db: AsyncSession, search: str | None = None) -> list[dic
     stmt = select(m.MaterialIssue).where(
         m.MaterialIssue.direction == IssueDirection.OUT.value,
         m.MaterialIssue.is_stock_posted.is_(True),
+        m.MaterialIssue.qc_status.notin_([QcStatus.PENDING.value, QcStatus.FAILED.value])
     )
     if used:
         stmt = stmt.where(m.MaterialIssue.id.notin_(used))
@@ -10125,6 +10299,8 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
     issue = await get_issue(db, issue_id)
     if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
         raise ValidationError("Only a posted outward issue can become a dispatch")
+    if issue.qc_status in (QcStatus.PENDING.value, QcStatus.FAILED.value):
+        raise ValidationError("QC Outward must be completed before dispatch.")
     existing = await db.scalar(
         select(m.Dispatch.id).where(
             m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
@@ -10153,9 +10329,13 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
     )).scalars().all()
     # Keyed on the serial, so the consignment can print the IMEI beside the unit it
     # belongs to instead of the receiving point retyping it off the handset.
-    imei_by_serial = {
-        serial.serial_number: serial.imei for serial in serial_rows if serial.imei
-    }
+    imei_by_serial = {}
+    for serial in serial_rows:
+        if not serial.imei:
+            continue
+        if serial.serial_number: imei_by_serial[serial.serial_number] = serial.imei
+        if serial.asset_code: imei_by_serial[serial.asset_code] = serial.imei
+        if serial.consumable_code: imei_by_serial[serial.consumable_code] = serial.imei
     for serial in serial_rows:
         serials_by_item_batch.setdefault(
             (serial.item_id, serial.batch_id or m.NO_BATCH),
@@ -10175,6 +10355,33 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
     # nobody could see the decision until they had saved — and a consignment saved
     # with a blank destination is one the receiving point cannot raise a GRN against.
     requesting = await _requesting_point(db, issue)
+
+    qc = await db.scalar(
+        select(m.OutboundInspection).where(
+            m.OutboundInspection.issue_id == issue.id,
+            m.OutboundInspection.status == InspectionStatus.COMPLETED.value
+        ).order_by(m.OutboundInspection.id.desc()).limit(1).options(
+            selectinload(m.OutboundInspection.items)
+        )
+    )
+
+    qc_accepted = {}
+    qc_serials = {}
+    if qc:
+        for item in qc.items:
+            qc_accepted[item.issue_item_id] = item.accepted_qty
+            if item.serial_numbers:
+                qc_serials[item.issue_item_id] = item.serial_numbers
+
+    def _get_accepted_serials(line) -> list[str]:
+        if line.id in qc_serials:
+            s_data = qc_serials[line.id]
+            if isinstance(s_data, dict):
+                return s_data.get("accepted", [])
+            elif isinstance(s_data, list):
+                return s_data
+            return []
+        return _get_line_serials(line)
 
     return {
         "issue_id": issue.id,
@@ -10214,23 +10421,23 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "is_serial_tracked": (
                     bool(item_by_id[line.item_id].is_serial_tracked)
                     if line.item_id in item_by_id else False
-                ),
+                ) or bool(_get_accepted_serials(line)),
                 "is_imei_tracked": (
                     bool(item_by_id[line.item_id].is_imei_tracked)
                     if line.item_id in item_by_id else False
-                ),
-                "serial_numbers": _get_line_serials(line),
+                ) or any(s in imei_by_serial for s in _get_accepted_serials(line)),
+                "serial_numbers": _get_accepted_serials(line),
                 "imei_by_serial": {
                     serial: imei_by_serial[serial]
-                    for serial in _get_line_serials(line)
+                    for serial in _get_accepted_serials(line)
                     if serial in imei_by_serial
                 },
-                "quantity": _d(line.issued_qty),
+                "quantity": _d(qc_accepted.get(line.id, line.issued_qty)),
                 "rate": line.rate,
                 "remarks": line.remarks,
             }
             for line in issue.items
-            if _d(line.issued_qty) > ZERO
+            if _d(qc_accepted.get(line.id, line.issued_qty)) > ZERO
         ],
     }
 
@@ -10760,3 +10967,227 @@ def _register_transport_hooks() -> None:
 
 
 _register_transport_hooks()
+
+# ---------------- Outbound Quality Inspection ----------------
+
+async def get_outbound_inspection(db: AsyncSession, inspection_id: int) -> m.OutboundInspection:
+    return await _load(db, m.OutboundInspection, inspection_id, "OutboundInspection", m.OutboundInspection.items)
+
+def _outbound_inspection_totals(inspection: m.OutboundInspection) -> None:
+    inspection.total_items = len(inspection.items)
+    passed = 0
+    failed = 0
+    for line in inspection.items:
+        if line.result == InspectionResult.PASSED.value:
+            passed += 1
+        elif line.result == InspectionResult.FAILED.value:
+            failed += 1
+        elif line.result == InspectionResult.PARTIAL.value:
+            # A partial is one line that yielded both passed and failed units. Both
+            # counters increment because the vendor needs a reason for the failed portion
+            # just as much as the line must pass to bank what was accepted.
+            passed += 1
+            failed += 1
+    inspection.passed_items = passed
+    inspection.failed_items = failed
+
+async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.OutboundInspection,
+                                           lines: list[s.OutboundInspectionItemWrite]) -> None:
+    inspection.items.clear()
+    await db.flush()
+
+    issued_by_line: dict[int, Decimal] = {}
+    issued_by_item: dict[int, Decimal] = {}
+    line_id_by_item: dict[int, int] = {}
+    if inspection.issue_id:
+        for row_id, item_id, qty in (await db.execute(
+            select(m.MaterialIssueLine.id, m.MaterialIssueLine.item_id, m.MaterialIssueLine.issued_qty)
+            .where(m.MaterialIssueLine.issue_id == inspection.issue_id)
+        )).all():
+            issued_by_line[row_id] = _d(qty)
+            issued_by_item[item_id] = issued_by_item.get(item_id, ZERO) + _d(qty)
+            line_id_by_item.setdefault(item_id, row_id)
+
+    for line in lines:
+        item = await _item_snapshot(db, line.item_id)
+        inspected = _d(line.inspected_qty)
+        if inspected < ZERO:
+            raise ValidationError(f"{item.code}: inspected quantity cannot be negative")
+            
+        if line.issue_item_id is None and inspection.issue_id:
+            line.issue_item_id = line_id_by_item.get(line.item_id)
+            if line.issue_item_id is None:
+                raise ValidationError(f"{item.code} is not on this Material Issue")
+        if line.issue_item_id is not None:
+            if line.issue_item_id not in issued_by_line:
+                repointed = line_id_by_item.get(line.item_id)
+                if repointed is None:
+                    raise ValidationError(f"{item.code} is not on this Material Issue")
+                line.issue_item_id = repointed
+            issued = issued_by_line[line.issue_item_id]
+            if inspected > issued:
+                raise ValidationError(
+                    f"{item.code}: {inspected} inspected but only {issued} was "
+                    f"issued. QC cannot pass more than was issued."
+                )
+        if _d(line.accepted_qty) > inspected:
+            raise ValidationError(
+                f"{item.code}: {line.accepted_qty} accepted out of {inspected} "
+                f"inspected. Accepted cannot exceed inspected."
+            )
+        accepted = min(_d(line.accepted_qty), inspected)
+        rejected = inspected - accepted
+        result = (line.result.value if line.result != InspectionResult.PENDING
+                  else _derive_result(inspected, accepted))
+                  
+        serials_data = line.serial_numbers or []
+        if isinstance(serials_data, dict):
+             serials = [value.strip() for value in serials_data.get("accepted", []) if value.strip()]
+        elif isinstance(serials_data, list):
+             serials = [value.strip() for value in serials_data if value.strip()]
+        else:
+             serials = []
+        if len(serials) != len(set(serials)):
+            raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
+            
+        if item.is_serial_tracked and accepted != accepted.to_integral_value():
+            raise ValidationError(f"{item.code}: accepted quantity must be a whole number for serialized items")
+        if item.is_serial_tracked and len(serials) != int(accepted):
+            raise ValidationError(f"{item.code}: select exactly {int(accepted)} accepted serial numbers")
+            
+        reason = line.rejection_reason or line.defect_type
+        if rejected > ZERO and not (reason or "").strip():
+            raise ValidationError(f"{item.code}: a failed line needs a defect type")
+
+        inspection.items.append(m.OutboundInspectionItem(
+            issue_item_id=line.issue_item_id,
+            item_id=item.id, item_code=item.code, item_name=item.name,
+            uom_code=item.uom_code, batch_no=line.batch_no,
+            inspected_qty=inspected, accepted_qty=accepted, rejected_qty=rejected,
+            parameters=[p.model_dump() for p in line.parameters] if line.parameters else None,
+            result=result, defect_type=reason, remarks=line.remarks,
+            serial_numbers={"accepted": serials} if serials else None,
+        ))
+    _outbound_inspection_totals(inspection)
+
+async def create_outbound_inspection(db: AsyncSession, data: s.OutboundInspectionWrite, user) -> m.OutboundInspection:
+    issue = await get_issue(db, data.issue_id) if data.issue_id else None
+    wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
+
+    if issue is not None:
+        existing = await db.scalar(
+            select(m.OutboundInspection).where(
+                m.OutboundInspection.issue_id == issue.id,
+                m.OutboundInspection.status != InspectionStatus.CANCELLED.value,
+            ).limit(1)
+        )
+        if existing is not None:
+            raise ValidationError(
+                f"{issue.issue_no} is already inspected on {existing.inspection_no}. "
+                f"Cancel that one to inspect it again."
+            )
+        if issue.qc_status not in (QcStatus.PENDING.value, QcStatus.FAILED.value):
+            raise ValidationError(
+                f"{issue.issue_no} QC status is {issue.qc_status}. Cannot inspect."
+            )
+
+    inspection = m.OutboundInspection(
+        items=[],
+        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
+        inspection_date=data.inspection_date,
+        issue_id=data.issue_id,
+        issue_no=issue.issue_no if issue else None,
+        warehouse_id=data.warehouse_id or (issue.warehouse_id if issue else None),
+        warehouse_name=wh.name if wh else (issue.warehouse_name if issue else None),
+        status=InspectionStatus.DRAFT.value,
+        inspector_id=data.inspector_id or getattr(user, "id", None),
+        inspector_name=_name(user) if not data.inspector_id else None,
+        remarks=data.remarks,
+    )
+    db.add(inspection)
+    await db.flush()
+
+    await _apply_outbound_inspection_lines(db, inspection, data.items)
+    await db.flush()
+
+    await write_audit(db, entity="whs_inspections", entity_id=inspection.id,
+                      entity_no=inspection.inspection_no, action=AuditAction.CREATE, actor=user,
+                      after={"status": inspection.status, "lines": len(inspection.items)})
+    await db.commit()
+    return await get_outbound_inspection(db, inspection.id)
+
+async def update_outbound_inspection(db: AsyncSession, inspection_id: int, data: s.OutboundInspectionWrite, user) -> m.OutboundInspection:
+    inspection = await get_outbound_inspection(db, inspection_id)
+    _guard(inspection.status,
+           {InspectionStatus.DRAFT.value, InspectionStatus.IN_PROGRESS.value},
+           "edit", "outbound inspection")
+
+    before = {"status": inspection.status, "failed_items": inspection.failed_items}
+    inspection.inspection_date = data.inspection_date
+    inspection.inspector_id = data.inspector_id or inspection.inspector_id
+    inspection.remarks = data.remarks
+    inspection.status = InspectionStatus.IN_PROGRESS.value
+
+    await _apply_outbound_inspection_lines(db, inspection, data.items)
+    await db.flush()
+
+    await write_audit(db, entity="whs_inspections", entity_id=inspection.id,
+                      entity_no=inspection.inspection_no, action=AuditAction.UPDATE, actor=user,
+                      before=before,
+                      after={"status": inspection.status, "failed_items": inspection.failed_items})
+    await db.commit()
+    return await get_outbound_inspection(db, inspection_id)
+
+async def complete_outbound_inspection(db: AsyncSession, inspection_id: int, user) -> m.OutboundInspection:
+    inspection = await get_outbound_inspection(db, inspection_id)
+    _guard(inspection.status,
+           {InspectionStatus.DRAFT.value, InspectionStatus.IN_PROGRESS.value},
+           "complete", "outbound inspection")
+           
+    if not inspection.items:
+        raise ValidationError("Cannot complete an empty inspection")
+        
+    for line in inspection.items:
+        if line.result == InspectionResult.PENDING.value:
+            raise ValidationError(
+                f"Line {line.item_code} is pending. "
+                "Record a result for every item before completing the inspection."
+            )
+
+    inspection.status = InspectionStatus.COMPLETED.value
+    
+    # Update Material Issue qc_status
+    issue = await get_issue(db, inspection.issue_id)
+    if inspection.passed_items == len(inspection.items):
+         issue.qc_status = QcStatus.PASSED.value
+    elif inspection.failed_items == len(inspection.items):
+         issue.qc_status = QcStatus.FAILED.value
+    else:
+         issue.qc_status = QcStatus.PARTIAL.value
+
+    await write_audit(db, entity="whs_inspections", entity_id=inspection.id,
+                      entity_no=inspection.inspection_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": InspectionStatus.IN_PROGRESS.value},
+                      after={"status": inspection.status, "issue_qc_status": issue.qc_status})
+    await db.commit()
+    return inspection
+
+async def list_outbound_inspections(db: AsyncSession, params: PageParams,
+                                    status: str | None = None,
+                                    warehouse_id: int | None = None,
+                                    search: str | None = None) -> dict:
+    stmt = select(m.OutboundInspection).where(m.OutboundInspection.status != InspectionStatus.CANCELLED.value)
+    if status:
+        stmt = stmt.where(m.OutboundInspection.status == status)
+    if warehouse_id:
+        stmt = stmt.where(m.OutboundInspection.warehouse_id == warehouse_id)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            or_(
+                m.OutboundInspection.inspection_no.ilike(like),
+                m.OutboundInspection.issue_no.ilike(like),
+                m.OutboundInspection.warehouse_name.ilike(like),
+            )
+        )
+    return await paginate(db, stmt.order_by(m.OutboundInspection.created_at.desc()), params)

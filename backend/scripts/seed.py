@@ -171,13 +171,15 @@ PAGE_TREE = [
      P.ISSUE_VIEW, 49, "grp_warehouse"),
     ("wh_material_returns", "/warehouse/material-returns", "Material Returns",
      "undo-2", P.ISSUE_VIEW, 50, "grp_warehouse"),
+    ("wh_qc_outward", "/warehouse/qc-outward", "Outward QC", "check-circle",
+     P.INSPECTION_VIEW, 51, "grp_warehouse"),
     ("wh_consignments", "/warehouse/dispatch/consignments", "Consignments", "boxes",
      P.DISPATCH_VIEW, 52, "grp_warehouse"),
     ("wh_dispatch", "/warehouse/dispatch", "Dispatch", "truck",
      P.DISPATCH_VIEW, 54, "grp_warehouse"),
     ("wh_ack", "/warehouse/acknowledge-delivery", "Acknowledge Delivery",
      "check-circle", P.DISPATCH_ACKNOWLEDGE, 55, "grp_warehouse"),
-    # Outward QC, Outward Labelling and Purchase Returns were dropped from the module
+    # Outward Labelling and Purchase Returns were dropped from the module
     # on 2026-08-13: not part of the flow this business runs. The endpoints and their
     # tables are still there, unreachable — nothing routes to them.
     ("wh_notifications", "/warehouse/notifications", "Notifications", "bell",

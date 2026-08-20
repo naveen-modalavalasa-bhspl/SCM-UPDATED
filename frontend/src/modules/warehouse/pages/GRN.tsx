@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
+import { FileText } from "lucide-react";
 import { StatusPill, type Column } from "@/shared/components";
 import { DocumentList } from "../components/DocumentList";
 import { listReceipts, deleteReceipt, DRAFT_DELETE_PERMISSION } from "../api";
@@ -86,6 +87,27 @@ export default function GRN() {
       ),
     },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "actions",
+      header: "",
+      className: "w-12 text-right",
+      render: (r) => (
+        <div className="flex justify-end gap-1">
+          <button
+            type="button"
+            aria-label={`Print ${r.grn_no || "Draft"}`}
+            title="Download PDF"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-neutral-100 hover:text-ink"
+            onClick={(e) => {
+              e.stopPropagation();
+              window.open(`/warehouse/grn/${r.id}/print`, "_blank");
+            }}
+          >
+            <FileText className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    },
   ];
 
   return (
@@ -127,7 +149,19 @@ export default function GRN() {
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
             <span className="font-mono text-xs font-semibold text-ink">{r.grn_no}</span>
-            <StatusPill status={r.status} />
+            <div className="flex items-center gap-2">
+              <StatusPill status={r.status} />
+              <button
+                type="button"
+                className="text-muted hover:text-ink p-1"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(`/warehouse/grn/${r.id}/print`, "_blank");
+                }}
+              >
+                <FileText className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div className="truncate text-sm text-body">{r.vendor_name ?? "—"}</div>
           <div className="truncate text-[11px] text-muted">

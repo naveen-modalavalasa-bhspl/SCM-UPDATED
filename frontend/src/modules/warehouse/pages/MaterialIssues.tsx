@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { Forward } from "lucide-react";
+import { Forward, FileText, CheckCircle } from "lucide-react";
 import {
   Button, Can, ConfirmModal, StatusPill, type Column,
 } from "@/shared/components";
@@ -69,7 +69,7 @@ export default function MaterialIssues({
         </div>
       ),
     },
-    { key: "warehouse", header: "From", hideOnNarrow: true, render: (r) => r.warehouse_name ?? "—" },
+    { key: "warehouse", header: "From", hideOnNarrow: true, render: (r) => r.warehouse_id ? `WH-${r.warehouse_id}` : "—" },
     {
       key: "qty",
       header: "Qty",
@@ -107,7 +107,56 @@ export default function MaterialIssues({
         </span>
       ),
     },
+    {
+      key: "qc_status",
+      header: "QC Status",
+      hideOnNarrow: true,
+      render: (r) => r.qc_status && r.qc_status !== "NOT_REQUIRED" ? (
+        <span className={`text-[11px] font-semibold uppercase tracking-wider ${
+          r.qc_status === "PASSED" ? "text-success" : 
+          r.qc_status === "FAILED" ? "text-danger" : 
+          r.qc_status === "PARTIAL" ? "text-warning" : "text-neutral-500"
+        }`}>
+          {r.qc_status}
+        </span>
+      ) : <span className="text-muted text-[11px] uppercase tracking-wider">N/A</span>,
+    },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "actions",
+      header: "",
+      className: "w-24 text-right",
+      render: (r) => (
+        <div className="flex justify-end gap-1">
+          {r.qc_status && ["PENDING", "PARTIAL", "FAILED"].includes(r.qc_status) && (
+            <button
+              type="button"
+              aria-label={`QC ${r.issue_no}`}
+              title="Perform QC"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-primary transition-colors hover:bg-primary-50"
+              onClick={(e) => {
+                e.stopPropagation();
+                nav(`/warehouse/qc-outward/new?issue_id=${r.id}`);
+              }}
+            >
+              <CheckCircle className="h-4 w-4" />
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label={`Print ${r.issue_no || "Draft"}`}
+            title="Download PDF"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-neutral-100 hover:text-ink"
+            onClick={(e) => {
+              e.stopPropagation();
+              window.open(`/warehouse/material-issues/${r.id}/print`, "_blank");
+            }}
+          >
+            <FileText className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    },
   ];
 
   return (
@@ -152,7 +201,33 @@ export default function MaterialIssues({
             <span className="font-mono text-xs font-semibold text-ink">{r.issue_no}</span>
             <StatusPill status={r.status} />
           </div>
-          <div className="truncate text-sm text-body">{r.issued_to_name ?? r.department_name ?? "—"}</div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="truncate text-sm text-body">{r.issued_to_name ?? r.department_name ?? "—"}</div>
+            <div className="flex items-center gap-1">
+              {r.qc_status && ["PENDING", "PARTIAL", "FAILED"].includes(r.qc_status) && (
+                <button
+                  type="button"
+                  className="text-primary hover:bg-primary-50 p-1 rounded"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    nav(`/warehouse/qc-outward/new?issue_id=${r.id}`);
+                  }}
+                >
+                  <CheckCircle className="h-4 w-4" />
+                </button>
+              )}
+              <button
+                type="button"
+                className="text-muted hover:text-ink p-1"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(`/warehouse/material-issues/${r.id}/print`, "_blank");
+                }}
+              >
+                <FileText className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
           <div className="text-[11px] text-muted">
             {fmtQty(r.total_qty)} across {r.total_items} lines · {fmtDate(r.issue_date)}
           </div>
