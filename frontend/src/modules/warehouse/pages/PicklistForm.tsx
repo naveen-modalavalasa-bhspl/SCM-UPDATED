@@ -114,7 +114,7 @@ export default function PicklistForm() {
       /* A pick raised off an issue has had its consignment raised for it by the
        * time this returns, so go there. A pick with no issue behind it (the older
        * pick-then-issue path) still goes to a new issue. */
-      if (saved.ref_type === "ISSUE") nav("/warehouse/dispatch/consignments");
+      if (saved.ref_type === "ISSUE") nav("/warehouse/consignments");
       else nav(`/warehouse/material-issues/new?picking_id=${id}`);
     },
   });

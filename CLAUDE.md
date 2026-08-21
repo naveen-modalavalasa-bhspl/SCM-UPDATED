@@ -115,9 +115,22 @@ Consignments → Dispatch → Shipments → Provider Selection → Activity Ledg
 ```
 
 **Consignments is the WAREHOUSE's document** (`out_dispatches`) and its own screen,
-mounted under `/logistics/consignments` as well as `/warehouse/*` — one implementation,
-two front doors, re-exported from `modules/warehouse`. Nothing of the warehouse's is
-touched.
+served at `/logistics/consignments` and re-exported from `modules/warehouse`, which
+still owns the implementation. `/warehouse/consignments` renders the same component
+inside the warehouse rail; nothing of the warehouse's is touched.
+
+**The warehouse's own Dispatch door is retired** (2026-08-21). `/warehouse/dispatch/*`
+was a rival lifecycle on the same table — create, submit, approve, packages, gate out
+— and `gate_out` sets DISPATCHED without ever raising a transport request, so a load
+left with no carrier, no freight, no LR and nothing in the activity ledger. 26 of the
+30 consignments on the road went out that way. The screens are no longer rendered
+(`Dispatch.tsx`, `DispatchForm.tsx` stay on disk, unimported), every `/warehouse/
+dispatch/*` path redirects into `/logistics/*`, and `wh_consignments` / `wh_dispatch`
+are in `page_registry.RETIRED_PAGES` — `is_active = 0`, grants kept, so an admin can
+put them back. `/api/warehouse/dispatches/*` stays registered: existing rows must
+still be readable, and the gate pass still prints from
+`/warehouse/dispatches/{id}/print`. `_apply_gate_out` was always shared with the
+logistics release hook, so the stock side never had two copies.
 
 **Dispatch** (`DispatchPage.tsx`, the queue → `DispatchConfirmPage.tsx`, the press →
 `POST /api/transport/dispatch-consignment`) is the one decision the floor makes: how

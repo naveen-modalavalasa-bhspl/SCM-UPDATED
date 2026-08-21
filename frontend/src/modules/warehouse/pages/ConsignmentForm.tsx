@@ -228,12 +228,14 @@ export default function ConsignmentForm() {
   // handed a logistics user over to the warehouse module mid-flow, and the module
   // rail, the tabs and the eyebrow all changed under them.
   const inLogistics = useLocation().pathname.startsWith("/logistics");
-  const listPath = inLogistics ? "/logistics/consignments" : "/warehouse/dispatch/consignments";
-  // And the next step differs with the door: the warehouse confirms the gate pass,
-  // logistics decides the MODE and raises the transport.
-  const dispatchPath = (docId: number) => (inLogistics
-    ? `/logistics/dispatch/new?consignment_id=${docId}`
-    : `/warehouse/dispatch/new?consignment_id=${docId}`);
+  // `/warehouse/consignments`, not `/warehouse/dispatch/consignments`: that path is
+  // retired and now REDIRECTS to logistics, so Back would have walked a warehouse
+  // user out of their own module.
+  const listPath = inLogistics ? "/logistics/consignments" : "/warehouse/consignments";
+  // The next step is the same screen through either door — the warehouse's own
+  // dispatch confirm is retired, and a redirect could not carry it there anyway: it
+  // would drop the `consignment_id` and open the confirm screen on nothing.
+  const dispatchPath = (docId: number) => `/logistics/dispatch/new?consignment_id=${docId}`;
 
   const [form, setForm] = useState<ConsignmentWrite>({
     issue_id: 0,

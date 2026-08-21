@@ -15,8 +15,6 @@ import MaterialIssues from "./pages/MaterialIssues";
 import MaterialIssueForm from "./pages/MaterialIssueForm";
 import Consignments from "./pages/Consignments";
 import ConsignmentForm from "./pages/ConsignmentForm";
-import Dispatch from "./pages/Dispatch";
-import DispatchForm from "./pages/DispatchForm";
 import AcknowledgeDelivery from "./pages/AcknowledgeDelivery";
 import StockSegregation from "./pages/StockSegregation";
 import WarehouseNotifications from "./pages/WarehouseNotifications";
@@ -98,12 +96,19 @@ export function WarehouseModule() {
         <Route path="consignments/new" element={<ConsignmentForm />} />
         <Route path="consignments/:id" element={<ConsignmentForm />} />
 
-        <Route path="dispatch/consignments" element={<Consignments />} />
-        <Route path="dispatch/consignments/new" element={<ConsignmentForm />} />
-        <Route path="dispatch/consignments/:id" element={<ConsignmentForm />} />
-        <Route path="dispatch" element={<Dispatch />} />
-        <Route path="dispatch/new" element={<DispatchForm />} />
-        <Route path="dispatch/:id" element={<DispatchForm />} />
+        {/* FIXED 2026-08-20 — Consignments and Dispatch are LOGISTICS screens now.
+          * The components stay here and are re-exported below (logistics mounts the
+          * SAME implementation), but this module no longer serves them: two front
+          * doors to one decision is what the split was undoing, and the warehouse
+          * copies showed none of the logistics context the desk decides on.
+          * Redirected, never deleted — a printed gate pass or an old bookmark still
+          * lands on the live screen instead of the 404 page. */}
+        <Route path="dispatch/consignments" element={<Navigate to="/logistics/consignments" replace />} />
+        <Route path="dispatch/consignments/new" element={<Navigate to="/logistics/consignments/new" replace />} />
+        <Route path="dispatch/consignments/:id" element={<ConsignmentRedirect />} />
+        <Route path="dispatch" element={<Navigate to="/logistics/dispatch" replace />} />
+        <Route path="dispatch/new" element={<Navigate to="/logistics/dispatch/new" replace />} />
+        <Route path="dispatch/:id" element={<Navigate to="/logistics/dispatch" replace />} />
 
       </Route>
 
@@ -148,16 +153,17 @@ export function WarehouseModule() {
       <Route path="material-returns/new" element={<MaterialIssueForm direction="IN" />} />
       <Route path="material-returns/:id" element={<MaterialIssueForm direction="IN" />} />
 
-      <Route path="consignments" element={<Navigate to="/warehouse/dispatch/consignments" replace />} />
-      <Route path="consignments/new" element={<Navigate to="/warehouse/dispatch/consignments/new" replace />} />
+      <Route path="consignments" element={<Navigate to="/logistics/consignments" replace />} />
+      <Route path="consignments/new" element={<Navigate to="/logistics/consignments/new" replace />} />
       <Route path="consignments/:id" element={<ConsignmentRedirect />} />
 
-      <Route path="dispatch/consignments" element={<Consignments />} />
-      <Route path="dispatch/consignments/new" element={<ConsignmentForm />} />
-      <Route path="dispatch/consignments/:id" element={<ConsignmentForm />} />
-      <Route path="dispatch" element={<Dispatch />} />
-      <Route path="dispatch/new" element={<DispatchForm />} />
-      <Route path="dispatch/:id" element={<DispatchForm />} />
+      {/* See the note above — logistics owns these screens now. */}
+      <Route path="dispatch/consignments" element={<Navigate to="/logistics/consignments" replace />} />
+      <Route path="dispatch/consignments/new" element={<Navigate to="/logistics/consignments/new" replace />} />
+      <Route path="dispatch/consignments/:id" element={<ConsignmentRedirect />} />
+      <Route path="dispatch" element={<Navigate to="/logistics/dispatch" replace />} />
+      <Route path="dispatch/new" element={<Navigate to="/logistics/dispatch/new" replace />} />
+      <Route path="dispatch/:id" element={<Navigate to="/logistics/dispatch" replace />} />
 
       {/* Where a label's QR points. Not in the menu — nobody navigates here, a camera
        * arrives here. `*` because a document number contains slashes. */}
@@ -187,7 +193,7 @@ export function WarehouseModule() {
 
 function ConsignmentRedirect() {
   const { id } = useParams();
-  return <Navigate to={`/warehouse/dispatch/consignments/${id}`} replace />;
+  return <Navigate to={`/logistics/consignments/${id}`} replace />;
 }
 
 export default WarehouseModule;
@@ -201,6 +207,10 @@ export default WarehouseModule;
  * business decides which one it wants. Retiring the warehouse copies later is then a
  * matter of switching those page rows off — no component moves and no import changes.
  */
+// Dispatch and DispatchForm are no longer imported above: this module does not render
+// them any more, it only redirects. They are still re-exported here, unchanged, because
+// the LOGISTICS module mounts these exact components — moving the files would break the
+// warehouse-side imports they carry for no gain.
 export { default as ConsignmentsScreen } from "./pages/Consignments";
 export { default as ConsignmentFormScreen } from "./pages/ConsignmentForm";
 export { default as DispatchScreen } from "./pages/Dispatch";

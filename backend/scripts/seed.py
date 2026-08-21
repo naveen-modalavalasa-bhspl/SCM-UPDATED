@@ -178,10 +178,14 @@ PAGE_TREE = [
     # page_registry.PAGES and migration 96dd19ed80c2, the other two writers of this row.
     ("wh_qc_outward", "/warehouse/qc-outward", "Outward QC", "check-circle",
      P.page_view_code("wh_qc_outward"), 51, "grp_warehouse"),
-    ("wh_consignments", "/warehouse/dispatch/consignments", "Consignments", "boxes",
-     P.DISPATCH_VIEW, 52, "grp_warehouse"),
-    ("wh_dispatch", "/warehouse/dispatch", "Dispatch", "truck",
-     P.DISPATCH_VIEW, 54, "grp_warehouse"),
+    # Consignments and Dispatch moved to LOGISTICS (2026-08-20). Left commented rather
+    # than deleted: seed_pages sets is_active = True for everything in PAGE_TREE, so a
+    # row left here would put the dead warehouse screens back on the rail at the next
+    # seed. `page_registry.RETIRED_PAGES` parks them on an existing database.
+    # ("wh_consignments", "/warehouse/dispatch/consignments", "Consignments", "boxes",
+    #  P.DISPATCH_VIEW, 52, "grp_warehouse"),
+    # ("wh_dispatch", "/warehouse/dispatch", "Dispatch", "truck",
+    #  P.DISPATCH_VIEW, 54, "grp_warehouse"),
     ("wh_ack", "/warehouse/acknowledge-delivery", "Acknowledge Delivery",
      "check-circle", P.DISPATCH_ACKNOWLEDGE, 55, "grp_warehouse"),
     # Outward Labelling and Purchase Returns were dropped from the module

@@ -338,6 +338,21 @@ async def sync_permission_labels(db: AsyncSession) -> list[str]:
 RETIRED_PAGES: list[str] = [
     "admin_approvals_config",
     "admin_workflows",
+    # FIXED 2026-08-20 — Consignments and Dispatch belong to LOGISTICS, and after the
+    # indent/approvals/logistics integration they are reached at /logistics/consignments
+    # and /logistics/dispatch. The warehouse rows were still on the rail pointing at
+    # /warehouse/dispatch/* — a second front door to a decision that is made in one
+    # place, and the one nearly every consignment was actually leaving through: a
+    # warehouse gate-out sets DISPATCHED without ever raising a transport request, so
+    # the load goes with no carrier, no freight, no LR and nothing in the activity
+    # ledger. WITHOUT retiring them the split is advertised and bypassed at once.
+    #
+    # Retired, not deleted: `retire_pages` only sets is_active = 0, so the grants on the
+    # rows survive and an admin can put them back if the split is ever reversed. The old
+    # paths redirect (modules/warehouse/index.tsx), so a bookmark still lands on the
+    # live screen.
+    "wh_consignments",
+    "wh_dispatch",
 ]
 
 
