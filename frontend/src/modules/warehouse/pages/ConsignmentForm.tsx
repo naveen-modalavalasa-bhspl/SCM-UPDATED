@@ -16,7 +16,6 @@ import {
   getConsignment,
   getIssueDispatchSource,
   issueOptions,
-  submitDispatch,
   updateConsignment,
   allWarehouseOptions,
 } from "../api";
@@ -425,20 +424,6 @@ export default function ConsignmentForm() {
     },
   });
 
-  // The release step. `transport_release_blocked` refuses a dispatch while the project's
-  // DISPATCH ladder still owes a signature and tells the user to send it for release
-  // here — this is the press it names. Where no ladder is configured the chain resolves
-  // to NO_APPROVAL and the consignment comes straight back APPROVED, which gate-out has
-  // always accepted, so nothing changes for a site that never asked for a signature.
-  const sendForRelease = useMutation({
-    mutationFn: () => submitDispatch(Number(id)),
-    onSuccess: (saved: Dispatch) => {
-      qc.invalidateQueries({ queryKey: ["wh-consignments"] });
-      qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
-      qc.invalidateQueries({ queryKey: ["wh-consignment", String(saved.id)] });
-    },
-  });
-
   const locked = !!doc && !["DRAFT", "PACKED"].includes(doc.status);
   const destination = destinationOf(doc, source);
   const destinationSac = destinationSacOf(doc, source);
@@ -686,19 +671,13 @@ export default function ConsignmentForm() {
             <Button variant="ghost" onClick={() => nav(listPath)}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            {doc?.status === "PACKED" && (
-              <Can do="dispatch.create">
-                <Button variant="soft" onClick={() => sendForRelease.mutate()}
-                        disabled={sendForRelease.isPending}>
-                  <CheckCircle2 className="h-4 w-4" />
-                  {sendForRelease.isPending ? "Sending..." : "Send for release"}
-                </Button>
-              </Can>
-            )}
-            {/* APPROVED as well as PACKED: a consignment that WAS sent for release
-                comes back APPROVED, and gating this press on PACKED alone left it
-                with no way forward at all — the release button is gone by then, the
-                form is locked, and the only control left on the screen was Back. */}
+            {/* APPROVED as well as PACKED. Nothing on THIS screen releases a
+                consignment any more, but `transport_release_blocked` still submits
+                one to its DISPATCH ladder on the dispatch press, and the warehouse's
+                own Dispatch screen still has a release button — so APPROVED is a
+                state a consignment reaches, and gating this press on PACKED alone
+                left it with no way forward at all: the form is locked by then and
+                the only control on the page was Back. */}
             {(doc?.status === "PACKED" || doc?.status === "APPROVED") && (
               <Can do={inLogistics ? "transport.create" : "dispatch.gate_out"}>
                 {/* This press does not dispatch anything — it opens the screen where
@@ -722,7 +701,7 @@ export default function ConsignmentForm() {
         }
       />
 
-      <ErrorBanner error={save.error ?? sendForRelease.error ?? loadIssue.error} />
+      <ErrorBanner error={save.error ?? loadIssue.error} />
 
       {/* The issue came out of the point that raised the indent, so there is no
           journey to record. Saying nothing left a blank destination on screen, a
