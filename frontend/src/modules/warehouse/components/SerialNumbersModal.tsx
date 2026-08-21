@@ -107,6 +107,31 @@ export function SerialNumbersModal({
     const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
     /**
+     * Tick the whole list in one press.
+     *
+     * Issuing 200 handsets off a bin meant 200 individual clicks, or 200 scans, for a
+     * decision the storekeeper had already made — the units are all in the same bin and
+     * the line is for all of them. Bounded by the SAME ceiling a scan is: never more
+     * than the line asks for, so it fills the remaining slots and stops.
+     *
+     * It follows the search box. With a filter typed, "all" means the units on screen,
+     * which is how a storekeeper picks one batch out of a mixed bin; clearing the search
+     * offers the rest. Already-selected units are left alone rather than re-added.
+     */
+    const addable = visible.filter((s) => !selected.has(s));
+    const room = required - selected.size;
+    const willAdd = Math.max(0, Math.min(room, addable.length));
+    const selectAll = () => {
+      if (willAdd <= 0) return;
+      setError(null);
+      setSerials((rows) => [...rows, ...addable.slice(0, willAdd)]);
+    };
+    const clearAll = () => {
+      setError(null);
+      setSerials([]);
+    };
+
+    /**
      * One scan of the gun. Enter fires this; the box is cleared either way so the
      * next barcode lands in an empty field without anyone touching the keyboard.
      *
@@ -197,6 +222,38 @@ export function SerialNumbersModal({
                 )}
               </span>
             </div>
+
+            {selectMode && !readOnly && (available ?? []).length > 0 && (
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                {/* `disabled`, not `isDisabled`: the shared Button forwards only the
+                  * former (see shared/components/ui.tsx), so the latter would be
+                  * dropped and the button would stay pressable at the ceiling. */}
+                <Button
+                  variant="soft"
+                  disabled={willAdd <= 0}
+                  onClick={selectAll}
+                >
+                  {/* Says what the press will actually do. "Select all" on a bin holding
+                    * more units than the line asks for would be a promise it cannot
+                    * keep, and the ceiling is the reason it stops short. */}
+                  {willAdd > 0 && willAdd < addable.length
+                    ? `Select first ${willAdd}`
+                    : `Select all${entry.trim() ? " shown" : ""}`}
+                </Button>
+                <Button
+                  variant="subtle"
+                  disabled={selected.size === 0}
+                  onClick={clearAll}
+                >
+                  Clear
+                </Button>
+                {willAdd <= 0 && selected.size >= required && (
+                  <span className="text-xs text-muted">
+                    This line is full at {required}.
+                  </span>
+                )}
+              </div>
+            )}
 
             {(available ?? []).length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">
