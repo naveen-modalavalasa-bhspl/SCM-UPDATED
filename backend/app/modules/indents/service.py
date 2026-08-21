@@ -6263,6 +6263,16 @@ _BATCH_STATUSES = (
     IndentStatus.APPROVED.value,
     IndentStatus.AWAITING_ALLOCATION.value,
     IndentStatus.PARTIALLY_FULFILLED.value,
+    # A cycle member whose shortfall went to procurement is not finished and not done
+    # with the store: the goods arrive, the allocation reopens
+    # (`allocations.reopen_for_receipt`) and the rest is handed over. Left out, a
+    # monthly indent that reached PENDING_PROCUREMENT vanished from the cycle row AND
+    # from the screen it opens — the one status the regular queue has always kept
+    # (`_ALLOCATION_ELIGIBLE_STATUSES`, `list_fulfilment_queue`) was the one a monthly
+    # indent could not survive. What is still OWED on it is worked out line by line
+    # below and net of `_on_order_by_lines`, so re-listing it cannot re-offer quantity
+    # procurement is already buying.
+    IndentStatus.PENDING_PROCUREMENT.value,
 )
 
 #: Cycles that owe nothing more. Out of the queue by default, reachable on request.
@@ -6428,6 +6438,11 @@ async def fulfilment_batches(db: AsyncSession, user,
     # covered by a live allocation — counted by the row, absent from the list below.
     committed = await _committed_by_lines(
         db, [line.id for ind in indents for line in ind.items])
+    # Quantity already with procurement. Subtracted alongside `committed` so a cycle
+    # member sitting in PENDING_PROCUREMENT counts as "waiting on goods", never as
+    # "still to allocate" — the row and the Submit behind it agree again.
+    on_order = await _on_order_by_lines(
+        db, [line.id for ind in indents for line in ind.items])
     in_approval = await _indents_in_allocation_approval(
         db, [ind.id for ind in indents])
 
@@ -6436,7 +6451,7 @@ async def fulfilment_batches(db: AsyncSession, user,
         lines = [line for ind in group for line in ind.items]
         owed = [ind for ind in group
                 if ind.status in _BATCH_STATUSES and ind.id not in in_approval
-                and _has_demand(ind, committed)]
+                and _has_demand(ind, committed, on_order)]
         waiting = [ind for ind in group if ind.id in in_approval]
         # A cycle with nothing left to allocate leaves the queue — right until somebody
         # wants to look back at the one they just finished and finds it gone, with no
@@ -6473,12 +6488,10 @@ async def fulfilment_batches(db: AsyncSession, user,
             # 7 — true figures, different questions, printed under one word.
             "owed_item_count": len({
                 line.item_id for ind in owed for line in ind.items
-                if owed_quantity(line) - _d(line.allocated_quantity)
-                - committed.get(line.id, Decimal("0")) > 0}),
+                if _line_pending(line, committed, on_order) > 0}),
             "owed_line_count": len([
                 line for ind in owed for line in ind.items
-                if owed_quantity(line) - _d(line.allocated_quantity)
-                - committed.get(line.id, Decimal("0")) > 0]),
+                if _line_pending(line, committed, on_order) > 0]),
             "requester_count": len({ind.requested_by_id for ind in group}),
             "urgent_count": sum(1 for ind in owed
                                 if ind.priority == Priority.URGENT.value),
@@ -6517,6 +6530,30 @@ async def _committed_by_lines(db: AsyncSession,
     )).all()}
 
 
+async def _on_order_by_lines(db: AsyncSession,
+                             line_ids: list[int]) -> dict[int, Decimal]:
+    """`_on_order_by_line` for many indents at once — one query for a whole cycle.
+
+    Quantity already handed to procurement as a material request. The single-indent
+    guards subtract it (`create_allocation_for_indent`), so the cycle screens must
+    too: without it a line whose shortage is already being bought is offered again,
+    and `_reject_over_allocation` can only refuse the Submit it invited.
+
+    Same status filter as everywhere else — a rejected, cancelled or received request
+    holds no demand.
+    """
+    if not line_ids:
+        return {}
+    return {int(row[0]): _d(row[1]) for row in (await db.execute(
+        select(MaterialRequestItem.indent_item_id,
+               func.coalesce(func.sum(MaterialRequestItem.quantity), 0))
+        .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+        .where(MaterialRequestItem.indent_item_id.in_(line_ids),
+               MaterialRequest.status.notin_(_SETTLED_MR_STATUSES))
+        .group_by(MaterialRequestItem.indent_item_id)
+    )).all() if row[0]}
+
+
 async def _indents_in_allocation_approval(db: AsyncSession,
                                           indent_ids: list[int]) -> set[int]:
     """Indents an unapproved allocation is already in flight for.
@@ -6535,17 +6572,33 @@ async def _indents_in_allocation_approval(db: AsyncSession,
     )).all()}
 
 
-def _has_demand(indent: Indent, committed: dict[int, Decimal]) -> bool:
+def _has_demand(indent: Indent, committed: dict[int, Decimal],
+                on_order: dict[int, Decimal] | None = None) -> bool:
     """Is any quantity on this indent still unspoken for?
 
     The same arithmetic `fulfilment_batch` builds its item rows from, so a cycle's
-    "still to allocate" count and the list of what to allocate cannot disagree.
+    "still to allocate" count and the list of what to allocate cannot disagree —
+    including `on_order`, which is quantity procurement is already buying and which no
+    allocation may be raised against a second time.
     """
+    on_order = on_order or {}
     return any(
-        owed_quantity(line) - _d(line.allocated_quantity)
-        - committed.get(line.id, Decimal("0")) > 0
+        _line_pending(line, committed, on_order) > 0
         for line in indent.items
     )
+
+
+def _line_pending(line, committed: dict[int, Decimal],
+                  on_order: dict[int, Decimal]) -> Decimal:
+    """What one indent line is still owed off the shelf.
+
+    The single definition the cycle row, the cycle screen and the item-first demand
+    list all read, so they cannot drift apart again.
+    """
+    return (owed_quantity(line)
+            - _d(line.allocated_quantity)
+            - committed.get(line.id, Decimal("0"))
+            - on_order.get(line.id, Decimal("0")))
 
 
 async def _consolidations_by_key(db: AsyncSession, keys) -> dict[str, Consolidation]:
@@ -6648,6 +6701,11 @@ async def fulfilment_batch(db: AsyncSession, user,
     # An allocation already in flight owns the whole indent until it is signed or
     # cancelled (`allocations.ensure_no_active`), so these lines are not on offer here
     # however much is left on them. Listing them produced a Submit that could only fail.
+    # What procurement is already buying for these lines. `create_allocation_for_indent`
+    # refuses a second allocation against it, so offering it here produced a Submit
+    # that could only come back refused — and, on a cycle, one refusal per indent.
+    on_order = await _on_order_by_lines(db, line_ids)
+
     in_approval = await _indents_in_allocation_approval(
         db, [indent.id for indent in indents])
 
@@ -6656,9 +6714,7 @@ async def fulfilment_batch(db: AsyncSession, user,
         if indent.id in in_approval:
             continue
         for line in indent.items:
-            pending = (owed_quantity(line)
-                       - _d(line.allocated_quantity)
-                       - committed.get(line.id, Decimal("0")))
+            pending = _line_pending(line, committed, on_order)
             if pending <= 0:
                 continue
             by_item[line.item_id].append({

@@ -31,6 +31,18 @@ interface ItemPlan {
   /** Lines the allocator typed over, as raw strings so a half-typed "1" on the way to
    *  "12" is not clamped out from under the cursor. */
   edited: Record<number, string>;
+  /** Send what no shelf can cover to procurement.
+   *
+   *  The single-indent screen has never needed a flag: it posts a ZERO row for a line
+   *  it is giving nothing to, and the backend turns the unservable part of it into a
+   *  material request. This screen skipped those lines entirely, so a monthly cycle's
+   *  out-of-stock demand was silently dropped — the indent was never even submitted.
+   *
+   *  A flag rather than always-on because one press here decides a whole cycle: an
+   *  item nobody has looked at yet must not commit nine hundred indents to a purchase.
+   *  Defaulted ON only when the shelves hold NOTHING, where procurement is the only
+   *  possible answer and there is no quantity to type. */
+  procure: boolean;
 }
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -93,6 +105,10 @@ const defaultPlan = (item: BatchDemandItem): ItemPlan => {
       qty: String(Math.min(first?.available_qty ?? 0, item.total_demand)),
     }],
     edited: {},
+    // Nothing on any shelf: there is no allocation to make, so the only outcome this
+    // row can have is a material request. Anything partly covered stays off until the
+    // allocator says how much he is giving.
+    procure: item.available_total <= 0 && item.total_demand > 0,
   };
 };
 
@@ -129,22 +145,42 @@ function buildDecisions(
   const out: AllocationDecision[] = [];
   for (const line of item.demand) {
     let need = shares.get(line.indent_item_id) ?? 0;
-    if (need <= 0) continue;
-    for (const pool of pools) {
-      if (need <= 0) break;
-      const take = round3(Math.min(pool.left, need));
-      if (take <= 0) continue;
+    // The line's requested quantity belongs to the LINE, not to each split. Repeating
+    // it on every row made the backend read one line asking 10 and served 6+4 as two
+    // lines each 4 and 6 short — a material request for goods that were handed over.
+    // Same rule the single-indent screen applies: first row only.
+    let first = true;
+    const push = (quantity: number, warehouse: number | null) => {
       out.push({
         indent_item_id: line.indent_item_id,
         item_id: item.item_id,
         item_code: item.item_code ?? undefined,
         item_name: item.item_name ?? undefined,
         uom_code: item.uom_code ?? undefined,
-        requested_qty: line.pending_qty,
-        quantity: take,
-        warehouse_id: pool.wh,
+        requested_qty: first ? line.pending_qty : 0,
+        quantity,
+        warehouse_id: warehouse,
         project_id: 0,
       });
+      first = false;
+    };
+
+    if (need <= 0) {
+      // "Give nothing" is a decision, and the ONLY way this line reaches procurement:
+      // the backend works the shortfall out of `requested_qty - quantity` and raises
+      // one material request for the indent. Skipped, the line was dropped from the
+      // payload, its indent was never submitted at all, and a whole cycle's
+      // out-of-stock demand went nowhere. Withheld on purpose (stock is there, the
+      // allocator chose not to give it) stays skipped: the backend also refuses to buy
+      // what is sitting on the shelf, but not sending it keeps the allocation honest.
+      if (plan.procure) push(0, null);
+      continue;
+    }
+    for (const pool of pools) {
+      if (need <= 0) break;
+      const take = round3(Math.min(pool.left, need));
+      if (take <= 0) continue;
+      push(take, pool.wh);
       pool.left = round3(pool.left - take);
       need = round3(need - take);
     }
@@ -329,9 +365,11 @@ function ItemRow({ item, plan, onChange }: {
             Giving <strong className="text-ink">{fmt(handed)} {item.uom_code ?? ""}</strong>
             {" "}of {fmt(item.total_demand)} asked.
             {unavailable > 0 && (
-              <span className="text-warning">
-                {" "}· {fmt(unavailable)} {item.uom_code ?? ""} goes to procurement —
-                nothing on any shelf covers it
+              <span className={plan.procure ? "text-warning" : "text-muted"}>
+                {" "}· {fmt(unavailable)} {item.uom_code ?? ""}
+                {plan.procure
+                  ? " goes to procurement — nothing on any shelf covers it"
+                  : " cannot be served from any shelf — tick below to buy it in"}
               </span>
             )}
             {withheld > 0 && (
@@ -362,6 +400,30 @@ function ItemRow({ item, plan, onChange }: {
               </button>
             )}
           </p>
+
+          {/* The one thing this screen could not say. A line given nothing is only
+              sent as a zero decision when this is ticked, and that zero is what the
+              backend turns into a material request — exactly what the single-indent
+              screen has always posted. Ticked by default when no shelf holds any of
+              it, because then there is no other answer to give. */}
+          {unavailable > 0 && (
+            <label className="mb-3 flex min-h-11 items-center gap-2 text-sm text-ink">
+              <input
+                type="checkbox"
+                checked={plan.procure}
+                onChange={(e) => onChange({ ...plan, procure: e.target.checked })}
+                className="h-4 w-4"
+                aria-label={`Send the shortfall of ${item.item_name ?? "this item"} to procurement`}
+              />
+              <span>
+                Send the {fmt(unavailable)} {item.uom_code ?? ""} no shelf can cover to
+                procurement
+                <span className="ml-1 text-muted">
+                  — raises a material request on each indent's own approval ladder
+                </span>
+              </span>
+            </label>
+          )}
 
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
