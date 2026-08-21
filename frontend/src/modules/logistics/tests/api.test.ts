@@ -32,9 +32,14 @@ describe("logistics api", () => {
     expect(Object.keys(consignmentApi).sort()).toEqual(["get", "list"]);
   });
 
-  it("gives the carrier the four things they can do to a job", () => {
+  it("gives the carrier what they can do to a job, and nothing more", () => {
+    // `acknowledge` is the award answered WITH the driver and vehicle, and
+    // `carriageModes` is the routing they are allowed to pick from — both read off
+    // the same rules the desk's own screens are held to. Still no create, edit or
+    // delete: a carrier answers a shipment, it never raises one.
     expect(Object.keys(carrierPortalApi).sort()).toEqual(
-      ["accept", "decline", "deliver", "get", "list", "quote", "summary", "track"].sort(),
+      ["accept", "acknowledge", "carriageModes", "decline", "deliver", "get", "list",
+       "quote", "summary", "track"].sort(),
     );
   });
 

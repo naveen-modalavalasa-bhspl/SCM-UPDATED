@@ -35,7 +35,14 @@ const EXPECTED_REQUEST_STATUS_FILTERS = [
   ["Fulfilled", "CLOSED"],
 ] as const;
 
+// The journey read newest-first, which is the order the filter offers them in. The
+// outward leg — issued, dispatched, acknowledged — joined the ledger when the indent
+// stopped ending at allocation, so a request can now be asked what actually reached
+// the site. Mirrors `INDENT_ACTIVITY_EVENT_FILTER_OPTIONS` exactly.
 const EXPECTED_ACTIVITY_EVENT_FILTERS = [
+  ["Receipt acknowledged", "RECEIPT_ACKNOWLEDGED"],
+  ["Material dispatched", "MATERIAL_DISPATCHED"],
+  ["Material issued", "MATERIAL_ISSUED"],
   ["Stock allocated", "STOCK_ALLOCATED"],
   ["Approval completed", "APPROVAL_COMPLETED"],
   ["Request submitted", "REQUEST_SUBMITTED"],
@@ -1309,7 +1316,7 @@ describe("indent UI shell", () => {
     expect(screen.getByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
   });
 
-  it("shows exactly the four Activity ledger event options and maps each label", async () => {
+  it("shows exactly the seven Activity ledger event options and maps each label", async () => {
     renderWithProviders(<IndentReportsPage />, "/indents/reports");
 
     expect(await screen.findByRole("searchbox", { name: "Search indents" })).toHaveAttribute(
