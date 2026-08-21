@@ -1759,6 +1759,17 @@ async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
     await inventory_service.mark_mrs_received(
         db, await _receipts_by_indent_line(db, po, lines, received))
 
+    # FIXED 2026-08-21 — `mark_mrs_received` only reopens an allocation when the MR it
+    # settles carries the indent that raised it. Stock bought against a DIFFERENT
+    # indent, or on a manually raised MR, reached the shelf and woke nothing: the
+    # allocation stayed on AWAITING_PROCUREMENT and its indent stayed out of the
+    # Fulfilment Queue with the goods sitting in a bin. Availability decides here, not
+    # lineage — see `allocations.reopen_for_available_stock`.
+    from app.modules.inventory import allocations as stock_allocations
+
+    await stock_allocations.reopen_for_available_stock(
+        db, {line.item_id for line in lines if line.item_id})
+
 
 async def _receipts_by_indent_line(db: AsyncSession, po, lines,
                                    received: dict[int, Decimal]) -> dict[int, Decimal]:

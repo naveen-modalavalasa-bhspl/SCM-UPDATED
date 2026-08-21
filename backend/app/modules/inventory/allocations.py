@@ -771,6 +771,80 @@ async def _attach_totals(db: AsyncSession, rows) -> None:
         row.requested_total = float(_d(requested))
 
 
+async def warehouse_available(db: AsyncSession, item_ids: set[int]) -> dict[int, Decimal]:
+    """Free stock at the WAREHOUSE tier only, per item.
+
+    LIP and MDP hold real stock, but it is theirs — a unit sitting at a LIP is not
+    something the warehouse can issue, and counting it would wake an indent the
+    warehouse still cannot serve. Same rule `main_available_qty` applies on the
+    allocation screen, so the reopen below and the Give figure the approver then sees
+    are computed off the same stock.
+    """
+    if not item_ids:
+        return {}
+    rows = (await db.execute(
+        select(Stock.item_id, func.coalesce(func.sum(Stock.available_qty), 0))
+        .join(Warehouse, Warehouse.id == Stock.warehouse_id)
+        .where(Stock.item_id.in_(item_ids),
+               Warehouse.warehouse_type.notin_(list(_CHAIN_TYPES)))
+        .group_by(Stock.item_id)
+    )).all()
+    return {item_id: _d(qty) for item_id, qty in rows}
+
+
+async def reopen_for_available_stock(db: AsyncSession, item_ids: set[int]) -> list[int]:
+    """Wake every allocation parked on procurement whose goods are now on the shelf.
+
+    FIXED 2026-08-21 — the only path back from AWAITING_PROCUREMENT was
+    `reopen_for_receipt`, keyed on the indent whose shortfall raised the material
+    request. That covers exactly one case: goods bought against THIS indent, through an
+    MR that carries its id. It misses every other way the stock actually turns up —
+    a manually raised MR, a purchase made for a different indent that happens to cover
+    this one, a transfer in, a return to stock. IND/2026-27/00089 sat on
+    PENDING_PROCUREMENT with its 30 monitors already in the bin for exactly this reason.
+    WITHOUT this an allocation can be stranded by stock the warehouse is holding.
+
+    Availability decides, not lineage: any stock of the item, however it arrived, is
+    stock the approver can give. Warehouse tier only — see `warehouse_available`.
+
+    Idempotent by construction: an allocation already reopened is PENDING_APPROVAL, not
+    AWAITING_PROCUREMENT, so a second receipt of the same item does not touch it.
+    """
+    if not item_ids:
+        return []
+    parked = (await db.execute(
+        select(Allocation)
+        .where(
+            Allocation.status == AllocationStatus.AWAITING_PROCUREMENT.value,
+            Allocation.id.in_(
+                select(AllocationItem.allocation_id)
+                .where(AllocationItem.item_id.in_(item_ids))
+            ),
+        )
+    )).scalars().all()
+    if not parked:
+        return []
+
+    on_shelf = await warehouse_available(db, item_ids)
+    indent_ids = []
+    for alloc in parked:
+        wanted = (await db.execute(
+            select(AllocationItem.item_id)
+            .where(AllocationItem.allocation_id == alloc.id,
+                   AllocationItem.item_id.in_(item_ids))
+        )).scalars().all()
+        # One line's goods arriving is enough: the approver opens the document and tops
+        # up what they can. Waiting for every short line would strand a two-line
+        # allocation on the slower half of it.
+        if any(on_shelf.get(item_id, ZERO) > ZERO for item_id in wanted):
+            indent_ids.append(alloc.indent_id)
+
+    reopened: list[int] = []
+    for indent_id in dict.fromkeys(indent_ids):
+        reopened.extend(await reopen_for_receipt(db, indent_id))
+    return reopened
+
+
 async def reopen_for_receipt(db: AsyncSession, indent_id: int) -> list[int]:
     """Put an allocation waiting on procurement back in front of its approver.
 
