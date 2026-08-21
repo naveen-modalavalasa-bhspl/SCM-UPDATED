@@ -1206,8 +1206,12 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
         if item is None:
             raise NotFoundError(f"Item {line['item_id']} not found")
         resolved.append({
-            "item_id": item.id, "item_code": item.item_code,
-            "item_name": item.item_name, "uom_code": item.uom_code,
+            # FIXED 2026-08-21 — `item` is the MASTER row (`mst_items`), whose columns
+            # are `code` and `name`. Reading `item_code`/`item_name` off it raised
+            # AttributeError and 500'd every manual material request. The snapshot keys
+            # keep the document's own names; only the source attributes were wrong.
+            "item_id": item.id, "item_code": item.code,
+            "item_name": item.name, "uom_code": item.uom_code,
             "quantity": quantity,
             "project_id": line.get("project_id") or project_id or NO_PROJECT,
             "indent_item_id": line.get("indent_item_id"),

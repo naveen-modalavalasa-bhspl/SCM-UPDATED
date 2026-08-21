@@ -533,7 +533,13 @@ class OutboundInspectionItemRead(_Read):
     defect_type: str | None = None
     rejection_reason: str | None = None
     remarks: str | None = None
-    serial_numbers: dict[str, list[str]] | list[str] | None = None
+    # FIXED 2026-08-21 — a stored line can hold PER-UNIT rows
+    # ({imei_no, serial_number, asset_code, consumable_code}), not just bare strings,
+    # and this read model rejected them: GET /outbound-inspections/{id} answered 500
+    # with ResponseValidationError on any inspection carrying them (id 6 is the live
+    # proof, 32 occurrences in sys_app_logs). A read model must be able to render what
+    # the column actually holds; the WRITE side still takes strings and is unchanged.
+    serial_numbers: dict[str, list[str]] | list[str] | list[dict] | None = None
 
 class OutboundInspectionRead(_Read):
     id: int
