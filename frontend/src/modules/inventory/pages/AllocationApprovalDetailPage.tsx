@@ -105,6 +105,16 @@ export function AllocationApprovalDetailPage() {
       ? "Approve, reserve and raise MR"
       : revisions.length ? "Approve revised and reserve" : "Approve and reserve";
 
+  // FIXED 2026-08-21 — approving with every Give at 0 while the shelf is full is
+  // almost always a slip: the approver opened a reopened allocation, read "Free now
+  // 30", and pressed Approve without touching the Give column, which signs the
+  // document for nothing and sends the indent back round. Giving nothing IS a real
+  // decision — the request may be premature, or the goods earmarked — so this asks
+  // rather than blocks.
+  const freeTotal = (a?.items ?? []).reduce(
+    (sum, item) => sum + Number(freeFor(item.id)?.free ?? 0), 0);
+  const givingNothingWithStock = givenTotal <= 0 && freeTotal > 0;
+
   const overCap = (a?.items ?? []).some((item) => {
     const typed = edits[item.id];
     if (typed === undefined || typed === "") return false;
@@ -355,7 +365,14 @@ export function AllocationApprovalDetailPage() {
                 <Can do="allocation.approve_reserve">
                   <Button
                     disabled={act.isPending || overCap}
-                    onClick={() => act.mutate({ approve: true })}
+                    onClick={() => void (async () => {
+                      // See `givingNothingWithStock`.
+                      if (givingNothingWithStock && !(await alerts.confirm(
+                        "allocation.give_nothing",
+                        { free: freeTotal, requested: requestedTotal },
+                      ))) return;
+                      act.mutate({ approve: true });
+                    })()}
                   >
                     <CheckCircle2 className="h-4 w-4" />
                     {approveLabel}

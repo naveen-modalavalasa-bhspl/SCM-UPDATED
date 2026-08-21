@@ -886,6 +886,53 @@ async def reopen_for_available_stock(db: AsyncSession, item_ids: set[int]) -> li
     return reopened
 
 
+async def _prefill_from_shelf(db: AsyncSession, alloc: Allocation) -> None:
+    """Fill a reopened allocation's Give with what the warehouse can now serve.
+
+    FIXED 2026-08-21 — a reopened allocation came back with Give still 0, the number
+    it was parked with. The whole reason the document is in front of the approver again
+    is that the goods arrived, so asking them to retype the quantity the system already
+    knows is how ALL/2026-27/00075 got signed for nothing with 30 monitors on the shelf.
+
+    Never MORE than was asked for, and never less than what is already there: this is a
+    starting point the approver can revise down, not a decision made for them. A line
+    that already carries a quantity is left alone — a part-served line was decided by a
+    person and must not be quietly rewritten.
+
+    Warehouse tier only, same rule as `reopen_for_available_stock` and
+    `main_available_qty`: stock at a LIP is not the warehouse's to give.
+    """
+    await db.refresh(alloc, ["items"])
+    short = [line for line in alloc.items
+             if _d(line.quantity) <= ZERO and _d(line.requested_qty) > ZERO]
+    if not short:
+        return
+    free = await warehouse_available(db, {line.item_id for line in short})
+    # Which point to name. `warehouse_available` sums the tier, so the line is pinned to
+    # the point actually holding the stock — an allocation line with a quantity and no
+    # warehouse cannot be reserved against anything.
+    points = {}
+    for item_id in {line.item_id for line in short}:
+        row = (await db.execute(
+            select(Stock.warehouse_id, Stock.warehouse_name)
+            .join(Warehouse, Warehouse.id == Stock.warehouse_id)
+            .where(Stock.item_id == item_id,
+                   Stock.available_qty > 0,
+                   Warehouse.warehouse_type.notin_(list(_CHAIN_TYPES)))
+            .order_by(Stock.available_qty.desc())
+            .limit(1)
+        )).first()
+        if row:
+            points[item_id] = row
+    for line in short:
+        can_give = min(_d(line.requested_qty), free.get(line.item_id, ZERO))
+        point = points.get(line.item_id)
+        if can_give <= ZERO or point is None:
+            continue
+        line.quantity = can_give
+        line.warehouse_id, line.warehouse_name = point[0], point[1]
+
+
 async def reopen_for_receipt(db: AsyncSession, indent_id: int) -> list[int]:
     """Put an allocation waiting on procurement back in front of its approver.
 
@@ -925,6 +972,7 @@ async def reopen_for_receipt(db: AsyncSession, indent_id: int) -> list[int]:
             continue
         alloc.status = AllocationStatus.PENDING_APPROVAL.value
         alloc.approved_at = None
+        await _prefill_from_shelf(db, alloc)
         await db.flush()
         await engine.start(
             db, doc_type=await doc_type_for(db, alloc.id), doc_id=alloc.id,
@@ -1073,8 +1121,24 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                 "requester_position_id": getattr(user, "active_position_id", None),
             })
 
+    # FIXED 2026-08-21 — this read `given_total` alone, so "gave nothing because there
+    # is nothing to give" and "gave nothing because the approver never typed a number"
+    # produced the identical status. The second case parks the indent on
+    # PENDING_PROCUREMENT with NO material request behind it: nothing is on order, so
+    # no receipt will ever fire `reopen_for_available_stock`, and the document sits
+    # waiting for goods that were already on the shelf when it was signed.
+    #
+    # PENDING_PROCUREMENT is a claim that somebody is buying this. It is only true when
+    # a shortfall was actually raised, so it is `shortfalls` that decides it — not the
+    # quantity, which says nothing about whether the stock exists.
     if given_total <= ZERO:
-        return IndentStatus.PENDING_PROCUREMENT.value, bool(shortfalls)
+        return ((IndentStatus.PENDING_PROCUREMENT.value if shortfalls
+                 # Nothing given and nothing ordered: the goods are there and the
+                 # approver simply did not take them. The indent stays exactly where it
+                 # was — allocatable — rather than being parked behind a purchase that
+                 # is not happening.
+                 else IndentStatus.AWAITING_ALLOCATION.value),
+                bool(shortfalls))
     if given_total >= requested_total:
         return IndentStatus.ALLOCATED.value, bool(shortfalls)
     return IndentStatus.PARTIALLY_FULFILLED.value, bool(shortfalls)

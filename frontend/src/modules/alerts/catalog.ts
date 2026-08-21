@@ -213,6 +213,11 @@ const DEFINITIONS: AlertDef[] = [
     "Issue",
   ),
   confirm(
+    "allocation.give_nothing", "warning", "Approve without giving anything?",
+    "{free} is free on the shelf and you are giving 0 of the {requested} asked for. The request stays open and nothing is reserved — nobody is buying this, so it will come back to you unchanged.",
+    "Approve anyway",
+  ),
+  confirm(
     "allocation.override", "warning", "Override allocation?",
     "You are allocating more than the system suggested for {item}. The override and your reason are logged against the request.",
     "Override",
