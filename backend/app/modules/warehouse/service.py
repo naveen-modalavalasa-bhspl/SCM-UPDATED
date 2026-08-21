@@ -6282,18 +6282,39 @@ async def _raise_outbound_inspection_for(
         if not item.requires_qi:
             continue
             
-        # Collect serials for this line
+        # FIXED 2026-08-21 — one STRING per unit, seeded once.
+        #
+        # This appended a dict per entry, but `serial_numbers` is a list of strings
+        # everywhere else it is touched: `OutboundInspectionItemWrite` accepts only
+        # `dict[str, list[str]] | list[str]`, and `_apply_outbound_inspection_lines`
+        # calls `.strip()` on each value. So Complete inspection was refused with one
+        # validation error per unit — QC/2026-27/00019 could not be signed at all — and
+        # reading the document back 500'd on ResponseValidationError.
+        #
+        # And it counted every unit twice. `_issued_serial_index` is a LOOKUP keyed on
+        # any identifier: the same row is filed under its serial, its asset code and its
+        # consumable code, which is right for resolving a scan and wrong to iterate as
+        # though it were a list of units. 196 units carrying both a serial and an asset
+        # code seeded 392 entries, which is the number the Accepted serials column showed.
+        #
+        # Deduplicated on the unit's own id, and named by whichever identifier it
+        # actually carries — the same value the issue hands the picker, so QC and the
+        # issue speak about a unit with one name.
         line_serials = []
         if item.is_serial_tracked:
-            # Match serials by item_id and batch_id
-            for sn, s_row in issued_serials.items():
-                if s_row.item_id == line.item_id and (not line.batch_id or s_row.batch_id == line.batch_id):
-                    line_serials.append({
-                        "serial_no": s_row.serial_number,
-                        "imei_no": s_row.imei,
-                        "asset_code": s_row.asset_code,
-                        "consumable_code": s_row.consumable_code
-                    })
+            seen_units: set[int] = set()
+            for s_row in issued_serials.values():
+                if s_row.id in seen_units:
+                    continue
+                if s_row.item_id != line.item_id:
+                    continue
+                if line.batch_id and s_row.batch_id != line.batch_id:
+                    continue
+                seen_units.add(s_row.id)
+                marker = (s_row.serial_number or s_row.asset_code
+                          or s_row.consumable_code)
+                if marker:
+                    line_serials.append(marker)
 
         inspection.items.append(m.OutboundInspectionItem(
             issue_item_id=line.id, item_id=line.item_id,
