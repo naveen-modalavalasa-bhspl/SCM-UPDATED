@@ -351,6 +351,10 @@ export interface MovementRow {
   value?: number | null;
   /** JSON list — one movement can carry a whole putaway of serials. */
   serial_numbers?: string[] | null;
+  /** The lot the movement touched. Needed to find its units in the serial summary,
+   *  which files PLACED units under item:warehouse:bin:batch. */
+  bin_id?: number | null;
+  batch_id?: number | null;
   asset_code?: string | null;
   consumable_code?: string | null;
   ref_type?: string | null;

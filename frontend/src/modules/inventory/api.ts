@@ -119,6 +119,15 @@ const toLedger = (r: MovementRow): StockLedgerItem => ({
   unit_rate: r.rate == null ? null : num(r.rate),
   total_value: r.value == null ? null : num(r.value),
   serial_number: r.serial_numbers?.length ? r.serial_numbers.join(", ") : undefined,
+  // FIXED 2026-08-21 — the lot the movement touched. THIS is why the ledger showed a
+  // dash for units that were sitting correctly coded in `whs_serial_numbers`: the row
+  // reached the screen through this mapper, which dropped bin and batch, so the unit
+  // lookup asked for `item:warehouse::` — a key `indexSerials` only ever writes for
+  // UNPLACED units — and missed every put-away lot. Adding the fields to the API and
+  // to the row type was necessary and not sufficient; the mapper in between has to
+  // carry them.
+  bin_id: r.bin_id ?? undefined,
+  batch_id: r.batch_id ?? undefined,
   asset_code: r.asset_code ?? undefined,
   consumable_code: r.consumable_code ?? undefined,
   reference_no: r.ref_no ?? undefined,

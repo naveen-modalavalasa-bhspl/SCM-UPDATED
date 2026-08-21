@@ -457,9 +457,30 @@ export function StockLedgerView() {
             </SheetSection>
             <SheetSection title="Context">
               <SheetRow label="Item code" value={selected.item_code} />
-              <SheetRow label="Serial / IMEI" value={selected.serial_number} />
-              <SheetRow label="Asset code" value={selected.asset_code} />
-              <SheetRow label="Consumable code" value={selected.consumable_code} />
+              {/* FIXED 2026-08-21 — these read the ledger row's own columns and nothing
+                * else, so a movement whose units live on `whs_serial_numbers` — which
+                * is every put-away lot — showed a dash here while the TABLE behind the
+                * sheet named them correctly through `unitsOf`. Two views of one row
+                * disagreeing is worse than either being blank. Same lookup, same
+                * fallback, so the sheet can never say less than the row it opened
+                * from. `serial_numbers` (plural) is the ledger's own column; the
+                * singular one this used never existed on the wire. */}
+              <SheetRow
+                label="Serial / IMEI"
+                value={selected.serial_number
+                  || unitsOf(selected)?.serials.join(", ")
+                  || unitsOf(selected)?.imeis.join(", ")}
+              />
+              <SheetRow
+                label="Asset code"
+                value={selected.asset_code
+                  || unitsOf(selected)?.asset_codes?.join(", ")}
+              />
+              <SheetRow
+                label="Consumable code"
+                value={selected.consumable_code
+                  || unitsOf(selected)?.consumable_codes?.join(", ")}
+              />
               <SheetRow label="Warehouse" value={selected.warehouse_name} />
               <SheetRow label="Batch" value={selected.batch_number} />
               <SheetRow label="Source document" value={selected.reference_no} />
