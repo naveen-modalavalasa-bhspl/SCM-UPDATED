@@ -256,6 +256,10 @@ from app.modules.logistics.transport import (  # noqa: E402
     carriage_catalogue,
     carrier_accept,
     carrier_acknowledge,
+    # FIXED 2026-08-21 — `8bee41b` added the route (`/carrier/transport-carriage-modes`)
+    # and the function in transport.py, but never re-exported it here, so the carrier
+    # acknowledgement screen 500'd on AttributeError every time it opened.
+    carrier_carriage_options,
     carrier_decline,
     carrier_deliver,
     carrier_get_request,
@@ -307,7 +311,7 @@ __all__ = [
     "activity_catalogue", "activity_ledger", "add_document", "add_event",
     "ask_revised_quote",
     "award_carrier", "cancel_tr", "carriage_catalogue",
-    "carrier_accept", "carrier_acknowledge",
+    "carrier_accept", "carrier_acknowledge", "carrier_carriage_options",
     "carrier_decline", "carrier_deliver", "carrier_get_request",
     "carrier_open_requests", "carrier_options", "carrier_quote", "carrier_summary",
     "carrier_view_request",
