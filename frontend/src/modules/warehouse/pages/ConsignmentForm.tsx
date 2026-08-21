@@ -5,7 +5,7 @@ import { Checkbox } from "@heroui/react";
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
 import { AlertCircle, ArrowLeft, CheckCircle2, Package, Lock, PackagePlus, Printer, QrCode, Trash2, Truck, Unlock } from "lucide-react";
-import { Button, Can, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { PrintPortal } from "../components/LabelPrint";
 import { Lookup } from "../components/Lookup";
@@ -13,9 +13,11 @@ import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   carrierOptions,
   createConsignment,
+  approveDispatch,
   getConsignment,
   getIssueDispatchSource,
   issueOptions,
+  rejectDispatch,
   updateConsignment,
   allWarehouseOptions,
 } from "../api";
@@ -262,6 +264,9 @@ export default function ConsignmentForm() {
   });
   const [source, setSource] = useState<IssueDispatchSource | null>(null);
   const [packages, setPackages] = useState<PackageDraft[]>([newPackage(0)]);
+  // The release decision's own state. See the `approve` / `reject` mutations below.
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectNote, setRejectNote] = useState("");
   const [serialTarget, setSerialTarget] = useState<SerialTarget>(null);
 
   const { data: doc, isLoading } = useQuery({
@@ -425,6 +430,25 @@ export default function ConsignmentForm() {
       if (!editing) nav(`${listPath}/${saved.id}`, { replace: true });
     },
   });
+
+  // The release decision, made HERE because this is where the approvals inbox lands.
+  //
+  // FIXED 2026-08-21 — a DISPATCH approval deep-linked to the consignment and the
+  // consignment had no way to answer it: PENDING_APPROVAL locks the form, so an
+  // approver arrived from Waiting for me at a read-only page whose only control was
+  // Back. The routes have existed since the module landed; nothing ever called them.
+  const decide = (run: () => Promise<Dispatch>) => ({
+    mutationFn: run,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["wh-consignments"] });
+      qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
+      qc.invalidateQueries({ queryKey: ["wh-consignment", String(id)] });
+      // The inbox is the screen they came from and the row has to leave it.
+      qc.invalidateQueries({ queryKey: ["approvals"] });
+    },
+  });
+  const approve = useMutation(decide(() => approveDispatch(Number(id))));
+  const reject = useMutation(decide(() => rejectDispatch(Number(id), rejectNote)));
 
   const locked = !!doc && !["DRAFT", "PACKED"].includes(doc.status);
   const destination = destinationOf(doc, source);
@@ -680,6 +704,17 @@ export default function ConsignmentForm() {
                 state a consignment reaches, and gating this press on PACKED alone
                 left it with no way forward at all: the form is locked by then and
                 the only control on the page was Back. */}
+            {doc?.status === "PENDING_APPROVAL" && (
+              <Can do="dispatch.approve">
+                <Button variant="dangerSoft" onClick={() => setRejecting(true)}>
+                  Send it back
+                </Button>
+                <Button onClick={() => approve.mutate()} disabled={approve.isPending}>
+                  <CheckCircle2 className="h-4 w-4" />
+                  {approve.isPending ? "Releasing..." : "Release it"}
+                </Button>
+              </Can>
+            )}
             {(doc?.status === "PACKED" || doc?.status === "APPROVED") && (
               <Can do={inLogistics ? "transport.create" : "dispatch.gate_out"}>
                 {/* This press does not dispatch anything — it opens the screen where
@@ -703,7 +738,24 @@ export default function ConsignmentForm() {
         }
       />
 
-      <ErrorBanner error={save.error ?? loadIssue.error} />
+      <ErrorBanner error={save.error ?? approve.error ?? reject.error ?? loadIssue.error} />
+
+      {/* Sending it back is a decision the raiser has to act on, so it carries a
+          reason. Releasing does not — the release IS the reason. */}
+      <ConfirmModal
+        isOpen={rejecting}
+        title="Send this consignment back"
+        message="It returns to the warehouse to be corrected and packed again. Say what is wrong with it."
+        confirmLabel="Send it back"
+        busy={reject.isPending}
+        confirmDisabled={!rejectNote.trim()}
+        onConfirm={() => reject.mutate(undefined, { onSuccess: () => setRejecting(false) })}
+        onClose={() => setRejecting(false)}
+      >
+        <Field label="Why">
+          <Input value={rejectNote} onChange={(e) => setRejectNote(e.target.value)} />
+        </Field>
+      </ConfirmModal>
 
       {/* The issue came out of the point that raised the indent, so there is no
           journey to record. Saying nothing left a blank destination on screen, a
