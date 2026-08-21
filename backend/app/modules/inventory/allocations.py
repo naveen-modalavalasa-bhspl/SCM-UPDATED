@@ -1110,9 +1110,22 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
         # is signed and reopened later for the same lines, so approving it a second
         # time must reserve the DIFFERENCE — reserving `quantity` again would hold the
         # goods twice and starve every other indent of stock nobody is using.
+        #
+        # FIXED 2026-08-21 — CONSUMED counts here, not just ACTIVE. A reservation is
+        # consumed when the goods actually LEAVE, so after the first signature is
+        # issued the line's hold reads zero and the whole quantity was reserved a
+        # SECOND time on reopen. Live proof on item 69: reservation 47 for 2 CONSUMED
+        # by WHI/2026-27/00045, then reservation 51 for the same 2 ACTIVE again — 198
+        # on the shelf, 196 free, and the next allocation for that very indent was
+        # refused for stock that had already been delivered to it.
+        #
+        # RELEASED stays out: that stock went back on the shelf and is genuinely
+        # reservable again.
         held = await allocation.reserved_quantity(
             db, RefType.RESERVATION.value, alloc.indent_id,
             ref_line_id=line.indent_item_id, item_id=line.item_id,
+            statuses=(ReservationStatus.ACTIVE.value,
+                      ReservationStatus.CONSUMED.value),
         )
         to_reserve = _d(line.quantity) - _d(held)
         if to_reserve > ZERO:

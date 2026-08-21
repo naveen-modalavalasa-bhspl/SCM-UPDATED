@@ -253,12 +253,22 @@ async def reserved_quantity(
     ref_line_id: int | None = None,
     item_id: int | None = None,
     warehouse_id: int | None = None,
+    statuses: tuple[str, ...] = (ReservationStatus.ACTIVE.value,),
 ) -> Decimal:
-    """Active quantity for one fulfilment slice without mutating it."""
+    """Quantity held for one fulfilment slice without mutating it.
+
+    ACTIVE only by default — that is what "how much is currently held" means, and it is
+    what the availability arithmetic wants.
+
+    `statuses` widens it for the one caller that is asking a different question: how
+    much of this line has ALREADY been put aside, across the whole life of the line.
+    A reopened allocation needs CONSUMED counted too — see `apply_to_stock`.
+    RELEASED is never in that answer: a released reservation gave its stock back.
+    """
     stmt = select(func.coalesce(func.sum(Reservation.quantity), 0)).where(
         Reservation.ref_type == ref_type,
         Reservation.ref_id == ref_id,
-        Reservation.status == ReservationStatus.ACTIVE.value,
+        Reservation.status.in_(list(statuses)),
     )
     if ref_line_id is not None:
         stmt = stmt.where(Reservation.ref_line_id == ref_line_id)
