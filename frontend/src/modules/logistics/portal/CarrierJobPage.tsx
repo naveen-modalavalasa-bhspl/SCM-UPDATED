@@ -8,6 +8,7 @@ import {
 import { fmtDate, fmtDateTime } from "@/shared/datetime";
 import { carrierPortalApi } from "../api";
 import { load, money } from "../components/modeCopy";
+import { manifestLines } from "../components/consignmentToLines";
 
 const SCANS = [
   { value: "", label: "No scan, just save the numbers" },
@@ -218,7 +219,7 @@ export function CarrierJobPage() {
                 </tr>
               </thead>
               <tbody>
-                {job.items.map((line) => (
+                {manifestLines(job.items).map((line) => (
                   <tr key={line.id} className="border-b border-line/50">
                     <td className="py-2">
                       {line.item_name ?? "—"}

@@ -15,6 +15,7 @@ import { CARRIAGE_ICON, modeIcon } from "../components/transportIcons";
 import { phoneError, PHONE_HINT, problems, sanitizePhone } from "../components/validate";
 import type { CarriageMode, TransportRequest, TRListRow } from "../transportTypes";
 import { EmptyQueue, PortalHeading } from "./portalUi";
+import { manifestLines } from "../components/consignmentToLines";
 
 const BLANK = {
   driver_name: "", vehicle_number: "", driver_phone: "", driver_licence_no: "",
@@ -390,7 +391,7 @@ function JobDetails({ row, detail }: {
             Items in this load
           </p>
           <div className="space-y-2">
-            {detail!.items.map((item) => (
+            {manifestLines(detail!.items).map((item) => (
               <div key={item.id} className="grid gap-1 rounded-lg bg-content1 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_auto_auto]">
                 <span className="min-w-0 truncate font-medium text-ink">
                   {item.item_code ? `${item.item_code} - ` : ""}{item.item_name ?? "Item"}
