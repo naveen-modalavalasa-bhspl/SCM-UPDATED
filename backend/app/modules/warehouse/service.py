@@ -11379,11 +11379,20 @@ async def transport_released(db: AsyncSession, tr, user) -> None:
     dispatch = await _consignment_of(db, tr)
     if dispatch is None:
         return
+    # PENDING_APPROVAL belongs here too, now that the release gate is retired: the
+    # consignments submitted by it are still sitting in that chain, and the press that
+    # would have answered them is the one that just ran. Leaving them out would strand
+    # exactly the documents the retired gate created.
     if dispatch.status not in (DispatchStatus.APPROVED.value,
-                               DispatchStatus.PACKED.value):
+                               DispatchStatus.PACKED.value,
+                               DispatchStatus.PENDING_APPROVAL.value):
         # Already gated out through the warehouse's own screen, or cancelled. Either
         # way there is nothing left for the release to say.
         return
+    # A chain the retired gate started is answered by the load leaving, not left open
+    # in somebody's inbox forever. Cancelled rather than approved: nobody signed it,
+    # and recording an approval no human made would be a lie in `wf_actions` (rule 9).
+    await _cancel_open_dispatch_approval(db, dispatch, user)
     if await _dispatch_signature_outstanding(db, dispatch, user):
         # Logged, never refused. `transport_release_blocked` is where that signature is
         # demanded, and it runs while the load can still be held back; reaching this
@@ -11508,6 +11517,25 @@ async def _submit_dispatch_independently(dispatch_id: int, user) -> str | None:
         return None
 
 
+async def _cancel_open_dispatch_approval(db: AsyncSession, dispatch: m.Dispatch,
+                                         user) -> None:
+    """Close any release chain still open on this consignment.
+
+    The release gate is retired (`_register_transport_hooks`), but the consignments it
+    submitted before that are still parked at PENDING_APPROVAL with a live instance and
+    a row in somebody's inbox. The dispatch press is what those chains were waiting to
+    hear, so it ends them — otherwise the approver keeps a queue of decisions for loads
+    that have already gone.
+
+    `abandon`, not `act`: nobody signed it, and recording an approval no human made
+    would be a lie in `wf_actions` (rule 9). The engine writes its own CANCELLED row.
+    """
+    await engine.abandon(
+        db, WarehouseDocType.DISPATCH.value, dispatch.id, user,
+        reason="Released by the dispatch press; the separate release step is retired",
+    )
+
+
 async def _dispatch_signature_outstanding(db: AsyncSession, dispatch: m.Dispatch,
                                           user) -> bool:
     """Read-only twin of `_dispatch_approval_pending`, for the hook.
@@ -11573,11 +11601,19 @@ async def transport_acknowledged(db: AsyncSession, tr, user) -> None:
 
 
 def _register_transport_hooks() -> None:
-    """Wire this module onto the outward leg, once, at import."""
+    """Wire this module onto the outward leg, once, at import.
+
+    RETIRED 2026-08-21 — `transport_release_blocked` is deliberately NOT registered.
+    The consignment's release was a second sign-off on a decision the dispatch press
+    already IS, and because a consignment is only submitted at that press the gate
+    fired last: after the transport request, after the tender, after the award. The
+    desk picked a carrier, agreed a freight, and only then was told the load could not
+    leave. Pressing Dispatch is the release; there is nothing left for a separate one
+    to add. The function stays for `submit_dispatch`, which is still a route.
+    """
     from app.modules.logistics import hooks as lgs_hooks
 
-    for registry, hook in ((lgs_hooks.BEFORE_RELEASE, transport_release_blocked),
-                           (lgs_hooks.ON_RELEASE, transport_released),
+    for registry, hook in ((lgs_hooks.ON_RELEASE, transport_released),
                            (lgs_hooks.ON_ACKNOWLEDGE, transport_acknowledged)):
         if hook not in registry:
             registry.append(hook)
