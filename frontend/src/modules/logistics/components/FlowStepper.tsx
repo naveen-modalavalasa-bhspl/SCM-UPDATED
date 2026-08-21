@@ -14,8 +14,18 @@ import { transportApi } from "../api";
  * A rejected or cancelled request is not a stage of the flow, it is the flow stopping,
  * so it renders as a single line rather than as a stepper with a red dot somewhere in
  * the middle of it.
+ *
+ * `awardPending` is the one thing the status cannot say on its own. An award waiting on
+ * its own sign-off is left on QUOTING deliberately — an overruled award unwinds to the
+ * tender — so the status alone lit "Quotes from providers" while the tender was closed
+ * and the only press left was this desk's. It stands on "Provider accepts" instead,
+ * which is where the Approve award button is and where the provider answers next.
  */
-export function FlowStepper({ mode, status }: { mode: string; status: string }) {
+export function FlowStepper({ mode, status, awardPending = false }: {
+  mode: string;
+  status: string;
+  awardPending?: boolean;
+}) {
   const { data: stages } = useQuery({
     queryKey: ["transport-flow", mode],
     queryFn: () => transportApi.flow(mode),
@@ -36,9 +46,15 @@ export function FlowStepper({ mode, status }: { mode: string; status: string }) 
 
   if (!stages?.length) return null;
 
+  // Which rung, and whether the desk's own half of it is still outstanding. The award
+  // stage is the only one that can be reached without the status naming it, so it is
+  // looked up by key rather than inferred from a position in the list — a hand-over
+  // has no such stage at all, and must fall back to what its status says.
+  const awardStage = stages.findIndex((stage) => stage.key === "CONFIRM");
+  const pendingHere = awardPending && awardStage >= 0;
   const current = Math.max(
     0,
-    stages.findIndex((stage) => stage.statuses.includes(status)),
+    pendingHere ? awardStage : stages.findIndex((stage) => stage.statuses.includes(status)),
   );
 
   return (
@@ -84,7 +100,7 @@ export function FlowStepper({ mode, status }: { mode: string; status: string }) 
                 </span>
                 {here && (
                   <span className="mt-0.5 text-[10px] leading-tight text-muted">
-                    {stage.help}
+                    {(pendingHere && stage.pending_help) || stage.help}
                   </span>
                 )}
               </div>

@@ -40,42 +40,39 @@ export function CarrierLayout() {
     nav("/carrier/login", { replace: true });
   };
 
-  // Pills on the dark band, not underlines on a white one. The tab a carrier is on
-  // has to be readable across a loading bay in daylight, and an underline two pixels
-  // high is the first thing a phone screen loses.
+  // Underline tabs on a light band — the same shape the supplier portal uses, so a
+  // partner who holds both accounts reads one product. The active tab is carried by
+  // a 2px rule and the weight of the word, not by a filled pill: on a phone at a
+  // loading bay the loudest thing on screen should be the shipment, not the chrome.
   const tab = ({ isActive }: { isActive: boolean }) =>
-    `flex min-h-11 items-center gap-2 rounded-full px-4 text-sm transition ${
+    `flex min-h-11 items-center gap-2 whitespace-nowrap border-b-2 px-1 text-sm transition-colors ${
       isActive
-        ? "bg-white font-semibold text-ink shadow-sm"
-        : "text-white/70 hover:bg-white/10 hover:text-white"
+        ? "border-brand font-semibold text-ink"
+        : "border-transparent text-muted hover:border-line hover:text-body"
     }`;
 
   return (
     <div className="min-h-screen">
-      {/* The identity band. A partner signing in is not looking at our ERP — they
-          are looking at OUR portal, on their own account, and the dark band says
-          which of the two this is before they read a word of it. It is one element
-          deep: a tinted glow, a badge, a name and the tabs. */}
-      <header className="relative overflow-hidden bg-ink text-white">
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -right-24 -top-32 h-64 w-64 rounded-full bg-brand/30 blur-3xl"
-        />
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -left-16 top-10 h-48 w-48 rounded-full bg-signal/15 blur-3xl"
-        />
-        <div className="relative mx-auto max-w-5xl px-4 pb-3 pt-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <Link to="/carrier/jobs" className="flex min-w-0 items-center gap-3">
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white/10 ring-1 ring-white/15">
-                <Truck className="h-5 w-5 text-white" />
+      {/* The identity band. A partner signing in is not looking at our ERP — they are
+          looking at OUR portal, on their own account. That is said by the mark, the
+          eyebrow and their own name, not by a tinted glow: this header is one flat
+          surface, a hairline rule and the tabs, and it stays put while a shipment
+          list scrolls under it. */}
+      <header className="sticky top-0 z-20 border-b border-line bg-content1/90 backdrop-blur">
+        <div className="mx-auto max-w-5xl px-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+            <Link
+              to="/carrier/jobs"
+              className="flex min-w-0 items-center gap-3 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-brand"
+            >
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand text-white shadow-sm">
+                <Truck className="h-5 w-5" strokeWidth={2.2} />
               </span>
-              <span className="min-w-0">
-                <span className="block text-[10px] font-semibold uppercase tracking-[0.2em] text-white/55">
+              <span className="min-w-0 leading-tight">
+                <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-brand">
                   Logistics Partner Portal
                 </span>
-                <span className="block truncate font-display text-xl font-bold leading-tight text-white">
+                <span className="block truncate font-display text-lg font-bold text-ink">
                   {profile?.name ?? "…"}
                 </span>
               </span>
@@ -83,7 +80,7 @@ export function CarrierLayout() {
             <button
               type="button"
               onClick={signOut}
-              className="flex min-h-11 items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 text-sm text-white/80 transition hover:bg-white/15 hover:text-white"
+              className="flex min-h-11 shrink-0 items-center gap-2 rounded-lg border border-line px-3 text-sm font-medium text-muted transition-colors hover:bg-surface hover:text-ink"
             >
               <LogOut className="h-4 w-4" /> Sign out
             </button>
@@ -91,8 +88,8 @@ export function CarrierLayout() {
 
           {/* The rail scrolls rather than wraps: three tabs fit any phone today, and
               a fourth must not push the sign-out button onto its own line. */}
-          <nav aria-label="Carrier" className="-mx-1 mt-3 overflow-x-auto px-1 pb-0.5">
-            <div className="flex w-max gap-1">
+          <nav aria-label="Carrier" className="-mx-1 overflow-x-auto px-1">
+            <div className="flex w-max gap-6">
               <NavLink to="/carrier/jobs" className={tab}>
                 <Truck className="h-4 w-4" /> Shipments
               </NavLink>

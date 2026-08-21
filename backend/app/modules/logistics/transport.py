@@ -325,6 +325,10 @@ def flow_catalogue(mode: str | None = None) -> list[dict]:
         "key": stage.key,
         "label": stage.label,
         "help": stage.help,
+        # The same rung read while the desk still owes it a press. Served rather than
+        # written in the screen for the reason above: what a stage MEANS is the flow's
+        # to say, and the award half of "Provider accepts" is no different.
+        "pending_help": stage.pending_help,
         "statuses": list(stage.statuses),
     } for stage in flow_stages(mode)]
 
@@ -414,6 +418,24 @@ PROVIDER_BOARD_STATUSES = (
 )
 
 
+def _mode_label(mode: str | None) -> str:
+    """The arrangement's short name, and the raw code back if it is not one of ours —
+    a label is presentation, and an unknown mode must not break "where is my stuff"."""
+    try:
+        return mode_rule(mode).label
+    except KeyError:
+        return (mode or "").replace("_", " ").title()
+
+
+def _carriage_label(carriage: str | None) -> str:
+    """What it travels ON. Nothing recorded reads as Road, the same fallback
+    `_resolve_carriage` applies when the column is empty."""
+    try:
+        return carriage_rule(carriage or DEFAULT_CARRIAGE).label
+    except (KeyError, ValidationError):
+        return (carriage or "").replace("_", " ").title()
+
+
 def _raiser_view(doc: TransportRequest) -> dict:
     """What a raiser is shown about the leg carrying their indent.
 
@@ -423,6 +445,14 @@ def _raiser_view(doc: TransportRequest) -> dict:
     return {
         "tr_id": doc.id, "tr_no": doc.tr_no,
         "status": doc.status, "mode": doc.mode,
+        # How it travels, in the raiser's words as well as ours. The LABELS travel with
+        # the codes because the screen reading this is Indents, and indents sits BEFORE
+        # logistics in the chain (rule 5) — it may not import our mode tables to look
+        # one up. The field asking "where is my material" is owed the answer in plain
+        # words anyway: THIRD_PARTY on a card tells a storekeeper nothing.
+        "mode_label": _mode_label(doc.mode),
+        "carriage_mode": doc.carriage_mode,
+        "carriage_label": _carriage_label(doc.carriage_mode),
         "consignment_no": doc.consignment_no,
         "carrier_name": doc.carrier_name,
         # The tracking handle and the carrier's own page, pasted by the desk at
@@ -1105,7 +1135,16 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         carrier_reference=getattr(data, "carrier_reference", None),
         vehicle_number=data.vehicle_number, driver_name=data.driver_name,
         driver_phone=data.driver_phone, trip_reference=data.trip_reference,
+        # Who came for the load, and which number names them. `TRCreate` has asked
+        # for these since the custody columns landed and `create_tr` dropped every
+        # one of them on the floor, so a gate pass printed from a request raised
+        # through the register carried no driver licence and no custody identity —
+        # the only place the fields survived was the one-press dispatch path.
+        driver_licence_no=getattr(data, "driver_licence_no", None),
         handed_over_by_name=data.handed_over_by_name,
+        handed_over_employee_id=getattr(data, "handed_over_employee_id", None),
+        handed_over_aadhaar=getattr(data, "handed_over_aadhaar", None),
+        handed_over_phone=getattr(data, "handed_over_phone", None),
         # Legacy read column only: logistics cannot name the receiver at dispatch.
         # The indent requester's receipt stamps the actual receiver later.
         received_by_name=None,
@@ -1910,16 +1949,25 @@ async def award_carrier(db: AsyncSession, tr_id: int, data, user) -> TransportRe
     doc.evaluation_method = method
 
     # Awarding commits freight, so it gets its own sign-off. If nothing is configured
-    # the engine hands back an approved instance and the shipment moves on — a missing
-    # ladder must never strand a consignment (rule 8).
-    instance = await engine.start(db, DocType.CARRIER_AWARD.value, doc.id,
-                                  _context(doc), user)
-    # Approved internally, but not yet a booking: the carrier has to accept it in their
-    # own portal before anything is loaded. READY means "it can leave", and a shipment
-    # whose truck has not been confirmed emphatically cannot.
-    doc.status = (TransportStatus.AWAITING_CARRIER.value
-                  if instance.status == InstanceStatus.APPROVED.value
-                  else TransportStatus.QUOTING.value)
+    # the engine hands back an approved instance and nobody is asked — a missing ladder
+    # must never strand a consignment (rule 8).
+    await engine.start(db, DocType.CARRIER_AWARD.value, doc.id, _context(doc), user)
+    # And then it waits here REGARDLESS, on the rung the award was made from.
+    #
+    # Picking the winner off the comparison sheet and telling the winner are two
+    # presses, not one. This used to read the engine's answer and, when the ladder
+    # resolved to nobody, send the shipment straight to AWAITING_CARRIER — which is
+    # exactly what happens for anyone raising an award from the top of the org, since
+    # there is no rung above them to sign it. The desk pressed Award on Provider
+    # Selection and the offer was already out to the carrier: no chance to re-read the
+    # sheet, no chance to overrule it, and nothing on the shipment left to press.
+    #
+    # So the award always lands on QUOTING carrying `awarded_at`, which is the state
+    # the screens draw as "confirm the award" on the Provider accepts rung. Whether a
+    # signature was ALSO required is `act_on_award`'s question, not this one: with a
+    # ladder configured the confirm press is the approver's, without one it is the
+    # desk's, and either way the carrier hears nothing until it is made.
+    doc.status = TransportStatus.QUOTING.value
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -1932,17 +1980,64 @@ async def award_carrier(db: AsyncSession, tr_id: int, data, user) -> TransportRe
     return doc
 
 
+async def _award_in_approval(db: AsyncSession, tr_id: int) -> bool:
+    """Is a CARRIER_AWARD signature actually outstanding on this shipment?
+
+    Asked because the confirm press has two meanings and only one of them is the
+    engine's. A configured ladder leaves a live instance and the press is the
+    APPROVER's, so it must go through `engine.act` and be recorded as an approval. A
+    ladder that resolved to nobody — no rung above the raiser, which is every award
+    raised from the top of the org — was self-approved at `start`, and calling `act`
+    on it raises "No in-progress approval for this document": the press would fail on
+    exactly the shipments that have nobody but this desk to make it.
+
+    Read off `wf_instances` rather than kept on the request, so the answer is the
+    engine's own and cannot drift from it.
+    """
+    return bool(await db.scalar(
+        select(Instance.id)
+        .where(Instance.doc_type == DocType.CARRIER_AWARD.value,
+               Instance.doc_id == tr_id,
+               Instance.status == InstanceStatus.IN_PROGRESS.value)
+        .limit(1)))
+
+
+def _guard_award_confirmable(doc: TransportRequest) -> None:
+    """There has to BE an award, and it has to be one nobody has confirmed yet."""
+    if doc.status != TransportStatus.QUOTING.value or doc.awarded_at is None:
+        raise ValidationError(
+            f"{doc.tr_no} has no award waiting to be confirmed")
+
+
 async def act_on_award(db: AsyncSession, tr_id: int, action: str, user,
                        comments: str = "") -> TransportRequest:
+    """Confirm the award, or overrule it — the press that tells the carrier.
+
+    Both halves of the Provider accepts rung meet here: this is our side of it, and
+    only once it is made does the shipment reach the carrier's portal to be
+    acknowledged. Whether it also carried a signature is `_award_in_approval`'s
+    question; the outcome for the shipment is the same either way.
+    """
     doc = await get_tr(db, tr_id)
     action = (action or "").upper()
     if action not in {ApprovalAction.APPROVED.value, ApprovalAction.REJECTED.value}:
         raise ValidationError("An award can only be approved or rejected")
-    instance = await engine.act(db, DocType.CARRIER_AWARD.value, doc.id, action,
-                                user, comments, context=_context(doc))
-    if instance.status == InstanceStatus.APPROVED.value:
+    _guard_award_confirmable(doc)
+
+    if await _award_in_approval(db, tr_id):
+        instance = await engine.act(db, DocType.CARRIER_AWARD.value, doc.id, action,
+                                    user, comments, context=_context(doc))
+        outcome = instance.status
+    else:
+        # Nobody was asked, so there is nothing to record against a stage — the press
+        # itself is the decision, and the audit row below is what carries it.
+        outcome = (InstanceStatus.APPROVED.value
+                   if action == ApprovalAction.APPROVED.value
+                   else InstanceStatus.REJECTED.value)
+
+    if outcome == InstanceStatus.APPROVED.value:
         doc.status = TransportStatus.AWAITING_CARRIER.value
-    elif instance.status == InstanceStatus.REJECTED.value:
+    elif outcome == InstanceStatus.REJECTED.value:
         # Back to the tender, not to rejected: the shipment still has to travel. The
         # quote goes back to SUBMITTED — it was overruled, not withdrawn, so it is
         # still on the comparison sheet and can win again under another method.
@@ -1951,7 +2046,10 @@ async def act_on_award(db: AsyncSession, tr_id: int, action: str, user,
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
                       after={"status": doc.status},
-                      summary=f"{action.title()} the carrier award on {doc.tr_no}")
+                      summary=(f"Confirmed the award on {doc.tr_no} — "
+                               f"{doc.carrier_name} asked to acknowledge"
+                               if outcome == InstanceStatus.APPROVED.value
+                               else f"Overruled the carrier award on {doc.tr_no}"))
     await db.commit()
     await db.refresh(doc)
     return doc
@@ -2069,8 +2167,12 @@ async def set_provider(db: AsyncSession, tr_id: int, data, user) -> TransportReq
     if data.carrier_id:
         vendor = await _carrier(db, data.carrier_id)
         doc.carrier_id, doc.carrier_name = vendor.id, vendor.name
-    for field in ("freight_amount", "vehicle_number", "driver_name", "driver_phone",
-                  "trip_reference", "handed_over_by_name"):
+    # Same list the gate pass prints from. Leaving the custody fields out here meant
+    # a provider named on Provider Selection arrived with a blank hand-over record.
+    for field in ("freight_amount", "vehicle_number", "driver_name",
+                  "driver_phone", "driver_licence_no", "trip_reference",
+                  "handed_over_by_name", "handed_over_employee_id",
+                  "handed_over_aadhaar", "handed_over_phone"):
         value = getattr(data, field, None)
         if value is not None:
             setattr(doc, field, value)
@@ -2531,7 +2633,12 @@ WINNER_ONLY_FIELDS = (
     "carrier_id", "carrier_name", "freight_amount", "awarded_by_name",
     "carrier_accepted_at", "carrier_declined_at", "carrier_decline_reason",
     "carrier_reference", "carrier_confirmed_by_name", "vehicle_number", "driver_name",
-    "driver_phone", "trip_reference", "handed_over_by_name", "received_by_name",
+    # The custody record is the winner's too — a licence number and an Aadhaar belong
+    # to the person who actually came for the load, and a carrier who lost the tender
+    # has no business reading either.
+    "driver_phone", "driver_licence_no", "trip_reference", "handed_over_by_name",
+    "handed_over_employee_id", "handed_over_aadhaar", "handed_over_phone",
+    "received_by_name",
     "lr_no", "docket_no", "tracking_url", "eway_bill_no", "gate_pass_no",
     "dispatched_at", "dispatched_by_name", "delivered_at", "delivered_to_name",
     "pod_url", "tracking_shared_at", "acknowledged_at", "acknowledged_by_name",

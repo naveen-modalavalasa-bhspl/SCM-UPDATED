@@ -7,7 +7,7 @@ import { ChevronRight, Inbox } from "lucide-react";
  * Presentation ONLY — no fetching, no rules, no copy that carries a decision. It
  * exists because the carrier screens are not the internal console: the people on
  * them are outside the company, work one shipment at a time on a phone at a loading
- * bay, and never learn a menu. So the portal reads as its own product — a dark
+ * bay, and never learn a menu. So the portal reads as its own product — a plain
  * identity band, one clear thing to press per card — while every number, permission
  * and route behind it stays exactly what the desk's screens use.
  *

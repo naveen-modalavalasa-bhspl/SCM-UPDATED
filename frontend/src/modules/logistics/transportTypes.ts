@@ -92,6 +92,9 @@ export interface FlowStage {
   key: string;
   label: string;
   help: string;
+  /** The same rung read while the desk still owes it a press. Only the award stage
+   *  has one, because that rung has two halves — our sign-off, then the provider's. */
+  pending_help?: string | null;
   statuses: string[];
 }
 

@@ -46,8 +46,6 @@ export function TransportDetailPage() {
   const [tracking, setTracking] = useState({
     lr_no: "", docket_no: "", tracking_url: "", eway_bill_no: "", gate_pass_no: "",
   });
-  const [confirming, setConfirming] = useState(false);
-  const [confirm, setConfirm] = useState({ confirmed_by: "", carrier_reference: "" });
   const [declining, setDeclining] = useState(false);
   const [declineNote, setDeclineNote] = useState("");
   const [downloadingEvidence, setDownloadingEvidence] = useState<number | null>(null);
@@ -99,7 +97,8 @@ export function TransportDetailPage() {
   });
   const approveAward = useAction({
     run: () => transportApi.approveAward(trId),
-    success: "Award approved — waiting on the carrier now", invalidates,
+    success: "Award confirmed — the provider has been asked to acknowledge it",
+    invalidates,
   });
   const rejectAward = useAction({
     run: () => transportApi.rejectAward(trId, awardRejectNote),
@@ -116,12 +115,6 @@ export function TransportDetailPage() {
     }),
     success: "Dispatched — it has left the yard", invalidates,
     onDone: () => setDispatching(false),
-  });
-  const confirmCarrier = useAction({
-    run: () => transportApi.confirmCarrier(trId, confirm.confirmed_by,
-      confirm.carrier_reference),
-    success: "Carrier confirmed", invalidates,
-    onDone: () => setConfirming(false),
   });
   const carrierDeclined = useAction({
     run: () => transportApi.carrierDeclined(trId, declineNote),
@@ -159,12 +152,12 @@ export function TransportDetailPage() {
   if (!doc) return <ErrorBanner error={error} />;
 
   const openClaims = doc.events.filter((e) => e.is_exception && !e.resolved_at).length;
-  // Awarding freight starts its OWN approval (CARRIER_AWARD sanctions the spend), and
-  // the request stays at QUOTING until that is signed — so there is no status to read
-  // it off. A won tender is the only thing that stamps `awarded_at` while still at
-  // QUOTING: an unwind (overruled, or the carrier dropped it) clears the stamp on its
-  // way back to the tender. Without this the award had nowhere to be decided and the
-  // shipment sat at QUOTING forever, invisible to the carrier's portal.
+  // A carrier has been picked and this desk has not yet confirmed it. The request
+  // stays at QUOTING until it does — so there is no status to read it off. A won
+  // tender is the only thing that stamps `awarded_at` while still at QUOTING: an
+  // unwind (overruled, or the carrier dropped it) clears the stamp on its way back to
+  // the tender. This is the state the Confirm award press exists for, and nothing
+  // reaches the carrier's portal while the shipment is in it.
   const awardPending = doc.status === "QUOTING" && Boolean(doc.awarded_at);
 
   return (
@@ -198,6 +191,8 @@ export function TransportDetailPage() {
               </Can>
             )}
 
+            {/* Our half of "Provider accepts". The carrier hears nothing until this
+                is pressed, so it is the press the whole rung waits on. */}
             {awardPending && (
               <Can do="transport.approve">
                 <Button variant="ghost" onClick={() => setAwardReject(true)}>
@@ -205,18 +200,21 @@ export function TransportDetailPage() {
                 </Button>
                 <Button onClick={() => approveAward.mutate()}
                   disabled={approveAward.isPending}>
-                  Approve award
+                  Confirm award
                 </Button>
               </Can>
             )}
 
+            {/* Their answer, and only the "no" half of it. Accepting is the
+                provider's own press in their portal — they name the vehicle and the
+                driver with it, and the shipment goes READY on its own — so a desk
+                button that said yes for them booked a truck nobody had confirmed and
+                left those columns empty. Declining stays, because a provider who
+                drops out by phone still has to be recorded somewhere. */}
             {doc.status === "AWAITING_CARRIER" && (
               <Can do="transport.award">
                 <Button variant="dangerSoft" onClick={() => setDeclining(true)}>
                   Carrier declined
-                </Button>
-                <Button onClick={() => setConfirming(true)}>
-                  Provider accepted
                 </Button>
               </Can>
             )}
@@ -253,11 +251,11 @@ export function TransportDetailPage() {
       />
 
       <ErrorBanner error={submit.error ?? approve.error ?? dispatch.error
-        ?? close.error ?? share.error ?? confirmCarrier.error
+        ?? close.error ?? share.error
         ?? carrierDeclined.error ?? approveAward.error
         ?? rejectAward.error ?? evidence.error ?? evidenceDownloadError} />
 
-      <FlowStepper mode={doc.mode} status={doc.status} />
+      <FlowStepper mode={doc.mode} status={doc.status} awardPending={awardPending} />
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
@@ -291,7 +289,9 @@ export function TransportDetailPage() {
         <Card className="mb-4 flex items-center gap-3 border-brand/30 bg-brand/5 p-4">
           <Clock className="h-4 w-4 shrink-0 text-brand" />
           <p className="text-sm font-medium text-ink">
-            {awardPending ? "Waiting on sign-off for the freight" : nextMove(doc.status)}
+            {awardPending
+              ? "Confirm the award — then the provider is asked to acknowledge it"
+              : nextMove(doc.status)}
           </p>
         </Card>
       )}
@@ -606,28 +606,6 @@ export function TransportDetailPage() {
           <Input value={awardRejectNote}
             onChange={(e) => setAwardRejectNote(e.target.value)} />
         </Field>
-      </ConfirmModal>
-
-      <ConfirmModal
-        isOpen={confirming}
-        title="Confirm the carrier accepted"
-        message="Use this only when the carrier confirmed outside the portal. It is recorded as a desk confirmation."
-        confirmLabel="Confirm"
-        busy={confirmCarrier.isPending}
-        confirmDisabled={!confirm.confirmed_by.trim()}
-        onConfirm={() => confirmCarrier.mutate()}
-        onClose={() => setConfirming(false)}
-      >
-        <div className="space-y-3">
-          <Field label="Who at the carrier confirmed it">
-            <Input value={confirm.confirmed_by}
-              onChange={(e) => setConfirm({ ...confirm, confirmed_by: e.target.value })} />
-          </Field>
-          <Field label="Their booking reference" hint="Optional">
-            <Input value={confirm.carrier_reference}
-              onChange={(e) => setConfirm({ ...confirm, carrier_reference: e.target.value })} />
-          </Field>
-        </div>
       </ConfirmModal>
 
       <ConfirmModal

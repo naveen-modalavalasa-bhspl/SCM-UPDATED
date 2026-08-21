@@ -383,10 +383,14 @@ CARRIER_VENDOR_TYPES = CARRIER_VENDOR_TYPES  # noqa: PLW0127 - re-export
 # carrier saying yes), so the list is per-mode and served at /api/transport/flow.
 
 class Stage:
-    __slots__ = ("key", "label", "help", "statuses")
+    #: `pending_help` is the same rung read while the DESK still owes it a press —
+    #: only the award stage has one, and only because that rung has two halves.
+    __slots__ = ("key", "label", "help", "statuses", "pending_help")
 
-    def __init__(self, key: str, label: str, help: str, statuses: tuple[str, ...]):
+    def __init__(self, key: str, label: str, help: str, statuses: tuple[str, ...],
+                 pending_help: str | None = None):
         self.key, self.label, self.help, self.statuses = key, label, help, statuses
+        self.pending_help = pending_help
 
 
 _PLAN = Stage(
@@ -404,10 +408,21 @@ _TENDER = Stage(
     "The providers invited at dispatch send a price; the best one is awarded (E3).",
     (TransportStatus.QUOTING.value,),
 )
+#: One rung with two halves, in this order: WE award the job and sign for the freight,
+#: THEN the provider says yes to it in their portal. The shipment stands here for both.
+#:
+#: The award half is why AWAITING_CARRIER is not the whole story. An award in approval
+#: sits back on QUOTING — deliberately, because an overruled award unwinds to the
+#: tender — so reading the rung off the status alone lit "Quotes from providers" while
+#: the tender was closed and the only press left was this desk's sign-off. The stepper
+#: takes the pending award as standing HERE instead, which is where the Approve award
+#: button is, and nothing reaches the provider until it is pressed.
 _CONFIRM = Stage(
     "CONFIRM", "Provider accepts",
     "The provider says yes to the job in their portal — nothing leaves until they do.",
     (TransportStatus.AWAITING_CARRIER.value,),
+    pending_help="Confirm the award and the freight — then the provider is asked to "
+                 "acknowledge it.",
 )
 _DISPATCH = Stage(
     "DISPATCH", "Ready to dispatch",

@@ -208,6 +208,13 @@ const trackingHandle = (leg: { lr_no?: string | null; docket_no?: string | null 
  */
 function ShipmentCard({ leg }: { leg: RaiserTracking }) {
   const handle = trackingHandle(leg);
+  // An outside company is carrying it — a courier or a third-party truck. That is
+  // exactly when "how is it coming" stops being obvious to the person waiting for it,
+  // and it is read off the carrier rather than off a list of mode names, because this
+  // module may not import logistics' mode tables (rule 5). A hand-over and a company
+  // vehicle have no carrier, and their answer to "where is it" is the driver below.
+  const outside = Boolean(leg.carrier_name);
+
   const who = leg.carrier_name
     || [leg.vehicle_number, leg.driver_name].filter(Boolean).join(" · ");
   const landed = leg.acknowledged_at ?? leg.delivered_at;
@@ -228,6 +235,16 @@ function ShipmentCard({ leg }: { leg: RaiserTracking }) {
             </span>
           </div>
           <div className="text-sm text-body">{who || "Hand delivery"}</div>
+          {outside && (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5">
+              <span className="rounded-full bg-content2 px-2 py-0.5 text-[11px] font-medium text-body">
+                {leg.carriage_label ?? "Road"}
+              </span>
+              <span className="rounded-full bg-brand-050 px-2 py-0.5 text-[11px] font-medium text-brand">
+                {leg.mode_label ?? leg.mode}
+              </span>
+            </div>
+          )}
           {handle && (
             <div className="mt-0.5 text-xs text-muted">
               Docket <span className="font-mono text-ink">{handle}</span>
@@ -266,6 +283,7 @@ function ShipmentCard({ leg }: { leg: RaiserTracking }) {
           </a>
         )}
       </div>
+
     </li>
   );
 }

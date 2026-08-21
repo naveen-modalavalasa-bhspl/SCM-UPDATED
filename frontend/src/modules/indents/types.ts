@@ -236,6 +236,11 @@ export interface RaiserTracking {
   tr_no: string;
   status: string;
   mode: string;
+  /** How it travels, in words. Served with the codes because this module sits before
+   *  logistics in the chain and cannot import its mode tables to look one up. */
+  mode_label?: string | null;
+  carriage_mode?: string | null;
+  carriage_label?: string | null;
   consignment_no?: string | null;
   carrier_name?: string | null;
   lr_no?: string | null;

@@ -38,9 +38,9 @@ export function CarrierComparison({
   trId: number;
   status: string;
   quotes: CarrierQuote[];
-  /** An award on this request is in approval. The status is still QUOTING, but the
-   *  tender is closed: inviting or awarding again would raise a second award against
-   *  a decision nobody has made yet. */
+  /** An award on this request is made and not yet confirmed. The status is still
+   *  QUOTING, but the tender is closed: inviting or awarding again would raise a
+   *  second award against a decision nobody has made yet. */
   awardPending?: boolean;
   /** Drop the card chrome — the host screen supplies its own heading. */
   compact?: boolean;
@@ -80,7 +80,10 @@ export function CarrierComparison({
   });
   const award = useAction({
     run: (quoteId: number) => transportApi.award(trId, quoteId),
-    success: "Shipment awarded — waiting for the carrier to confirm",
+    // Awarded, NOT yet offered: the shipment lands on the Provider accepts rung and
+    // waits there to be confirmed. Saying "waiting for the carrier" here told the desk
+    // the ball was in somebody else's court while the only press left was its own.
+    success: "Awarded — confirm it on the shipment to send it to the provider",
     invalidates,
     onDone: () => onAwarded?.(trId),
   });

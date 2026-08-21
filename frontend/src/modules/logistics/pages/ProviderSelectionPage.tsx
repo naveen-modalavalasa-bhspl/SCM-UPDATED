@@ -294,9 +294,9 @@ function ProviderSheet({ trId, onBack }: { trId: number; onBack: () => void }) {
     refetchInterval: 5_000,
   });
 
-  // An award that has gone to the CARRIER_AWARD ladder and is still sitting there.
-  // The status is back on QUOTING, but the tender is closed: awarding again would
-  // raise a second award against a decision nobody has made yet.
+  // A carrier is picked and the shipment is waiting to have it confirmed. The status
+  // is still QUOTING, but the tender is closed: awarding again would raise a second
+  // award against a decision nobody has made yet.
   const awardPending = Boolean(doc?.awarded_at) && doc?.status === "QUOTING";
 
   if (isLoading || !doc) {
@@ -350,7 +350,7 @@ function ProviderSheet({ trId, onBack }: { trId: number; onBack: () => void }) {
           </span>
           {awardPending && (
             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-              Award in approval
+              Awaiting award confirmation
             </span>
           )}
         </div>
