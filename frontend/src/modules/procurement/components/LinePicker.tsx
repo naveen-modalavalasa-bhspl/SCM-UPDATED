@@ -12,6 +12,11 @@ import { todayIst } from "@/shared/datetime";
 export interface DraftLine {
   id?: number | null;
   item_id: number | "";
+  /** The document's own snapshot of the chosen item. The picker only ever holds one
+   *  page of the master, so a prefilled line whose item sits outside that page has
+   *  no label to draw and renders blank — see `optionsFor` below. */
+  item_code?: string | null;
+  item_name?: string | null;
   quantity: string;
   original_quantity?: string;
   uom_code?: string | null;
@@ -61,10 +66,24 @@ export function LinePicker({
       }).then((r) => r.data.items),
   });
 
+  const label = (code: string | null | undefined, name: string | null | undefined) =>
+    code ? `${code} — ${name ?? ""}`.trim() : name ?? "";
+
   const options = items.map((item) => ({
     value: item.id,
-    label: item.code ? `${item.code} — ${item.name}` : item.name,
+    label: label(item.code, item.name),
   }));
+
+  /** The loaded page, plus the line's own item where that page does not hold it.
+   *  `/api/items` is fetched 50 rows at a time, so a requisition line pointing at
+   *  item 80 of 87 found nothing to render and the box came up empty — the value was
+   *  saved and sent correctly all along. Same seeding OrgFields does for warehouses. */
+  const optionsFor = (line: DraftLine) =>
+    line.item_id !== "" && !items.some((item) => item.id === line.item_id)
+      ? [{ value: line.item_id,
+           label: label(line.item_code, line.item_name) || "Selected item" },
+         ...options]
+      : options;
 
   const set = (index: number, patch: Partial<DraftLine>) =>
     onChange(lines.map((line, i) => (i === index ? { ...line, ...patch } : line)));
@@ -83,7 +102,7 @@ export function LinePicker({
             <Field label={index === 0 ? "Item" : ""} required={index === 0}>
               <ItemCombobox
                 value={line.item_id}
-                options={options}
+                options={optionsFor(line)}
                 isLoading={isLoading}
                 onQueryChange={setSearch}
                 isDisabled={disabled || !!line.id}
@@ -93,7 +112,12 @@ export function LinePicker({
                     return;
                   }
                   const chosen = items.find((item) => item.id === value);
-                  set(index, { item_id: value, uom_code: chosen?.uom_code ?? null });
+                  set(index, {
+                    item_id: value,
+                    uom_code: chosen?.uom_code ?? null,
+                    item_code: chosen?.code ?? null,
+                    item_name: chosen?.name ?? null,
+                  });
                 }}
               />
             </Field>

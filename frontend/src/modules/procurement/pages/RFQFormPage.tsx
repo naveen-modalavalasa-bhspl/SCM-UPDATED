@@ -95,6 +95,8 @@ export function RFQFormPage() {
     setVendorIds(existing.vendors.map((v) => v.vendor_id));
     setLines(existing.items.map((item) => ({
       item_id: item.item_id,
+      item_code: item.item_code,
+      item_name: item.item_name,
       quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
@@ -117,6 +119,8 @@ export function RFQFormPage() {
     setTerms((current) => current || source.remarks || "");
     setLines(source.items.map((item) => ({
       item_id: item.item_id,
+      item_code: item.item_code,
+      item_name: item.item_name,
       quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",

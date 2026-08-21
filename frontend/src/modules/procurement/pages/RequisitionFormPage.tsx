@@ -58,6 +58,8 @@ export function RequisitionFormPage() {
     setRemarks(existing.remarks ?? "");
     setLines(existing.items.map((item) => ({
       item_id: item.item_id,
+      item_code: item.item_code,
+      item_name: item.item_name,
       quantity: String(item.quantity),
       uom_code: item.uom_code,
       // The estimated rate is kept — the approval ladder routes on the requisition's

@@ -73,6 +73,8 @@ export function PODetailPage() {
     setAmendLines(po.data?.items.map((i: any) => ({
       id: i.id,
       item_id: i.item_id,
+      item_code: i.item_code,
+      item_name: i.item_name,
       quantity: String(i.quantity),
       original_quantity: String(i.quantity),
       rate: String(i.rate),
