@@ -27,6 +27,8 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
+from app.core.database import SessionLocal
+
 from app.core.exceptions import AppException, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation as stock_allocation
@@ -11443,20 +11445,67 @@ async def transport_release_blocked(db: AsyncSession, tr, user) -> str | None:
     # releases nobody was ever waiting on. So ask it properly — the same call
     # `gate_out` makes through `_dispatch_approval_pending`, minus the commit.
     #
-    # Safe to write here: an objection is raised by the caller and takes the whole
-    # transport transaction down with it, so a chain started for a load that is then
-    # refused is rolled back with everything else. Nothing is left half-submitted.
+    # Asked on THIS session, which the objection below rolls back with the rest of the
+    # transport transaction — so nothing here is left half-submitted.
     instance = await _apply_dispatch_submit(db, dispatch, user)
     if instance.status == InstanceStatus.APPROVED.value:
         # Nobody had to sign. The consignment now reads APPROVED and `transport_released`
         # gates it out on the way past, which is exactly the old behaviour.
         return None
-    # Worded as a requirement, not as an accomplished fact: the objection rolls this
-    # submit back with the rest of the transaction, so the chain has NOT actually
-    # started. Naming the approver is still the useful half.
-    return (f"{dispatch.dispatch_no} cannot leave yet — this project asks "
-            f"{dispatch.current_approver_name or 'an approver'} to release it first. "
-            f"Send it for release on Consignments, then dispatch it again.")
+
+    # Somebody does have to sign, and the dispatch press is the only place left that can
+    # ask them.
+    #
+    # FIXED 2026-08-21 — this used to refuse with "send it for release on Consignments,
+    # then dispatch it again", which was already the weaker half of the contract (the
+    # rolled-back submit meant the chain had NOT started) and became impossible when
+    # that button was taken off the consignment screen: the desk was told to press
+    # something that no longer exists, and the load could never leave. Releasing is not
+    # a separate errand — it is what pressing dispatch on a consignment this project
+    # guards MEANS.
+    #
+    # So the request is raised through a session of its own, which survives the
+    # objection that takes this transaction down. Same pattern, and same reason, as
+    # `platform/admin/app_logs.py`: a fact that must outlive the failure it describes.
+    approver = await _submit_dispatch_independently(dispatch.id, user)
+    return (f"{dispatch.dispatch_no} cannot leave yet — it is now with "
+            f"{approver or 'an approver'} to release. Dispatch it again once "
+            f"they have signed.")
+
+
+async def _submit_dispatch_independently(dispatch_id: int, user) -> str | None:
+    """Start a consignment's release chain on its own session, and name the approver.
+
+    The caller is about to raise, so a submit written on ITS session would be rolled
+    back and the desk would be told to wait for an approval nobody had been asked for.
+    Returns None when the chain could not be started — the objection still stands, it
+    just cannot name anybody.
+    """
+    try:
+        async with SessionLocal() as db:
+            dispatch = (await db.execute(
+                select(m.Dispatch)
+                .options(selectinload(m.Dispatch.items), selectinload(m.Dispatch.packages))
+                .where(m.Dispatch.id == dispatch_id)
+            )).scalar_one_or_none()
+            if dispatch is None:
+                return None
+            # Re-checked on this session: another press may have got here first, and
+            # submitting a consignment that is already in approval would start a second
+            # chain against the same document.
+            if dispatch.status != DispatchStatus.PACKED.value:
+                return dispatch.current_approver_name
+            await _apply_dispatch_submit(db, dispatch, user)
+            await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
+                              entity_no=dispatch.dispatch_no, action=AuditAction.UPDATE,
+                              actor=user, before={"status": DispatchStatus.PACKED.value},
+                              after={"status": dispatch.status},
+                              summary=f"Sent {dispatch.dispatch_no} for release on dispatch")
+            await db.commit()
+            return dispatch.current_approver_name
+    except Exception:
+        logger.exception("Could not send %s for release", dispatch_id)
+        return None
 
 
 async def _dispatch_signature_outstanding(db: AsyncSession, dispatch: m.Dispatch,
@@ -11901,3 +11950,12 @@ async def list_outbound_inspections(db: AsyncSession, params: PageParams,
             )
         )
     return await paginate(db, stmt.order_by(m.OutboundInspection.created_at.desc()), params)
+
+
+# Inventory wakes a parked allocation from `move_stock` — the one chokepoint every
+# stock increase passes — and has no warehouse callback in scope to hand it (rule 5:
+# inventory imports no module). Registering it here, at import, is how that doorway
+# still produces the issue drafts the floor picks against.
+from app.modules.inventory import allocations as _stock_allocations  # noqa: E402
+
+_stock_allocations.register_on_approved(create_fulfilment_drafts_for_allocation)

@@ -25,7 +25,11 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
     case "ISSUE":
     case "WH_ISSUE":
     case "OWN_STOCK_ISSUE": return `/warehouse/material-issues/${document.doc_id}`;
-    case "DISPATCH": return `/warehouse/transactions/dispatch/${document.doc_id}`;
+    // The consignment IS the dispatch document, and it lives under Logistics now:
+    // /warehouse/transactions/dispatch/:id redirects to the queue and drops the id,
+    // so an approver deep-linking from the inbox landed on a list instead of the
+    // consignment they had been asked to release.
+    case "DISPATCH": return `/logistics/consignments/${document.doc_id}`;
     case "QC_OUTWARD": return `/warehouse/qc-outward/${document.doc_id}`;
     case "PURCHASE_RETURN": return `/warehouse/purchase-returns/${document.doc_id}`;
     // A transport approval acts on the transport request itself. Without this case,
@@ -61,7 +65,11 @@ export function approvalDecisionDocumentPath(document: ApprovalDocument): string
     case "ISSUE":
     case "WH_ISSUE":
     case "OWN_STOCK_ISSUE": return `/warehouse/material-issues/${document.doc_id}`;
-    case "DISPATCH": return `/warehouse/transactions/dispatch/${document.doc_id}`;
+    // The consignment IS the dispatch document, and it lives under Logistics now:
+    // /warehouse/transactions/dispatch/:id redirects to the queue and drops the id,
+    // so an approver deep-linking from the inbox landed on a list instead of the
+    // consignment they had been asked to release.
+    case "DISPATCH": return `/logistics/consignments/${document.doc_id}`;
     case "QC_OUTWARD": return `/warehouse/qc-outward/${document.doc_id}`;
     case "PURCHASE_RETURN": return `/warehouse/purchase-returns/${document.doc_id}`;
     case "TRANSPORT_REQUEST": return `/logistics/shipments/${document.doc_id}?decision=1`;
