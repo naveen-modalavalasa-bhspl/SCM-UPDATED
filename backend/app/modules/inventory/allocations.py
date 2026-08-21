@@ -28,7 +28,7 @@ from app.platform.workflow import engine
 from app.platform.workflow.models import Instance
 from app.shared.enums import (
     AllocationStatus, ApprovalAction, AuditAction, DocType, IndentStatus,
-    InstanceStatus, RefType, WarehouseType,
+    InstanceStatus, RefType, ReservationStatus, WarehouseType,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
