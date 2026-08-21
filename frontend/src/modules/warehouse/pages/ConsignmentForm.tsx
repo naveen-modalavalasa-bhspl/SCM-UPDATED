@@ -756,7 +756,7 @@ export default function ConsignmentForm() {
         </MetaCard>
       )}
 
-      <Section title="Material issue">
+      <Section title={inLogistics ? "Consignment Details" : "Material issue"}>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
           <Field label="Against material issue">
             <Lookup
@@ -779,7 +779,9 @@ export default function ConsignmentForm() {
                     options={DISPATCH_TYPES} isDisabled={locked} />
           </Field>
           <Field label="Date">
-            <Input type="date" value={form.dispatch_date} disabled={locked}
+            {/* Read-only on the logistics door: the date the consignment goes out is
+                the warehouse's to set, and logistics only carries the leg after it. */}
+            <Input type="date" value={form.dispatch_date} disabled={locked || inLogistics}
                    onChange={(event) => setForm((f) => ({ ...f, dispatch_date: event.target.value }))} />
           </Field>
           {/* Where it ships FROM. Derived by the server from the material issue and
@@ -802,9 +804,11 @@ export default function ConsignmentForm() {
                     onChange={(value) => setForm((f) => ({ ...f, to_warehouse_id: value === "" ? null : value }))}
                     placeholder="Auto from the indent" />
           </Field>
-          <Field label="Destination">
-            <Input value={destination || "—"} disabled />
-          </Field>
+          {!inLogistics && (
+            <Field label="Destination">
+              <Input value={destination || "—"} disabled />
+            </Field>
+          )}
           {/* Comes with the material issue, like the destination beside it: the code
               belongs to the office the consignment is addressed to, so picking the
               issue fills it and nothing on this screen sets it. */}
@@ -822,34 +826,44 @@ export default function ConsignmentForm() {
                    min={form.dispatch_date || undefined}
                    onChange={(event) => setForm((f) => ({ ...f, expected_delivery: event.target.value || null }))} />
           </Field>
-          <Field label="Mode">
-            <Select value={form.transport_mode ?? "ROAD"} onChange={(value) => setForm((f) => ({ ...f, transport_mode: value }))}
-                    options={MODES} isDisabled={locked} />
-          </Field>
-          <Field label="Carrier">
-            <Lookup name="carriers" load={carrierOptions} value={form.carrier_id ?? ""} isDisabled={locked}
-                    onChange={(value) => setForm((f) => ({ ...f, carrier_id: value === "" ? null : value }))}
-                    placeholder="Carrier" />
-          </Field>
-          {/* Not editable: nothing on this screen chooses a vehicle — the number is
-              read off the issue or the destination office's name. See `vehicleOf`. */}
-          <Field label="Vehicle">
-            <Input value={vehicleNumber || "—"} disabled />
-          </Field>
-          <Field label="Driver">
-            <Input value={form.driver_name ?? ""} disabled={locked}
-                   onChange={(event) => setForm((f) => ({ ...f, driver_name: event.target.value }))} />
-          </Field>
-          <Field label="LR no">
-            <Input value={form.lr_no ?? ""} disabled={locked}
-                   onChange={(event) => setForm((f) => ({ ...f, lr_no: event.target.value }))} />
-          </Field>
-          <div className="lg:col-span-2">
-            <Field label="Delivery address">
-              <Input value={form.delivery_address ?? ""} disabled={locked}
-                     onChange={(event) => setForm((f) => ({ ...f, delivery_address: event.target.value }))} />
-            </Field>
-          </div>
+          {/* How it travels (mode, carrier) and who moves it (vehicle, driver, LR,
+              the delivery address) are the warehouse's half of the document: derived
+              from, or written against, the material issue. The logistics door shows
+              none of them — the mode and the provider are the one decision the floor
+              makes on the DISPATCH press, not here, and the rest still travel with
+              the payload untouched. */}
+          {!inLogistics && (
+            <>
+              <Field label="Mode">
+                <Select value={form.transport_mode ?? "ROAD"} onChange={(value) => setForm((f) => ({ ...f, transport_mode: value }))}
+                        options={MODES} isDisabled={locked} />
+              </Field>
+              <Field label="Carrier">
+                <Lookup name="carriers" load={carrierOptions} value={form.carrier_id ?? ""} isDisabled={locked}
+                        onChange={(value) => setForm((f) => ({ ...f, carrier_id: value === "" ? null : value }))}
+                        placeholder="Carrier" />
+              </Field>
+              {/* Not editable: nothing on this screen chooses a vehicle — the number is
+                  read off the issue or the destination office's name. See `vehicleOf`. */}
+              <Field label="Vehicle">
+                <Input value={vehicleNumber || "—"} disabled />
+              </Field>
+              <Field label="Driver">
+                <Input value={form.driver_name ?? ""} disabled={locked}
+                       onChange={(event) => setForm((f) => ({ ...f, driver_name: event.target.value }))} />
+              </Field>
+              <Field label="LR no">
+                <Input value={form.lr_no ?? ""} disabled={locked}
+                       onChange={(event) => setForm((f) => ({ ...f, lr_no: event.target.value }))} />
+              </Field>
+              <div className="lg:col-span-2">
+                <Field label="Delivery address">
+                  <Input value={form.delivery_address ?? ""} disabled={locked}
+                         onChange={(event) => setForm((f) => ({ ...f, delivery_address: event.target.value }))} />
+                </Field>
+              </div>
+            </>
+          )}
         </div>
       </Section>
 
