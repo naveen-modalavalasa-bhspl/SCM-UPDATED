@@ -833,7 +833,8 @@ async def warehouse_available(db: AsyncSession, item_ids: set[int]) -> dict[int,
     return {item_id: _d(qty) for item_id, qty in rows}
 
 
-async def reopen_for_available_stock(db: AsyncSession, item_ids: set[int]) -> list[int]:
+async def reopen_for_available_stock(db: AsyncSession, item_ids: set[int],
+                                     on_approved=None) -> list[int]:
     """Wake every allocation parked on procurement whose goods are now on the shelf.
 
     FIXED 2026-08-21 — the only path back from AWAITING_PROCUREMENT was
@@ -882,7 +883,7 @@ async def reopen_for_available_stock(db: AsyncSession, item_ids: set[int]) -> li
 
     reopened: list[int] = []
     for indent_id in dict.fromkeys(indent_ids):
-        reopened.extend(await reopen_for_receipt(db, indent_id))
+        reopened.extend(await reopen_for_receipt(db, indent_id, on_approved))
     return reopened
 
 
@@ -933,7 +934,8 @@ async def _prefill_from_shelf(db: AsyncSession, alloc: Allocation) -> None:
         line.warehouse_id, line.warehouse_name = point[0], point[1]
 
 
-async def reopen_for_receipt(db: AsyncSession, indent_id: int) -> list[int]:
+async def reopen_for_receipt(db: AsyncSession, indent_id: int,
+                             on_approved=None) -> list[int]:
     """Put an allocation waiting on procurement back in front of its approver.
 
     Called when the goods bought for its shortfall reach stock. The SAME document is
@@ -974,8 +976,9 @@ async def reopen_for_receipt(db: AsyncSession, indent_id: int) -> list[int]:
         alloc.approved_at = None
         await _prefill_from_shelf(db, alloc)
         await db.flush()
-        await engine.start(
-            db, doc_type=await doc_type_for(db, alloc.id), doc_id=alloc.id,
+        doc_type = await doc_type_for(db, alloc.id)
+        instance = await engine.start(
+            db, doc_type=doc_type, doc_id=alloc.id,
             context={
                 "doc_no": alloc.allocation_no,
                 "doc_summary": f"Stock arrived for {alloc.indent_no} — top up the "
@@ -984,9 +987,43 @@ async def reopen_for_receipt(db: AsyncSession, indent_id: int) -> list[int]:
             },
             user=raiser,
         )
-        await _refresh_approver(db, alloc, await doc_type_for(db, alloc.id))
+        # FIXED 2026-08-21 — the return of `engine.start` was thrown away here and the
+        # status hardcoded to PENDING_APPROVAL above. The ladder can finish AT SUBMIT:
+        # an OWN_STOCK_ALLOCATION raised by the top of its own ladder, or any ladder set
+        # to NO_APPROVAL, comes back already APPROVED. `create()` has checked for that
+        # since it was written (see the same branch there); this second doorway into the
+        # same state never got it, so a reopened allocation whose raiser self-approves
+        # ended up with the workflow saying APPROVED and the document saying
+        # PENDING_APPROVAL — nothing reserved, no fulfilment draft, and nobody on the
+        # pending list, so the review screen offered neither a Give box nor a button.
+        # ALL/2026-27/00079 is the live proof: instance APPROVED at 12:19:12, allocation
+        # still PENDING_APPROVAL, 198 mice on the shelf and no way to issue them.
+        #
+        # This branch only fires for a ladder that self-approves. Where a real approver
+        # is named the engine returns IN_PROGRESS, `_refresh_approver` puts their name on
+        # the document, and the signature settles it through `act()` exactly as before —
+        # that path is untouched.
+        if instance.status == InstanceStatus.APPROVED.value:
+            await db.refresh(alloc, ["items"])
+            await _settle_approved(db, alloc, raiser, _reopen_ctx(alloc), on_approved)
+        else:
+            await _refresh_approver(db, alloc, doc_type)
         reopened.append(alloc.id)
     return reopened
+
+
+def _reopen_ctx(alloc: Allocation) -> dict:
+    """The project a reopened allocation is serving, for the MR a residual shortfall
+    may still raise.
+
+    Read off the allocation's own lines rather than the indent: inventory is the base
+    module and cannot read `ind_indents` (rule 5). The name is not stored on a line, so
+    only the id travels — `apply_to_stock` writes it onto the request and the name is
+    resolved by whoever displays it.
+    """
+    project_id = next((line.project_id for line in alloc.items
+                       if line.project_id and line.project_id != NO_PROJECT), None)
+    return {"project_id": project_id, "project_name": None}
 
 
 async def act(db: AsyncSession, allocation_id: int, action: str, user,

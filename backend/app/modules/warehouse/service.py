@@ -1757,7 +1757,8 @@ async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
     from app.modules.inventory import service as inventory_service
 
     await inventory_service.mark_mrs_received(
-        db, await _receipts_by_indent_line(db, po, lines, received))
+        db, await _receipts_by_indent_line(db, po, lines, received),
+        create_fulfilment_drafts_for_allocation)
 
     # FIXED 2026-08-21 — `mark_mrs_received` only reopens an allocation when the MR it
     # settles carries the indent that raised it. Stock bought against a DIFFERENT
@@ -1768,7 +1769,8 @@ async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
     from app.modules.inventory import allocations as stock_allocations
 
     await stock_allocations.reopen_for_available_stock(
-        db, {line.item_id for line in lines if line.item_id})
+        db, {line.item_id for line in lines if line.item_id},
+        create_fulfilment_drafts_for_allocation)
 
 
 async def _receipts_by_indent_line(db: AsyncSession, po, lines,
@@ -4385,6 +4387,36 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
 
     drafts: list[m.MaterialIssue] = []
     for warehouse_id, lines in by_warehouse.items():
+        # FIXED 2026-08-21 — draft only the INCREMENT, never the whole allocation.
+        #
+        # An allocation is approved more than once. It is signed, the shelf covers part
+        # of it, the rest goes to procurement, the goods arrive, and the SAME document
+        # is reopened and signed again (`allocations.reopen_for_receipt`). The line the
+        # first signature already issued is still on it, so this used to re-draft the
+        # full quantity and `_guard_indent_quantity` refused the whole batch:
+        # "IND/2026-27/00093 is already covered for K2 EDTA Vacutainer Lavender 2 ml —
+        # 10.000 of 10.000 by WHI/2026-27/00045 (ISSUED)". One settled line took the
+        # topped-up line down with it, so nothing could be issued at all.
+        #
+        # The reservation half of approval was already incremental — `_settle_approved`
+        # reserves the DIFFERENCE — and this is that same rule for the handoff. Netted
+        # against live issues from THIS point only, the same scope the guard applies, so
+        # a chain leg still gets its own allowance. An item with nothing left drops out
+        # rather than raising: it is not an error for a line to be finished.
+        #
+        # This is NOT specific to a self-approving ladder. A reopened allocation signed
+        # by a real approver reaches the identical handoff through `act()`, and hit the
+        # identical refusal.
+        already = await _already_issued(db, alloc.indent_id, warehouse_id)
+        outstanding: dict[int, dict] = {}
+        for item_id, v in lines.items():
+            left = _d(v["qty"]) - already.get(item_id, ZERO)
+            if left <= ZERO:
+                continue
+            outstanding[item_id] = {**v, "qty": left}
+        if not outstanding:
+            continue
+        lines = outstanding
         project_id = next(
             (v["project_id"] for v in lines.values() if v["project_id"]), None
         )
@@ -4393,6 +4425,8 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
             items.extend(await _allocation_lines_by_batch(
                 db, alloc.indent_id, warehouse_id, item_id, v,
             ))
+        if not items:
+            continue
         data = s.IssueWrite(
             issue_date=ist_today(),
             warehouse_id=warehouse_id,

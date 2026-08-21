@@ -946,7 +946,8 @@ async def get_mr(db: AsyncSession, mr_id: int, user=None) -> MaterialRequest:
 
 
 async def mark_mrs_received(db: AsyncSession,
-                            receipts: dict[int, Decimal]) -> list[int]:
+                            receipts: dict[int, Decimal],
+                            on_approved=None) -> list[int]:
     """Close every material request whose goods have now reached stock.
 
     `receipts` is the CUMULATIVE accepted quantity per INDENT LINE, worked out by the
@@ -998,7 +999,12 @@ async def mark_mrs_received(db: AsyncSession,
                 # for its MR helper, and a top-level import would close the loop.
                 from app.modules.inventory import allocations
 
-                await allocations.reopen_for_receipt(db, mr.indent_id)
+                # `on_approved` travels with it: a reopened allocation whose ladder
+                # self-approves settles inside that call, and settling means the
+                # warehouse's fulfilment draft too. Inventory cannot import warehouse
+                # (rule 5), so the caller that owns the receipt supplies the handoff.
+                await allocations.reopen_for_receipt(
+                    db, mr.indent_id, on_approved)
     return closed
 
 
