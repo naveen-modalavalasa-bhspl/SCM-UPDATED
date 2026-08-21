@@ -589,14 +589,20 @@ export const binOptions = (
   storage_type_id?: string | number | null,
   all_locations?: boolean,
   exclude_bin_id?: number | null,
+  /** The indent being issued. Its own reservation would otherwise hide the very bin
+   *  the line is issuing from — see warehouse service `_stock_offerable`. */
+  indent_id?: number | null,
 ) =>
   get<Option[]>(`${BASE}/options/bins`, {
     warehouse_id, search, item_id, batch_id, storage_type_id, all_locations,
-    exclude_bin_id,
+    exclude_bin_id, indent_id,
   });
 
-export const batchOptions = (item_id: number, warehouse_id: number, bin_id?: number | null) =>
-  get<Option[]>(`${BASE}/options/batches`, { item_id, warehouse_id, bin_id });
+/** `indent_id`: same reason as `binOptions` — a line issuing the whole balance must
+ *  still be offered the batch it is issuing from. */
+export const batchOptions = (item_id: number, warehouse_id: number,
+                             bin_id?: number | null, indent_id?: number | null) =>
+  get<Option[]>(`${BASE}/options/batches`, { item_id, warehouse_id, bin_id, indent_id });
 
 /** Orders a delivery can arrive against — sent to the vendor, not yet fully received.
  *  Behind `receipt.view`, not `po.view`: a storekeeper picks the order the goods came

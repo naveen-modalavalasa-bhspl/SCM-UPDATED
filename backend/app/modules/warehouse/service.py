@@ -10103,11 +10103,41 @@ async def warehouse_options(db: AsyncSession, *, mine_only: bool = False,
              "warehouse_type": r.warehouse_type} for r in rows]
 
 
+def _stock_offerable(indent_id: int | None):
+    """Stock a picker may still choose: what is free, plus what THIS indent is holding.
+
+    FIXED 2026-08-21 — both option lists filtered on `available_qty > 0` alone, and an
+    approved allocation RESERVES the stock it is about to issue. So a line that takes
+    the whole balance erased its own batch and bin from its own dropdowns: WHI/2026-27/
+    00047 line 2 held batch 22 / bin 4 correctly and drew two empty boxes, because the
+    10 units on that balance were reserved by the very indent being issued. The sibling
+    line only rendered because 5 units happened to be spare.
+
+    Issuing exactly what is on hand is the normal case, not the edge one, so the
+    document's own hold has to come back. Same shape as `_free_by_point`'s
+    `exclude_allocation_id`: everyone else's reservations still hide the row.
+    """
+    from app.modules.inventory.models import Reservation, Stock
+
+    free = Stock.available_qty > ZERO
+    if not indent_id:
+        return free
+    mine = Stock.id.in_(
+        select(Reservation.stock_id).where(
+            Reservation.ref_type == InventoryRefType.RESERVATION.value,
+            Reservation.ref_id == indent_id,
+            Reservation.status == ReservationStatus.ACTIVE.value,
+        )
+    )
+    return or_(free, mine)
+
+
 async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = None,
                       item_id: int | None = None, batch_id: int | None = None,
                       storage_type_id: str | None = None,
                       all_locations: bool = False,
-                      exclude_bin_id: int | None = None) -> list[dict]:
+                      exclude_bin_id: int | None = None,
+                      indent_id: int | None = None) -> list[dict]:
     # A picker chooses somewhere to put stock, so offer bins and not the lanes and
     # racks they hang from, unless all_locations is True.
     stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True))
@@ -10126,7 +10156,7 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
         from app.modules.inventory.models import Stock
         stmt = stmt.join(Stock, Stock.bin_id == Bin.id).where(
             Stock.warehouse_id == warehouse_id,
-            Stock.available_qty > ZERO,
+            _stock_offerable(indent_id),
         )
         if item_id:
             stmt = stmt.where(Stock.item_id == item_id)
@@ -10145,6 +10175,7 @@ async def batch_options(
     item_id: int,
     warehouse_id: int,
     bin_id: int | None = None,
+    indent_id: int | None = None,
 ) -> list[dict]:
     from app.modules.inventory.models import Stock
 
@@ -10154,7 +10185,9 @@ async def batch_options(
         .where(
             m.Batch.item_id == item_id,
             Stock.warehouse_id == warehouse_id,
-            Stock.available_qty > ZERO,
+            # See `_stock_offerable`: the document's own reservation must not hide the
+            # batch it is issuing from.
+            _stock_offerable(indent_id),
         )
         .distinct()
     )

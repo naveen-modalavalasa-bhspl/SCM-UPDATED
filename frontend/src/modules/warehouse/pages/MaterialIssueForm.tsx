@@ -469,8 +469,8 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       hideOnNarrow: true,
       render: (line, index) => (
         <Lookup
-          name={`issue-batches-${line.item_id}-${form.warehouse_id}`}
-          load={() => batchOptions(line.item_id, form.warehouse_id)}
+          name={`issue-batches-${line.item_id}-${form.warehouse_id}-${form.indent_id ?? 0}`}
+          load={() => batchOptions(line.item_id, form.warehouse_id, null, form.indent_id)}
           value={line.batch_id ?? ""}
           isDisabled={locked || !line.item_id || !form.warehouse_id}
           onChange={(value) => patchLine(index, {
@@ -489,8 +489,9 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       hideOnNarrow: true,
       render: (l: IssueItemWrite, i: number) => (
         <Lookup
-          name={`bins-${form.warehouse_id}-${l.batch_id ?? 0}`}
-          load={(s) => binOptions(form.warehouse_id, s, l.item_id, l.batch_id)}
+          name={`bins-${form.warehouse_id}-${l.batch_id ?? 0}-${form.indent_id ?? 0}`}
+          load={(s) => binOptions(form.warehouse_id, s, l.item_id, l.batch_id,
+                                  undefined, undefined, undefined, form.indent_id)}
           value={l.bin_id ?? ""}
           isDisabled={locked || !form.warehouse_id || !l.batch_id}
           onChange={(v) => patchLine(i, { bin_id: v === "" ? null : v, serial_numbers: [] })}

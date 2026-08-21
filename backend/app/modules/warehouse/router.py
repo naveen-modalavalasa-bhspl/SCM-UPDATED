@@ -909,21 +909,29 @@ async def bin_options(warehouse_id: int, search: str | None = None,
                       storage_type_id: str | None = None,
                       all_locations: bool = False,
                       exclude_bin_id: int | None = None,
+                      indent_id: int | None = None,
                       db: AsyncSession = Depends(get_db),
                       _=Depends(require_permission(STOCK_VIEW))):
+    """`indent_id` adds back the stock this indent already holds — see
+    `service._stock_offerable`."""
     return await service.bin_options(
         db, warehouse_id, search, item_id=item_id, batch_id=batch_id,
         storage_type_id=storage_type_id, all_locations=all_locations,
-        exclude_bin_id=exclude_bin_id,
+        exclude_bin_id=exclude_bin_id, indent_id=indent_id,
     )
 
 
 @router.get("/options/batches", response_model=list[s.Option])
 async def batch_options(item_id: int = Query(...), warehouse_id: int = Query(...),
-                        bin_id: int | None = None, db: AsyncSession = Depends(get_db),
+                        bin_id: int | None = None, indent_id: int | None = None,
+                        db: AsyncSession = Depends(get_db),
                         _=Depends(require_permission(STOCK_VIEW))):
+    """`indent_id` adds back the stock this indent already holds — see
+    `service._stock_offerable`. Without it a line issuing the whole balance loses the
+    batch it is issuing from."""
     return await service.batch_options(
-        db, item_id=item_id, warehouse_id=warehouse_id, bin_id=bin_id
+        db, item_id=item_id, warehouse_id=warehouse_id, bin_id=bin_id,
+        indent_id=indent_id,
     )
 
 
