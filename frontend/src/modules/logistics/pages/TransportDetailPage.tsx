@@ -16,6 +16,7 @@ import {
   carriageLabel, carriageTint, load, modeLabel, modeTint, money, nextMove,
 } from "../components/modeCopy";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
+import { manifestLines } from "../components/consignmentToLines";
 
 /**
  * One consignment's transport leg, from planning to the signature at the far end.
@@ -536,7 +537,7 @@ export function TransportDetailPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {doc.items.map((line) => (
+                  {manifestLines(doc.items).map((line) => (
                     <tr key={line.id} className="border-b border-line/50 last:border-0">
                       <td className="py-2.5 pr-3 text-body">
                         {line.item_name ?? "—"}

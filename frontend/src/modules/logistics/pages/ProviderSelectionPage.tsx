@@ -11,6 +11,7 @@ import { transportApi } from "../api";
 import { CarrierComparison } from "../components/CarrierComparison";
 import { load, modeLabel, modeTint, money } from "../components/modeCopy";
 import type { ProviderBoardRow } from "../transportTypes";
+import { manifestLines } from "../components/consignmentToLines";
 
 const SIZE = 20;
 
@@ -421,7 +422,7 @@ function ProviderSheet({ trId, onBack }: { trId: number; onBack: () => void }) {
               </tr>
             </thead>
             <tbody>
-              {doc.items.map((line) => (
+              {manifestLines(doc.items).map((line) => (
                 <tr key={line.id} className="border-b border-line/50">
                   <td className="py-2">
                     <div className="text-body">{line.item_name ?? "—"}</div>

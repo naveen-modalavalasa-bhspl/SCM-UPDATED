@@ -1,4 +1,4 @@
-import type { ConsignmentDetail, TRInput, TRLineInput } from "../transportTypes";
+import type { ConsignmentDetail, TRInput, TRItem, TRLineInput } from "../transportTypes";
 
 /**
  * A packed consignment, turned into the transport lines a carrier can price.
@@ -103,4 +103,46 @@ export function headerFromConsignment(doc: ConsignmentDetail): Partial<TRInput> 
     project_name: doc.project_name ?? null,
     expected_delivery: doc.expected_delivery ?? null,
   };
+}
+
+/**
+ * The same collapse, applied to a shipment that is already raised.
+ *
+ * `linesFromConsignment` stops a NEW request being built one row per unit, but every
+ * request raised before it still carries them, and the screens that read a shipment —
+ * the register's line table, the sheet a carrier prices off — are exactly where the
+ * wall of repeats shows up. A manifest is a statement about what travels, so it is
+ * grouped for READING rather than rewritten in the database: `out_dispatch_items` names
+ * every serial in the box on purpose (that IS the packing list) and nothing here erases
+ * it.
+ *
+ * Grouped on item and batch, and the cartons and weights inside a group are ADDED, not
+ * taken from whichever row happened to be first — one line carries the count and the
+ * rest carry none, so keeping the first would report a twelve-unit shipment as
+ * weighing nothing. There is no `package_id` on a stored line, so this cannot tell one
+ * carton from two; the totals it prints are right either way, which is what the table
+ * shows. Rows that merge with nothing come through untouched.
+ */
+export function manifestLines(items: TRItem[] | undefined | null): TRItem[] {
+  const byKey = new Map<string, TRItem>();
+  const lines: TRItem[] = [];
+
+  for (const line of items ?? []) {
+    const key = `${line.item_id ?? line.item_code ?? line.item_name}|${line.remarks ?? ""}`;
+    const merged = byKey.get(key);
+    if (merged) {
+      merged.quantity = Number(merged.quantity ?? 0) + Number(line.quantity ?? 0);
+      merged.delivered_qty = Number(merged.delivered_qty ?? 0) + Number(line.delivered_qty ?? 0);
+      merged.package_count = Number(merged.package_count ?? 0) + Number(line.package_count ?? 0);
+      if (line.weight_kg != null) {
+        merged.weight_kg = Number(merged.weight_kg ?? 0) + Number(line.weight_kg);
+      }
+      merged.is_fragile = merged.is_fragile || line.is_fragile;
+      continue;
+    }
+    const copy = { ...line };
+    byKey.set(key, copy);
+    lines.push(copy);
+  }
+  return lines;
 }

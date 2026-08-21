@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  headerFromConsignment, linesFromConsignment,
+  headerFromConsignment, linesFromConsignment, manifestLines,
 } from "../components/consignmentToLines";
 import type { ConsignmentDetail } from "../transportTypes";
 
@@ -191,5 +191,57 @@ describe("a packed consignment, turned into transport lines", () => {
   it("does not claim an issue id when the consignment came from something else", () => {
     const header = headerFromConsignment(consignment({ ref_type: "STO", ref_id: 9 }));
     expect(header.issue_id).toBeNull();
+  });
+});
+
+describe("a shipment already raised, read as a manifest", () => {
+  // TR/2026-27/00011 as it actually stands: ten vacutainers and two mice picked one
+  // row per serial into a single box. The first row carries the carton and the
+  // weight, the rest carry nothing.
+  const stored = [
+    ...Array.from({ length: 10 }, (_, n) => ({
+      id: 100 + n, line_no: n + 1, item_id: 7, item_code: "VAC",
+      item_name: "K2 EDTA Vacutainer Lavender 2 ml", uom_code: "NOS",
+      quantity: 1, delivered_qty: 0, package_count: n === 0 ? 1 : 0,
+      package_type: n === 0 ? "BOX" : null, weight_kg: n === 0 ? 6 : null,
+      is_fragile: false, remarks: "Batch EDTA26G118",
+    })),
+    ...Array.from({ length: 2 }, (_, n) => ({
+      id: 200 + n, line_no: 11 + n, item_id: 69, item_code: "MOU",
+      item_name: "Wireless Mouse", uom_code: "NOS",
+      quantity: 1, delivered_qty: 0, package_count: 0,
+      package_type: null, weight_kg: null, is_fragile: false,
+      remarks: "Batch 08-2026",
+    })),
+  ] as Parameters<typeof manifestLines>[0];
+
+  it("collapses the per-unit rows to one line per item", () => {
+    const lines = manifestLines(stored);
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0].item_name).toBe("K2 EDTA Vacutainer Lavender 2 ml");
+    expect(lines[0].quantity).toBe(10);
+    expect(lines[1].item_name).toBe("Wireless Mouse");
+    expect(lines[1].quantity).toBe(2);
+  });
+
+  it("keeps the carton count and the weight the shipment actually carries", () => {
+    const lines = manifestLines(stored);
+
+    // One box, six kilos — taken from the row that opened the carton, not lost
+    // because eleven siblings said nothing.
+    expect(lines.reduce((sum, line) => sum + line.package_count, 0)).toBe(1);
+    expect(lines[0].weight_kg).toBe(6);
+  });
+
+  it("leaves a shipment picked one row per item alone", () => {
+    const plain = [
+      { id: 1, line_no: 1, item_id: 7, item_name: "Gloves", quantity: 5,
+        delivered_qty: 0, package_count: 1, weight_kg: 3, is_fragile: false },
+      { id: 2, line_no: 2, item_id: 8, item_name: "Masks", quantity: 4,
+        delivered_qty: 0, package_count: 1, weight_kg: 2, is_fragile: false },
+    ] as Parameters<typeof manifestLines>[0];
+
+    expect(manifestLines(plain)).toHaveLength(2);
   });
 });
