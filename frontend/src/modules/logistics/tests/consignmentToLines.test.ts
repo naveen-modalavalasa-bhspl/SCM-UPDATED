@@ -30,6 +30,76 @@ const consignment = (over: Partial<ConsignmentDetail>): ConsignmentDetail =>
   ({ ...base, items: [], packages: [], ...over }) as ConsignmentDetail;
 
 describe("a packed consignment, turned into transport lines", () => {
+  it("gives one manifest line per item per carton, however it was picked", () => {
+    // The failing shape: a serial-tracked item records one picked row per unit, so
+    // twelve vacutainers in one box arrived as twelve identical "1 NOS" lines.
+    const doc = consignment({
+      packages: [
+        { id: 1, package_no: "P1", package_type: "CARTON", weight_kg: 6,
+          length_cm: null, width_cm: null, height_cm: null, is_fragile: false },
+      ],
+      items: Array.from({ length: 12 }, (_, n) => ({
+        id: 20 + n, line_no: n + 1, package_id: 1, item_id: 501,
+        item_name: "K2 EDTA Vacutainer Lavender 2 ml", uom_code: "NOS", quantity: 1,
+      })) as ConsignmentDetail["items"],
+    });
+
+    const lines = linesFromConsignment(doc);
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0].quantity).toBe(12);
+    expect(lines[0].package_count).toBe(1);
+    expect(lines[0].weight_kg).toBe(6);
+  });
+
+  it("keeps one item in two cartons as two lines", () => {
+    // The box owns the weight, so the same item split across two of them stays two
+    // lines — merging those would price a two-carton load as one.
+    const doc = consignment({
+      packages: [
+        { id: 1, package_no: "P1", package_type: "CARTON", weight_kg: 6,
+          length_cm: null, width_cm: null, height_cm: null, is_fragile: false },
+        { id: 2, package_no: "P2", package_type: "CARTON", weight_kg: 4,
+          length_cm: null, width_cm: null, height_cm: null, is_fragile: false },
+      ],
+      items: [
+        { id: 31, line_no: 1, package_id: 1, item_id: 501, item_name: "Vacutainer",
+          uom_code: "NOS", quantity: 8 },
+        { id: 32, line_no: 2, package_id: 2, item_id: 501, item_name: "Vacutainer",
+          uom_code: "NOS", quantity: 4 },
+      ] as ConsignmentDetail["items"],
+    });
+
+    const lines = linesFromConsignment(doc);
+
+    expect(lines).toHaveLength(2);
+    expect(lines.reduce((sum, line) => sum + (line.package_count ?? 0), 0)).toBe(2);
+  });
+
+  it("keeps two batches of one item in one carton apart", () => {
+    // The batch is on the line's remarks and is what a receiving site reconciles
+    // against, so merging across batches would lose it.
+    const doc = consignment({
+      packages: [
+        { id: 1, package_no: "P1", package_type: "CARTON", weight_kg: 6,
+          length_cm: null, width_cm: null, height_cm: null, is_fragile: false },
+      ],
+      items: [
+        { id: 41, line_no: 1, package_id: 1, item_id: 501, item_name: "Vacutainer",
+          uom_code: "NOS", quantity: 5, batch_no: "B1" },
+        { id: 42, line_no: 2, package_id: 1, item_id: 501, item_name: "Vacutainer",
+          uom_code: "NOS", quantity: 7, batch_no: "B2" },
+      ] as ConsignmentDetail["items"],
+    });
+
+    const lines = linesFromConsignment(doc);
+
+    expect(lines).toHaveLength(2);
+    expect(lines.map((line) => line.remarks)).toEqual(["Batch B1", "Batch B2"]);
+    // Still one box between them.
+    expect(lines.reduce((sum, line) => sum + (line.package_count ?? 0), 0)).toBe(1);
+  });
+
   it("counts a carton once however many lines are packed in it", () => {
     const doc = consignment({
       packages: [
