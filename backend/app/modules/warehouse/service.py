@@ -3100,7 +3100,18 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                              project_id=project_id,
                              # Putaway moves the same goods into their bin, so it
                              # carries the same cost the batch was received at.
-                             rate=batch.rate if batch else None)
+                             rate=batch.rate if batch else None,
+                             # FIXED 2026-08-21 — the units this leg carried were never
+                             # handed to the ledger. `_place_serials` below names each
+                             # one on `whs_serial_numbers` and stamps its asset code, so
+                             # the data was right; but `stk_balance.serial_number` and
+                             # `stk_ledger.serial_numbers` stayed NULL, and the Stock
+                             # Balance and Stock Ledger screens read the codes off the
+                             # BALANCE row — so a put-away lot showed a dash under
+                             # Serial / IMEI and Asset Code while its 30 units sat
+                             # correctly coded one table away. WITHOUT this the ledger
+                             # cannot say which physical units a movement moved.
+                             serial_numbers=serials or None)
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date

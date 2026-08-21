@@ -9,6 +9,7 @@ import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { UnitCell } from "./UnitsPanel";
 import {
   getSerialSummary, getStockLedger, getStockLedgerSummary, getWarehouses, indexSerials,
+  unplaced,
 } from "../api";
 import type { SerialSummaryRow, StockLedgerItem } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -129,8 +130,23 @@ export function StockLedgerView() {
     enabled: rows.length > 0,
   });
   const serialsByRow = indexSerials(serialRows);
+  /** The units behind one ledger row.
+   *
+   *  FIXED 2026-08-21 — this asked for `item:warehouse` only, and `indexSerials`
+   *  files a row under that short key ONLY when its units are unplaced (no bin, no
+   *  batch). Every unit that has actually been put away is filed under the full
+   *  `item:warehouse:bin:batch`, so the lookup missed every one of them and the
+   *  Serial / IMEI and Asset Code columns showed a dash for stock whose units were
+   *  sitting correctly coded one table away.
+   *
+   *  Most specific first, exactly as Stock Balance does it: the row's own bin and
+   *  batch, then the bin alone, then the point. Falling back that way is what lets a
+   *  movement whose lot has since been emptied still name what it carried, without
+   *  handing one lot another lot's units. */
   const unitsOf = (r: StockLedgerItem) =>
-    serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
+    serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${unplaced(r.bin_id)}:${unplaced(r.batch_id)}`)
+    ?? serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${unplaced(r.bin_id)}`)
+    ?? serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
 
   /** The serial to show for a row, or nothing.
    *

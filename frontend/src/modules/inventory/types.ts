@@ -178,6 +178,10 @@ export interface StockLedgerItem {
   item_code: string;
   item_name: string;
   warehouse_id: number;
+  /** The lot the movement touched — needed to find its units in the serial
+   *  summary, which files placed units under item:warehouse:bin:batch. */
+  bin_id?: number | null;
+  batch_id?: number | null;
   warehouse_name: string;
   uom_code: string;
   in_qty: number;

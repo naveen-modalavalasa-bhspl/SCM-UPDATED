@@ -81,6 +81,13 @@ class MovementRow(BaseModel):
     serial_numbers: list[str] | None = None
     asset_code: str | None = None
     consumable_code: str | None = None
+    # FIXED 2026-08-21 — the lot a movement touched. `stk_ledger` has carried both
+    # since it was written and `list_movements` already reads them to look the codes
+    # up, but neither was on the wire: the screen could only ask the unit lookup for
+    # `item:warehouse`, which is the key placed units are NOT filed under, so every
+    # put-away lot showed a dash for Serial / IMEI and Asset Code.
+    bin_id: int | None = None
+    batch_id: int | None = None
     ref_type: str | None = None
     ref_no: str | None = None
     created_by_name: str | None = None
