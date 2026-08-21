@@ -5738,8 +5738,24 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     sources = {d.get("warehouse_id") for d in decisions
                if d.get("warehouse_id") and Decimal(str(d.get("quantity") or 0)) > 0}
     my_points = await locations.location_ids_for_user(db, user)
-    doc_type = (DocType.OWN_STOCK_ALLOCATION.value
-                if sources and sources <= my_points
+    # FIXED 2026-08-21 — giving NOTHING names no source at all, and `sources and ...`
+    # then short-circuited to an ordinary ALLOCATION. So the same storekeeper, deciding
+    # over the same shelf, was the rung on his own document when he gave 2 and a
+    # stranger to it when he gave 0: the empty case fell through to the code-level
+    # fallback and landed on System Admin. ALL/2026-27/00080 is the live proof — raised
+    # by MAHENDRA, who holds the only point involved, and pending on Administrator, so
+    # neither Allocation Approvals nor the cycle screen offered him anything to press.
+    #
+    # It also compounds, because "gave nothing" is exactly the document that comes BACK
+    # when procurement delivers: the reopened allocation keeps the doc type it was
+    # classified under, so the wrong approver outlives the shortage that caused it.
+    #
+    # By the rule this function already states — a single source he does NOT hold makes
+    # it an ordinary allocation — no sources means no such point, so it stays his. The
+    # `my_points` guard keeps it honest: a central desk that holds no point of its own
+    # is not serving its own stock, and still goes down the inventory ladder.
+    own_stock = (sources <= my_points) if sources else bool(my_points)
+    doc_type = (DocType.OWN_STOCK_ALLOCATION.value if own_stock
                 else DocType.ALLOCATION.value)
 
     alloc = await allocations.create(
