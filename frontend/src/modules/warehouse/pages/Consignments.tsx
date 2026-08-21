@@ -9,6 +9,8 @@ import type { Dispatch } from "../types";
 
 const STATUSES = [
   { value: "PACKED", label: "Ready" },
+  { value: "PENDING_APPROVAL", label: "Awaiting release" },
+  { value: "APPROVED", label: "Released" },
   { value: "DISPATCHED", label: "Dispatched" },
   { value: "IN_TRANSIT", label: "In transit" },
   { value: "DELIVERED", label: "Delivered" },
@@ -77,7 +79,8 @@ export default function Consignments() {
       render: (row) => (
         <div className="flex flex-wrap items-center gap-2">
           <StatusPill status={row.status} />
-          {row.status === "PACKED" && <Chip size="sm" variant="flat" color="success">Ready</Chip>}
+          {(row.status === "PACKED" || row.status === "APPROVED")
+            && <Chip size="sm" variant="flat" color="success">Ready</Chip>}
         </div>
       ),
     },
@@ -133,7 +136,7 @@ export default function Consignments() {
         deleteLabel="consignment"
         labelOf={(row) => row.dispatch_no ?? `Consignment ${row.id}`}
         kpiCounts={[
-          { label: "Ready", statuses: ["PACKED"], tone: "text-ok" },
+          { label: "Ready", statuses: ["PACKED", "APPROVED"], tone: "text-ok" },
           { label: "Dispatched", statuses: ["DISPATCHED", "IN_TRANSIT"] },
         ]}
         kpis={(rows) => [

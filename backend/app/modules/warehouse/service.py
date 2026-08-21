@@ -7653,8 +7653,13 @@ async def list_consignments(db: AsyncSession, params: PageParams, *, status: str
         m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
         m.Dispatch.packages.any(),
     )
-    if status:
-        stmt = stmt.where(m.Dispatch.status == status)
+    # Comma-separated, because "ready to go out" is not one status. A consignment
+    # sent for release comes back APPROVED, not PACKED, and the Dispatch queue asking
+    # for a single value dropped every released consignment off the board it was
+    # released onto. One value still behaves exactly as it always did.
+    wanted = [part.strip().upper() for part in (status or "").split(",") if part.strip()]
+    if wanted:
+        stmt = stmt.where(m.Dispatch.status.in_(wanted))
     if warehouse_id:
         stmt = stmt.where(m.Dispatch.warehouse_id == warehouse_id)
     if search:

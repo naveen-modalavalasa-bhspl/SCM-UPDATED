@@ -695,7 +695,11 @@ export default function ConsignmentForm() {
                 </Button>
               </Can>
             )}
-            {doc?.status === "PACKED" && (
+            {/* APPROVED as well as PACKED: a consignment that WAS sent for release
+                comes back APPROVED, and gating this press on PACKED alone left it
+                with no way forward at all — the release button is gone by then, the
+                form is locked, and the only control left on the screen was Back. */}
+            {(doc?.status === "PACKED" || doc?.status === "APPROVED") && (
               <Can do={inLogistics ? "transport.create" : "dispatch.gate_out"}>
                 {/* This press does not dispatch anything — it opens the screen where
                     the mode and the provider are chosen and the transport request is

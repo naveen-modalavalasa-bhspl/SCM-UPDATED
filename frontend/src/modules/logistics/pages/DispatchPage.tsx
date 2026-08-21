@@ -66,7 +66,13 @@ export function DispatchPage() {
   const { data, isLoading, error, isFetching: queueFetching } = useQuery({
     queryKey: ["lgs-dispatch-queue", search, page],
     queryFn: () => consignmentApi.list({
-      status: "PACKED", search: search.trim() || undefined, page, size: SIZE,
+      // Both rungs a consignment can be ready on. PACKED is one that never needed a
+      // release signature; APPROVED is one that was sent for release and got it. Only
+      // PACKED was asked for, so pressing "Send for release" made the consignment
+      // vanish off this queue — released, and then unreachable from the screen that
+      // exists to dispatch it.
+      status: "PACKED,APPROVED",
+      search: search.trim() || undefined, page, size: SIZE,
     }),
     // A poll must never blank the board it is refreshing: keeping the previous page
     // on screen is what makes ten-second refreshes invisible instead of a flicker.

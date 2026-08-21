@@ -149,7 +149,9 @@ export default function Dispatch() {
         labelOf={(r) => r.dispatch_no ?? `Dispatch ${r.id}`}
         kpiCounts={[
           { label: "In transit", statuses: ["DISPATCHED", "IN_TRANSIT"] },
-          { label: "Awaiting gate-out", statuses: ["PACKED"], tone: "text-warn" },
+          // A released consignment reads APPROVED, and it is just as much awaiting
+          // gate-out as a packed one that never needed a signature.
+          { label: "Awaiting gate-out", statuses: ["PACKED", "APPROVED"], tone: "text-warn" },
         ]}
         kpis={(rows) => [
           {
