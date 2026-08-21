@@ -111,7 +111,7 @@ Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock
 Logistics runs the whole outward leg, in the order it happens:
 
 ```
-Consignments → Dispatch → Transport Requests → Provider Selection → Activity Ledger
+Consignments → Dispatch → Shipments → Provider Selection → Activity Ledger
 ```
 
 **Consignments is the WAREHOUSE's document** (`out_dispatches`) and its own screen,
@@ -149,8 +149,16 @@ warehouse module: `ConsignmentForm` reads which door it was opened from and keep
 every route it pushes on that side, because hardcoded `/warehouse/...` links handed
 the logistics desk over to the warehouse module halfway through the flow.
 
-**Transport** is logistics' own document (`lgs_transport_requests`) and carries the
-leg that moves a consignment:
+**Shipments** is logistics' own document (`lgs_transport_requests`) and carries the
+leg that moves a consignment. The screen is **Shipments** on `/logistics/shipments`
+(2026-08-21): a row stops being a "transport request" the moment it is awarded and
+spends the rest of its life as a load on a truck, which is what the register lists —
+lane, load, LR/docket, freight, and the queues from DRAFT through CLOSED. Only the
+USER-FACING name moved. The page code (`logistics_transport`), the permission codes
+(`transport.*`), the table, `tr_no` and the `TR-` prefix are unchanged, so every grant
+already issued still resolves; `sync_pages` refreshes an existing row's path and name
+on the next start, and `/logistics/transport/*` redirects with its tail intact because
+the approvals inbox deep-links straight at a leg:
 
 ```
 TR  DRAFT → PENDING_APPROVAL → QUOTING* → AWAITING_CARRIER* → READY

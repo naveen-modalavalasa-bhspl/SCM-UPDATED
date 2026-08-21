@@ -68,6 +68,14 @@ class IndentActivityType(str, Enum):
     APPROVAL_ROUTED_AUTOMATICALLY = "APPROVAL_ROUTED_AUTOMATICALLY"
     STOCK_ALLOCATED = "STOCK_ALLOCATED"
     PROCUREMENT_REQUEST_CREATED = "PROCUREMENT_REQUEST_CREATED"
+    # The outward leg. A request does not end at allocation: the warehouse issues it,
+    # the consignment leaves the gate and the receiving site signs for it, and until
+    # those three are on the ledger it cannot say whether anything was ever handed
+    # over. Each is read off the document that already records it (`out_issues`,
+    # `out_dispatches`), never written for the ledger's benefit.
+    MATERIAL_ISSUED = "MATERIAL_ISSUED"
+    MATERIAL_DISPATCHED = "MATERIAL_DISPATCHED"
+    RECEIPT_ACKNOWLEDGED = "RECEIPT_ACKNOWLEDGED"
     BOOKMARK_ADDED = "BOOKMARK_ADDED"
     BOOKMARK_REMOVED = "BOOKMARK_REMOVED"
 

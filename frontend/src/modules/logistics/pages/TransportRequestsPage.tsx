@@ -175,7 +175,7 @@ export function TransportRequestsPage() {
     <div>
       <PageHeader
         eyebrow="Logistics"
-        title={onlyReturns ? "Return legs" : "Transport Requests"}
+        title={onlyReturns ? "Return legs" : "Shipments"}
         actions={
           <Can do="transport.create">
             <Button variant="ghost" onClick={() => nav("/logistics/consignments")}>
@@ -189,11 +189,11 @@ export function TransportRequestsPage() {
                 press instead of finding a checkbox halfway down a form titled
                 "Where it goes". */}
             <Button variant="ghost"
-              onClick={() => nav("/logistics/transport/new?direction=return")}>
+              onClick={() => nav("/logistics/shipments/new?direction=return")}>
               Return leg
             </Button>
-            <Button onClick={() => nav("/logistics/transport/new")}>
-              New request
+            <Button onClick={() => nav("/logistics/shipments/new")}>
+              New shipment
             </Button>
           </Can>
         }
@@ -285,7 +285,7 @@ export function TransportRequestsPage() {
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}
-          onRowClick={(r) => nav(`/logistics/transport/${r.id}`)}
+          onRowClick={(r) => nav(`/logistics/shipments/${r.id}`)}
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
@@ -293,7 +293,7 @@ export function TransportRequestsPage() {
             onlyReturns && !status && !mode && !search
               ? "No return legs yet. Raise one with “Return leg” when a site is sending material back."
               : status || mode || direction || search
-                ? "No transport requests match that."
+                ? "No shipments match that."
                 : "Nothing being moved yet. Start from a packed consignment."
           }
           renderCard={(r) => (

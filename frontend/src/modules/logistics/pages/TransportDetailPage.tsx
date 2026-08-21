@@ -12,7 +12,9 @@ import {
 import { fmtDate, fmtDateTime } from "@/shared/datetime";
 import { transportApi } from "../api";
 import { FlowStepper } from "../components/FlowStepper";
-import { load, modeLabel, modeTint, money, nextMove } from "../components/modeCopy";
+import {
+  carriageLabel, carriageTint, load, modeLabel, modeTint, money, nextMove,
+} from "../components/modeCopy";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
 
 /**
@@ -23,10 +25,13 @@ import { ShipmentTimeline } from "../components/ShipmentTimeline";
  * the acknowledgement lands on the same record so "what did the site say about the
  * thing we sent" is one row and not a join.
  *
- * The action bar is driven entirely by `status` — a request out to carriers offers
- * the tender, a ready one offers dispatch, a delivered one offers the signature.
- * Showing every button and disabling most of them was the alternative, and it makes
- * a screen nobody can read at a glance.
+ * The action bar is driven entirely by `status`, and it offers only the move that
+ * status actually has: a request out to providers offers their answer, a ready one
+ * offers dispatch, a moving one offers tracking. Showing every button and disabling
+ * most of them was the alternative, and it makes a screen nobody can read at a
+ * glance — so a button this desk cannot honestly press is not drawn at all. The
+ * signature at the end is one of those: it belongs to whoever raised the indent, and
+ * it is made on Indents > Acknowledgements, not here.
  */
 export function TransportDetailPage() {
   const nav = useNavigate();
@@ -41,8 +46,6 @@ export function TransportDetailPage() {
   const [tracking, setTracking] = useState({
     lr_no: "", docket_no: "", tracking_url: "", eway_bill_no: "", gate_pass_no: "",
   });
-  const [delivering, setDelivering] = useState(false);
-  const [delivery, setDelivery] = useState({ delivered_to_name: "", pod_url: "" });
   const [confirming, setConfirming] = useState(false);
   const [confirm, setConfirm] = useState({ confirmed_by: "", carrier_reference: "" });
   const [declining, setDeclining] = useState(false);
@@ -114,14 +117,6 @@ export function TransportDetailPage() {
     success: "Dispatched — it has left the yard", invalidates,
     onDone: () => setDispatching(false),
   });
-  const deliver = useAction({
-    run: () => transportApi.deliver(trId, {
-      delivered_to_name: delivery.delivered_to_name || null,
-      pod_url: delivery.pod_url || null,
-    }),
-    success: "Marked delivered", invalidates,
-    onDone: () => setDelivering(false),
-  });
   const confirmCarrier = useAction({
     run: () => transportApi.confirmCarrier(trId, confirm.confirmed_by,
       confirm.carrier_reference),
@@ -181,11 +176,11 @@ export function TransportDetailPage() {
         title={doc.tr_no}
         actions={
           <>
-            <Button variant="ghost" onClick={() => nav("/logistics/transport")}>Back</Button>
+            <Button variant="ghost" onClick={() => nav("/logistics/shipments")}>Back</Button>
 
             {doc.status === "DRAFT" && (
               <Can do="transport.create">
-                <Button variant="ghost" onClick={() => nav(`/logistics/transport/${doc.id}/edit`)}>
+                <Button variant="ghost" onClick={() => nav(`/logistics/shipments/${doc.id}/edit`)}>
                   Edit
                 </Button>
                 <Button onClick={() => submit.mutate()} disabled={submit.isPending}>
@@ -221,7 +216,7 @@ export function TransportDetailPage() {
                   Carrier declined
                 </Button>
                 <Button onClick={() => setConfirming(true)}>
-                  Approve
+                  Provider accepted
                 </Button>
               </Can>
             )}
@@ -232,19 +227,18 @@ export function TransportDetailPage() {
               </Can>
             )}
 
-            {doc.status === "IN_TRANSIT" && (
+            {/* On the road, and the only signature left is the site's. "Mark
+                delivered" used to sit here and it bought nothing: `acknowledge_tr`
+                stamps the delivery itself, so the desk ticking it first was a
+                keystroke nobody at the destination can make, holding the indent open
+                until somebody here remembered. Tracking is still shared from here,
+                because that IS this desk's job while it moves. */}
+            {["IN_TRANSIT", "DELIVERED"].includes(doc.status) && (
               <Can do="transport.track">
                 <Button variant="ghost" onClick={() => share.mutate()} disabled={share.isPending}>
                   Share tracking
                 </Button>
-                <Button onClick={() => setDelivering(true)}>Mark delivered</Button>
               </Can>
-            )}
-
-            {doc.status === "DELIVERED" && (
-              <span className="text-sm font-medium text-muted">
-                Waiting for the indent requester
-              </span>
             )}
 
             {doc.status === "ACKNOWLEDGED" && (
@@ -259,7 +253,7 @@ export function TransportDetailPage() {
       />
 
       <ErrorBanner error={submit.error ?? approve.error ?? dispatch.error
-        ?? deliver.error ?? close.error ?? share.error ?? confirmCarrier.error
+        ?? close.error ?? share.error ?? confirmCarrier.error
         ?? carrierDeclined.error ?? approveAward.error
         ?? rejectAward.error ?? evidence.error ?? evidenceDownloadError} />
 
@@ -270,11 +264,20 @@ export function TransportDetailPage() {
           label="Status"
           value={<StatusPill status={doc.status} />}
         />
+        {/* Both halves of "how does this travel": what it goes ON, and what it was
+            arranged as. The carriage may be the CARRIER's answer rather than the
+            desk's — a tendered lane can be sent by rail — so it is read off the
+            shipment, never inferred from the arrangement beside it. */}
         <StatCard
           label="Mode"
           value={
-            <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${modeTint(doc.mode)}`}>
-              {modeLabel(doc.mode)}
+            <span className="flex flex-wrap items-center gap-1.5">
+              <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${carriageTint(doc.carriage_mode)}`}>
+                {carriageLabel(doc.carriage_mode)}
+              </span>
+              <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${modeTint(doc.mode)}`}>
+                {modeLabel(doc.mode)}
+              </span>
             </span>
           }
         />
@@ -491,6 +494,10 @@ export function TransportDetailPage() {
               ["Confirmed by the desk", doc.carrier_confirmed_by_name],
               ["Vehicle", doc.vehicle_number],
               ["Driver", doc.driver_name],
+              // Filled by the carrier when they acknowledged the award on a tender,
+              // and by the desk on a leg it settled itself. Same columns either way.
+              ["Driver phone", doc.driver_phone],
+              ["Licence", doc.driver_licence_no],
               ["Rides on", doc.trip_reference],
             ]} />
             <Section title="Dispatch" rows={[
@@ -668,27 +675,6 @@ export function TransportDetailPage() {
           <Field label="E-way bill">
             <Input value={tracking.eway_bill_no}
               onChange={(e) => setTracking({ ...tracking, eway_bill_no: e.target.value })} />
-          </Field>
-        </div>
-      </ConfirmModal>
-
-      <ConfirmModal
-        isOpen={delivering}
-        title="Mark delivered"
-        message="Every line is recorded as delivered in full. The site still has to sign for it."
-        confirmLabel="Delivered"
-        busy={deliver.isPending}
-        onConfirm={() => deliver.mutate()}
-        onClose={() => setDelivering(false)}
-      >
-        <div className="space-y-3">
-          <Field label="Received by">
-            <Input value={delivery.delivered_to_name}
-              onChange={(e) => setDelivery({ ...delivery, delivered_to_name: e.target.value })} />
-          </Field>
-          <Field label="Proof of delivery link">
-            <Input value={delivery.pod_url}
-              onChange={(e) => setDelivery({ ...delivery, pod_url: e.target.value })} />
           </Field>
         </div>
       </ConfirmModal>

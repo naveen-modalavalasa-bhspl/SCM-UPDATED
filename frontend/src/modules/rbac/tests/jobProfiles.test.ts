@@ -78,7 +78,7 @@ describe("buildAccessSections", () => {
     const logistics = page("grp_logistics", "Logistics", null);
     const warehouse = page("grp_warehouse", "Warehouse", null);
     const sections = buildAccessSections(
-      [logistics, page("logistics_transport", "Transport Requests", logistics.id),
+      [logistics, page("logistics_transport", "Shipments", logistics.id),
        warehouse, page("wh_grn", "Goods Receipt", warehouse.id)],
       [{ code: "transport.view", module: "logistics", description: "View transport" },
        { code: "receipt.view", module: "warehouse", description: "View receipts" }],

@@ -43,6 +43,9 @@ const EVENT_LABELS: Record<string, string> = {
   MOVED: "Moved to another approval chain",
   STOCK_ALLOCATED: "Stock allocated",
   PROCUREMENT_REQUEST_CREATED: "Procurement request created",
+  MATERIAL_ISSUED: "Material issued",
+  MATERIAL_DISPATCHED: "Material dispatched",
+  RECEIPT_ACKNOWLEDGED: "Receipt acknowledged",
   BOOKMARK_ADDED: "Bookmark added",
   BOOKMARK_REMOVED: "Bookmark removed",
 };
@@ -60,6 +63,7 @@ const RESULT_LABELS: Record<string, string> = {
   PARTIALLY_ALLOCATED: "Partially Allocated",
   PARTIALLY_FULFILLED: "Partially Fulfilled",
   FULFILLED: "Fulfilled",
+  DISPATCHED: "Dispatched",
   CLOSED: "Fulfilled",
   PENDING_APPROVAL: "Pending Approval",
   BOOKMARKED: "Bookmarked",
@@ -109,6 +113,8 @@ const RESULT_STATUS: Record<string, string> = {
 /** Results the donut has no slice for — a ledger event, not a document status. */
 const RESULT_TONE: Record<string, string> = {
   SUBMITTED: "bg-info-bg text-info",
+  // Gate-out is a movement, not a document status: the donut has no slice for it.
+  DISPATCHED: "bg-info-bg text-info",
   ROUTED_AUTOMATICALLY: "bg-info-bg text-info",
   BOOKMARKED: "bg-brand-050 text-brand",
   BOOKMARK_REMOVED: "bg-neutral-bg text-neutral",
@@ -182,6 +188,25 @@ function decimalText(value: unknown) {
   return normalized === "0" ? "0" : `${sign}${normalized}`;
 }
 
+/**
+ * Events that served part of a request line, so the quantity reads "2 of 3" the
+ * moment it fell short. Everything downstream of allocation belongs here: a short
+ * issue is exactly what "partially fulfilled" is counting.
+ */
+const QUANTITY_AGAINST_REQUEST = new Set([
+  "STOCK_ALLOCATED",
+  "MATERIAL_ISSUED",
+  "RECEIPT_ACKNOWLEDGED",
+]);
+
+/** Events whose `actor_position` carries the source document number, not a post. */
+const DOCUMENT_REFERENCE_EVENTS = new Set([
+  "PROCUREMENT_REQUEST_CREATED",
+  "MATERIAL_ISSUED",
+  "MATERIAL_DISPATCHED",
+  "RECEIPT_ACKNOWLEDGED",
+]);
+
 function formatQuantity(row: ActivityRow) {
   const quantity = decimalText(row.quantity);
   if (quantity === null) return "—";
@@ -189,7 +214,7 @@ function formatQuantity(row: ActivityRow) {
   const uomCode = displayUom(row.uom_code) || null;
   const uom = uomCode ? ` ${uomCode}` : "";
   if (
-    eventCode(row) === "STOCK_ALLOCATED"
+    QUANTITY_AGAINST_REQUEST.has(eventCode(row) ?? "")
     && requestedQuantity !== null
     && Number(quantity) !== Number(requestedQuantity)
   ) {
@@ -204,8 +229,11 @@ function DetailCell({ row }: { row: ActivityRow }) {
   if (itemName) {
     const secondary = [
       nonEmptyText(row.item_code),
-      eventCode(row) === "PROCUREMENT_REQUEST_CREATED"
+      DOCUMENT_REFERENCE_EVENTS.has(eventCode(row) ?? "")
         ? nonEmptyText(row.actor_position)
+        : null,
+      DOCUMENT_REFERENCE_EVENTS.has(eventCode(row) ?? "")
+        ? nonEmptyText(row.actor_name)
         : null,
     ].filter(Boolean).join(" · ");
     return (

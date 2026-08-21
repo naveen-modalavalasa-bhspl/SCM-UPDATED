@@ -391,7 +391,7 @@ export function IndentFormPage() {
                 return (
                   <div key={i}>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px] sm:items-end">
-                      <Field label={i === 0 ? "Item" : ""}>
+                      <Field label={i === 0 ? "Item" : ""} required={i === 0}>
                         <ItemCombobox
                           placeholder="Type item code or name…"
                           value={line.item_id}
@@ -402,7 +402,7 @@ export function IndentFormPage() {
                           errorId={duplicateErrorId}
                         />
                       </Field>
-                      <Field label={i === 0 ? "Qty" : ""}>
+                      <Field label={i === 0 ? "Qty" : ""} required={i === 0}>
                         <Input
                           type="number"
                           min={0}
@@ -490,7 +490,7 @@ export function IndentFormPage() {
                 options={[{ value: "NORMAL", label: "Normal" }, { value: "URGENT", label: "Urgent" }]}
               />
             </Field>
-            <Field label="Required date">
+            <Field label="Required date" required>
               <Input
                 type="date"
                 min={today}

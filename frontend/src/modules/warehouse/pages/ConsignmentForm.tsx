@@ -697,8 +697,13 @@ export default function ConsignmentForm() {
             )}
             {doc?.status === "PACKED" && (
               <Can do={inLogistics ? "transport.create" : "dispatch.gate_out"}>
+                {/* This press does not dispatch anything — it opens the screen where
+                    the mode and the provider are chosen and the transport request is
+                    raised. The load actually leaves later, on the shipment. Calling it
+                    "Confirm dispatch" read as the final word on a consignment that had
+                    not yet been offered to a carrier. */}
                 <Button variant="soft" onClick={() => nav(dispatchPath(doc.id))}>
-                  <Truck className="h-4 w-4" /> Confirm dispatch
+                  <Truck className="h-4 w-4" /> Process dispatch
                 </Button>
               </Can>
             )}

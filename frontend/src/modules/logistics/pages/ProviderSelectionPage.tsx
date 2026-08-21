@@ -53,8 +53,8 @@ const VIEWS = [
     key: "all",
     label: "All",
     status: ALL_STATUSES,
-    blurb: "Every transport request the desk has seen, whatever became of it.",
-    empty: "No transport requests.",
+    blurb: "Every shipment the desk has seen, whatever became of it.",
+    empty: "No shipments.",
   },
 ] as const;
 
@@ -333,8 +333,8 @@ function ProviderSheet({ trId, onBack }: { trId: number; onBack: () => void }) {
                 request is the document that gets dispatched, tracked and signed for,
                 and this desk's work ends at the award. */}
             <Button variant="subtle"
-              onClick={() => nav(`/logistics/transport/${doc.id}`)}>
-              <Truck className="h-4 w-4" /> Open the transport request
+              onClick={() => nav(`/logistics/shipments/${doc.id}`)}>
+              <Truck className="h-4 w-4" /> Open the shipment
             </Button>
           </>
         }
@@ -403,7 +403,7 @@ function ProviderSheet({ trId, onBack }: { trId: number; onBack: () => void }) {
           <p className="mt-4 rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200">
             Awarded to {doc.carrier_name}. They have not confirmed the job yet — a won
             tender is an offer, not a booking. Their answer, or the desk recording one
-            on their behalf, is on the transport request.
+            on their behalf, is on the shipment.
           </p>
         )}
       </Card>
@@ -466,7 +466,7 @@ function ProviderSheet({ trId, onBack }: { trId: number; onBack: () => void }) {
             // Awarding ends this desk's work: the shipment now has a provider and
             // everything after it — dispatch, the LR, tracking — is the transport
             // request's. Landing there is the next press, not a search for it.
-            onAwarded={(id) => nav(`/logistics/transport/${id}`)}
+            onAwarded={(id) => nav(`/logistics/shipments/${id}`)}
           />
         </Card>
       ) : (

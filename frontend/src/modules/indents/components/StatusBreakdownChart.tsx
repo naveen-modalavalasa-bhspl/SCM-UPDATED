@@ -10,12 +10,33 @@ import {
 import type { SectorProps } from "recharts";
 import { DEFAULT_STATUS_COLOR, STATUS_COLOR, STATUS_INDICATOR } from "../statusPalette";
 
-const PRIMARY_STATUSES = [
+/**
+ * Every status the backend can report, in the order the lifecycle happens, which
+ * is the order the legend reads down.
+ *
+ * The legend shows only the ones with indents in them. A row reading "Draft 0 0%"
+ * costs a line of the card to say nothing, and which statuses are empty differs per
+ * login — a store keeper's board and a plant head's are not the same shape — so a
+ * fixed set of rows is wrong for both. The list below fixes the ORDER; the data
+ * decides which of them appear.
+ *
+ * The list is exhaustive on purpose. It used to name only eight of these and the
+ * centre total was the sum of THOSE, so the 11 indents parked in
+ * PENDING_PROCUREMENT were missing from the donut while the "Total indents" card
+ * above it counted them, and the two disagreed by 11 with nothing on the screen to
+ * explain it.
+ */
+const LIFECYCLE_STATUSES = [
+  { status: "SUBMITTED", label: "Submitted" },
   { status: "PENDING_APPROVAL", label: "Pending approval" },
   { status: "RETURNED_FOR_CORRECTION", label: "Returned for correction" },
+  { status: "APPROVED", label: "Approved" },
   { status: "AWAITING_ALLOCATION", label: "Awaiting allocation" },
   { status: "ALLOCATED", label: "Allocated" },
   { status: "PARTIALLY_FULFILLED", label: "Partially fulfilled" },
+  { status: "PENDING_PROCUREMENT", label: "Pending procurement" },
+  { status: "PARTIALLY_ORDERED", label: "Partially ordered" },
+  { status: "ORDERED", label: "Ordered" },
   { status: "CLOSED", label: "Fulfilled" },
   { status: "REJECTED", label: "Rejected" },
   { status: "DRAFT", label: "Draft" },
@@ -86,13 +107,34 @@ function safeCount(count: number | undefined) {
   return Number.isFinite(count) && (count ?? 0) > 0 ? count! : 0;
 }
 
+/** "PENDING_PROCUREMENT" -> "Pending procurement", for a status this file has yet
+ *  to be told about. Ugly beats invisible: an unnamed status still has to be drawn
+ *  or the slices stop summing to the centre. */
+function humanizeStatus(status: string) {
+  const words = status.replace(/_/g, " ").toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 export function buildStatusBreakdownData(byStatus: Record<string, number>) {
-  const displayedCounts = PRIMARY_STATUSES.map(({ status, label }) => ({
-    status,
-    label,
-    count: safeCount(byStatus[status]),
-    isSelectable: true,
-  }));
+  const named = new Set<string>(LIFECYCLE_STATUSES.map(({ status }) => status));
+  const displayedCounts: Omit<StatusSlice, "percentage">[] = LIFECYCLE_STATUSES
+    .map(({ status, label }) => ({
+      status,
+      label,
+      count: safeCount(byStatus[status]),
+      isSelectable: true,
+    }))
+    .filter(({ count }) => count > 0);
+  // Whatever the backend reports that the list above does not name goes on the end
+  // rather than being dropped. Every count in `byStatus` is now drawn, so `total` is
+  // the same number the Total indents card shows and cannot drift from it again.
+  for (const [status, value] of Object.entries(byStatus)) {
+    if (named.has(status)) continue;
+    const count = safeCount(value);
+    if (count > 0) {
+      displayedCounts.push({ status, label: humanizeStatus(status), count, isSelectable: true });
+    }
+  }
   const total = displayedCounts.reduce((sum, { count }) => sum + count, 0);
   const entries: StatusSlice[] = displayedCounts.map((entry) => ({
     ...entry,

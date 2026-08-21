@@ -800,7 +800,7 @@ describe("indent UI shell", () => {
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
     const slice = await screen.findByTestId("status-donut-slice-AWAITING_ALLOCATION");
-    expect(slice).toHaveAccessibleName("Awaiting allocation: 7 indents, 54 percent");
+    expect(slice).toHaveAccessibleName("Awaiting allocation: 7 indents, 47 percent");
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
     fireEvent.mouseEnter(slice);
@@ -808,7 +808,7 @@ describe("indent UI shell", () => {
     const tooltip = await screen.findByRole("tooltip");
     expect(within(tooltip).getByText("Awaiting allocation")).toBeInTheDocument();
     expect(within(tooltip).getByText("7 indents")).toBeInTheDocument();
-    expect(within(tooltip).getByText("54% of total")).toBeInTheDocument();
+    expect(within(tooltip).getByText("47% of total")).toBeInTheDocument();
     expect(tooltip).toHaveClass("pointer-events-none", "w-40", "shadow-sm");
     expect(screen.getByTestId("status-legend-row-AWAITING_ALLOCATION")).toHaveAttribute("data-active", "true");
 
@@ -875,7 +875,10 @@ describe("indent UI shell", () => {
     expect(chart.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
   });
 
-  it("excludes unsupported statuses from the chart total, rows and segments", async () => {
+  it("counts every status into the donut so its centre matches the Total indents card", async () => {
+    // This used to assert the opposite, and the opposite is the bug that was
+    // reported: the card said 74 and the donut said 63, the missing 11 being a
+    // status the chart had no slice for.
     vi.mocked(indentApi.stats).mockResolvedValueOnce(overviewStats({
       APPROVED: 99,
       REJECTED: 1,
@@ -883,17 +886,20 @@ describe("indent UI shell", () => {
 
     const { container } = renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
-    const rejected = await screen.findByTestId("status-legend-row-REJECTED");
-    expect(rejected).toHaveAccessibleName("Rejected: 1 indent, 100 percent");
+    const approved = await screen.findByTestId("status-legend-row-APPROVED");
+    expect(approved).toHaveAccessibleName("Approved: 99 indents, 99 percent");
+    expect(within(approved).getByTestId("status-legend-count-APPROVED")).toHaveTextContent(/^99$/);
+    expect(screen.getByTestId("status-donut-slice-APPROVED")).toBeInTheDocument();
+
+    const rejected = screen.getByTestId("status-legend-row-REJECTED");
+    expect(rejected).toHaveAccessibleName("Rejected: 1 indent, 1 percent");
     expect(within(rejected).getByTestId("status-legend-count-REJECTED")).toHaveTextContent(/^1$/);
-    expect(within(rejected).getByTestId("status-legend-percentage-REJECTED")).toHaveTextContent(/^100%$/);
-    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("1 total indent");
+    expect(within(rejected).getByTestId("status-legend-percentage-REJECTED")).toHaveTextContent(/^1%$/);
+    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("100 total indents");
     expect(screen.queryByText("Other")).not.toBeInTheDocument();
     expect(screen.queryByTestId("status-legend-row-OTHER")).not.toBeInTheDocument();
     expect(screen.queryByTestId("status-marker-OTHER")).not.toBeInTheDocument();
     expect(screen.queryByTestId("status-donut-slice-OTHER")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("status-legend-row-APPROVED")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("status-donut-slice-APPROVED")).not.toBeInTheDocument();
     expect(container.querySelector(".recharts-pie-labels")).not.toBeInTheDocument();
   });
 
@@ -927,7 +933,8 @@ describe("indent UI shell", () => {
     expect(chart).toHaveClass("absolute", "inset-0");
     expect(legend).toHaveClass("max-w-[320px]", "gap-1");
     expect(legend).not.toHaveClass("overflow-y-auto", "md:overflow-y-auto", "max-h-[260px]", "md:max-h-[260px]");
-    expect(within(legend).getAllByTestId(/^status-legend-row-/)).toHaveLength(7);
+    // DRAFT and APPROVED are the only two statuses with indents in this fixture.
+    expect(within(legend).getAllByTestId(/^status-legend-row-/)).toHaveLength(2);
     expect(layout.children[0]).toBe(donut);
     expect(layout.children[1]).toBe(legend);
   });
@@ -963,7 +970,7 @@ describe("indent UI shell", () => {
 
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
     await screen.findByRole("img", {
-      name: "Indent status donut chart. 12 total indents.",
+      name: "Indent status donut chart. 15 total indents.",
     });
 
     expect(screen.getAllByText("Total indents")).toHaveLength(2);

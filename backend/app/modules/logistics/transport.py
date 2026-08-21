@@ -37,7 +37,9 @@ from app.modules.logistics.enums import (
     activity_label,
     activity_result,
     AWAITING_ACK_STATUSES,
+    CARRIAGE_RULES,
     CARRIER_VENDOR_TYPES,
+    DEFAULT_CARRIAGE,
     EXCEPTION_EVENT_TYPES,
     LogisticsActivityType,
     MODE_RULES,
@@ -48,6 +50,8 @@ from app.modules.logistics.enums import (
     TERMINAL_STATUSES,
     TransportMode,
     TransportStatus,
+    carriage_rule,
+    carriages_for_mode,
     flow_stages,
     is_inbound,
     mode_rule,
@@ -145,6 +149,47 @@ async def _tr_scope(db: AsyncSession, user):
     )
 
 
+# The paperwork that travels WITH the load, as opposed to the receipt evidence above,
+# which is the requester's and comes back from the far end. Two documents, because
+# those are the two a leg leaves with: the way bill the carrier moves it on, and the
+# delivery challan the receiving site signs. Filed on `sys_attachments` under the
+# shipment, so no logistics table learns about files.
+DOC_ENTITY_TYPE = "TRANSPORT_REQUEST"
+WAY_BILL_CATEGORY = "WAY_BILL"
+DELIVERY_CHALLAN_CATEGORY = "DELIVERY_CHALLAN"
+# A booked leg leaves with the counter's receipt instead: the parcel is handed over at
+# a published rate, and the slip is what proves it was, and for how much.
+RECEIPT_CATEGORY = "COURIER_RECEIPT"
+TR_DOC_CATEGORIES = (WAY_BILL_CATEGORY, DELIVERY_CHALLAN_CATEGORY, RECEIPT_CATEGORY)
+
+
+async def list_documents(db: AsyncSession, tr_id: int) -> list:
+    """The way bill and delivery challan filed against this leg."""
+    await get_tr(db, tr_id)
+    return await attachments.list_attachments(db, DOC_ENTITY_TYPE, tr_id)
+
+
+async def add_document(db: AsyncSession, tr_id: int, upload, doc_category: str, user):
+    """File one of them. The category is checked here rather than taken as typed:
+    `sys_attachments` is shared by every module, and a free-text category is how a
+    panel that filters on one stops finding what another wrote."""
+    await get_tr(db, tr_id)
+    if doc_category not in TR_DOC_CATEGORIES:
+        raise ValidationError(
+            "A transport document is either a way bill or a delivery challan.")
+    return await attachments.add_attachment(
+        db, entity_type=DOC_ENTITY_TYPE, entity_id=tr_id, upload=upload,
+        doc_category=doc_category, user=user)
+
+
+async def document_file(db: AsyncSession, tr_id: int, attachment_id: int):
+    """Download one, only when it belongs to this shipment."""
+    rows = await list_documents(db, tr_id)
+    if not any(row.id == attachment_id for row in rows):
+        raise NotFoundError("That document is not filed against this shipment")
+    return await attachments.attachment_file(db, attachment_id)
+
+
 async def list_trs(db: AsyncSession, params: PageParams, status: str | None = None,
                    mode: str | None = None, carrier_id: int | None = None,
                    indent_id: int | None = None,
@@ -209,6 +254,47 @@ def mode_catalogue() -> list[dict]:
         "needs_quotes": rule.needs_quotes,
         "required_fields": list(rule.required_fields),
     } for value, rule in MODE_RULES.items()]
+
+
+def carriage_catalogue() -> list[dict]:
+    """The carriage modes and what can be arranged under each, served like the rules.
+
+    Road, rail, air, sea — and which of the four arrangements each one allows, so the
+    Dispatch screen narrows the arrangement tiles from the backend's table instead of
+    from a constant of its own. It had one, and a copy of a rule in a screen is a rule
+    with two values the day somebody starts shipping by barge.
+    """
+    return [{
+        "value": value,
+        "label": rule.label,
+        "help": rule.help,
+        "allowed_modes": list(rule.allowed_modes),
+    } for value, rule in CARRIAGE_RULES.items()]
+
+
+def _resolve_carriage(mode: str, carriage: str | None,
+                      *, current: str | None = None) -> str:
+    """The carriage this leg travels on, checked against the arrangement made.
+
+    Nothing said falls back to what the document already carries, and then to ROAD:
+    an unstated leg is a road leg, which is what every row written before the column
+    existed actually was. Anything else is validated as a PAIR, because the two
+    questions are not independent — a hand-over cannot be made by sea, and accepting
+    one would leave the form asking for a driver on a container ship.
+    """
+    value = (carriage or "").strip().upper() or (current or "") or DEFAULT_CARRIAGE
+    if value not in CARRIAGE_RULES:
+        raise ValidationError(
+            f"{carriage!r} is not a carriage mode. "
+            f"Choose one of: {', '.join(CARRIAGE_RULES)}.")
+    if (mode or "").upper() not in carriage_rule(value).allowed_modes:
+        allowed = ", ".join(mode_rule(m).label
+                            for m in carriage_rule(value).allowed_modes)
+        raise ValidationError(
+            f"{mode_rule(mode).label} cannot be arranged by "
+            f"{carriage_rule(value).label.lower()}. By "
+            f"{carriage_rule(value).label.lower()} the choices are: {allowed}.")
+    return value
 
 
 def evaluation_methods() -> list[dict]:
@@ -307,9 +393,12 @@ async def for_consignments(db: AsyncSession, dispatch_ids: list[int]) -> list[di
             "tr_id": doc.id,
             "tr_no": doc.tr_no,
             "mode": doc.mode,
+            "carriage_mode": doc.carriage_mode,
             "status": doc.status,
             "carrier_name": doc.carrier_name,
             "lr_no": doc.lr_no or doc.docket_no,
+            "driver_name": doc.driver_name,
+            "vehicle_number": doc.vehicle_number,
         })
     return list(seen.values())
 
@@ -986,6 +1075,10 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         tr_no=await next_number(db, DocType.TRANSPORT_REQUEST.value.lower()),
         tr_date=data.tr_date or date.today(),
         mode=data.mode.upper(),
+        # WHAT it travels on, checked against the arrangement made under it. The
+        # Dispatch screen has always asked; until now the answer went nowhere.
+        carriage_mode=_resolve_carriage(
+            data.mode, getattr(data, "carriage_mode", None)),
         status=TransportStatus.DRAFT.value,
         source_type=data.source_type, source_id=data.source_id,
         source_no=data.source_no,
@@ -1009,6 +1102,7 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         docket_no=getattr(data, "docket_no", None),
         tracking_url=getattr(data, "tracking_url", None),
         eway_bill_no=getattr(data, "eway_bill_no", None),
+        carrier_reference=getattr(data, "carrier_reference", None),
         vehicle_number=data.vehicle_number, driver_name=data.driver_name,
         driver_phone=data.driver_phone, trip_reference=data.trip_reference,
         handed_over_by_name=data.handed_over_by_name,
@@ -1028,7 +1122,8 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
     await db.flush()
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.CREATE, actor=user,
-                      after={"mode": doc.mode, "status": doc.status},
+                      after={"mode": doc.mode, "carriage_mode": doc.carriage_mode,
+                             "status": doc.status},
                       summary=f"Raised transport request {doc.tr_no}")
     await db.commit()
     await db.refresh(doc)
@@ -1133,8 +1228,12 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
         elif data.freight_amount is not None:
             doc.freight_amount = _d(data.freight_amount)
         _check_mode_fields(doc)
-        settled_summary = (f"{doc.tr_no} ready to leave with "
-                           f"{doc.carrier_name or doc.vehicle_number or 'the warehouse'}")
+        settled_summary = (
+            f"Sent {doc.tr_no} to {doc.carrier_name} for acknowledgement"
+            if mode == TransportMode.COURIER.value
+            else (f"{doc.tr_no} ready to leave with "
+                  f"{doc.carrier_name or doc.vehicle_number or 'the warehouse'}")
+        )
 
     # Rule 8: whether this needs a signature is the LADDER's answer, not this
     # function's — but only when somebody actually configured one.
@@ -1286,8 +1385,24 @@ async def ask_revised_quote(db: AsyncSession, tr_id: int, note: str,
 
 async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportRequest:
     doc = await get_tr(db, tr_id)
-    _guard_editable(doc)
-    before = {"mode": doc.mode, "carrier_id": doc.carrier_id}
+    # This is still preparation until the final Dispatch action moves it to
+    # IN_TRANSIT. Prices, acknowledgement and READY therefore do not lock the form.
+    editable = {
+        TransportStatus.DRAFT.value,
+        TransportStatus.PENDING_APPROVAL.value,
+        TransportStatus.QUOTING.value,
+        TransportStatus.AWAITING_CARRIER.value,
+        TransportStatus.READY.value,
+    }
+    if doc.status not in editable:
+        raise ValidationError(
+            f"{doc.tr_no} can no longer be changed after final dispatch.")
+    before = {"mode": doc.mode, "carriage_mode": doc.carriage_mode,
+              "carrier_id": doc.carrier_id}
+    workflow_status = doc.status
+    fields_set = getattr(data, "model_fields_set",
+                         getattr(data, "__fields_set__", set()))
+    mode_changed = False
 
     if data.mode:
         if data.mode.upper() not in MODE_RULES:
@@ -1296,10 +1411,17 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
         # a truck tender, and carrying the old quotes forward would let an award be
         # justified by prices collected for a different job.
         if doc.mode != data.mode.upper():
+            mode_changed = True
             doc.quotes.clear()
             doc.carrier_id = doc.carrier_name = None
             doc.freight_amount = doc.awarded_quote_id = None
         doc.mode = data.mode.upper()
+
+    # Re-checked whichever of the two moved: switching an air leg to a hand-over is
+    # exactly as impossible as arranging a hand-over by air, and an edit that changes
+    # only the mode would otherwise leave the pair contradicting itself.
+    doc.carriage_mode = _resolve_carriage(
+        doc.mode, getattr(data, "carriage_mode", None), current=doc.carriage_mode)
 
     for field in ("tr_date", "source_type", "source_id", "source_no", "issue_id",
                   "dispatch_id", "consignment_no",
@@ -1307,21 +1429,79 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                   "from_warehouse_name", "to_location_name", "delivery_address",
                   "contact_person", "contact_phone", "distance_km", "project_id",
                   "project_name", "expected_delivery", "remarks", "vehicle_number",
-                  "driver_name", "driver_phone", "trip_reference",
-                  "handed_over_by_name"):
-        value = getattr(data, field, None)
-        if value is not None:
-            setattr(doc, field, value)
+                  "driver_name", "driver_phone",
+                  "driver_licence_no", "trip_reference",
+                  "handed_over_by_name", "handed_over_employee_id",
+                  "handed_over_aadhaar", "handed_over_phone", "gate_pass_no",
+                  "lr_no", "docket_no", "tracking_url", "eway_bill_no",
+                  "carrier_reference"):
+        if field in fields_set:
+            setattr(doc, field, getattr(data, field, None))
 
-    if data.carrier_id:
-        vendor = await _carrier(db, data.carrier_id)
-        doc.carrier_id, doc.carrier_name = vendor.id, vendor.name
-    if data.lines:
+    selection_supplied = bool({"carrier_id", "carrier_ids"} & fields_set)
+    if selection_supplied or mode_changed:
+        chosen = _chosen_carriers(data)
+        rule = mode_rule(doc.mode)
+        if rule.needs_carrier and not chosen:
+            raise ValidationError(
+                "Choose the logistics provider(s) this consignment goes with")
+        if not rule.needs_quotes and len(chosen) > 1:
+            raise ValidationError(
+                f"A {rule.label.lower()} booking goes with one provider.")
+
+        if rule.needs_quotes:
+            current = [quote.carrier_id for quote in doc.quotes]
+            if mode_changed or current != chosen:
+                doc.awarded_quote_id = None
+                doc.carrier_id = doc.carrier_name = None
+                doc.freight_amount = None
+                doc.quotes.clear()
+                await db.flush()
+                for carrier_id in chosen:
+                    vendor = await _carrier(db, carrier_id)
+                    doc.quotes.append(CarrierQuote(
+                        carrier_id=vendor.id, carrier_name=vendor.name,
+                        status=QuoteStatus.INVITED.value, invited_at=utcnow(),
+                    ))
+                if workflow_status not in {
+                        TransportStatus.DRAFT.value,
+                        TransportStatus.PENDING_APPROVAL.value}:
+                    doc.status = TransportStatus.QUOTING.value
+            method = getattr(data, "evaluation_method", None)
+            if method:
+                if not evaluation.is_valid(method):
+                    raise ValidationError(
+                        f"{method!r} is not an evaluation method")
+                doc.evaluation_method = method.upper()
+        elif rule.needs_carrier:
+            if mode_changed or doc.carrier_id != chosen[0]:
+                vendor = await _carrier(db, chosen[0])
+                doc.quotes.clear()
+                doc.awarded_quote_id = None
+                doc.carrier_id, doc.carrier_name = vendor.id, vendor.name
+                doc.freight_amount = None
+                if workflow_status not in {
+                        TransportStatus.DRAFT.value,
+                        TransportStatus.PENDING_APPROVAL.value}:
+                    doc.status = TransportStatus.AWAITING_CARRIER.value
+        elif mode_changed:
+            doc.quotes.clear()
+            doc.awarded_quote_id = None
+            doc.carrier_id = doc.carrier_name = None
+            doc.freight_amount = (ZERO if doc.mode == TransportMode.OWN_VEHICLE.value
+                                  else None)
+            if workflow_status not in {
+                    TransportStatus.DRAFT.value,
+                    TransportStatus.PENDING_APPROVAL.value}:
+                doc.status = TransportStatus.READY.value
+
+    if "lines" in fields_set:
         _apply_lines(doc, data.lines)
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user, before=before,
-                      after={"mode": doc.mode, "carrier_id": doc.carrier_id})
+                      after={"mode": doc.mode, "carriage_mode": doc.carriage_mode,
+                             "carrier_id": doc.carrier_id})
     await db.commit()
     await db.refresh(doc)
     return doc
@@ -1377,13 +1557,17 @@ async def submit_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
 def _advance_after_approval(doc: TransportRequest) -> None:
     """Where an approved request goes next, which is entirely a question of mode.
 
-    A quoted mode goes out to carriers; every other mode already knows who is taking
-    it, so it is ready to leave. Setting both from one place is what keeps a DIRECT
-    hand-over from sitting in a QUOTING queue nobody works.
+    A quoted mode goes out to carriers. A courier booking already knows the provider,
+    but still waits for that provider to acknowledge the job and supply the vehicle,
+    driver and tracking details from their own login. The two modes operated by the
+    warehouse are ready immediately because those details were entered by the desk.
     """
-    doc.status = (TransportStatus.QUOTING.value
-                  if mode_rule(doc.mode).needs_quotes
-                  else TransportStatus.READY.value)
+    if mode_rule(doc.mode).needs_quotes:
+        doc.status = TransportStatus.QUOTING.value
+    elif doc.mode == TransportMode.COURIER.value:
+        doc.status = TransportStatus.AWAITING_CARRIER.value
+    else:
+        doc.status = TransportStatus.READY.value
 
 
 async def act_on_tr(db: AsyncSession, tr_id: int, action: str, user,
@@ -1811,7 +1995,7 @@ def _guard_awaiting_carrier(doc: TransportRequest) -> None:
     if doc.status != TransportStatus.AWAITING_CARRIER.value:
         raise ValidationError(
             f"{doc.tr_no} is {doc.status.lower().replace('_', ' ')} — "
-            "there is no award waiting to be accepted")
+            "there is no provider acknowledgement waiting")
 
 
 async def accept_award(db: AsyncSession, tr_id: int, carrier_id: int | None,
@@ -2602,12 +2786,67 @@ async def carrier_quote(db: AsyncSession, carrier_id: int, tr_id: int,
     return await record_quote(db, tr_id, carrier_id, data, user=None)
 
 
+def carrier_carriage_options(mode: str) -> list[dict]:
+    """The carriages this arrangement can be made under, for the portal's tiles.
+
+    The catalogue read the other way round: the desk picks a carriage and narrows the
+    arrangements, the carrier is handed an arrangement and narrows the carriages. One
+    table either way, so the portal can never offer a routing the desk's own screen
+    would refuse.
+    """
+    allowed = set(carriages_for_mode(mode))
+    return [row for row in carriage_catalogue() if row["value"] in allowed]
+
+
 async def carrier_accept(db: AsyncSession, carrier_id: int, tr_id: int,
                          data) -> TROut:
     """The carrier takes the job they won."""
     await carrier_get_request(db, carrier_id, tr_id)
     doc = await accept_award(db, tr_id, carrier_id, data.carrier_reference)
     return _carrier_view(doc, carrier_id)
+
+
+#: What the carrier states when they acknowledge the award, by the column it is
+#: written to. The desk types the same set on the dispatch form for a leg it settles
+#: itself; on a tender they belong to whoever won it, so they arrive with the yes.
+CARRIER_ACK_FIELDS = (
+    "driver_name", "vehicle_number", "driver_phone", "driver_licence_no",
+    "lr_no", "docket_no", "tracking_url", "eway_bill_no",
+)
+
+
+async def carrier_acknowledge(db: AsyncSession, carrier_id: int, tr_id: int,
+                              data) -> TROut:
+    """The carrier takes the job AND says what is coming for it.
+
+    One press, not two: the vehicle and the driver are written first and the award is
+    then accepted through `accept_award`, so a shipment can never end up READY with
+    nobody named against it — and the audit row, the status and the "an award is an
+    offer" rule all stay exactly where they were. Written before the accept because
+    `accept_award` is what commits.
+    """
+    doc = await carrier_get_request(db, carrier_id, tr_id)
+    if doc.carrier_id != carrier_id:
+        raise ValidationError("This shipment was awarded to another carrier")
+    # Refused here as well as inside `accept_award`, so nothing is written onto a
+    # shipment that is not this carrier's to answer.
+    _guard_awaiting_carrier(doc)
+
+    for field in CARRIER_ACK_FIELDS:
+        value = getattr(data, field, None)
+        if value is not None and str(value).strip():
+            setattr(doc, field, str(value).strip())
+
+    # Which way they are actually sending it. The ARRANGEMENT stays the desk's — it
+    # was settled before the tender went out and the award was made against it — so
+    # the pair is validated against `doc.mode`, not against anything the carrier sent:
+    # a third-party job can go by road or by rail, and neither answer can turn it into
+    # a hand-over. Saying nothing keeps whatever the dispatch desk picked.
+    doc.carriage_mode = _resolve_carriage(
+        doc.mode, getattr(data, "carriage_mode", None), current=doc.carriage_mode)
+
+    accepted = await accept_award(db, tr_id, carrier_id, data.carrier_reference)
+    return _carrier_view(accepted, carrier_id)
 
 
 async def carrier_decline(db: AsyncSession, carrier_id: int, tr_id: int,

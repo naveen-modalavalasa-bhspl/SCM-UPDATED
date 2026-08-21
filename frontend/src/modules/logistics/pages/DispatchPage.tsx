@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, ScrollText } from "lucide-react";
@@ -8,10 +8,8 @@ import {
 } from "@/shared/components";
 import { fmtDate, fmtTime } from "@/shared/datetime";
 import { consignmentApi, transportApi } from "../api";
-import { load, modeLabel, modeTint, money } from "../components/modeCopy";
-import type {
-  Consignment, ConsignmentLink, TransportRequest,
-} from "../transportTypes";
+import { carriageLabel, carriageTint, load, modeLabel, modeTint, money } from "../components/modeCopy";
+import type { Consignment, ConsignmentLink, TransportRequest } from "../transportTypes";
 
 const SIZE = 20;
 
@@ -93,9 +91,6 @@ export function DispatchPage() {
     refetchInterval: LIVE_MS,
     refetchOnWindowFocus: true,
   });
-  // Only fetched while a quote is on the table, and only for that one shipment — but
-  // polled while it is open, because the price the desk is looking at is one the
-  // provider can revise from their portal mid-decision.
   const { data: quoted } = useQuery({
     queryKey: ["transport", String(asking?.tr_id ?? "")],
     queryFn: () => transportApi.get(asking!.tr_id),
@@ -103,7 +98,9 @@ export function DispatchPage() {
     refetchInterval: LIVE_MS,
     refetchOnWindowFocus: true,
   });
-
+  // Only fetched while a quote is on the table, and only for that one shipment — but
+  // polled while it is open, because the price the desk is looking at is one the
+  // provider can revise from their portal mid-decision.
   const linkOf = (row: Consignment) =>
     links?.find((link) => link.dispatch_id === row.id);
 
@@ -115,17 +112,21 @@ export function DispatchPage() {
   // change (keepPreviousData), so a stale answer counts as not-known too.
   const linksKnown = ids.length === 0 || (!linksPending && !linksAreOld);
 
+  // WHICH rows the answer on screen actually covers.
+  //
+  // `links` is stale-but-shown while a new page's answer is in flight, and the whole
+  // board was being held on a placeholder for it: one consignment getting packed
+  // changes the id set, the key changes with it, and every row without transport went
+  // back to a grey bar — including the row the desk was about to press Dispatch on.
+  // A row the current answer already asked about keeps that answer; only a row it has
+  // never asked about is genuinely unknown, and only that row waits.
+  const covered = useRef<Set<number>>(new Set());
+  if (links && !linksAreOld) covered.current = new Set(ids);
+  const rowKnown = (row: Consignment) => linksKnown || covered.current.has(row.id);
+
   const invalidates = [["lgs-dispatch-queue"], ["lgs-consignment-links"],
     ["lgs-packed-consignments"], ["transport"], ["transport-summary"]];
 
-  /**
-   * Move the row the instant the server answers, rather than one round trip later.
-   *
-   * Invalidating is right but it is not immediate — it fires a refetch and the row sits
-   * on its old status until that returns. The response to the press already carries the
-   * new status, so write it into the queue's own cache; the refetch that follows
-   * confirms it.
-   */
   const patchLink = (tr: TransportRequest) =>
     qc.setQueriesData<ConsignmentLink[]>(
       { queryKey: ["lgs-consignment-links"] },
@@ -140,6 +141,14 @@ export function DispatchPage() {
         : link)),
     );
 
+  /**
+   * Move the row the instant the server answers, rather than one round trip later.
+   *
+   * Invalidating is right but it is not immediate — it fires a refetch and the row sits
+   * on its old status until that returns. The response to the press already carries the
+   * new status, so write it into the queue's own cache; the refetch that follows
+   * confirms it.
+   */
   /** The decision screen, with this consignment already chosen. */
   const dispatch = (row: Consignment) =>
     nav(`/logistics/dispatch/new?consignment_id=${row.id}`);
@@ -167,11 +176,7 @@ export function DispatchPage() {
     qc.invalidateQueries({ queryKey: ["lgs-consignment-links"] });
   };
 
-  const open = (row: Consignment) => {
-    const link = linkOf(row);
-    if (link) nav(`/logistics/transport/${link.tr_id}`);
-    else dispatch(row);
-  };
+  const open = (row: Consignment) => dispatch(row);
 
   const columns: Column<Consignment>[] = [
     {
@@ -215,10 +220,9 @@ export function DispatchPage() {
       render: (row) => {
         const link = linkOf(row);
         if (!link) {
-          if (!linksKnown) {
+          if (!rowKnown(row)) {
             return (
-              <span className="block h-4 w-28 animate-pulse rounded bg-content2"
-                aria-label="Checking transport" />
+              <span className="text-xs text-muted">Checking…</span>
             );
           }
           return <span className="text-xs text-muted">Not dispatched yet</span>;
@@ -226,6 +230,9 @@ export function DispatchPage() {
         return (
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-1.5">
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${carriageTint(link.carriage_mode)}`}>
+                {carriageLabel(link.carriage_mode)}
+              </span>
               <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${modeTint(link.mode)}`}>
                 {modeLabel(link.mode)}
               </span>
@@ -235,6 +242,15 @@ export function DispatchPage() {
               {link.carrier_name ?? link.tr_no}
               {link.lr_no ? ` · ${link.lr_no}` : ""}
             </div>
+            {/* Who is coming for it. On a tender the desk never typed this — it is the
+                carrier's own answer, written when they acknowledged the award — so the
+                queue is where it is first read, and a row that says READY without a
+                vehicle against it is a row nobody can meet at the gate. */}
+            {(link.driver_name || link.vehicle_number) && (
+              <div className="truncate text-[11px] text-muted">
+                {[link.driver_name, link.vehicle_number].filter(Boolean).join(" · ")}
+              </div>
+            )}
           </div>
         );
       },
@@ -248,7 +264,7 @@ export function DispatchPage() {
         if (!link) {
           // Offering Dispatch before the lookup lands is how a consignment gets a
           // second transport request for one physical load.
-          if (!linksKnown) {
+          if (!rowKnown(row)) {
             return (
               <span className="ml-auto block h-8 w-20 animate-pulse rounded-lg bg-content2" />
             );
@@ -261,10 +277,8 @@ export function DispatchPage() {
         }
         if (link.status === "QUOTING") {
           return (
-            <Can do="transport.award">
-              <Button variant="soft" onClick={() => setAsking(link)}>
-                See price
-              </Button>
+            <Can do="transport.create">
+              <Button onClick={() => dispatch(row)}>Dispatch</Button>
             </Can>
           );
         }
@@ -272,10 +286,9 @@ export function DispatchPage() {
         // reading as booked, because nothing may be loaded against it yet.
         if (link.status === "AWAITING_CARRIER") {
           return (
-            <Button variant="soft"
-              onClick={() => nav(`/logistics/transport/${link.tr_id}`)}>
-              Awaiting {link.carrier_name ?? "carrier"}
-            </Button>
+            <Can do="transport.create">
+              <Button onClick={() => dispatch(row)}>Dispatch</Button>
+            </Can>
           );
         }
         return (
@@ -283,17 +296,7 @@ export function DispatchPage() {
             {/* This consignment's own trail, scoped by the warehouse document rather
                 than by the transport number — the desk knows the consignment it is
                 chasing, not the TR it grew into. */}
-            <Button
-              variant="ghost"
-              aria-label={`Activity for ${row.dispatch_no}`}
-              onClick={() => nav(
-                `/logistics/activity?dispatch_id=${row.id}&scope=${encodeURIComponent(row.dispatch_no)}`)}
-            >
-              <ScrollText className="h-4 w-4" />
-            </Button>
-            <Button variant="ghost" onClick={() => nav(`/logistics/transport/${link.tr_id}`)}>
-              Open
-            </Button>
+            <Button onClick={() => dispatch(row)}>Dispatch</Button>
           </div>
         );
       },
@@ -384,7 +387,7 @@ export function DispatchPage() {
                     {row.dispatch_no}
                   </span>
                   {link ? <StatusPill status={link.status} /> : null}
-                  {!link && !linksKnown ? (
+                  {!link && !rowKnown(row) ? (
                     <span className="block h-4 w-20 animate-pulse rounded bg-content2" />
                   ) : null}
                 </div>

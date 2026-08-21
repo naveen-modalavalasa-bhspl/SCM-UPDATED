@@ -113,6 +113,11 @@ class TRLineIn(BaseModel):
 
 class TRCreate(BaseModel):
     mode: str
+    #: ROAD / RAIL / AIR / SEA — what it travels ON, a separate question from the
+    #: arrangement above. Optional so an older caller still works: the service falls
+    #: back to ROAD, which is what an unstated leg has always been. Validated against
+    #: the mode, because a hand-over cannot be made by sea.
+    carriage_mode: str | None = None
     tr_date: date | None = None
     source_type: str | None = None
     source_id: int | None = None
@@ -147,11 +152,16 @@ class TRCreate(BaseModel):
     eway_bill_no: str | None = None
 
     carrier_id: int | None = None
+    carrier_reference: str | None = None
     vehicle_number: str | None = None
     driver_name: str | None = None
     driver_phone: str | None = None
+    driver_licence_no: str | None = None
     trip_reference: str | None = None
     handed_over_by_name: str | None = None
+    handed_over_employee_id: str | None = None
+    handed_over_aadhaar: str | None = None
+    handed_over_phone: str | None = None
 
     lines: list[TRLineIn] = []
 
@@ -159,6 +169,10 @@ class TRCreate(BaseModel):
 class TRUpdate(TRCreate):
     """Same body; a separate name so the route reads as an edit."""
     mode: str | None = None
+    #: `None` means the provider picker was not part of this edit. An empty list is
+    #: intentional for a mode that does not travel with an external provider.
+    carrier_ids: list[int] | None = None
+    evaluation_method: str | None = None
 
 
 class QuickDispatchIn(TRCreate):
@@ -290,6 +304,7 @@ class TROut(BaseModel):
     tr_no: str
     tr_date: date | None = None
     mode: str
+    carriage_mode: str | None = None
     status: str
     source_type: str | None = None
     source_id: int | None = None
@@ -327,8 +342,12 @@ class TROut(BaseModel):
     vehicle_number: str | None = None
     driver_name: str | None = None
     driver_phone: str | None = None
+    driver_licence_no: str | None = None
     trip_reference: str | None = None
     handed_over_by_name: str | None = None
+    handed_over_employee_id: str | None = None
+    handed_over_aadhaar: str | None = None
+    handed_over_phone: str | None = None
     received_by_name: str | None = None
     lr_no: str | None = None
     docket_no: str | None = None
@@ -360,6 +379,7 @@ class TRListRow(BaseModel):
     tr_no: str
     tr_date: date | None = None
     mode: str
+    carriage_mode: str | None = None
     status: str
     dispatch_id: int | None = None
     consignment_no: str | None = None
@@ -442,8 +462,12 @@ class ProviderIn(BaseModel):
     vehicle_number: str | None = None
     driver_name: str | None = None
     driver_phone: str | None = None
+    driver_licence_no: str | None = None
     trip_reference: str | None = None
     handed_over_by_name: str | None = None
+    handed_over_employee_id: str | None = None
+    handed_over_aadhaar: str | None = None
+    handed_over_phone: str | None = None
 
 
 class DispatchIn(BaseModel):
@@ -460,6 +484,36 @@ class DispatchIn(BaseModel):
 
 class CarrierAcceptIn(BaseModel):
     """The carrier taking the job. `carrier_reference` is their own booking id."""
+    carrier_reference: str | None = None
+
+
+class CarrierAckIn(BaseModel):
+    """The awarded carrier acknowledging the job, with what is coming for the load.
+
+    The same boxes the dispatch desk fills for a leg it settles on the spot — driver,
+    vehicle, the numbers the site chases it on — asked of the carrier instead, because
+    on a tender nobody on our side knows them until the winner says so. Answering it
+    IS accepting the award, so it lands the shipment on READY exactly as `/accept`
+    does; the difference is that the details come with the yes rather than after it.
+
+    Two are required: a load leaves with a vehicle and somebody driving it, and a
+    booking with neither cannot be met at the gate. The rest are optional — a docket
+    is issued at the counter and a tracking link may not exist at all.
+    """
+    driver_name: str = Field(min_length=1)
+    vehicle_number: str = Field(min_length=1)
+    #: Which way the winner is actually sending it. The ARRANGEMENT is the desk's and
+    #: was settled before the tender went out, but the carriage is the carrier's own
+    #: routing decision — a tendered lane quoted as a truck can go on a wagon — so it
+    #: is the one part of "how does this travel" they are asked to state. Optional:
+    #: leaving it alone keeps whatever the dispatch desk picked.
+    carriage_mode: str | None = None
+    driver_phone: str | None = None
+    driver_licence_no: str | None = None
+    lr_no: str | None = None
+    docket_no: str | None = None
+    tracking_url: str | None = None
+    eway_bill_no: str | None = None
     carrier_reference: str | None = None
 
 
@@ -532,9 +586,18 @@ class ConsignmentLink(BaseModel):
     tr_id: int
     tr_no: str
     mode: str
+    #: Read back onto the dispatch screen beside the arrangement, so the desk that
+    #: raised the leg sees the way it is actually going — including a carriage the
+    #: WINNING carrier changed when they acknowledged it.
+    carriage_mode: str | None = None
     status: str
     carrier_name: str | None = None
     lr_no: str | None = None
+    # Who is coming for it. On a tender these are the CARRIER's answer, written when
+    # they acknowledge the award — the desk never typed them, so the queue is where
+    # they are first read.
+    driver_name: str | None = None
+    vehicle_number: str | None = None
 
 
 class Option(BaseModel):

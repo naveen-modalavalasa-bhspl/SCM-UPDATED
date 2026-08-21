@@ -104,6 +104,9 @@ export const INDENT_REQUEST_STATUS_FILTER_OPTIONS: { value: string; label: strin
 ];
 
 export const INDENT_ACTIVITY_EVENT_FILTER_OPTIONS: { value: string; label: string }[] = [
+  { value: "RECEIPT_ACKNOWLEDGED", label: "Receipt acknowledged" },
+  { value: "MATERIAL_DISPATCHED", label: "Material dispatched" },
+  { value: "MATERIAL_ISSUED", label: "Material issued" },
   { value: "STOCK_ALLOCATED", label: "Stock allocated" },
   { value: "APPROVAL_COMPLETED", label: "Approval completed" },
   { value: "REQUEST_SUBMITTED", label: "Request submitted" },
@@ -167,6 +170,9 @@ export const INDENT_ACTIVITY_TRANSACTION_OPTIONS: { value: string; label: string
     value: "PROCUREMENT_REQUEST_CREATED",
     label: "Procurement request created",
   },
+  { value: "MATERIAL_ISSUED", label: "Material issued" },
+  { value: "MATERIAL_DISPATCHED", label: "Material dispatched" },
+  { value: "RECEIPT_ACKNOWLEDGED", label: "Receipt acknowledged" },
   { value: "BOOKMARK_ADDED", label: "Bookmark added" },
   { value: "BOOKMARK_REMOVED", label: "Bookmark removed" },
 ];

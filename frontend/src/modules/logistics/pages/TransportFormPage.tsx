@@ -295,9 +295,9 @@ export function TransportFormPage() {
     run: () => (editing
       ? transportApi.update(Number(id), payload())
       : transportApi.create(payload())),
-    success: editing ? "Transport request saved" : "Transport request raised",
+    success: editing ? "Shipment saved" : "Shipment raised",
     invalidates: [["transport"], ["lgs-consignment-links"]],
-    onDone: (doc) => nav(`/logistics/transport/${doc.id}`),
+    onDone: (doc) => nav(`/logistics/shipments/${doc.id}`),
   });
 
   // Save and submit in one press. Two buttons for "I am done with this form" is the
@@ -311,7 +311,7 @@ export function TransportFormPage() {
     },
     success: "Sent for approval",
     invalidates: [["transport"], ["lgs-consignment-links"]],
-    onDone: (doc) => nav(`/logistics/transport/${doc.id}`),
+    onDone: (doc) => nav(`/logistics/shipments/${doc.id}`),
   });
 
   const setLine = (index: number, patch: Partial<TRLineInput>) =>
@@ -350,7 +350,7 @@ export function TransportFormPage() {
       <PageHeader
         eyebrow="Logistics"
         title={editing
-          ? `Edit ${existing?.tr_no ?? "request"}`
+          ? `Edit ${existing?.tr_no ?? "shipment"}`
           : isReturn ? "Plan a return leg" : "Plan a movement"}
         actions={
           <Button variant="ghost" onClick={() => nav(-1)}>Back</Button>

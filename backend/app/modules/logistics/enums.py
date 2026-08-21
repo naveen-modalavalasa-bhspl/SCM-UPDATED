@@ -30,6 +30,99 @@ class TransportMode(str, Enum):
     THIRD_PARTY = "THIRD_PARTY"
 
 
+class CarriageMode(str, Enum):
+    """WHICH WAY the load physically travels.
+
+    A different question from `TransportMode`, and the reason both exist: the mode
+    says who moves it and how the money is settled, this says what it moves ON. A
+    third-party leg is a truck on the highway, a wagon on the railway or a container
+    on a ship, and the three are priced, papered and chased nothing like each other —
+    but they are all "third party" to the ledger. Recording only the arrangement threw
+    that away, so the desk picked road or rail on the dispatch screen and the shipment
+    remembered neither.
+    """
+    ROAD = "ROAD"
+    RAIL = "RAIL"
+    AIR = "AIR"
+    SEA = "SEA"
+
+
+class CarriageRule:
+    """A carriage mode, and which arrangements can be made under it.
+
+    Held as data beside `MODE_RULES` and served from the same place, for the same
+    reason: the Dispatch screen had its own copy of "you cannot drive your own van
+    onto a ship", and a copy in a screen is a rule with two values.
+    """
+
+    __slots__ = ("label", "help", "allowed_modes")
+
+    def __init__(self, label: str, help: str, allowed_modes: tuple[str, ...]):
+        self.label = label
+        self.help = help
+        self.allowed_modes = allowed_modes
+
+
+#: Only a road leg can be carried by hand or run on a company vehicle — nobody drives
+#: their own wagon onto the railway or their own van onto a ship, so rail, air and sea
+#: are bought from somebody: a courier at a published rate, or a tender.
+CARRIAGE_RULES: dict[str, CarriageRule] = {
+    CarriageMode.ROAD.value: CarriageRule(
+        label="Road",
+        help="By road. The only carriage the warehouse can make itself — by hand, or "
+             "on a company vehicle — as well as buy from a provider.",
+        allowed_modes=(TransportMode.DIRECT.value, TransportMode.OWN_VEHICLE.value,
+                       TransportMode.COURIER.value, TransportMode.THIRD_PARTY.value),
+    ),
+    CarriageMode.RAIL.value: CarriageRule(
+        label="Rail",
+        help="By rail. Bought from a provider — a courier's published rate, or a "
+             "tender.",
+        allowed_modes=(TransportMode.COURIER.value, TransportMode.THIRD_PARTY.value),
+    ),
+    CarriageMode.AIR.value: CarriageRule(
+        label="Air",
+        help="By air. Bought from a provider — a courier's published rate, or a "
+             "tender.",
+        allowed_modes=(TransportMode.COURIER.value, TransportMode.THIRD_PARTY.value),
+    ),
+    CarriageMode.SEA.value: CarriageRule(
+        label="Sea",
+        help="By sea. Bought from a provider — a courier's published rate, or a "
+             "tender.",
+        allowed_modes=(TransportMode.COURIER.value, TransportMode.THIRD_PARTY.value),
+    ),
+}
+
+#: What a leg travels on when nobody said. Road is not a guess: every leg the business
+#: runs today is a road leg, and an existing row that predates the column is one too.
+DEFAULT_CARRIAGE = CarriageMode.ROAD.value
+
+
+def carriage_rule(carriage: str) -> CarriageRule:
+    rule = CARRIAGE_RULES.get((carriage or "").upper())
+    if rule is None:
+        raise KeyError(carriage)
+    return rule
+
+
+def carriage_allows(carriage: str, mode: str) -> bool:
+    """Can this arrangement be made under this carriage? Unknown carriage: no."""
+    rule = CARRIAGE_RULES.get((carriage or "").upper())
+    return bool(rule) and (mode or "").upper() in rule.allowed_modes
+
+
+def carriages_for_mode(mode: str) -> list[str]:
+    """The carriages an arrangement can be made under — the table read the other way.
+
+    What the carrier portal offers: the arrangement is the desk's decision and settled
+    long before the award, so the only thing left for the winner to say is which way
+    they are actually sending it.
+    """
+    return [value for value, rule in CARRIAGE_RULES.items()
+            if (mode or "").upper() in rule.allowed_modes]
+
+
 class TransportSource(str, Enum):
     """What the leg is carrying, which is also WHICH WAY it runs.
 
@@ -297,7 +390,7 @@ class Stage:
 
 
 _PLAN = Stage(
-    "PLAN", "Transport request",
+    "PLAN", "Shipment",
     "Items, quantity, weight and dimensions, taken off the packing list (E2).",
     (TransportStatus.DRAFT.value,),
 )
@@ -307,44 +400,59 @@ _APPROVE = Stage(
     (TransportStatus.PENDING_APPROVAL.value,),
 )
 _TENDER = Stage(
-    "TENDER", "Provider identified",
-    "Invite providers, compare what they quoted and award the job (E3).",
+    "TENDER", "Quotes from providers",
+    "The providers invited at dispatch send a price; the best one is awarded (E3).",
     (TransportStatus.QUOTING.value,),
 )
 _CONFIRM = Stage(
-    "CONFIRM", "Provider confirms",
-    "The awarded provider accepts the job in their portal.",
+    "CONFIRM", "Provider accepts",
+    "The provider says yes to the job in their portal — nothing leaves until they do.",
     (TransportStatus.AWAITING_CARRIER.value,),
 )
 _DISPATCH = Stage(
-    "DISPATCH", "Sent to provider",
+    "DISPATCH", "Ready to dispatch",
     "Gate pass, LR / docket and e-way bill — then it leaves the yard (E4).",
     (TransportStatus.READY.value,),
 )
+#: On the road, and DELIVERED sits here rather than in a stage of its own.
+#:
+#: "Delivered" is the provider's word and it settles nothing: `acknowledge_tr` stamps
+#: the delivery itself on the way through, so a leg goes IN_TRANSIT -> ACKNOWLEDGED
+#: without anyone at this desk ticking a box in between. Drawn as its own step it was
+#: a rung the flow does not have to climb, sitting between the goods landing and the
+#: only signature that closes the indent.
 _TRANSIT = Stage(
-    "TRANSIT", "Tracked to destination",
-    "Scans, delays and damage, tracked to the final destination (E5).",
-    (TransportStatus.IN_TRANSIT.value,),
-)
-_DELIVERED = Stage(
-    "DELIVERED", "Delivered",
-    "The provider says it arrived and hands over the proof of delivery.",
-    (TransportStatus.DELIVERED.value,),
+    "TRANSIT", "In transit",
+    "On its way to the site, tracked to the destination (E5).",
+    (TransportStatus.IN_TRANSIT.value, TransportStatus.DELIVERED.value),
 )
 _ACK = Stage(
-    "ACKNOWLEDGE", "Cycle closed",
+    "ACKNOWLEDGE", "Received & closed",
     "The indent's raiser signs for what reached them, and the leg is closed (E8).",
     (TransportStatus.ACKNOWLEDGED.value, TransportStatus.CLOSED.value),
 )
 
 
 def flow_stages(mode: str | None = None) -> list[Stage]:
-    """The stages this mode actually passes through, in order."""
-    tendered = bool(mode) and mode_rule(mode).needs_quotes
+    """The stages this mode actually passes through, in order.
+
+    Two things past the approval depend on the mode, and they are separate questions:
+
+      * was there a TENDER — only a third-party job asks several providers for a price.
+      * does an outside provider have to ACCEPT it — a third party and a courier both
+        do, and the shipment waits at AWAITING_CARRIER until they answer. A courier was
+        being drawn without that stage, so a booked parcel sitting on exactly that rung
+        matched no stage at all and the stepper fell back to lighting up step one.
+
+    A hand-over or an own vehicle hires nobody, so it has neither.
+    """
+    rule = mode_rule(mode) if mode else None
     stages = [_PLAN, _APPROVE]
-    if tendered:
-        stages += [_TENDER, _CONFIRM]
-    return stages + [_DISPATCH, _TRANSIT, _DELIVERED, _ACK]
+    if rule and rule.needs_quotes:
+        stages.append(_TENDER)
+    if rule and rule.needs_carrier:
+        stages.append(_CONFIRM)
+    return stages + [_DISPATCH, _TRANSIT, _ACK]
 
 
 #: The shipment is on the road or has landed, and nobody at the receiving site has
@@ -433,7 +541,7 @@ class LogisticsActivityType(str, Enum):
 #: return (`GET /api/transport/activity-types`), the same rule the mode rules and the
 #: stepper already follow.
 ACTIVITY_META: dict[str, tuple[str, str]] = {
-    LogisticsActivityType.RAISED.value: ("Transport request raised", "DRAFT"),
+    LogisticsActivityType.RAISED.value: ("Shipment raised", "DRAFT"),
     LogisticsActivityType.SUBMITTED.value: ("Sent for approval", "PENDING_APPROVAL"),
     LogisticsActivityType.APPROVED.value: ("Approved", "APPROVED"),
     LogisticsActivityType.REJECTED.value: ("Rejected", "REJECTED"),

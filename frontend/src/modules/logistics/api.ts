@@ -3,7 +3,7 @@ import type { Paginated } from "@/shared/types";
 import type { GRN, GRNCreate, GRNListRow, Issue, MovementRow, StockRow } from "./types";
 import type {
   ActivityRow, ActivityType,
-  CarrierOption, CarrierQuote, Comparison, Consignment, ConsignmentDetail,
+  CarriageRule, CarrierOption, CarrierQuote, Comparison, Consignment, ConsignmentDetail,
   ConsignmentLink, DispatchInput, EvaluationMethod, FlowStage, LogisticsVendor,
   LogisticsVendorInput, LogisticsVendorSummary, ModeRule, ModeSuggestion,
   PartnerType, ProviderBoardRow, RaiserTracking, ReceiptEvidence, ShipmentEvent, TransportRequest,
@@ -41,6 +41,11 @@ export const transportApi = {
   /** The mode rules and the scoring methods come from the backend, never from a
    * constant here: the form must ask for exactly what the service enforces. */
   modes: () => api.get<ModeRule[]>("/api/transport/modes").then((r) => r.data),
+  /** Road / rail / air / sea, and which arrangements each one allows. Served for the
+   * same reason `modes` is — the screen used to hold its own copy of "you cannot run
+   * a company van onto a ship", and a rule with two copies has two values. */
+  carriageModes: () =>
+    api.get<CarriageRule[]>("/api/transport/carriage-modes").then((r) => r.data),
   evaluationMethods: () =>
     api.get<EvaluationMethod[]>("/api/transport/evaluation-methods").then((r) => r.data),
   /** Which mode SUITS this load (doc E3). Advice, not a decision — the thresholds are
@@ -98,6 +103,23 @@ export const transportApi = {
       .then((r) => r.data),
   downloadReceiptEvidence: (id: number, attachmentId: number) =>
     api.get<Blob>(`/api/transport/${id}/receipt-evidence/${attachmentId}/download`, {
+      responseType: "blob",
+    }).then((r) => r.data),
+  /** The paperwork that travels WITH the load — the way bill and the delivery
+   * challan — as against the receipt evidence above, which comes back from the far
+   * end. Filed against the shipment, so both front doors read the same two files. */
+  documents: (id: number) =>
+    api.get<ReceiptEvidence[]>(`/api/transport/${id}/documents`).then((r) => r.data),
+  /** Multipart: the field name must be `file`, which is what the endpoint reads. */
+  uploadDocument: (id: number, file: File, docCategory: string) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("doc_category", docCategory);
+    return api.post<ReceiptEvidence>(`/api/transport/${id}/documents`, form)
+      .then((r) => r.data);
+  },
+  downloadDocument: (id: number, attachmentId: number) =>
+    api.get<Blob>(`/api/transport/${id}/documents/${attachmentId}/download`, {
       responseType: "blob",
     }).then((r) => r.data),
   create: (data: TRInput) =>
@@ -302,6 +324,25 @@ export const carrierPortalApi = {
   accept: (id: number, carrier_reference?: string) =>
     api.post<TransportRequest>(`${PORTAL}/transport/${id}/accept`,
       { carrier_reference: carrier_reference || null }).then((r) => r.data),
+  /** Taking the job AND saying what is coming for it — the same boxes the dispatch
+   *  desk fills on a leg it settles itself. One press: the service writes the vehicle
+   *  and the driver, then accepts the award, so a shipment can never reach READY with
+   *  nobody named against it. */
+  /** Which carriages this arrangement can be made under — the desk's table read the
+   *  other way. The arrangement was settled before the tender went out, so the only
+   *  part of "how does this travel" left for the winner is what it travels on. */
+  carriageModes: (mode: string) =>
+    api.get<CarriageRule[]>(`${PORTAL}/transport-carriage-modes`, { params: { mode } })
+      .then((r) => r.data),
+  acknowledge: (id: number, data: {
+    driver_name: string; vehicle_number: string; carriage_mode?: string | null;
+    driver_phone?: string | null;
+    driver_licence_no?: string | null; lr_no?: string | null;
+    docket_no?: string | null; tracking_url?: string | null;
+    eway_bill_no?: string | null; carrier_reference?: string | null;
+  }) =>
+    api.post<TransportRequest>(`${PORTAL}/transport/${id}/acknowledge`, data)
+      .then((r) => r.data),
   decline: (id: number, reason: string) =>
     api.post<TransportRequest>(`${PORTAL}/transport/${id}/decline`, { reason })
       .then((r) => r.data),

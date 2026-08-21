@@ -4,14 +4,14 @@
  * `/api/transport/modes` and are never duplicated here — this file is only the short
  * label and the tint, which are presentation and have no business meaning.
  */
-import type { TransportMode } from "../transportTypes";
+import type { CarriageMode, TransportMode } from "../transportTypes";
 
 export const MODE_LABEL: Record<TransportMode, string> = {
   DIRECT: "Hand-over",
   COURIER: "Courier",
   OWN_VEHICLE: "Own vehicle",
   // "Third-party", never "3PL": the desk chooses it by that name, the mode filter on
-  // Transport Requests has always read it that way, and a screen that abbreviates it
+  // Shipments has always read it that way, and a screen that abbreviates it
   // in the picker and spells it out in the filter reads as two different modes.
   THIRD_PARTY: "Third-party",
 };
@@ -30,6 +30,29 @@ export const modeLabel = (mode: string) =>
 
 export const modeTint = (mode: string) =>
   MODE_TINT[mode as TransportMode] ?? MODE_TINT.DIRECT;
+
+/** The other half of "how does this travel": what it is carried ON. Same arrangement
+ * as the mode above — the RULE (which arrangements each carriage allows) is served at
+ * `/api/transport/carriage-modes` and never restated here; this is the short chip
+ * label for reading a carriage BACK off a document, where no catalogue was fetched. */
+export const CARRIAGE_LABEL: Record<CarriageMode, string> = {
+  ROAD: "Road", RAIL: "Rail", AIR: "Air", SEA: "Sea",
+};
+
+export const CARRIAGE_TINT: Record<CarriageMode, string> = {
+  ROAD: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+  RAIL: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
+  AIR: "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300",
+  SEA: "bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300",
+};
+
+/** Nothing recorded reads as Road, because that is what an unstated leg has always
+ * been — the same fallback the service applies when the column is empty. */
+export const carriageLabel = (carriage?: string | null) =>
+  CARRIAGE_LABEL[(carriage ?? "ROAD") as CarriageMode] ?? String(carriage);
+
+export const carriageTint = (carriage?: string | null) =>
+  CARRIAGE_TINT[(carriage ?? "ROAD") as CarriageMode] ?? CARRIAGE_TINT.ROAD;
 
 export const money = (n?: number | null) =>
   `₹${Number(n ?? 0).toLocaleString("en-IN", {
@@ -62,7 +85,7 @@ export const NEXT_MOVE: Record<string, string> = {
   QUOTING: "Invite carriers and award",
   AWAITING_CARRIER: "Carrier has not confirmed yet",
   READY: "Dispatch it — gate pass and LR",
-  IN_TRANSIT: "Track it and share the LR",
+  IN_TRANSIT: "Waiting for the site to sign",
   DELIVERED: "Waiting for the site to sign",
   ACKNOWLEDGED: "Close the shipment",
   CLOSED: "Done",

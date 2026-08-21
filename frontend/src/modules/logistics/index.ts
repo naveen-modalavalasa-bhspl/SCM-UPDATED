@@ -28,6 +28,9 @@ export {
  *  doors land, the queue and the consignment itself, so the decision exists once. */
 export { DispatchPage } from "./pages/DispatchPage";
 export { DispatchConfirmPage } from "./pages/DispatchConfirmPage";
+/** The gate pass that press produces, as paper. Mounted outside the app shell in
+ *  `App.tsx`, so printing gives the pass and not the sidebar around it. */
+export { GatePassPrintPage } from "./pages/GatePassPrintPage";
 export { TransportRequestsPage } from "./pages/TransportRequestsPage";
 export { TransportFormPage } from "./pages/TransportFormPage";
 export { TransportDetailPage } from "./pages/TransportDetailPage";
@@ -51,3 +54,4 @@ export { CarrierLayout } from "./portal/CarrierLayout";
 export { CarrierLoginPage } from "./portal/CarrierLoginPage";
 export { CarrierJobsPage } from "./portal/CarrierJobsPage";
 export { CarrierJobPage } from "./portal/CarrierJobPage";
+export { CarrierAckPage } from "./portal/CarrierAckPage";

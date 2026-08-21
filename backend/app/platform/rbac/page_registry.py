@@ -157,7 +157,7 @@ PAGES: list[PageDef] = [
     # The order is the order the material moves, and the module's front door is its
     # FIRST child: Consignments. That is where a logistics day starts — the warehouse
     # has packed something and it is sitting on the floor waiting for a truck. Opening
-    # on Transport Requests asked the desk to read the answer before the question.
+    # on Shipments asked the desk to read the answer before the question.
     #
     # Consignments and Dispatch are the SAME screens (and the same documents, and the
     # same flow) the warehouse serves; these are separate rbac_pages rows pointing at
@@ -167,7 +167,14 @@ PAGES: list[PageDef] = [
             parent="grp_logistics", module="logistics", sort_order=1),
     PageDef("logistics_dispatch", "/logistics/dispatch", "Dispatch",
             parent="grp_logistics", module="logistics", sort_order=2),
-    PageDef("logistics_transport", "/logistics/transport", "Transport Requests",
+    # "Shipments", not "Transport Requests": the row is not a request for long. The
+    # screen carries the leg from DRAFT through IN_TRANSIT, DELIVERED and CLOSED, and
+    # lists the lane, the load, the LR/docket and the freight — a register of what is
+    # moving, which is the word the documents already use (`lgs_shipment_events`).
+    # `sync_pages` refreshes path and name on an existing row, so a deployed database
+    # picks both up on the next start; the code stays `logistics_transport` so every
+    # `page.logistics_transport.view` grant already issued keeps working.
+    PageDef("logistics_transport", "/logistics/shipments", "Shipments",
             parent="grp_logistics", module="logistics", sort_order=3),
     # Provider Selection is the RFQ desk: Dispatch asks several partners to price the
     # SAME consignment, and this is where those prices come back, sit side by side and

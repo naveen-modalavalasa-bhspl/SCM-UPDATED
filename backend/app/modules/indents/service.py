@@ -4726,11 +4726,194 @@ async def activity_ledger(
         )
     )
 
+    # The outward leg. Indents sits before warehouse in the import chain (rule 5), so
+    # the models are read through a local import - the same one the Journey endpoint
+    # uses, and for the same reason. It cannot widen access: every branch hangs off
+    # `visible`, which already carries the indent visibility predicate.
+    from app.modules.warehouse.enums import DispatchStatus, IssueDirection
+    from app.modules.warehouse.models import (
+        Dispatch, DispatchItem, MaterialIssue, MaterialIssueLine,
+    )
+
+    # Net of what came back: a returned unit was never fulfilment, and `returned_qty`
+    # is where the return document already records that against the original line.
+    net_issued = (
+        MaterialIssueLine.issued_qty
+        - func.coalesce(MaterialIssueLine.returned_qty, literal(0))
+    )
+    # What the line owed. The approved quantity is the promise; the requested one
+    # stands in while a line predates approval, and the issue's own requested_qty is
+    # the last resort for a legacy line that never carried an indent_item_id.
+    line_required = func.coalesce(
+        func.nullif(IndentItem.approved_quantity, literal(0)),
+        IndentItem.quantity,
+        MaterialIssueLine.requested_qty,
+    )
+    issue_lines = (
+        select(
+            MaterialIssue.id.label("issue_id"),
+            MaterialIssue.issue_no,
+            MaterialIssue.indent_id,
+            MaterialIssue.posted_at,
+            MaterialIssue.acknowledged_at,
+            MaterialIssue.acknowledged_by_name,
+            MaterialIssue.issued_by_id,
+            MaterialIssue.issued_by_name,
+            MaterialIssue.remarks.label("issue_remarks"),
+            MaterialIssueLine.id.label("line_id"),
+            MaterialIssueLine.item_id,
+            MaterialIssueLine.item_code,
+            MaterialIssueLine.item_name,
+            MaterialIssueLine.uom_code,
+            MaterialIssueLine.remarks.label("line_remarks"),
+            net_issued.label("issued_qty"),
+            line_required.label("required_qty"),
+            # Fulfilled is a running total, not one document's line: two half issues
+            # against the same request line finish it between them, and only the
+            # second of the two may say so. Partitioned on the indent item where the
+            # line carries one, on the item within the indent where it does not.
+            func.sum(net_issued).over(
+                partition_by=(
+                    MaterialIssue.indent_id,
+                    func.coalesce(MaterialIssueLine.indent_item_id, literal(0)),
+                    MaterialIssueLine.item_id,
+                ),
+                order_by=(MaterialIssue.posted_at, MaterialIssue.id),
+            ).label("issued_to_date"),
+        )
+        .select_from(MaterialIssue)
+        .join(MaterialIssueLine, MaterialIssueLine.issue_id == MaterialIssue.id)
+        .outerjoin(IndentItem, IndentItem.id == MaterialIssueLine.indent_item_id)
+        .where(
+            MaterialIssue.indent_id.is_not(None),
+            MaterialIssue.direction == IssueDirection.OUT.value,
+            # Posted stock is the evidence. A drafted issue moved nothing and must
+            # never read as fulfilment on the ledger.
+            MaterialIssue.is_stock_posted.is_(True),
+            MaterialIssue.posted_at.is_not(None),
+        )
+        .subquery("indent_issue_lines")
+    )
+    fulfilled_to_date = issue_lines.c.issued_to_date >= issue_lines.c.required_qty
+    fulfilment_result = case(
+        (fulfilled_to_date, literal("FULFILLED")),
+        else_=literal("PARTIALLY_FULFILLED"),
+    )
+    fulfilment_result_label = case(
+        (fulfilled_to_date, literal("Fulfilled")),
+        else_=literal("Partially Fulfilled"),
+    )
+    issue_remarks = func.coalesce(
+        issue_lines.c.line_remarks, issue_lines.c.issue_remarks)
+
+    material_issued = (
+        select(*_activity_event_columns(
+            visible,
+            event_id=literal("issue:") + cast(issue_lines.c.line_id, String),
+            event_type=IndentActivityType.MATERIAL_ISSUED.value,
+            event_label="Material issued",
+            result=fulfilment_result,
+            result_label=fulfilment_result_label,
+            occurred_at=issue_lines.c.posted_at,
+            actor_id=issue_lines.c.issued_by_id,
+            actor_name=issue_lines.c.issued_by_name,
+            actor_position=issue_lines.c.issue_no,
+            item_id=issue_lines.c.item_id,
+            item_code=issue_lines.c.item_code,
+            item_name=issue_lines.c.item_name,
+            quantity=issue_lines.c.issued_qty,
+            requested_quantity=issue_lines.c.required_qty,
+            uom_code=issue_lines.c.uom_code,
+            remarks=issue_remarks,
+            source_type="out_issues",
+            source_id=issue_lines.c.issue_id,
+            source_rank=60,
+            event_key=issue_lines.c.line_id,
+            search_position=issue_lines.c.issue_no,
+            search_remarks=issue_remarks,
+        ))
+        .select_from(visible)
+        .join(issue_lines, issue_lines.c.indent_id == visible.c.indent_id)
+    )
+
+    # Gate-out, off the consignment the issue was loaded onto. `indent_id` on the
+    # line is the link the dispatch itself records, so a consignment carrying two
+    # requests contributes only its own lines to each.
+    dispatch_actor = func.coalesce(Dispatch.security_by_name, Dispatch.created_by_name)
+    material_dispatched = (
+        select(*_activity_event_columns(
+            visible,
+            event_id=literal("dispatch:") + cast(DispatchItem.id, String),
+            event_type=IndentActivityType.MATERIAL_DISPATCHED.value,
+            event_label="Material dispatched",
+            result="DISPATCHED",
+            result_label="Dispatched",
+            occurred_at=Dispatch.gate_out_at,
+            actor_name=dispatch_actor,
+            actor_position=Dispatch.dispatch_no,
+            item_id=DispatchItem.item_id,
+            item_code=DispatchItem.item_code,
+            item_name=DispatchItem.item_name,
+            quantity=DispatchItem.quantity,
+            uom_code=DispatchItem.uom_code,
+            remarks=Dispatch.remarks,
+            source_type="out_dispatches",
+            source_id=Dispatch.id,
+            source_rank=70,
+            event_key=DispatchItem.id,
+            search_position=Dispatch.dispatch_no,
+        ))
+        .select_from(visible)
+        .join(DispatchItem, DispatchItem.indent_id == visible.c.indent_id)
+        .join(Dispatch, Dispatch.id == DispatchItem.dispatch_id)
+        .where(
+            Dispatch.gate_out_at.is_not(None),
+            Dispatch.status != DispatchStatus.CANCELLED.value,
+        )
+    )
+
+    # The receiving site's signature, taken once. Acknowledging a consignment stamps
+    # the issue it was carrying and the other way round (`_apply_issue_acknowledgement`
+    # / `_apply_dispatch_acknowledgement`), so reading it off both documents would
+    # print the same event twice: the issue is the one that carries the request line.
+    receipt_acknowledged = (
+        select(*_activity_event_columns(
+            visible,
+            event_id=literal("acknowledgement:") + cast(issue_lines.c.line_id, String),
+            event_type=IndentActivityType.RECEIPT_ACKNOWLEDGED.value,
+            event_label="Receipt acknowledged",
+            result=fulfilment_result,
+            result_label=fulfilment_result_label,
+            occurred_at=issue_lines.c.acknowledged_at,
+            actor_name=issue_lines.c.acknowledged_by_name,
+            actor_position=issue_lines.c.issue_no,
+            item_id=issue_lines.c.item_id,
+            item_code=issue_lines.c.item_code,
+            item_name=issue_lines.c.item_name,
+            quantity=issue_lines.c.issued_qty,
+            requested_quantity=issue_lines.c.required_qty,
+            uom_code=issue_lines.c.uom_code,
+            remarks=issue_remarks,
+            source_type="out_issues",
+            source_id=issue_lines.c.issue_id,
+            source_rank=80,
+            event_key=issue_lines.c.line_id,
+            search_position=issue_lines.c.issue_no,
+            search_remarks=issue_remarks,
+        ))
+        .select_from(visible)
+        .join(issue_lines, issue_lines.c.indent_id == visible.c.indent_id)
+        .where(issue_lines.c.acknowledged_at.is_not(None))
+    )
+
     combined_rows = union_all(
         created,
         workflow,
         allocation,
         material_request,
+        material_issued,
+        material_dispatched,
+        receipt_acknowledged,
         bookmark,
     ).subquery("activity_events")
     filtered = select(combined_rows)

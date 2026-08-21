@@ -17,7 +17,11 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
-from app.modules.logistics.enums import QuoteStatus, TransportStatus
+from app.modules.logistics.enums import (
+    DEFAULT_CARRIAGE,
+    QuoteStatus,
+    TransportStatus,
+)
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 
 QTY = Numeric(16, 3)
@@ -140,6 +144,13 @@ class TransportRequest(Base):
     # DIRECT / COURIER / OWN_VEHICLE / THIRD_PARTY. Decides which columns below are
     # required and whether the quoting round runs at all — see enums.MODE_RULES.
     mode = Column(String(30), nullable=False, index=True)
+    # ROAD / RAIL / AIR / SEA — what it travels ON, as against the `mode` above, which
+    # says who moves it. Two questions, and the screen was asking both while only one
+    # of them was ever written down. Never null: a leg that named no carriage is a
+    # road leg, which is what every existing row is — see enums.CARRIAGE_RULES for
+    # which arrangements each carriage can be made under.
+    carriage_mode = Column(String(20), nullable=False, index=True,
+                           default=DEFAULT_CARRIAGE, server_default=DEFAULT_CARRIAGE)
     status = Column(String(30), nullable=False, index=True,
                     default=TransportStatus.DRAFT.value)
 
@@ -206,11 +217,25 @@ class TransportRequest(Base):
     vehicle_number = Column(String(50), nullable=True)
     driver_name = Column(String(200), nullable=True)
     driver_phone = Column(String(30), nullable=True)
+    # Who was behind the wheel. A courier books at a published rate and a tender is
+    # priced by the carriers, so there is no price to record when the load is handed
+    # over — what the gate and the receiving site need is the person, and the licence
+    # is the only thing that names one who is not ours.
+    driver_licence_no = Column(String(50), nullable=True)
     # The other job the vehicle was already doing — the whole reason this mode is free.
     trip_reference = Column(String(200), nullable=True)
 
     # Direct hand-over.
     handed_over_by_name = Column(String(200), nullable=True)
+    # WHO that person is, pinned to a number. A name on its own identifies nobody once
+    # the load is being chased: one of ours is their employee id, anybody else is an
+    # Aadhaar, and never both — an employee's Aadhaar is not ours to hold when HCM
+    # already knows who they are. The same pair carries the DRIVER of an own vehicle,
+    # who is the person custody passes to for the trip; the name and phone of a driver
+    # stay in the driver columns above, next to the vehicle they came on.
+    handed_over_employee_id = Column(String(50), nullable=True)
+    handed_over_aadhaar = Column(String(12), nullable=True)
+    handed_over_phone = Column(String(30), nullable=True)
     received_by_name = Column(String(200), nullable=True)
 
     # The tracking handle. `lr_no` for a truck, `docket_no` for a courier; both kept

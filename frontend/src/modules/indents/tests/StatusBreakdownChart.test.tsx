@@ -39,10 +39,10 @@ const STATUS_DATA = {
   CLOSED: 4,
   REJECTED: 1,
   DRAFT: 2,
-  APPROVED: 20,
 };
 
-const DISPLAYED_STATUSES = [
+/** The statuses STATUS_DATA has indents in, in lifecycle order. */
+const POPULATED_STATUSES = [
   "PENDING_APPROVAL",
   "AWAITING_ALLOCATION",
   "ALLOCATED",
@@ -184,21 +184,56 @@ describe("StatusBreakdownChart tooltip interaction", () => {
 });
 
 describe("StatusBreakdownChart presentation", () => {
-  it("shows exactly the seven supported statuses in the required order and excludes Other", () => {
+  it("lists the populated statuses in lifecycle order and buckets nothing into Other", () => {
     render(<StatusBreakdownChart byStatus={STATUS_DATA} />);
 
     expect(screen.getAllByTestId(/^status-legend-row-/).map((row) => (
       row.getAttribute("data-testid")?.replace("status-legend-row-", "")
-    ))).toEqual(DISPLAYED_STATUSES);
+    ))).toEqual(POPULATED_STATUSES);
     expect(screen.queryByText("Other")).not.toBeInTheDocument();
     expect(screen.queryByTestId("status-legend-row-OTHER")).not.toBeInTheDocument();
     expect(screen.queryByTestId("status-marker-OTHER")).not.toBeInTheDocument();
     expect(screen.queryByTestId("status-donut-slice-OTHER")).not.toBeInTheDocument();
+    // Neither of these has an indent in it, so neither takes a row.
     expect(screen.queryByTestId("status-legend-row-APPROVED")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("status-donut-slice-APPROVED")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("status-legend-row-RETURNED_FOR_CORRECTION")).not.toBeInTheDocument();
   });
 
-  it("calculates the centre total and percentages from displayed statuses only", () => {
+  it("draws the later lifecycle statuses instead of dropping them from the total", () => {
+    // The reported bug: 74 indents on the card, 63 in the donut, because the 11 in
+    // PENDING_PROCUREMENT had no slice.
+    const byStatus = {
+      PENDING_APPROVAL: 17,
+      CLOSED: 17,
+      ALLOCATED: 15,
+      PENDING_PROCUREMENT: 11,
+      AWAITING_ALLOCATION: 6,
+      PARTIALLY_FULFILLED: 6,
+      DRAFT: 1,
+      REJECTED: 1,
+    };
+
+    const { total } = buildStatusBreakdownData(byStatus);
+
+    expect(total).toBe(74);
+    render(<StatusBreakdownChart byStatus={byStatus} />);
+    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("74 total indents");
+    expect(screen.getByTestId("status-legend-count-PENDING_PROCUREMENT")).toHaveTextContent(/^11$/);
+    // Pending procurement no longer shares Allocated's violet, which would have read
+    // as one 26-indent arc.
+    expect(screen.getByTestId("status-donut-slice-PENDING_PROCUREMENT"))
+      .toHaveAttribute("fill", "#db2777");
+  });
+
+  it("draws a status it has never been told about rather than losing its count", () => {
+    const { entries, total } = buildStatusBreakdownData({ ALLOCATED: 4, SOMETHING_NEW: 6 });
+
+    expect(total).toBe(10);
+    expect(entries.find(({ status }) => status === "SOMETHING_NEW")?.label)
+      .toBe("Something new");
+  });
+
+  it("calculates the centre total and percentages across every reported status", () => {
     const byStatus = {
       PENDING_APPROVAL: 4,
       AWAITING_ALLOCATION: 5,
@@ -213,29 +248,43 @@ describe("StatusBreakdownChart presentation", () => {
 
     const { entries, total } = buildStatusBreakdownData(byStatus);
 
-    expect(total).toBe(22);
-    expect(entries.map(({ status }) => status)).toEqual(DISPLAYED_STATUSES);
-    expect(entries.map(({ percentage }) => percentage)).toEqual([18, 23, 9, 14, 18, 14, 5]);
+    expect(total).toBe(122);
+    // Lifecycle order: the two later statuses take their place mid-list rather than
+    // being appended on the end.
+    expect(entries.map(({ status }) => status)).toEqual([
+      "PENDING_APPROVAL",
+      "APPROVED",
+      "AWAITING_ALLOCATION",
+      "ALLOCATED",
+      "PARTIALLY_FULFILLED",
+      "ORDERED",
+      "CLOSED",
+      "REJECTED",
+      "DRAFT",
+    ]);
+    expect(entries.map(({ percentage }) => percentage)).toEqual([3, 66, 4, 2, 2, 16, 3, 2, 1]);
 
     render(<StatusBreakdownChart byStatus={byStatus} />);
-    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("22 total indents");
-    expect(screen.getByTestId("status-legend-percentage-PENDING_APPROVAL")).toHaveTextContent("18%");
-    expect(screen.getByTestId("status-legend-percentage-DRAFT")).toHaveTextContent("5%");
+    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("122 total indents");
+    expect(screen.getByTestId("status-legend-percentage-APPROVED")).toHaveTextContent("66%");
+    expect(screen.getByTestId("status-legend-percentage-DRAFT")).toHaveTextContent("1%");
   });
 
-  it("keeps zero-count statuses in the breakdown without creating donut segments", () => {
+  it("leaves an empty status off the legend entirely rather than printing a zero row", () => {
     render(
       <StatusBreakdownChart
         byStatus={{ ALLOCATED: 6, DRAFT: 0, REJECTED: Number.NaN, APPROVED: 40 }}
       />,
     );
 
-    expect(screen.getAllByTestId(/^status-legend-row-/)).toHaveLength(7);
-    expect(screen.getByTestId("status-legend-count-DRAFT")).toHaveTextContent(/^0$/);
-    expect(screen.getByTestId("status-legend-percentage-DRAFT")).toHaveTextContent(/^0%$/);
+    // Only the two statuses holding indents. A "Draft 0 0%" row spends a line of the
+    // card saying nothing, and an unreadable count is treated the same as an empty one.
+    expect(screen.getAllByTestId(/^status-legend-row-/)).toHaveLength(2);
+    expect(screen.queryByTestId("status-legend-row-DRAFT")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("status-legend-row-REJECTED")).not.toBeInTheDocument();
     expect(screen.queryByTestId("status-donut-slice-DRAFT")).not.toBeInTheDocument();
-    expect(screen.getAllByTestId(/^status-donut-slice-/)).toHaveLength(1);
-    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("6 total indents");
+    expect(screen.getAllByTestId(/^status-donut-slice-/)).toHaveLength(2);
+    expect(screen.getByTestId("status-donut-total")).toHaveAccessibleName("46 total indents");
   });
 
   it("uses padded responsive sizing and the preserved status colours", () => {
@@ -278,7 +327,7 @@ describe("StatusBreakdownChart presentation", () => {
   it("renders a selected single status as one clean solid full ring", () => {
     render(
       <StatusBreakdownChart
-        byStatus={{ ALLOCATED: 6, APPROVED: 99 }}
+        byStatus={{ ALLOCATED: 6 }}
         selectedStatuses={["ALLOCATED"]}
       />,
     );

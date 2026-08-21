@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Navigate, Route, Routes, useNavigate, useHref } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useHref } from "react-router-dom";
 import { HeroUIProvider } from "@heroui/react";
 import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
@@ -34,6 +34,9 @@ import { PutawayPrintPage } from "@/modules/warehouse/pages/PutawayPrintPage";
 import { InspectionPrintPage } from "@/modules/warehouse/pages/InspectionPrintPage";
 import { DispatchPrintPage } from "@/modules/warehouse/pages/DispatchPrintPage";
 import { StockMovementPrintPage } from "@/modules/warehouse/pages/StockMovementPrintPage";
+// The gate pass, outside the shell for the same reason the order print is: what
+// leaves the printer is the pass the driver shows at the gate.
+import { GatePassPrintPage } from "@/modules/logistics/pages/GatePassPrintPage";
 import { POFormPage } from "@/modules/procurement/pages/POFormPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
 // sub-pages, so these paths hand the whole subtree to it.
@@ -92,6 +95,7 @@ import {
   TransportRequestsPage, TransportFormPage, TransportDetailPage, ProviderSelectionPage,
   LogisticsActivityPage, LogisticsVendorsPage,
   CarrierLayout, CarrierLoginPage, CarrierJobsPage, CarrierJobPage,
+  CarrierAckPage,
 } from "@/modules/logistics";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
 import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
@@ -131,6 +135,17 @@ function FullScreen({ children }: { children: ReactNode }) {
   );
 }
 
+/* /logistics/transport/... -> /logistics/shipments/..., carrying whatever followed.
+ * A plain <Navigate> cannot: the tail is a splat and the deep links that matter all
+ * have one — the approvals inbox opens `/logistics/transport/12?approval=1`, and the
+ * gate pass hangs off the id. Dropping the tail would land every one of them on the
+ * list with the document they were sent to open nowhere in sight. */
+function LegacyTransportRedirect() {
+  const { pathname, search, hash } = useLocation();
+  const tail = pathname.replace(/^\/logistics\/transport/, "");
+  return <Navigate to={`/logistics/shipments${tail}${search}${hash}`} replace />;
+}
+
 function AppRoutes() {
   const { me, loading } = useAuth();
   if (loading) return <FullScreen>Loading…</FullScreen>;
@@ -166,6 +181,10 @@ function AppRoutes() {
         <Route index element={<Navigate to="/carrier/jobs" replace />} />
         <Route path="jobs" element={<CarrierJobsPage />} />
         <Route path="jobs/:id" element={<CarrierJobPage />} />
+        {/* Awarded, not yet confirmed: the carrier says yes and, in the same press,
+            names the vehicle and the driver the gate should expect. Those answers are
+            what the dispatch queue and the shipment then read back. */}
+        <Route path="acknowledgements" element={<CarrierAckPage />} />
         {/* The same account screen the supplier portal shows, mounted here too. One
             implementation — a carrier IS a vendor and the details are identical — but
             reached inside the carrier shell, because linking the tab at
@@ -213,6 +232,13 @@ function AppRoutes() {
           path="/warehouse/stock-movements/print"
           element={me ? <StockMovementPrintPage /> : <Navigate to="/login" replace />}
         />
+
+      {/* The gate pass for one transport leg — printed, or saved as a PDF, from the
+          dispatch screen that raised it. Signed-in only, same data as the shipment. */}
+      <Route
+        path="/logistics/shipments/:id/gate-pass"
+        element={me ? <GatePassPrintPage /> : <Navigate to="/login" replace />}
+      />
 
         <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
         <Route index element={<HomePage />} />
@@ -302,10 +328,19 @@ function AppRoutes() {
          * queue and from a packed consignment — a logistics day never crosses into
          * the warehouse module to send something out. */}
         <Route path="logistics/dispatch/new" element={<DispatchConfirmPage />} />
-        <Route path="logistics/transport" element={<TransportRequestsPage />} />
-        <Route path="logistics/transport/new" element={<TransportFormPage />} />
-        <Route path="logistics/transport/:id" element={<TransportDetailPage />} />
-        <Route path="logistics/transport/:id/edit" element={<TransportFormPage />} />
+        {/* Shipments. The screen was "Transport Requests" and answered on
+         * /logistics/transport; a row stops being a request the moment it is awarded
+         * and spends the rest of its life as a load on a truck, which is what the
+         * register actually lists. The four routes below moved with the name, and the
+         * old addresses redirect rather than 404 — links were handed out, and the
+         * approvals inbox deep-links straight at a leg. */}
+        <Route path="logistics/shipments" element={<TransportRequestsPage />} />
+        <Route path="logistics/shipments/new" element={<TransportFormPage />} />
+        <Route path="logistics/shipments/:id" element={<TransportDetailPage />} />
+        <Route path="logistics/shipments/:id/edit" element={<TransportFormPage />} />
+        <Route path="logistics/transport"
+               element={<Navigate to="/logistics/shipments" replace />} />
+        <Route path="logistics/transport/*" element={<LegacyTransportRedirect />} />
         <Route path="logistics/providers" element={<ProviderSelectionPage />} />
         {/* The ledger: every event on every shipment, in the order it happened. */}
         <Route path="logistics/activity" element={<LogisticsActivityPage />} />

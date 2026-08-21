@@ -31,11 +31,11 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
     // A transport approval acts on the transport request itself. Without this case,
     // clicking the item in the inbox returned to the same approvals page and looked
     // like the approval button was broken.
-    case "TRANSPORT_REQUEST": return `/logistics/transport/${document.doc_id}?approval=1`;
+    case "TRANSPORT_REQUEST": return `/logistics/shipments/${document.doc_id}?approval=1`;
     // The award of a transport leg. Its doc_id is the transport request, and the
     // request stays at QUOTING while the award is in approval — so this lands on the
     // transport screen, which offers the decision off `awarded_at`, not off a status.
-    case "CARRIER_AWARD": return `/logistics/transport/${document.doc_id}?approval=1`;
+    case "CARRIER_AWARD": return `/logistics/shipments/${document.doc_id}?approval=1`;
     default: return "/approvals";
   }
 }
@@ -64,8 +64,8 @@ export function approvalDecisionDocumentPath(document: ApprovalDocument): string
     case "DISPATCH": return `/warehouse/transactions/dispatch/${document.doc_id}`;
     case "QC_OUTWARD": return `/warehouse/qc-outward/${document.doc_id}`;
     case "PURCHASE_RETURN": return `/warehouse/purchase-returns/${document.doc_id}`;
-    case "TRANSPORT_REQUEST": return `/logistics/transport/${document.doc_id}?decision=1`;
-    case "CARRIER_AWARD": return `/logistics/transport/${document.doc_id}?decision=1`;
+    case "TRANSPORT_REQUEST": return `/logistics/shipments/${document.doc_id}?decision=1`;
+    case "CARRIER_AWARD": return `/logistics/shipments/${document.doc_id}?decision=1`;
     default: return "/approvals/decisions";
   }
 }

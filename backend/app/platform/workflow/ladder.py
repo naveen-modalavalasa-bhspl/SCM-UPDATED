@@ -112,7 +112,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
     DocType.CONSOLIDATION.value: "Consolidated Purchase Sheet",
     DocType.RFQ.value: "Request for Quotation",
     DocType.PO.value: "Purchase Order",
-    DocType.TRANSPORT_REQUEST.value: "Transport Request",
+    DocType.TRANSPORT_REQUEST.value: "Shipment (the outward transport leg)",
     # Only reached on a mode that actually hires somebody — see logistics.enums.
     DocType.CARRIER_AWARD.value: "Carrier Award (choosing the transport provider)",
 }

@@ -52,8 +52,15 @@ export function CarrierJobPage() {
     freight_amount: "", other_charges: "", tax_percent: "", transit_days: "",
     vehicle_type: "", remarks: "",
   });
-  const [reference, setReference] = useState("");
   const [declineReason, setDeclineReason] = useState("");
+  // A quote already sent can be sent again, right up until the desk awards the lane —
+  // `record_quote` overwrites the row whenever the request is still QUOTING, and the
+  // desk's own "ask for a revised quote" has no other way of being answered. The form
+  // is folded away rather than gone, because the common case on an answered tender is
+  // reading what you sent, not retyping it; this opens it back up, seeded with the
+  // last price. The board has always offered "Revise your price" on these rows — it
+  // opened a screen with no form on it.
+  const [revising, setRevising] = useState(false);
   const [track, setTrack] = useState({
     lr_no: "", docket_no: "", event_type: "", location_name: "", description: "",
   });
@@ -101,10 +108,6 @@ export function CarrierJobPage() {
     // left the screen looking exactly as it did before it — same fields, same button —
     // which is why a sent quote read as an unsent one.
     onDone: () => nav("/carrier/jobs?queue=QUOTING"),
-  });
-  const accept = useAction({
-    run: () => carrierPortalApi.accept(jobId, reference),
-    success: "Job accepted — the warehouse can load it", invalidates,
   });
   const decline = useAction({
     run: () => carrierPortalApi.decline(jobId, declineReason),
@@ -166,15 +169,16 @@ export function CarrierJobPage() {
         <div className="flex items-center gap-2">
           <StatusPill status={lost ? "NOT_AWARDED" : job.status} />
           {/* Back to the queue this job is actually on, not to whatever tab the board
-              defaults to — landing somewhere the job isn't reads as it having vanished. */}
-          <Button variant="ghost" onClick={() => nav(`/carrier/jobs?queue=${
-            lost ? "NOT_AWARDED"
-              : ["DELIVERED", "ACKNOWLEDGED"].includes(job.status)
-                ? "DELIVERED,ACKNOWLEDGED" : job.status}`)}>Back</Button>
+              defaults to — landing somewhere the job isn't reads as it having vanished.
+              An awarded job is not on the board at all: it lives on Acknowledgements,
+              which is where taking it is done, so Back goes there. */}
+          <Button variant="ghost" onClick={() => nav(backTo(job.status, lost))}>
+            Back
+          </Button>
         </div>
       </div>
 
-      <ErrorBanner error={sendQuote.error ?? accept.error ?? decline.error
+      <ErrorBanner error={sendQuote.error ?? decline.error
         ?? saveTracking.error ?? deliver.error} />
 
       <Card className="p-5">
@@ -266,9 +270,11 @@ export function CarrierJobPage() {
         <Card className="space-y-3 p-5">
           <div>
             <h2 className="font-display text-lg font-semibold text-ink">
-              {quoted
-                ? "Quote submitted"
-                : askedAgain ? "Revise your quote" : "Quote for this lane"}
+              {revising
+                ? "Revise your quote"
+                : quoted
+                  ? "Quote submitted"
+                  : askedAgain ? "Revise your quote" : "Quote for this lane"}
             </h2>
             <p className="text-xs text-muted">
               {myQuote?.submitted_at
@@ -279,15 +285,22 @@ export function CarrierJobPage() {
           </div>
 
           {quoted && (
-            <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900 dark:border-emerald-900 dark:bg-emerald-900/20 dark:text-emerald-200">
+            <div className="rounded-lg border border-ok/25 bg-ok-bg p-3 text-sm text-ok">
               <span className="font-semibold">Your quote is in. </span>
               {money(myQuote?.freight_amount)} is with the logistics desk — they will
               either award it or ask you for a better number.
+              {!revising && (
+                <span className="mt-2 block">
+                  <Button variant="ghost" onClick={() => setRevising(true)}>
+                    Revise your price
+                  </Button>
+                </span>
+              )}
             </div>
           )}
 
           {askedAgain && (
-            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-900/20 dark:text-amber-200">
+            <div className="rounded-lg border border-warn/25 bg-warn-bg p-3 text-sm text-warn">
               <span className="font-semibold">They asked for a new price: </span>
               {askedAgain.remarks}
               {askedAgain.freight_amount != null && (
@@ -297,7 +310,7 @@ export function CarrierJobPage() {
               )}
             </div>
           )}
-          {!quoted && (
+          {(!quoted || revising) && (
             <>
               <div className="grid gap-3 sm:grid-cols-3">
                 {/* "Freight" is the trade word and the API field, but this form is read by
@@ -333,8 +346,15 @@ export function CarrierJobPage() {
                   onClick={() => sendQuote.mutate()}
                   disabled={sendQuote.isPending || !quoteReady}
                 >
-                  {sendQuote.isPending ? "Sending…" : "Send quote"}
+                  {sendQuote.isPending
+                    ? "Sending…"
+                    : revising || askedAgain ? "Send new price" : "Send quote"}
                 </Button>
+                {revising && (
+                  <Button variant="ghost" onClick={() => setRevising(false)}>
+                    Keep my last price
+                  </Button>
+                )}
                 {!quoteReady && (
                   <span className="text-xs text-muted">
                     Fill every field marked * — put 0 where nothing applies.
@@ -353,18 +373,17 @@ export function CarrierJobPage() {
               You won this shipment
             </h2>
             <p className="text-sm text-body">
-              {money(job.freight_amount)} agreed. Accept it and the warehouse will load
-              against your booking; decline it and it goes back out to the others.
+              {money(job.freight_amount)} agreed. Acknowledge it — naming the vehicle
+              and the driver coming for the load — and the warehouse will load against
+              your booking; decline it and it goes back out to the others.
             </p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Your booking reference" hint="Optional">
-              <Input value={reference} onChange={(e) => setReference(e.target.value)} />
-            </Field>
-          </div>
+          {/* One place to say yes, and it is the one that asks what is coming. Accepting
+              here as well would put shipments on READY with no vehicle against them,
+              which is a booking nobody can meet at the gate. */}
           <div className="flex flex-wrap gap-2">
-            <Button onClick={() => accept.mutate()} disabled={accept.isPending}>
-              {accept.isPending ? "Accepting…" : "Accept the job"}
+            <Button onClick={() => nav(`/carrier/acknowledgements?tr=${job.id}`)}>
+              Acknowledge the job
             </Button>
           </div>
           <div className="rounded-lg border border-line p-3">
@@ -501,6 +520,18 @@ export function CarrierJobPage() {
       )}
     </div>
   );
+}
+
+/** Where "Back" lands: the one list this shipment is on right now. Kept beside the
+ *  queues it mirrors — the board carries a chip per rung except AWAITING_CARRIER,
+ *  whose rows are worked on the Acknowledgements screen. */
+function backTo(status: string, lost: boolean): string {
+  if (lost) return "/carrier/jobs?queue=NOT_AWARDED";
+  if (status === "AWAITING_CARRIER") return "/carrier/acknowledgements";
+  if (["DELIVERED", "ACKNOWLEDGED"].includes(status)) {
+    return "/carrier/jobs?queue=DELIVERED,ACKNOWLEDGED";
+  }
+  return `/carrier/jobs?queue=${status}`;
 }
 
 function Row({ label, value }: { label: string; value?: string | null }) {

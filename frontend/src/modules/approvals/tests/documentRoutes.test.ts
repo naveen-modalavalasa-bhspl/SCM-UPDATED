@@ -30,16 +30,16 @@ describe("approval document routes", () => {
   // approval that releases a shipment to its carrier had nowhere to be decided.
   it("routes a carrier award to its transport request", () => {
     expect(approvalDocumentPath({ doc_type: "CARRIER_AWARD", doc_id: 1 }))
-      .toBe("/logistics/transport/1?approval=1");
+      .toBe("/logistics/shipments/1?approval=1");
     expect(approvalDecisionDocumentPath({ doc_type: "CARRIER_AWARD", doc_id: 1 }))
-      .toBe("/logistics/transport/1?decision=1");
+      .toBe("/logistics/shipments/1?decision=1");
   });
 
   it("routes a transport request to its actionable transport detail", () => {
     expect(approvalDocumentPath({ doc_type: "TRANSPORT_REQUEST", doc_id: 5 }))
-      .toBe("/logistics/transport/5?approval=1");
+      .toBe("/logistics/shipments/5?approval=1");
     expect(approvalDecisionDocumentPath({ doc_type: "TRANSPORT_REQUEST", doc_id: 5 }))
-      .toBe("/logistics/transport/5?decision=1");
+      .toBe("/logistics/shipments/5?decision=1");
   });
 
   it("opens the exact purchase order instead of the generic PO page", () => {

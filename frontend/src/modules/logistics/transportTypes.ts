@@ -6,6 +6,23 @@
 
 export type TransportMode = "DIRECT" | "COURIER" | "OWN_VEHICLE" | "THIRD_PARTY";
 
+/** WHAT the load travels on, as against `TransportMode`, which says who moves it.
+ *  Two questions, and the dispatch screen has always asked both — this is the half
+ *  that now has a column behind it (`lgs_transport_requests.carriage_mode`). */
+export type CarriageMode = "ROAD" | "RAIL" | "AIR" | "SEA";
+
+/** Served by `GET /api/transport/carriage-modes`, and by
+ *  `GET /api/supplier/transport-carriage-modes?mode=` for the carrier's portal.
+ *  `allowed_modes` is which arrangements can be made under this carriage: only a road
+ *  leg can be carried by hand or run on a company vehicle. Served, never a constant
+ *  here — the screen kept its own copy of that rule and it is the backend's. */
+export interface CarriageRule {
+  value: CarriageMode;
+  label: string;
+  help: string;
+  allowed_modes: TransportMode[];
+}
+
 /** Served by `GET /api/transport/modes`. The screen never hardcodes these rules —
  * the backend enforces them, so the form asks for exactly what will be validated. */
 export interface ModeRule {
@@ -100,9 +117,16 @@ export interface ConsignmentLink {
   tr_id: number;
   tr_no: string;
   mode: TransportMode;
+  /** What it is travelling on — including a carriage the WINNING carrier changed
+   *  when they acknowledged the award. */
+  carriage_mode?: CarriageMode | null;
   status: string;
   carrier_name?: string | null;
   lr_no?: string | null;
+  /** Who is coming for it. The carrier's own answer on a tender — written when they
+   *  acknowledge the award, never typed by the desk. */
+  driver_name?: string | null;
+  vehicle_number?: string | null;
 }
 
 /** A packed consignment as the warehouse serves it (`/api/warehouse/consignments`).
@@ -242,6 +266,7 @@ export interface TransportRequest {
   tr_no: string;
   tr_date?: string | null;
   mode: TransportMode;
+  carriage_mode?: CarriageMode | null;
   status: string;
   source_type?: string | null;
   source_id?: number | null;
@@ -279,8 +304,12 @@ export interface TransportRequest {
   vehicle_number?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
+  driver_licence_no?: string | null;
   trip_reference?: string | null;
   handed_over_by_name?: string | null;
+  handed_over_employee_id?: string | null;
+  handed_over_aadhaar?: string | null;
+  handed_over_phone?: string | null;
   received_by_name?: string | null;
   lr_no?: string | null;
   docket_no?: string | null;
@@ -321,6 +350,7 @@ export interface TRListRow {
   tr_no: string;
   tr_date?: string | null;
   mode: TransportMode;
+  carriage_mode?: CarriageMode | null;
   status: string;
   dispatch_id?: number | null;
   consignment_no?: string | null;
@@ -472,6 +502,9 @@ export interface TRLineInput {
 
 export interface TRInput {
   mode: TransportMode;
+  /** Road / rail / air / sea. Optional on the wire: the service falls back to ROAD,
+   *  which is what a leg that named no carriage has always been. */
+  carriage_mode?: CarriageMode | null;
   tr_date?: string | null;
   source_type?: string | null;
   source_id?: number | null;
@@ -503,11 +536,16 @@ export interface TRInput {
   tracking_url?: string | null;
   eway_bill_no?: string | null;
   carrier_id?: number | null;
+  carrier_reference?: string | null;
   vehicle_number?: string | null;
   driver_name?: string | null;
   driver_phone?: string | null;
+  driver_licence_no?: string | null;
   trip_reference?: string | null;
   handed_over_by_name?: string | null;
+  handed_over_employee_id?: string | null;
+  handed_over_aadhaar?: string | null;
+  handed_over_phone?: string | null;
   lines?: TRLineInput[];
 }
 

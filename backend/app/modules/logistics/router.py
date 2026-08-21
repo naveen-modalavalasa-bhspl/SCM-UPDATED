@@ -9,7 +9,7 @@ Same arrangement the supplier portal already uses.
 """
 from datetime import date
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,8 +18,8 @@ from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.logistics import partners, service
 from app.modules.logistics.schemas import (
-    AcceptQuoteIn, ActionIn, ActivityRow, AwardIn, CarrierAcceptIn, CarrierConfirmIn,
-    CarrierDeclineIn, CarrierTrackIn, ConsignmentLink, DeliverIn, DispatchIn, EventIn,
+    AcceptQuoteIn, ActionIn, ActivityRow, AwardIn, CarrierAcceptIn, CarrierAckIn,
+    CarrierConfirmIn, CarrierDeclineIn, CarrierTrackIn, ConsignmentLink, DeliverIn, DispatchIn, EventIn,
     EventOut, GRNCreate, GRNListRow, GRNOut, InviteIn, IssueCreate, IssueOut, Option,
     PartnerCreate, PartnerLoginIn, PartnerOut, PartnerUpdate, ProviderBoardRow,
     ProviderIn, QuickDispatchIn, QuoteIn, QuoteOut, ResolveIn, ReviseQuoteIn, TRCreate,
@@ -97,6 +97,15 @@ transport_router = APIRouter(prefix="/api/transport")
 @transport_router.get("/modes", response_model=list[dict])
 async def transport_modes(user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return service.mode_catalogue()
+
+
+# What it travels ON — road, rail, air, sea — and which arrangements each one allows.
+# Served for the same reason /modes is: the Dispatch screen narrows the arrangement
+# tiles from this table, and it used to narrow them from a constant of its own.
+@transport_router.get("/carriage-modes", response_model=list[dict])
+async def transport_carriage_modes(
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return service.carriage_catalogue()
 
 
 # Which mode SUITS this load (doc E3). Advice only — whatever the desk picks is
@@ -257,6 +266,30 @@ async def download_transport_receipt_evidence(
         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     path, file_name, media_type = await service.receipt_evidence_file(
         db, tr_id, attachment_id)
+    return FileResponse(path, filename=file_name, media_type=media_type)
+
+
+@transport_router.get("/{tr_id:int}/documents", response_model=list[AttachmentRead])
+async def transport_documents(
+        tr_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    return await service.list_documents(db, tr_id)
+
+
+@transport_router.post("/{tr_id:int}/documents", response_model=AttachmentRead,
+                       status_code=201)
+async def upload_transport_document(
+        tr_id: int, doc_category: str = Form(...), file: UploadFile = File(...),
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_CREATE))):
+    return await service.add_document(db, tr_id, file, doc_category, user)
+
+
+@transport_router.get("/{tr_id:int}/documents/{attachment_id:int}/download")
+async def download_transport_document(
+        tr_id: int, attachment_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    path, file_name, media_type = await service.document_file(db, tr_id, attachment_id)
     return FileResponse(path, filename=file_name, media_type=media_type)
 
 
@@ -462,6 +495,15 @@ async def carrier_transport_summary(db: AsyncSession = Depends(get_db),
     return await service.carrier_summary(db, account.vendor_id)
 
 
+# The carriages this arrangement can be made under, for the acknowledgement screen.
+# Served rather than derived in the portal, and off the same table the desk's own
+# Dispatch screen narrows by, so the carrier can never be offered a routing that
+# screen would refuse. Its own path segment, so it never collides with /transport/{id}.
+@carrier_router.get("/transport-carriage-modes", response_model=list[dict])
+async def carrier_carriage_modes(mode: str, account=Depends(get_current_vendor)):
+    return service.carrier_carriage_options(mode)
+
+
 @carrier_router.get("/transport/{tr_id}", response_model=TROut)
 async def carrier_get_transport(tr_id: int, db: AsyncSession = Depends(get_db),
                                 account=Depends(get_current_vendor)):
@@ -480,6 +522,13 @@ async def carrier_accept_job(tr_id: int, body: CarrierAcceptIn = CarrierAcceptIn
                              db: AsyncSession = Depends(get_db),
                              account=Depends(get_current_vendor)):
     return await service.carrier_accept(db, account.vendor_id, tr_id, body)
+
+
+@carrier_router.post("/transport/{tr_id}/acknowledge", response_model=TROut)
+async def carrier_acknowledge_job(tr_id: int, body: CarrierAckIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  account=Depends(get_current_vendor)):
+    return await service.carrier_acknowledge(db, account.vendor_id, tr_id, body)
 
 
 @carrier_router.post("/transport/{tr_id}/decline", response_model=TROut)

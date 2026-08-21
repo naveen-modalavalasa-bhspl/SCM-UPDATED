@@ -326,7 +326,7 @@ export function LogisticsActivityPage() {
           columns={columns}
           keyOf={(row) => row.event_id}
           loading={isLoading}
-          onRowClick={(row) => nav(`/logistics/transport/${row.tr_id}`)}
+          onRowClick={(row) => nav(`/logistics/shipments/${row.tr_id}`)}
           page={page}
           totalPages={Math.max(1, Math.ceil(total / SIZE))}
           onPageChange={setPage}
