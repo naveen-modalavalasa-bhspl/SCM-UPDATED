@@ -388,16 +388,57 @@ async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
     )).scalars().all()
     free_map = await _free_by_point(db, lines, exclude_allocation_id=alloc.id)
 
+    # FIXED 2026-08-21 — a line that names NO warehouse used to report a hard zero, so
+    # the screen said "Free now 0 · Shortage 20" with 30 units standing in the main
+    # warehouse, and `max_allowed` came out 0 — the approver could not type a quantity
+    # at all. The document was unapprovable and looked like the stock had never arrived.
+    #
+    # `warehouse_id` is NULL on every line inventory decided to give nothing for, which
+    # is exactly the line an approver revisits once the goods are bought. Keying the
+    # shelf read on that column asked "how much is at NULL", and the answer is always
+    # none.
+    #
+    # WITHOUT this the whole reopen path is decorative: `reopen_for_available_stock`
+    # hands the allocation back to its approver and the approver arrives at a screen
+    # still insisting there is nothing to give.
+    #
+    # An unplaced line is answered across the WAREHOUSE tier — LIP and MDP hold real
+    # stock but it is theirs to issue, the same rule `main_available_qty` and the
+    # reopen apply. Pledges are netted off the same set, so two approvers cannot both
+    # be told the same units are free.
+    unplaced = [line for line in lines if not line.warehouse_id]
+    tier_free: dict[int, Decimal] = {}
+    if unplaced:
+        item_ids = {line.item_id for line in unplaced}
+        tier_free = await warehouse_available(db, item_ids)
+        # The points that shelf figure was summed over, named explicitly:
+        # `pledged_by_point` returns {} for an empty warehouse set, so passing None
+        # here would skip the netting in silence and quote gross stock as free.
+        tier_points = set((await db.execute(
+            select(Warehouse.id).where(
+                Warehouse.warehouse_type.notin_(list(_CHAIN_TYPES)))
+        )).scalars().all())
+        pledged_any = await pledged_by_point(
+            db, item_ids, tier_points, exclude_allocation_id=alloc.id)
+        for (item_id, _warehouse_id), qty in pledged_any.items():
+            if item_id in tier_free:
+                tier_free[item_id] = max(tier_free[item_id] - qty, ZERO)
+
     out = []
     for line in lines:
         pair = (line.item_id, line.warehouse_id)
-        free = free_map.get(pair, ZERO)
-        on_shelf = _d(await db.scalar(
-            select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
-                Stock.item_id == line.item_id,
-                Stock.warehouse_id == line.warehouse_id,
-            )
-        )) if line.warehouse_id else ZERO
+        if line.warehouse_id:
+            free = free_map.get(pair, ZERO)
+            on_shelf = _d(await db.scalar(
+                select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
+                    Stock.item_id == line.item_id,
+                    Stock.warehouse_id == line.warehouse_id,
+                )
+            ))
+        else:
+            # No point chosen yet: answer for the tier, not for NULL.
+            free = tier_free.get(line.item_id, ZERO)
+            on_shelf = free
         # An APPROVED allocation already holds its quantity in reserved_qty, so the
         # shelf no longer counts it and it is not free to be given again.
         already_held = (_d(line.quantity)
