@@ -74,6 +74,21 @@ UNAPPROVED_ALLOCATION_STATUSES = (
 )
 
 
+# The downstream handoff an approved allocation triggers, registered by the module
+# that owns it. Inventory is the base module and may not import warehouse (rule 5), so
+# `warehouse.service` registers `create_fulfilment_drafts_for_allocation` here at
+# import and every doorway into approval can reach it — including `move_stock`, which
+# has no business module in scope to pass it in. An explicit `on_approved` argument
+# still wins; this is only the fallback for callers that cannot supply one.
+ON_APPROVED_HOOK = None
+
+
+def register_on_approved(hook) -> None:
+    """Name the callback an allocation's approval hands off to."""
+    global ON_APPROVED_HOOK
+    ON_APPROVED_HOOK = hook
+
+
 def _d(value) -> Decimal:
     return Decimal(str(value or 0))
 
@@ -854,6 +869,7 @@ async def reopen_for_available_stock(db: AsyncSession, item_ids: set[int],
     """
     if not item_ids:
         return []
+    on_approved = on_approved or ON_APPROVED_HOOK
     parked = (await db.execute(
         select(Allocation)
         .where(

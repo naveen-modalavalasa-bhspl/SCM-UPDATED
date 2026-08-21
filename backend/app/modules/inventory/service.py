@@ -460,6 +460,31 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         after = await _available_at(db, item_id, warehouse_id)
         await notify_if_below_minimum(db, item_id, warehouse_id,
                                       after + float(qty), after)
+
+    # FIXED 2026-08-21 — an allocation parked on AWAITING_PROCUREMENT only ever woke
+    # from TWO doorways: warehouse putaway, and a receipt against the MR its own
+    # shortfall raised. Stock reaching the shelf any other way — a transfer in, a
+    # return to stock, an adjustment, a GRN posted through another path — left the
+    # allocation asleep, so the indent stayed out of the fulfilment queue and could
+    # not be edited with the goods sitting in the bin. That is the bug that has come
+    # back over and over, once per doorway.
+    #
+    # Here because this is the ONE function every stock increase passes through
+    # (rule 7), so there is no doorway left to miss. It is deliberately not gated on
+    # ref_type: how the goods arrived is exactly the lineage that was wrong to care
+    # about. `reopen_for_available_stock` is idempotent and tier-filtered — an inward
+    # move at a LIP or MDP wakes nothing, because that stock is not the warehouse's to
+    # give — and it returns immediately when no allocation is parked on the item.
+    if direction == StockDirection.IN.value:
+        # Imported here, not at module load: `allocations` imports this file for its
+        # MR helper, and a top-level import would close the loop.
+        from app.modules.inventory import allocations
+
+        # No `on_approved` to pass: inventory may not import warehouse (rule 5). The
+        # warehouse registers its handoff on `allocations.ON_APPROVED_HOOK` at import
+        # and the reopen falls back to it, so an allocation whose ladder self-approves
+        # still gets its fulfilment drafts from this doorway as from the others.
+        await allocations.reopen_for_available_stock(db, {item_id})
     return stock
 
 
