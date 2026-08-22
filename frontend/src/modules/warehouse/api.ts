@@ -260,6 +260,16 @@ export const getStockMovementOrder = (order_no: string) =>
 export const createStockMovementOrder = (body: StockMovementOrderWrite) =>
   post<StockMovementOrder>(`${BASE}/stock-movement-orders`, body);
 
+/** Approve or reject a movement waiting on a signature. Only reachable when the
+ *  project has an approval ladder configured for STOCK_MOVEMENT_ORDER — with none
+ *  (every project today) a movement completes on the press and never lands here. */
+export const actOnStockMovementOrder = (
+  orderId: number, action: "APPROVED" | "REJECTED", comments = "",
+) =>
+  post<{ id: number; order_no: string; status: string;
+         current_approver_name?: string | null }>(
+    `${BASE}/stock-movement-orders/${orderId}/act`, { action, comments });
+
 
 export const getStockAvailability = (
   warehouse_id: number,

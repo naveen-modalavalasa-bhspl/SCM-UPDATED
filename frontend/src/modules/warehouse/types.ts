@@ -1403,11 +1403,16 @@ export interface StockAvailability {
 }
 
 export interface StockMovementOrder {
+  /** 0 when no approval ladder is configured and the movement completed on the press —
+   *  that path writes no document row, exactly as it always did. Non-zero means there
+   *  is a record to approve (2026-08-21). */
   id: number;
   order_no: string;
   warehouse_id: number;
   warehouse_name?: string | null;
   status: string;
+  /** Who it is waiting on, and on which rung — "Mahendra Kumar (Warehouse Manager)". */
+  current_approver_name?: string | null;
   reason?: string | null;
   created_by_name?: string | null;
   created_at?: string | null;

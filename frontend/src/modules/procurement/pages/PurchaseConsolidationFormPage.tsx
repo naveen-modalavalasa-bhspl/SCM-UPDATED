@@ -7,6 +7,7 @@ import {
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
+import { SelectAllBar } from "../components/SelectAllBar";
 import { money } from "./RequisitionListPage";
 import type { ReqListRow } from "../types";
 
@@ -34,6 +35,15 @@ export function PurchaseConsolidationFormPage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["consolidation-candidates", page],
     queryFn: () => consolidationApi.candidates({ page, size: SIZE }),
+  });
+
+  // Every candidate id, so "select all" can mean ALL of them rather than the fifty on
+  // screen — a month of requisitions runs past one page and folding them into a sheet
+  // was fifty ticks a page. Ids only: the rows themselves are already paged in, and
+  // shipping the full records just to select them would be slower than the paging.
+  const allIds = useQuery({
+    queryKey: ["consolidation-candidate-ids"],
+    queryFn: () => consolidationApi.candidateIds(),
   });
 
   const create = useAction({
@@ -122,7 +132,16 @@ export function PurchaseConsolidationFormPage() {
       <div className="mb-4 grid gap-3 sm:grid-cols-3">
         <StatCard label="Available to consolidate" value={data?.total ?? 0} />
         <StatCard label="Selected" value={chosen.length} />
-        <StatCard label="Selected value" value={money(pickedValue)} />
+        {/* FIXED 2026-08-22 — this totals only the rows in HAND. It always did, but
+            with select-all spanning pages it can now be short by most of the sheet, and
+            a value card that quietly under-reports is worse than one that admits its
+            scope. The label says which it is; the figure itself is unchanged.
+            Totalling the whole selection would mean fetching every chosen requisition
+            just to add up a number the sheet computes properly on save. */}
+        <StatCard
+          label={picked.length < chosen.length ? "Value on this page" : "Selected value"}
+          value={money(pickedValue)}
+        />
       </div>
 
       <Card className="mb-4 space-y-4 p-5">
@@ -149,6 +168,17 @@ export function PurchaseConsolidationFormPage() {
           />
         </Field>
       </Card>
+
+      {/* Pick a hundred in one press. The total comes from the server, so
+          "Select all 137" ticks 137 and not the fifty in view. */}
+      <SelectAllBar
+        noun="requisition"
+        pickedCount={chosen.length}
+        pageIds={rows.map((r) => r.id)}
+        allIds={allIds.data}
+        loadingAll={allIds.isLoading}
+        onPick={setChosen}
+      />
 
       <Card className="p-2">
         <ResponsiveList

@@ -1,8 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, FileText } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Check, FileText, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button, Card, ErrorBanner, PageHeader, StatusPill, ResponsiveList } from "@/shared/components";
-import { getStockMovementOrder } from "../api";
+import {
+  Button, Can, Card, ErrorBanner, PageHeader, StatusPill, ResponsiveList, useToast,
+} from "@/shared/components";
+import { actOnStockMovementOrder, getStockMovementOrder } from "../api";
 import { Section } from "../components/DocumentMeta";
 import { fmtDateTime, fmtQty } from "../format";
 import type { StockMovementOrderItem } from "../types";
@@ -11,11 +13,29 @@ export default function StockMovementDetail() {
   const [params] = useSearchParams();
   const orderNo = params.get("order_no");
   const nav = useNavigate();
+  const toast = useToast();
+  const queryClient = useQueryClient();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["wh-stock-movement-order", orderNo],
     queryFn: () => getStockMovementOrder(orderNo as string),
     enabled: !!orderNo,
+  });
+
+  // Approving is what MOVES the stock — `_perform_movement_order` re-checks the shelf
+  // first, because the units can be issued or picked between the press and the
+  // signature. A refusal there means the order is stale, not that the approval failed.
+  const act = useMutation({
+    mutationFn: (action: "APPROVED" | "REJECTED") =>
+      actOnStockMovementOrder((data as { id: number }).id, action),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-order"] });
+      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-orders"] });
+      queryClient.invalidateQueries({ queryKey: ["inventory-stock"] });
+      toast.success(result.status === "REJECTED"
+        ? `${result.order_no} rejected — nothing moved`
+        : `${result.order_no} approved — the stock has moved`);
+    },
   });
 
   if (!orderNo) {
@@ -46,6 +66,29 @@ export default function StockMovementDetail() {
             >
               <FileText className="h-4 w-4" /> Print
             </Button>
+            {/* Only on an order that is actually waiting. `id` is 0 when no ladder is
+                configured — that path moves the stock on the press and writes no
+                document, so there is nothing to sign and no button to show. Gated on
+                `movement.approve`, which is also what the endpoint checks: hiding a
+                button is not security, the backend is. */}
+            {data.status === "PENDING_APPROVAL" && data.id > 0 && (
+              <Can do="movement.approve">
+                <Button
+                  variant="secondary"
+                  disabled={act.isPending}
+                  onClick={() => act.mutate("REJECTED")}
+                >
+                  <X className="h-4 w-4" /> Reject
+                </Button>
+                <Button
+                  disabled={act.isPending}
+                  onClick={() => act.mutate("APPROVED")}
+                >
+                  <Check className="h-4 w-4" />
+                  {act.isPending ? "Working…" : "Approve & move"}
+                </Button>
+              </Can>
+            )}
           </>
         }
       />
@@ -64,8 +107,12 @@ export default function StockMovementDetail() {
               </div>
             </div>
             <div>
-              <div className="text-xs text-muted">Warehouse</div>
-              <div className="text-sm">{data.warehouse_name ?? "—"}</div>
+              <div className="text-xs text-muted">
+                {data.current_approver_name ? "Waiting on" : "Warehouse"}
+              </div>
+              <div className="text-sm">
+                {data.current_approver_name ?? data.warehouse_name ?? "—"}
+              </div>
             </div>
             <div>
               <div className="text-xs text-muted">Created</div>
