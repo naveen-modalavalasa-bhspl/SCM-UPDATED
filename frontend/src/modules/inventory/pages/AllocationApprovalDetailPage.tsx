@@ -74,7 +74,7 @@ export function AllocationApprovalDetailPage() {
   });
   const waitingOnMe = (pending.data ?? []).some((row) => row.doc_id === allocationId);
 
-  const goBack = () => nav(decisionView ? "/approvals/decisions" : "/inventory/allocation-approvals");
+  const goBack = () => nav(decisionView ? "/approvals/decisions" : "/inventory/fulfilment?tab=approvals");
 
   const a = allocation.data;
 

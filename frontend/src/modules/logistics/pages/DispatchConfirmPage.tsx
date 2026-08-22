@@ -961,7 +961,12 @@ export function DispatchConfirmPage() {
    *  it — is this one of ours — so the control is written once and only its aria
    *  label says whose hands it is in. */
   const personChoice = (aria: string) => (
-    <Field label="Person">
+    // FIXED 2026-08-21 — every field `missing` will hold the press back for is now
+    // MARKED. The asterisks are driven off the same served mode rule
+    // (`rule.required_fields`, plus the hand-over id rule below it), never a second
+    // hand-written list, so the form cannot advertise a requirement the service does
+    // not have — or stay silent about one it does.
+    <Field label="Person" required>
       <Select
         value={handoverPerson}
         onChange={(value) => {
@@ -982,14 +987,14 @@ export function DispatchConfirmPage() {
   /** The number behind that choice. An outsider has no employee id, and an employee's
    *  Aadhaar is not ours to hold when HCM already knows who they are. */
   const personId = () => (handoverPerson === "EMPLOYEE" ? (
-    <Field label="Employee ID">
+    <Field label="Employee ID" required>
       <Input value={form.handed_over_employee_id}
         onChange={(e) => setForm({
           ...form, handed_over_employee_id: e.target.value,
         })} />
     </Field>
   ) : (
-    <Field label="Aadhaar number"
+    <Field label="Aadhaar number" required
       hint={aadhaarError(form.handed_over_aadhaar) ?? "12 digits"}>
       <Input value={form.handed_over_aadhaar} inputMode="numeric" maxLength={12}
         onChange={(e) => setForm({
@@ -1323,7 +1328,8 @@ export function DispatchConfirmPage() {
                     {/* A tender leaves with a hired truck and the man behind its
                         wheel; a courier sends whoever is on the round for a parcel.
                         Same box, and the label says which of the two turned up. */}
-                    <Field label={rule.needs_quotes ? "Driver name" : "Collected by"}>
+                    <Field label={rule.needs_quotes ? "Driver name" : "Collected by"}
+                      required={needs("driver_name")}>
                       <Input value={form.driver_name}
                         onChange={(e) => setForm({ ...form, driver_name: e.target.value })} />
                     </Field>
@@ -1338,7 +1344,7 @@ export function DispatchConfirmPage() {
                           ...form, vehicle_number: e.target.value,
                         })} />
                     </Field>
-                    <Field label="Phone number"
+                    <Field label="Phone number" required={needs("driver_phone")}
                       hint={phoneError(form.driver_phone, "Phone") ?? PHONE_HINT}>
                       <Input value={form.driver_phone} inputMode="numeric" maxLength={18}
                         onChange={(e) => setForm({
@@ -1414,15 +1420,15 @@ export function DispatchConfirmPage() {
                     />
                     {personChoice("Who is driving")}
                     {personId()}
-                    <Field label="Vehicle number">
+                    <Field label="Vehicle number" required={needs("vehicle_number")}>
                       <Input value={form.vehicle_number}
                         onChange={(e) => setForm({ ...form, vehicle_number: e.target.value })} />
                     </Field>
-                    <Field label="Driver name">
+                    <Field label="Driver name" required={needs("driver_name")}>
                       <Input value={form.driver_name}
                         onChange={(e) => setForm({ ...form, driver_name: e.target.value })} />
                     </Field>
-                    <Field label="Driver phone"
+                    <Field label="Driver phone" required={needs("driver_phone")}
                       hint={phoneError(form.driver_phone, "Driver phone") ?? PHONE_HINT}>
                       <Input value={form.driver_phone} inputMode="numeric" maxLength={18}
                         onChange={(e) => setForm({
@@ -1451,7 +1457,8 @@ export function DispatchConfirmPage() {
                     />
                     {personChoice("Who hands it over")}
 
-                    <Field label="Handed over by">
+                    <Field label="Handed over by"
+                      required={needs("handed_over_by_name")}>
                       <Input value={form.handed_over_by_name}
                         onChange={(e) => setForm({ ...form, handed_over_by_name: e.target.value })} />
                     </Field>
@@ -1459,6 +1466,7 @@ export function DispatchConfirmPage() {
                     {personId()}
 
                     <Field label="Phone number"
+                      required={needs("handed_over_phone")}
                       hint={phoneError(form.handed_over_phone, "Phone") ?? PHONE_HINT}>
                       <Input value={form.handed_over_phone} inputMode="numeric"
                         maxLength={18}

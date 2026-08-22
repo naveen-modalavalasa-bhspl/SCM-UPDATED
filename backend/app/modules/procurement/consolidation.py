@@ -164,6 +164,36 @@ async def _already_consolidated(db: AsyncSession,
     return {row[0]: row[1] for row in rows}
 
 
+async def candidate_ids(db: AsyncSession, project_id: int | None = None) -> list[int]:
+    """Every requisition `candidates` would offer, as bare ids.
+
+    NEW 2026-08-21, for "select all". The screen pages twenty at a time, so a select-all
+    built from what is loaded could only ever tick the visible twenty — and on a month
+    with 100+ requisitions that is the opposite of what the button says it does. This
+    answers for the WHOLE filtered set, so ticking it means what a reader thinks it
+    means.
+
+    Ids only, deliberately: the rows themselves are already on screen and shipping a
+    thousand full requisitions to select them would be slower than the paging it
+    replaces. Identical filters to `candidates` — same helper would be better still,
+    but the two differ only in what they SELECT, and keeping the WHERE in one place is
+    handled by both reading the same constants.
+    """
+    taken = select(PurchaseConsolidationSource.requisition_id).join(
+        PurchaseConsolidation,
+        PurchaseConsolidation.id == PurchaseConsolidationSource.consolidation_id
+    ).where(PurchaseConsolidation.status.notin_([
+        ConsolidationStatus.CANCELLED.value,
+        ConsolidationStatus.REJECTED.value]))
+    stmt = (select(Requisition.id)
+            .where(Requisition.status.in_(CONSOLIDATABLE),
+                   Requisition.id.notin_(taken))
+            .order_by(Requisition.created_at.desc()))
+    if project_id:
+        stmt = stmt.where(Requisition.project_id == project_id)
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def candidates(db: AsyncSession, params: PageParams,
                      project_id: int | None = None) -> dict:
     """Approved requisitions that are not on a sheet yet — what the buyer picks from.
@@ -314,7 +344,10 @@ async def create_consolidation(db: AsyncSession, data, user) -> PurchaseConsolid
     rows = await _aggregate(db, requisitions)
 
     doc = PurchaseConsolidation(
-        cons_no=await next_number(db, DocType.CONSOLIDATION.value.lower()),
+        # Same project the sheet is filed under, two lines below.
+        cons_no=await next_number(db, DocType.CONSOLIDATION.value.lower(),
+                                  project=(data.project_name
+                                           or requisitions[0].project_name)),
         cons_date=data.cons_date or date.today(),
         title=data.title, period_label=data.period_label,
         project_id=data.project_id or requisitions[0].project_id,

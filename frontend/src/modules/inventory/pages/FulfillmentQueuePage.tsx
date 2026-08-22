@@ -72,7 +72,11 @@ const hashCycle = (cycle: string) =>
 const ageInDays = (s?: string | null) =>
   s ? Math.floor((Date.now() - new Date(s).getTime()) / 86_400_000) : 0;
 
-export function FulfillmentQueuePage() {
+/** `embedded` drops this page's own header and intro, because the Fulfilment Desk
+ *  wraps it as a tab and a screen must not print two headings. Everything else — the
+ *  filters, the cycle rows, where a click leads — is identical either way, so the desk
+ *  never has to keep a second copy of the queue's rules. */
+export function FulfillmentQueuePage({ embedded = false }: { embedded?: boolean } = {}) {
   const [search, setSearch] = useState("");
   const [priorityFilter, setPriorityFilter] = useState("");
   const [deptFilter, setDeptFilter] = useState("");
@@ -270,7 +274,7 @@ export function FulfillmentQueuePage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Inventory" title="Fulfilment Queue" />
+      {!embedded && <PageHeader eyebrow="Inventory" title="Fulfilment Queue" />}
 
       <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-3">
         <Card className="p-3">

@@ -30,7 +30,9 @@ from app.modules.procurement.schemas import (
     PORevisionOut, POVendorResponseIn, QuoteListRow,
     QuoteOut, QuoteSubmit, ReqCreate, ReqFromMRsIn, ReqListRow,
     ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
-    VendorAccountOut, VendorLoginIn, VendorPasswordIn, VendorProfileOut,
+    LedgerRow,
+    VendorAccountOut, VendorLoginIn, VendorNotificationOut, VendorPasswordIn,
+    VendorProfileOut,
     VendorTokenOut,
 )
 from app.platform.rbac import permissions as perms
@@ -40,6 +42,9 @@ pos = APIRouter(prefix="/api/pos", tags=["procurement"])
 requisitions = APIRouter(prefix="/api/requisitions", tags=["procurement"])
 consolidations = APIRouter(prefix="/api/consolidations", tags=["procurement"])
 rfqs = APIRouter(prefix="/api/rfqs", tags=["procurement"])
+# The buying trail spans all four document types, so it belongs to the module rather
+# than to any one of them — hence its own prefix instead of hanging off /api/pos.
+ledger_api = APIRouter(prefix="/api/procurement", tags=["procurement"])
 supplier = APIRouter(prefix="/api/supplier", tags=["supplier-portal"])
 # Its own prefix, not /api/rfqs/portal/…: `/api/rfqs/{rfq_id}` is int-typed and is
 # declared first, so a literal "portal" segment there would 422 rather than fall
@@ -219,6 +224,16 @@ async def mr_candidates(params: PageParams = Depends(), project_id: int | None =
                         user=Depends(require_permission(perms.REQUISITION_CREATE))):
     """Approved material requests no requisition has claimed — the picker's source."""
     return await service.mr_candidates(db, params, project_id)
+
+
+# "Select all" needs every id, not the twenty on screen — see
+# `service.mr_candidate_ids`. Same permission as the list it selects from: this reveals
+# nothing the list does not already show.
+@requisitions.get("/mr-candidates/ids", response_model=list[int])
+async def mr_candidate_ids(project_id: int | None = None,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.REQUISITION_CREATE))):
+    return await service.mr_candidate_ids(db, project_id)
 
 
 @requisitions.post("/from-material-requests", response_model=ReqOut, status_code=201)
@@ -482,6 +497,56 @@ async def vendor_change_password(body: VendorPasswordIn,
         db, account.vendor_id, body.current_password, body.new_password)
 
 
+# The vendor's own bell. NEW 2026-08-21 — before this an amendment reached the vendor
+# through no channel at all; `platform/notifications` is keyed on `employee_id` and a
+# vendor has none. Scoped on `account.vendor_id` from the TOKEN, never a query
+# parameter: the portal carries no permissions, so the scope IS the guard.
+@supplier.get("/notifications", response_model=Page[VendorNotificationOut])
+async def vendor_notifications(params: PageParams = Depends(),
+                               unread_only: bool = False,
+                               db: AsyncSession = Depends(get_db),
+                               account=Depends(get_current_vendor)):
+    return await service.vendor_notifications(
+        db, account.vendor_id, params, unread_only)
+
+
+@supplier.post("/notifications/{notification_id}/read", status_code=204)
+async def vendor_read_notification(notification_id: int,
+                                   db: AsyncSession = Depends(get_db),
+                                   account=Depends(get_current_vendor)):
+    await service.mark_vendor_notification_read(
+        db, account.vendor_id, notification_id)
+
+
+# The buying trail. Its own screen in Procurement rather than a row in the reports
+# module, because it reads nothing outside procurement and a reader wants to click
+# through to the document — see `procurement/ledger.py`.
+#
+# Gated on `po.view`: the register's most sensitive column is what an order came to, and
+# that is exactly what a purchase order carries. Somebody who may not see orders must
+# not see the same numbers unioned into a list beside three other document types.
+@ledger_api.get("/ledger", response_model=Page[LedgerRow])
+async def procurement_ledger(params: PageParams = Depends(),
+                             doc_kind: str | None = None,
+                             status: str | None = None,
+                             project: str | None = None,
+                             vendor: str | None = None,
+                             date_from: date | None = None,
+                             date_to: date | None = None,
+                             search: str | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.PO_VIEW))):
+    return await service.procurement_ledger(
+        db, params, doc_kind=doc_kind, status=status, project=project,
+        vendor=vendor, date_from=date_from, date_to=date_to, search=search)
+
+
+@ledger_api.get("/ledger/filters")
+async def procurement_ledger_filters(db: AsyncSession = Depends(get_db),
+                                     user=Depends(require_permission(perms.PO_VIEW))):
+    return await service.procurement_ledger_filters(db)
+
+
 @supplier.get("/rfqs", response_model=Page[RFQListRow])
 async def vendor_list_rfqs(params: PageParams = Depends(),
                            search: str | None = None,  # Real-time search filter for RFQ number and title in supplier portal
@@ -596,6 +661,15 @@ async def consolidation_candidates(
     return await service.consolidation_candidates(db, params, project_id)
 
 
+@consolidations.get("/candidates/ids", response_model=list[int])
+async def consolidation_candidate_ids(
+        project_id: int | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.CONSOLIDATION_CREATE))):
+    """Every candidate id, so "select all" can mean all of them and not one page."""
+    return await service.consolidation_candidate_ids(db, project_id)
+
+
 @consolidations.get("", response_model=Page[ConsolidationListRow])
 async def list_consolidations(params: PageParams = Depends(),
                               status: str | None = None,
@@ -696,5 +770,6 @@ router.include_router(pos)
 router.include_router(requisitions)
 router.include_router(consolidations)
 router.include_router(rfqs)
+router.include_router(ledger_api)
 router.include_router(accounts)
 router.include_router(supplier)

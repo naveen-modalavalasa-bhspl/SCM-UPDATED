@@ -237,6 +237,12 @@ class WarehouseDocType(str, Enum):
     DISPATCH = "DISPATCH"
     PURCHASE_RETURN = "PURCHASE_RETURN"
     STOCK_MOVEMENT = "STOCK_MOVEMENT"
+    # The multi-line ORDER, as against the single bin-to-bin movement above. Its own
+    # doc type since 2026-08-21 for two reasons: they were sharing one `sys_doc_series`
+    # (so an order and a movement drew from the same running number), and an order is
+    # the thing an approval ladder can be configured against — a movement is what the
+    # order produces once it is signed.
+    STOCK_MOVEMENT_ORDER = "STOCK_MOVEMENT_ORDER"
     # The outward check on a posted issue. Same string as
     # `shared.enums.DocType.QC_OUTWARD`, which is what puts it on Approvals
     # Config; INSPECTION stays the NUMBERING series for both directions.

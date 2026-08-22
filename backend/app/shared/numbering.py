@@ -24,7 +24,16 @@ def _fiscal_year(now: datetime | None = None) -> str:
     return f"{start}-{str(start + 1)[-2:]}"
 
 
-DEFAULT_PATTERN = "{PREFIX}/{FY}/{SEQ:5}"
+# CHANGED 2026-08-21 — was "{PREFIX}/{FY}/{SEQ:5}". A number now names the company and
+# the project it belongs to, so `BHS/MED/2026-27/IND0007` says on sight where the paper
+# came from. `c3d4e5f6a7b9` moves the series already in the database; this is what a
+# series AUTO-CREATED from here on gets, so a doc type nobody configured does not
+# quietly go back to the old shape.
+#
+# Both scope tokens always render — `numbering.UNSET` ("NA") stands in where the caller
+# has no project — so adding them can never stop a document getting a number. See
+# SCOPE_SLUG_LEN for why they are three letters and not twelve.
+DEFAULT_PATTERN = "{COMPANY}/{PROJECT}/{FY}/{PREFIX}{SEQ:4}"
 
 # The DB team's rows use {PREFIX}/{FY}/{SEQ:5}; earlier code wrote {prefix}/{fy}/{num:04d}.
 # Both are accepted, because rejecting either would break live series or existing code.
@@ -50,6 +59,21 @@ _MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
 # What a scope token renders as when the caller has no value for it. Not blank: a blank
 # would collapse "no project" and "project 1" into the same-looking number.
 UNSET = "NA"
+
+#: How many letters a COMPANY or PROJECT contributes to a document number.
+#:
+#: THREE, fixed, 2026-08-21. The scope tokens used to take `slug`'s default of 12, and
+#: a real pair of names blew the number past the column that has to hold it:
+#: "Tirumala Constructions" + "Medak Phase Two" renders
+#: `TIRUMALACONS/MEDAKPHASETW/2026-27/IND0007` — 41 characters into a `String(30)`
+#: document-number column, which is a truncation or an error on every document raised.
+#:
+#: Three is also what makes the number READABLE, which is the point of putting them
+#: there: `TIR/MED/2026-27/IND0007` is 23 characters and says at a glance whose it is
+#: and which project it came from. Longer is not more informative, it is just longer.
+#:
+#: If this is ever widened, check every `*_no` column first — the narrowest is 30.
+SCOPE_SLUG_LEN = 3
 
 
 def slug(value: str | None, limit: int = 12) -> str:
@@ -150,7 +174,17 @@ _DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      # Logistics and the consolidated buying sheet. Named for the same
                      # reason the warehouse types are: the three-letter fallback gives
                      # "TRA" and "CON", neither of which is what anyone calls them.
-                     "transport_request": "TR", "consolidation": "CONS"}
+                     "transport_request": "TR", "consolidation": "CONS",
+                     # FIXED 2026-08-21 — both of these fell through to the
+                     # three-letter fallback, and `STOCK_MOVEMENT`[:3] is "STO", which
+                     # is what everybody in this system reads as a Stock TRANSFER
+                     # Order. So every bin-to-bin movement and every movement ORDER
+                     # came out numbered STO/..., indistinguishable on paper from an
+                     # inter-warehouse transfer that is a completely different
+                     # document. Named explicitly so the fallback can never rename
+                     # them again.
+                     "stock_movement": "SMV",
+                     "stock_movement_order": "SMO"}
 
 
 # A doc type whose number is more than prefix/year/sequence says so here, or the
@@ -172,7 +206,7 @@ async def _company(db: AsyncSession) -> str:
     row = (await db.execute(
         select(Setting).where(Setting.setting_key == "company.name")
     )).scalar_one_or_none()
-    return slug(row.setting_value if row else None)
+    return slug(row.setting_value if row else None, SCOPE_SLUG_LEN)
 
 
 async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = None,
@@ -206,7 +240,7 @@ async def next_number(db: AsyncSession, doc_type: str, *, project: str | None = 
     # {PREFIX}/{FY}/{SEQ} series still costs exactly one query.
     wanted = tokens_in(series.pattern) & set(_SCOPE_TOKENS)
     if "project" in wanted:
-        extra["project"] = slug(project)
+        extra["project"] = slug(project, SCOPE_SLUG_LEN)
     if "company" in wanted:
         extra["company"] = await _company(db)
 

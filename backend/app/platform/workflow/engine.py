@@ -1219,6 +1219,66 @@ async def move_to_workflow(db, instance_id: int, workflow_id: int, user,
     return instance
 
 
+async def current_stage_rank(db, doc_type: str, doc_id: int) -> str | None:
+    """The RUNG a document is sitting on, as a person would name it.
+
+    `role_name` is the HCM org role an admin picked on Approvals Config — "Warehouse
+    Manager" — and is what a reader recognises. `position_name` is the specific post and
+    is the fallback for a chain built from a pinned POSITION stage, which carries no
+    rank. Read off the frozen chain, never from the approver's own record: see
+    `current_approver_label`.
+    """
+    instance = await _load_instance(db, doc_type, doc_id)
+    if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
+        return None
+    link = _link(instance) or {}
+    return (link.get("role_name") or link.get("position_name") or "").strip() or None
+
+
+async def current_approver_label(db, doc_type: str, doc_id: int) -> str | None:
+    """Who a document is waiting on, AND the rung they are sitting on.
+
+    NEW 2026-08-21. Every module built this string the same way — `", ".join(full_name)`
+    — nine copies of one line, and all nine said only the person. "Pending approval:
+    Mahendra Kumar" tells a requester nothing about WHY it is with him or how far up the
+    ladder the document has climbed, and where one person holds two posts it is actively
+    misleading. "Mahendra Kumar (Warehouse Manager)" answers both.
+
+    The rank is READ, never inferred. `wf_instances.resolved_chain` already froze which
+    rung the document is on at submit time, and each link carries `role_name` (the HCM
+    org role — the RANK an admin picked on Approvals Config) and `position_name` (the
+    specific post that rank resolved to). Deriving it from the approver's own HCM record
+    instead would pick whichever hat they happen to be wearing, which is the wrong one
+    as often as not.
+
+    `wf_pending` has no position column (see the note on the Pending model), so this is
+    the only place the answer exists without a migration — and it is the better source
+    anyway, because the chain is what the ladder actually decided rather than what the
+    org tree says today.
+
+    Falls back gracefully: the rank alone when nobody holds the post, the names alone
+    when a chain predates `role_name`, and None when the document is not in approval —
+    so a caller can assign the result straight onto `current_approver_name`.
+    """
+    instance = await _load_instance(db, doc_type, doc_id)
+    if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
+        return None
+    approvers = await current_approvers(db, doc_type, doc_id)
+    # Collapsed, not joined. `current_approver_name` is String(200) on every document
+    # that stores this, and a rung with eight holders plus a rank overruns it — the
+    # warehouse's own builder has collapsed to "first +N" since it was written for
+    # exactly that reason, and this replaces it, so the ceiling has to come along.
+    # Truncated hard at the end too, because a single very long name plus a long rank
+    # can still reach 200 on its own.
+    full = [a.full_name for a in approvers if a.full_name]
+    names = (full[0] if len(full) == 1
+             else f"{full[0]} +{len(full) - 1}" if full else "")
+    link = _link(instance) or {}
+    rank = (link.get("role_name") or link.get("position_name") or "").strip()
+    label = f"{names} ({rank})" if names and rank else (names or rank)
+    return label[:200] if label else None
+
+
 async def current_approvers(db, doc_type: str, doc_id: int) -> list:
     instance = await _load_instance(db, doc_type, doc_id)
     if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:

@@ -1166,6 +1166,15 @@ async def list_indents(
         # At least one line still owes something. EXISTS rather than a join, so an
         # indent with three unfulfilled lines is still one row in the queue.
         #
+        # LOAD-BEARING since 2026-08-21. An approved allocation is terminal
+        # (`inventory.allocations`, module docstring), so nothing wakes a part-served
+        # indent any more — THIS arithmetic is the only thing that brings it back to
+        # the Fulfilment Desk once the shelf can serve it again. Narrow any of the
+        # three terms and an indent silently stops being servable, with no error and
+        # nothing in a log to say so. Widen them and the desk is offered quantity
+        # somebody is already buying. Both failure modes are silent, which is why the
+        # three terms are spelled out below rather than folded into one expression.
+        #
         # Live allocations count against the remainder as well as approved ones:
         # `allocated_quantity` does not move until an allocation is signed off, so a
         # line an approver has just committed would otherwise sit in the queue looking
@@ -1884,8 +1893,12 @@ async def _fulfil(db: AsyncSession, indent: Indent, user) -> None:
 
 
 async def _refresh_current_approver(db: AsyncSession, indent: Indent) -> None:
-    approvers = await engine.current_approvers(db, DocType.INDENT.value, indent.id)
-    indent.current_approver_name = ", ".join(a.full_name for a in approvers) or None
+    # Name AND rung — "Mahendra Kumar (Warehouse Manager)" rather than a bare name, so
+    # a requester can see how far up the ladder their indent has climbed. One builder in
+    # the engine, used by every module, so the wording cannot drift apart again
+    # (2026-08-21).
+    indent.current_approver_name = await engine.current_approver_label(
+        db, DocType.INDENT.value, indent.id)
 
 
 _POST_APPROVAL_STATUSES = {
@@ -5265,7 +5278,21 @@ async def list_notifications(
 # allocate, a rejected one counted as outstanding is a line nobody can serve.
 _SETTLED_MR_STATUSES = (
     MRStatus.REJECTED.value, MRStatus.CANCELLED.value, MRStatus.RECEIVED.value,
+    # FIXED 2026-08-21 — DRAFT counts as settled for this arithmetic, which is only
+    # ever asked "how much of this line is somebody already buying". A draft is not:
+    # nobody has submitted it, so no purchase exists behind it. An auto-raised
+    # shortfall MR never sits here (`create_mr_from_shortfall` submits it in the same
+    # call), so the only rows this touches are hand-typed requests somebody abandoned
+    # — and every one of those was subtracting from the remainder forever, keeping its
+    # indent line off the fulfilment desk with nothing on order to justify it.
+    MRStatus.DRAFT.value,
 )
+# Read by the "on order" term of `has_remainder` and by `_on_order_by_lines`. Both
+# directions are silent failures, so change it with the two of them in mind: a status
+# wrongly treated as STILL ON ORDER keeps subtracting and hides its indent line from
+# the Fulfilment Desk forever; one wrongly treated as SETTLED puts the line back on
+# the desk while procurement is still buying it, and the desk allocates against stock
+# that is already spoken for.
 
 _ALLOCATION_ELIGIBLE_STATUSES = {
     IndentStatus.AWAITING_ALLOCATION.value,
@@ -6281,7 +6308,7 @@ _BATCH_STATUSES = (
     IndentStatus.PARTIALLY_FULFILLED.value,
     # A cycle member whose shortfall went to procurement is not finished and not done
     # with the store: the goods arrive, the allocation reopens
-    # (`allocations.reopen_for_receipt`) and the rest is handed over. Left out, a
+    # is recomputed net of what is on order and the rest is handed over. Left out, a
     # monthly indent that reached PENDING_PROCUREMENT vanished from the cycle row AND
     # from the screen it opens — the one status the regular queue has always kept
     # (`_ALLOCATION_ELIGIBLE_STATUSES`, `list_fulfilment_queue`) was the one a monthly

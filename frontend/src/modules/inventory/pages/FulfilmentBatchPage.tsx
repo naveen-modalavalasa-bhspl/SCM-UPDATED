@@ -46,7 +46,7 @@ export function FulfilmentBatchPage() {
           ? `${batch.month_label} — ${batch.consolidation_no ?? "consolidated"}`
           : "Consolidated cycle"}
         actions={
-          <Button variant="ghost" onClick={() => nav("/inventory/fulfillment")}>
+          <Button variant="ghost" onClick={() => nav("/inventory/fulfilment")}>
             <ArrowLeft className="h-4 w-4" /> Back to queue
           </Button>
         }

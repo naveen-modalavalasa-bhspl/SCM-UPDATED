@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FileText, LogOut, Truck, User } from "lucide-react";
 import { clearVendorToken, vendorToken } from "@/shared/api/client";
 import { supplierApi } from "@/modules/procurement/api";
+import { VendorBell } from "./VendorBell";
 
 /**
  * The shell for everyone outside the company.
@@ -47,13 +48,18 @@ export function SupplierLayout() {
               {profile?.name ?? "…"}
             </span>
           </Link>
-          <button
-            type="button"
-            onClick={signOut}
-            className="flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm text-muted hover:bg-surface-2 hover:text-body"
-          >
-            <LogOut className="h-4 w-4" /> Sign out
-          </button>
+          <div className="flex items-center gap-1">
+            {/* What the company needed to tell them — an amended order, most of all.
+                See VendorBell (2026-08-21). */}
+            <VendorBell />
+            <button
+              type="button"
+              onClick={signOut}
+              className="flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm text-muted hover:bg-surface-2 hover:text-body"
+            >
+              <LogOut className="h-4 w-4" /> Sign out
+            </button>
+          </div>
         </div>
         <nav aria-label="Supplier" className="mx-auto max-w-5xl px-4">
           <div className="flex gap-6">

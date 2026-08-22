@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -910,3 +911,39 @@ class VendorPOListRow(BaseModel):
     status: str
     total_amount: float
     despatch_note_count: int = 0
+
+
+class VendorNotificationOut(BaseModel):
+    """One message on the vendor's own bell.
+
+    `deep_link` is a PORTAL path, resolved by the portal — the vendor has no access to
+    an internal screen and must never be handed a link to one.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    body: str | None = None
+    entity_type: str | None = None
+    entity_id: int | None = None
+    deep_link: str | None = None
+    is_read: bool
+    created_at: datetime | None = None
+
+
+class LedgerRow(BaseModel):
+    """One document on the buying trail. See `procurement/ledger.py`."""
+    model_config = ConfigDict(from_attributes=True)
+
+    doc_kind: str
+    doc_id: int
+    doc_no: str
+    doc_date: date | None = None
+    party: str | None = None
+    project_name: str | None = None
+    title: str | None = None
+    status: str | None = None
+    value: Decimal | None = None
+    ref_no: str | None = None
+    with_whom: str | None = None
+

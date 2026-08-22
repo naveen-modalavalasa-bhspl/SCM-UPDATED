@@ -9,7 +9,8 @@ import type {
   VendorPOListRow,
   Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
-  VendorToken,
+  ProcurementLedgerFilters, ProcurementLedgerRow,
+  VendorNotification, VendorToken,
 } from "./types";
 
 export const poApi = {
@@ -95,6 +96,11 @@ export const requisitionApi = {
   mrCandidates: (params: { project_id?: number; page?: number; size?: number } = {}) =>
     api.get<Paginated<MRCandidate>>("/api/requisitions/mr-candidates", { params })
       .then((r) => r.data),
+  /** Every candidate id, for "select all". The list pages twenty at a time, so a
+   *  select-all built from the loaded rows would only ever tick the visible twenty. */
+  mrCandidateIds: (params: { project_id?: number } = {}) =>
+    api.get<number[]>("/api/requisitions/mr-candidates/ids", { params })
+      .then((r) => r.data),
   /** Several approved MRs folded into ONE requisition, merged item-wise. */
   createFromMrs: (data: ReqFromMRs) =>
     api.post<Requisition>("/api/requisitions/from-material-requests", data)
@@ -118,6 +124,10 @@ export const consolidationApi = {
   /** Approved requisitions not already on a sheet — the picker's source. */
   candidates: (params: { project_id?: number; page?: number; size?: number } = {}) =>
     api.get<Paginated<ReqListRow>>("/api/consolidations/candidates", { params })
+      .then((r) => r.data),
+  /** Every candidate id, for "select all" — see `mrCandidateIds`. */
+  candidateIds: (params: { project_id?: number } = {}) =>
+    api.get<number[]>("/api/consolidations/candidates/ids", { params })
       .then((r) => r.data),
   list: (params: { status?: string; project_id?: number; page?: number; size?: number } = {}) =>
     api.get<Paginated<ConsolidationListRow>>("/api/consolidations", { params })
@@ -203,6 +213,13 @@ export const supplierApi = {
   login: (username: string, password: string) =>
     api.post<VendorToken>("/api/supplier/login", { username, password }).then((r) => r.data),
   me: () => api.get<VendorProfile>("/api/supplier/me").then((r) => r.data),
+  /* --- the vendor's own bell (2026-08-21) --- */
+  /** Scoped server-side on the vendor id in the token; there is no id to pass. */
+  notifications: (params: { unread_only?: boolean; page?: number; size?: number } = {}) =>
+    api.get<Paginated<VendorNotification>>("/api/supplier/notifications", { params })
+      .then((r) => r.data),
+  readNotification: (id: number) =>
+    api.post(`/api/supplier/notifications/${id}/read`),
   changePassword: (current_password: string, new_password: string) =>
     api.post("/api/supplier/change-password", { current_password, new_password }),
   rfqs: (params: { search?: string; status?: string; page?: number; size?: number } = {}) =>
@@ -269,3 +286,22 @@ export const approvalTrailApi = {
 
 export const approvalTrailKey = (docType: string, docId: number) =>
   ["procurement", "approval-trail", docType, docId] as const;
+
+/* --- the buying trail (2026-08-21) --------------------------------------- */
+
+/** Every procurement document in one register. Scoped and filtered server-side; the
+ *  screen sends what the user picked and renders what comes back. */
+export const ledgerApi = {
+  rows: (params: {
+    doc_kind?: string; status?: string; project?: string; vendor?: string;
+    date_from?: string; date_to?: string; search?: string;
+    page?: number; size?: number;
+  } = {}) =>
+    api.get<Paginated<ProcurementLedgerRow>>("/api/procurement/ledger", { params })
+      .then((r) => r.data),
+  /** Filter options come from the DATA, never a hand-written list that drifts. */
+  filters: () =>
+    api.get<ProcurementLedgerFilters>("/api/procurement/ledger/filters")
+      .then((r) => r.data),
+};
+

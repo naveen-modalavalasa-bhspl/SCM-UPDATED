@@ -213,11 +213,17 @@ PAGE_TREE = [
     # register nobody can write to should not need the write permission to open.
     ("inv_transfers", "/inventory/transfers", "Transfer Records", "arrow-left-right",
      P.STOCK_VIEW, 55, "grp_inventory"),
-    ("inv_fulfillment", "/inventory/fulfillment", "Fulfilment Queue", "check-circle",
-     P.STOCK_RESERVE, 56, "grp_inventory"),
-    ("inv_allocation_approvals", "/inventory/allocation-approvals",
-     "Allocation Approvals", "badge-check",
-     P.ALLOCATION_APPROVE, 57, "grp_inventory"),
+    # The Fulfilment Queue and Allocation Approvals as one screen (2026-08-21): decide
+    # what to give and sign it in the same place. Both old rows are in
+    # `page_registry.RETIRED_PAGES`, so an existing database parks them on the next
+    # start; a database built from this file simply never grows them.
+    # Its own page code, not a borrowed action one like the inventory rows above:
+    # `page_registry.sync_pages` catalogues this screen and mints
+    # `page.inv_fulfilment_desk.view` for it, and sync does NOT refresh
+    # required_permission on a row that already exists. If the two disagreed, whichever
+    # ran first would decide how the screen is gated. They agree.
+    ("inv_fulfilment_desk", "/inventory/fulfilment", "Fulfilment Desk", "check-circle",
+     P.page_view_code("inv_fulfilment_desk"), 56, "grp_inventory"),
     ("inv_stocking_points", "/inventory/stocking-points", "Stocking Points", "map-pin",
      P.STOCK_POINTS_MANAGE, 58, "grp_inventory"),
     # Parked, not deleted: Demand by Item, Adjustments and Valuation & Ageing are

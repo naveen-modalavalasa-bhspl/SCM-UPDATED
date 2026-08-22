@@ -23,7 +23,14 @@ logger = logging.getLogger(__name__)
 DOC_LINKS: dict[str, str] = {
     "INDENT": "/indents/{id}",
     "MR": "/inventory/material-requests/{id}",
-    "ALLOCATION": "/inventory/allocation-approvals?review={id}",
+    # Straight at the review screen. This used to be `?review={id}` on the Allocation
+    # Approvals list, which forwarded from there; that list is now the Fulfilment
+    # Desk's Approvals tab (2026-08-21) and the detail route is the one that never
+    # moved. Links already sent under the old shape still arrive —
+    # `LegacyAllocationApprovalsRedirect` reads the review id back out of the query.
+    "ALLOCATION": "/inventory/allocation-approvals/{id}",
+    # Raised under the point-owner's own ladder, same document, same screen.
+    "OWN_STOCK_ALLOCATION": "/inventory/allocation-approvals/{id}",
     "GRN": "/warehouse/grn/{id}",
     "RECEIPT": "/warehouse/grn/{id}",
     "WH_ISSUE": "/warehouse/material-issues/{id}",

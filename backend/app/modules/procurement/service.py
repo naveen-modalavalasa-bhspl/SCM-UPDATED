@@ -27,13 +27,13 @@ from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POItem, PurchaseConsolidation,
     PurchaseConsolidationSource, PurchaseOrder, Quotation, QuotationItem, Requisition,
     PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
-    VendorUser,
+    VendorNotification, VendorUser,
 )
 from app.modules.procurement.schemas import (
     AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, POHeaderUpdate, QuoteSubmit,
     ReqCreate, RFQCreate, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
 )
-from app.modules.procurement import consolidation
+from app.modules.procurement import consolidation, ledger
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.service import get_user_permissions
@@ -884,10 +884,44 @@ async def send_to_vendor(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
 #  Amendments
 # --------------------------------------------------------------------------- #
 
-#: Orders nobody can amend any more. RECEIVED and CLOSED are finished; the other two
-#: never became agreements, so they are re-raised rather than rewritten.
+#: Orders nobody can amend any more.
+#:
+#: REVISED 2026-08-21 — the line is now THE VENDOR'S DISPATCH, not the order's status.
+#:
+#: The business rule the buyers actually work to: once a vendor has accepted, the order
+#: keeps being negotiated — quantities move, dates move, a second and third revision go
+#: out — and every one of those is a version the vendor has to accept again. That is
+#: what an amendment is FOR. It stops mattering the moment the goods are on a vehicle:
+#: after that the paperwork has to describe what was actually sent, and rewriting the
+#: order underneath a lorry in transit is how a GRN ends up unable to explain itself.
+#:
+#: So ACCEPTED_BY_SUPPLIER stays amendable (it always was), and PARTIALLY_RECEIVED —
+#: which used to be amendable — no longer is: goods against it have already arrived, so
+#: by definition the vendor dispatched. The real test is `_vendor_has_dispatched` below,
+#: because a vendor can file a despatch note days before anything reaches the gate and
+#: the order must lock at THAT moment, not at the receipt.
 _UNAMENDABLE = (POStatus.RECEIVED.value, POStatus.CLOSED.value,
-                POStatus.CANCELLED.value, POStatus.REJECTED.value)
+                POStatus.CANCELLED.value, POStatus.REJECTED.value,
+                POStatus.PARTIALLY_RECEIVED.value)
+
+
+async def _vendor_has_dispatched(db: AsyncSession, po_id: int) -> str | None:
+    """The despatch note that closes this order to amendment, if the vendor filed one.
+
+    SUBMITTED only. A DRAFT note is the vendor still typing and nothing has left their
+    yard; a CANCELLED one was withdrawn, and withdrawing it must hand the order back to
+    the buyer rather than leaving it frozen forever.
+
+    Returns the note number so the refusal can name it — "PO/2026-27/00031 cannot be
+    amended: the vendor despatched DN/2026-27/00007" tells a buyer what to do next
+    (raise it with the vendor, or amend after the GRN), where a bare status does not.
+    """
+    return (await db.execute(
+        select(DespatchNote.dn_no)
+        .where(DespatchNote.po_id == po_id,
+               DespatchNote.status == DespatchNoteStatus.SUBMITTED.value)
+        .order_by(DespatchNote.id).limit(1)
+    )).scalar_one_or_none()
 
 
 def _po_snapshot(po: PurchaseOrder) -> dict:
@@ -943,6 +977,15 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
     if po.status in _UNAMENDABLE:
         raise ValidationError(
             f"{po.po_no} is {po.status} and can no longer be amended")
+    # The real gate — see `_UNAMENDABLE`. Checked after the status so a finished order
+    # still reports the plainer reason.
+    despatched = await _vendor_has_dispatched(db, po.id)
+    if despatched:
+        raise ValidationError(
+            f"{po.po_no} cannot be amended: the vendor has despatched against it "
+            f"({despatched}). Amend after the goods are received, or ask the vendor to "
+            "cancel that despatch note first."
+        )
     if not (data.reason or "").strip():
         raise ValidationError("Say why the order is being amended")
 
@@ -1028,12 +1071,94 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
     po.vendor_responded_at = None
     po.vendor_response_note = None
 
+    # Tell the vendor, in the same transaction. Before this, a buyer could revise an
+    # order and the vendor was told nothing at all: the PO dropped back to DRAFT, left
+    # their portal until somebody re-sent it, and returned later carrying different
+    # numbers with no statement that it had changed or why. `notify_vendor` swallows
+    # its own failures, so this cannot cost us the amendment.
+    #
+    # Sent whether or not they had accepted: an order still sitting unanswered in their
+    # queue has also just changed under them, and the revision they are looking at is
+    # no longer the one we are asking about.
+    await notify_vendor(
+        db, po.vendor_id,
+        title=f"{po.po_no} amended — revision {po.revision_no}",
+        body=(f"{po.amendment_reason} — the order has been revised and needs "
+              f"your acceptance again. Total is now "
+              f"{float(po.total_amount or 0):,.2f}."),
+        entity_type="PO", entity_id=po.id,
+        deep_link=f"/supplier/pos/{po.id}",
+    )
     await db.commit()
     logger.info("%s amended to revision %s by %s (was %s%s): %s",
                 po.po_no, po.revision_no, getattr(user, "full_name", user),
                 previous_status, ", vendor had accepted" if was_accepted else "",
                 po.amendment_reason)
     return await get_po(db, po.id, user)
+
+
+async def notify_vendor(db: AsyncSession, vendor_id: int | None, *, title: str,
+                        body: str | None = None, entity_type: str | None = None,
+                        entity_id: int | None = None,
+                        deep_link: str | None = None) -> int:
+    """Tell a vendor something. Returns how many rows were written (0 or 1).
+
+    NEVER raises. A notification is a courtesy on the side of a real transaction — an
+    amendment, an award, a cancellation — and a failure to write one must not roll that
+    transaction back. `platform/notifications.notify` takes the same position for
+    employees and for the same reason; this is its vendor-side twin, and it exists
+    because that one is keyed on `employee_id` and a vendor has none (see
+    `VendorNotification`).
+
+    Does NOT commit. The caller owns the transaction, so the notification lands or is
+    rolled back with the thing it is announcing — a vendor must never be told about an
+    amendment that then failed to save.
+    """
+    if not vendor_id:
+        return 0
+    try:
+        db.add(VendorNotification(
+            vendor_id=int(vendor_id), title=title[:200],
+            body=body[:1000] if body else None,
+            entity_type=entity_type, entity_id=entity_id,
+            deep_link=deep_link, is_read=False,
+        ))
+        await db.flush()
+        return 1
+    except Exception:  # noqa: BLE001 — a courtesy must not fail the real work
+        logger.exception("Could not notify vendor %s: %r", vendor_id, title)
+        return 0
+
+
+async def vendor_notifications(db: AsyncSession, vendor_id: int, params: PageParams,
+                               unread_only: bool = False) -> dict:
+    """This vendor's messages, newest first.
+
+    Scoped on the vendor id taken from the TOKEN by the caller, never from a query
+    parameter — the portal has no permissions to lean on, so the scope is the whole
+    guard (see the router's module docstring).
+    """
+    stmt = select(VendorNotification).where(VendorNotification.vendor_id == vendor_id)
+    if unread_only:
+        stmt = stmt.where(VendorNotification.is_read.is_(False))
+    return await paginate(db, stmt.order_by(VendorNotification.id.desc()), params)
+
+
+async def mark_vendor_notification_read(db: AsyncSession, vendor_id: int,
+                                        notification_id: int) -> None:
+    """Mark one message read. Scoped to the caller's own vendor: a notification id
+    belonging to somebody else must not be touchable, and 404 rather than 403 so an id
+    that is not yours is not confirmed to exist."""
+    row = (await db.execute(
+        select(VendorNotification).where(
+            VendorNotification.id == notification_id,
+            VendorNotification.vendor_id == vendor_id,
+        )
+    )).scalars().first()
+    if row is None:
+        raise NotFoundError(f"Notification {notification_id} not found")
+    row.is_read = True
+    await db.commit()
 
 
 async def po_revisions(db: AsyncSession, po_id: int, user=None) -> list:
@@ -1076,8 +1201,9 @@ async def _attach_pending_with(db: AsyncSession, doc_type: str, page: dict) -> d
 
 
 async def _refresh_current_approver(db: AsyncSession, po: PurchaseOrder) -> None:
-    approvers = await engine.current_approvers(db, DocType.PO.value, po.id)
-    po.current_approver_name = ", ".join(a.full_name for a in approvers) or None
+    # Name AND rung, from the engine's one builder — see `current_approver_label`.
+    po.current_approver_name = await engine.current_approver_label(
+        db, DocType.PO.value, po.id)
 
 
 # =========================================================================== #
@@ -1085,8 +1211,14 @@ async def _refresh_current_approver(db: AsyncSession, po: PurchaseOrder) -> None
 # =========================================================================== #
 
 async def _approver_names(db: AsyncSession, doc_type: str, doc_id: int) -> str | None:
-    approvers = await engine.current_approvers(db, doc_type, doc_id)
-    return ", ".join(a.full_name for a in approvers) or None
+    """Who the document is with, and on which rung.
+
+    Was `", ".join(full_name)`. Now the engine's shared builder, so a requisition, an
+    RFQ and a PO all read "Mahendra Kumar (Warehouse Manager)" rather than three
+    modules each inventing their own phrasing. Kept as a wrapper because five call
+    sites in this file use it and the name is the clearer one to read here.
+    """
+    return await engine.current_approver_label(db, doc_type, doc_id)
 
 
 # =========================================================================== #
@@ -1222,7 +1354,11 @@ async def create_requisition(db: AsyncSession, data: ReqCreate, user) -> Requisi
     warehouse_name, project_name = await _place_names(
         db, data.warehouse_id, data.project_id)
     req = Requisition(
-        req_no=await next_number(db, DocType.REQUISITION.value),
+        # The project goes into the number (2026-08-21): a requisition now reads
+        # BHS/MMU/2026-27/REQ0001. Same `project_name` the snapshot column below
+        # uses, so the number and the document can never disagree.
+        req_no=await next_number(db, DocType.REQUISITION.value,
+                                 project=project_name),
         req_date=utcnow().date(),
         warehouse_id=data.warehouse_id,
         warehouse_name=warehouse_name,
@@ -1310,7 +1446,12 @@ async def create_requisition_from_mr(db: AsyncSession, mr_id: int, user) -> Requ
     # The MR names a project but no stocking point; the buyer picks one on the edit.
     _, project_name = await _place_names(db, None, mr.project_id)
     req = Requisition(
-        req_no=await next_number(db, DocType.REQUISITION.value),
+        # The project goes into the number (2026-08-21): a requisition now reads
+        # BHS/MMU/2026-27/REQ0001. Same `project_name` the snapshot column below
+        # uses, so the number and the document can never disagree.
+        req_no=await next_number(db, DocType.REQUISITION.value,
+                                 project=project_name
+                                 or getattr(mr, "project_name", None)),
         req_date=utcnow().date(),
         warehouse_id=None,
         project_id=mr.project_id,
@@ -1386,6 +1527,31 @@ async def mr_candidates(db: AsyncSession, params: PageParams,
     return await paginate(db, stmt, params)
 
 
+async def mr_candidate_ids(db: AsyncSession,
+                           project_id: int | None = None) -> list[int]:
+    """Every material request `mr_candidates` would offer, as bare ids.
+
+    NEW 2026-08-21, for "select all" — see `consolidation.candidate_ids` for the full
+    reasoning. In short: the screen pages twenty at a time, so a select-all built from
+    the loaded rows would tick twenty of a hundred and quietly mean something other than
+    what it says.
+    """
+    stmt = (
+        select(MaterialRequest.id)
+        .where(MaterialRequest.status == MRStatus.APPROVED.value)
+        .order_by(MaterialRequest.created_at.desc())
+    )
+    claimed = await _consolidated_mr_ids(db)
+    if claimed:
+        stmt = stmt.where(MaterialRequest.id.notin_(claimed))
+    if project_id is not None:
+        stmt = stmt.where(MaterialRequest.project_id == project_id)
+    return list((await db.execute(stmt)).scalars().all())
+
+
+consolidation_candidate_ids = consolidation.candidate_ids
+
+
 async def create_requisition_from_mrs(db: AsyncSession, data, user) -> Requisition:
     """Fold a batch of approved material requests into one requisition.
 
@@ -1458,7 +1624,13 @@ async def create_requisition_from_mrs(db: AsyncSession, data, user) -> Requisiti
     numbers = ", ".join(mr.mr_no for mr in requests)
 
     req = Requisition(
-        req_no=await next_number(db, DocType.REQUISITION.value),
+        # The project goes into the number (2026-08-21): a requisition now reads
+        # BHS/MMU/2026-27/REQ0001. Same `project_name` the snapshot column below
+        # uses, so the number and the document can never disagree.
+        req_no=await next_number(db, DocType.REQUISITION.value,
+                                 project=project_name or next(
+                                     (mr.project_name for mr in requests
+                                      if mr.project_name), None)),
         req_date=utcnow().date(),
         warehouse_id=data.warehouse_id,
         warehouse_name=warehouse_name,
@@ -1836,7 +2008,12 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
     warehouse_name, project_name = await _place_names(db, warehouse_id, project_id)
 
     rfq = RFQ(
-        rfq_no=await next_number(db, DocType.RFQ.value),
+        # The project goes into the number (2026-08-21): a requisition now reads
+        # BHS/MMU/2026-27/REQ0001. Same `project_name` the snapshot column below
+        # uses, so the number and the document can never disagree.
+        rfq_no=await next_number(db, DocType.RFQ.value,
+                                 project=project_name
+                                 or getattr(source, "project_name", None)),
         rfq_date=utcnow().date(),
         title=data.title or (f"Quotation for {requisition.req_no}" if requisition
                              else f"Quotation for {sheet.cons_no}" if sheet else None),
@@ -2124,7 +2301,10 @@ async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
         invited.sent_at = now
         invited.status = QuotationStatus.DRAFT.value
         quote = Quotation(
-            quotation_no=await next_number(db, DocType.QUOTATION.value),
+            # The RFQ's project: a quote answers one enquiry and belongs to whatever
+            # that enquiry was raised for.
+            quotation_no=await next_number(db, DocType.QUOTATION.value,
+                                           project=rfq.project_name),
             rfq_id=rfq.id, rfq_no=rfq.rfq_no,
             vendor_id=invited.vendor_id, vendor_name=invited.vendor_name,
             quotation_date=now.date(),
@@ -3154,7 +3334,10 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
 
     if note is None:
         note = DespatchNote(
-            dn_no=await next_number(db, DocType.DESPATCH_NOTE.value),
+            # The order's project: a despatch note is the vendor's statement about one
+            # purchase order and belongs wherever that order does.
+            dn_no=await next_number(db, DocType.DESPATCH_NOTE.value,
+                                    project=po.project_name),
             po_id=po.id, po_no=po.po_no,
             vendor_id=vendor_id, vendor_name=po.vendor_name,
             status=DespatchNoteStatus.DRAFT.value,
@@ -3248,3 +3431,87 @@ async def _despatch_note_is_received(db: AsyncSession, note_id: int) -> bool:
 
     return bool(await db.scalar(
         select(Receipt.id).where(Receipt.despatch_note_id == note_id).limit(1)))
+
+
+# =========================================================================== #
+#  The buying trail — see `procurement/ledger.py` for what it is and why here
+# =========================================================================== #
+
+async def procurement_ledger(
+    db: AsyncSession, params: PageParams, *,
+    doc_kind: str | None = None, status: str | None = None,
+    project: str | None = None, vendor: str | None = None,
+    date_from=None, date_to=None, search: str | None = None,
+) -> dict:
+    """Every procurement document, filtered, newest first.
+
+    The union is wrapped in a subquery and the FILTERS are applied to the subquery, not
+    to each branch. Four branches filtered separately is four chances to get one wrong,
+    and a filter that silently means something different on the PO branch than on the
+    requisition branch is worse than no filter at all.
+
+    Read-only. Nothing here writes, and the register cannot show an event the documents
+    do not already carry.
+    """
+    trail = ledger.source().subquery("trail")
+    stmt = select(trail)
+
+    if doc_kind:
+        stmt = stmt.where(trail.c.doc_kind == doc_kind)
+    if status:
+        stmt = stmt.where(trail.c.status == status)
+    if project:
+        stmt = stmt.where(trail.c.project_name == project)
+    if vendor:
+        stmt = stmt.where(trail.c.party == vendor)
+    if date_from is not None:
+        stmt = stmt.where(trail.c.doc_date >= date_from)
+    if date_to is not None:
+        stmt = stmt.where(trail.c.doc_date <= date_to)
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(*[
+            trail.c[name].ilike(like) for name in ledger.SEARCH_COLUMNS
+        ]))
+
+    # Date descending, then the id, so two documents raised on one day keep a stable
+    # order instead of shuffling between pages.
+    #
+    # No `.nullslast()`: that emits Postgres's NULLS LAST, which MySQL rejects outright
+    # (1064). MySQL already sorts NULL as the lowest value, so DESC puts an undated
+    # document at the bottom, which is where it belongs anyway.
+    stmt = stmt.order_by(trail.c.doc_date.desc(), trail.c.doc_id.desc())
+
+    # Paged by hand, NOT through `core.pagination.paginate`: that helper ends in
+    # `.scalars()`, which keeps only the FIRST column of each row — so every row of this
+    # eleven-column register came back as the bare string "QUOTATION". `.mappings()` is
+    # what a multi-column SELECT needs, and it is what `reports.service` uses for the
+    # same reason on the same shape of query. The response is the same
+    # {items, total, page, size} contract (rule 11).
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    page = max(1, params.page)
+    size = max(1, params.size)
+    rows = await db.execute(stmt.limit(size).offset((page - 1) * size))
+    return {"items": [dict(row) for row in rows.mappings()],
+            "total": total, "page": page, "size": size}
+
+
+async def procurement_ledger_filters(db: AsyncSession) -> dict:
+    """What the filter dropdowns offer: the values actually present, never a
+    hand-written list that drifts from the data."""
+    trail = ledger.source().subquery("trail")
+
+    async def distinct(column) -> list[str]:
+        rows = (await db.execute(
+            select(column).where(column.is_not(None)).distinct().order_by(column)
+        )).scalars().all()
+        return [value for value in rows if value]
+
+    return {
+        "doc_kinds": ledger.DOC_KINDS,
+        "columns": ledger.COLUMNS,
+        "statuses": await distinct(trail.c.status),
+        "projects": await distinct(trail.c.project_name),
+        "vendors": await distinct(trail.c.party),
+    }
+

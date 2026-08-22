@@ -221,11 +221,37 @@ export function LabelsPage() {
                   className="label flex flex-col items-center justify-between overflow-hidden rounded border border-line bg-white p-1.5 text-black"
                   style={{ width: `${dim.w}mm`, height: `${dim.h}mm` }}
                 >
-                  <div className="w-full text-center leading-tight">
-                    <div className="truncate text-[8px] font-bold">{r.item_name}</div>
-                    <div className="truncate text-[7px]">
-                      {r.batch_number ? `B:${r.batch_number}` : r.bin_code || ""}
-                      {r.expiry_date ? ` · Exp ${r.expiry_date}` : ""}
+                  {/* FIXED 2026-08-21 — the label carried the item name, then EITHER a
+                      batch or a bin, and nothing else in words. Scanning a sticker told
+                      a storekeeper what it was only if the scanner worked; read by eye
+                      it was a name over a QR square. The five things a picker actually
+                      checks against the shelf — what it is, which item code, which
+                      batch, where it sits, when it expires — are now written out and
+                      LABELLED, so the sticker can be read without a device.
+
+                      Every row is dropped when it has no value rather than printed
+                      empty: a 38mm label has no room for "Batch —", and a blank field
+                      reads as missing data rather than as not-applicable. Batch and bin
+                      are both shown now; they were an either/or, which hid the bin on
+                      every batch-tracked item. */}
+                  <div className="w-full leading-tight">
+                    <div className="truncate text-center text-[8px] font-bold">
+                      {r.item_name}
+                    </div>
+                    <div className="mt-0.5 space-y-[1px] text-[6px]">
+                      {[
+                        ["Item", r.item_code],
+                        ["Batch", r.batch_number],
+                        ["Bin", r.bin_code],
+                        ["Exp", r.expiry_date],
+                      ].map(([label, value]) => (value ? (
+                        <div key={label} className="flex gap-1 leading-none">
+                          <span className="shrink-0 font-semibold uppercase">
+                            {label}
+                          </span>
+                          <span className="truncate font-mono">{value}</span>
+                        </div>
+                      ) : null))}
                     </div>
                   </div>
                   <div className="flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden">

@@ -201,6 +201,24 @@ export function StockBalanceView() {
     enabled: rows.length > 0,
   });
   const serialsByRow = indexSerials(serialRows);
+
+  /** The serial to show for a lot, or nothing.
+   *
+   *  FIXED 2026-08-21 — both readers below fell back to `r.serial_number` when the
+   *  serial summary had none, and for an UNSERIALISED lot that column holds the asset
+   *  or consumable code: `warehouse._place_unit_codes` writes the one string into both,
+   *  because `whs_serial_numbers.serial_number` is UNIQUE and NOT NULL. So the code
+   *  appeared under "Serial / IMEI" and again in the Codes column beside it, and one
+   *  lot read as two identities.
+   *
+   *  The summary endpoint is already right (`warehouse.serial_summary` keeps a serial
+   *  only for a serial-tracked item), so the fallback was the whole bug — it reached
+   *  past a deliberately empty list to the raw column. A lot carrying a code is
+   *  identified BY that code; it has no serial to show. Same rule as
+   *  `StockLedgerView.serialOf`. */
+  const serialOf = (r: { serial_number?: string | null; asset_code?: string | null;
+                         consumable_code?: string | null }) =>
+    (r.asset_code || r.consumable_code) ? undefined : r.serial_number ?? undefined;
   // Narrowest key first: the units in THIS bin and THIS batch. A lot only widens the
   // question to the whole bin, or the whole point, when it does not itself name one —
   // a lot standing in BINA1 that has no units of its own has none, and must not be
@@ -253,7 +271,7 @@ export function StockBalanceView() {
       // Three columns, because the three identities are not interchangeable. The
       // summary carries the first five of each — the whole list of a single lot is a
       // Download away in the row's popover, which is the right place for 88 codes.
-      unitsOf(r)?.serials.join(" | ") || r.serial_number,
+      unitsOf(r)?.serials.join(" | ") || serialOf(r),
       unitsOf(r)?.imeis.join(" | "),
       unitsOf(r)?.codes.join(" | ") || (r.asset_code ?? r.consumable_code),
       r.valuation_rate, r.total_value,
@@ -331,7 +349,7 @@ export function StockBalanceView() {
         // Serial first, IMEI second: both name the unit, and an item is rarely
         // tracked by both. The lot's own column is the last resort — it holds one
         // value for a lot that may contain eighty units.
-        const first = units?.serials[0] ?? units?.imeis[0] ?? r.serial_number;
+        const first = units?.serials[0] ?? units?.imeis[0] ?? serialOf(r);
         return (
           <UnitCell
             text={first}

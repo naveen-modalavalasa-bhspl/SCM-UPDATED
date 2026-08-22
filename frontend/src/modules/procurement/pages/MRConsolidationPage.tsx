@@ -5,9 +5,10 @@ import {
   Button, Card, ErrorBanner, Field, FormActions, Input, PageHeader, ResponsiveList,
   Select, StatusPill, useToast, type Column,
 } from "@/shared/components";
-import { fmtDate } from "@/shared/datetime";
+import { fmtDate, todayIst } from "@/shared/datetime";
 import { requisitionApi } from "../api";
 import { OrgFields, type OrgValue } from "../components/OrgFields";
+import { SelectAllBar } from "../components/SelectAllBar";
 import type { MRCandidate } from "../types";
 
 const PRIORITIES = [
@@ -53,6 +54,14 @@ export function MRConsolidationPage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["mr-candidates", page],
     queryFn: () => requisitionApi.mrCandidates({ page, size: SIZE }),
+  });
+
+  // Every candidate id, so "select all" can mean ALL of them rather than the twenty on
+  // screen. Ids only — the rows are already loaded page by page, and shipping a
+  // thousand full records just to tick them would be slower than the paging it saves.
+  const allIds = useQuery({
+    queryKey: ["mr-candidate-ids"],
+    queryFn: () => requisitionApi.mrCandidateIds(),
   });
 
   const rows = data?.items ?? [];
@@ -161,7 +170,17 @@ export function MRConsolidationPage() {
                     onChange={(value) => setPriority(String(value))} />
           </Field>
           <Field label="Needed by" hint="Applies to every line.">
-            <Input type="date" value={requiredDate}
+            {/* FIXED 2026-08-21 — this was the one date box in the app with no `min`.
+                A consolidation is a request for the FUTURE, exactly like the
+                requisition it becomes (RequisitionFormPage bounds the same field), so
+                the calendar must not offer a day the save will refuse. `todayIst`, not
+                the browser's today: the server validates in IST and a user in another
+                timezone could otherwise pick a day that is already yesterday there.
+
+                This bounds the PICKER only. If the service does not also refuse a past
+                date on this route, a crafted request still gets through — the input is
+                a courtesy, never the guard. */}
+            <Input type="date" min={todayIst()} value={requiredDate}
                    onChange={(e) => setRequiredDate(e.target.value)} />
           </Field>
           <Field label="Remarks">
@@ -178,6 +197,17 @@ export function MRConsolidationPage() {
           </Button>
         </FormActions>
       </Card>
+
+      {/* Pick a hundred in one press. See SelectAllBar — the total comes from the
+          server, so "Select all 137" ticks 137 and not the twenty in view. */}
+      <SelectAllBar
+        noun="material request"
+        pickedCount={picked.length}
+        pageIds={rows.map((r) => r.id)}
+        allIds={allIds.data}
+        loadingAll={allIds.isLoading}
+        onPick={setPicked}
+      />
 
       <Card className="p-2">
         <ResponsiveList

@@ -314,11 +314,17 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   inv_transfers: {
     hint: "Create and track stock transfers between warehouses.",
   },
+  inv_fulfilment_desk: {
+    hint: "Decide how much stock each indent gets, and sign it off — one screen.",
+  },
+  // Retired 2026-08-21, replaced by the Fulfilment Desk above. The hints stay: the
+  // rows are only parked (is_active = 0), so an admin who un-parks one must still see
+  // what it was for rather than a bare page code.
   inv_fulfillment: {
-    hint: "See approved indents waiting for stock to be allocated and issued.",
+    hint: "Retired — replaced by the Fulfilment Desk.",
   },
   inv_allocation_approvals: {
-    hint: "Review and decide on stock allocations waiting for approval.",
+    hint: "Retired — replaced by the Fulfilment Desk.",
   },
   inv_stocking_points: {
     hint: "Set up which positions are responsible for each stocking point.",

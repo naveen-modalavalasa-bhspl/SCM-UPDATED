@@ -13,8 +13,8 @@ are also the ones kept: they snapshot `item_code`, `item_name`, `vendor_name` an
 a master is renamed.
 """
 from sqlalchemy import (
-    Column, Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text,
-    Index,
+    BigInteger, Column, Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric,
+    String, Text, Index,
 )
 from sqlalchemy.orm import relationship
 
@@ -535,6 +535,37 @@ class DespatchNoteItem(Base):
 # --------------------------------------------------------------------------- #
 #  Vendor portal identity
 # --------------------------------------------------------------------------- #
+
+class VendorNotification(Base):
+    """`pro_vendor_notifications`. Something the company needs a vendor to know.
+
+    NEW 2026-08-21, for the amendment case: a buyer could revise a purchase order and
+    the vendor was told NOTHING. The order simply went back to DRAFT, vanished off
+    their portal until somebody re-sent it, and reappeared later carrying different
+    numbers with no statement anywhere that it had changed or why.
+
+    Why a table of its own rather than `sys_notifications`: that one is keyed on
+    `employee_id`, and a vendor is not an employee and never will be (see VendorUser).
+    There is nowhere in it to put a vendor. Keyed on the VENDOR, not on the vendor
+    USER, for the same reason `pro_vendor_users` is one row per vendor — the message is
+    for the company, not for whoever happens to hold the login today, so re-issuing an
+    account never loses the history.
+
+    Deliberately dumb. No delivery, no email, no retry: the portal reads it. Raising one
+    must never be able to fail the transaction that raised it — see `notify_vendor`.
+    """
+    __tablename__ = "pro_vendor_notifications"
+    id = pk()
+    vendor_id = Column(ForeignKey("mst_vendors.id", ondelete="CASCADE"),
+                       nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    body = Column(String(1000), nullable=True)
+    #: Where it happened, so the portal can link straight at the document.
+    entity_type = Column(String(30), nullable=True)
+    entity_id = Column(BigInteger, nullable=True)
+    deep_link = Column(String(300), nullable=True)
+    is_read = Column(Boolean, nullable=False, default=False, index=True)
+
 
 class VendorUser(Base):
     """A login for someone outside the company.

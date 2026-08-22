@@ -18,7 +18,9 @@ const fmt = (value: number) =>
  * (AllocationApprovalDetailPage) — a real screen, not a popup card. This page is
  * only the queue: browse, filter, click through.
  */
-export function AllocationApprovalsPage() {
+/** `embedded` drops the header, for the same reason as the queue: the Fulfilment Desk
+ *  renders this as its second tab. */
+export function AllocationApprovalsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const nav = useNavigate();
   const [searchParams] = useSearchParams();
   const reviewId = Number(searchParams.get("review"));
@@ -57,9 +59,12 @@ export function AllocationApprovalsPage() {
       }
       // A decided allocation is read from the allocation list, not the approval
       // inbox: the inbox only ever holds what is still owed a signature.
-      // AWAITING_PROCUREMENT is a signed allocation whose shortfall is being bought.
-      // It belongs in "every decision" — leaving it out made a document that is very
-      // much alive disappear from the screen it was signed on.
+      //
+      // AWAITING_PROCUREMENT is still listed, and is LEGACY: no allocation is written
+      // with it since 2026-08-21 and `a1c2e3f4b5d6` renames the ones that had it, but
+      // a database that has not been migrated yet still holds signed allocations
+      // carrying it, and dropping the status here would make them vanish off the
+      // screen they were signed on.
       const wanted = decision === "ALL"
         ? ["PENDING_APPROVAL", "AWAITING_PROCUREMENT", "APPROVED", "REJECTED"]
         : [decision];
@@ -184,11 +189,15 @@ export function AllocationApprovalsPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Inventory" title="Allocation Approvals" />
-      <p className="mb-4 max-w-[70ch] text-sm text-body">
-        Inventory has decided how much stock to promise. Approving reserves exactly
-        that quantity; any shortage becomes one Material Request.
-      </p>
+      {!embedded && (
+        <>
+          <PageHeader eyebrow="Inventory" title="Allocation Approvals" />
+          <p className="mb-4 max-w-[70ch] text-sm text-body">
+            Inventory has decided how much stock to promise. Approving reserves exactly
+            that quantity; any shortage becomes one Material Request.
+          </p>
+        </>
+      )}
 
       <div className="mb-4 grid grid-cols-2 gap-2">
         <div className="rounded-xl border border-line/70 bg-content1 p-3 text-left">
@@ -229,9 +238,9 @@ export function AllocationApprovalsPage() {
             { value: "ALL", label: "All decisions" },
             { value: "WAITING", label: "Waiting for me" },
             { value: "APPROVED", label: "Approved" },
-            // Signed, but the shortfall is on order — it comes back for a top-up when
-            // the goods land, so it is worth being able to list on its own.
-            { value: "AWAITING_PROCUREMENT", label: "Waiting on procurement" },
+            // Legacy — see the query above. Kept so the rows on an unmigrated
+            // database are still reachable; nothing lands here any more.
+            { value: "AWAITING_PROCUREMENT", label: "Waiting on procurement (old)" },
             { value: "REJECTED", label: "Rejected" },
           ]}
           placeholder="All decisions"

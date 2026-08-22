@@ -3,7 +3,9 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Truck } from "lucide-react";
 import { Button, Card, ErrorBanner, Field, Input } from "@/shared/components";
-import { api, setVendorPortal, setVendorToken } from "@/shared/api/client";
+import {
+  api, setVendorPortal, setVendorToken, vendorPasswordPath,
+} from "@/shared/api/client";
 
 interface VendorToken {
   access_token: string;
@@ -35,10 +37,11 @@ export function CarrierLoginPage() {
       // They came in the carrier door: remember it, so the screens both portals share
       // send them back HERE and not to the supplier's RFQ list.
       setVendorPortal("carrier");
-      // Still on the shared default? The change form is the only screen they get. It
-      // lives on the supplier path because there is one of it, and it now returns to
-      // whichever portal set the line above.
-      nav(token.must_change_password ? "/supplier/password" : "/carrier/jobs", {
+      // Still on the shared default? The change form is the only screen they get.
+      // There is one implementation of it, mounted on both portals' paths — this takes
+      // the carrier's copy, so the driver never lands in the supplier shell. It was
+      // hardcoded to /supplier/password, which is exactly what dropped them out.
+      nav(token.must_change_password ? vendorPasswordPath() : "/carrier/jobs", {
         replace: true,
       });
     },

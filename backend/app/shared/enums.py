@@ -171,6 +171,12 @@ class DocType(str, Enum):
     # engine when the two points sit in different projects — a same-project transfer
     # is the holder's own call and never starts a workflow at all.
     STOCK_TRANSFER = "STOCK_TRANSFER"
+    # Stock moving between BINS inside one warehouse. Its own doc type, not
+    # STOCK_TRANSFER: a transfer crosses stocking points and is the receiving side's
+    # business, while a movement never leaves the building and is the point owner's
+    # own. Added 2026-08-21 — before it, a movement went through no ladder at all and
+    # `stock.movement.approve` existed with nothing able to call it.
+    STOCK_MOVEMENT_ORDER = "STOCK_MOVEMENT_ORDER"
     # Material going back UP the chain: a LIP returning expired or damaged stock to
     # the MDP above it. Its own doc type, not STOCK_TRANSFER — a transfer is the
     # holder's own call and a return has to be sanctioned by the tier receiving it.

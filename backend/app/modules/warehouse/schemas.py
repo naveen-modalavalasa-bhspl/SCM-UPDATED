@@ -750,9 +750,15 @@ class StockMovementOrderRead(BaseModel):
     line, so `items` is empty there and populated on create.
     """
     order_no: str
+    #: 0 when no ladder is configured and the movement completed on the press — that
+    #: path writes no document row, exactly as it always did. Non-zero means there is
+    #: an `inv_sto` row to approve (2026-08-21).
+    id: int = 0
     warehouse_id: int
     warehouse_name: str | None = None
     status: str
+    #: Who it is waiting on, and on which rung — "Mahendra Kumar (Warehouse Manager)".
+    current_approver_name: str | None = None
     reason: str | None = None
     total_lines: int = 0
     created_by_name: str | None = None
@@ -1621,3 +1627,10 @@ class DespatchPrefill(BaseModel):
     transporter_name: str | None = None
     lr_no: str | None = None
     lines: list[DespatchPrefillLine] = []
+
+
+class MovementOrderAction(BaseModel):
+    """Approve or reject a stock movement waiting on a signature."""
+    action: str
+    comments: str = ""
+

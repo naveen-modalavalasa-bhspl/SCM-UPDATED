@@ -29,7 +29,7 @@ from app.platform.rbac.permissions import INDENT_VIEW
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
     DISPATCH_GATE_OUT, DISPATCH_VIEW, INSPECTION_DELETE, ISSUE_DELETE, MOVEMENT_DELETE,
-    MOVEMENT_CREATE, MOVEMENT_VIEW,
+    MOVEMENT_APPROVE, MOVEMENT_CREATE, MOVEMENT_VIEW,
     PICKING_DELETE, PUTAWAY_DELETE, RECEIPT_DELETE, RETURN_DELETE,
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_FORWARD, ISSUE_POST,
     ISSUE_VIEW,
@@ -351,6 +351,19 @@ async def create_stock_movement_order(data: s.StockMovementOrderWrite,
                                       db: AsyncSession = Depends(get_db),
                                       user=Depends(require_permission(MOVEMENT_CREATE))):
     return await service.create_stock_movement_order(db, data, user)
+
+
+# The approval door. `movement.approve` was defined months ago and NO route used it, so
+# a stock movement went through no ladder at all: pressing create moved the stock. It
+# now behaves like every other document — with no chain configured (every project
+# today) create still moves on the press, and only a project that has built one on
+# Approvals Config reaches this.
+@router.post("/stock-movement-orders/{order_id}/act")
+async def act_on_stock_movement_order(order_id: int, body: s.MovementOrderAction,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(MOVEMENT_APPROVE))):
+    return await service.act_on_stock_movement_order(
+        db, order_id, body.action, body.comments, user)
 
 
 @router.get("/stock-movements/availability", response_model=s.StockAvailabilityRead)

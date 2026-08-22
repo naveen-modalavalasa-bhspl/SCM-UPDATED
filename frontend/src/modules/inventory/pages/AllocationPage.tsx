@@ -165,7 +165,7 @@ export function AllocationPage() {
         qc.invalidateQueries({ queryKey: ["inventory", "allocation-approvals"] }),
         qc.invalidateQueries({ queryKey: ["allocation-approval-batches"] }),
       ]);
-      nav("/inventory/fulfillment");
+      nav("/inventory/fulfilment");
     },
   });
 
@@ -430,7 +430,7 @@ export function AllocationPage() {
               </Button>
             </Can>
           )}
-          <Button variant="subtle" onClick={() => nav("/inventory/fulfillment")}>
+          <Button variant="subtle" onClick={() => nav("/inventory/fulfilment")}>
             {data.allocatable ? "Cancel" : "Back to the queue"}
           </Button>
         </div>

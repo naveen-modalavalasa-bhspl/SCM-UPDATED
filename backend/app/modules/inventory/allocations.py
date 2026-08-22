@@ -9,6 +9,47 @@ the warehouse the allocator chose; it never changes the quantity they decided.
 
 Kept out of service.py because that file already owns stock movement and material
 requests, and this is a third responsibility with its own lifecycle.
+
+------------------------------------------------------------------------------
+AN APPROVED ALLOCATION IS TERMINAL  (2026-08-21 — read this before changing it)
+------------------------------------------------------------------------------
+A signed allocation is APPROVED and never changes again. It is not reopened, not
+topped up, and not re-approved. An indent that is only partly served collects a
+SECOND allocation later, a third after that — one document per round of serving,
+each with its own ladder, its own reservations and its own issue draft.
+
+What replaced what: `AWAITING_PROCUREMENT` used to park the document until the goods
+arrived, and something then had to WAKE it. That made every route by which stock can
+reach a shelf — putaway, GRN, transfer in, return to stock, adjustment — responsible
+for remembering to wake it, and every doorway that forgot was a live defect. Six of
+them, one per doorway, plus the guards the wake-up path skipped on the way back in.
+The status value survives in the enum and in the tuples below only so an unmigrated
+database still reads its old rows as signed; `a1c2e3f4b5d6` renames the rest.
+
+The invariant that makes it work: WHAT AN INDENT IS STILL OWED IS READ, NEVER STORED.
+It is `approved - allocated - on order`, computed by
+`indents.list_indents(has_remainder=True)` and by `fulfilment_batches` for a monthly
+cycle. Arriving stock changes that answer simply by existing, so the indent returns to
+the Fulfilment Desk on its own with nothing having been notified.
+
+IF YOU CHANGE THIS, these break:
+  * `indents.list_indents(has_remainder=True)` — the Fulfilment Desk's queue. It is
+    the ONLY thing bringing a part-served indent back. Narrow it and an indent
+    silently stops being servable; nothing else will notice.
+  * `indents._SETTLED_MR_STATUSES` — the "on order" half of that arithmetic. A status
+    wrongly counted as on-order hides the line forever (that was the DRAFT bug); one
+    wrongly counted as settled offers quantity procurement is already buying.
+  * `SETTLED_ALLOCATION_STATUSES` — read by `_recalculate_indent_allocation_state` to
+    total `ind_indent_items.allocated_qty`. Drop a status from it and an indent reads
+    as unserved over stock it is holding.
+  * `apply_to_stock` nets what a line has ALREADY reserved before reserving again,
+    counting CONSUMED as well as ACTIVE. Several approved allocations now exist per
+    indent line, so without that netting each one re-reserves the whole quantity.
+  * `create_mr_from_shortfall` deduplicates per indent LINE. Per indent was enough
+    when a shortage was raised once; rounds of serving mean a later shortage on the
+    same indent is a DIFFERENT shortage and needs its own request.
+Do not reintroduce a "wake the document" path. If an allocation needs to come back,
+the answer is a new allocation off the desk, not a second life for a signed one.
 """
 from decimal import Decimal
 
@@ -53,8 +94,13 @@ ACTIVE_ALLOCATION_STATUSES = (
     AllocationStatus.AWAITING_PROCUREMENT.value,
 )
 # Signed off: the quantity is reserved and `ind_indent_items.allocated_qty` holds it.
-# AWAITING_PROCUREMENT belongs here for exactly that reason — it differs from APPROVED
-# only in having unfinished business with procurement, not in what it gave.
+#
+# AWAITING_PROCUREMENT is LEGACY as of 2026-08-21 and is never written any more — an
+# allocation whose shortfall went to procurement is simply APPROVED, and what is still
+# owed is recomputed from the shelf and the open material requests instead of being
+# held on the document (see `_settle_approved`). `a1c2e3f4b5d6` flips the rows that
+# already carried it. Both tuples keep the value so a straggler on a database that has
+# not been migrated still reads as signed rather than as a live unapproved promise.
 SETTLED_ALLOCATION_STATUSES = (
     AllocationStatus.APPROVED.value,
     AllocationStatus.AWAITING_PROCUREMENT.value,
@@ -72,21 +118,6 @@ UNAPPROVED_ALLOCATION_STATUSES = (
     AllocationStatus.DRAFT.value,
     AllocationStatus.PENDING_APPROVAL.value,
 )
-
-
-# The downstream handoff an approved allocation triggers, registered by the module
-# that owns it. Inventory is the base module and may not import warehouse (rule 5), so
-# `warehouse.service` registers `create_fulfilment_drafts_for_allocation` here at
-# import and every doorway into approval can reach it — including `move_stock`, which
-# has no business module in scope to pass it in. An explicit `on_approved` argument
-# still wins; this is only the fallback for callers that cannot supply one.
-ON_APPROVED_HOOK = None
-
-
-def register_on_approved(hook) -> None:
-    """Name the callback an allocation's approval hands off to."""
-    global ON_APPROVED_HOOK
-    ON_APPROVED_HOOK = hook
 
 
 def _d(value) -> Decimal:
@@ -131,6 +162,11 @@ async def ensure_no_active(db: AsyncSession, indent_id: int,
 # warehouse itself (`locations._TIER_BY_TYPE` draws the same line). Stock at these
 # points is real and can be given, but it is not stock the warehouse holds.
 _CHAIN_TYPES = frozenset({WarehouseType.LIP.value, WarehouseType.MDP.value})
+# The same line drawn the other way round, as an INCLUSIVE list, because
+# `availability.available_for` filters by the types it is given rather than the types
+# it is denied. Derived from the enum so a warehouse type added tomorrow lands on the
+# warehouse tier automatically — which is the rule `WarehouseType` already states.
+_WAREHOUSE_TIER_TYPES = [t.value for t in WarehouseType if t.value not in _CHAIN_TYPES]
 
 
 # ---------------- propose: read-only ----------------
@@ -413,9 +449,9 @@ async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
     # shelf read on that column asked "how much is at NULL", and the answer is always
     # none.
     #
-    # WITHOUT this the whole reopen path is decorative: `reopen_for_available_stock`
-    # hands the allocation back to its approver and the approver arrives at a screen
-    # still insisting there is nothing to give.
+    # WITHOUT this a line the desk decided to give nothing for can never be topped up:
+    # the approver opens it once the goods arrive and the screen still insists there is
+    # nothing to give.
     #
     # An unplaced line is answered across the WAREHOUSE tier — LIP and MDP hold real
     # stock but it is theirs to issue, the same rule `main_available_qty` and the
@@ -591,7 +627,12 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
 
     ctx = ctx or {}
     alloc = Allocation(
-        allocation_no=await next_number(db, "allocation"),
+        # The project goes into the number (2026-08-21). `ctx` already carries the
+        # INDENT's project — inventory cannot read `ind_indents` itself (rule 5), so the
+        # caller in indents hands it down, which is the same value the material request
+        # a shortfall raises is filed under.
+        allocation_no=await next_number(db, "allocation",
+                                        project=(ctx or {}).get("project_name")),
         indent_id=indent_id, indent_no=indent_no,
         status=AllocationStatus.DRAFT.value,
         allocated_by_id=getattr(user, "id", None),
@@ -674,6 +715,15 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
         # The lines were only just added; loading them lazily inside apply_to_stock
         # would be a blocking IO call on the async session.
         await db.refresh(alloc, ["items"])
+        # The same guard `act` takes before a signature settles anything, and for the
+        # same reason — but it matters MORE here. The per-line check in the loop above
+        # reads the shelf WITHOUT a row lock, which is fine while a human still has to
+        # sign afterwards: the locked check runs at that signature. On a ladder set to
+        # NO_APPROVAL there is no second moment, so this branch settles straight off an
+        # unlocked read and two desks pressing at the same instant could both be told
+        # the same units were free. `_assert_still_available` re-reads under the locks
+        # the reservation itself takes, so they queue instead of both winning.
+        await _assert_still_available(db, alloc)
         await _settle_approved(db, alloc, user, ctx, on_approved)
     else:
         alloc.status = AllocationStatus.PENDING_APPROVAL.value
@@ -701,14 +751,22 @@ async def _settle_approved(db: AsyncSession, alloc: Allocation, user,
     """
     alloc.approved_at = utcnow()
     alloc.current_approver_name = None
-    implied_indent_status, went_to_procurement = await apply_to_stock(
+    implied_indent_status, _went_to_procurement = await apply_to_stock(
         db, alloc, user, ctx)
-    # Signed either way. APPROVED means finished; AWAITING_PROCUREMENT means the part
-    # the shelf could not cover is being bought, and this same document reopens when it
-    # arrives (`reopen_for_receipt`). Keeping it open is what stops a second allocation
-    # being raised against a requirement that already has one.
-    alloc.status = (AllocationStatus.AWAITING_PROCUREMENT.value if went_to_procurement
-                    else AllocationStatus.APPROVED.value)
+    # ONE terminal status, 2026-08-21. A signed allocation is APPROVED whether or not
+    # the shelf covered all of it.
+    #
+    # AWAITING_PROCUREMENT used to park the document until the goods arrived, and the
+    # document then had to be woken again — which meant every way stock can reach a
+    # shelf was a doorway that had to remember to wake it, every reopen had to re-run
+    # the ladder, and a reopened line had to be re-prefilled and re-guarded. Six
+    # separate live defects came out of that one design, each one a doorway somebody
+    # missed. What is still owed does not need to be held on a document: it is
+    # `approved - allocated - on order`, and `indents.list_indents(has_remainder=True)`
+    # already computes exactly that from the indent lines. So the remainder is READ,
+    # never parked, and the indent comes back to the fulfilment desk on its own the
+    # moment the shelf can serve it.
+    alloc.status = AllocationStatus.APPROVED.value
     if on_approved is not None:
         # The owning business module supplies its downstream handoff. Keeping the
         # callback inside this transaction means approval, reservations and the
@@ -736,8 +794,9 @@ async def _settle_approved(db: AsyncSession, alloc: Allocation, user,
 async def _refresh_approver(db: AsyncSession, alloc: Allocation,
                             doc_type: str | None = None) -> None:
     doc_type = doc_type or await doc_type_for(db, alloc.id)
-    approvers = await engine.current_approvers(db, doc_type, alloc.id)
-    alloc.current_approver_name = ", ".join(a.full_name for a in approvers) or None
+    # Name AND rung, from the engine's one builder — see `current_approver_label`.
+    alloc.current_approver_name = await engine.current_approver_label(
+        db, doc_type, alloc.id)
 
 
 async def get(db: AsyncSession, allocation_id: int, user=None) -> Allocation:
@@ -848,199 +907,23 @@ async def warehouse_available(db: AsyncSession, item_ids: set[int]) -> dict[int,
     return {item_id: _d(qty) for item_id, qty in rows}
 
 
-async def reopen_for_available_stock(db: AsyncSession, item_ids: set[int],
-                                     on_approved=None) -> list[int]:
-    """Wake every allocation parked on procurement whose goods are now on the shelf.
-
-    FIXED 2026-08-21 — the only path back from AWAITING_PROCUREMENT was
-    `reopen_for_receipt`, keyed on the indent whose shortfall raised the material
-    request. That covers exactly one case: goods bought against THIS indent, through an
-    MR that carries its id. It misses every other way the stock actually turns up —
-    a manually raised MR, a purchase made for a different indent that happens to cover
-    this one, a transfer in, a return to stock. IND/2026-27/00089 sat on
-    PENDING_PROCUREMENT with its 30 monitors already in the bin for exactly this reason.
-    WITHOUT this an allocation can be stranded by stock the warehouse is holding.
-
-    Availability decides, not lineage: any stock of the item, however it arrived, is
-    stock the approver can give. Warehouse tier only — see `warehouse_available`.
-
-    Idempotent by construction: an allocation already reopened is PENDING_APPROVAL, not
-    AWAITING_PROCUREMENT, so a second receipt of the same item does not touch it.
-    """
-    if not item_ids:
-        return []
-    on_approved = on_approved or ON_APPROVED_HOOK
-    parked = (await db.execute(
-        select(Allocation)
-        .where(
-            Allocation.status == AllocationStatus.AWAITING_PROCUREMENT.value,
-            Allocation.id.in_(
-                select(AllocationItem.allocation_id)
-                .where(AllocationItem.item_id.in_(item_ids))
-            ),
-        )
-    )).scalars().all()
-    if not parked:
-        return []
-
-    on_shelf = await warehouse_available(db, item_ids)
-    indent_ids = []
-    for alloc in parked:
-        wanted = (await db.execute(
-            select(AllocationItem.item_id)
-            .where(AllocationItem.allocation_id == alloc.id,
-                   AllocationItem.item_id.in_(item_ids))
-        )).scalars().all()
-        # One line's goods arriving is enough: the approver opens the document and tops
-        # up what they can. Waiting for every short line would strand a two-line
-        # allocation on the slower half of it.
-        if any(on_shelf.get(item_id, ZERO) > ZERO for item_id in wanted):
-            indent_ids.append(alloc.indent_id)
-
-    reopened: list[int] = []
-    for indent_id in dict.fromkeys(indent_ids):
-        reopened.extend(await reopen_for_receipt(db, indent_id, on_approved))
-    return reopened
-
-
-async def _prefill_from_shelf(db: AsyncSession, alloc: Allocation) -> None:
-    """Fill a reopened allocation's Give with what the warehouse can now serve.
-
-    FIXED 2026-08-21 — a reopened allocation came back with Give still 0, the number
-    it was parked with. The whole reason the document is in front of the approver again
-    is that the goods arrived, so asking them to retype the quantity the system already
-    knows is how ALL/2026-27/00075 got signed for nothing with 30 monitors on the shelf.
-
-    Never MORE than was asked for, and never less than what is already there: this is a
-    starting point the approver can revise down, not a decision made for them. A line
-    that already carries a quantity is left alone — a part-served line was decided by a
-    person and must not be quietly rewritten.
-
-    Warehouse tier only, same rule as `reopen_for_available_stock` and
-    `main_available_qty`: stock at a LIP is not the warehouse's to give.
-    """
-    await db.refresh(alloc, ["items"])
-    short = [line for line in alloc.items
-             if _d(line.quantity) <= ZERO and _d(line.requested_qty) > ZERO]
-    if not short:
-        return
-    free = await warehouse_available(db, {line.item_id for line in short})
-    # Which point to name. `warehouse_available` sums the tier, so the line is pinned to
-    # the point actually holding the stock — an allocation line with a quantity and no
-    # warehouse cannot be reserved against anything.
-    points = {}
-    for item_id in {line.item_id for line in short}:
-        row = (await db.execute(
-            select(Stock.warehouse_id, Stock.warehouse_name)
-            .join(Warehouse, Warehouse.id == Stock.warehouse_id)
-            .where(Stock.item_id == item_id,
-                   Stock.available_qty > 0,
-                   Warehouse.warehouse_type.notin_(list(_CHAIN_TYPES)))
-            .order_by(Stock.available_qty.desc())
-            .limit(1)
-        )).first()
-        if row:
-            points[item_id] = row
-    for line in short:
-        can_give = min(_d(line.requested_qty), free.get(line.item_id, ZERO))
-        point = points.get(line.item_id)
-        if can_give <= ZERO or point is None:
-            continue
-        line.quantity = can_give
-        line.warehouse_id, line.warehouse_name = point[0], point[1]
-
-
-async def reopen_for_receipt(db: AsyncSession, indent_id: int,
-                             on_approved=None) -> list[int]:
-    """Put an allocation waiting on procurement back in front of its approver.
-
-    Called when the goods bought for its shortfall reach stock. The SAME document is
-    reused — status back to PENDING_APPROVAL, so the review screen opens it editable
-    and the approver tops up the Give from what has arrived. That is the whole point:
-    no second allocation for one requirement, and no second row in the fulfilment
-    queue for an indent somebody already decided on.
-
-    The ladder decides again, through the engine: `engine.start` reopens the document's
-    existing instance in place (`_open_instance`), keeping every `wf_actions` row where
-    it is (rule 9) and resolving the chain from the CONFIGURED ladder — so whoever
-    Approvals Config names today gets the pending row, and the approvals inbox shows it
-    like any other waiting document. Without that the reopened allocation would be
-    editable but sit in nobody's queue.
-
-    Raised in the name of whoever decided the allocation, not the storekeeper who
-    happened to book the delivery: the ladder climbs the RAISER's reporting line, and
-    keying it to the receiving clerk would route this indent's decision through a
-    stranger. `_settle_approved` then reserves only the DIFFERENCE when it is signed.
-
-    Returns the allocation ids reopened.
-    """
-    rows = (await db.execute(
-        select(Allocation).where(
-            Allocation.indent_id == indent_id,
-            Allocation.status == AllocationStatus.AWAITING_PROCUREMENT.value,
-        )
-    )).scalars().all()
-    reopened: list[int] = []
-    for alloc in rows:
-        raiser = (await hcm_service.get_employee(db, alloc.allocated_by_id)
-                  if alloc.allocated_by_id else None)
-        if raiser is None:
-            # No raiser to climb from — leave it signed rather than parking it in a
-            # state nobody can act on.
-            continue
-        alloc.status = AllocationStatus.PENDING_APPROVAL.value
-        alloc.approved_at = None
-        await _prefill_from_shelf(db, alloc)
-        await db.flush()
-        doc_type = await doc_type_for(db, alloc.id)
-        instance = await engine.start(
-            db, doc_type=doc_type, doc_id=alloc.id,
-            context={
-                "doc_no": alloc.allocation_no,
-                "doc_summary": f"Stock arrived for {alloc.indent_no} — top up the "
-                               f"allocation",
-                "department_id": alloc.department_id,
-            },
-            user=raiser,
-        )
-        # FIXED 2026-08-21 — the return of `engine.start` was thrown away here and the
-        # status hardcoded to PENDING_APPROVAL above. The ladder can finish AT SUBMIT:
-        # an OWN_STOCK_ALLOCATION raised by the top of its own ladder, or any ladder set
-        # to NO_APPROVAL, comes back already APPROVED. `create()` has checked for that
-        # since it was written (see the same branch there); this second doorway into the
-        # same state never got it, so a reopened allocation whose raiser self-approves
-        # ended up with the workflow saying APPROVED and the document saying
-        # PENDING_APPROVAL — nothing reserved, no fulfilment draft, and nobody on the
-        # pending list, so the review screen offered neither a Give box nor a button.
-        # ALL/2026-27/00079 is the live proof: instance APPROVED at 12:19:12, allocation
-        # still PENDING_APPROVAL, 198 mice on the shelf and no way to issue them.
-        #
-        # This branch only fires for a ladder that self-approves. Where a real approver
-        # is named the engine returns IN_PROGRESS, `_refresh_approver` puts their name on
-        # the document, and the signature settles it through `act()` exactly as before —
-        # that path is untouched.
-        if instance.status == InstanceStatus.APPROVED.value:
-            await db.refresh(alloc, ["items"])
-            await _settle_approved(db, alloc, raiser, _reopen_ctx(alloc), on_approved)
-        else:
-            await _refresh_approver(db, alloc, doc_type)
-        reopened.append(alloc.id)
-    return reopened
-
-
-def _reopen_ctx(alloc: Allocation) -> dict:
-    """The project a reopened allocation is serving, for the MR a residual shortfall
-    may still raise.
-
-    Read off the allocation's own lines rather than the indent: inventory is the base
-    module and cannot read `ind_indents` (rule 5). The name is not stored on a line, so
-    only the id travels — `apply_to_stock` writes it onto the request and the name is
-    resolved by whoever displays it.
-    """
-    project_id = next((line.project_id for line in alloc.items
-                       if line.project_id and line.project_id != NO_PROJECT), None)
-    return {"project_id": project_id, "project_name": None}
-
+# The reopen machinery is GONE, 2026-08-21.
+#
+# `reopen_for_available_stock`, `reopen_for_receipt`, `_prefill_from_shelf` and
+# `_reopen_ctx` existed to wake an allocation parked on AWAITING_PROCUREMENT and put it
+# back in front of its approver with the arrived quantity filled in. Every one of them
+# was a source of live defects: the wake-up had to be wired into each doorway stock can
+# reach a shelf through, the prefill promised tier-wide stock out of a single point,
+# nothing netted what other parked allocations had already been promised, and the
+# self-approving reopen settled without either of the shelf guards `create` and `act`
+# carry.
+#
+# None of it is needed once a signed allocation is terminal. The remainder an indent is
+# still owed is READ — `approved - allocated - on order`, computed by
+# `indents.list_indents(has_remainder=True)` — so the indent surfaces on the fulfilment
+# desk again by itself as soon as the shelf can serve it, and the desk raises a fresh
+# allocation for what it can now give. No second document, no ladder to re-run, no
+# quantity to re-guess.
 
 async def act(db: AsyncSession, allocation_id: int, action: str, user,
               comments: str = "", ctx: dict | None = None,
@@ -1107,8 +990,9 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
     """Turn an approved decision into reservations, then one MR for the remainder.
 
     Returns (indent status this implies, whether a material request was raised). The
-    second half decides whether the allocation is FINISHED or merely waiting on
-    procurement — the caller cannot see the shortfalls from outside.
+    second half no longer decides the ALLOCATION's status — a signed allocation is
+    APPROVED either way since 2026-08-21 — but the caller cannot see the shortfalls
+    from outside and the rules engine still reports on them, so it is still answered.
 
     Runs only on approval.
     """
@@ -1122,10 +1006,10 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
         requested_total += _d(line.requested_qty)
         given_total += _d(line.quantity)
 
-        # What this line has ALREADY put aside. An allocation that went to procurement
-        # is signed and reopened later for the same lines, so approving it a second
-        # time must reserve the DIFFERENCE — reserving `quantity` again would hold the
-        # goods twice and starve every other indent of stock nobody is using.
+        # What this line has ALREADY put aside. A requirement can collect more than one
+        # approved allocation — the cascade hands the remainder up the chain — so
+        # reserving `quantity` outright would hold the same goods twice and starve
+        # every other indent of stock nobody is using.
         #
         # FIXED 2026-08-21 — CONSUMED counts here, not just ACTIVE. A reservation is
         # consumed when the goods actually LEAVE, so after the first signature is
@@ -1144,8 +1028,21 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                       ReservationStatus.CONSUMED.value),
         )
         to_reserve = _d(line.quantity) - _d(held)
+        # FIXED 2026-08-21 — `reserve` is deliberately partial-tolerant (an indent for
+        # 100 against 60 on hand reserves 60 and returns the rest as a shortfall) and
+        # this threw its answer away. A line promising more than its own point actually
+        # holds therefore reserved less than it claimed, `line.quantity` still read the
+        # full number, and `_recalculate_indent_allocation_state` counted the full
+        # number as allocated — so the indent closed as ALLOCATED over stock nobody was
+        # holding, and the gap became nobody's shortfall because the arithmetic below
+        # measures `requested - decided`, not `requested - reserved`.
+        #
+        # `act` and `create` both check the shelf per point before they get here, so
+        # this should be unreachable on those paths; it is the safety net for every
+        # other doorway into approval, and it is what makes the two numbers agree.
+        unreserved = ZERO
         if to_reserve > ZERO:
-            await allocation.reserve(
+            _got, unreserved = await allocation.reserve(
                 db, line.item_id, to_reserve, RefType.RESERVATION.value,
                 alloc.indent_id, alloc.indent_no, user,
                 project_id=line.project_id or NO_PROJECT,
@@ -1153,6 +1050,12 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                 ref_line_id=line.indent_item_id,
                 item=await db.get(Item, line.item_id),
             )
+            if unreserved > ZERO:
+                # The decision has to tell the truth about what it actually holds, or
+                # every reader downstream — the indent's allocated_qty, the fulfilment
+                # draft, the remainder — inherits the lie.
+                line.quantity = _d(line.quantity) - unreserved
+                given_total -= unreserved
 
         short = _d(line.requested_qty) - _d(line.quantity)
         if short > ZERO:
@@ -1163,8 +1066,18 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
             # procurement chased stock that was sitting on the shelf. Availability is
             # read after this line's own reservation, so it is what is genuinely
             # spare.
+            #
+            # FIXED 2026-08-21 — WAREHOUSE TIER ONLY. This asked `available_for` with no
+            # warehouse filter, so stock standing at a LIP or an MDP counted as spare
+            # and suppressed the material request. That stock is real but it is not the
+            # warehouse's to issue — every other read in this file draws the same line
+            # (`warehouse_available`, `line_availability`, `main_available_qty`) — so a
+            # shortage the warehouse genuinely could not cover was answered with "there
+            # is plenty" and nobody bought it. The indent then sat on
+            # AWAITING_ALLOCATION with nothing on order and no one buying.
             spare = _d(await availability.available_for(
-                db, line.item_id, project_id=line.project_id or NO_PROJECT))
+                db, line.item_id, project_id=line.project_id or NO_PROJECT,
+                warehouse_types=_WAREHOUSE_TIER_TYPES))
             unavailable = short - spare
             if unavailable > ZERO:
                 shortfalls.append({
@@ -1191,8 +1104,8 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
     # is nothing to give" and "gave nothing because the approver never typed a number"
     # produced the identical status. The second case parks the indent on
     # PENDING_PROCUREMENT with NO material request behind it: nothing is on order, so
-    # no receipt will ever fire `reopen_for_available_stock`, and the document sits
-    # waiting for goods that were already on the shelf when it was signed.
+    # no purchase will ever cover it, and the indent sits waiting for goods that were
+    # already on the shelf when it was signed.
     #
     # PENDING_PROCUREMENT is a claim that somebody is buying this. It is only true when
     # a shortfall was actually raised, so it is `shortfalls` that decides it — not the

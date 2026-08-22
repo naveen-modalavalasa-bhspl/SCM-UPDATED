@@ -2,6 +2,7 @@ import { Link, Navigate, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Handshake, LogOut, Truck, User } from "lucide-react";
 import { api, clearVendorToken, vendorToken } from "@/shared/api/client";
+import { VendorBell } from "@/modules/supplier/VendorBell";
 
 /**
  * The shell for the transport provider.
@@ -77,13 +78,18 @@ export function CarrierLayout() {
                 </span>
               </span>
             </Link>
-            <button
-              type="button"
-              onClick={signOut}
-              className="flex min-h-11 shrink-0 items-center gap-2 rounded-lg border border-line px-3 text-sm font-medium text-muted transition-colors hover:bg-surface hover:text-ink"
-            >
-              <LogOut className="h-4 w-4" /> Sign out
-            </button>
+            <div className="flex shrink-0 items-center gap-1">
+              {/* The same bell the supplier shell carries, off the same table: a
+                  carrier IS a vendor. See VendorBell (2026-08-21). */}
+              <VendorBell />
+              <button
+                type="button"
+                onClick={signOut}
+                className="flex min-h-11 shrink-0 items-center gap-2 rounded-lg border border-line px-3 text-sm font-medium text-muted transition-colors hover:bg-surface hover:text-ink"
+              >
+                <LogOut className="h-4 w-4" /> Sign out
+              </button>
+            </div>
           </div>
 
           {/* The rail scrolls rather than wraps: three tabs fit any phone today, and

@@ -552,6 +552,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     // Same rules for IMEIs, minus the count floor. The backend enforces them too;
     // this only saves the storekeeper a round-trip once the lines are on screen.
     for (const [index, line] of form.items.entries()) {
+      // Only a TRACKED item carries the whole-number and count rules. An optional IMEI
+      // typed against an ordinary item is just a note on the unit (see the IMEIs column
+      // above) and has nothing to be counted against.
       if (!line.is_imei_tracked) continue;
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
@@ -897,13 +900,29 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       width: "w-28",
       hideOnNarrow: true,
       render: (l, i) => {
-        if (!l.is_imei_tracked) return <span className="text-xs text-muted">—</span>;
+        // FIXED 2026-08-21 — this returned a dash unless the item master had
+        // `is_imei_tracked` ticked, so on every other item there was no control at all:
+        // an IMEI is OPTIONAL, and "optional" was being enforced as "impossible". A
+        // storekeeper holding a handset with a readable IMEI had nowhere to put it.
+        //
+        // The backend already accepts this — `_apply_receipt_lines` only applies the
+        // one-per-unit ceiling to IMEI-tracked items and stores whatever else it is
+        // given — so nothing on the write side changes.
+        //
+        // KNOWN LIMIT, deliberately not fixed here: `_unit_mode` picks the identifier
+        // for an item as serial → IMEI → code off the MASTER FLAGS, so an IMEI typed
+        // against an untracked item is stored and displayed but is not what that unit
+        // is matched on when it is issued or scanned. Making it matchable means
+        // changing that ladder, which touches issue, picking and scanning — a separate
+        // decision, not a side effect of letting somebody type a number.
         const captured = l.imei_numbers?.length ?? 0;
         const required = Math.floor(num(l.received_qty));
         return (
           <Button variant="ghost" onClick={() => setImeiLine(i)}>
             <ScanLine className="h-4 w-4" />
-            {captured || required ? `${captured}/${required}` : "Add"}
+            {captured
+              ? `${captured}${l.is_imei_tracked ? `/${required}` : ""}`
+              : l.is_imei_tracked ? `0/${required}` : "Add"}
           </Button>
         );
       },
@@ -1331,7 +1350,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               ?? `Line ${imeiLine + 1}`
         }
         readOnly={locked}
-        partial={!isGrn}
+        // FIXED 2026-08-21 — was `partial={!isGrn}`, so at GRN stage the modal still
+        // demanded exactly one IMEI per received unit. The BACKEND stopped demanding
+        // that on 2026-08-20 (`_apply_receipt_lines`: more than received is wrong,
+        // fewer is not — vendors deliver without IMEI lists and the numbers are on
+        // handsets inside sealed cartons). The screen was never brought in line, so the
+        // wall simply moved one step earlier: the storekeeper could not get out of the
+        // modal to reach the save that would have accepted it.
+        //
+        // Unconditionally partial now, exactly like the serial modal above it. Whatever
+        // was actually read is kept; the rest is filled in at put-away.
+        partial
         onSave={(imeis) => imeiLine !== null && patchLine(imeiLine, { imei_numbers: imeis })}
       />
 

@@ -65,6 +65,7 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.FORWARD_ISSUE.value: "Warehouse",
     DocType.MR.value: "Inventory",
     DocType.STOCK_TRANSFER.value: "Inventory",
+    DocType.STOCK_MOVEMENT_ORDER.value: "Inventory",
     DocType.STOCK_RETURN.value: "Returns",
     DocType.STOCK_RETURN_RECEIPT.value: "Returns",
     DocType.WH_ISSUE.value: "Warehouse",
@@ -99,6 +100,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # Only ever raised for a transfer that crosses a project boundary — a
     # same-project transfer never starts a workflow, so this ladder stays quiet.
     DocType.STOCK_TRANSFER.value: "Stock Transfer (cross-project)",
+    DocType.STOCK_MOVEMENT_ORDER.value: "Stock Movement (bin to bin)",
     DocType.STOCK_RETURN.value: "Stock Return (sending material back up)",
     DocType.STOCK_RETURN_RECEIPT.value: "Stock Return (receiving and deciding)",
     DocType.WH_ISSUE.value: "Material Issue",
@@ -130,6 +132,13 @@ MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Returns", "Procurement",
 SELF_OWNED_DOC_TYPES = frozenset({
     DocType.OWN_STOCK_ALLOCATION.value,
     DocType.OWN_STOCK_ISSUE.value,
+    # A bin-to-bin movement never leaves the warehouse, so authority over it comes from
+    # HOLDING the warehouse rather than from rank — the same rule as the two above.
+    # This is what makes "the warehouse manager approves his own movements" the
+    # behaviour out of the box, without a person being named anywhere in code: an admin
+    # can still configure a real ladder for it on Approvals Config, and a project that
+    # wants nobody to sign sets NO_APPROVAL there.
+    DocType.STOCK_MOVEMENT_ORDER.value,
     # Forwarding is not a decision, but the default must never be "nobody looks at it":
     # it lands in the forwarder's own queue as a one-click task until an admin sets
     # NO_APPROVAL on the Approvals Config row.

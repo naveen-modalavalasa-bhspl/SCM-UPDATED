@@ -62,12 +62,11 @@ import { StockReplenishmentView } from "@/modules/inventory/components/StockRepl
 import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
 import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
 import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
-import { FulfillmentQueuePage } from "@/modules/inventory/pages/FulfillmentQueuePage";
+import { FulfilmentDeskPage } from "@/modules/inventory/pages/FulfilmentDeskPage";
 import { FulfilmentBatchPage } from "@/modules/inventory/pages/FulfilmentBatchPage";
 import { MaterialRequestFormPage } from "@/modules/inventory/pages/MaterialRequestFormPage";
 import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
 import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
-import { AllocationApprovalsPage } from "@/modules/inventory/pages/AllocationApprovalsPage";
 import { AllocationApprovalDetailPage } from "@/modules/inventory/pages/AllocationApprovalDetailPage";
 import { AllocationCycleApprovalPage } from "@/modules/inventory/pages/AllocationCycleApprovalPage";
 import { StockingPointsPage } from "@/modules/inventory/pages/StockingPointsPage";
@@ -98,6 +97,7 @@ import {
   CarrierAckPage,
 } from "@/modules/logistics";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
+import { ProcurementLedgerPage } from "@/modules/procurement/pages/ProcurementLedgerPage";
 import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
 import { MRConsolidationPage } from "@/modules/procurement/pages/MRConsolidationPage";
 import { RequisitionDetailPage } from "@/modules/procurement/pages/RequisitionDetailPage";
@@ -146,6 +146,25 @@ function LegacyTransportRedirect() {
   return <Navigate to={`/logistics/shipments${tail}${search}${hash}`} replace />;
 }
 
+/* /inventory/allocation-approvals -> the Fulfilment Desk's Approvals tab.
+ *
+ * A plain <Navigate> would drop the query string, and `?review=<id>` is exactly what
+ * the notification for an allocation carries (`platform/notifications/service.py`).
+ * Every one of those links, including the ones already sitting in somebody's inbox,
+ * would have landed on the list with the document it was sent to open nowhere in
+ * sight — so a review id goes straight to the review screen, which is a live route
+ * and was never part of the merge. */
+function LegacyAllocationApprovalsRedirect() {
+  const { search, hash } = useLocation();
+  const review = Number(new URLSearchParams(search).get("review"));
+  if (Number.isFinite(review) && review > 0) {
+    const decision = new URLSearchParams(search).get("decision") === "1";
+    return <Navigate to={`/inventory/allocation-approvals/${review}`
+      + (decision ? "?decision=1" : "")} replace />;
+  }
+  return <Navigate to={`/inventory/fulfilment?tab=approvals${hash}`} replace />;
+}
+
 function AppRoutes() {
   const { me, loading } = useAuth();
   if (loading) return <FullScreen>Loading…</FullScreen>;
@@ -192,6 +211,13 @@ function AppRoutes() {
             tabs with no route back to their shipments. */}
         <Route path="profile" element={<SupplierProfilePage />} />
       </Route>
+      {/* The forced change-password screen, on the carrier's own path. Same component
+          as /supplier/password and OUTSIDE the carrier shell for the same reason that
+          one is outside the supplier shell: it is what a vendor gets BEFORE they are
+          let in, so there are no tabs to render yet. Without this route a carrier
+          signing in for the first time was sent to /supplier/password and came out the
+          other side looking at the supplier portal. */}
+      <Route path="/carrier/password" element={<SupplierPasswordPage />} />
 
       {/* The order as a document, for paper and for "save as PDF". Outside the shell
           on purpose: what prints has to be the order, not a sidebar with an order next
@@ -294,6 +320,8 @@ function AppRoutes() {
         <Route path="pos/new" element={<POFormPage />} />
         <Route path="pos/:id" element={<PODetailPage />} />
         {/* The buying chain upstream of a PO: requisition -> RFQ -> quotation. */}
+        {/* The buying trail, all four document types in one register. */}
+        <Route path="procurement/ledger" element={<ProcurementLedgerPage />} />
         <Route path="procurement/requisitions" element={<RequisitionListPage />} />
         <Route path="procurement/requisitions/new" element={<RequisitionFormPage />} />
         {/* Both literals before `:id`, which is read as a number. */}
@@ -396,7 +424,17 @@ function AppRoutes() {
         <Route path="inventory/transfers" element={<StockTransferView />} />
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
         <Route path="inventory/valuation" element={<StockValuationView />} />
-        <Route path="inventory/fulfillment" element={<FulfillmentQueuePage />} />
+        {/* The Fulfilment Desk: the Fulfilment Queue and Allocation Approvals as one
+            screen (2026-08-21). `/inventory/fulfilment` — one L, the British spelling
+            the rest of the app uses — so it cannot collide with the old path beside
+            it, which now redirects. */}
+        <Route path="inventory/fulfilment" element={<FulfilmentDeskPage />} />
+        {/* Both retired front doors, kept as redirects. The rows are parked in
+            `page_registry.RETIRED_PAGES`, so they are off the rail — but a bookmark, a
+            notification and the alerts catalogue all still point at them, and landing
+            on "No screen at this address" is how a retirement reads as a breakage. */}
+        <Route path="inventory/fulfillment"
+               element={<Navigate to="/inventory/fulfilment" replace />} />
         {/* One monthly cycle, opened from the row above. A detail screen, not a page
             of its own: it carries no rbac_pages row, exactly like
             inventory/allocate/:indentId, so it inherits the Fulfilment Queue's
@@ -404,13 +442,18 @@ function AppRoutes() {
             The queue has always linked here; the route was simply never registered,
             so every monthly cycle landed on "No screen at this address". */}
         <Route path="inventory/fulfillment/:cycle" element={<FulfilmentBatchPage />} />
+        {/* The same screen under the desk's own spelling. Two paths rather than a
+            redirect because the queue builds this link from a cycle key that can carry
+            a slash, and a redirect would have to reassemble it. */}
+        <Route path="inventory/fulfilment/:cycle" element={<FulfilmentBatchPage />} />
         <Route path="inventory/material-requests" element={<MaterialRequestsPage />} />
         {/* Before the `:id` route below, or "new" is read as a material request id. */}
         <Route path="inventory/material-requests/new" element={<MaterialRequestFormPage />} />
         <Route path="inventory/allocate/:indentId" element={<AllocationPage />} />
         {/* Where the MDP/LIP chain is declared — everything downstream reads it. */}
         <Route path="inventory/stocking-points" element={<StockingPointsPage />} />
-        <Route path="inventory/allocation-approvals" element={<AllocationApprovalsPage />} />
+        <Route path="inventory/allocation-approvals"
+               element={<LegacyAllocationApprovalsRedirect />} />
         {/* Child screen, not a menu entry: the list navigates here to review one
             allocation. Without this route that row click is a dead end. */}
         {/* Before the :id route, which matches a single segment and would never catch

@@ -136,6 +136,13 @@ PAGES: list[PageDef] = [
     # it feeds, which is where it sits in the flow.
     PageDef("pro_consolidations", "/procurement/consolidations", "Consolidation",
             parent="grp_purchasing", module="procurement", sort_order=26),
+    # The buying trail: every requisition, RFQ, quotation and order in one register.
+    # LAST in the group (sort_order 32, after po_list's 31) — a ledger is where you go
+    # to look something up, never the module's front door, and the left rail opens a
+    # module on its FIRST child.
+    PageDef("pro_ledger", "/procurement/ledger", "Procurement Ledger",
+            parent="grp_purchasing", module="procurement", icon="list",
+            sort_order=32),
 
     # Renames the live Transfers row. The screen is a read-only STO/SMO register now,
     # and "Transfers" read like somewhere you could raise one. `always_on` so the
@@ -145,6 +152,21 @@ PAGES: list[PageDef] = [
     PageDef("inv_transfers", "/inventory/transfers", "Transfer Records",
             parent="grp_inventory", module="inventory", icon="arrow-left-right",
             sort_order=55, always_on=True),
+    # The Fulfilment Desk — the Fulfilment Queue and Allocation Approvals as ONE
+    # screen (2026-08-21). They were two halves of a single decision: the queue listed
+    # what an indent was still owed, you typed what to give, and the document then went
+    # to a second screen to be signed. Where the project's ladder says NO_APPROVAL that
+    # second screen was a page with one button on it; where a real ladder is configured
+    # the approver had to leave the numbers behind to find it. One screen carries both
+    # — a Queue tab and an Approvals tab over the same rows — so the ladder decides how
+    # many presses it takes and the screen never has to.
+    #
+    # sort_order 56 is the live `inv_fulfillment` row's own number, so the desk lands
+    # exactly where the queue used to sit in the rail rather than becoming the module's
+    # front door (see the note on `rbac_job_profiles`).
+    PageDef("inv_fulfilment_desk", "/inventory/fulfilment", "Fulfilment Desk",
+            parent="grp_inventory", module="inventory", icon="check-circle",
+            sort_order=56),
 
     # ------------------------------------------------------------------ #
     #  Logistics — the outward transport leg
@@ -353,6 +375,15 @@ RETIRED_PAGES: list[str] = [
     # live screen.
     "wh_consignments",
     "wh_dispatch",
+    # FIXED 2026-08-21 — the Fulfilment Queue and Allocation Approvals are one screen
+    # now (`inv_fulfilment_desk`). Two rows for two halves of one decision is how a
+    # desk ended up typing a quantity on one screen and hunting for the button on
+    # another. Both paths redirect (modules/inventory/index.tsx), and retiring only
+    # parks the rows — every grant on them survives, and
+    # `page.inv_fulfilment_desk.view` inherits from `page.inv_fulfillment.view` so the
+    # desk that worked the queue yesterday opens the new screen today.
+    "inv_fulfillment",
+    "inv_allocation_approvals",
 ]
 
 

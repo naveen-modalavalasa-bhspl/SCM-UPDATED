@@ -51,8 +51,8 @@ INDENTS = ["grp_indents", "ind_dashboard", "ind_list", "ind_deliveries",
 # `approval_team` dropped with the Team Queue screen.
 APPROVALS = ["approvals", "approval_waiting", "approval_decisions"]
 INVENTORY = ["grp_inventory", "inv_overview", "inv_balance", "inv_ledger",
-             "inv_replenishment", "inv_transfers", "inv_fulfillment",
-             "inv_allocation_approvals", "inv_stocking_points", "inv_mr",
+             "inv_replenishment", "inv_transfers", "inv_fulfilment_desk",
+             "inv_stocking_points", "inv_mr",
              "inv_labels"]
 WAREHOUSE = ["grp_warehouse", "wh_dashboard", "wh_inward", "wh_grn", "wh_qc",
              "wh_qc_outward", "wh_putaway", "wh_segregation", "wh_stock_movements", "wh_picklist",

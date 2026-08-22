@@ -323,16 +323,46 @@ class StockAdjustmentItem(Base):
     adjustment = relationship("StockAdjustment", back_populates="items")
 
 
-class StockTransferOrder(Base):
-    """Stock Transfer Order (STO): create -> approval -> dispatch -> receive.
+#: The two documents `inv_sto` carries. EXTENDED 2026-08-21.
+#:
+#: They share a header, lines, and a DRAFT -> PENDING_APPROVAL -> APPROVED ladder, which
+#: is why an SMO lives here rather than in a table of its own. They do NOT share what
+#: approval MEANS, and that is the part to be careful with:
+#:
+#:   STO  moves stock warehouse -> warehouse, and only on RECEIPT.
+#:   SMO  moves stock bin -> bin inside ONE warehouse, at the moment it is approved.
+#:
+#: Two lifecycles on one table is exactly the mistake the warehouse Dispatch door was
+#: retired for, so the rule here is explicit: `doc_kind` is load-bearing, every reader
+#: filters on it, and the two are never served by one code path past the approval. What
+#: is shared is the paperwork; what differs is kept apart.
+STO_KIND_TRANSFER = "STO"
+STO_KIND_MOVEMENT = "SMO"
 
-    Stock moves physically ONLY upon receipt (via move_stock).
+
+class StockTransferOrder(Base):
+    """Stock Transfer Order (STO) and Stock Movement Order (SMO).
+
+    STO: create -> approval -> dispatch -> receive. Stock moves physically ONLY upon
+    receipt (via move_stock).
+
+    SMO: create -> approval -> the bins change hands. Added here 2026-08-21 because it
+    had NO record of its own at all — `create_stock_movement_order` minted a number,
+    moved the stock and returned, so there was nothing to approve, nothing to reject and
+    nothing to look up afterwards. `MOVEMENT_APPROVE` had been defined for months with
+    no route able to use it. See STO_KIND_* above for what the two do not share.
     """
     __tablename__ = "inv_sto"
     id = pk()
     sto_no = Column(String(30), unique=True, nullable=False)
+    #: STO or SMO. Defaulted to STO so every row written before this reads correctly.
+    doc_kind = Column(String(10), nullable=False, index=True,
+                      default=STO_KIND_TRANSFER, server_default=STO_KIND_TRANSFER)
     from_warehouse_id = Column(BigInteger, nullable=False)
     from_warehouse_name = Column(String(200), nullable=True)
+    #: On an SMO this is the SAME warehouse as `from_warehouse_id` — the move is between
+    #: bins inside it — so the column stays NOT NULL and no reader has to special-case a
+    #: null destination.
     to_warehouse_id = Column(BigInteger, nullable=False)
     to_warehouse_name = Column(String(200), nullable=True)
     from_project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
@@ -365,6 +395,17 @@ class StockTransferOrderItem(Base):
     dispatched_qty = Column(Numeric(16, 3), nullable=False, default=0)
     received_qty = Column(Numeric(16, 3), nullable=False, default=0)
     remarks = Column(String(500), nullable=True)
+    # SMO only, and null on every STO row. A transfer names warehouses and lets putaway
+    # decide the bin at the far end; a movement IS the choice of bin, so the two bins
+    # are the line. Batch travels with them because stock is held per bin per batch and
+    # a movement that does not say which batch cannot find the row it is moving.
+    source_bin_id = Column(BigInteger, nullable=True)
+    destination_bin_id = Column(BigInteger, nullable=True)
+    batch_id = Column(BigInteger, nullable=True)
+    # The units being moved, when the item is serial tracked. Held on the line so the
+    # selection made at CREATE is the selection approved later — re-picking serials at
+    # approval would let an approver move units nobody chose.
+    serial_numbers = Column(JSON, nullable=True)
 
     sto = relationship("StockTransferOrder", back_populates="items")
 

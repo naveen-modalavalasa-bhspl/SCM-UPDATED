@@ -1283,7 +1283,13 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
 
     receipt = m.Receipt(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
-        grn_no=await next_number(db, WarehouseDocType.RECEIPT.value),
+        # The project goes INTO the number (2026-08-21): a document number now reads
+        # BHS/MED/2026-27/REC0007, so the paper says whose it is without opening it.
+        # `project` is already loaded above for the snapshot columns, so this costs
+        # nothing. Where a receipt genuinely names no project the number renders NA in
+        # that slot, which is the truth rather than a guess.
+        grn_no=await next_number(db, WarehouseDocType.RECEIPT.value,
+                                 project=getattr(project, "name", None)),
         receipt_type=data.receipt_type.value,
         grn_date=data.grn_date,
         po_id=data.po_id,
@@ -1758,20 +1764,18 @@ async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
     # (`whs_receipts`), and `lgs_grn` carries no rows on this install.
     from app.modules.inventory import service as inventory_service
 
+    # Settling the request is the WHOLE handoff now. It used to be followed by a call
+    # that woke every allocation parked on the arrived item; allocations are terminal
+    # since 2026-08-21 (`inventory.allocations`, module docstring) and there is nothing
+    # to wake. Closing the MR is what stops `has_remainder` counting this quantity as
+    # on order, and that alone is what puts the indent back on the Fulfilment Desk. So
+    # this call is load-bearing in a way it did not look before: skip it, or let it
+    # fail quietly, and the goods reach the shelf while the indent stays hidden.
+    #
+    # `create_fulfilment_drafts_for_allocation` is still passed and is IGNORED inside —
+    # left in place because both callers pass it and removing it is a separate tidy-up.
     await inventory_service.mark_mrs_received(
         db, await _receipts_by_indent_line(db, po, lines, received),
-        create_fulfilment_drafts_for_allocation)
-
-    # FIXED 2026-08-21 — `mark_mrs_received` only reopens an allocation when the MR it
-    # settles carries the indent that raised it. Stock bought against a DIFFERENT
-    # indent, or on a manually raised MR, reached the shelf and woke nothing: the
-    # allocation stayed on AWAITING_PROCUREMENT and its indent stayed out of the
-    # Fulfilment Queue with the goods sitting in a bin. Availability decides here, not
-    # lineage — see `allocations.reopen_for_available_stock`.
-    from app.modules.inventory import allocations as stock_allocations
-
-    await stock_allocations.reopen_for_available_stock(
-        db, {line.item_id for line in lines if line.item_id},
         create_fulfilment_drafts_for_allocation)
 
 
@@ -2153,7 +2157,9 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
     suggested = await _suggest_bin(db, receipt.warehouse_id, line.item_id)
     item = await _item_snapshot(db, line.item_id)
     task = m.PutawayTask(
-        putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value),
+        # From the receipt it belongs to — see the note on the GRN number.
+        putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                     project=receipt.project_name),
         grn_id=receipt.id, grn_item_id=line.id,
         warehouse_id=receipt.warehouse_id,
         item_id=line.item_id, batch_id=line.batch_id or None,
@@ -2416,7 +2422,9 @@ async def _raise_inspection_for(
         # touch of an uninitialised collection is a lazy SELECT, which async has no
         # greenlet to run in. Handing it an empty list loads it up front.
         items=[],
-        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
+        # From the receipt it belongs to — see the note on the GRN number.
+        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value,
+                                        project=receipt.project_name),
         inspection_date=ist_today(),
         receipt_id=receipt.id, grn_no=receipt.grn_no,
         warehouse_id=receipt.warehouse_id, warehouse_name=receipt.warehouse_name,
@@ -2551,6 +2559,21 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
         serials = [value.strip() for value in (line.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
+        # FIXED 2026-08-21 — QC accepted serial numbers for an item that is not serial
+        # tracked. `_apply_receipt_lines` has refused that since it was written; this
+        # path, which is the OTHER door onto the same `whs_serial_numbers` rows, never
+        # got the same guard. So a number rejected at the gate could be walked in
+        # through the inspection instead, and `_unit_mode` then reads that item as CODE
+        # mode and never looks at the column the numbers went into — they are stored,
+        # unreachable, and indistinguishable from real ones to anybody reading the
+        # table.
+        #
+        # Same wording as the GRN guard on purpose: one rule, said the same way at both
+        # doors, so a storekeeper who has hit it once recognises it.
+        if serials and not item.is_serial_tracked:
+            raise ValidationError(
+                f"{item.code} is not configured for serial tracking"
+            )
         # IMEIs are checked but not stored: `inb_inspection_items` has no column for
         # them, and it needs none — an IMEI names the same physical unit its serial
         # does, and the GRN line it came off already holds the list.
@@ -2611,7 +2634,9 @@ async def create_inspection(db: AsyncSession, data: s.InspectionWrite, user) -> 
 
     inspection = m.Inspection(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
-        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
+        # From the receipt it belongs to — see the note on the GRN number.
+        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value,
+                                        project=receipt.project_name),
         inspection_date=data.inspection_date,
         receipt_id=data.receipt_id,
         grn_no=receipt.grn_no if receipt else None,
@@ -3144,7 +3169,9 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     task.qty = qty
     if remainder > ZERO:
         db.add(m.PutawayTask(
-            putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value),
+            # From the receipt it belongs to — see the note on the GRN number.
+        putaway_no=await next_number(db, WarehouseDocType.PUTAWAY.value,
+                                     project=receipt.project_name),
             grn_id=task.grn_id,
             grn_item_id=task.grn_item_id,
             warehouse_id=task.warehouse_id,
@@ -3807,6 +3834,150 @@ async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
     }
 
 
+#: What an SMO can be. Deliberately NOT the STO status set: a transfer has DISPATCHED
+#: and RECEIVED rungs that a bin-to-bin move has no meaning for, and reusing them would
+#: leave a movement able to sit in a state nothing can act on.
+class MovementOrderStatus:
+    PENDING_APPROVAL = IssueStatus.PENDING_APPROVAL
+    COMPLETED = IssueStatus.APPROVED
+    REJECTED = IssueStatus.REJECTED
+
+
+async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
+                              batch_id, quantity, serial_rows, order_no, user) -> None:
+    """Move ONE line out of its source bin and into its destination bin.
+
+    The physical half of a movement, in one place so the immediate path (no ladder
+    configured) and the approved path run identically. Out then in, both through
+    `move_stock`, because rule 7 says physical stock changes only ever go through it —
+    and each call writes its own `stk_ledger` row, which is what makes a movement
+    traceable afterwards.
+    """
+    for direction, bin_row in ((StockDirection.OUT.value, source),
+                               (StockDirection.IN.value, destination)):
+        await move_stock(
+            db, item_id=item.id, qty=quantity, direction=direction,
+            ref_type=InventoryRefType.STOCK_MOVEMENT.value,
+            ref_id=0, ref_no=order_no, user=user,
+            warehouse_id=wh.id, bin_id=bin_row.id, batch_id=batch_id, project_id=0,
+        )
+    for row in serial_rows:
+        row.bin_id = destination.id
+        row.remarks = f"Moved by {order_no}"
+
+
+async def _perform_movement_order(db: AsyncSession, order, user) -> None:
+    """Do what an approved movement order says, then mark it done.
+
+    Availability is re-checked HERE and not trusted from create time. The order was
+    validated against the shelf when it was raised, and between that press and this
+    signature the same units can be issued, picked or moved by somebody else — so
+    approving a stale order would either move stock that is gone or move units that are
+    now reserved for a material issue. Refusing is right: the approver is told what
+    changed and the order stays pending rather than half-applying.
+    """
+    from app.modules.inventory.models import Stock
+
+    wh = await _warehouse(db, order.from_warehouse_id)
+    for line in order.items:
+        item = await _item_snapshot(db, line.item_id)
+        source = await _get(db, Bin, line.source_bin_id, "Source bin")
+        destination = await _get(db, Bin, line.destination_bin_id, "Destination bin")
+        batch_id = line.batch_id or m.NO_BATCH
+        stock = (await db.execute(
+            select(Stock).where(
+                Stock.warehouse_id == wh.id, Stock.bin_id == source.id,
+                Stock.item_id == item.id, Stock.batch_id == batch_id,
+                Stock.project_id == 0,
+            ).with_for_update()
+        )).scalar_one_or_none()
+        available = _d(stock.available_qty) if stock else ZERO
+        if available < _d(line.requested_qty):
+            raise ValidationError(
+                f"{order.sto_no}: only {available} of {item.code} is left in bin "
+                f"{source.code} — this order was raised for {_d(line.requested_qty)}. "
+                "The stock moved after it was raised; reject it and raise it again."
+            )
+        serial_rows: list[m.SerialNumber] = []
+        wanted = [v for v in (line.serial_numbers or []) if str(v).strip()]
+        if wanted:
+            serial_rows = (await db.execute(
+                select(m.SerialNumber).where(
+                    m.SerialNumber.item_id == item.id,
+                    m.SerialNumber.warehouse_id == wh.id,
+                    m.SerialNumber.bin_id == source.id,
+                    m.SerialNumber.serial_number.in_(wanted),
+                    m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+                    m.SerialNumber.is_active.is_(True),
+                ).with_for_update()
+            )).scalars().all()
+            if len(serial_rows) != len(wanted):
+                raise ValidationError(
+                    f"{order.sto_no}: one or more units of {item.code} are no longer "
+                    "available in the source bin."
+                )
+        await _move_movement_line(
+            db, wh, item, source, destination, batch_id,
+            line.requested_qty, serial_rows, order.sto_no, user)
+
+    order.status = MovementOrderStatus.COMPLETED.value
+    order.approved_by_name = _name(user)
+    order.approved_at = utcnow()
+    order.current_approver_name = None
+
+
+async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: str,
+                                      comments: str, user) -> dict:
+    """Approve or reject a movement waiting on a signature.
+
+    The engine owns the chain; this owns the document status and the stock. Approval is
+    what finally moves anything — see `_perform_movement_order`, which re-checks the
+    shelf before it does.
+    """
+    from app.modules.inventory.models import StockTransferOrder, STO_KIND_MOVEMENT
+
+    order = (await db.execute(
+        select(StockTransferOrder).where(
+            StockTransferOrder.id == order_id,
+            StockTransferOrder.doc_kind == STO_KIND_MOVEMENT,
+        )
+    )).scalars().first()
+    if order is None:
+        raise NotFoundError(f"Stock movement order {order_id} not found")
+    _guard(order.status, {MovementOrderStatus.PENDING_APPROVAL.value},
+           action.lower(), "stock movement order")
+
+    before = order.status
+    instance = await engine.act(
+        db, DocType.STOCK_MOVEMENT_ORDER.value, order.id, action, user, comments,
+        context={"doc_no": order.sto_no, "warehouse_id": order.from_warehouse_id},
+    )
+    if instance.status == InstanceStatus.APPROVED.value:
+        await _perform_movement_order(db, order, user)
+    elif instance.status == InstanceStatus.REJECTED.value:
+        order.status = MovementOrderStatus.REJECTED.value
+        order.current_approver_name = None
+    else:
+        # More rungs to climb: the next approver's name goes on the document.
+        order.current_approver_name = _approver_label(
+            await engine.current_approvers(
+                db, DocType.STOCK_MOVEMENT_ORDER.value, order.id),
+            await _approver_rank(
+                db, DocType.STOCK_MOVEMENT_ORDER.value, order.id))
+
+    await write_audit(
+        db, entity="inv_sto", entity_id=order.id, entity_no=order.sto_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before}, after={"status": order.status},
+        summary=f"{action.title()} stock movement order",
+    )
+    await db.commit()
+    return {
+        "id": order.id, "order_no": order.sto_no, "status": order.status,
+        "current_approver_name": order.current_approver_name,
+    }
+
+
 async def create_stock_movement_order(
     db: AsyncSession,
     data: s.StockMovementOrderWrite,
@@ -3820,9 +3991,33 @@ async def create_stock_movement_order(
     to a table that does not exist.
     """
     from app.modules.inventory.models import Stock
+    from app.modules.inventory.models import (
+        StockTransferOrder, StockTransferOrderItem, STO_KIND_MOVEMENT,
+    )
 
     wh = await _warehouse(db, data.warehouse_id)
-    order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT.value)
+
+    # Does anybody have to sign for this? Asked BEFORE anything is written, which is
+    # the same guard `dispatch_consignment` and `submit_receipt` use, and for the same
+    # reason: with no ladder configured — which is every project today — this function
+    # behaves EXACTLY as it always did, moves the stock on the press and returns
+    # COMPLETED. Only a project that has deliberately built a chain gets the extra rung.
+    #
+    # `engine.start` is deliberately NOT called unconditionally. With nothing configured
+    # the engine climbs the raiser's reporting line, which would put every bin-to-bin
+    # movement into a stranger's queue.
+    project_id, project_name = await wf_ladder.project_for(
+        db, getattr(user, "active_position_id", None), user)
+    needs_approval = await wf_ladder.find_ladder(
+        db, project_id, DocType.STOCK_MOVEMENT_ORDER.value) is not None
+
+    # Its OWN series (2026-08-21). This drew on STOCK_MOVEMENT, which meant two
+    # things at once: an order and a plain bin-to-bin movement shared one running
+    # number, and the three-letter prefix fallback rendered both as "STO" — the
+    # abbreviation this system already uses for a Stock TRANSFER Order, which is an
+    # inter-warehouse document with a different table, a different screen and a
+    # different meaning. An SMO now reads SMO.
+    order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT_ORDER.value)
     moved: list[dict] = []
 
     for line in data.items:
@@ -3887,37 +4082,20 @@ async def create_stock_movement_order(
         elif serial_numbers:
             raise ValidationError(f"{item.code} is not serial tracked")
 
-        await move_stock(
-            db,
-            item_id=item.id,
-            qty=line.quantity,
-            direction=StockDirection.OUT.value,
-            ref_type=InventoryRefType.STOCK_MOVEMENT.value,
-            ref_id=0,
-            ref_no=order_no,
-            user=user,
-            warehouse_id=wh.id,
-            bin_id=source.id,
-            batch_id=batch_id,
-            project_id=0,
-        )
-        await move_stock(
-            db,
-            item_id=item.id,
-            qty=line.quantity,
-            direction=StockDirection.IN.value,
-            ref_type=InventoryRefType.STOCK_MOVEMENT.value,
-            ref_id=0,
-            ref_no=order_no,
-            user=user,
-            warehouse_id=wh.id,
-            bin_id=destination.id,
-            batch_id=batch_id,
-            project_id=0,
-        )
-        for row in serial_rows:
-            row.bin_id = destination.id
-            row.remarks = f"Moved by {order_no}"
+        # THE MOVE, only when nobody has to sign for it.
+        #
+        # Everything above this line is validation and runs either way: an order that
+        # will be refused for a bad bin or missing stock must be refused NOW, at the
+        # desk, not after somebody has approved it. What is deferred is the physical
+        # move, and only that.
+        #
+        # `_perform_movement_order` runs the identical two calls on approval and
+        # re-checks availability first, because the shelf can move between the press
+        # and the signature.
+        if not needs_approval:
+            await _move_movement_line(
+                db, wh, item, source, destination, batch_id,
+                line.quantity, serial_rows, order_no, user)
         moved.append({
             "item_id": item.id,
             "item_code": item.code,
@@ -3932,10 +4110,66 @@ async def create_stock_movement_order(
             "serial_numbers": serial_numbers,
         })
 
+    order = None
+    if needs_approval:
+        # The document, so there is something to approve. Written only on this branch:
+        # a project with no ladder has nothing to hold and keeps the old behaviour of
+        # leaving no header row, exactly as before.
+        order = StockTransferOrder(
+            sto_no=order_no,
+            doc_kind=STO_KIND_MOVEMENT,
+            # Both ends are the same warehouse — a movement never leaves the building.
+            # Kept NOT NULL so no reader of `inv_sto` has to special-case a null.
+            from_warehouse_id=wh.id, from_warehouse_name=wh.name,
+            to_warehouse_id=wh.id, to_warehouse_name=wh.name,
+            status=MovementOrderStatus.PENDING_APPROVAL.value,
+            requested_by_id=getattr(user, "id", None),
+            requested_by_name=_name(user),
+            remarks=data.reason,
+            items=[StockTransferOrderItem(
+                item_id=row["item_id"], item_code=row["item_code"],
+                item_name=row["item_name"], uom_code=row["uom_code"],
+                requested_qty=_d(row["quantity"]),
+                source_bin_id=row["source_bin_id"],
+                destination_bin_id=row["destination_bin_id"],
+                batch_id=row["batch_id"],
+                serial_numbers=row["serial_numbers"] or None,
+            ) for row in moved],
+        )
+        db.add(order)
+        await db.flush()
+
+        instance = await engine.start(
+            db, doc_type=DocType.STOCK_MOVEMENT_ORDER.value, doc_id=order.id,
+            context={
+                "doc_no": order_no,
+                "doc_summary": f"Stock movement in {wh.name}",
+                "warehouse_id": wh.id,
+                "project_id": project_id,
+                "project_name": project_name,
+                "requester_position_id": getattr(user, "active_position_id", None),
+            },
+            user=user,
+        )
+        # The ladder can finish AT SUBMIT — a warehouse manager raising a movement in
+        # his own warehouse is the top of a self-owned chain, and any ladder set to
+        # NO_APPROVAL comes back approved too. Recording PENDING_APPROVAL anyway would
+        # leave the document and its workflow disagreeing: nothing in anybody's queue,
+        # and stock that never moved. Same branch `allocations.create` has carried
+        # since it was written.
+        if instance.status == InstanceStatus.APPROVED.value:
+            await _perform_movement_order(db, order, user)
+        else:
+            order.current_approver_name = _approver_label(
+                await engine.current_approvers(
+                    db, DocType.STOCK_MOVEMENT_ORDER.value, order.id),
+                await _approver_rank(
+                    db, DocType.STOCK_MOVEMENT_ORDER.value, order.id))
+
     await write_audit(
         db,
-        entity="whs_stock_movements",
-        entity_id=0,
+        entity="inv_sto" if order is not None else "whs_stock_movements",
+        entity_id=order.id if order is not None else 0,
         entity_no=order_no,
         action=AuditAction.CREATE,
         actor=user,
@@ -3943,15 +4177,19 @@ async def create_stock_movement_order(
             "warehouse_id": wh.id,
             "lines": len(data.items),
             "remarks": data.reason,
+            "status": order.status if order is not None else "COMPLETED",
         },
     )
     await db.commit()
 
     return {
         "order_no": order_no,
+        "id": order.id if order is not None else 0,
         "warehouse_id": wh.id,
         "warehouse_name": wh.name,
-        "status": "COMPLETED",
+        "status": order.status if order is not None else "COMPLETED",
+        "current_approver_name": (order.current_approver_name
+                                  if order is not None else None),
         "reason": data.reason,
         "total_lines": len(moved),
         "items": moved,
@@ -4391,10 +4629,10 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
     for warehouse_id, lines in by_warehouse.items():
         # FIXED 2026-08-21 — draft only the INCREMENT, never the whole allocation.
         #
-        # An allocation is approved more than once. It is signed, the shelf covers part
-        # of it, the rest goes to procurement, the goods arrive, and the SAME document
-        # is reopened and signed again (`allocations.reopen_for_receipt`). The line the
-        # first signature already issued is still on it, so this used to re-draft the
+        # A requirement collects more than one approved allocation: the cascade hands
+        # the remainder up the chain, and once the goods for a shortfall arrive the desk
+        # allocates the rest against the same indent lines. The line an earlier
+        # signature already issued is still owed nothing, so this used to re-draft the
         # full quantity and `_guard_indent_quantity` refused the whole batch:
         # "IND/2026-27/00093 is already covered for K2 EDTA Vacutainer Lavender 2 ml —
         # 10.000 of 10.000 by WHI/2026-27/00045 (ISSUED)". One settled line took the
@@ -5464,7 +5702,9 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
         # SELECT. A lazy load inside an AsyncSession raises MissingGreenlet, so the
         # create failed before writing a single line. Same reason on every create_* here.
         items=[],
-        issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value),
+        # From the indent it serves — see the note on the GRN above.
+        issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value,
+                                   project=getattr(indent, "project_name", None)),
         issue_type=data.issue_type.value,
         issue_date=data.issue_date,
         indent_id=data.indent_id,
@@ -5987,7 +6227,9 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
         issue.current_approver_name = None
     else:
         approvers = await engine.current_approvers(db, doc_type, issue.id)
-        issue.current_approver_name = _approver_label(approvers)
+        # Rung as well as name — see `_approver_label` (2026-08-21).
+        issue.current_approver_name = _approver_label(
+            approvers, await _approver_rank(db, doc_type, issue.id))
         issue.status = IssueStatus.PENDING_APPROVAL.value
 
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
@@ -6036,7 +6278,8 @@ async def act_on_issue(
         issue.current_approver_name = None
     else:
         issue.current_approver_name = _approver_label(
-            await engine.current_approvers(db, doc_type, issue.id)
+            await engine.current_approvers(db, doc_type, issue.id),
+            await _approver_rank(db, doc_type, issue.id),
         )
 
     await write_audit(
@@ -6049,17 +6292,43 @@ async def act_on_issue(
     return await get_issue(db, issue_id)
 
 
-def _approver_label(approvers: list) -> str | None:
-    """A readable "who is holding this" from whatever the engine returned."""
+def _approver_label(approvers: list, rank: str | None = None) -> str | None:
+    """A readable "who is holding this" from whatever the engine returned.
+
+    2026-08-21 — now says the RUNG as well: "Mahendra Kumar (Warehouse Manager)". A bare
+    name does not tell a requester why the document is with that person or how far it
+    has climbed, and where one person holds two posts it is actively misleading.
+
+    Kept as a list-taking helper rather than replaced by
+    `engine.current_approver_label`, because all six callers here have already fetched
+    the approvers for their own reasons and swapping them would double the queries. The
+    rank is passed in from the same instance the caller already loaded. The collapsing
+    rule ("first +N") is unchanged and is shared with the engine's builder — both write
+    into `current_approver_name`, which is String(200).
+    """
     names = []
     for a in approvers or []:
         name = (a.get("name") or a.get("employee_name") or a.get("full_name")
                 if isinstance(a, dict) else getattr(a, "full_name", None))
         if name:
             names.append(name)
-    if not names:
-        return None
-    return names[0] if len(names) == 1 else f"{names[0]} +{len(names) - 1}"
+    who = ("" if not names
+           else names[0] if len(names) == 1
+           else f"{names[0]} +{len(names) - 1}")
+    rank = (rank or "").strip()
+    label = f"{who} ({rank})" if who and rank else (who or rank)
+    return label[:200] if label else None
+
+
+async def _approver_rank(db: AsyncSession, doc_type: str, doc_id: int) -> str | None:
+    """The rung a document is sitting on, for `_approver_label` above.
+
+    Read off the frozen `wf_instances.resolved_chain` by the engine, never derived from
+    the approver's HCM record: the chain is what the ladder actually decided, and an
+    approver holding two posts would otherwise be labelled with whichever hat came back
+    first. See `engine.current_approver_label` for the full reasoning.
+    """
+    return await engine.current_stage_rank(db, doc_type, doc_id)
 
 
 async def _raise_picking_for_issue(
@@ -6264,7 +6533,9 @@ async def _raise_outbound_inspection_for(
     """The outbound inspection a posted issue creates for items requiring QC."""
     inspection = m.OutboundInspection(
         items=[],
-        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
+        # From the receipt it belongs to — see the note on the GRN number.
+        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value,
+                                        project=getattr(issue, "project_name", None)),
         inspection_date=ist_today(),
         issue_id=issue.id,
         issue_no=issue.issue_no,
@@ -7763,7 +8034,9 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
 
     dispatch = m.Dispatch(
         items=[], packages=[], events=[],
-        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value),
+        # From the issue it ships — see the note on the GRN above.
+        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value,
+                                      project=getattr(issue, "project_name", None)),
         dispatch_type=data.dispatch_type.value,
         dispatch_date=data.dispatch_date,
         warehouse_id=wh.id,
@@ -7929,7 +8202,9 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         # them loaded to work out the cascade — which is a lazy load, which an
         # AsyncSession cannot do.
         items=[], packages=[], events=[],
-        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value),
+        # From the issue it ships — see the note on the GRN above.
+        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value,
+                                      project=getattr(ref_issue, "project_name", None)),
         dispatch_type=data.dispatch_type.value,
         dispatch_date=data.dispatch_date,
         warehouse_id=wh.id, warehouse_name=wh.name,
@@ -8054,7 +8329,9 @@ async def _apply_dispatch_submit(db: AsyncSession, dispatch: m.Dispatch, user):
         approvers = await engine.current_approvers(
             db, WarehouseDocType.DISPATCH.value, dispatch.id
         )
-        dispatch.current_approver_name = _approver_label(approvers)
+        dispatch.current_approver_name = _approver_label(
+            approvers,
+            await _approver_rank(db, WarehouseDocType.DISPATCH.value, dispatch.id))
         dispatch.status = DispatchStatus.PENDING_APPROVAL.value
     return instance
 
@@ -8115,7 +8392,8 @@ async def act_on_dispatch(
         dispatch.current_approver_name = _approver_label(
             await engine.current_approvers(
                 db, WarehouseDocType.DISPATCH.value, dispatch.id
-            )
+            ),
+            await _approver_rank(db, WarehouseDocType.DISPATCH.value, dispatch.id),
         )
 
     await write_audit(
@@ -11752,7 +12030,9 @@ async def create_outbound_inspection(db: AsyncSession, data: s.OutboundInspectio
 
     inspection = m.OutboundInspection(
         items=[],
-        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value),
+        # From the receipt it belongs to — see the note on the GRN number.
+        inspection_no=await next_number(db, WarehouseDocType.INSPECTION.value,
+                                        project=getattr(issue, "project_name", None)),
         inspection_date=data.inspection_date,
         issue_id=data.issue_id,
         issue_no=issue.issue_no if issue else None,
@@ -11875,7 +12155,8 @@ async def _outbound_inspection_approval_pending(db: AsyncSession,
     inspection.status = InspectionStatus.PENDING_APPROVAL.value
     inspection.current_approver_name = _approver_label(
         await engine.current_approvers(
-            db, WarehouseDocType.QC_OUTWARD.value, inspection.id))
+            db, WarehouseDocType.QC_OUTWARD.value, inspection.id),
+        await _approver_rank(db, WarehouseDocType.QC_OUTWARD.value, inspection.id))
     return True
 
 
@@ -11946,7 +12227,8 @@ async def act_on_outbound_inspection(db: AsyncSession, inspection_id: int, actio
     else:
         inspection.current_approver_name = _approver_label(
             await engine.current_approvers(
-                db, WarehouseDocType.QC_OUTWARD.value, inspection.id))
+                db, WarehouseDocType.QC_OUTWARD.value, inspection.id),
+            await _approver_rank(db, WarehouseDocType.QC_OUTWARD.value, inspection.id))
 
     after["status"] = inspection.status
     await write_audit(db, entity="whs_inspections", entity_id=inspection.id,
@@ -11986,12 +12268,3 @@ async def list_outbound_inspections(db: AsyncSession, params: PageParams,
             )
         )
     return await paginate(db, stmt.order_by(m.OutboundInspection.created_at.desc()), params)
-
-
-# Inventory wakes a parked allocation from `move_stock` — the one chokepoint every
-# stock increase passes — and has no warehouse callback in scope to hand it (rule 5:
-# inventory imports no module). Registering it here, at import, is how that doorway
-# still produces the issue drafts the floor picks against.
-from app.modules.inventory import allocations as _stock_allocations  # noqa: E402
-
-_stock_allocations.register_on_approved(create_fulfilment_drafts_for_allocation)

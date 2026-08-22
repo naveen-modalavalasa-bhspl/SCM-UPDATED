@@ -31,7 +31,13 @@ const matches = (path: string, loc: string) =>
  * A row click must leave the tab it came from selected.
  */
 const DETAIL_OWNER: [prefix: string, page: string][] = [
-  ["/inventory/allocate", "/inventory/fulfillment"],
+  ["/inventory/allocate", "/inventory/fulfilment"],
+  // The allocation review and the monthly cycle screens, which the Fulfilment Desk's
+  // Approvals tab navigates to. Their own menu rows were retired with the two screens
+  // the desk replaced (2026-08-21), so without this the tab strip lights up nothing at
+  // all while somebody is signing an allocation.
+  ["/inventory/allocation-approvals", "/inventory/fulfilment"],
+  ["/inventory/fulfillment", "/inventory/fulfilment"],
 ];
 
 /** The menu path the tab strip should treat this URL as, detail screens included. */

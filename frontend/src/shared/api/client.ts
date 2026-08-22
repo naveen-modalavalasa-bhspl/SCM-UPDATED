@@ -54,6 +54,18 @@ export const vendorPortal = (): VendorPortal =>
 export const vendorHome = () =>
   vendorPortal() === "carrier" ? "/carrier/jobs" : "/supplier/rfqs";
 
+/** The change-password screen, on the door they came in through.
+ *
+ *  FIXED 2026-08-21 — there is ONE password screen and it was only ever mounted on
+ *  /supplier/password, so a carrier forced to change theirs at first sign-in was
+ *  dropped out of the carrier shell into the supplier portal's header and tabs, with
+ *  no route back to their shipments. Same bug and the same fix as /carrier/profile:
+ *  one implementation, mounted on both paths, reached through here so no screen has to
+ *  know which portal it is standing in. `vendorHome()` above already sends them back
+ *  to the right side afterwards, which is why only the path was ever wrong. */
+export const vendorPasswordPath = () =>
+  vendorPortal() === "carrier" ? "/carrier/password" : "/supplier/password";
+
 const isSupplierCall = (url?: string) => Boolean(url?.startsWith("/api/supplier"));
 
 /** Where they are standing beats what they last logged in as — a carrier looking at a

@@ -106,6 +106,67 @@ A module only creates tables with its own prefix.
 Indent → PO (`indent_id`) → GRN (`po_id`) → Stock → Issue (`grn_id`/`indent_id`).
 Handoffs: `create_po_from_indent`, `create_grn_from_po`, `qc_pass → move_stock`.
 
+### Fulfilment: one desk, and a signed allocation is terminal (2026-08-21)
+
+**The Fulfilment Queue and Allocation Approvals are ONE screen** — the **Fulfilment
+Desk**, `/inventory/fulfilment`, page code `inv_fulfilment_desk`. They were two halves
+of a single decision: the queue listed what an indent was still owed and took the
+decision, and a second screen signed it. Where a project's ladder says `NO_APPROVAL`
+that second screen was a page with one button on it; where a real ladder is configured
+the approver had to leave the numbers behind to go find the document. It is two tabs
+now — **To allocate** and **To approve** — over the same rows, gated separately on
+`allocation.create` and `allocation.approve`, so a storekeeper who allocates but does
+not approve still sees one tab. `FulfilmentDeskPage` renders the two original page
+components with `embedded`; neither keeps a second copy of the other's rules.
+
+This is **not** a way around the ladder. Every press still goes through
+`allocations.create` / `allocations.act`, which ask `platform/workflow/ladder` who
+signs. How many presses a fulfilment takes is decided on Settings > Approvals Config,
+per project, per document type — never in the screen.
+
+`inv_fulfillment` and `inv_allocation_approvals` are in `page_registry.RETIRED_PAGES`
+(`is_active = 0`, every grant kept), and `page.inv_fulfilment_desk.view` inherits from
+`page.inv_fulfillment.view` — the wider of the two, since the buttons are still gated
+one by one. Both old paths redirect; `/inventory/allocation-approvals` redirects
+through `LegacyAllocationApprovalsRedirect` because the notification for an allocation
+carried `?review=<id>` and a plain `<Navigate>` would have dropped it. The review and
+monthly-cycle screens (`/inventory/allocation-approvals/:id`, `/cycle/:cycle`) never
+moved.
+
+**An approved allocation is TERMINAL.** It is never reopened, topped up or
+re-approved. An indent served in rounds collects one allocation per round, each with
+its own ladder, reservations and issue draft. `AWAITING_PROCUREMENT` is retired
+(`a1c2e3f4b5d6` renames the rows; the enum value survives so an unmigrated database
+still reads its old rows as signed).
+
+The invariant that replaces it: **what an indent is still owed is READ, never stored.**
+It is `approved − allocated − on order`, computed by
+`indents.list_indents(has_remainder=True)` and by `fulfilment_batches` for a monthly
+cycle. Arriving stock changes that answer by existing, so the indent returns to the
+desk on its own and nothing has to be notified. The whole reopen machinery —
+`reopen_for_available_stock`, `reopen_for_receipt`, `_prefill_from_shelf`,
+`ON_APPROVED_HOOK` — is gone, and with it six defects that were one per doorway stock
+can reach a shelf through. **Do not reintroduce a "wake the document" path.** If an
+allocation needs to come back, the answer is a new allocation off the desk.
+
+What is load-bearing because of it, all failing SILENTLY if narrowed:
+`list_indents(has_remainder=True)`, `indents._SETTLED_MR_STATUSES` (its "on order"
+term — `DRAFT` counts as settled: nobody is buying an unsubmitted request),
+`SETTLED_ALLOCATION_STATUSES`, and `mark_mrs_received` (closing the MR is what stops
+the quantity counting as on order). The module docstring on
+`inventory/allocations.py` carries the full list.
+
+Four defects fixed alongside, on the first-approval path where they always lived:
+`apply_to_stock` now reads `reserve()`'s return and corrects the line down when the
+point held less than was promised (it reserved short and still reported the full
+number, so an indent closed ALLOCATED over stock nobody held); the "is it genuinely
+spare" check is **warehouse-tier only**, since LIP/MDP stock counted as spare and
+suppressed the material request; the one-press path takes `_assert_still_available`
+under row locks before settling, because with `NO_APPROVAL` there is no later locked
+check; and `create_mr_from_shortfall` deduplicates per indent **line**, not per indent
+— per indent was enough while a shortage was raised once, and rounds of serving mean a
+later shortage on the same indent is a different shortage that was being dropped.
+
 ### The outward leg (doc Phase D+E), under Logistics
 
 Logistics runs the whole outward leg, in the order it happens:

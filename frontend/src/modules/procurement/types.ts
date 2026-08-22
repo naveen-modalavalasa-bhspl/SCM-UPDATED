@@ -814,3 +814,41 @@ export interface PORevisionLine {
  *  which is every order still on its original version. */
 export const revisionLines = (revision?: PORevision | null): PORevisionLine[] =>
   (revision?.snapshot?.items as PORevisionLine[] | undefined) ?? [];
+
+/** One message on the vendor's bell. `deep_link` is always a PORTAL path — a vendor
+ *  can never be handed a link to an internal screen. */
+export interface VendorNotification {
+  id: number;
+  title: string;
+  body?: string | null;
+  entity_type?: string | null;
+  entity_id?: number | null;
+  deep_link?: string | null;
+  is_read: boolean;
+  created_at?: string | null;
+}
+
+/** One document on the buying trail. `ref_no` is what it was raised FROM, which is
+ *  what makes the register read as a chain rather than four unrelated lists. */
+export interface ProcurementLedgerRow {
+  doc_kind: string;
+  doc_id: number;
+  doc_no: string;
+  doc_date?: string | null;
+  party?: string | null;
+  project_name?: string | null;
+  title?: string | null;
+  status?: string | null;
+  value?: number | string | null;
+  ref_no?: string | null;
+  with_whom?: string | null;
+}
+
+export interface ProcurementLedgerFilters {
+  doc_kinds: { value: string; label: string }[];
+  columns: { key: string; label: string; kind: string; narrow?: boolean }[];
+  statuses: string[];
+  projects: string[];
+  vendors: string[];
+}
+

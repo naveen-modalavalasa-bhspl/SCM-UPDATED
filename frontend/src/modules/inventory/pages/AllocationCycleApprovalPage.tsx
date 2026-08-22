@@ -145,7 +145,7 @@ export function AllocationCycleApprovalPage() {
             ? `${result.done_count} allocation${result.done_count === 1 ? "" : "s"} signed — nothing left in this cycle.`
             : "Nothing in this cycle is waiting for you."}
           <div className="mt-3">
-            <Button variant="secondary" onClick={() => nav("/inventory/allocation-approvals")}>
+            <Button variant="secondary" onClick={() => nav("/inventory/fulfilment?tab=approvals")}>
               Back to approvals
             </Button>
           </div>
@@ -160,7 +160,7 @@ export function AllocationCycleApprovalPage() {
         eyebrow="Inventory · Allocation Approvals"
         title={`${batch.month_label} — ${batch.consolidation_no ?? "consolidated"}`}
         actions={
-          <Button variant="ghost" onClick={() => nav("/inventory/allocation-approvals")}>
+          <Button variant="ghost" onClick={() => nav("/inventory/fulfilment?tab=approvals")}>
             <ArrowLeft className="h-4 w-4" /> Back
           </Button>
         }

@@ -577,8 +577,16 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("inv_ledger", "inventory", "Inventory · Stock Ledger"),
     ("inv_replenishment", "inventory", "Inventory · Replenishment"),
     ("inv_transfers", "inventory", "Inventory · Transfers"),
+    # Retired 2026-08-21, replaced by the Fulfilment Desk below. Catalogued still,
+    # because `seed_permissions` never prunes: the rows and every grant on them are in
+    # the database, and the new screen's own code inherits from the first of them.
     ("inv_fulfillment", "inventory", "Inventory · Fulfilment Queue"),
     ("inv_allocation_approvals", "inventory", "Inventory · Allocation Approvals"),
+    # The two above as one screen: decide what to give and sign it in the same place.
+    ("inv_fulfilment_desk", "inventory", "Inventory · Fulfilment Desk"),
+    # The buying trail. Catalogued rather than left for `sync_pages` to invent, so it
+    # can inherit below instead of landing Admin-only.
+    ("pro_ledger", "procurement", "Procurement · Ledger"),
     ("inv_mr", "inventory", "Inventory · Material Requests"),
     ("inv_labels", "inventory", "Inventory · Labels & Printing"),
     # Rode on `stock.points.manage`, which is the action that RE-TAGS a stocking point.
@@ -691,4 +699,17 @@ INHERITS_GRANTS_FROM.update({
     # Outward QC is a genuinely NEW screen on a genuinely new code, so this one is
     # fail-closed on purpose: nobody holds `qc_outward.view` until an admin grants it.
     page_view_code("wh_qc_outward"): QC_OUTWARD_VIEW,
+    # The Fulfilment Desk replaces the Fulfilment Queue and Allocation Approvals, so it
+    # lands with the people who worked them rather than fail-closed to Admin — the same
+    # reasoning as the Activity Ledger above. It inherits from the QUEUE, not from
+    # Allocation Approvals: the queue is the wider grant (every desk that allocates has
+    # it, only some of them approve), and the buttons on the new screen are still gated
+    # one by one on `allocation.create` / `allocation.approve_reserve`, so inheriting
+    # the screen hands nobody an approval they did not already hold.
+    page_view_code("inv_fulfilment_desk"): page_view_code("inv_fulfillment"),
+    # A read-only register over documents `po.view` already covers, so it lands with the
+    # buyers who can see purchase orders today rather than fail-closed to Admin. The
+    # endpoint behind it is gated on PO_VIEW for the same reason: the register's most
+    # sensitive column is what an order came to.
+    page_view_code("pro_ledger"): PO_VIEW,
 })

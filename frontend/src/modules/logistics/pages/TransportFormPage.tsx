@@ -521,6 +521,12 @@ export function TransportFormPage() {
           <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {rule?.needs_carrier && (
               <Field
+                // FIXED 2026-08-21 — marked, not just validated. The asterisk reads
+                // the SAME served rule the submit check does (`rule.required_fields`,
+                // less the tender exception), so a mode whose carrier is awarded off
+                // the quotes correctly shows none, and the screen can never disagree
+                // with the refusal it is about to give.
+                required={!rule.needs_quotes}
                 label={rule.needs_quotes ? "Carrier (optional until awarded)" : "Carrier"}
                 hint={rule.needs_quotes
                   ? "Leave blank — the carrier is chosen from the quotes."
@@ -536,11 +542,13 @@ export function TransportFormPage() {
             )}
             {needs("vehicle_number") && (
               <>
-                <Field label="Vehicle number">
+                {/* Required by the mode rule, and now marked as such — `needs()` is
+                    the same served list `submitProblems` refuses on. */}
+                <Field label="Vehicle number" required={needs("vehicle_number")}>
                   <Input value={provider.vehicle_number}
                     onChange={(e) => setProvider({ ...provider, vehicle_number: e.target.value })} />
                 </Field>
-                <Field label="Driver">
+                <Field label="Driver" required={needs("driver_name")}>
                   <Input value={provider.driver_name}
                     onChange={(e) => setProvider({ ...provider, driver_name: e.target.value })} />
                 </Field>
@@ -557,6 +565,7 @@ export function TransportFormPage() {
             )}
             {needs("handed_over_by_name") && (
               <Field label="Handed over by"
+                required={needs("handed_over_by_name")}
                 hint="Receipt is confirmed later by the indent requester with photos and bills.">
                 <Input value={provider.handed_over_by_name}
                   onChange={(e) => setProvider({ ...provider, handed_over_by_name: e.target.value })} />
@@ -703,7 +712,7 @@ export function TransportFormPage() {
               className="grid gap-3 rounded-lg border border-line/70 p-3 sm:grid-cols-2 lg:grid-cols-7"
             >
               <div className="lg:col-span-2">
-                <Field label="Item">
+                <Field label="Item" required={!fromPackingList}>
                   <Input value={line.item_name ?? ""} readOnly={fromPackingList}
                     disabled={fromPackingList}
                     onChange={(e) => setLine(index, { item_name: e.target.value })} />

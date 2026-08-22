@@ -461,30 +461,12 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         await notify_if_below_minimum(db, item_id, warehouse_id,
                                       after + float(qty), after)
 
-    # FIXED 2026-08-21 — an allocation parked on AWAITING_PROCUREMENT only ever woke
-    # from TWO doorways: warehouse putaway, and a receipt against the MR its own
-    # shortfall raised. Stock reaching the shelf any other way — a transfer in, a
-    # return to stock, an adjustment, a GRN posted through another path — left the
-    # allocation asleep, so the indent stayed out of the fulfilment queue and could
-    # not be edited with the goods sitting in the bin. That is the bug that has come
-    # back over and over, once per doorway.
-    #
-    # Here because this is the ONE function every stock increase passes through
-    # (rule 7), so there is no doorway left to miss. It is deliberately not gated on
-    # ref_type: how the goods arrived is exactly the lineage that was wrong to care
-    # about. `reopen_for_available_stock` is idempotent and tier-filtered — an inward
-    # move at a LIP or MDP wakes nothing, because that stock is not the warehouse's to
-    # give — and it returns immediately when no allocation is parked on the item.
-    if direction == StockDirection.IN.value:
-        # Imported here, not at module load: `allocations` imports this file for its
-        # MR helper, and a top-level import would close the loop.
-        from app.modules.inventory import allocations
-
-        # No `on_approved` to pass: inventory may not import warehouse (rule 5). The
-        # warehouse registers its handoff on `allocations.ON_APPROVED_HOOK` at import
-        # and the reopen falls back to it, so an allocation whose ladder self-approves
-        # still gets its fulfilment drafts from this doorway as from the others.
-        await allocations.reopen_for_available_stock(db, {item_id})
+    # NOTE 2026-08-21 — a stock increase used to have to WAKE any allocation parked on
+    # AWAITING_PROCUREMENT, and getting that wiring right at every doorway (putaway,
+    # GRN, transfer in, return to stock, adjustment) was a recurring source of live
+    # defects. Nothing to wake any more: a signed allocation is terminal, and what an
+    # indent is still owed is recomputed on read from the shelf and the open material
+    # requests. Arriving stock changes that answer by existing.
     return stock
 
 
@@ -975,6 +957,12 @@ async def mark_mrs_received(db: AsyncSession,
                             on_approved=None) -> list[int]:
     """Close every material request whose goods have now reached stock.
 
+    `on_approved` is accepted and IGNORED. It used to carry the warehouse's fulfilment
+    handoff down into the allocation this receipt reopened; allocations are terminal
+    since 2026-08-21 and nothing is reopened here. The parameter stays so the two
+    callers that pass it keep working — dropping it is a separate tidy-up, not part of
+    this change.
+
     `receipts` is the CUMULATIVE accepted quantity per INDENT LINE, worked out by the
     module that owns the receipt — inventory cannot read a GRN (rule 5), and the caller
     already holds the join. A request is only closed when every one of its lines is
@@ -1016,20 +1004,11 @@ async def mark_mrs_received(db: AsyncSession,
         if covered and mr.items:
             mr.status = MRStatus.RECEIVED.value
             closed.append(mr.id)
-            # The allocation that raised this request has been sitting on
-            # AWAITING_PROCUREMENT waiting for exactly these goods. Hand it back to its
-            # approver rather than leaving the indent to raise a second one.
-            if mr.indent_id:
-                # Imported here, not at module load: `allocations` imports this file
-                # for its MR helper, and a top-level import would close the loop.
-                from app.modules.inventory import allocations
-
-                # `on_approved` travels with it: a reopened allocation whose ladder
-                # self-approves settles inside that call, and settling means the
-                # warehouse's fulfilment draft too. Inventory cannot import warehouse
-                # (rule 5), so the caller that owns the receipt supplies the handoff.
-                await allocations.reopen_for_receipt(
-                    db, mr.indent_id, on_approved)
+            # Closing the request is the whole job now. It used to also hand the
+            # allocation that raised it back to an approver; a signed allocation is
+            # terminal since 2026-08-21, and settling the MR is precisely what stops
+            # `has_remainder` counting this quantity as still on order — which is what
+            # brings the indent back to the fulfilment desk by itself.
     return closed
 
 
@@ -1062,16 +1041,48 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
 
     ctx = ctx or {}
     if indent_id is not None:
-        existing = (await db.execute(
-            select(MaterialRequest).where(
+        # FIXED 2026-08-21 — deduplicate per indent LINE, not per indent.
+        #
+        # This used to return the first non-rejected MR on the indent and drop the
+        # shortfall on the floor. That was survivable while an indent raised its
+        # shortage once; it is not now. An indent is served in ROUNDS — allocate what
+        # the shelf holds, buy the rest, allocate again when it lands — and a shortage
+        # discovered in a LATER round is a different shortage. Ask for 100, hold 30,
+        # buy 70, take delivery of only 40: the remaining 30 is short again, this
+        # found the first MR (RECEIVED, closed, already delivered against) and returned
+        # it, so nothing was ever bought for those 30. The indent then sat on the
+        # fulfilment desk owed 30 with no purchase behind it — exactly the shape of the
+        # two other "owed with nothing on order" defects.
+        #
+        # An indent line that ALREADY has a live or delivered request is still a
+        # duplicate and is still dropped; only the lines nothing has been raised for
+        # reach a new document. Rejected requests do not count as covering anything —
+        # that shortage was refused, not bought.
+        wanted = {s.get("indent_item_id") for s in shortfalls if s.get("indent_item_id")}
+        already = set((await db.execute(
+            select(MaterialRequestItem.indent_item_id)
+            .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+            .where(
                 MaterialRequest.indent_id == indent_id,
                 MaterialRequest.status != MRStatus.REJECTED.value,
-            ).order_by(MaterialRequest.id)
-        )).scalars().first()
-        if existing is not None:
-            # Replaying an approval, or approving a second partial allocation, must
-            # not create two purchase demands for the same shortage.
-            return existing
+                MaterialRequestItem.indent_item_id.in_(wanted or {0}),
+            )
+        )).scalars().all())
+        outstanding = [s for s in shortfalls
+                       if s.get("indent_item_id") not in already]
+        if not outstanding:
+            # Every short line is already on a request — a replayed approval, or the
+            # same shortage reaching this twice. Hand back the document that carries
+            # them rather than writing a second one for the same demand.
+            existing = (await db.execute(
+                select(MaterialRequest).where(
+                    MaterialRequest.indent_id == indent_id,
+                    MaterialRequest.status != MRStatus.REJECTED.value,
+                ).order_by(MaterialRequest.id)
+            )).scalars().first()
+            if existing is not None:
+                return existing
+        shortfalls = outstanding or shortfalls
 
     return await _raise_mr(db, indent_id, indent_no, shortfalls, user, ctx)
 
@@ -1262,8 +1273,9 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
 
 
 async def _refresh_mr_approver(db: AsyncSession, mr: MaterialRequest) -> None:
-    approvers = await engine.current_approvers(db, DocType.MR.value, mr.id)
-    mr.current_approver_name = ", ".join(a.full_name for a in approvers) or None
+    # Name AND rung, from the engine's one builder — see `current_approver_label`.
+    mr.current_approver_name = await engine.current_approver_label(
+        db, DocType.MR.value, mr.id)
 
 
 async def act_on_mr(db: AsyncSession, mr_id: int, action: str, user,

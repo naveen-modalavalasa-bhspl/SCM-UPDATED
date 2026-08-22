@@ -181,7 +181,30 @@ export function UnitsPanel({
   });
 
   const stem = (itemCode || `item-${itemId}`).replace(/[^\w.-]+/g, "_");
-  const serials = units.map((u) => u.serial_number).filter(Boolean) as string[];
+  /** The serial a unit ACTUALLY carries, or nothing.
+   *
+   *  FIXED 2026-08-21 — an unserialised unit is given its asset or consumable code as
+   *  its `serial_number` too (`warehouse._place_unit_codes` writes the one string into
+   *  both columns, because `whs_serial_numbers.serial_number` is UNIQUE and NOT NULL
+   *  and there is nothing else to put there). This panel read the column raw, so a unit
+   *  with no serial tracking at all listed its asset code under "Serial" — the same
+   *  code then appeared again in the Asset code column beside it, and one unit read as
+   *  two identities.
+   *
+   *  The SUMMARY endpoint already suppresses this (`warehouse.serial_summary` keeps a
+   *  serial only for an item the master says is serial tracked), which is why the Stock
+   *  Ledger column was right and this panel was not: the panel reads the raw `/serials`
+   *  rows instead, and nothing filtered them.
+   *
+   *  Compared against the codes rather than re-fetching the item's flags: the row that
+   *  proves it is the row in hand, and the panel is opened per lot with no item master
+   *  on the wire. The same string in both columns means it was never a serial. */
+  const realSerial = (u: UnitRow) =>
+    u.serial_number && u.serial_number !== u.asset_code
+      && u.serial_number !== u.consumable_code
+      ? u.serial_number : undefined;
+
+  const serials = units.map(realSerial).filter(Boolean) as string[];
   const imeis = units.map((u) => u.imei).filter(Boolean) as string[];
   const codes = units
     .map((u) => u.asset_code || u.consumable_code)
@@ -190,7 +213,9 @@ export function UnitsPanel({
   const everything = [
     ["Serial", "IMEI", "Asset code", "Consumable code", "Batch", "Bin", "Status"],
     ...units.map((u: UnitRow) => [
-      u.serial_number, u.imei, u.asset_code, u.consumable_code,
+      // Blank, not the code: the export has an Asset code column of its own, and
+      // repeating the value made a spreadsheet read as two identities per unit.
+      realSerial(u), u.imei, u.asset_code, u.consumable_code,
       u.batch_no, u.bin_code, u.status,
     ]),
   ].map((line) => line.map(csvCell).join(",")).join("\n");

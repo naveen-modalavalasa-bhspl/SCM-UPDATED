@@ -1102,7 +1102,9 @@ async def create_tr(db: AsyncSession, data, user) -> TransportRequest:
         raise ValidationError("Name the warehouse this return is coming back to")
 
     doc = TransportRequest(
-        tr_no=await next_number(db, DocType.TRANSPORT_REQUEST.value.lower()),
+        # Same project the shipment is filed under, below.
+        tr_no=await next_number(db, DocType.TRANSPORT_REQUEST.value.lower(),
+                                project=data.project_name),
         tr_date=data.tr_date or date.today(),
         mode=data.mode.upper(),
         # WHAT it travels on, checked against the arrangement made under it. The

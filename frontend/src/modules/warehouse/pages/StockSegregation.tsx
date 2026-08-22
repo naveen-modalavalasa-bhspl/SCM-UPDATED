@@ -188,17 +188,41 @@ export default function StockSegregation() {
     { key: "status", header: "Status", render: (s) => <StatusPill status={normaliseStatus(s.status)} /> },
   ];
 
-  const labels: LabelSpec[] = serialRows.slice(0, 200).map((s) => ({
-    code: s.serial_number,
-    title: s.asset_code ?? s.consumable_code ?? s.serial_number,
-    subtitle: s.item_name ?? s.item_code ?? "",
-    kind: "qr",
-    meta: [
-      { label: "Serial", value: s.serial_number },
-      { label: "Batch", value: s.batch_no ?? "—" },
-      { label: "Bin", value: placeOf(s) },
-    ],
-  }));
+  // FIXED 2026-08-21 — the printed sticker carried Serial, Batch and Bin, so read by
+  // eye it did not say WHICH MATERIAL it was stuck to: the item code was nowhere and
+  // the item name was an unlabelled subtitle. The five things a storekeeper checks
+  // against the shelf — material, item, batch, code, expiry — are all written out and
+  // labelled now, matching the block the Scan screen already prints (`ScanView`) and
+  // the inventory label sheet (`inventory/LabelsPage`), so one unit reads the same way
+  // wherever it is seen.
+  //
+  // Rows with no value are DROPPED rather than printed as "—". A 280px sticker has no
+  // room to spend on absent fields, and "Batch —" reads as missing data rather than as
+  // not-applicable.
+  //
+  // "Serial" is only printed when the unit really has one: for an unserialised unit
+  // `warehouse._place_unit_codes` writes the asset/consumable code into
+  // `serial_number` as well, so printing it raw put the same string on two lines under
+  // two different names. Same rule as `UnitsPanel.realSerial`.
+  const labels: LabelSpec[] = serialRows.slice(0, 200).map((s) => {
+    const code = s.asset_code ?? s.consumable_code ?? null;
+    const serial = s.serial_number && s.serial_number !== code ? s.serial_number : null;
+    return {
+      code: s.serial_number,
+      title: code ?? s.serial_number,
+      subtitle: s.item_name ?? s.item_code ?? "",
+      kind: "qr" as const,
+      meta: [
+        { label: "Material", value: s.item_code ?? "" },
+        { label: "Item", value: s.item_name ?? "" },
+        { label: "Batch", value: s.batch_no ?? "" },
+        { label: "Code", value: code ?? "" },
+        { label: "Serial", value: serial ?? "" },
+        { label: "Expiry", value: s.expiry_date ?? "" },
+        { label: "Bin", value: placeOf(s) },
+      ].filter((row) => row.value && row.value !== "—"),
+    };
+  });
 
   const expiring = (batches.data?.items ?? []).filter((b) => {
     const d = daysUntil(b.expiry_date);
