@@ -6,6 +6,7 @@ import type {
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
   CorrectionIndent, PendingApproval,
+  PendingSummary, AllocationCycleRow,
 } from "./types";
 import type { Paginated } from "@/shared/types";
 
@@ -201,6 +202,16 @@ export const approvalsApi = {
       .then((r) => r.data.items),
   report: () =>
     api.get<ApprovalReport>("/api/approvals/reports/summary").then((r) => r.data),
+  /** The inbox counted server-side. Scoped to the caller by the endpoint — the same
+   *  approver_id + other-hat rule `pending` itself applies, so the tiles can never
+   *  report work the list will not show. */
+  pendingSummary: () =>
+    api.get<PendingSummary>("/api/approvals/pending/summary").then((r) => r.data),
+  /** Monthly cycles waiting on me. Gated on `allocation.view` server-side, so a
+   *  caller without it gets a 403 and the card stays off the page. */
+  allocationCycles: () =>
+    api.get<{ items: AllocationCycleRow[] }>("/api/approvals/allocation-cycles")
+      .then((r) => r.data.items),
   getCorrection: (indentId: number) =>
     api.get<CorrectionIndent>(`/api/indents/${indentId}`).then((r) => r.data),
   saveCorrection: (indentId: number, data: {

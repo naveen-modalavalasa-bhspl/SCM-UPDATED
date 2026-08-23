@@ -65,15 +65,14 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
   );
 }
 
-export function PageHeader({ eyebrow, title, actions }: { eyebrow?: string; title: string; actions?: ReactNode }) {
+export function PageHeader({ eyebrow: _eyebrow, title, actions }: { eyebrow?: string; title: string; actions?: ReactNode }) {
   return (
     <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
-      <div>
-        {eyebrow && (
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-brand">{eyebrow}</div>
-        )}
-        <h1 className="font-display text-[26px] font-bold text-ink">{title}</h1>
-      </div>
+      {/* The eyebrow is accepted and deliberately not drawn (2026-08-22). The sticky
+          header names the module and the tab strip beside it names the screen, so a
+          third naming of the same thing in brand caps above the title was noise on
+          every page in the app. The prop stays so no call site had to change. */}
+      <h1 className="font-display text-[26px] font-bold text-ink">{title}</h1>
       {/* flex-wrap, not nowrap: a document form puts up to six buttons here (Back,
        * Save, Submit, Approve, Reject, Cancel), which overflows a 375px screen
        * sideways without it. The outer div already wraps; this one has to as well. */}

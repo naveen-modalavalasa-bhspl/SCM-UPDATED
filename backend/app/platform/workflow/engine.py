@@ -21,6 +21,7 @@ from app.platform.hcm.models import HcmEmployee, HcmPositionAssignment
 from app.platform.notifications import service as notifications
 from app.platform.workflow import custom_ladder, fallback, ladder, resolver
 from app.platform.workflow.conditions import stage_applies
+from app.platform.workflow import doc_registry
 from app.platform.workflow.models import (
     Action, Instance, Pending, Stage, StageCondition, Workflow,
 )
@@ -1213,9 +1214,32 @@ async def move_to_workflow(db, instance_id: int, workflow_id: int, user,
     await db.flush()
     await _open_ladder_link(db, instance, chain[0], context)
     await db.flush()
-    logger.info("Approval %s (%s %s) moved from workflow %s to %s by %s",
+
+    # FIXED 2026-08-23 — the move used to stop here, and the DOCUMENT never learned
+    # about it. Every ordinary transition updates `current_approver_name` because the
+    # MODULE calls the engine and then writes its own row (rule 8); a move is the one
+    # transition with no module on the other end, so the snapshot was left naming the
+    # approver from the version the document had just been taken off.
+    #
+    # Measured on live data before the fix: instance 457 moved 106 -> 94 and its rung
+    # went SCM HEAD -> OE, `wf_pending` went 16070 -> 7703, and `ind_indents` still
+    # read "MAHENDRA (SCM HEAD)". The new approver held it, the old one did not, and
+    # every screen named the old one — which is what "the move does not actually
+    # migrate the document" meant.
+    #
+    # Written through `doc_registry` rather than by importing the module's model,
+    # because platform may not import app.modules (rule 5). An unregistered doc type
+    # is a no-op, exactly as before, so this can never make a Move fail.
+    label = await current_approver_label(db, instance.doc_type, instance.doc_id)
+    updated = await doc_registry.sync_approver(
+        db, instance.doc_type, instance.doc_id, label)
+    await db.flush()
+
+    logger.info("Approval %s (%s %s) moved from workflow %s to %s by %s "
+                "(document snapshot %s)",
                 instance.id, instance.doc_type, instance.doc_no,
-                from_workflow_id, wf.id, getattr(user, "full_name", user))
+                from_workflow_id, wf.id, getattr(user, "full_name", user),
+                "updated" if updated else "not registered")
     return instance
 
 

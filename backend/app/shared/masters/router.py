@@ -286,4 +286,165 @@ async def get_unit_code_tracking(item_id: int, db: AsyncSession = Depends(get_db
             "kind": "asset" if item.is_asset else "consumable"}
 
 
+# --------------------------------------------------------------------------- #
+# Item eligibility needs two dropdowns whose rows live in two unrelated tables:
+# `rbac_roles` for a ROLE tag and `hcm_offices` for a REGION one. Served together
+# from one route so the screen makes ONE call, and gated on the same permission that
+# manages the tagging itself — reaching for /api/rbac/roles would have made the
+# masters screen depend on an administrator's role-management permission to render a
+# dropdown, which is a wider grant than tagging an item needs.
+# --------------------------------------------------------------------------- #
+
+# NOT "/api/item-eligibility/scope-options": the factory registers
+# `/api/item-eligibility/{row_id}` (int-typed) before this router is included, so a
+# literal segment under that prefix never matches — it 422s trying to read
+# "scope-options" as an id. Its own path avoids the collision without reordering
+# routes that already work.
+@_tracking.get("/api/item-eligibility-scopes")
+async def item_eligibility_scope_options(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.MASTER_ITEM_MANAGE)),
+):
+    from app.platform.hcm.models import HcmOffice
+    from app.platform.rbac.models import Role
+
+    roles = (await db.execute(
+        select(Role.id, Role.name).where(Role.is_active.is_(True))
+        .order_by(Role.name))).all()
+    offices = (await db.execute(
+        select(HcmOffice.id, HcmOffice.name).where(HcmOffice.is_active.is_(True))
+        .order_by(HcmOffice.name))).all()
+    return {
+        "roles": [{"id": r[0], "name": r[1]} for r in roles],
+        "regions": [{"id": o[0], "name": o[1]} for o in offices],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Bulk assignment: one scope, many items.
+#
+# The row-at-a-time CRUD the factory generates is the right SHAPE for the table and
+# the wrong shape for the job. A role serves hundreds of items; tagging them through
+# a modal one pair at a time is not a screen anybody would use twice. So the desk
+# works the way the question is actually asked — "which items may this role raise?" —
+# and this pair of routes reads and replaces that whole answer in one call.
+#
+# Their own path, NOT under `/api/item-eligibility/…`: the factory registers
+# `/{row_id}` (int-typed) before this router is included, so a literal segment there
+# never matches and 422s instead.
+# --------------------------------------------------------------------------- #
+
+class _AssignIn(BaseModel):
+    scope_type: str
+    scope_id: int
+    #: The COMPLETE set for this scope. Anything already tagged and absent here is
+    #: removed — a replace, not a merge, because the screen shows the whole list with
+    #: ticks and "untick then save" has to mean something.
+    item_ids: list[int]
+
+
+@_tracking.get("/api/item-eligibility-assignments")
+async def item_eligibility_assignments(
+    scope_type: str, scope_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.MASTER_ITEM_MANAGE)),
+):
+    """The item ids currently tagged to one role or region."""
+    from app.shared.models.master import ItemEligibility
+
+    scope = (scope_type or "").strip().upper()
+    rows = (await db.execute(
+        select(ItemEligibility.item_id).where(
+            ItemEligibility.scope_type == scope,
+            ItemEligibility.scope_id == scope_id,
+            ItemEligibility.is_active.is_(True),
+        ))).scalars().all()
+    return {"scope_type": scope, "scope_id": scope_id,
+            "item_ids": sorted(int(i) for i in rows)}
+
+
+@_tracking.put("/api/item-eligibility-assignments")
+async def set_item_eligibility_assignments(
+    body: _AssignIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.MASTER_ITEM_MANAGE)),
+):
+    """Replace everything tagged to one scope, in one call.
+
+    Differences are applied rather than the set being deleted and rebuilt: a tag that
+    is staying keeps its row, its id and its created_at, so the audit trail reads as
+    "this item was added in March" and not as "everything was recreated today".
+
+    Re-activates rather than inserting a duplicate when a pair is tagged again after
+    being switched off — the unique index would refuse the insert, and an admin
+    re-ticking a box means "on", not "error".
+    """
+    from app.shared.enums import ItemScope
+    from app.shared.models.master import Item, ItemEligibility
+
+    scope = (body.scope_type or "").strip().upper()
+    if scope not in {s.value for s in ItemScope}:
+        raise ValidationError(
+            f"scope_type must be one of {sorted(s.value for s in ItemScope)}")
+
+    if scope == ItemScope.ROLE.value:
+        from app.platform.rbac.models import Role
+        scope_name = (await db.execute(
+            select(Role.name).where(Role.id == body.scope_id))).scalar_one_or_none()
+        if scope_name is None:
+            raise NotFoundError(f"Unknown role id: {body.scope_id}")
+    else:
+        from app.platform.hcm.models import HcmOffice
+        scope_name = (await db.execute(
+            select(HcmOffice.name).where(
+                HcmOffice.id == body.scope_id))).scalar_one_or_none()
+        if scope_name is None:
+            raise NotFoundError(f"Unknown region (office) id: {body.scope_id}")
+
+    wanted = {int(i) for i in body.item_ids}
+    existing = {
+        int(row.item_id): row for row in (await db.execute(
+            select(ItemEligibility).where(
+                ItemEligibility.scope_type == scope,
+                ItemEligibility.scope_id == body.scope_id,
+            ))).scalars().all()
+    }
+
+    # Snapshots, so the register reads without joining — same reason the row-at-a-time
+    # hook takes them. One query for every new item rather than one per item.
+    new_ids = wanted - set(existing)
+    names = {
+        int(i): (code, name) for i, code, name in (await db.execute(
+            select(Item.id, Item.code, Item.name).where(Item.id.in_(new_ids or [0]))
+        )).all()
+    }
+    unknown = new_ids - set(names)
+    if unknown:
+        raise ValidationError(f"Unknown item ids: {sorted(unknown)}")
+
+    added = removed = restored = 0
+    for item_id in new_ids:
+        code, name = names[item_id]
+        db.add(ItemEligibility(
+            item_id=item_id, item_code=code, item_name=name,
+            scope_type=scope, scope_id=body.scope_id, scope_name=scope_name,
+            is_active=True))
+        added += 1
+    for item_id, row in existing.items():
+        if item_id in wanted and not row.is_active:
+            row.is_active = True
+            restored += 1
+        elif item_id not in wanted and row.is_active:
+            # Deactivated, not deleted: the row is the record that this pair was once
+            # allowed, and `eligibility` only ever reads active rows.
+            row.is_active = False
+            removed += 1
+        # A row already active and still wanted is left completely alone.
+
+    await db.commit()
+    return {"scope_type": scope, "scope_id": body.scope_id,
+            "scope_name": scope_name, "total": len(wanted),
+            "added": added, "restored": restored, "removed": removed}
+
+
 router.include_router(_tracking)

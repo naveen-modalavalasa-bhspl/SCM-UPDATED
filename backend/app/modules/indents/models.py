@@ -16,6 +16,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
+from app.platform.workflow import doc_registry
+from app.shared.enums import DocType
 from app.modules.indents.enums import ConsolidationStatus, IndentType
 from app.shared.enums import IndentItemStatus
 from app.shared.models.base import (
@@ -186,3 +188,18 @@ class IndentItem(Base):
     remarks = Column(String(500), nullable=True)
 
     indent = relationship("Indent", back_populates="items")
+
+# --------------------------------------------------------------------------- #
+# Where these documents keep their "waiting on" snapshot.
+#
+# Declared HERE, beside the models, because this file is the only place that knows
+# the table and column names. `platform.workflow.engine.move_to_workflow` reads the
+# registry when an admin moves a document onto another ladder version — that is the
+# one transition with no module on the other end to update the row afterwards, and
+# before this the document went on naming the approver from the version it had just
+# been taken off. See `platform/workflow/doc_registry.py`.
+#
+# Modules -> platform, never the reverse (rule 5): this passes plain strings, so the
+# platform never imports a model.
+# --------------------------------------------------------------------------- #
+doc_registry.register(DocType.INDENT.value, "ind_indents")

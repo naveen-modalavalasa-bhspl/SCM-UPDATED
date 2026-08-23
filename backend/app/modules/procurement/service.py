@@ -22,6 +22,7 @@ from app.core.pagination import PageParams, paginate
 from app.core.security import create_access_token, hash_password, verify_password
 from app.modules.indents import service as indent_service
 from app.modules.indents.models import Indent, IndentItem
+from app.modules.inventory import hooks as inventory_hooks
 from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POItem, PurchaseConsolidation,
@@ -708,6 +709,7 @@ async def list_pos(
     project_id: int | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    pending_for_me: bool = False,
     user=None
 ) -> dict:
     stmt = select(PurchaseOrder)
@@ -727,8 +729,10 @@ async def list_pos(
                 PurchaseOrder.indent_no.ilike(search_term), # Fallback, still helpful
             )
         )
-    if status:
-        stmt = stmt.where(PurchaseOrder.status == status)
+    stmt = _status_in(stmt, PurchaseOrder.status, status)
+    if pending_for_me and user is not None:
+        stmt = _only_ids(stmt, PurchaseOrder.id, await _pending_doc_ids(
+            db, user, DocType.PO.value))
     if vendor_id is not None:
         stmt = stmt.where(PurchaseOrder.vendor_id == vendor_id)
     if project_id is not None:
@@ -1847,8 +1851,45 @@ async def ensure_mr_drafts(db: AsyncSession, user) -> int:
     return made
 
 
+async def _pending_doc_ids(db: AsyncSession, user, doc_type: str) -> list[int]:
+    """The ids of one document type sitting in THIS login's approval queue.
+
+    Off `engine.pending_for_user`, never off the document's status: PENDING_APPROVAL
+    says somebody has to sign, and only `wf_pending` says who. A register filtered on
+    the status would show every approver the whole queue and call all of it theirs.
+
+    Read-only use of the engine — the module owns its status, the engine owns the
+    chain (rule 8), and this asks the chain a question rather than answering one.
+    """
+    return [row["doc_id"] for row in
+            await engine.pending_for_user(db, user, doc_types=[doc_type])]
+
+
+def _status_in(stmt, status_col, status: str | None):
+    """`?status=` as one value or as a comma-separated set.
+
+    A KPI tile counts a BUCKET — "with vendor" is three statuses — and the tile has to
+    open a list holding exactly what it counted. One value still works unchanged, so
+    every existing link and every screen that sends one is untouched.
+    """
+    if not status:
+        return stmt
+    wanted = [part.strip().upper() for part in status.split(",") if part.strip()]
+    return stmt.where(status_col.in_(wanted)) if wanted else stmt
+
+
+def _only_ids(stmt, id_col, ids: list[int]):
+    """Narrow to `ids`, and to nothing at all when the list is empty.
+
+    `in_([])` is what we want and what MySQL warns about; the explicit `[0]` keeps the
+    meaning ("no rows") without relying on how an empty IN is compiled.
+    """
+    return stmt.where(id_col.in_(ids or [0]))
+
+
 async def list_requisitions(db: AsyncSession, params: PageParams,
                             status: str | None = None, search: str | None = None,
+                            pending_for_me: bool = False,
                             user=None) -> dict:
     if user is not None:
         await ensure_mr_drafts(db, user)
@@ -1856,8 +1897,10 @@ async def list_requisitions(db: AsyncSession, params: PageParams,
     if user is not None:
         stmt = stmt.where(await scope_condition(
             db, user, owner_col=Requisition.created_by_id))
-    if status:
-        stmt = stmt.where(Requisition.status == status)
+    stmt = _status_in(stmt, Requisition.status, status)
+    if pending_for_me and user is not None:
+        stmt = _only_ids(stmt, Requisition.id, await _pending_doc_ids(
+            db, user, DocType.REQUISITION.value))
     
     # Apply real-time search filtering if a search query is provided.
     # We search across requisition number, project name, and warehouse name.
@@ -2148,12 +2191,24 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None) -> RFQ:
 
 
 async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = None,
-                    search: str | None = None, user=None) -> dict:
+                    search: str | None = None, pending_for_me: bool = False,
+                    ready_to_award: bool = False, user=None) -> dict:
     stmt = select(RFQ)
     if user is not None:
         stmt = stmt.where(await scope_condition(db, user, owner_col=RFQ.created_by_id))
-    if status:
-        stmt = stmt.where(RFQ.status == status)
+    stmt = _status_in(stmt, RFQ.status, status)
+    if pending_for_me and user is not None:
+        stmt = _only_ids(stmt, RFQ.id, await _pending_doc_ids(
+            db, user, DocType.RFQ.value))
+    if ready_to_award:
+        # The same predicate `stats.rfq_stats` counts, written once here and once
+        # there because the two live in different files — a tender that is open or
+        # closed, has replies, and has no winner. If one moves, move both.
+        stmt = stmt.where(
+            RFQ.status.in_((RFQStatus.PUBLISHED.value, RFQStatus.CLOSED.value)),
+            RFQ.response_count > 0,
+            RFQ.awarded_vendor_id.is_(None),
+        )
     
     # Apply real-time search filtering if a search query is provided.
     # We search across RFQ number, title, project name, and warehouse name.
@@ -2400,6 +2455,7 @@ async def list_quotations(db: AsyncSession, params: PageParams,
                           rfq_id: int | None = None,
                           vendor_id: int | None = None,
                           search: str | None = None,
+                          status: str | None = None,
                           user=None) -> dict:
     """FIXED 2026-08-20 — the quotation register was the one procurement list with no
     rung on it, while `list_rfqs`, `list_pos` and `list_requisitions` all carry one.
@@ -2422,6 +2478,7 @@ async def list_quotations(db: AsyncSession, params: PageParams,
         stmt = stmt.where(Quotation.rfq_id == rfq_id)
     if vendor_id is not None:
         stmt = stmt.where(Quotation.vendor_id == vendor_id)
+    stmt = _status_in(stmt, Quotation.status, status)
         
     # Apply real-time search filtering if a search query is provided.
     # We search across quotation number and vendor name.
@@ -3515,3 +3572,34 @@ async def procurement_ledger_filters(db: AsyncSession) -> dict:
         "vendors": await distinct(trail.c.party),
     }
 
+
+# --------------------------------------------------------------------------- #
+#  Picking an approved material request up, the moment it is approved
+# --------------------------------------------------------------------------- #
+
+async def _draft_requisition_on_mr_approval(db: AsyncSession, mr, user) -> None:
+    """Raise the draft requisition for a material request that has just been signed.
+
+    The eager half of `ensure_mr_drafts`, and deliberately the SAME writer: both doors
+    call `create_requisition_from_mr`, which refuses an MR that already has a live
+    requisition, so whichever fires first wins and the second is a no-op. That guard is
+    what makes registering this safe rather than a source of duplicates.
+
+    Registered on inventory's hook list rather than called from inventory, because
+    inventory sits BEFORE procurement in the import chain (rule 5) and may not reach a
+    `pro_` document. See `app/modules/inventory/hooks.py`.
+
+    A request this cannot turn into a requisition — every line already ordered, a
+    consolidation sheet holding it — is logged and left alone. It is still picked up
+    later by `ensure_mr_drafts` if it becomes eligible.
+    """
+    try:
+        await create_requisition_from_mr(db, mr.id, user)
+    except (ValidationError, NotFoundError) as exc:
+        await db.rollback()
+        logger.info("no draft requisition for %s: %s", mr.mr_no, exc)
+
+
+# Guarded so a module reload cannot register the same hook twice and raise two drafts.
+if _draft_requisition_on_mr_approval not in inventory_hooks.ON_MR_APPROVED:
+    inventory_hooks.ON_MR_APPROVED.append(_draft_requisition_on_mr_approval)

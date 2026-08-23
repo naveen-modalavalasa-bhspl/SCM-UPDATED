@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { Plus } from "lucide-react";
+import { Clock, Plus, TriangleAlert } from "lucide-react";
 import { Button, Can, PageHeader, Card, ResponsiveGrid, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { listMaterialRequests } from "../api";
@@ -136,14 +136,13 @@ export function MaterialRequestsPage() {
       />
 
       <p className="mb-4 text-sm text-muted">
-        Raised automatically when an approved indent runs short of stock, or by hand for
-        anything the warehouse cannot serve. Procurement picks them up from here.
+        Buy requests for what stock could not serve. Procurement picks them up here.
       </p>
 
       <ResponsiveGrid cols={3} className="mb-4">
-        <StatCard label="In Approval" value={kpis.pending} tone={kpis.pending ? "text-warning" : "text-muted"} />
-        <StatCard label="Urgent" value={kpis.urgent} tone={kpis.urgent ? "text-danger" : "text-muted"} />
-        <StatCard label="Past Needed-By" value={kpis.overdue} tone={kpis.overdue ? "text-danger" : "text-muted"} />
+        <StatCard label="In Approval" value={kpis.pending} icon={<Clock size={16} />} tone={kpis.pending ? "text-warning" : "text-muted"} />
+        <StatCard label="Urgent" value={kpis.urgent} icon={<TriangleAlert size={16} />} tone={kpis.urgent ? "text-danger" : "text-muted"} />
+        <StatCard label="Past Needed-By" value={kpis.overdue} icon={<Clock size={16} />} tone={kpis.overdue ? "text-danger" : "text-muted"} />
       </ResponsiveGrid>
 
       <FilterBar
@@ -168,7 +167,7 @@ export function MaterialRequestsPage() {
             keyOf={(r) => r.id}
             onRowClick={(r) => nav(`/inventory/material-requests/${r.id}`)}
             columns={columns}
-            empty="No store requests yet. One appears here when an approved indent cannot be filled from stock."
+            empty="No requests yet."
             renderCard={(r) => (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2">

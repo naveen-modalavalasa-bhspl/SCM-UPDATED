@@ -1,6 +1,5 @@
-import { Button, Card, FilterMenu, selectOnFocus } from "@/shared/components";
+import { FilterBar as SharedFilterBar, FilterMenu } from "@/shared/components";
 import type { ReactNode } from "react";
-import { Search, X } from "lucide-react";
 
 /** The option shape `<Select>` takes. Declared here because the shared barrel
  *  exports the component but not its option type, and modules do not edit shared. */
@@ -12,59 +11,51 @@ export interface SelectOption {
 /**
  * The filter strip every warehouse list screen sits under.
  *
- * Local to the module on purpose: it is composition over the shared kit, not a new
- * primitive. Inventory has its own for the same reason — the shared layer owns the
- * controls, a module owns how it arranges them.
+ * A wrapper over the shared strip since 2026-08-22, keeping this module's prop names
+ * (`placeholder`, `onReset`) so none of its fifteen screens had to change. It used to
+ * be a local composition; the three modules' compositions had drifted into three
+ * different heights and three different search boxes, which is exactly the kind of
+ * thing a shared kit exists to stop.
  */
-
 export function FilterBar({
   search,
   onSearch,
   placeholder = "Search…",
   children,
   onReset,
+  right,
 }: {
   search?: string;
   onSearch?: (value: string) => void;
   placeholder?: string;
   children?: ReactNode;
   onReset?: () => void;
+  right?: ReactNode;
 }) {
   return (
-    <Card className="mb-4 p-3">
-      <div className="flex flex-wrap items-end gap-2">
-        {onSearch && (
-          <label className="relative min-w-[220px] flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-            <input
-              value={search ?? ""}
-              onFocus={selectOnFocus}
-              onChange={(e) => onSearch(e.target.value)}
-              placeholder={placeholder}
-              aria-label={placeholder}
-              className="min-h-11 w-full rounded-md border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
-            />
-          </label>
-        )}
-        {children}
-        {onReset && (
-          <Button variant="ghost" onClick={onReset}>
-            <X className="h-4 w-4" /> Clear
-          </Button>
-        )}
-      </div>
-    </Card>
+    <SharedFilterBar
+      search={search}
+      onSearch={onSearch}
+      searchPlaceholder={placeholder}
+      onClear={onReset}
+      /* Warehouse screens never counted their set filters, and Clear has always been
+         on show here whether or not anything is set. `active={1}` keeps that. */
+      active={onReset ? 1 : 0}
+      right={right}
+    >
+      {children}
+    </SharedFilterBar>
   );
 }
 
-/** A filter dropdown sized for the strip, with a built-in "all" row. */
+/** A filter dropdown sized for the strip, with a built-in "show all" row. */
 export function FilterSelect({
   value,
   onChange,
   options,
   label,
   allLabel = "All",
-  className = "min-w-[170px]",
+  className = "",
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -73,15 +64,13 @@ export function FilterSelect({
   allLabel?: string;
   className?: string;
 }) {
-  // The Indents pill, not a bare <Select>: a warehouse list carries four or five of
+  // The shared pill, not a bare <Select>: a warehouse list carries four or five of
   // these and a row of unlabelled dropdowns gives no clue which ones are narrowing the
   // page. The pill reads "Status" until something is picked and then reads the pick,
   // and its icon comes from the label. `allLabel` is kept in the signature so no caller
-  // breaks; the pill writes its own "<label> — all" row.
+  // breaks; the pill writes its own "Show all" row.
   void allLabel;
   return (
-    <div className={className}>
-      <FilterMenu label={label} value={value} onChange={onChange} options={options} />
-    </div>
+    <FilterMenu label={label} value={value} onChange={onChange} options={options} className={className} />
   );
 }

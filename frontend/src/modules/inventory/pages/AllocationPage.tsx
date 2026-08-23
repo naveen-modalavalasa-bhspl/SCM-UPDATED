@@ -4,7 +4,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, ShoppingCart, Trash2 } from "lucide-react";
 import { Can, PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { createAllocation, createMaterialRequest, getAllocationProposal } from "../api";
+// A LIP or an MDP is a distribution rung, never the default shelf — see
+// warehouseTiers.ts.
+import { isChainPoint, orderPoints } from "../warehouseTiers";
 import { ClaimsPanel } from "../components/ClaimsPanel";
+import { LoadingRows } from "../components/PageStates";
 import { alerts } from "@/modules/alerts";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
 
@@ -43,11 +47,19 @@ export function AllocationPage() {
 
   // Pre-fill with the largest single warehouse, capped at what was requested. A
   // starting point, not a decision -- every box stays editable, including down to 0.
+  //
+  // FIXED 2026-08-22 — largest of the WAREHOUSE-tier points only. A LIP or an MDP is
+  // where stock ends up, not a shelf an indent is filled from; seeding one meant the
+  // screen opened proposing the one move the store almost never makes, on the strength
+  // of five units parked at a distribution point. They stay in the dropdown, below the
+  // warehouses and labelled — drawing on one is a decision somebody makes on purpose.
   useEffect(() => {
     if (!data) return;
     const seed: Record<number, Split[]> = {};
     for (const line of data.lines) {
-      const best = [...line.warehouses].sort((a, b) => b.available_qty - a.available_qty)[0];
+      const best = [...line.warehouses]
+        .filter((w) => !isChainPoint(w) && w.available_qty > 0)
+        .sort((a, b) => b.available_qty - a.available_qty)[0];
       const suggested = Math.min(line.requested_qty, best?.available_qty ?? 0);
       seed[line.indent_item_id] = [{
         qty: String(suggested),
@@ -124,6 +136,12 @@ export function AllocationPage() {
           item_id: line.item_id,
           quantity,
           indent_item_id: line.indent_item_id,
+          // The INDENT's project, off the proposal. Without it the backend can only
+          // fall back to the login's own project, and the request was being filed
+          // against whichever project the storekeeper's post sits in rather than the
+          // one the indent is serving — which then feeds the document number and the
+          // requisition raised behind it. See create_mr_manual.
+          project_id: line.project_id,
         }],
       }),
     onSuccess: (mr, { line }) => {
@@ -188,7 +206,7 @@ export function AllocationPage() {
       return { ...prev, [lineId]: rows.length ? rows : [{ qty: "0", wh: "" }] };
     });
 
-  if (isLoading) return <p className="p-6 text-muted">Loading…</p>;
+  if (isLoading) return <LoadingRows rows={6} className="mt-2" />;
   if (error) return <p className="p-6 text-danger">{(error as Error).message}</p>;
   if (!data) return null;
 
@@ -302,9 +320,12 @@ export function AllocationPage() {
                                   { wh: v, qty: clampQty(line, next, i, next[i].qty) });
                             }}
                             placeholder="— none —"
-                            options={pointsFor(line, splits, i).map((w) => ({
+                            // Warehouses first, then the distribution points, each
+                            // saying what it is — see `isChainPoint`.
+                            options={orderPoints(pointsFor(line, splits, i)).map((w) => ({
                               value: String(w.warehouse_id),
-                              label: `${w.warehouse_name} (${w.available_qty} free)`,
+                              label: `${w.warehouse_name} (${w.available_qty} free)`
+                                + (isChainPoint(w) ? " · distribution point" : ""),
                             }))}
                           />
                         </Field>

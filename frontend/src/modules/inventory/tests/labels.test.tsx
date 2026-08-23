@@ -30,7 +30,10 @@ beforeEach(() => {
     Promise.resolve({
       data: url.startsWith("/api/stock")
         ? { items: [STOCK], total: 1, page: 1, size: 200 }
-        : { items: [], total: 0, page: 1, size: 200 },
+        // The scoped warehouse options endpoint answers a bare array, not a page.
+        : url === "/api/warehouse/options/warehouses"
+          ? [{ id: 1, name: "Main Store" }]
+          : { items: [], total: 0, page: 1, size: 200 },
     }),
   );
 });

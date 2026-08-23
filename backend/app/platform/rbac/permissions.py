@@ -200,6 +200,13 @@ RFQ_AWARD = "rfq.award"
 # ride on the same code: a transport provider IS a vendor row (vendor_type TRANSPORT)
 # and signs in through the same portal, so minting one is the same act.
 VENDOR_PORTAL_MANAGE = "vendor.portal.manage"
+
+# --- Mail (Settings > Mail) ---
+# Two codes, not one. Reading what the company has sent and SENDING as the company
+# are different rights: the Sent log is a record anyone running the desk may need,
+# while every message put out under `scm@` carries the company's name to an outsider.
+MAIL_VIEW = "mail.view"
+MAIL_SEND = "mail.send"
 # Rolling many requisitions into one buying sheet. Separate from REQUISITION_* because
 # the person who raises a requisition is not the person who decides what the month's
 # consolidated demand looks like — that sheet is what the CPO and SCM Head sign.
@@ -420,6 +427,10 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(RFQ_AWARD, "procurement", "rfq", "award", "Award an RFQ to a vendor"),
     Perm(VENDOR_PORTAL_MANAGE, "procurement", "vendor", "portal_manage",
          "Issue and reset supplier & carrier portal logins"),
+    Perm(MAIL_VIEW, "admin", "mail", "view",
+         "Read the company mailbox and the sent log"),
+    Perm(MAIL_SEND, "admin", "mail", "send",
+         "Send mail from the company address"),
     Perm(CONSOLIDATION_VIEW, "procurement", "consolidation", "view",
          "View consolidated purchase sheets"),
     Perm(CONSOLIDATION_CREATE, "procurement", "consolidation", "create",
@@ -533,6 +544,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # Rode on `indent.approve` because it was never catalogued: unticking the screen
     # revoked the approve BUTTON on every indent screen, and ticking it handed the
     # button back. Same split as the rest.
+    ("approval_overview", "approvals", "Approvals · Overview"),
     ("approval_consolidation", "approvals", "Approvals · Consolidation"),
     ("approval_waiting", "approvals", "Approvals · Waiting for Me"),
     ("approval_decisions", "approvals", "Approvals · My Decisions"),
@@ -541,6 +553,31 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # `page.approval_team.view` row and every grant on it stay untouched.
     ("grp_purchasing", "procurement", "Purchasing"),
     ("po_list", "procurement", "Purchase Orders"),
+    # The four buying-chain screens, catalogued late (2026-08-23). `sync_pages` had
+    # been inventing their `page.*.view` rows, which works — the tick-box on Job
+    # Profiles does gate them — but an auto-created row is not in ALL_PERMISSIONS, so
+    # `sync_permission_labels` can never relabel it and the RBAC screen listed four
+    # rows described as "See the RFQs page" with no module beside them. Listing them
+    # changes no grant: the rows already exist, and `seed_permissions` never prunes or
+    # re-grants. It only makes them describable — and makes the Overview below able to
+    # inherit from one of them.
+    ("pro_requisitions", "procurement", "Procurement · Requisitions"),
+    ("pro_consolidations", "procurement", "Procurement · Consolidation"),
+    ("pro_rfqs", "procurement", "Procurement · RFQs"),
+    ("pro_quotations", "procurement", "Procurement · Quotations"),
+    # The module's front door: the buying chain as one board — what is waiting on me,
+    # what each rung is holding, and the demand pool underneath it. Every tile on it is
+    # gated separately on the document family it counts, so the screen's own code is
+    # only "may open the board".
+    ("pro_overview", "procurement", "Procurement · Overview"),
+    # Settings > Mail. Fail-closed to Admin on purpose: it reads a shared mailbox and
+    # can send under the company's address, and neither is something to hand out by
+    # inheritance. No INHERITS_GRANTS_FROM entry for exactly that reason.
+    ("settings_mail", "admin", "Settings · Mail"),
+    # The document trail. Catalogued so it can inherit below rather than landing
+    # Admin-only: it reads the same documents the other ledgers already show this
+    # login, assembled into a chain.
+    ("rep_traceability", "reports", "Reports · Document Trail"),
     ("grp_warehouse", "warehouse", "Warehouse"),
     ("wh_dashboard", "warehouse", "Warehouse · Dashboard"),
     ("wh_inward", "warehouse", "Warehouse » Material Inward"),
@@ -689,6 +726,10 @@ INHERITS_GRANTS_FROM.update({
     # now on the screen and the action can be granted apart.
     page_view_code("admin_approval_flow"): ADMIN_WORKFLOW_MANAGE,
     page_view_code("approval_consolidation"): INDENT_APPROVE,
+    # The Overview reads nothing the inbox does not already show this person — it is
+    # the same approval-scoped queries, summarised — so anybody who can open the inbox
+    # can open it. Fail-closed would retire a landing page nobody granted yet.
+    page_view_code("approval_overview"): page_view_code("approval_waiting"),
     page_view_code("inv_stocking_points"): STOCK_POINTS_MANAGE,
     # The four inbound warehouse screens, same story: catalogued late (2026-08-20), so
     # each inherits the action code that has been gating it since the module landed.
@@ -712,4 +753,17 @@ INHERITS_GRANTS_FROM.update({
     # endpoint behind it is gated on PO_VIEW for the same reason: the register's most
     # sensitive column is what an order came to.
     page_view_code("pro_ledger"): PO_VIEW,
+    # The Overview lands with whoever can already open the register that is the
+    # module's front door today, rather than fail-closed to Admin: it is the same
+    # documents, summarised, and a landing page nobody has been granted is a module
+    # that opens on an error. It does NOT inherit from `po.view` — the board's most
+    # sensitive numbers (month spend, open commitment) come from the PO tile, and that
+    # tile is gated on `po.view` separately, so a requisition clerk sees the board with
+    # the order strip simply absent.
+    page_view_code("pro_overview"): page_view_code("pro_requisitions"),
+    # Lands with everyone who can already read the ledgers. The trail shows no
+    # document a reader could not open one at a time from Reports today — it only
+    # saves them doing it by hand — and its endpoints are gated on `report.view`
+    # independently.
+    page_view_code("rep_traceability"): REPORT_VIEW,
 })

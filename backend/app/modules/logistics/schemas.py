@@ -502,12 +502,6 @@ class CarrierAckIn(BaseModel):
     """
     driver_name: str = Field(min_length=1)
     vehicle_number: str = Field(min_length=1)
-    #: Which way the winner is actually sending it. The ARRANGEMENT is the desk's and
-    #: was settled before the tender went out, but the carriage is the carrier's own
-    #: routing decision — a tendered lane quoted as a truck can go on a wagon — so it
-    #: is the one part of "how does this travel" they are asked to state. Optional:
-    #: leaving it alone keeps whatever the dispatch desk picked.
-    carriage_mode: str | None = None
     driver_phone: str | None = None
     driver_licence_no: str | None = None
     lr_no: str | None = None

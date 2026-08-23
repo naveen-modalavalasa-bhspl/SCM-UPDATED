@@ -11,6 +11,8 @@ import type {
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
   ProcurementLedgerFilters, ProcurementLedgerRow,
   VendorNotification, VendorToken,
+  ConsolidationStats, DemandPoolRow, LedgerStats, POStats, QuoteStats, ReqStats,
+  RFQStats,
 } from "./types";
 
 export const poApi = {
@@ -21,8 +23,12 @@ export const poApi = {
     project_id?: number;
     date_from?: string;
     date_to?: string;
-    page?: number; 
-    size?: number 
+    /** Only what is waiting on THIS login's signature, straight off the workflow
+     *  engine. It can only NARROW what `po.view` already returns, so it needs no
+     *  permission of its own. */
+    pending_for_me?: boolean;
+    page?: number;
+    size?: number
   }) =>
     api.get<Paginated<POListRow>>("/api/pos", { params }).then((r) => r.data),
   /** The CSV comes back through axios so it carries the bearer token — a plain
@@ -80,7 +86,10 @@ export const poApi = {
 };
 
 export const requisitionApi = {
-  list: (params: { status?: string; search?: string; page?: number; size?: number } = {}) =>
+  list: (params: {
+    status?: string; search?: string; pending_for_me?: boolean;
+    page?: number; size?: number;
+  } = {}) =>
     api.get<Paginated<ReqListRow>>("/api/requisitions", { params }).then((r) => r.data),
   get: (id: number) =>
     api.get<Requisition>(`/api/requisitions/${id}`).then((r) => r.data),
@@ -129,7 +138,10 @@ export const consolidationApi = {
   candidateIds: (params: { project_id?: number } = {}) =>
     api.get<number[]>("/api/consolidations/candidates/ids", { params })
       .then((r) => r.data),
-  list: (params: { status?: string; project_id?: number; page?: number; size?: number } = {}) =>
+  list: (params: {
+    status?: string; project_id?: number; pending_for_me?: boolean;
+    page?: number; size?: number;
+  } = {}) =>
     api.get<Paginated<ConsolidationListRow>>("/api/consolidations", { params })
       .then((r) => r.data),
   get: (id: number) =>
@@ -160,7 +172,14 @@ export const consolidationApi = {
 };
 
 export const rfqApi = {
-  list: (params: { status?: string; search?: string; page?: number; size?: number } = {}) =>
+  list: (params: {
+    status?: string; search?: string; pending_for_me?: boolean;
+    /** A tender that is open or closed, has replies, and has no winner. Not a
+     *  status, so it cannot ride on `status` — and it is the same predicate
+     *  `stats.rfq_stats` counts, so the tile opens exactly the rows it counted. */
+    ready_to_award?: boolean;
+    page?: number; size?: number;
+  } = {}) =>
     api.get<Paginated<RFQListRow>>("/api/rfqs", { params }).then((r) => r.data),
   get: (id: number) => api.get<RFQ>(`/api/rfqs/${id}`).then((r) => r.data),
   create: (data: RFQCreate) => api.post<RFQ>("/api/rfqs", data).then((r) => r.data),
@@ -187,7 +206,13 @@ export const rfqApi = {
       .then((r) => r.data),
   award: (id: number, quotation_id: number, comments = "") =>
     api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_id, comments }).then((r) => r.data),
-  quotations: (params: { rfq_id?: number; vendor_id?: number; search?: string; page?: number; size?: number } = {}) =>
+  quotations: (params: {
+    rfq_id?: number; vendor_id?: number; search?: string;
+    /** One status or a comma-separated set, so a KPI tile counting a bucket
+     *  ("to compare" = submitted + revised) opens exactly the rows it counted. */
+    status?: string;
+    page?: number; size?: number;
+  } = {}) =>
     api.get<Paginated<QuoteListRow>>("/api/rfqs/quotations", { params }).then((r) => r.data),
   quotation: (id: number) =>
     api.get<Quotation>(`/api/rfqs/quotations/${id}`).then((r) => r.data),
@@ -303,5 +328,63 @@ export const ledgerApi = {
   filters: () =>
     api.get<ProcurementLedgerFilters>("/api/procurement/ledger/filters")
       .then((r) => r.data),
+  /** One count per document kind, under the same filters the register is showing —
+   *  so the four tiles always add up to the total beside the search box. */
+  stats: (params: {
+    status?: string; project?: string; vendor?: string;
+    date_from?: string; date_to?: string; search?: string;
+  } = {}, signal?: AbortSignal) =>
+    api.get<LedgerStats>("/api/procurement/ledger/stats", { params, signal })
+      .then((r) => r.data),
 };
 
+
+/* --- KPI strips (2026-08-23) ---------------------------------------------- *
+ *
+ * FIVE endpoints, not one. Each is gated on the server on the view code of the
+ * documents it counts (`requisition.view`, `consolidation.view`, `rfq.view`,
+ * `rfq.compare`, `po.view`) and applies the same data rung as that document's
+ * register, so a tile can never count a row the list under it would hide.
+ *
+ * A composite `/overview` could only carry ONE permission, and would then either fail
+ * closed for a buyer holding the others or serve numbers off documents they may not
+ * read. The Overview screen asks only for the strips its login holds — see
+ * `procurementStatsKeys`, whose queries are `enabled` on `can(...)`.
+ * ------------------------------------------------------------------------- */
+
+export const procurementStatsApi = {
+  requisitions: (signal?: AbortSignal) =>
+    api.get<ReqStats>("/api/requisitions/stats", { signal }).then((r) => r.data),
+  consolidations: (signal?: AbortSignal) =>
+    api.get<ConsolidationStats>("/api/consolidations/stats", { signal })
+      .then((r) => r.data),
+  rfqs: (signal?: AbortSignal) =>
+    api.get<RFQStats>("/api/rfqs/stats", { signal }).then((r) => r.data),
+  quotations: (signal?: AbortSignal) =>
+    api.get<QuoteStats>("/api/rfqs/quotations/stats", { signal }).then((r) => r.data),
+  pos: (signal?: AbortSignal) =>
+    api.get<POStats>("/api/pos/stats", { signal }).then((r) => r.data),
+  /** How much of each item is sanctioned and not yet ordered — the question a
+   *  consolidated buying sheet exists to answer. Gated on `requisition.view`. */
+  demandPool: (params: {
+    project_id?: number; search?: string; page?: number; size?: number;
+  } = {}, signal?: AbortSignal) =>
+    api.get<Paginated<DemandPoolRow>>("/api/requisitions/demand-pool",
+                                      { params, signal }).then((r) => r.data),
+};
+
+/** Query keys, in one place so a KPI strip and the Overview share one cached answer
+ *  instead of each fetching the same numbers. */
+export const procurementStatsKeys = {
+  requisitions: () => ["procurement", "stats", "requisitions"] as const,
+  consolidations: () => ["procurement", "stats", "consolidations"] as const,
+  rfqs: () => ["procurement", "stats", "rfqs"] as const,
+  quotations: () => ["procurement", "stats", "quotations"] as const,
+  pos: () => ["procurement", "stats", "pos"] as const,
+  demandPool: (params: Record<string, unknown> = {}) =>
+    ["procurement", "stats", "demand-pool", params] as const,
+};
+
+/** KPIs are a summary, not a document: a few seconds of staleness is invisible, and
+ *  refetching five endpoints on every tab focus is not. */
+export const STATS_STALE_TIME = 30_000;

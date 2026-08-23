@@ -10,8 +10,7 @@ import { carrierPortalApi } from "../api";
 import {
   carriageLabel, carriageTint, load, modeLabel, modeTint, money,
 } from "../components/modeCopy";
-import { OptionTiles } from "../components/OptionTiles";
-import { CARRIAGE_ICON, modeIcon } from "../components/transportIcons";
+import { CARRIAGE_ICON } from "../components/transportIcons";
 import { phoneError, PHONE_HINT, problems, sanitizePhone } from "../components/validate";
 import type { CarriageMode, TransportRequest, TRListRow } from "../transportTypes";
 import { EmptyQueue, PortalHeading } from "./portalUi";
@@ -45,7 +44,8 @@ const REQUIRED = ["driver_name", "vehicle_number"] as const;
  * they won, and those two should not have to be found among the rest.
  *
  * No uploads. The paperwork is raised on our side at dispatch; what is wanted from
- * the carrier is the vehicle and the man, not a scan.
+ * the carrier is the vehicle and the man, not a scan. Nor the carriage: road, rail,
+ * air or sea was the desk's call at dispatch and the price was quoted against it.
  */
 export function CarrierAckPage() {
   // Which shipment is being answered lives in the URL, so the page can be linked to
@@ -53,11 +53,6 @@ export function CarrierAckPage() {
   const [search, setSearch] = useSearchParams();
   const chosenId = Number(search.get("tr") ?? 0);
   const [form, setForm] = useState({ ...BLANK });
-  // Which way THEY are sending it. Held apart from `form`, which is all free text:
-  // this is a pick from a served list, and an empty string means "not touched", so
-  // the shipment keeps the carriage the dispatch desk chose unless the carrier says
-  // otherwise. Cleared with the form when a different job is opened.
-  const [carriage, setCarriage] = useState<CarriageMode | "">("");
 
   const { data: awarded, isLoading, error } = useQuery({
     queryKey: ["carrier-jobs", "AWAITING_CARRIER"],
@@ -80,17 +75,6 @@ export function CarrierAckPage() {
     queryFn: () => carrierPortalApi.get(chosenId),
     enabled: chosenId > 0 && Boolean(job),
   });
-  // What this job may travel on. Served rather than listed here: the arrangement was
-  // settled by the desk before the tender went out, and only some carriages can carry
-  // it — a courier booking can go by road, rail or air, a hand-over only by road. The
-  // backend narrows it, so the portal can never offer a routing Dispatch would refuse.
-  const { data: carriages } = useQuery({
-    queryKey: ["carrier-carriage-modes", job?.mode],
-    queryFn: () => carrierPortalApi.carriageModes(job!.mode),
-    enabled: Boolean(job?.mode),
-  });
-  // What is going to be sent: their pick, or what the shipment already carries.
-  const carriageValue = (carriage || job?.carriage_mode || "ROAD") as CarriageMode;
 
   // One shipment to answer is not a list to choose from. Opened straight onto it, and
   // only while nothing else is chosen, so this never fights the carrier's own pick.
@@ -102,10 +86,8 @@ export function CarrierAckPage() {
 
   const choose = (id: number) => {
     // A fresh form per shipment: carrying one truck's number onto the next job is how
-    // the wrong vehicle turns up at the gate. The carriage clears with it and falls
-    // back to whatever the next shipment already says, never to the last job's.
+    // the wrong vehicle turns up at the gate.
     setForm({ ...BLANK });
-    setCarriage("");
     setSearch(id ? { tr: String(id) } : {}, { replace: true });
   };
 
@@ -113,9 +95,6 @@ export function CarrierAckPage() {
     run: () => carrierPortalApi.acknowledge(job!.id, {
       driver_name: form.driver_name.trim(),
       vehicle_number: form.vehicle_number.trim(),
-      // Travels back with the yes, like everything else on this form: one press
-      // writes it onto the shipment, and the dispatch desk reads it there.
-      carriage_mode: carriageValue,
       driver_phone: form.driver_phone || null,
       driver_licence_no: form.driver_licence_no || null,
       lr_no: form.lr_no || null,
@@ -193,44 +172,6 @@ export function CarrierAckPage() {
                     docket is what the receiving site tracks it on. Only the first two
                     are needed to confirm.
                   </p>
-
-                  {/* The other half of "what is coming": which way it is going. The
-                      ARRANGEMENT below it is the logistics desk's — it was settled
-                      before this job was tendered and the award was made against it —
-                      so it is shown, not offered. The carriage is the carrier's own
-                      routing call: a lane quoted as a truck can be sent on a wagon,
-                      and until now there was nowhere to say so. */}
-                  <div className="mb-4">
-                    <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                      <span className="text-sm font-medium text-body">How it travels</span>
-                      <span className="flex items-center gap-1.5 text-xs text-muted">
-                        Arranged as
-                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${modeTint(row.mode)}`}>
-                          <span aria-hidden className="[&>svg]:h-3 [&>svg]:w-3">
-                            {modeIcon(row.mode)}
-                          </span>
-                          {modeLabel(row.mode)}
-                        </span>
-                      </span>
-                    </div>
-                    <OptionTiles
-                      ariaLabel="Carriage mode"
-                      columns={4}
-                      size="sm"
-                      value={carriageValue}
-                      onChange={(value) => setCarriage(value as CarriageMode)}
-                      options={(carriages ?? []).map((option) => ({
-                        value: option.value,
-                        label: option.label,
-                        icon: CARRIAGE_ICON[option.value],
-                      }))}
-                    />
-                    <p className="mt-1.5 text-xs text-muted">
-                      {carriages?.find((option) => option.value === carriageValue)?.help
-                        ?? "Which way you are sending it. The desk sees your answer on "
-                           + "the dispatch screen the moment you acknowledge."}
-                    </p>
-                  </div>
 
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field label="Driver name" required>
@@ -411,9 +352,9 @@ function JobDetails({ row, detail }: {
 
 /** How this job travels, in two chips: what it goes ON, and what it was arranged as.
  *
- *  Both come off the shipment, and the carriage is the one the carrier themself set
- *  when they acknowledged — so a job that was tendered as a truck and sent by rail
- *  reads as rail here, on the carrier's own board, exactly as it does on the desk's. */
+ *  Both come off the shipment and both are the dispatch desk's: the carriage was
+ *  settled before the tender went out and the award was priced against that lane, so
+ *  it is read here, never offered. Shown, not asked. */
 function Travel({ row }: { row: TRListRow }) {
   return (
     <>

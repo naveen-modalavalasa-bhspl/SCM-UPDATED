@@ -187,3 +187,62 @@ class UserSession(Base):
     revoked_at = Column(DateTime, nullable=True)
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(String(300), nullable=True)
+
+
+class PasswordReset(Base):
+    """`sys_password_resets` — one issued "forgot password" link.
+
+    The RAW token is never stored, only its SHA-256. A reset link is a bearer secret:
+    anyone holding the row would otherwise be able to take over any account whose link
+    is still live, and a database backup would carry live credentials.
+
+    Rows are kept after use rather than deleted, so "this link was already used" is a
+    different answer from "this link never existed" — one is a person clicking twice,
+    the other is worth looking at.
+    """
+    __tablename__ = "sys_password_resets"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    employee_id = Column(BigInteger, index=True, nullable=False)
+    #: SHA-256 hex of the token that went out in the link. Unique: two live links can
+    #: never collide, and a lookup is a single indexed equality.
+    token_hash = Column(String(64), unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    #: Where the request came from. Not used to decide anything — recorded so a burst
+    #: of requests against one account can be read after the fact.
+    requested_ip = Column(String(45), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+
+
+class MailMessage(Base):
+    """`sys_mail_messages` — every message this app has SENT, and what came of it.
+
+    This is the Sent tab, deliberately rather than the mailbox's own Sent folder:
+    the folder only ever holds what the provider accepted, so a message that failed
+    to send leaves no trace anywhere — which is the one case somebody goes looking.
+    A row is written BEFORE the send and updated after, so a crash mid-send is still
+    visible as QUEUED rather than vanishing.
+
+    Received mail is NOT stored here. The Inbox reads IMAP live; copying a mailbox
+    into our database would mean a sync, a schedule and a second source of truth for
+    something the mail server already owns.
+    """
+    __tablename__ = "sys_mail_messages"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    #: Comma-separated, as typed. Stored as sent rather than normalised into rows —
+    #: this is a log of what happened, not an address book.
+    to_addrs = Column(String(1000), nullable=False)
+    cc_addrs = Column(String(1000), nullable=True)
+    subject = Column(String(500), nullable=True)
+    body = Column(Text, nullable=True)
+    #: QUEUED -> SENT | FAILED. See `shared.enums.MailStatus`.
+    status = Column(String(20), nullable=False, index=True)
+    error = Column(Text, nullable=True)
+    #: What raised it: a person on the Mail screen, or the system. Password-reset mail
+    #: is logged with `kind='PASSWORD_RESET'` and NO body — the body carries a live
+    #: reset link, and the Sent tab is readable by anyone holding `mail.view`.
+    kind = Column(String(30), nullable=False, default="MANUAL", index=True)
+    sent_by_id = Column(BigInteger, index=True, nullable=True)
+    sent_by_name = Column(String(200), nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow, index=True)

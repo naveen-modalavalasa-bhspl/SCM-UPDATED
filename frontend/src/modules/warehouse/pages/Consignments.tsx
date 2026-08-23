@@ -136,7 +136,7 @@ export default function Consignments() {
         deleteLabel="consignment"
         labelOf={(row) => row.dispatch_no ?? `Consignment ${row.id}`}
         kpiCounts={[
-          { label: "Ready", statuses: ["PACKED", "APPROVED"], tone: "text-ok" },
+          { label: "Ready", statuses: ["PACKED", "APPROVED"], tone: "ok" },
           { label: "Dispatched", statuses: ["DISPATCHED", "IN_TRANSIT"] },
         ]}
         kpis={(rows) => [

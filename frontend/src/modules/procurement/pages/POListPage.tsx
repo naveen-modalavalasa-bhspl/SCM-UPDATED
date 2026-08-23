@@ -1,15 +1,17 @@
-import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Calendar, Download, Search } from "lucide-react";
+import { Download } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, FilterMenu, Input, PageHeader, ResponsiveList,
-  StatusPill, type Column,
+  Button, Can, Card, ErrorBanner, FilterBar, FilterDateRange, FilterMenu, PageHeader,
+  ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
 import { poApi } from "../api";
 import type { POListRow } from "../types";
 import { fmtDate } from "@/shared/datetime";
 import { formatPONo } from "@/shared/format";
+import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
+import { POKpis } from "../components/ProcurementKpis";
+import { useUrlFilters } from "../urlFilters";
 
 /** POStatus, as the backend enum spells it. */
 const STATUSES = [
@@ -30,6 +32,10 @@ const money = (n?: number) =>
 
 const SIZE = 20;
 
+/** Every filter this screen owns, so Clear knows what to drop. */
+const FILTER_KEYS = ["search", "status", "vendor", "date_from", "date_to",
+                     "pending_for_me"];
+
 /**
  * The purchase order list.
  *
@@ -41,23 +47,22 @@ const SIZE = 20;
  */
 export function POListPage() {
   const nav = useNavigate();
-  
-  // Filter state
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
-  const [vendor, setVendor] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  const [page, setPage] = useState(1);
 
-  // Debounced search text to prevent excessive API calls
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  
-  // Update debounced search after 500ms
-  useMemo(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search), 500);
-    return () => clearTimeout(timer);
-  }, [search]);
+  // Filters live in the URL, not in component state (see `../urlFilters`): the KPI
+  // strip above applies them, the Overview links straight into them, and a filtered
+  // register is a link somebody can paste to a colleague.
+  const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const search = get("search");
+  const status = get("status");
+  const vendor = get("vendor");
+  const dateFrom = get("date_from");
+  const dateTo = get("date_to");
+  const pendingForMe = getBool("pending_for_me");
+
+  // The shared hook, not a hand-rolled setTimeout inside useMemo — that one never
+  // cleared its timer (useMemo discards a returned function), so every keystroke left
+  // a live timeout behind.
+  const debouncedSearch = useDebouncedValue(search);
 
   // Combine filters for API
   const queryParams = {
@@ -65,6 +70,7 @@ export function POListPage() {
     status: status || undefined,
     date_from: dateFrom || undefined,
     date_to: dateTo || undefined,
+    pending_for_me: pendingForMe || undefined,
     page,
     size: SIZE,
   };
@@ -153,59 +159,45 @@ export function POListPage() {
         }
       />
 
+      {/* The KPI strip: pressing a tile applies the filter it counts and pressing it
+          again clears it. Gated on `po.view` inside the component, the same code this
+          screen's endpoint checks — revoke it and the strip, its request and its
+          numbers all go together. */}
+      <div className="mb-4">
+        <POKpis />
+      </div>
+
       {/* One pill row, the shape the Indents filter bar uses. It was a bordered panel
         * of raw <input>s with hardcoded neutral-* colours — off the design tokens, so
         * it did not follow the theme, and it took a third of the screen above the
         * table. Vendor is filtered in the browser over the page in hand; the endpoint
         * takes no vendor parameter and at 20 rows a page it does not need one. */}
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
-        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-          <Input
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search PO, RFQ, or Quotation no..."
-            className="pl-9"
-          />
-        </div>
+      <FilterBar
+        search={search}
+        onSearch={(value) => set({ search: value })}
+        searchPlaceholder="Search PO, RFQ, or Quotation no…"
+        active={activeCount(FILTER_KEYS)}
+        onClear={() => clear(FILTER_KEYS)}
+      >
         <FilterMenu
           label="Status"
           value={status}
-          onChange={(value) => { setStatus(value); setPage(1); }}
+          onChange={(value) => set({ status: value })}
           options={STATUSES.filter((o) => o.value)}
         />
-        <FilterMenu label="Vendor" value={vendor} onChange={setVendor}
+        <FilterMenu label="Vendor" value={vendor}
+                    onChange={(value) => set({ vendor: value })}
                     options={vendorOptions} />
-        <div className="flex items-center gap-1 rounded-lg border border-line bg-content1 px-2">
-          <Calendar className="h-4 w-4 text-muted" />
-          <input
-            type="date"
-            aria-label="Ordered from"
-            value={dateFrom}
-            onChange={(e) => { setDateFrom(e.target.value); setPage(1); }}
-            className="h-11 bg-transparent text-sm text-ink outline-none"
-          />
-          <span className="text-xs text-muted">to</span>
-          <input
-            type="date"
-            aria-label="Ordered to"
-            value={dateTo}
-            onChange={(e) => { setDateTo(e.target.value); setPage(1); }}
-            className="h-11 bg-transparent text-sm text-ink outline-none"
-          />
-        </div>
-        {(search || status || vendor || dateFrom || dateTo) && (
-          <button
-            onClick={() => {
-              setSearch(""); setStatus(""); setVendor("");
-              setDateFrom(""); setDateTo(""); setPage(1);
-            }}
-            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
-          >
-            Clear
-          </button>
-        )}
-      </div>
+        {/* The shared date pair, so it sits level with the pills and carries its own
+            clear. It was two bare browser date boxes in a box of their own. */}
+        <FilterDateRange
+          label="Ordered"
+          from={dateFrom}
+          to={dateTo}
+          onFrom={(value) => set({ date_from: value })}
+          onTo={(value) => set({ date_to: value })}
+        />
+      </FilterBar>
 
       <ErrorBanner error={error} />
 
@@ -220,9 +212,11 @@ export function POListPage() {
           totalPages={totalPages}
           onPageChange={setPage}
           empty={
-            status || vendor || search
-              ? "No purchase orders match these filters."
-              : "No purchase orders yet. Raise one here, or award a tender and create it from the winning quote."
+            pendingForMe
+              ? "Nothing is waiting for your signature."
+              : status || vendor || search
+                ? "No purchase orders match these filters."
+                : "No purchase orders yet. Raise one here, or award a tender and create it from the winning quote."
           }
           renderCard={(r) => (
             <div className="space-y-1.5">

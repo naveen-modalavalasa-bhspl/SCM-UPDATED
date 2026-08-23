@@ -122,7 +122,7 @@ export default function Picklist() {
       deleteLabel="picklist"
       labelOf={(r) => r.pick_no ?? `Picklist ${r.id}`}
       kpiCounts={[
-        { label: "Released", statuses: ["RELEASED"], tone: "text-warn" },
+        { label: "Released", statuses: ["RELEASED"], tone: "warn" },
         { label: "In progress", statuses: ["IN_PROGRESS"] },
         { label: "Completed", statuses: ["COMPLETED"] },
       ]}

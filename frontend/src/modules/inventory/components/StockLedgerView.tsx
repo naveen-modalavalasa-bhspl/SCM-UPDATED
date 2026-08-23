@@ -2,16 +2,16 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { ArrowDownLeft, ArrowUpRight, FileSpreadsheet } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, FileSpreadsheet, History } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { UnitCell } from "./UnitsPanel";
 import {
-  getSerialSummary, getStockLedger, getStockLedgerSummary, getWarehouses, indexSerials,
-  unplaced,
+  getSerialSummary, getStockLedger, getStockLedgerSummary, getUnitCodes, getWarehouses,
+  indexSerials, indexUnitCodes, unitCodeKey, unplaced,
 } from "../api";
-import type { SerialSummaryRow, StockLedgerItem } from "../types";
+import type { SerialSummaryRow, StockLedgerItem, UnitCodeRow } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { fmtDate, fmtTime } from "@/shared/datetime";
 
@@ -27,6 +27,15 @@ import { fmtDate, fmtTime } from "@/shared/datetime";
  * six ref_types on the live ledger (VEHICLE_ISSUE alone is a third of all rows), so a
  * user filtering by document type simply could not see them.
  */
+/** What the count line under a ledger cell calls the units it is showing.
+ *
+ * Deliberately NOT "units in lot" (2026-08-22). A stock row lists what is standing on
+ * a shelf; a ledger row lists what MOVED, and the two are different sets that were
+ * being read as one — an issue of 2 said "198 units in lot" beside its own two
+ * serials. The wording is half the fix; the other half is that the numbers now come
+ * off the movement. */
+const MOVEMENT_CAPTION = "units in this movement";
+
 const REF_TYPES = [
   { value: "GRN", label: "Goods Receipt" },
   { value: "ISSUE", label: "Material Issue" },
@@ -143,10 +152,56 @@ export function StockLedgerView() {
    *  batch, then the bin alone, then the point. Falling back that way is what lets a
    *  movement whose lot has since been emptied still name what it carried, without
    *  handing one lot another lot's units. */
-  const unitsOf = (r: StockLedgerItem) =>
+  const lotOfRow = (r: StockLedgerItem) =>
     serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${unplaced(r.bin_id)}:${unplaced(r.batch_id)}`)
     ?? serialsByRow.get(`${r.item_id}:${r.warehouse_id}:${unplaced(r.bin_id)}`)
     ?? serialsByRow.get(`${r.item_id}:${r.warehouse_id}`);
+
+  /** The units THIS MOVEMENT carried, straight off `stk_ledger.serial_numbers`. */
+  const movedUnits = (r: StockLedgerItem) => r.serial_numbers ?? [];
+
+  /** The codes those units carry, looked up in the warehouse module.
+   *
+   *  NEW 2026-08-22. `list_movements` can only reach `stk_balance` for a code, which
+   *  is one code for a whole LOT — so a serial-tracked movement arrived with nothing
+   *  in its code columns and the screen filled them from the lot summary below. Asked
+   *  for once per page, over the units the page actually names. */
+  const { data: codeRows = [] } = useQuery({
+    queryKey: ["ledger-unit-codes", rows.flatMap(movedUnits).join(",")],
+    queryFn: () => getUnitCodes(rows.flatMap(movedUnits)),
+    enabled: rows.some((r) => movedUnits(r).length > 0),
+  });
+  const codeByUnit = indexUnitCodes(codeRows);
+
+  /** Does this row name its own units?
+   *
+   *  THE question the whole cell hangs on (2026-08-22). A row that names them is a
+   *  record of what MOVED and must be read from that list alone. A row that does not
+   *  — every ledger line written before `serial_numbers` was mapped — has nothing but
+   *  the lot behind it, and the lot summary stays its best available answer.
+   *
+   *  Mixing the two is the defect this fixes: an issue of 2 mice showed its own two
+   *  serials beside "198 units in lot", because the serials came off the movement and
+   *  the codes came off the shelf as it stands today. Two columns of one row,
+   *  answering two different questions, reading as one fact. */
+  const namesOwnUnits = (r: StockLedgerItem) => movedUnits(r).length > 0;
+
+  /** The lot summary, but ONLY for a row that cannot speak for itself. */
+  const unitsOf = (r: StockLedgerItem) =>
+    (namesOwnUnits(r) ? undefined : lotOfRow(r));
+
+  /** One kind of code for the units this movement carried, in the order it carried
+   *  them. Empty for a row that names no units, which falls back to the lot. */
+  const movedCodes = (r: StockLedgerItem, pick: (u: UnitCodeRow) => string | null) =>
+    movedUnits(r)
+      .map((unit) => {
+        // Keyed on the row's ITEM as well as the identity: a serial is not unique
+        // across items in the live data, and a bare identity lookup handed a mouse
+        // the monitor's asset code. See `indexUnitCodes`.
+        const u = codeByUnit.get(unitCodeKey(r.item_id, unit));
+        return u ? pick(u) : null;
+      })
+      .filter(Boolean) as string[];
 
   /** The serial to show for a row, or nothing.
    *
@@ -186,9 +241,15 @@ export function StockLedgerView() {
       r.transaction_date, r.transaction_no, r.transaction_type, r.item_code, r.item_name,
       // A column each, and every value in it — not the one the cell has room for.
       r.warehouse_name, r.batch_number,
-      serialOf(r) || unitsOf(r)?.serials.join(" | ") || unitsOf(r)?.imeis.join(" | "),
-      r.asset_code || unitsOf(r)?.asset_codes?.join(" | "),
-      r.consumable_code || unitsOf(r)?.consumable_codes?.join(" | "),
+      // The movement's own units first — the export must say the same thing the
+      // screen does, and the screen no longer borrows the lot's units for a row that
+      // names its own.
+      (namesOwnUnits(r) ? movedUnits(r).join(" | ") : "")
+        || serialOf(r) || unitsOf(r)?.serials.join(" | ") || unitsOf(r)?.imeis.join(" | "),
+      movedCodes(r, (u) => u.asset_code).join(" | ")
+        || r.asset_code || unitsOf(r)?.asset_codes?.join(" | "),
+      movedCodes(r, (u) => u.consumable_code).join(" | ")
+        || r.consumable_code || unitsOf(r)?.consumable_codes?.join(" | "),
       r.in_qty, r.out_qty, r.balance_qty, r.unit_rate, r.total_value, r.performed_by,
     ]);
     const csv = [header, ...body].map((line) => line.map(cell).join(",")).join("\n");
@@ -209,11 +270,27 @@ export function StockLedgerView() {
     ownOf: (r: StockLedgerItem) => string | undefined,
     listOf: (u: SerialSummaryRow) => string[] | undefined,
     countOf: (u: SerialSummaryRow) => number | undefined,
+    /** The same kind of code, read off ONE unit — used for the units the movement
+     *  itself carried, which is the answer this column should give whenever the row
+     *  has one. */
+    mine: (u: UnitCodeRow) => string | null,
   ): Column<StockLedgerItem> => ({
     key,
     header,
     hideOnNarrow: true,
     render: (r) => {
+      // The units this movement carried, if it named any: their codes, and no others.
+      const moved = movedCodes(r, mine);
+      if (moved.length) {
+        return (
+          <UnitCell
+            units={moved}
+            caption={MOVEMENT_CAPTION}
+            listTitle={header}
+            title={r.item_name}
+          />
+        );
+      }
       const units = unitsOf(r);
       const own = ownOf(r);
       const codes = (units && listOf(units)) || [];
@@ -253,9 +330,17 @@ export function StockLedgerView() {
       key: "item",
       header: "Item",
       render: (r) => (
-        <div className="min-w-0">
-          <div className="truncate text-sm text-ink">{r.item_name}</div>
-          <div className="font-mono text-[11px] text-muted">{r.item_code}</div>
+        <div className="flex items-center gap-2.5">
+          <span
+            aria-hidden
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-050 font-display text-sm font-bold text-brand"
+          >
+            {(r.item_name.charAt(0) || "?").toUpperCase()}
+          </span>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-ink">{r.item_name}</div>
+            <div className="font-mono text-[11px] text-muted">{r.item_code}</div>
+          </div>
         </div>
       ),
     },
@@ -278,6 +363,19 @@ export function StockLedgerView() {
       header: "Serial / IMEI",
       hideOnNarrow: true,
       render: (r) => {
+        // A movement that names its units lists exactly those — one per line moved,
+        // in order, with the rest a click away. It used to render them as one long
+        // comma-joined string that the cell then truncated to the first two.
+        if (namesOwnUnits(r)) {
+          return (
+            <UnitCell
+              units={movedUnits(r)}
+              caption={MOVEMENT_CAPTION}
+              listTitle="Serial / IMEI"
+              title={r.item_name}
+            />
+          );
+        }
         const units = unitsOf(r);
         const serial = serialOf(r);
         return (
@@ -295,21 +393,27 @@ export function StockLedgerView() {
     // identity that could be either kind, which is exactly what the ledger is opened
     // to tell apart.
     codeColumn("asset_code", "Asset Code",
-               (r) => r.asset_code, (u) => u.asset_codes, (u) => u.asset_count),
+               (r) => r.asset_code, (u) => u.asset_codes, (u) => u.asset_count,
+               (u) => u.asset_code),
     codeColumn("consumable_code", "Consumable Code",
                (r) => r.consumable_code,
-               (u) => u.consumable_codes, (u) => u.consumable_count),
+               (u) => u.consumable_codes, (u) => u.consumable_count,
+               (u) => u.consumable_code),
     {
       key: "in",
       header: "In",
       className: "text-right",
-      render: (r) => (r.in_qty ? <span className="font-semibold text-success">+{r.in_qty}</span> : <span className="text-muted">—</span>),
+      render: (r) => (r.in_qty
+        ? <span className="inline-block rounded-md bg-ok-bg px-2 py-0.5 font-semibold tabular text-ok">+{r.in_qty}</span>
+        : <span className="text-muted">—</span>),
     },
     {
       key: "out",
       header: "Out",
       className: "text-right",
-      render: (r) => (r.out_qty ? <span className="font-semibold text-danger">−{r.out_qty}</span> : <span className="text-muted">—</span>),
+      render: (r) => (r.out_qty
+        ? <span className="inline-block rounded-md bg-bad-bg px-2 py-0.5 font-semibold tabular text-bad">−{r.out_qty}</span>
+        : <span className="text-muted">—</span>),
     },
     {
       key: "balance",
@@ -352,7 +456,7 @@ export function StockLedgerView() {
       />
 
       <ResponsiveGrid cols={3} className="mb-4">
-        <StatCard label="Movements" value={num(totals?.movements)} />
+        <StatCard label="Movements" value={num(totals?.movements)} icon={<History size={16} />} />
         <StatCard label="Total In" value={signed(totals?.total_in, "+")} icon={<ArrowDownLeft size={16} />} tone="text-success" />
         <StatCard label="Total Out" value={signed(totals?.total_out, "−")} icon={<ArrowUpRight size={16} />} tone="text-danger" />
       </ResponsiveGrid>
@@ -378,7 +482,7 @@ export function StockLedgerView() {
           max={dateTo || TODAY}
           onChange={(e) => setDateFrom(e.target.value)}
           aria-label="From date"
-          className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
+          className="h-11 rounded-xl border border-line/60 bg-content1 px-3 text-sm text-ink shadow-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/25"
         />
         <input
           type="date"
@@ -387,12 +491,15 @@ export function StockLedgerView() {
           max={TODAY}
           onChange={(e) => setDateTo(e.target.value)}
           aria-label="To date"
-          className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
+          className="h-11 rounded-xl border border-line/60 bg-content1 px-3 text-sm text-ink shadow-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/25"
         />
         <FilterSelect
           value={size.toString()}
           onChange={(val) => { setSize(Number(val)); setPage(1); }}
           placeholder="20 per page"
+          // A page size must always hold a value: the shared pill offers a "Show all"
+          // row by default, and picking it here set the size to "" -> Number("") -> 0.
+          allowEmpty={false}
           options={[
             { value: "20", label: "20 per page" },
             { value: "50", label: "50 per page" },
@@ -422,8 +529,8 @@ export function StockLedgerView() {
               </div>
               <div className="font-mono text-[11px] text-muted">{r.transaction_no}</div>
               <div className="flex gap-4 text-sm">
-                {r.in_qty > 0 && <span className="text-success">+{r.in_qty}</span>}
-                {r.out_qty > 0 && <span className="text-danger">−{r.out_qty}</span>}
+                {r.in_qty > 0 && <span className="rounded-md bg-ok-bg px-2 py-0.5 font-semibold text-ok">+{r.in_qty}</span>}
+                {r.out_qty > 0 && <span className="rounded-md bg-bad-bg px-2 py-0.5 font-semibold text-bad">−{r.out_qty}</span>}
                 <span className="text-muted">Balance {r.balance_qty}</span>
               </div>
               <div className="text-[11px] text-muted">
@@ -465,20 +572,25 @@ export function StockLedgerView() {
                 * fallback, so the sheet can never say less than the row it opened
                 * from. `serial_numbers` (plural) is the ledger's own column; the
                 * singular one this used never existed on the wire. */}
+              {/* Same order of preference as the table, so the sheet can never say
+                * something the row it opened from does not. */}
               <SheetRow
                 label="Serial / IMEI"
-                value={selected.serial_number
+                value={movedUnits(selected).join(", ")
+                  || selected.serial_number
                   || unitsOf(selected)?.serials.join(", ")
                   || unitsOf(selected)?.imeis.join(", ")}
               />
               <SheetRow
                 label="Asset code"
-                value={selected.asset_code
+                value={movedCodes(selected, (u) => u.asset_code).join(", ")
+                  || selected.asset_code
                   || unitsOf(selected)?.asset_codes?.join(", ")}
               />
               <SheetRow
                 label="Consumable code"
-                value={selected.consumable_code
+                value={movedCodes(selected, (u) => u.consumable_code).join(", ")
+                  || selected.consumable_code
                   || unitsOf(selected)?.consumable_codes?.join(", ")}
               />
               <SheetRow label="Warehouse" value={selected.warehouse_name} />

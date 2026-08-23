@@ -2,13 +2,16 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Button, Can, Card, ErrorBanner, Input, PageHeader, ResponsiveList, Select,
-  StatusPill, type Column,
+  Clock, Gavel, Hourglass, PenLine, PencilLine, Send, Truck, type LucideIcon,
+} from "lucide-react";
+import {
+  Button, Can, Card, ErrorBanner, Input, KpiTiles, PageHeader, ResponsiveList,
+  Select, StatusPill, type Column, type Tone,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { transportApi } from "../api";
 import {
-  load, modeLabel, modeTint, money, nextMove, statusTint, TR_STATUSES,
+  load, modeLabel, modeTint, money, nextMove, TR_STATUSES,
 } from "../components/modeCopy";
 import type { TransportSummary, TRListRow } from "../transportTypes";
 
@@ -38,14 +41,22 @@ const DIRECTIONS = [
 /** The board across the top: one tile per queue, and pressing it filters the list.
  *  The order is the order the flow runs, so the board reads left to right as the
  *  journey a consignment takes. */
-const QUEUES: { key: keyof TransportSummary; label: string; status: string }[] = [
-  { key: "draft", label: "Draft", status: "DRAFT" },
-  { key: "pending_approval", label: "Approval", status: "PENDING_APPROVAL" },
-  { key: "quoting", label: "Quotes", status: "QUOTING" },
-  { key: "awaiting_carrier", label: "Carrier", status: "AWAITING_CARRIER" },
-  { key: "ready", label: "To dispatch", status: "READY" },
-  { key: "in_transit", label: "On the road", status: "IN_TRANSIT" },
-  { key: "delivered", label: "To sign", status: "DELIVERED" },
+const QUEUES: {
+  key: keyof TransportSummary; label: string; status: string;
+  icon: LucideIcon; tone: Tone;
+}[] = [
+  { key: "draft", label: "Draft", status: "DRAFT", icon: PencilLine, tone: "neutral" },
+  { key: "pending_approval", label: "In approval", status: "PENDING_APPROVAL",
+    icon: Hourglass, tone: "info" },
+  { key: "quoting", label: "Out for quotes", status: "QUOTING",
+    icon: Gavel, tone: "brand" },
+  { key: "awaiting_carrier", label: "Awaiting carrier", status: "AWAITING_CARRIER",
+    icon: Clock, tone: "warn" },
+  { key: "ready", label: "To dispatch", status: "READY", icon: Send, tone: "ok" },
+  { key: "in_transit", label: "On the road", status: "IN_TRANSIT",
+    icon: Truck, tone: "brand" },
+  { key: "delivered", label: "To sign", status: "DELIVERED",
+    icon: PenLine, tone: "warn" },
 ];
 
 /**
@@ -199,34 +210,26 @@ export function TransportRequestsPage() {
         }
       />
 
-      <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
-        {QUEUES.map((queue) => {
-          const active = status === queue.status;
-          const count = summary?.[queue.key] ?? 0;
-          return (
-            <button
-              key={queue.key}
-              type="button"
-              onClick={() => {
-                setStatus(active ? "" : queue.status);
-                setPage(1);
-              }}
-              className={`min-h-11 rounded-xl border px-3 py-2.5 text-left transition ${
-                active
-                  ? "border-brand bg-brand/5 ring-2 ring-brand/20"
-                  : "border-line bg-content1 hover:border-brand/50 hover:bg-surface-2"
-              }`}
-            >
-              <span className="block font-display text-2xl font-bold tabular text-ink">
-                {count}
-              </span>
-              <span className={`mt-0.5 inline-block rounded-full px-1.5 text-[10px] font-semibold uppercase tracking-wide ${statusTint(queue.status)}`}>
-                {queue.label}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+      {/* The shared KPI strip (2026-08-23), replacing this screen's own hand-rolled
+          tiles — one app, one shape for "here is a queue". The behaviour it already
+          had is kept exactly: a tile is a TOGGLE, so pressing the one that is on
+          clears the filter rather than reapplying it. */}
+      <KpiTiles
+        label="Shipment queues"
+        className="mb-4"
+        tiles={QUEUES.map((queue) => ({
+          key: String(queue.key),
+          label: queue.label,
+          icon: queue.icon,
+          tone: queue.tone,
+          value: summary ? (summary[queue.key] ?? 0) : undefined,
+          active: status === queue.status,
+          onPress: () => {
+            setStatus(status === queue.status ? "" : queue.status);
+            setPage(1);
+          },
+        }))}
+      />
 
       {Boolean(summary?.open_claims) && (
         <Card className="mb-4 flex flex-wrap items-center justify-between gap-2 border-amber-300 bg-amber-50 p-3 dark:bg-amber-900/20">

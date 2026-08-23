@@ -65,19 +65,35 @@ export function ResponsiveList<T>({
        * which CLIPPED a table wider than the page instead of scrolling it — the last
        * columns were simply unreachable, with no scrollbar to say so. Wide content
        * scrolls inside its own box; the page itself never scrolls sideways. */}
-      <div className="hidden overflow-x-auto md:block">
+      <div className="hidden md:block">
+      <div className="overflow-x-auto">
         <Table
           key={revision ?? "static"}
           aria-label="List"
           removeWrapper
           selectionMode="none"
-          bottomContent={pager}
           onRowAction={onRowClick ? (key) => {
             const r = rowByKey.get(String(key));
             if (r) onRowClick(r);
           } : undefined}
           classNames={{
-            base: "rounded-2xl border border-line/70 bg-content1",
+            // `w-max min-w-full` is load-bearing, not styling (2026-08-23).
+            //
+            // HeroUI's `base` slot is a plain block `<div>` (theme: "flex flex-col
+            // relative gap-4") and it wraps the table WHETHER OR NOT `removeWrapper`
+            // is set — that flag only drops the inner scroll box. A block div takes
+            // the width of its container, while the `<table>` inside it is
+            // `min-w-full h-auto` and grows past that whenever the columns need more
+            // room. So on every list wide enough to scroll, the border below was
+            // painted at the CONTAINER's width and the last columns hung outside it:
+            // a hard vertical rule straight down the middle of the table, in every
+            // module, wherever the visible edge happened to fall.
+            //
+            // `w-max` sizes the div to its content (the table's real width) and
+            // `min-w-full` keeps it at least as wide as the scroll container, so a
+            // narrow table still fills the card. The border now wraps the whole
+            // table, and there is nothing left to draw a line through it.
+            base: "w-max min-w-full rounded-2xl border border-line/70 bg-content1",
             th: "bg-content2 text-[11px] font-semibold uppercase tracking-wider text-muted",
             tr: onRowClick ? "cursor-pointer transition-colors hover:bg-brand-050/50" : "",
             td: "py-3.5 text-sm",
@@ -110,6 +126,13 @@ export function ResponsiveList<T>({
             )}
           </TableBody>
         </Table>
+      </div>
+        {/* The pager sits OUTSIDE the scroll box, not in the Table's `bottomContent`.
+            Inside, it lives in the same `base` div as the table — which is now as wide
+            as the table — so on a wide register it scrolled sideways with the columns
+            and could end up off-screen. Out here it stays put, and it is still inside
+            whichever <Card> the screen wrapped this list in. */}
+        {pager}
       </div>
 
       {/* Mobile cards */}

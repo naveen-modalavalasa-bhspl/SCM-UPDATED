@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ArrowRight, Eye, EyeOff } from "lucide-react";
 import { Input, Button } from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -88,6 +88,17 @@ export function LoginPage() {
                 </button>
               }
             />
+
+            {/* Under the password box, where somebody looks the moment the one they
+                typed did not work. */}
+            <div className="-mt-1 flex justify-end">
+              <Link
+                to="/forgot-password"
+                className="rounded text-sm font-medium text-brand transition-colors hover:text-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
+              >
+                Forgot password?
+              </Link>
+            </div>
 
             {error && (
               <div className="rounded-xl bg-bad-bg px-3 py-2 text-sm font-medium text-bad">{error}</div>

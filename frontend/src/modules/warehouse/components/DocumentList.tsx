@@ -1,9 +1,10 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { ListChecks, Plus, Trash2, type LucideIcon } from "lucide-react";
 import {
-  Button, Can, PageHeader, ResponsiveList, StatCard, type Column,
+  Button, Can, KpiTiles, PageHeader, ResponsiveList,
+  type Column, type KpiTileSpec, type Tone,
 } from "@/shared/components";
 import { ConfirmModal, ErrorBanner, useToast } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -72,7 +73,12 @@ export interface DocumentListProps<T> {
    *  Statuses are disjoint, so summing across several is a true total.
    *
    *  Anything that is a count of documents belongs here rather than in `kpis`. */
-  kpiCounts?: { label: string; statuses: string[]; tone?: string }[];
+  kpiCounts?: {
+    label: string; statuses: string[];
+    /** A shared KPI tone, not a raw text colour — the strip owns the palette. */
+    tone?: Tone;
+    icon?: LucideIcon;
+  }[];
   /** Tiles that cannot be expressed as a status count — sums of quantity or value,
    *  date arithmetic, flag combinations. Computed over the scanned rows.
    *
@@ -219,9 +225,13 @@ export function DocumentList<T>({
     // sum would tick upward as the requests land and read as the queue moving.
     const parts = t.statuses.map((s) => countByStatus.get(s));
     const value = parts.some((n) => n === undefined)
-      ? "…"
+      // `undefined`, not "…": the shared strip draws a skeleton for it, which is the
+      // same "not answered yet" the ellipsis meant and reads as loading rather than
+      // as a value.
+      ? undefined
       : parts.reduce<number>((sum, n) => sum + (n ?? 0), 0);
-    return { label: t.label, value, tone: t.tone };
+    return { label: t.label, value, tone: t.tone, icon: t.icon,
+             statuses: t.statuses };
   });
 
   // Everything a status count cannot express — sums of quantity or value, date
@@ -243,6 +253,36 @@ export function DocumentList<T>({
   }));
 
   const tiles = [...countTiles, ...scanTiles];
+
+  /* --- the strip -------------------------------------------------------------
+   * A COUNT tile is pressable: it stands for a set of statuses, and pressing it
+   * filters the list to exactly what it counted. Pressing the one already on clears
+   * it, so the strip is the fastest filter on the screen rather than a one-way door.
+   *
+   * Only single-status tiles filter. The status dropdown underneath takes one value,
+   * so a tile summing three statuses has nothing to set it to — and a tile that
+   * filtered to only the first of its three would show a number that disagreed with
+   * itself. Those stay read-outs.
+   *
+   * A SCAN tile is never pressable: it is a sum of quantity or value, not a set of
+   * rows, so there is no list for it to open.
+   * -------------------------------------------------------------------------- */
+  const kpiTiles: KpiTileSpec[] = tiles.map((tile) => {
+    const own = "statuses" in tile ? (tile.statuses as string[]) : [];
+    const filterable = own.length === 1;
+    const active = filterable && status === own[0];
+    return {
+      key: tile.label,
+      label: tile.label,
+      icon: ("icon" in tile && tile.icon) || ListChecks,
+      tone: ("tone" in tile ? tile.tone : undefined) as Tone | undefined,
+      value: tile.value as number | string | undefined,
+      active,
+      onPress: filterable
+        ? () => { setStatus(active ? "" : own[0]); setPage(1); }
+        : undefined,
+    };
+  });
 
   // The heading says what the point IS, not what the module is called. A DM working
   // their MDP should read "MDP · Kadapa Store", not "Warehouse" — the picker already
@@ -337,12 +377,12 @@ export function DocumentList<T>({
         actions={createPermission && create ? <Can do={createPermission}>{create}</Can> : create}
       />
 
-      {tiles.length > 0 && (
-        <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {tiles.map((t) => (
-            <StatCard key={t.label} label={t.label} value={t.value} tone={t.tone} />
-          ))}
-        </div>
+      {/* The shared KPI strip (2026-08-23). One definition across Indents, Approvals,
+          Procurement, Inventory, Logistics and every warehouse transaction screen —
+          this component backs all of the last group, so Material Inward, GRN, QC,
+          Put-away, Picklists and Issues all pick it up from here. */}
+      {kpiTiles.length > 0 && (
+        <KpiTiles label="Queues" tiles={kpiTiles} className="mb-4" />
       )}
 
       <FilterBar

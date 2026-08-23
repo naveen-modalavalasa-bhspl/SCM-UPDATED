@@ -6,11 +6,12 @@ import {
 } from "recharts";
 import * as XLSX from "xlsx";
 import {
-  CheckCircle2, Clock, Download, FileCheck2, RotateCcw, Search,
+  CheckCircle2, Clock, Download, FileCheck2, RotateCcw,
   ShieldCheck, TriangleAlert, X, XCircle,
 } from "lucide-react";
 import {
   Button, Card, PageHeader, ResponsiveList, StatCard, StatusPill, type Column,
+  Select, SearchField,
 } from "@/shared/components";
 import { approvalsApi } from "../api";
 import { raisedWindow, type RaisedRange } from "../filters";
@@ -178,13 +179,19 @@ export function ApprovalReportsPage() {
         </>}
       </div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <select aria-label="Document type" value={docType} onChange={(event) => setDocType(event.target.value)} className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink"><option value="">All document types</option>{docTypes.map((value) => <option key={value} value={value}>{typeLabel(value)}</option>)}</select>
-        <select aria-label="Decision status" value={status} onChange={(event) => setStatus(event.target.value)} className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink"><option value="">All statuses</option>{statuses.map((value) => <option key={value} value={value}>{value.replace(/_/g, " ")}</option>)}</select>
-        <select aria-label="Approval stage" value={stage} onChange={(event) => setStage(event.target.value)} className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink"><option value="">All stages</option>{stageOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select>
-        <select aria-label="Approver" value={approver} onChange={(event) => setApprover(event.target.value)} className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink"><option value="">All approvers</option>{approvers.map((value) => <option key={value} value={value}>{value}</option>)}</select>
+        {/* The shared Select, like every other filter in the app. These were four
+            native <select>s, which the browser draws — no CSS makes them match. */}
+        <Select ariaLabel="Document type" placeholder="All document types" value={docType} onChange={setDocType}
+          options={docTypes.map((value) => ({ value, label: typeLabel(value) }))} />
+        <Select ariaLabel="Decision status" placeholder="All statuses" value={status} onChange={setStatus}
+          options={statuses.map((value) => ({ value, label: value.replace(/_/g, " ") }))} />
+        <Select ariaLabel="Approval stage" placeholder="All stages" value={stage} onChange={setStage}
+          options={stageOptions.map((value) => ({ value, label: value }))} />
+        <Select ariaLabel="Approver" placeholder="All approvers" value={approver} onChange={setApprover}
+          options={approvers.map((value) => ({ value, label: value }))} />
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-64 flex-1"><Search className="absolute left-3 top-3.5 h-4 w-4 text-muted" /><input aria-label="Requester filter" value={requester} onChange={(event) => setRequester(event.target.value)} placeholder="Search requester" className="h-11 w-full rounded-lg border border-line bg-content1 pl-9 pr-3 text-sm text-ink" /></div>
+        <div className="min-w-64 flex-1"><SearchField label="Requester filter" value={requester} onChange={setRequester} placeholder="Search requester" /></div>
         <Button variant={overdueOnly ? "danger" : "ghost"} onClick={() => setOverdueOnly(!overdueOnly)}>Overdue only</Button>
         {activeFilters && <Button variant="ghost" onClick={clear}><X className="h-4 w-4" /> Reset</Button>}
         <span className="ml-auto text-xs text-muted">Showing {rows.length} approval records</span>

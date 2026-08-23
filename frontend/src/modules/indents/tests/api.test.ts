@@ -25,7 +25,12 @@ describe("indents api", () => {
     expect(Object.keys(indentApi).sort()).toEqual(
       [
         "acknowledge", "activity", "approve", "bookmark", "create",
-        "delete", "deleteReceiptAttachment", "fulfilment", "get", "journey", "list",
+        "delete", "deleteReceiptAttachment",
+        // The indent picker, narrowed to what the requester's role and region may
+        // ask for. Its own call rather than the shared item master, which the
+        // warehouse and procurement also read — see indentApi.eligibleItems.
+        "eligibleItems",
+        "fulfilment", "get", "journey", "list",
         "myAcknowledgements", "notifications", "offices", "receiptAttachments", "regions",
         "reject", "resubmitCorrection", "returnForCorrection", "shipmentsForIndent", "stats",
         "submit", "unbookmark", "update", "uploadReceiptAttachment", "vehicles",

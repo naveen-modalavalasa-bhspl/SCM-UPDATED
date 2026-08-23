@@ -21,10 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
-from app.modules.procurement import service
+from app.modules.procurement import service, stats
 from app.modules.procurement.schemas import (
     ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
+    ConsolidationStatsOut, DemandPoolRow, LedgerStatsOut, POStatsOut, QuoteStatsOut,
+    ReqStatsOut, RFQStatsOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
     POAmendIn, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
     PORevisionOut, POVendorResponseIn, QuoteListRow,
@@ -61,12 +63,17 @@ async def list_pos(
     project_id: int | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    # What is waiting on THIS login, off `wf_pending` and not off the status — which
+    # is what the "Waiting for me" tile opens. No new permission: it can only ever
+    # NARROW what `po.view` already returns.
+    pending_for_me: bool = False,
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.PO_VIEW))
 ):
     return await service.list_pos(
-        db, params, search=search, status=status, vendor_id=vendor_id, 
-        project_id=project_id, date_from=date_from, date_to=date_to, user=user
+        db, params, search=search, status=status, vendor_id=vendor_id,
+        project_id=project_id, date_from=date_from, date_to=date_to,
+        pending_for_me=pending_for_me, user=user
     )
 
 @pos.get("/export")
@@ -95,6 +102,13 @@ async def export_pos(
 async def open_for_grn(params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.PO_VIEW))):
     return await service.open_for_grn(db, params)
+
+
+@pos.get("/stats", response_model=POStatsOut)
+async def po_stats(db: AsyncSession = Depends(get_db),
+                   user=Depends(require_permission(perms.PO_VIEW))):
+    """The KPI strip over the order register. `po.view`, same rung, same rows."""
+    return await stats.po_stats(db, user=user)
 
 
 @pos.post("", response_model=POOut, status_code=201)
@@ -195,9 +209,37 @@ async def send_to_vendor(po_id: int, db: AsyncSession = Depends(get_db),
 @requisitions.get("", response_model=Page[ReqListRow])
 async def list_requisitions(params: PageParams = Depends(), status: str | None = None,
                             search: str | None = None,  # Real-time search filter for requisition number, project, and warehouse
+                            # What is waiting on THIS login, off `wf_pending` and not
+                            # off the status — which is what the "Waiting for me" tile
+                            # opens. No new permission: it can only ever NARROW what
+                            # `requisition.view` already returns.
+                            pending_for_me: bool = False,
                             db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.REQUISITION_VIEW))):
-    return await service.list_requisitions(db, params, status, search, user=user)
+    return await service.list_requisitions(db, params, status, search,
+                                           pending_for_me=pending_for_me, user=user)
+
+
+# The KPI strip over the register. Same permission as the register itself, and the
+# service applies the same rung — a tile must never count a row the list would hide.
+# Declared above `/{req_id}`, which is int-typed.
+@requisitions.get("/stats", response_model=ReqStatsOut)
+async def requisition_stats(db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    return await stats.requisition_stats(db, user=user)
+
+
+# The demand pool: how much of each item is sanctioned and not yet ordered. Read off
+# requisition LINES, so `requisition.view` is the right gate and the same rung bounds
+# it — see `stats.demand_pool`.
+@requisitions.get("/demand-pool", response_model=Page[DemandPoolRow])
+async def demand_pool(params: PageParams = Depends(),
+                      project_id: int | None = None,
+                      search: str | None = None,
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    return await stats.demand_pool(
+        db, params, project_id=project_id, search=search, user=user)
 
 
 @requisitions.post("", response_model=ReqOut, status_code=201)
@@ -307,9 +349,32 @@ async def cancel_requisition(req_id: int, db: AsyncSession = Depends(get_db),
 @rfqs.get("", response_model=Page[RFQListRow])
 async def list_rfqs(params: PageParams = Depends(), status: str | None = None,
                     search: str | None = None,  # Real-time search filter for RFQ number, title, project, and warehouse
+                    pending_for_me: bool = False,
+                    # A tender that is open or closed, has replies, and has no winner.
+                    # Not a status, so it cannot ride on `?status=` — and the same
+                    # predicate `stats.rfq_stats` counts, so the "Ready to award" tile
+                    # opens exactly the rows it counted.
+                    ready_to_award: bool = False,
                     db: AsyncSession = Depends(get_db),
                     user=Depends(require_permission(perms.RFQ_VIEW))):
-    return await service.list_rfqs(db, params, status, search, user=user)
+    return await service.list_rfqs(db, params, status, search,
+                                   pending_for_me=pending_for_me,
+                                   ready_to_award=ready_to_award, user=user)
+
+
+# Both strips declared above `/{rfq_id}`, which is int-typed. Two endpoints and two
+# gates, not one: `rfq.view` says who may see a tender, `rfq.compare` says who may see
+# what it was priced at, and the quotation numbers are prices.
+@rfqs.get("/stats", response_model=RFQStatsOut)
+async def rfq_stats(db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await stats.rfq_stats(db, user=user)
+
+
+@rfqs.get("/quotations/stats", response_model=QuoteStatsOut)
+async def quotation_stats(db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.RFQ_COMPARE))):
+    return await stats.quotation_stats(db, user=user)
 
 
 @rfqs.post("", response_model=RFQOut, status_code=201)
@@ -324,9 +389,14 @@ async def create_rfq(body: RFQCreate, db: AsyncSession = Depends(get_db),
 async def list_quotations(params: PageParams = Depends(), rfq_id: int | None = None,
                           vendor_id: int | None = None,
                           search: str | None = None,  # Real-time search filter for quotation number and vendor name
+                          # One value or a comma-separated set, so a KPI tile that
+                          # counts a bucket ("to compare" = submitted + revised) can
+                          # open a list holding exactly what it counted.
+                          status: str | None = None,
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(perms.RFQ_COMPARE))):
-    return await service.list_quotations(db, params, rfq_id, vendor_id, search, user=user)
+    return await service.list_quotations(db, params, rfq_id, vendor_id, search,
+                                         status=status, user=user)
 
 
 @rfqs.get("/quotations/{quote_id}", response_model=QuoteOut)
@@ -541,6 +611,24 @@ async def procurement_ledger(params: PageParams = Depends(),
         vendor=vendor, date_from=date_from, date_to=date_to, search=search)
 
 
+# The strip over the register — one count per document kind, under the SAME filters
+# the register is showing (minus `doc_kind`, which is what the tiles set). `po.view`,
+# like the register, for the same reason: the trail's most sensitive column is what an
+# order came to.
+@ledger_api.get("/ledger/stats", response_model=LedgerStatsOut)
+async def procurement_ledger_stats(status: str | None = None,
+                                   project: str | None = None,
+                                   vendor: str | None = None,
+                                   date_from: date | None = None,
+                                   date_to: date | None = None,
+                                   search: str | None = None,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(perms.PO_VIEW))):
+    return await stats.ledger_stats(
+        db, status=status, project=project, vendor=vendor,
+        date_from=date_from, date_to=date_to, search=search)
+
+
 @ledger_api.get("/ledger/filters")
 async def procurement_ledger_filters(db: AsyncSession = Depends(get_db),
                                      user=Depends(require_permission(perms.PO_VIEW))):
@@ -674,9 +762,20 @@ async def consolidation_candidate_ids(
 async def list_consolidations(params: PageParams = Depends(),
                               status: str | None = None,
                               project_id: int | None = None,
+                              pending_for_me: bool = False,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
-    return await service.list_consolidations(db, params, status, project_id, user=user)
+    return await service.list_consolidations(
+        db, params, status, project_id, pending_for_me=pending_for_me, user=user)
+
+
+@consolidations.get("/stats", response_model=ConsolidationStatsOut)
+async def consolidation_stats(db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
+    """The KPI strip over the buying sheets. Same gate and same four rungs as the
+    register — a sheet carries every project's plan, so an unscoped count would put
+    the spend back in front of the login the rung was added to keep it from."""
+    return await stats.consolidation_stats(db, user=user)
 
 
 @consolidations.post("", response_model=ConsolidationOut, status_code=201)

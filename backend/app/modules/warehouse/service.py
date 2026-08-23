@@ -1073,7 +1073,39 @@ async def _transfer_for_receipt(
 _LEAVES_THE_COMPANY = (DispatchType.CUSTOMER.value, DispatchType.VENDOR_RETURN.value)
 
 
-async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user) -> None:
+def _dispatch_lots(lines, qty_field: str) -> list[tuple[int, int | None, Decimal]]:
+    """A consignment's lines, rolled up into one entry per lot it moves.
+
+    NEW 2026-08-22, and the fix for a ledger nobody could read. `out_dispatch_items`
+    holds one row per physical UNIT — each carries its own `serial_no`, which is what
+    the packing list and the gate pass are built from — so both stock legs of a
+    consignment used to walk that list and post a `stk_ledger` row PER UNIT. A ten-unit
+    delivery arrived as ten separate "+1" lines against the same item, the same batch
+    and the same second; DSP/2026-27/00039 wrote a hundred of them for one movement of
+    a hundred tourniquets. The OUT leg of an ISSUE never behaved that way — an issue
+    line is one row per item and posts a single movement naming its ten serials — so
+    the two halves of the same journey disagreed about what a movement is.
+
+    Grouped on (item, batch) because that is precisely what `stk_balance` is keyed on:
+    one movement per balance row touched, no more and no fewer. Insertion order is
+    kept so the ledger still reads in the order the consignment was packed, and a lot
+    with nothing on it is dropped rather than posting a zero.
+
+    Shared by both legs — `credit_arrival` (delivered_qty) and `_apply_gate_out`
+    (quantity) — so the inward and the outward can never drift apart again.
+    """
+    lots: dict[tuple[int, int | None], Decimal] = {}
+    for line in lines:
+        qty = _d(getattr(line, qty_field, None))
+        if qty <= ZERO:
+            continue
+        key = (line.item_id, line.batch_id)
+        lots[key] = lots.get(key, ZERO) + qty
+    return [(item_id, batch_id, qty) for (item_id, batch_id), qty in lots.items()]
+
+
+async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
+                         cap_by_item: dict[int, Decimal] | None = None) -> None:
     """Post the destination's inward leg for a consignment that has arrived.
 
     THE one place a consignment becomes stock at the far end. There are three doors
@@ -1092,12 +1124,20 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user) -> None:
         to credit;
       * the destination runs a receiving desk — the GRN is the stock event, not the
         signature, and posting here would shelve goods nobody inspected;
-      * a GRN was already raised against this consignment — it posted what it kept;
-      * a DISPATCH inward row already exists — this ran once already.
+      * a GRN was already raised against this consignment — it posted what it kept.
 
-    That last check is on `stk_ledger` itself, which makes this idempotent against any
-    combination of doors: two people signing the same delivery from two screens post
-    the goods once.
+    FIXED 2026-08-22 (P1) — the old fourth guard ("a DISPATCH inward row already
+    exists — this ran once already") made the credit one-shot, which a partial
+    receipt cannot live with: the requester confirms 6 of 10 today and 4 next week,
+    and the last confirmation must top the lot up rather than be swallowed by the
+    guard. The guard is now a running total per lot — every run posts only the
+    difference between what is confirmed and what earlier runs already shelved — so
+    the credit stays idempotent against any combination of doors AND accumulates
+    with the receipts.
+
+    `cap_by_item` caps each item's credit at what has actually been confirmed
+    (received_quantity), for the partial path that runs before an issue settles.
+    Absent, every delivered unit is credited as before.
     """
     from app.modules.inventory.models import StockMovement
 
@@ -1107,14 +1147,22 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user) -> None:
         return
     if await _inward_receipt_for_dispatch(db, dispatch.id) is not None:
         return
-    if await db.scalar(
-        select(StockMovement.id).where(
+
+    # What previous runs of this credit already put on the shelf, per lot.
+    credited: dict[tuple[int, int], Decimal] = {}
+    for item_id, batch_id, qty in (await db.execute(
+        select(StockMovement.item_id,
+               func.coalesce(StockMovement.batch_id, m.NO_BATCH),
+               func.sum(StockMovement.quantity))
+        .where(
             StockMovement.ref_type == InventoryRefType.DISPATCH.value,
             StockMovement.ref_id == dispatch.id,
             StockMovement.direction == StockDirection.IN.value,
-        ).limit(1)
-    ):
-        return
+        )
+        .group_by(StockMovement.item_id,
+                  func.coalesce(StockMovement.batch_id, m.NO_BATCH))
+    )).all():
+        credited[(item_id, batch_id)] = _d(qty)
 
     # Which documents the units in this consignment are travelling under. Both, and
     # in this order: the goods were claimed against the issue when one was posted, and
@@ -1125,24 +1173,37 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user) -> None:
 
     # Credit only what actually arrived; a shortage stays visible on the consignment
     # instead of becoming phantom stock at the destination.
-    for line in dispatch.items:
-        delivered = _d(line.delivered_qty)
-        if delivered <= ZERO:
+    #
+    # One movement per lot, not one per consignment LINE. See `_dispatch_lots`: a
+    # consignment is written one row per physical UNIT, so looping the lines posted a
+    # separate quantity-1 ledger row for every unit that arrived.
+    remaining_cap = ({k: _d(v) for k, v in cap_by_item.items()}
+                     if cap_by_item is not None else None)
+    for item_id, batch_id, delivered in _dispatch_lots(dispatch.items, "delivered_qty"):
+        allowed = _d(delivered)
+        if remaining_cap is not None:
+            # Confirmed-so-far ceiling, spent greedily across the lots of an item.
+            allowed = max(ZERO, min(allowed, remaining_cap.get(item_id, ZERO)))
+            remaining_cap[item_id] = _d(remaining_cap.get(item_id, ZERO)) - allowed
+        lot_key = (item_id, batch_id or m.NO_BATCH)
+        delta = (allowed - credited.get(lot_key, ZERO)).quantize(Decimal("0.001"))
+        if delta <= ZERO:
             continue
         # The units land BEFORE the quantity does, so the ledger row can name them.
-        # Only as many as were delivered: a short delivery leaves the rest in flight
-        # under the same marker rather than shelving units that never turned up.
+        # Only as many as are being credited now: a short delivery leaves the rest in
+        # flight under the same marker rather than shelving units that never turned up,
+        # and a partial receipt leaves the unconfirmed rest exactly the same way.
         units = await _land_units(
-            db, markers=markers, item_id=line.item_id, qty=delivered,
+            db, markers=markers, item_id=item_id, qty=delta,
             to_warehouse_id=dispatch.to_warehouse_id, ref_no=dispatch.dispatch_no,
         )
         await move_stock(
-            db, item_id=line.item_id, qty=delivered,
+            db, item_id=item_id, qty=delta,
             direction=StockDirection.IN.value,
             ref_type=InventoryRefType.DISPATCH.value, ref_id=dispatch.id,
             ref_no=dispatch.dispatch_no, user=user,
             warehouse_id=dispatch.to_warehouse_id,
-            bin_id=m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
+            bin_id=m.NO_BIN, batch_id=batch_id or m.NO_BATCH,
             project_id=dispatch.project_id or 0,
             serial_numbers=units or None,
         )
@@ -5393,6 +5454,53 @@ async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
     )
 
 
+async def _issue_confirmation_caps(db: AsyncSession, issue: m.MaterialIssue) -> dict[int, Decimal]:
+    """How much of THIS issue's quantities the requester has confirmed, per item.
+
+    `_receiver_confirmed` answers yes/no — settle or wait — and a partial receipt
+    failed it, which is why the six of ten units physically in the requester's hands
+    sat on no shelf until the last four arrived. This returns the numbers instead:
+    per line, what has been confirmed beyond everything EARLIER issues already
+    carried (the same cumulative arithmetic `_receiver_confirmed` runs, with `<`
+    instead of `<=`), clamped to this issue's own issued quantity, grouped by item
+    so `credit_arrival` can cap a partial credit by it.
+    """
+    lines = [line for line in issue.items if line.indent_item_id]
+    if not lines:
+        return {}
+
+    from app.modules.indents.models import IndentItem
+
+    confirmed = dict((await db.execute(
+        select(IndentItem.id, IndentItem.received_quantity)
+        .where(IndentItem.id.in_([line.indent_item_id for line in lines]))
+    )).all())
+
+    delivered_before = dict((await db.execute(
+        select(m.MaterialIssueLine.indent_item_id,
+               func.sum(m.MaterialIssueLine.issued_qty
+                        - func.coalesce(m.MaterialIssueLine.returned_qty, 0)))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .where(m.MaterialIssueLine.indent_item_id.in_(
+                   [line.indent_item_id for line in lines]),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.MaterialIssue.id < issue.id,
+               ~_relayed_onward())
+        .group_by(m.MaterialIssueLine.indent_item_id)
+    )).all())
+
+    caps: dict[int, Decimal] = {}
+    for line in lines:
+        mine = (_d(confirmed.get(line.indent_item_id))
+                - _d(delivered_before.get(line.indent_item_id)))
+        mine = max(ZERO, min(mine,
+                             _d(line.issued_qty) - _d(line.returned_qty or ZERO)))
+        if mine > ZERO:
+            caps[line.item_id] = caps.get(line.item_id, ZERO) + mine
+    return caps
+
+
 async def _office_sac(db: AsyncSession, office_id: int | None) -> str | None:
     """The service area code of one office, read live from the HCM mirror.
 
@@ -7298,6 +7406,7 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
     )).scalars().all()
 
     signed: list[str] = []
+    settled: set[int] = set()
     for issue in issues:
         # A consolidated issue serves several indents. Only the one whose raiser has
         # confirmed everything it carried is settled — the rest keep it open.
@@ -7305,6 +7414,26 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
             continue
         await _apply_issue_acknowledgement(db, issue, _name(user), None, user)
         signed.append(issue.issue_no)
+        settled.add(issue.id)
+
+    # FIXED 2026-08-22 (P1) — an issue that is only PARTLY confirmed used to be
+    # skipped outright, and with it the arrival credit: the six of ten units
+    # physically in the requester's hands sat on no shelf until the last four were
+    # acknowledged, so his stock balance and ledger stayed empty for a partially
+    # fulfilled indent while fully received ones posted neatly. The unsettled issues
+    # now credit what HAS been confirmed so far (`_issue_confirmation_caps` caps the
+    # credit at it), and `credit_arrival`'s running total tops the lot up as the
+    # remaining receipts come in — including the final one that eventually settles
+    # the issue through `_apply_issue_acknowledgement`.
+    for issue in issues:
+        if issue.id in settled:
+            continue
+        caps = await _issue_confirmation_caps(db, issue)
+        if not caps or all(_d(v) <= ZERO for v in caps.values()):
+            continue
+        dispatch = await _dispatch_for_issue(db, issue.id)
+        if dispatch is not None:
+            await credit_arrival(db, dispatch, user, cap_by_item=caps)
 
     signed += await _sign_transport_for_indent(
         db, indent_id, user, condition=condition, remarks=remarks,
@@ -8597,24 +8726,25 @@ async def _apply_gate_out(db: AsyncSession, dispatch: m.Dispatch,
         already_issued = True
 
     if not already_issued:
-        for line in dispatch.items:
-            qty = _d(line.quantity)
-            if qty <= ZERO:
-                continue
+        # One movement per lot, same as the inward leg — see `_dispatch_lots`. Walking
+        # the per-unit lines wrote a quantity-1 OUT row for every unit that left the
+        # gate, which is the same defect the arrival credit had, on the other side of
+        # the journey. FIXED 2026-08-22.
+        for item_id, batch_id, qty in _dispatch_lots(dispatch.items, "quantity"):
             # No issue behind this consignment, so the units are claimed against the
             # consignment itself. Without this a directly-gated dispatch left its
             # units on the source shelf, free to be picked again tomorrow.
             units = await _ship_units(
-                db, item_id=line.item_id, warehouse_id=dispatch.warehouse_id,
-                qty=qty, batch_id=line.batch_id,
+                db, item_id=item_id, warehouse_id=dispatch.warehouse_id,
+                qty=qty, batch_id=batch_id,
                 marker=_shipped_unit_marker("dispatch", dispatch.id),
             )
             await move_stock_out(
-                db, item_id=line.item_id, qty=qty,
+                db, item_id=item_id, qty=qty,
                 ref_type=InventoryRefType.DISPATCH.value, ref_id=dispatch.id,
                 ref_no=dispatch.dispatch_no, user=user,
                 warehouse_id=dispatch.warehouse_id,
-                batch_id=line.batch_id,
+                batch_id=batch_id,
                 project_id=dispatch.project_id or 0,
                 serial_numbers=units or None,
             )
@@ -9233,6 +9363,66 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
             if len(bucket["consumable_codes"]) < 5:
                 bucket["consumable_codes"].append(consumable)
     return list(grouped.values())
+
+
+#: How many identities one lookup will answer for. A ledger page is 100 rows at most
+#: and a single movement can carry a whole putaway, so the cap is generous; it exists
+#: so a hand-built request cannot ask for the whole table in one `IN (...)`.
+UNIT_CODE_LOOKUP_CAP = 2000
+
+
+async def unit_codes(db: AsyncSession, codes: list[str], user=None) -> list[dict]:
+    """The other identities carried by units the caller can already name.
+
+    NEW 2026-08-22, for the stock ledger. A `stk_ledger` row names the units that
+    MOVED, in `serial_numbers` — but the asset and consumable codes minted at putaway
+    live per unit in this module's `whs_serial_numbers`, and inventory may not read it
+    (rule 5). Without this the ledger screen had nothing to show in its code columns
+    for a serial-tracked movement, so it fell back to the units standing in that lot
+    RIGHT NOW: a movement of 2 mice displayed the 198 codes on the shelf behind them.
+    A ledger is a record of what happened, and "what is there now" is a different
+    question that the balance screen already answers.
+
+    Matched on all three identity columns, not just the serial: `_place_unit_codes`
+    writes the minted code into `serial_number` as well for an item with no serial
+    tracking of its own (the column is UNIQUE and NOT NULL and there is nothing else
+    to put there), so the string a ledger row carries is a serial for one item and a
+    consumable code for the next. The caller holds one string per unit and should not
+    have to know which kind it is — the same reasoning as `unit_lookup`.
+
+    Scoped like every other read here: a login is told about units at the points it is
+    allowed to see, and no others.
+    """
+    wanted = list(dict.fromkeys(
+        c.strip() for c in (codes or []) if c and c.strip()))[:UNIT_CODE_LOOKUP_CAP]
+    if not wanted:
+        return []
+
+    stmt = (
+        select(m.SerialNumber.serial_number, m.SerialNumber.imei,
+               m.SerialNumber.asset_code, m.SerialNumber.consumable_code,
+               m.SerialNumber.item_id, m.SerialNumber.warehouse_id,
+               m.SerialNumber.status)
+        .where(or_(m.SerialNumber.serial_number.in_(wanted),
+                   m.SerialNumber.asset_code.in_(wanted),
+                   m.SerialNumber.consumable_code.in_(wanted)),
+               m.SerialNumber.is_active.is_(True))
+        .order_by(m.SerialNumber.id)
+    )
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=m.SerialNumber.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        ))
+
+    return [
+        {"serial_number": serial, "imei": imei, "asset_code": asset,
+         "consumable_code": consumable, "item_id": item_id,
+         "warehouse_id": warehouse_id, "status": status}
+        for (serial, imei, asset, consumable,
+             item_id, warehouse_id, status) in (await db.execute(stmt)).all()
+    ]
 
 
 async def unit_lookup(db: AsyncSession, code: str, user=None) -> dict:

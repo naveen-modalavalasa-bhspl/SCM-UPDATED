@@ -3,6 +3,7 @@ import { useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Button, ErrorBanner, PageHeader, ResponsiveList, useToast, type Column,
+  Select,
 } from "@/shared/components";
 import {
   exportLedger, getFilters, getLedgers, getRows, reportKeys, saveFile,
@@ -133,15 +134,15 @@ export function ReportLedgerPage() {
         title="Ledger"
         actions={
           <div className="flex items-center gap-2 text-sm text-muted">
-            <label htmlFor="rows-per-page">Rows</label>
-            <select
-              id="rows-per-page"
-              value={size}
-              onChange={(e) => update({ size: e.target.value })}
-              className="min-h-11 rounded-lg border border-line bg-content1 px-2 text-sm"
-            >
-              {SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
+            <span>Rows</span>
+            <div className="w-24">
+              <Select
+                ariaLabel="Rows per page"
+                value={String(size)}
+                onChange={(next) => update({ size: next })}
+                options={SIZES.map((n) => ({ value: String(n), label: String(n) }))}
+              />
+            </div>
           </div>
         }
       />

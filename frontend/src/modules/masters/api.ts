@@ -1,6 +1,8 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
+  MasterItemEligibility,
+  ItemEligibilityScopes,
   JobProfileOption,
   MasterAttribute, MasterBin, MasterBom, MasterBomGroup, MasterBomItem, MasterBrand,
   MasterCategory, MasterCategoryTag, MasterFeature, MasterItem,
@@ -82,11 +84,38 @@ function crud<T>(path: string) {
   };
 }
 
+/** Roles and regions for the item-eligibility form. One call, because the two live in
+ *  unrelated tables (`rbac_roles` and `hcm_offices`) and neither has a masters CRUD of
+ *  its own. Gated on `master.item.manage`, the same permission as the tagging. */
+export const itemEligibilityScopes = () =>
+  api.get<ItemEligibilityScopes>("/api/item-eligibility-scopes").then((r) => r.data);
+
+/** What one role or region may currently request. */
+export const itemEligibilityAssignments = (scopeType: string, scopeId: number) =>
+  api.get<{ scope_type: string; scope_id: number; item_ids: number[] }>(
+    "/api/item-eligibility-assignments",
+    { params: { scope_type: scopeType, scope_id: scopeId } },
+  ).then((r) => r.data);
+
+/** Replace the WHOLE set for one scope in one call — a replace, not a merge, so
+ *  unticking a box means something. A role serves hundreds of items; saving them one
+ *  pair at a time is not a screen anybody would use twice. */
+export const setItemEligibilityAssignments = (body: {
+  scope_type: string; scope_id: number; item_ids: number[];
+}) =>
+  api.put<{ scope_type: string; scope_id: number; scope_name: string; total: number;
+            added: number; restored: number; removed: number }>(
+    "/api/item-eligibility-assignments", body,
+  ).then((r) => r.data);
+
 export const mastersApi = {
   items: crud<MasterItem>("/api/items"),
   categories: crud<MasterCategory>("/api/item-categories"),
   vendors: crud<MasterVendor>("/api/vendors"),
   vendorItems: crud<MasterVendorItem>("/api/vendor-items"),
+  /** Which items a role or a region may raise an indent for. Empty by default: an
+   *  untagged item stays requestable by everyone, so this screen only ever narrows. */
+  itemEligibility: crud<MasterItemEligibility>("/api/item-eligibility"),
   warehouses: crud<MasterWarehouse>("/api/warehouses"),
   bins: crud<MasterBin>("/api/bins"),
   // HCM owns projects, so the backend registers only the list route (see

@@ -947,3 +947,121 @@ class LedgerRow(BaseModel):
     ref_no: str | None = None
     with_whom: str | None = None
 
+
+
+# --------------------------------------------------------------------------- #
+# KPI strips. See `procurement/stats.py` — one schema per document family, and
+# deliberately not one composite, so each endpoint can be gated on the view code of
+# the documents it counts.
+#
+# `awaiting_me` is on every document that has a ladder. It is NOT "how many are
+# pending approval" — it is how many are pending on THIS login, straight off
+# `wf_pending`, so the tile can never tell four approvers the same queue is each of
+# theirs.
+# --------------------------------------------------------------------------- #
+
+class ReqStatsOut(BaseModel):
+    awaiting_me: int = 0
+    pending_approval: int = 0
+    approved: int = 0
+    draft: int = 0
+    rejected: int = 0
+    total: int = 0
+    this_month: int = 0
+    open_value: float = 0
+    total_lines: int = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class ConsolidationStatsOut(BaseModel):
+    awaiting_me: int = 0
+    pending_approval: int = 0
+    approved: int = 0
+    draft: int = 0
+    total: int = 0
+    this_month: int = 0
+    requisitions_rolled: int = 0
+    total_items: int = 0
+    estimated_value: float = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class RFQStatsOut(BaseModel):
+    awaiting_me: int = 0
+    pending_approval: int = 0
+    out_to_vendors: int = 0
+    ready_to_award: int = 0
+    draft: int = 0
+    awarded: int = 0
+    total: int = 0
+    closing_soon: int = 0
+    vendors_invited: int = 0
+    quotes_received: int = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class QuoteStatsOut(BaseModel):
+    to_compare: int = 0
+    revised: int = 0
+    accepted: int = 0
+    not_selected: int = 0
+    draft: int = 0
+    total: int = 0
+    this_month: int = 0
+    rfqs_covered: int = 0
+    vendors_quoting: int = 0
+    quoted_value: float = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class POStatsOut(BaseModel):
+    awaiting_me: int = 0
+    pending_approval: int = 0
+    to_send: int = 0
+    at_vendor: int = 0
+    awaiting_vendor: int = 0
+    draft: int = 0
+    received: int = 0
+    total: int = 0
+    this_month: int = 0
+    month_value: float = 0
+    open_commitment: float = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class DemandPoolRow(BaseModel):
+    """One item's sanctioned, unbought demand across every requisition the caller may
+    read. `open_qty` is the remainder — `quantity - ordered_qty` summed — so buying in
+    rounds shrinks it without anything being rewritten."""
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    open_qty: float = 0
+    estimated_value: float = 0
+    requisition_count: int = 0
+    project_count: int = 0
+    earliest_required: date | None = None
+
+
+class LedgerStatsOut(BaseModel):
+    """The buying trail's own strip — one count per document kind, under the same
+    filters the register is showing. See `stats.ledger_stats`."""
+    by_kind: dict[str, int] = {}
+    total: int = 0
+    filters: dict[str, dict[str, str]] = {}

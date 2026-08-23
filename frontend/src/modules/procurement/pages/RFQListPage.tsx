@@ -1,15 +1,15 @@
-import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, FilterMenu, PageHeader, ResponsiveList, StatusPill,
-  Input, type Column,
+  Button, Can, Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList,
+  StatusPill, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
 import type { RFQListRow } from "../types";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
+import { RFQKpis } from "../components/ProcurementKpis";
+import { useUrlFilters } from "../urlFilters";
 
 /** RFQStatus, as the backend enum spells it. */
 const STATUSES = [
@@ -32,25 +32,32 @@ const CLOSING = [
 
 const SIZE = 20;
 
+/** Every filter this screen owns, so Clear knows what to drop. */
+const FILTER_KEYS = ["status", "search", "closing", "pending_for_me", "ready_to_award"];
+
 export function RFQListPage() {
   const nav = useNavigate();
-  const [status, setStatus] = useState("");
+  // Filters live in the URL — see `../urlFilters`. The KPI strip above sets them.
+  const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const status = get("status");
   // Closing window, filtered in the browser: the endpoint takes no date parameter, and
   // "what shuts this week" is the question a buyer actually asks of this register.
-  const [closing, setClosing] = useState("");
-  const [search, setSearch] = useState("");
+  const closing = get("closing");
+  const search = get("search");
+  const pendingForMe = getBool("pending_for_me");
+  const readyToAward = getBool("ready_to_award");
   // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
-  const [page, setPage] = useState(1);
-
-  // Automatically reset to the first page whenever the search query or status filter changes
-  useEffect(() => {
-    setPage(1);
-  }, [status, debouncedSearch]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["rfqs", status, debouncedSearch, page],
-    queryFn: () => rfqApi.list({ status: status || undefined, search: debouncedSearch || undefined, page, size: SIZE }),
+    queryKey: ["rfqs", status, debouncedSearch, pendingForMe, readyToAward, page],
+    queryFn: () => rfqApi.list({
+      status: status || undefined,
+      search: debouncedSearch || undefined,
+      pending_for_me: pendingForMe || undefined,
+      ready_to_award: readyToAward || undefined,
+      page, size: SIZE,
+    }),
   });
 
   const all = data?.items ?? [];
@@ -126,28 +133,26 @@ export function RFQListPage() {
         }
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
-        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search RFQ no. or title..."
-            className="pl-9"
-          />
-        </div>
-        <FilterMenu label="Status" value={status} onChange={setStatus}
-                    options={STATUSES.filter((o) => o.value)} />
-        <FilterMenu label="Closes" value={closing} onChange={setClosing} options={CLOSING} />
-        {(search || status || closing) && (
-          <button
-            onClick={() => { setSearch(""); setStatus(""); setClosing(""); }}
-            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
-          >
-            Clear
-          </button>
-        )}
+      {/* The KPI strip. Gated inside the component on `rfq.view`, the same code this
+          screen's endpoint checks. */}
+      <div className="mb-4">
+        <RFQKpis />
       </div>
+
+      {/* Shared filter strip — see RequisitionListPage for why the local copies went. */}
+      <FilterBar
+        search={search}
+        onSearch={(value) => set({ search: value })}
+        searchPlaceholder="Search RFQ no. or title…"
+        active={activeCount(FILTER_KEYS)}
+        onClear={() => clear(FILTER_KEYS)}
+      >
+        <FilterMenu label="Status" value={status}
+                    onChange={(value) => set({ status: value })}
+                    options={STATUSES.filter((o) => o.value)} />
+        <FilterMenu label="Closes" value={closing}
+                    onChange={(value) => set({ closing: value })} options={CLOSING} />
+      </FilterBar>
 
       <ErrorBanner error={error} />
 
@@ -161,7 +166,13 @@ export function RFQListPage() {
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}
-          empty={status ? "No RFQs in this status." : "No RFQs yet."}
+          empty={
+            pendingForMe
+              ? "Nothing is waiting for your signature."
+              : readyToAward
+                ? "No tender has replies waiting to be awarded."
+                : status ? "No RFQs in this status." : "No RFQs yet."
+          }
           renderCard={(r) => (
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">

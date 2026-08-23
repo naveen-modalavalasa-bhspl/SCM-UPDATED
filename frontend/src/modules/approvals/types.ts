@@ -94,6 +94,23 @@ export interface ApprovalHistoryRow {
   acted_at?: string | null;
 }
 
+/** The inbox counted in SQL — already scoped to the caller by the API. */
+export interface PendingSummary {
+  total: number;
+  past_due: number;
+  /** ISO timestamp of the longest-waiting task, or null on an empty queue. */
+  oldest_waiting_since: string | null;
+  by_doc_type: Record<string, number>;
+}
+
+/** A monthly allocation cycle waiting on the caller. */
+export interface AllocationCycleRow {
+  cycle: string;
+  indent_count?: number;
+  item_count?: number;
+  total_qty?: number;
+}
+
 export interface ApprovalReport {
   total_decisions: number;
   approved: number;

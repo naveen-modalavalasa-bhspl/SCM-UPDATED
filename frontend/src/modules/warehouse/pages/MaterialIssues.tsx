@@ -188,7 +188,7 @@ export default function MaterialIssues({
       deleteLabel="issue"
       labelOf={(r) => r.issue_no ?? `Issue ${r.id}`}
       kpiCounts={[
-        { label: "In approval", statuses: ["PENDING_APPROVAL"], tone: "text-warn" },
+        { label: "In approval", statuses: ["PENDING_APPROVAL"], tone: "warn" },
         { label: "Approved, not issued", statuses: ["APPROVED"] },
         { label: "Awaiting acknowledgement", statuses: ["ISSUED", "DISPATCHED"] },
       ]}

@@ -16,11 +16,14 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
 from app.shared.enums import (
+    ItemScope,
     CARRIER_VENDOR_TYPES, AttributeDataType, BinType, CategoryTagType, UomClass,
     WarehouseType,
 )
 from app.shared.masters.crud import MasterDef
+from app.platform.rbac.models import Role
 from app.shared.models.master import (
+    ItemEligibility,
     Attribute, Bom, BomGroup, BomItem, Brand, BrandGeneralName, BrandManufacturer,
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
@@ -1594,7 +1597,103 @@ WAREHOUSE_USAGE = (
 )
 USED_BY_ITEMS = ("Items", "mst_items")
 
+# --------------------------------------------------------------------------- #
+#  Item eligibility — which items a role or a region may raise an indent for
+# --------------------------------------------------------------------------- #
+
+class ItemEligibilityIn(BaseModel):
+    """One tag: this item, for this role or this region.
+
+    An item with NO tags is requestable by everyone. Only a tagged item is ever
+    narrowed — see `modules/indents/eligibility.py` for why the default is open and
+    why it has to stay that way on a live system.
+    """
+    item_id: int
+    scope_type: str
+    scope_id: int
+    is_active: bool = True
+
+
+def item_eligibility_out(row: ItemEligibility) -> dict:
+    return {
+        "id": row.id,
+        "item_id": row.item_id,
+        "item_code": row.item_code,
+        "item_name": row.item_name,
+        "scope_type": row.scope_type,
+        "scope_id": row.scope_id,
+        "scope_name": row.scope_name,
+        "is_active": row.is_active,
+    }
+
+
+async def apply_item_eligibility(db: AsyncSession, row: ItemEligibility,
+                                 data: ItemEligibilityIn) -> None:
+    """Validate the pair and snapshot both names onto the row.
+
+    Snapshotted so the register reads without joining two unrelated tables — and
+    because `scope_id` points at `rbac_roles` for a ROLE and `hcm_offices` for a
+    REGION, which no single join could satisfy.
+    """
+    # Every field, not just the derived ones. `_apply_fields` calls this INSTEAD of
+    # copying the payload — an `apply` hook owns the whole row — so a field left unset
+    # here is never written. Missing `item_id` made every save a NOT NULL violation,
+    # which the screen showed as "Internal server error".
+    row.item_id = data.item_id
+    row.scope_id = data.scope_id
+    row.is_active = data.is_active
+
+    scope = (data.scope_type or "").strip().upper()
+    if scope not in {s.value for s in ItemScope}:
+        raise ValidationError(
+            f"scope_type must be one of {sorted(s.value for s in ItemScope)}")
+    row.scope_type = scope
+
+    item = await db.get(Item, data.item_id)
+    if item is None:
+        raise NotFoundError(f"Unknown item id: {data.item_id}")
+    row.item_code, row.item_name = item.code, item.name
+
+    if scope == ItemScope.ROLE.value:
+        found = (await db.execute(
+            select(Role.name).where(Role.id == data.scope_id))).scalar_one_or_none()
+        if found is None:
+            raise NotFoundError(f"Unknown role id: {data.scope_id}")
+    else:
+        found = (await db.execute(
+            select(HcmOffice.name).where(
+                HcmOffice.id == data.scope_id))).scalar_one_or_none()
+        if found is None:
+            raise NotFoundError(f"Unknown region (office) id: {data.scope_id}")
+    row.scope_name = found
+
+    # Checked in Python as well as by the unique index: the message an admin needs is
+    # "this item is already tagged to that role", not a driver-level duplicate-key
+    # error with a constraint name in it.
+    clash = (await db.execute(
+        select(ItemEligibility.id).where(
+            ItemEligibility.item_id == data.item_id,
+            ItemEligibility.scope_type == scope,
+            ItemEligibility.scope_id == data.scope_id,
+            ItemEligibility.id != (row.id or 0),
+        ))).scalar_one_or_none()
+    if clash is not None:
+        raise ValidationError(
+            f"{item.code} is already tagged to {found}.")
+
+
 MASTERS: list[MasterDef] = [
+    # Which items a role or a region may raise an indent for. Empty by default, and
+    # an untagged item stays open to everyone — so this screen NARROWS, and can never
+    # be the reason nobody can raise an indent.
+    MasterDef(path="item-eligibility", name="Item eligibility",
+              model=ItemEligibility, schema=ItemEligibilityIn,
+              manage_perm=perms.MASTER_ITEM_MANAGE,
+              serialize=item_eligibility_out, apply=apply_item_eligibility,
+              search_cols=("item_code", "item_name", "scope_name"),
+              order_col="item_code",
+              filters=("item_id", "scope_type", "scope_id")),
+
     MasterDef(path="items", name="Item", model=Item, schema=ItemIn,
               manage_perm=perms.MASTER_ITEM_MANAGE, serialize=item_out,
               search_cols=("name", "code"), apply=apply_item,

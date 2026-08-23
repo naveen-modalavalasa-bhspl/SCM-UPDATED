@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { AlertTriangle, Inbox } from "lucide-react";
+import { Inbox } from "lucide-react";
 // Straight from ./ui, not the barrel: the barrel re-exports this file, and a module
 // that imports its own barrel is a cycle waiting to bite at load time.
 import { Button, Card } from "./ui";
+import { Alert } from "./Alert";
 
 /**
  * Error, empty and confirm surfaces.
@@ -19,15 +20,9 @@ import { Button, Card } from "./ui";
 export function ErrorBanner({ error, className = "" }: { error?: unknown; className?: string }) {
   if (!error) return null;
   const message = error instanceof Error ? error.message : String(error);
-  return (
-    <div
-      role="alert"
-      className={`mb-4 flex items-start gap-2 rounded-xl border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad ${className}`}
-    >
-      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-      <span>{message}</span>
-    </div>
-  );
+  // The shape lives in <Alert> now, so the dozens of call sites already using
+  // ErrorBanner pick up the new one without being touched.
+  return <Alert tone="danger" title={message} className={`mb-4 ${className}`} />;
 }
 
 export function EmptyState({

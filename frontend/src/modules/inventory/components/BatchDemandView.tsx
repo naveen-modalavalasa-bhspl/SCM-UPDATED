@@ -3,8 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { AlertTriangle, ChevronDown, ChevronRight, Plus, Send, Trash2 } from "lucide-react";
 import { Button, Can, Card, Input } from "@/shared/components";
+import { LoadingRows } from "./PageStates";
 import { splitQuantity } from "@/shared/quantity";
 import { createAllocationsBatch, getBatchDemand } from "../api";
+// FIXED 2026-08-22 — a LIP is where stock ends up, not a shelf an indent is filled
+// from. See warehouseTiers.ts for why both allocation screens needed this.
+import { isChainPoint, orderPoints } from "../warehouseTiers";
 import type {
   AllocationDecision, BatchDemandItem, BatchDemandLine,
 } from "../types";
@@ -97,18 +101,30 @@ function splitPreview(
   return out;
 }
 
+/** What the warehouse tier can actually serve.
+ *
+ *  Falls back to `available_total` when the API did not send `main_available_qty`, so
+ *  an older backend behaves exactly as it did rather than reporting nothing available.
+ */
+const warehouseAvailable = (item: BatchDemandItem) =>
+  item.main_available_qty ?? item.available_total;
+
 const defaultPlan = (item: BatchDemandItem): ItemPlan => {
-  const first = item.warehouses[0];
+  // Only a WAREHOUSE-tier point is ever pre-selected. Where the only stock sits on the
+  // chain the row opens with no shelf picked, which is the honest starting position:
+  // taking it out of a LIP is a decision somebody has to make, not a default.
+  const first = item.warehouses.find((w) => !isChainPoint(w) && w.available_qty > 0);
   return {
     splits: [{
       wh: first ? String(first.warehouse_id) : "",
       qty: String(Math.min(first?.available_qty ?? 0, item.total_demand)),
     }],
     edited: {},
-    // Nothing on any shelf: there is no allocation to make, so the only outcome this
-    // row can have is a material request. Anything partly covered stays off until the
-    // allocator says how much he is giving.
-    procure: item.available_total <= 0 && item.total_demand > 0,
+    // Nothing the WAREHOUSE can serve: there is no allocation for it to make, so the
+    // only outcome this row can have is a material request. Read off the warehouse
+    // tier, not off `available_total` — stock parked at a LIP is not cover, and
+    // counting it left the checkbox off and the shortfall short.
+    procure: warehouseAvailable(item) <= 0 && item.total_demand > 0,
   };
 };
 
@@ -208,7 +224,36 @@ function ItemRow({ item, plan, onChange }: {
   // the shelf genuinely cannot cover becomes a material request. Quantity the
   // allocator deliberately withheld is still sitting in stock and must NOT be bought
   // again.
-  const unavailable = round3(Math.max(0, short - Math.max(0, item.available_total - handed)));
+  //
+  // FIXED 2026-08-22 — "still in stock" means the WAREHOUSE still holds it. Measured
+  // against `available_total`, 5 units parked at a LIP made a demand of 44 read as
+  // "39 to procurement · 5 not issued, still in stock", and those 5 were never bought
+  // and never issued. Only what is left on the warehouse tier AFTER what this plan is
+  // already drawing off it can be called withheld; a chain point the allocator chose
+  // to draw from is counted in `handed` and so needs no term of its own.
+  const takenFromWarehouse = plan.splits.reduce((sum, split) => {
+    const point = item.warehouses.find((w) => String(w.warehouse_id) === split.wh);
+    return point && !isChainPoint(point) ? sum + (Number(split.qty) || 0) : sum;
+  }, 0);
+  // FIXED 2026-08-22 (P1) — warehouse stock only counts as cover when this plan
+  // actually DRAWS from the warehouse tier. A point picked with qty 0 means "not
+  // serving from shelves", and the old math (`WA - taken`) cancelled the typed
+  // quantity out of `short - coverable`, so the procurement count sat frozen no
+  // matter what the top field said — it only moved from the per-indent Gets box,
+  // which never touches `takenFromWarehouse`.
+  const drawsWarehouse = plan.splits.some((s) => {
+    const point = item.warehouses.find((w) => String(w.warehouse_id) === s.wh);
+    return !!point && !isChainPoint(point) && (Number(s.qty) || 0) > 0;
+  });
+  const coverable = drawsWarehouse
+    ? Math.max(0, warehouseAvailable(item) - takenFromWarehouse)
+    : 0;
+  const unavailable = round3(Math.max(0, short - coverable));
+  // Ticked means BUY THE SHORTFALL — every unit this split did not serve, not just
+  // the slice no shelf could ever have covered. The number on the checkbox is what
+  // the allocator is committing to purchase, so it answers to the tick, and it now
+  // answers to the source rows above it too.
+  const toProcure = round3(plan.procure ? Math.max(0, short) : unavailable);
   const withheld = round3(short - unavailable);
   // Hand-edits can add up to more than the shelves offer, or leave some unspoken for.
   // Both are said out loud rather than silently corrected — the allocator is the one
@@ -326,9 +371,14 @@ function ItemRow({ item, plan, onChange }: {
                     className="h-11 w-full rounded-lg border border-line bg-content1 px-2 text-sm text-ink"
                   >
                     <option value="">— pick a point —</option>
-                    {item.warehouses.map((w) => (
+                    {/* Warehouses first, then the distribution points, and a chain
+                        point says so on its own row: drawing stock back out of a LIP
+                        is allowed and is sometimes right, but the picker must never
+                        let it happen by accident. */}
+                    {orderPoints(item.warehouses).map((w) => (
                       <option key={w.warehouse_id} value={String(w.warehouse_id)}>
                         {w.warehouse_name} ({fmt(w.available_qty)} free)
+                        {isChainPoint(w) ? " · distribution point" : ""}
                       </option>
                     ))}
                   </select>
@@ -366,9 +416,9 @@ function ItemRow({ item, plan, onChange }: {
             {" "}of {fmt(item.total_demand)} asked.
             {unavailable > 0 && (
               <span className={plan.procure ? "text-warning" : "text-muted"}>
-                {" "}· {fmt(unavailable)} {item.uom_code ?? ""}
+                {" "}· {fmt(plan.procure ? toProcure : unavailable)} {item.uom_code ?? ""}
                 {plan.procure
-                  ? " goes to procurement — nothing on any shelf covers it"
+                  ? " goes to procurement"
                   : " cannot be served from any shelf — tick below to buy it in"}
               </span>
             )}
@@ -406,7 +456,7 @@ function ItemRow({ item, plan, onChange }: {
               backend turns into a material request — exactly what the single-indent
               screen has always posted. Ticked by default when no shelf holds any of
               it, because then there is no other answer to give. */}
-          {unavailable > 0 && (
+          {toProcure > 0 && (
             <label className="mb-3 flex min-h-11 items-center gap-2 text-sm text-ink">
               <input
                 type="checkbox"
@@ -416,7 +466,7 @@ function ItemRow({ item, plan, onChange }: {
                 aria-label={`Send the shortfall of ${item.item_name ?? "this item"} to procurement`}
               />
               <span>
-                Send the {fmt(unavailable)} {item.uom_code ?? ""} no shelf can cover to
+                Send the {fmt(toProcure)} {item.uom_code ?? ""} no shelf can cover to
                 procurement
                 <span className="ml-1 text-muted">
                   — raises a material request on each indent's own approval ladder
@@ -562,7 +612,7 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
       </p>
     );
   }
-  if (batch.isLoading) return <Card className="p-6 text-sm text-muted">Loading…</Card>;
+  if (batch.isLoading) return <Card className="p-2"><LoadingRows rows={4} className="p-0" /></Card>;
   if (items.length === 0) {
     return (
       <Card className="p-6 text-sm text-muted">

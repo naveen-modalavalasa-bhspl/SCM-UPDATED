@@ -1,3 +1,4 @@
+export { ApprovalOverviewPage } from "./pages/OverviewPage";
 export { ApprovalsPage } from "./pages/ApprovalsPage";
 export { ConsolidationPage } from "./pages/ConsolidationPage";
 export { ConsolidationDetailPage } from "./pages/ConsolidationDetailPage";

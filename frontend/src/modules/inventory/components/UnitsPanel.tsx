@@ -106,30 +106,75 @@ function Group({ title, values, filename }: {
  *  one. They answer different questions — "which unit is this" versus "what is it
  *  labelled" — and a single column had to pick a winner, which meant the IMEI of a
  *  coded unit was never visible anywhere on the screen. */
-export function UnitCell({ text, extra, lot, title }: {
+export function UnitCell({
+  text, extra, lot, title, units, caption = "units in lot", listTitle = "Units",
+}: {
   text?: string | null;
   extra?: number;
   /** Omitted when the value came off the stock row itself: there are no per-unit rows
    *  behind it to open. */
   lot?: UnitsPanelProps & { label?: string };
   title?: string;
+  /** The exact values behind this cell, when the caller already knows them.
+   *
+   *  NEW 2026-08-22, for the stock ledger. A `lot` popover asks the server which units
+   *  are standing there NOW, which is the right answer for a stock row and the wrong
+   *  one for a MOVEMENT: a ledger line for 2 units issued opened a panel listing the
+   *  198 left on the shelf. A movement knows exactly what it carried, so it hands the
+   *  list over instead of asking. Takes precedence over `lot`. */
+  units?: string[];
+  /** What the count line calls them — "units in lot" on a stock row, "units in this
+   *  movement" on a ledger row. The two are not the same set and must not read alike. */
+  caption?: string;
+  /** Heading over the list in the popover. */
+  listTitle?: string;
 }) {
-  if (!text) return <span className="text-xs text-muted">—</span>;
+  const list = (units ?? []).filter(Boolean);
+  const shown = text ?? list[0];
+  const more = extra ?? (list.length ? list.length - 1 : 0);
+  if (!shown) return <span className="text-xs text-muted">—</span>;
   const body = (
     // max-w: the table lays out auto, so a cell holding every serial in the lot on one
     // nowrap line widened the column until the page scrolled sideways. Cap it and let
     // truncate do its job; the whole list is in the popover.
     <div className="min-w-0 max-w-[12rem] text-left">
-      <div className="truncate font-mono text-xs text-body">{text}</div>
+      <div className="truncate font-mono text-xs text-body">{shown}</div>
       {/* The WHOLE count, not "+18 more". A lot of 19 units sat beside an Available of
           12 and a Reserved of 7, and "+18 more" left the reader to work out that the
           three numbers agree. "19 units in lot" reconciles on sight: 12 free, 7 spoken
           for, 19 things on the shelf. */}
-      {!!extra && extra > 0 && (
-        <div className="text-[11px] text-brand">{extra + 1} units in lot</div>
+      {!!more && more > 0 && (
+        <div className="text-[11px] text-brand">{more + 1} {caption}</div>
       )}
     </div>
   );
+  // A known list wins: there is nothing to fetch, and fetching would answer a
+  // different question from the one this cell is asking.
+  if (list.length > 1) {
+    return (
+      <Popover placement="bottom-start" showArrow>
+        <PopoverTrigger>
+          <button
+            type="button"
+            className="w-full rounded-md px-1 py-0.5 text-left transition-colors hover:bg-content2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {body}
+          </button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[22rem] max-w-[90vw] p-3">
+          <div className="w-full">
+            {title && <div className="mb-2 text-xs font-semibold text-ink">{title}</div>}
+            <Group
+              title={listTitle}
+              values={list}
+              filename={`${(title || "units").replace(/[^\w.-]+/g, "_")}.csv`}
+            />
+          </div>
+        </PopoverContent>
+      </Popover>
+    );
+  }
   if (!lot) return body;
   const { label, ...panel } = lot;
   return (

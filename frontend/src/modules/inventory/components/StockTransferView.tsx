@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowRight, Calendar, MapPin } from "lucide-react";
+import { ArrowRight, Calendar, CheckCircle2, Clock, MapPin, Truck } from "lucide-react";
 import {
   Button, Card, PageHeader, ResponsiveList, StatCard, StatusPill, type Column,
   ResponsiveGrid,
 } from "@/shared/components";
 import { FilterBar, FilterMenu } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
+import { ErrorNote } from "./PageStates";
 import { MovementKindStrip } from "../pages/StockingPointsPage";
 import { listSTOs, getSTO, getWarehouses } from "../api";
 import { fmtDate } from "@/shared/datetime";
@@ -158,14 +159,12 @@ export function StockTransferView() {
       <MovementKindStrip />
 
       <ResponsiveGrid cols={3} className="mb-4">
-        <StatCard label="Awaiting Approval" value={counts.pending} tone={counts.pending ? "text-warning" : "text-muted"} />
-        <StatCard label="In Transit" value={counts.inTransit} tone={counts.inTransit ? "text-brand" : "text-muted"} />
-        <StatCard label="Received" value={counts.done} tone="text-success" />
+        <StatCard label="Awaiting Approval" value={counts.pending} icon={<Clock size={16} />} tone={counts.pending ? "text-warning" : "text-muted"} />
+        <StatCard label="In Transit" value={counts.inTransit} icon={<Truck size={16} />} tone={counts.inTransit ? "text-brand" : "text-muted"} />
+        <StatCard label="Received" value={counts.done} icon={<CheckCircle2 size={16} />} tone="text-success" />
       </ResponsiveGrid>
 
-      {error && (
-        <div className="mb-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>
-      )}
+      {error && <div className="mb-3"><ErrorNote message={error} /></div>}
 
       <FilterBar
         search={search}

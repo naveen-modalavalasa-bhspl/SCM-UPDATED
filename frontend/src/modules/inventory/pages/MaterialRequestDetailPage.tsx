@@ -11,6 +11,7 @@ import {
   reviseMaterialRequest,
 } from "../api";
 import { MRClaimsPanel } from "../components/MRClaimsPanel";
+import { ErrorNote, LoadingRows } from "../components/PageStates";
 // Reaching across into procurement for one call, the same direction the chain already
 // runs on the backend: inventory raises the request, procurement picks it up.
 import { requisitionApi } from "@/modules/procurement/api";
@@ -141,8 +142,8 @@ export function MaterialRequestDetailPage() {
     act.mutate(approve);
   };
 
-  if (isLoading) return <p className="p-6 text-muted">Loading…</p>;
-  if (error) return <p className="p-6 text-danger">{(error as Error).message}</p>;
+  if (isLoading) return <LoadingRows rows={6} className="mt-2" />;
+  if (error) return <div className="p-6"><ErrorNote message={(error as Error).message} /></div>;
   if (!data) return null;
 
   const open = data.status === "PENDING_APPROVAL";

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { TrendingDown, Clock, FilePlus2, Info, Trash2, Plus } from "lucide-react";
+import { TrendingDown, Clock, FilePlus2, Info, Trash2, Plus, TriangleAlert } from "lucide-react";
 import {
   Button, Card, ConfirmModal, Field, Input, PageHeader, ResponsiveList, Select,
   StatCard, useAction, type Column,
@@ -63,7 +63,7 @@ function SegmentedTabs({ value, onChange }: { value: Tab; onChange: (t: Tab) => 
             aria-selected={on}
             onClick={() => onChange(t.key)}
             className={`h-10 rounded-lg px-4 text-sm font-semibold transition-colors ${
-              on ? "bg-content1 text-brand shadow-sm" : "text-muted hover:text-ink"
+              on ? "bg-brand text-white shadow-sm" : "text-muted hover:text-ink"
             }`}
           >
             {t.label}
@@ -390,7 +390,7 @@ export function StockReplenishmentView() {
       <>
       <ResponsiveGrid cols={3} className="mb-4">
         <StatCard label="Items Below Reorder" value={rows.length} icon={<TrendingDown size={16} />} tone={rows.length ? "text-danger" : "text-muted"} />
-        <StatCard label="Critical / High" value={kpis.critical} tone={kpis.critical ? "text-danger" : "text-muted"} />
+        <StatCard label="Critical / High" value={kpis.critical} icon={<TriangleAlert size={16} />} tone={kpis.critical ? "text-danger" : "text-muted"} />
         <StatCard label="Lead Time > 14 days" value={kpis.longLead} icon={<Clock size={16} />} />
       </ResponsiveGrid>
 

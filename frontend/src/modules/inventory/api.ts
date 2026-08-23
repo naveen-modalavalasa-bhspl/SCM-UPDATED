@@ -28,6 +28,7 @@ import type {
   StockLedgerItem,
   StockSummary,
   SerialSummaryRow,
+  UnitCodeRow,
   UnitRow,
   LedgerSummary,
   StockRow,
@@ -119,6 +120,9 @@ const toLedger = (r: MovementRow): StockLedgerItem => ({
   unit_rate: r.rate == null ? null : num(r.rate),
   total_value: r.value == null ? null : num(r.value),
   serial_number: r.serial_numbers?.length ? r.serial_numbers.join(", ") : undefined,
+  // The raw list as well as the joined string. The columns need the individual units
+  // to look their codes up and to list them; the joined string is only a caption.
+  serial_numbers: r.serial_numbers?.length ? r.serial_numbers : undefined,
   // FIXED 2026-08-21 — the lot the movement touched. THIS is why the ledger showed a
   // dash for units that were sitting correctly coded in `whs_serial_numbers`: the row
   // reached the screen through this mapper, which dropped bin and batch, so the unit
@@ -176,6 +180,46 @@ export const getSerialSummary = (itemIds: number[], warehouseIds: number[]) =>
  * for bulk (NO_BIN / NO_BATCH); `whs_serial_numbers` says NULL. Keyed literally, a bulk
  * lot asks for `:0:0` while its own units are filed under `::` and never finds them. */
 export const unplaced = (v?: number | null) => (v ? String(v) : "");
+
+/** What else the named units carry — serial, IMEI, asset code, consumable code.
+ *
+ * NEW 2026-08-22. A ledger row names the units that MOVED (`stk_ledger.serial_numbers`)
+ * but not their putaway codes, which live per unit in the warehouse module. Asked for
+ * by the page in hand and merged, the same way `getSerialSummary` beside it works.
+ *
+ * POST for a read because one page of the ledger can name a couple of thousand units
+ * and that will not fit in a query string. Codes are deduplicated here so a hundred
+ * rows off one consignment ask once.
+ */
+export const getUnitCodes = (codes: string[]) => {
+  const wanted = [...new Set(codes.filter(Boolean))];
+  return wanted.length === 0
+    ? Promise.resolve([] as UnitCodeRow[])
+    : api
+        .post<{ items: UnitCodeRow[] }>("/api/warehouse/serials/codes", { codes: wanted })
+        .then((r) => r.data.items);
+};
+
+/** Index the answer by every identity a unit answers to, so a caller holding one
+ *  string finds the row whichever kind of code it turned out to be.
+ *
+ *  Keyed on ITEM AND identity, never identity alone. `whs_serial_numbers.serial_number`
+ *  is not unique across items in the live data — `SN-00000003` exists three times, on
+ *  a monitor, a mouse and one other item — so a bare map handed the mouse's movement
+ *  the monitor's asset code, which is a worse answer than none. The caller always
+ *  knows which item its row is about. */
+export const unitCodeKey = (itemId: number, identity: string) => `${itemId}:${identity}`;
+
+export const indexUnitCodes = (rows: UnitCodeRow[]) => {
+  const by = new Map<string, UnitCodeRow>();
+  for (const row of rows) {
+    for (const key of [row.serial_number, row.asset_code, row.consumable_code]) {
+      const full = key && unitCodeKey(row.item_id, key);
+      if (full && !by.has(full)) by.set(full, row);
+    }
+  }
+  return by;
+};
 
 /** Index a summary under the keys that HONESTLY describe it, most specific first:
  * item+warehouse+bin+batch, then item+warehouse+bin, then item+warehouse.
@@ -266,6 +310,7 @@ export const getStockBalances = (params?: StockBalanceFilter) =>
         search: params?.search?.trim(),
         batch_no: params?.batch_no?.trim(),
         include_zero: params?.include_zero || undefined,
+        stock_view: params?.stock_view || undefined,
         below_reorder: params?.below_reorder || undefined,
         expiring_in_days: params?.expiring_in_days,
         expiry_status: params?.expiry_status,
@@ -308,6 +353,7 @@ export const getStockSummary = (params?: StockBalanceFilter) =>
         search: params?.search?.trim(),
         batch_no: params?.batch_no?.trim(),
         include_zero: params?.include_zero || undefined,
+        stock_view: params?.stock_view || undefined,
         below_reorder: params?.below_reorder || undefined,
         expiring_in_days: params?.expiring_in_days,
         expiry_status: params?.expiry_status,

@@ -694,9 +694,6 @@ export default function AcknowledgementsPage() {
       {/* Same header as the other indent screens, minus the shared filter bar: this list
           has its own, and the shared one filters a different query shape. */}
       <IndentModuleHeader title="Acknowledgements" showCreate={false} showFilters={false} />
-      <p className="-mt-2 text-sm text-muted">
-        What you asked for, how far it has got, and acknowledging it reached you.
-      </p>
 
       <Card className="flex flex-col gap-3 p-3 md:flex-row md:items-center">
         <div className="min-w-0 flex-1">

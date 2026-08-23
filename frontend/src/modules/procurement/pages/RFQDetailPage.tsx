@@ -3,13 +3,16 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, Input, PageHeader, ResponsiveList, Select,
+  Button, Can, ErrorBanner, Input, PageHeader, ResponsiveList, Select,
   StatusPill, useToast, type Column,
 } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { approvalTrailApi, approvalTrailKey, poApi, rfqApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
+import {
+  DetailShell, SectionCard, FactGrid, RefChips, RailStat, DocRef,
+} from "../components/DetailKit";
 import { QuotationComparison } from "../components/QuotationComparison";
 import type { RFQItem, RFQVendor } from "../types";
 
@@ -83,6 +86,11 @@ export function RFQDetailPage() {
     queryClient.invalidateQueries({ queryKey: ["rfq", id] });
     queryClient.invalidateQueries({ queryKey: ["rfqs"] });
     queryClient.invalidateQueries({ queryKey: ["rfq-comparison", id] });
+    // The approval trail is engine state, and pressing Approve here CHANGES it.
+    // Without this the page kept showing the rung it was on before the press and
+    // only a full reload caught up. Keyed on the prefix so one line covers every
+    // document type this page can be showing.
+    queryClient.invalidateQueries({ queryKey: ["procurement", "approval-trail"] });
     toast.success(message);
   };
 
@@ -273,215 +281,166 @@ export function RFQDetailPage() {
 
       <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? raisePo.error} />
 
-      {rfq && (
-        <Card className="mb-4 p-5">
-          <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-            <div>
-              <dt className="text-xs text-muted">Status</dt>
-              <dd className="mt-1"><StatusPill status={rfq.status} /></dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Closes</dt>
-              <dd className="mt-1 text-body">{rfq.due_date ? fmtDate(rfq.due_date) : "No deadline"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Replies</dt>
-              <dd className="mt-1 text-body">{rfq.response_count} of {rfq.vendor_count}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">
-                {rfq.status === "PENDING_APPROVAL" ? "With" : "Awarded to"}
-              </dt>
-              <dd className="mt-1 text-body">
-                {rfq.current_approver_name ?? rfq.awarded_vendor_name ?? "—"}
-              </dd>
-            </div>
-          </dl>
-          {/* Everything the requisition said, carried across. A tender that names only
-            * a deadline cannot be checked by the person approving it: department,
-            * warehouse, project and company are what say who is buying, for where, on
-            * whose budget — and the indent numbers say who asked in the first place. */}
-          <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-line pt-4 text-sm sm:grid-cols-4">
-            <div>
-              <dt className="text-xs text-muted">Requisition</dt>
-              <dd className="mt-1">
-                {rfq.requisition_id ? (
-                  <button
-                    className="font-mono text-xs text-brand underline"
-                    onClick={() => nav(`/procurement/requisitions/${rfq.requisition_id}`)}
-                  >
-                    {rfq.requisition_no ?? `#${rfq.requisition_id}`}
-                  </button>
-                ) : (
-                  <span className="font-mono text-xs text-body">
-                    {rfq.consolidation_no ?? "—"}
-                  </span>
+      <DetailShell
+        main={(
+          <>
+            {rfq && (
+              <SectionCard title="Tender">
+                <FactGrid
+                  facts={[
+                    { label: "Closes", value: rfq.due_date ? fmtDate(rfq.due_date) : "No deadline" },
+                    { label: "Replies", value: `${rfq.response_count} of ${rfq.vendor_count}` },
+                    {
+                      label: "Requisition",
+                      value: rfq.requisition_id
+                        ? <DocRef no={rfq.requisition_no ?? `#${rfq.requisition_id}`}
+                            onOpen={() => nav(`/procurement/requisitions/${rfq.requisition_id}`)} />
+                        : <DocRef no={rfq.consolidation_no} />,
+                    },
+                    { label: "Priority", value: rfq.priority ?? "Normal" },
+                    { label: "Department", value: rfq.department_name ?? "\u2014" },
+                    { label: "Warehouse", value: rfq.warehouse_name ?? "\u2014" },
+                    { label: "Project", value: rfq.project_name ?? "\u2014" },
+                    { label: "Company", value: rfq.company_name ?? "\u2014" },
+                  ]}
+                />
+
+                <div className="mt-4 border-t border-line/60 pt-4">
+                  <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">
+                    Indents behind it
+                  </div>
+                  <div className="mt-1.5">
+                    <RefChips items={(rfq.source_indent_nos ?? []).map((no) => ({ no }))} />
+                  </div>
+                </div>
+
+                {rfq.terms && (
+                  <p className="mt-4 border-t border-line/60 pt-4 text-sm text-body">{rfq.terms}</p>
                 )}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Department</dt>
-              <dd className="mt-1 text-body">{rfq.department_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Warehouse</dt>
-              <dd className="mt-1 text-body">{rfq.warehouse_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Project</dt>
-              <dd className="mt-1 text-body">{rfq.project_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Company</dt>
-              <dd className="mt-1 text-body">{rfq.company_name ?? "—"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Priority</dt>
-              <dd className="mt-1 text-body">{rfq.priority ?? "Normal"}</dd>
-            </div>
-            <div className="col-span-2">
-              <dt className="text-xs text-muted">Indents behind it</dt>
-              <dd className="mt-1 flex flex-wrap gap-1.5">
-                {(rfq.source_indent_nos ?? []).length
-                  ? rfq.source_indent_nos!.map((no) => (
-                      <span
-                        key={no}
-                        className="rounded-md bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-body"
-                      >
-                        {no}
-                      </span>
-                    ))
-                  : <span className="text-body">—</span>}
-              </dd>
-            </div>
-          </dl>
+              </SectionCard>
+            )}
 
-          {/* Where the award went next. Without it an AWARDED RFQ is a dead end on
-            * screen even though the order exists — the chain only reads forward here. */}
-          {rfq.po_id && (
-            <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-line pt-4 text-sm sm:grid-cols-4">
-              <div>
-                <dt className="text-xs text-muted">Purchase order</dt>
-                <dd className="mt-1">
-                  <button className="font-mono text-brand underline" onClick={() => nav(`/pos/${rfq.po_id}`)}>
-                    {rfq.po_no ?? `#${rfq.po_id}`}
-                  </button>
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-muted">Order status</dt>
-                <dd className="mt-1"><StatusPill status={rfq.po_status ?? "DRAFT"} /></dd>
-              </div>
-            </dl>
-          )}
-          {rfq.terms && (
-            <p className="mt-4 border-t border-line pt-4 text-sm text-body">{rfq.terms}</p>
-          )}
-        </Card>
-      )}
-
-      <h2 className="mb-2 text-sm font-semibold text-ink">Lines</h2>
-      <Card className="mb-5 p-2">
-        <ResponsiveList
-          data={rfq?.items ?? []}
-          columns={lineColumns}
-          keyOf={(r) => r.id}
-          loading={isLoading}
-          empty="No lines on this RFQ."
-          renderCard={(r) => (
-            <div className="space-y-1">
-              <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
-              <div className="text-xs text-muted">
-                {r.quantity} {r.uom_code ?? ""}
-                {r.required_date ? ` · needed by ${fmtDate(r.required_date)}` : ""}
-              </div>
-            </div>
-          )}
-        />
-        {editableQty && (
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line p-3">
-            <p className="text-xs text-muted">
-              Change what is being asked for before you sign. The quantities are frozen
-              once the RFQ is published — the vendors have seen them by then.
-            </p>
-            <Button
-              variant="subtle"
-              disabled={saveQuantities.isPending || Object.keys(qtyEdits).length === 0}
-              onClick={() => saveQuantities.mutate()}
-            >
-              {saveQuantities.isPending ? "Saving…" : "Save quantities"}
-            </Button>
-          </div>
-        )}
-      </Card>
-
-      <h2 className="mb-2 text-sm font-semibold text-ink">Vendors asked</h2>
-      <Card className="mb-5 p-2">
-        <ResponsiveList
-          data={rfq?.vendors ?? []}
-          columns={vendorColumns}
-          keyOf={(r) => r.id}
-          empty="Nobody has been asked yet."
-          renderCard={(r) => (
-            <div className="space-y-1">
-              <div className="text-sm font-medium text-ink">{r.vendor_name ?? `Vendor ${r.vendor_id}`}</div>
-              <div className="text-xs text-muted">
-                {r.responded_at ? `Replied ${fmtDate(r.responded_at)}` : "Not replied"}
-              </div>
-            </div>
-          )}
-        />
-      </Card>
-
-      {published && (
-        <>
-          <div className="mb-2 flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold text-ink">Comparison</h2>
-              <p className="text-xs text-muted">
-                {comparison
-                  ? `${comparison.responded} quote${comparison.responded === 1 ? "" : "s"} in, ranked by ${
-                      methods?.find((m) => m.value === comparison.evaluation_method)?.label
-                      ?? comparison.evaluation_method.replace(/_/g, " ").toLowerCase()}`
-                  : "Waiting on quotes"}
-              </p>
-            </div>
-            <div className="w-56">
-              <Select
-                value={method || comparison?.evaluation_method || ""}
-                placeholder="Rank by…"
-                options={(methods ?? []).map((m) => ({ value: m.value, label: m.label }))}
-                onChange={setMethod}
+            <SectionCard title="Lines" className="p-2">
+              <ResponsiveList
+                data={rfq?.items ?? []}
+                columns={lineColumns}
+                keyOf={(r) => r.id}
+                loading={isLoading}
+                empty="No lines on this RFQ."
+                renderCard={(r) => (
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
+                    <div className="text-xs text-muted">
+                      {r.quantity} {r.uom_code ?? ""}
+                      {r.required_date ? ` \u00b7 needed by ${fmtDate(r.required_date)}` : ""}
+                    </div>
+                  </div>
+                )}
               />
-            </div>
-          </div>
+              {editableQty && (
+                <div className="flex justify-end border-t border-line/60 p-3">
+                  <Button
+                    variant="subtle"
+                    disabled={saveQuantities.isPending || Object.keys(qtyEdits).length === 0}
+                    onClick={() => saveQuantities.mutate()}
+                  >
+                    {saveQuantities.isPending ? "Saving\u2026" : "Save quantities"}
+                  </Button>
+                </div>
+              )}
+            </SectionCard>
 
-          {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
-            <p className="mb-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-              Only {comparison.responded} quote{comparison.responded === 1 ? "" : "s"} on
-              file. The standard is three — award anyway if this is a single-source item.
-            </p>
-          )}
+            <SectionCard title="Vendors asked" className="p-2">
+              <ResponsiveList
+                data={rfq?.vendors ?? []}
+                columns={vendorColumns}
+                keyOf={(r) => r.id}
+                empty="Nobody has been asked yet."
+                renderCard={(r) => (
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium text-ink">{r.vendor_name ?? `Vendor ${r.vendor_id}`}</div>
+                    <div className="text-xs text-muted">
+                      {r.responded_at ? `Replied ${fmtDate(r.responded_at)}` : "Not replied"}
+                    </div>
+                  </div>
+                )}
+              />
+            </SectionCard>
 
-          {/* The sheet decides nothing. It flags the cheapest cell per item and the
-            * top of the ranking, and leaves every column awardable — the buyer picks,
-            * and the PO is raised from whichever quote they picked. */}
-          {comparison && (
-            <QuotationComparison
-              comparison={comparison}
-              awardedQuotationId={awardedQuote?.id ?? null}
-              poId={rfq?.po_id ?? null}
-              poNo={rfq?.po_no ?? null}
-              busy={busy}
-              onAward={(quotationId) => award.mutate(quotationId)}
-              onCreatePo={(quotationId) => raisePo.mutate(quotationId)}
-              onOpenPo={() => nav(`/pos/${rfq?.po_id}`)}
-            />
-          )}
-        </>
-      )}
+            {published && (
+              <SectionCard
+                title="Comparison"
+                action={
+                  <div className="w-56">
+                    <Select
+                      value={method || comparison?.evaluation_method || ""}
+                      placeholder="Rank by\u2026"
+                      options={(methods ?? []).map((m) => ({ value: m.value, label: m.label }))}
+                      onChange={setMethod}
+                    />
+                  </div>
+                }
+              >
+                {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
+                  <p className="mb-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
+                    {comparison.responded} of 3 quotes on file.
+                  </p>
+                )}
+                {/* The sheet decides nothing. It flags the cheapest cell per item and
+                    the top of the ranking, and leaves every column awardable. */}
+                {comparison
+                  ? (
+                    <QuotationComparison
+                      comparison={comparison}
+                      awardedQuotationId={awardedQuote?.id ?? null}
+                      poId={rfq?.po_id ?? null}
+                      poNo={rfq?.po_no ?? null}
+                      busy={busy}
+                      onAward={(quotationId) => award.mutate(quotationId)}
+                      onCreatePo={(quotationId) => raisePo.mutate(quotationId)}
+                      onOpenPo={() => nav(`/pos/${rfq?.po_id}`)}
+                    />
+                  )
+                  : <p className="py-6 text-center text-sm text-muted">Waiting on quotes.</p>}
+              </SectionCard>
+            )}
+          </>
+        )}
+        rail={rfq ? (
+          <>
+            <SectionCard>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">Status</span>
+                <StatusPill status={rfq.status} />
+              </div>
+              <div className="mt-4 border-t border-line/60 pt-4">
+                <RailStat
+                  label={rfq.status === "PENDING_APPROVAL" ? "With" : "Awarded to"}
+                  value={(
+                    <span className="block truncate text-lg">
+                      {rfq.current_approver_name ?? rfq.awarded_vendor_name ?? "\u2014"}
+                    </span>
+                  )}
+                />
+              </div>
+              {/* Where the award went next. Without it an AWARDED RFQ is a dead end on
+                  screen even though the order exists \u2014 the chain only reads forward. */}
+              {rfq.po_id && (
+                <div className="mt-4 flex items-center justify-between gap-2 border-t border-line/60 pt-4">
+                  <DocRef
+                    label="Order"
+                    no={rfq.po_no ?? `#${rfq.po_id}`}
+                    onOpen={() => nav(`/pos/${rfq.po_id}`)}
+                  />
+                  <StatusPill status={rfq.po_status ?? "DRAFT"} />
+                </div>
+              )}
+            </SectionCard>
 
-      {rfq && <ApprovalTrail docType="RFQ" docId={rfq.id} />}
+            <ApprovalTrail docType="RFQ" docId={rfq.id} />
+          </>
+        ) : null}
+      />
     </div>
   );
 }

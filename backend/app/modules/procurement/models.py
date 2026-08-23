@@ -19,6 +19,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
+from app.platform.workflow import doc_registry
+from app.shared.enums import DocType
 from app.shared.enums import DespatchNoteStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 
@@ -706,3 +708,21 @@ class PurchaseConsolidationSource(Base):
 
 
 Index("ix_pro_cons_source_req", PurchaseConsolidationSource.requisition_id)
+
+# --------------------------------------------------------------------------- #
+# Where these documents keep their "waiting on" snapshot.
+#
+# Declared HERE, beside the models, because this file is the only place that knows
+# the table and column names. `platform.workflow.engine.move_to_workflow` reads the
+# registry when an admin moves a document onto another ladder version — that is the
+# one transition with no module on the other end to update the row afterwards, and
+# before this the document went on naming the approver from the version it had just
+# been taken off. See `platform/workflow/doc_registry.py`.
+#
+# Modules -> platform, never the reverse (rule 5): this passes plain strings, so the
+# platform never imports a model.
+# --------------------------------------------------------------------------- #
+doc_registry.register(DocType.PO.value, "pro_purchase_orders")
+doc_registry.register(DocType.REQUISITION.value, "pro_requisitions")
+doc_registry.register(DocType.RFQ.value, "pro_rfqs")
+doc_registry.register(DocType.CONSOLIDATION.value, "pro_consolidations")

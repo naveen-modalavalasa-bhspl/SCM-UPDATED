@@ -1,12 +1,13 @@
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Button, Can, Card, ErrorBanner, PageHeader, ResponsiveList, StatusPill,
+  Button, Can, ErrorBanner, PageHeader, ResponsiveList, StatusPill,
   useToast, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { approvalTrailApi, approvalTrailKey, requisitionApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
+import { DetailShell, SectionCard, FactGrid, RefChips, RailStat } from "../components/DetailKit";
 import { money } from "./RequisitionListPage";
 import type { ReqItem } from "../types";
 
@@ -42,6 +43,11 @@ export function RequisitionDetailPage() {
   const refresh = (message: string) => () => {
     queryClient.invalidateQueries({ queryKey: ["requisition", id] });
     queryClient.invalidateQueries({ queryKey: ["requisitions"] });
+    // The approval trail is engine state, and pressing Approve here CHANGES it.
+    // Without this the page kept showing the rung it was on before the press and
+    // only a full reload caught up. Keyed on the prefix so one line covers every
+    // document type this page can be showing.
+    queryClient.invalidateQueries({ queryKey: ["procurement", "approval-trail"] });
     toast.success(message);
   };
 
@@ -164,103 +170,85 @@ export function RequisitionDetailPage() {
 
       <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? cancel.error} />
 
-      {req && (
-        <>
-          {/* The three things a buyer reads first — who wants it, when, and what it is
-            * likely to cost — on one line, before the detail. The estimate sits apart
-            * because it is the figure the ladder routed on, not a fact about the
-            * request. */}
-          <Card className="mb-4 p-5">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-xs uppercase tracking-wide text-muted">Raised by</p>
-                <p className="text-lg font-semibold text-ink">{req.created_by_name ?? "—"}</p>
-                <p className="mt-1 text-sm text-muted">
-                  {req.status === "PENDING_APPROVAL" ? "With " : "Approved by "}
-                  <span className="text-body">
-                    {req.current_approver_name ?? req.approved_by_name ?? "—"}
-                  </span>
-                  {req.required_date ? ` · needed by ${fmtDate(req.required_date)}` : ""}
-                  {req.priority ? ` · ${req.priority.toLowerCase()} priority` : ""}
-                </p>
-              </div>
-              <div className="rounded-xl bg-content2 px-4 py-3 text-right">
-                <p className="text-xs uppercase tracking-wide text-muted">Estimated value</p>
-                <p className="text-xl font-bold text-ink">{money(req.estimated_value)}</p>
-                {/* Asked of every buyer who sees it, so the screen answers before they
-                  * ask. It is a routing figure, not a price — the approval ladder needs
-                  * a number and the vendors have not quoted yet. */}
-                <p className="mt-1 max-w-56 text-[11px] leading-snug text-muted">
-                  Preferred vendor's last rate, then any vendor's, then the item's
-                  purchase price. Not a quote.
-                </p>
-              </div>
-            </div>
+      <DetailShell
+        main={(
+          <>
+            {req && (
+              <SectionCard title="Request">
+                <FactGrid
+                  facts={[
+                    { label: "Raised by", value: req.created_by_name ?? "—" },
+                    {
+                      label: isPending ? "With" : "Approved by",
+                      value: req.current_approver_name ?? req.approved_by_name ?? "—",
+                    },
+                    { label: "Needed by", value: req.required_date ? fmtDate(req.required_date) : "—" },
+                    {
+                      label: "Priority",
+                      value: req.priority
+                        ? <span className="capitalize">{req.priority.toLowerCase()}</span>
+                        : "—",
+                    },
+                    { label: "Department", value: req.department_name ?? "—" },
+                    { label: "Warehouse", value: req.warehouse_name ?? "—" },
+                    { label: "Project", value: req.project_name ?? "—" },
+                    { label: "Company", value: req.company_name ?? "—" },
+                  ]}
+                />
 
-            {/* Who is asking, for what, and on whose budget. Department and company are
-              * read off the raiser's HCM record and the install settings — they are not
-              * typed on the document. */}
-            <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-line pt-4 text-sm sm:grid-cols-4">
-              {[
-                ["Department", req.department_name],
-                ["Warehouse", req.warehouse_name],
-                ["Project", req.project_name],
-                ["Company", req.company_name],
-              ].map(([label, value]) => (
-                <div key={label as string}>
-                  <dt className="text-[11px] uppercase tracking-wide text-muted">{label}</dt>
-                  <dd className="mt-0.5 truncate text-body" title={(value as string) ?? undefined}>
-                    {(value as string) ?? "—"}
-                  </dd>
+                {/* Every material request folded in, not just the first: a consolidated
+                    requisition serves several and the header is where they are named. */}
+                <div className="mt-4 border-t border-line/60 pt-4">
+                  <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">
+                    From material request{(req.source_mr_nos ?? []).length > 1 ? "s" : ""}
+                  </div>
+                  <div className="mt-1.5">
+                    {(req.source_mr_nos ?? []).length
+                      ? <RefChips items={req.source_mr_nos!.map((no) => ({ no }))} />
+                      : <span className="text-sm text-muted">Raised directly</span>}
+                  </div>
                 </div>
-              ))}
-            </dl>
 
-            {/* Every material request folded in, not just the first. A consolidated
-              * requisition serves several, and the header is where they are named. */}
-            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
-              <span className="text-[11px] uppercase tracking-wide text-muted">
-                From material request{(req.source_mr_nos ?? []).length > 1 ? "s" : ""}
-              </span>
-              {(req.source_mr_nos ?? []).length
-                ? req.source_mr_nos!.map((no) => (
-                    <span
-                      key={no}
-                      className="rounded-md bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-body"
-                    >
-                      {no}
-                    </span>
-                  ))
-                : <span className="text-sm text-body">Raised directly</span>}
-            </div>
-
-            {req.remarks && (
-              <p className="mt-4 border-t border-line pt-4 text-sm text-body">{req.remarks}</p>
+                {req.remarks && (
+                  <p className="mt-4 border-t border-line/60 pt-4 text-sm text-body">{req.remarks}</p>
+                )}
+              </SectionCard>
             )}
-          </Card>
-        </>
-      )}
 
-      <Card className="p-2">
-        <ResponsiveList
-          data={req?.items ?? []}
-          columns={columns}
-          keyOf={(r) => r.id}
-          loading={isLoading}
-          empty="No lines on this requisition."
-          renderCard={(r) => (
-            <div className="space-y-1.5">
-              <div className="text-sm font-medium text-ink">
-                {r.item_name ?? `Item ${r.item_id}`}
-              </div>
-              <div className="font-mono text-[11px] text-muted">{r.item_code ?? "—"}</div>
-              <div className="text-xs text-body">{r.quantity} {r.uom_code ?? ""}</div>
-            </div>
-          )}
-        />
-      </Card>
-
-      <ApprovalTrail docType="REQUISITION" docId={Number(id)} />
+            <SectionCard title="Lines" className="p-2">
+              <ResponsiveList
+                data={req?.items ?? []}
+                columns={columns}
+                keyOf={(r) => r.id}
+                loading={isLoading}
+                empty="No lines on this requisition."
+                renderCard={(r) => (
+                  <div className="space-y-1.5">
+                    <div className="text-sm font-medium text-ink">
+                      {r.item_name ?? `Item ${r.item_id}`}
+                    </div>
+                    <div className="font-mono text-[11px] text-muted">{r.item_code ?? "—"}</div>
+                    <div className="text-xs text-body">{r.quantity} {r.uom_code ?? ""}</div>
+                  </div>
+                )}
+              />
+            </SectionCard>
+          </>
+        )}
+        rail={(
+          <>
+            {req && (
+              <SectionCard>
+                {/* A routing figure, not a price — the ladder needs a number before
+                    anybody has quoted. The paragraph that used to explain that is
+                    gone; the label carries it. */}
+                <RailStat label="Estimated value" value={money(req.estimated_value)} />
+              </SectionCard>
+            )}
+            <ApprovalTrail docType="REQUISITION" docId={Number(id)} />
+          </>
+        )}
+      />
     </div>
   );
 }

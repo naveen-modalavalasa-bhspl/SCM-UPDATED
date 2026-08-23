@@ -138,6 +138,7 @@ def _include_routers() -> None:
         "app.platform.auth.router",
         "app.platform.hcm.router",
         "app.platform.settings.router",
+        "app.platform.mail.router",
         "app.platform.notifications.router",
         "app.platform.rbac.router",
         "app.platform.workflow.router",
@@ -173,6 +174,13 @@ def _include_routers() -> None:
         router = getattr(module, "router", None)
         if router is not None:
             app.include_router(router)
+        # A module may expose a second router when its routes belong under two
+        # prefixes with two different guards — `platform.mail` serves /api/mail behind
+        # `require_permission` and the /api/auth reset pair with no guard at all, and
+        # they cannot share one object. Looked up by name so nothing else changes.
+        extra = getattr(module, "auth_router", None)
+        if extra is not None:
+            app.include_router(extra)
 
 
 _include_routers()

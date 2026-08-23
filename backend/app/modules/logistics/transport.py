@@ -51,7 +51,6 @@ from app.modules.logistics.enums import (
     TransportMode,
     TransportStatus,
     carriage_rule,
-    carriages_for_mode,
     flow_stages,
     is_inbound,
     mode_rule,
@@ -2895,18 +2894,6 @@ async def carrier_quote(db: AsyncSession, carrier_id: int, tr_id: int,
     return await record_quote(db, tr_id, carrier_id, data, user=None)
 
 
-def carrier_carriage_options(mode: str) -> list[dict]:
-    """The carriages this arrangement can be made under, for the portal's tiles.
-
-    The catalogue read the other way round: the desk picks a carriage and narrows the
-    arrangements, the carrier is handed an arrangement and narrows the carriages. One
-    table either way, so the portal can never offer a routing the desk's own screen
-    would refuse.
-    """
-    allowed = set(carriages_for_mode(mode))
-    return [row for row in carriage_catalogue() if row["value"] in allowed]
-
-
 async def carrier_accept(db: AsyncSession, carrier_id: int, tr_id: int,
                          data) -> TROut:
     """The carrier takes the job they won."""
@@ -2928,6 +2915,11 @@ async def carrier_acknowledge(db: AsyncSession, carrier_id: int, tr_id: int,
                               data) -> TROut:
     """The carrier takes the job AND says what is coming for it.
 
+    HOW it travels is not among it. The carriage is settled by the dispatch desk
+    before the tender goes out and the award is priced against that lane, so a
+    carriage the winner could flip on the way in would change the basis of a price
+    already accepted, with nothing in the audit row to say it moved.
+
     One press, not two: the vehicle and the driver are written first and the award is
     then accepted through `accept_award`, so a shipment can never end up READY with
     nobody named against it — and the audit row, the status and the "an award is an
@@ -2945,14 +2937,6 @@ async def carrier_acknowledge(db: AsyncSession, carrier_id: int, tr_id: int,
         value = getattr(data, field, None)
         if value is not None and str(value).strip():
             setattr(doc, field, str(value).strip())
-
-    # Which way they are actually sending it. The ARRANGEMENT stays the desk's — it
-    # was settled before the tender went out and the award was made against it — so
-    # the pair is validated against `doc.mode`, not against anything the carrier sent:
-    # a third-party job can go by road or by rail, and neither answer can turn it into
-    # a hand-over. Saying nothing keeps whatever the dispatch desk picked.
-    doc.carriage_mode = _resolve_carriage(
-        doc.mode, getattr(data, "carriage_mode", None), current=doc.carriage_mode)
 
     accepted = await accept_award(db, tr_id, carrier_id, data.carrier_reference)
     return _carrier_view(accepted, carrier_id)

@@ -34,7 +34,8 @@ interface IndentModuleHeaderProps {
 
 export function IndentModuleHeader({
   title = "Indent",
-  eyebrow = "INDENT",
+  // Accepted and deliberately NOT rendered: see the note on the header below.
+  eyebrow: _eyebrow,
   showCreate = true,
   actions,
   subNav,
@@ -56,10 +57,13 @@ export function IndentModuleHeader({
 }: IndentModuleHeaderProps) {
   const nav = useNavigate();
 
+  /* The INDENT eyebrow is gone (2026-08-22). The sticky header says "Indents" and
+     the tab strip beside it says which screen this is, so a third naming of the
+     same thing in brand caps above the title was noise. The prop stays on the
+     interface — every screen passes one and no call site had to change. */
   return (
     <div className="mb-5">
       <PageHeader
-        eyebrow={eyebrow}
         title={title}
         actions={
           showCreate ? (

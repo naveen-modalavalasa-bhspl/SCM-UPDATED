@@ -15,10 +15,11 @@ from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams, paginate
-from app.modules.inventory import allocation, availability, locations
+from app.modules.inventory import allocation, availability, hooks, locations
 from app.modules.inventory.enums import AdjustmentStatus, CycleCountStatus, STOStatus
 from app.modules.inventory.models import (
-    NO_BATCH, NO_BIN, NO_PROJECT, Allocation, MaterialRequest, MaterialRequestItem, Stock,
+    NO_BATCH, NO_BIN, NO_PROJECT, Allocation, AllocationItem, MaterialRequest,
+    MaterialRequestItem, Stock,
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
     StockTransferOrderItem, CycleCount, CycleCountItem, Reservation,
 )
@@ -38,7 +39,7 @@ from app.shared.enums import (
     Priority, RefType, ScopeRung, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item, Uom
+from app.shared.models.master import Item, Project, Uom
 from app.shared.models.warehouse import Warehouse, WarehouseLocation
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
@@ -591,6 +592,15 @@ async def transfer_stock(db: AsyncSession, item_id: int, qty, user,
                      warehouse_id=to_warehouse_id, project_id=to_project_id)
 
 
+#: What the stock grid is being asked to show. Not a document status — a view mode —
+#: so it lives with the query it drives rather than in shared/enums.
+#:   available — drawable now: something on hand AND something unreserved
+#:   all       — every row, however empty or spoken for
+#:   zero      — nothing on hand at all
+#:   reserved  — stock on hand, all of it committed to an allocation
+STOCK_VIEWS = ("available", "all", "zero", "reserved")
+
+
 async def _stock_query(db: AsyncSession, item_id: int | None = None,
                        warehouse_id: int | None = None, project_id: int | None = None,
                        bin_id: int | None = None, search: str | None = None,
@@ -598,7 +608,8 @@ async def _stock_query(db: AsyncSession, item_id: int | None = None,
                        include_zero: bool = False, expiring_in_days: int | None = None,
                        expiry_status: str | None = None, expiry_from: date | None = None,
                        expiry_to: date | None = None, expired_in_last_days: int | None = None,
-                       below_reorder: bool = False, user=None):
+                       below_reorder: bool = False, *,
+                       stock_view: str | None = None, user=None):
     """Every filter the stock balance screen offers, applied once.
 
     The list and its KPI tiles have to agree, so they cannot each build their own
@@ -615,13 +626,22 @@ async def _stock_query(db: AsyncSession, item_id: int | None = None,
         stmt = stmt.where(Stock.bin_id == bin_id)
     if batch_no:
         stmt = stmt.where(Stock.batch_no.like(f"%{batch_no}%"))
-    if not include_zero:
-        # "Zero stock" is zero AVAILABLE, not zero on hand. A lot whose 40 units are
-        # all reserved against an allocation is nothing anybody can draw on, so it read
-        # as stock on a screen whose only question is what can be given out — and
-        # toggling the filter changed nothing, because total_qty alone is almost never
-        # zero in the live data. Both tests, so an emptied lot still goes too.
+    # `include_zero` is the old boolean and still answers for callers that pass it;
+    # `stock_view` supersedes it. The boolean could only ever ask one question, and
+    # "there is none left" and "there is some but it is all spoken for" are different
+    # answers a storekeeper needs to tell apart.
+    view = stock_view or ("all" if include_zero else "available")
+    if view == "available":
+        # Drawable NOW: zero available is nothing anybody can take, whether the lot is
+        # empty or its 40 units are all reserved against an allocation. Both tests, or
+        # a fully-reserved lot reads as stock on a screen whose only question is what
+        # can be given out.
         stmt = stmt.where(Stock.total_qty > 0, Stock.available_qty > 0)
+    elif view == "zero":
+        stmt = stmt.where(Stock.total_qty <= 0)
+    elif view == "reserved":
+        stmt = stmt.where(Stock.total_qty > 0, Stock.available_qty <= 0)
+    # "all" narrows nothing.
     if expiring_in_days is not None:
         today_date = utcnow().date()
         cutoff = today_date + timedelta(days=expiring_in_days)
@@ -675,12 +695,13 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
                      include_zero: bool = False, expiring_in_days: int | None = None,
                      expiry_status: str | None = None, expiry_from: date | None = None,
                      expiry_to: date | None = None, expired_in_last_days: int | None = None,
-                     below_reorder: bool = False, user=None) -> dict:
+                     below_reorder: bool = False, *,
+                     stock_view: str | None = None, user=None) -> dict:
     """The stock balance grid."""
     stmt = await _stock_query(
         db, item_id, warehouse_id, project_id, bin_id, search, category_id, batch_no,
         include_zero, expiring_in_days, expiry_status, expiry_from, expiry_to,
-        expired_in_last_days, below_reorder, user=user,
+        expired_in_last_days, below_reorder, stock_view=stock_view, user=user,
     )
 
     page = await paginate(db, stmt.order_by(Stock.item_name), params)
@@ -732,7 +753,8 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
                         expiry_status: str | None = None, expiry_from: date | None = None,
                         expiry_to: date | None = None,
                         expired_in_last_days: int | None = None,
-                        below_reorder: bool = False, user=None) -> dict:
+                        below_reorder: bool = False, *,
+                        stock_view: str | None = None, user=None) -> dict:
     """The four tiles above the stock balance grid, counted over every matching row.
 
     Same filters as `list_stock`, no LIMIT. The browser cannot do this: it only ever
@@ -741,7 +763,7 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
     stmt = await _stock_query(
         db, item_id, warehouse_id, project_id, bin_id, search, category_id, batch_no,
         include_zero, expiring_in_days, expiry_status, expiry_from, expiry_to,
-        expired_in_last_days, below_reorder, user=user,
+        expired_in_last_days, below_reorder, stock_view=stock_view, user=user,
     )
     rows = stmt.subquery()
     today_date = utcnow().date()
@@ -1175,6 +1197,38 @@ async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | No
     return mr
 
 
+async def _project_name_of(db: AsyncSession, project_id: int | None) -> str | None:
+    """The master's name for a project id, or None. Read rather than snapshotted from
+    the caller so the id and the name on a document can never disagree."""
+    if not project_id or project_id == NO_PROJECT:
+        return None
+    row = await db.get(Project, project_id)
+    return row.name if row else None
+
+
+async def _indent_project_id(db: AsyncSession, indent_id: int | None) -> int | None:
+    """The project an indent is serving, as INVENTORY already holds it.
+
+    Read off `inv_allocation_items` and never off the indent header: indents sit AFTER
+    inventory in the import chain (rule 5) and this module may not reach them. The
+    allocation is inventory's own mirror of the indent, written when it arrived here.
+
+    Returns None for an indent that has not been allocated yet — which is exactly the
+    case `create_mr_manual` falls back for.
+    """
+    if indent_id is None:
+        return None
+    return await db.scalar(
+        select(AllocationItem.project_id)
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .where(Allocation.indent_id == indent_id,
+               AllocationItem.project_id.isnot(None),
+               AllocationItem.project_id != NO_PROJECT)
+        .order_by(AllocationItem.id)
+        .limit(1)
+    )
+
+
 async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialRequest:
     """Raise a material request by hand — the allocation screen's per-line button and
     the Create button on the Material Requests screen both land here.
@@ -1232,7 +1286,34 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
                 "Change the quantity there rather than raising a second request."
             )
 
-    project_id = getattr(user, "project_id", None)
+    # FIXED 2026-08-22 — this was `getattr(user, "project_id", None)` alone, so a
+    # request raised off the allocation screen was filed under whichever project the
+    # STOREKEEPER's own HCM post belongs to instead of the one the indent is serving.
+    # BHS/104/2026-27/IND0007 (project 104-MMU) raised BHS/SUP/2026-27/MR0002 under
+    # SUPPLY CHAIN MANAGEMENT because that is where the approving inventory manager
+    # sits. The project is not cosmetic: it feeds {PROJECT} in the document number and
+    # is inherited by the requisition raised behind it, so a wrong one opens a running
+    # counter under the wrong project and lands the spend on the wrong cost centre.
+    #
+    # The automatic shortfall path never had this — `act_on_allocation` hands it the
+    # indent's project — and only this door was guessing. Three sources, narrowest
+    # first: the lines, which the allocation screen stamps with the indent's project
+    # (`allocation_proposal` puts it on every one); inventory's own allocation items,
+    # which mirror it for an indent already decided; and only then the login, which is
+    # the RIGHT answer for a free-standing buy no indent asked for.
+    project_id = (
+        next((line.get("project_id") for line in lines
+              if line.get("project_id") and line.get("project_id") != NO_PROJECT), None)
+        or await _indent_project_id(db, indent_id)
+        or getattr(user, "project_id", None)
+    )
+    # Named from the master, so the number and the snapshot cannot disagree. The
+    # login's own name stands in only when the project IS the login's and the master
+    # has no row for it — a mirror that has not been loaded must not blank the name.
+    project_name = await _project_name_of(db, project_id)
+    if project_name is None and project_id == getattr(user, "project_id", None):
+        project_name = getattr(user, "project_name", None)
+
     resolved = []
     for line in lines:
         quantity = _d(line.get("quantity"))
@@ -1258,7 +1339,7 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
                           or getattr(user, "department_id", None)),
         "department_name": getattr(user, "department_name", None),
         "project_id": project_id,
-        "project_name": getattr(user, "project_name", None),
+        "project_name": project_name,
         "priority": data.get("priority"),
         "required_by": data.get("required_by"),
         "remarks": data.get("remarks"),
@@ -1269,6 +1350,11 @@ async def create_mr_manual(db: AsyncSession, data: dict, user) -> MaterialReques
     # `_raise_mr` only flushes: on the automatic path it is one step inside the
     # allocation's transaction. This door is the whole transaction.
     await db.commit()
+    # A ladder that resolves to nobody signs the request at submit, so it never passes
+    # through `act_on_mr` and would otherwise wait for a buyer to open the Requisitions
+    # screen before anything picked it up. Same hook, same guard, after the commit.
+    if mr.status == MRStatus.APPROVED.value:
+        await hooks.fire_mr_approved(db, mr, user)
     return mr
 
 
@@ -1322,6 +1408,17 @@ async def act_on_mr(db: AsyncSession, mr_id: int, action: str, user,
     )
     await db.commit()
     await db.refresh(mr)
+
+    # FIXED 2026-08-22 — an approved MR used to sit here until a buyer happened to open
+    # the Requisitions screen, because that list is what runs `ensure_mr_drafts`. The
+    # draft requisition therefore appeared minutes or hours after the approval, stamped
+    # with the moment somebody opened a page and owned by whoever that was — and if no
+    # buyer ever opened it, nothing chased the demand at all. Procurement registers
+    # itself on ON_MR_APPROVED (see hooks.py) so the draft is raised when the approval
+    # happens. `ensure_mr_drafts` stays exactly as it is: it is idempotent, and it is
+    # still the net that catches an MR approved while procurement was not registered.
+    if mr.status == MRStatus.APPROVED.value:
+        await hooks.fire_mr_approved(db, mr, user)
     return mr
 
 

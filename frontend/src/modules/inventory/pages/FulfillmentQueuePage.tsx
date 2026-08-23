@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Chip, Pagination } from "@heroui/react";
+import { ClipboardList, Hourglass, PackageOpen } from "lucide-react";
 import { PageHeader, Card, ResponsiveList, StatusPill, Button, type Column } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { getFulfilmentBatches, getFulfillmentQueue, listAllocations } from "../api";
@@ -276,25 +277,29 @@ export function FulfillmentQueuePage({ embedded = false }: { embedded?: boolean 
     <div>
       {!embedded && <PageHeader eyebrow="Inventory" title="Fulfilment Queue" />}
 
-      <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-3">
+      <div className="mb-4 grid grid-cols-3 gap-2 lg:grid-cols-3">
         <Card className="p-3">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Still owed</div>
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+            <ClipboardList size={12} /> Still owed
+          </div>
           <div className="text-2xl font-bold text-brand">{queue.isLoading ? "…" : rows.length}</div>
         </Card>
         <Card className="p-3">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Nothing raised yet</div>
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+            <PackageOpen size={12} /> Nothing raised
+          </div>
           <div className="text-2xl font-bold text-ink">{queue.isLoading ? "…" : awaitingAllocation}</div>
         </Card>
         <Card className="p-3">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Allocation pending</div>
-          <div className="text-2xl font-bold text-ink">{rows.length - awaitingAllocation}</div>
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+            <Hourglass size={12} /> In approval
+          </div>
+          <div className="text-2xl font-bold text-warn">{rows.length - awaitingAllocation}</div>
         </Card>
       </div>
 
       <p className="mb-3 text-sm text-muted">
-        Every indent with a line still owed. Click one to allocate it from a point you
-        hold — that raises an allocation for approval; the goods hand over at the
-        warehouse material issue.
+        Pick an indent to decide what to give. Goods hand over at warehouse issue.
       </p>
 
       <FilterBar
@@ -370,7 +375,7 @@ export function FulfillmentQueuePage({ embedded = false }: { embedded?: boolean 
             onRowClick={(r) => nav(destinationFor(r))}
             columns={columns}
             empty={view === "OWED"
-              ? "Nothing owed. Indents appear here the moment a line is approved for more than has been allocated. Switch to Everything to see the ones already fulfilled."
+              ? "Nothing owed right now. Switch to Everything to see fulfilled indents."
               : "No indent matches these filters."}
             renderCard={(r) => (
               <div className="space-y-1.5">

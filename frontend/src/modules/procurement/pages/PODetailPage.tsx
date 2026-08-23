@@ -9,6 +9,7 @@ import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
 import { revisionLines } from "../types";
 import { ApprovalTrail } from "../components/ApprovalTrail";
+import { SectionCard, FactGrid } from "../components/DetailKit";
 import {
   blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue,
 } from "../components/POHeaderFields";
@@ -48,6 +49,11 @@ export function PODetailPage() {
     qc.invalidateQueries({ queryKey: ["purchase-order", poId] });
     qc.invalidateQueries({ queryKey: ["pos"] });
     qc.invalidateQueries({ queryKey: ["approvals"] });
+    // The approval trail is engine state, and pressing Approve here CHANGES it.
+    // Without this the page kept showing the rung it was on before the press and
+    // only a full reload caught up. Keyed on the prefix so one line covers every
+    // document type this page can be showing.
+    qc.invalidateQueries({ queryKey: ["procurement", "approval-trail"] });
   };
 
   useEffect(() => {
@@ -292,25 +298,35 @@ export function PODetailPage() {
       {((submit.error ?? send.error) as Error).message}
     </p>}
 
-    <Card className="mb-4 p-4">
-      <dl className="grid gap-3 text-sm sm:grid-cols-4">
-        <div><dt className="text-muted">Vendor</dt><dd className="font-semibold text-ink">{po.data.vendor_name ?? "—"}</dd></div>
-        <div><dt className="text-muted">Indent</dt><dd className="font-mono text-ink">{po.data.indent_no ?? "—"}</dd></div>
-        <div><dt className="text-muted">Project</dt><dd className="text-ink">{po.data.project_name ?? "—"}</dd></div>
-        <div><dt className="text-muted">Expected date</dt><dd className="text-ink">{fmtDate(po.data.expected_date)}</dd></div>
-      </dl>
-      {po.data.remarks && <p className="mt-3 whitespace-pre-line border-t border-line pt-3 text-sm text-body">{po.data.remarks}</p>}
-      {/* Where this order came from, when it came off an award rather than an indent.
-        * Every document in the chain points backward at the one before it, and this is
-        * the row that lets somebody reading a PO find the offer it was written from. */}
-      {po.data.quotation_no && (
-        <dl className="mt-3 grid gap-3 border-t border-line pt-3 text-sm sm:grid-cols-3">
-          <div><dt className="text-muted">Requisition</dt><dd className="font-mono text-ink">{po.data.requisition_no ?? "—"}</dd></div>
-          <div><dt className="text-muted">RFQ</dt><dd className="font-mono text-ink">{po.data.rfq_no ?? "—"}</dd></div>
-          <div><dt className="text-muted">Quotation</dt><dd className="font-mono text-ink">{po.data.quotation_no}</dd></div>
-        </dl>
+    <SectionCard title="Order" className="mb-4">
+      <FactGrid
+        facts={[
+          { label: "Vendor", value: po.data.vendor_name ?? "—" },
+          { label: "Indent", value: <span className="font-mono">{po.data.indent_no ?? "—"}</span> },
+          { label: "Project", value: po.data.project_name ?? "—" },
+          { label: "Expected date", value: fmtDate(po.data.expected_date) },
+        ]}
+      />
+      {po.data.remarks && (
+        <p className="mt-4 whitespace-pre-line border-t border-line/60 pt-4 text-sm text-body">
+          {po.data.remarks}
+        </p>
       )}
-    </Card>
+      {/* Where this order came from when it came off an award rather than an indent.
+          Every document in the chain points backward at the one before it. */}
+      {po.data.quotation_no && (
+        <div className="mt-4 border-t border-line/60 pt-4">
+          <FactGrid
+            cols={3}
+            facts={[
+              { label: "Requisition", value: <span className="font-mono">{po.data.requisition_no ?? "—"}</span> },
+              { label: "RFQ", value: <span className="font-mono">{po.data.rfq_no ?? "—"}</span> },
+              { label: "Quotation", value: <span className="font-mono">{po.data.quotation_no}</span> },
+            ]}
+          />
+        </div>
+      )}
+    </SectionCard>
 
     <div className="overflow-x-auto rounded-xl border border-line">
       <table className="w-full text-left text-sm">
@@ -372,26 +388,49 @@ export function PODetailPage() {
     {/* What the order comes to: the lines summed, then the money that belongs to the
       * document rather than to any line. Same arithmetic the server stored —
       * total = subtotal - discount + tax + freight. */}
-    <Card className="mt-4 p-4">
-      <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
-        <div><dt className="text-muted">Subtotal</dt><dd className="text-ink">{money(po.data.sub_total ?? 0)}</dd></div>
-        <div><dt className="text-muted">Discount</dt><dd className="text-ink">{money(po.data.discount_amount ?? 0)}</dd></div>
-        <div><dt className="text-muted">Tax</dt><dd className="text-ink">{money(po.data.tax_amount ?? 0)}</dd></div>
-        <div><dt className="text-muted">Freight</dt><dd className="text-ink">{money(po.data.freight_amount ?? 0)}</dd></div>
-        <div><dt className="text-muted">Total</dt><dd className="font-semibold text-ink">{money(po.data.total_amount)}</dd></div>
-      </dl>
-    </Card>
+    {/* Every component of the figure, and the figure. An approver signs the total,
+        so it is set apart rather than being the fifth of five identical cells. */}
+    <SectionCard className="mt-4">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <dl className="grid flex-1 grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
+          {([
+            ["Subtotal", po.data.sub_total ?? 0],
+            ["Discount", po.data.discount_amount ?? 0],
+            ["Tax", po.data.tax_amount ?? 0],
+            ["Freight", po.data.freight_amount ?? 0],
+          ] as const).map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">{label}</dt>
+              <dd className="mt-0.5 tabular-nums text-sm font-medium text-ink">{money(value)}</dd>
+            </div>
+          ))}
+        </dl>
+        <div className="rounded-xl bg-content2/70 px-4 py-3 text-right">
+          <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">Total</div>
+          <div className="mt-0.5 font-display text-2xl font-bold tabular-nums text-ink">
+            {money(po.data.total_amount)}
+          </div>
+        </div>
+      </div>
+    </SectionCard>
 
     {/* Addresses and terms, ALWAYS — including the blanks. This is what an approver is
       * signing, and a field that disappears when empty cannot be told apart from a
       * field nobody thought to ask for. An empty term on an order worth six figures is
       * something the person signing it should see. */}
-    <Card className="mt-4 p-4">
-      <dl className="grid gap-3 text-sm sm:grid-cols-2">
-        <div><dt className="text-muted">Billing address</dt><dd className="whitespace-pre-line text-ink">{po.data.billing_address || "—"}</dd></div>
-        <div><dt className="text-muted">Shipping address</dt><dd className="whitespace-pre-line text-ink">{po.data.shipping_address || "—"}</dd></div>
+    <SectionCard title="Addresses" className="mt-4">
+      <dl className="grid gap-4 text-sm sm:grid-cols-2">
+        {([
+          ["Billing address", po.data.billing_address],
+          ["Shipping address", po.data.shipping_address],
+        ] as const).map(([label, text]) => (
+          <div key={label}>
+            <dt className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">{label}</dt>
+            <dd className="mt-1 whitespace-pre-line text-sm text-ink">{text || "—"}</dd>
+          </div>
+        ))}
       </dl>
-    </Card>
+    </SectionCard>
 
     <Card className="mt-4 p-4">
       <h2 className="mb-3 text-sm font-semibold text-ink">Terms and conditions</h2>

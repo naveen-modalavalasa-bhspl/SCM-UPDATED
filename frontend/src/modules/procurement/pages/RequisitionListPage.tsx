@@ -1,15 +1,15 @@
-import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, FilterMenu, PageHeader, ResponsiveList, StatusPill,
-  Input, type Column,
+  Button, Can, Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList,
+  StatusPill, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { requisitionApi } from "../api";
 import type { ReqListRow } from "../types";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
+import { RequisitionKpis } from "../components/ProcurementKpis";
+import { useUrlFilters } from "../urlFilters";
 
 /** RequisitionStatus, as the backend enum spells it. */
 const STATUSES = [
@@ -36,26 +36,33 @@ const SIZE = 20;
  * Unlike a PO this one DOES have a New button: a requisition is where the buying
  * chain starts, and it can be raised cold rather than off an indent.
  */
+/** Every filter this screen owns, so Clear knows what to drop. */
+const FILTER_KEYS = ["status", "search", "project", "raiser", "pending_for_me"];
+
 export function RequisitionListPage() {
   const nav = useNavigate();
-  const [status, setStatus] = useState("");
+  // Filters live in the URL, not in component state (see `../urlFilters`): the KPI
+  // strip above applies them, the Overview links straight into them, and a filtered
+  // register is a link somebody can paste to a colleague.
+  const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const status = get("status");
   // Project and raiser, filtered in the browser over the page in hand — the endpoint
   // takes neither, and these are the two things a buyer narrows by after status.
-  const [project, setProject] = useState("");
-  const [raiser, setRaiser] = useState("");
-  const [search, setSearch] = useState("");
+  const project = get("project");
+  const raiser = get("raiser");
+  const search = get("search");
+  const pendingForMe = getBool("pending_for_me");
   // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
-  const [page, setPage] = useState(1);
-
-  // Automatically reset to the first page whenever the search query or status filter changes
-  useEffect(() => {
-    setPage(1);
-  }, [status, debouncedSearch]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["requisitions", status, debouncedSearch, page],
-    queryFn: () => requisitionApi.list({ status: status || undefined, search: debouncedSearch || undefined, page, size: SIZE }),
+    queryKey: ["requisitions", status, debouncedSearch, pendingForMe, page],
+    queryFn: () => requisitionApi.list({
+      status: status || undefined,
+      search: debouncedSearch || undefined,
+      pending_for_me: pendingForMe || undefined,
+      page, size: SIZE,
+    }),
   });
 
   const all = data?.items ?? [];
@@ -132,31 +139,33 @@ export function RequisitionListPage() {
         }
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
-        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search requisition, project or raiser..."
-            className="pl-9"
-          />
-        </div>
-        <FilterMenu label="Status" value={status} onChange={setStatus}
-                    options={STATUSES.filter((o) => o.value)} />
-        <FilterMenu label="Project" value={project} onChange={setProject}
-                    options={projectOptions} />
-        <FilterMenu label="Raised by" value={raiser} onChange={setRaiser}
-                    options={raiserOptions} />
-        {(search || status || project || raiser) && (
-          <button
-            onClick={() => { setSearch(""); setStatus(""); setProject(""); setRaiser(""); }}
-            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
-          >
-            Clear
-          </button>
-        )}
+      {/* The KPI strip: pressing a tile applies the filter it counts and pressing it
+          again clears it. Gated on `requisition.view` inside the component, which is
+          the same code this screen's endpoint checks. */}
+      <div className="mb-4">
+        <RequisitionKpis />
       </div>
+
+      {/* The shared strip, not a fourth hand-rolled copy of it (2026-08-22). Every
+          procurement list carried its own search box and its own Clear button, all at
+          slightly different heights; the count on Clear now says how many are set. */}
+      <FilterBar
+        search={search}
+        onSearch={(value) => set({ search: value })}
+        searchPlaceholder="Search requisition, project or raiser…"
+        active={activeCount(FILTER_KEYS)}
+        onClear={() => clear(FILTER_KEYS)}
+      >
+        <FilterMenu label="Status" value={status}
+                    onChange={(value) => set({ status: value })}
+                    options={STATUSES.filter((o) => o.value)} />
+        <FilterMenu label="Project" value={project}
+                    onChange={(value) => set({ project: value })}
+                    options={projectOptions} />
+        <FilterMenu label="Raised by" value={raiser}
+                    onChange={(value) => set({ raiser: value })}
+                    options={raiserOptions} />
+      </FilterBar>
 
       <ErrorBanner error={error} />
 
@@ -171,9 +180,11 @@ export function RequisitionListPage() {
           totalPages={totalPages}
           onPageChange={setPage}
           empty={
-            status
-              ? "No requisitions in this status."
-              : "No requisitions yet. Raise one to start the buying chain."
+            pendingForMe
+              ? "Nothing is waiting for your signature."
+              : status
+                ? "No requisitions in this status."
+                : "No requisitions yet. Raise one to start the buying chain."
           }
           renderCard={(r) => (
             <div className="space-y-1.5">

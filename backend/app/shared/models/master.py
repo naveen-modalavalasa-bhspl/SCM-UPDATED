@@ -719,3 +719,48 @@ class ItemSpec(Base):
     storage_conditions = Column(String(300), nullable=True)
     shelf_life_days = Column(Integer, nullable=True)
     image_url = Column(String(500), nullable=True)
+
+
+class ItemEligibility(Base):
+    """`mst_item_eligibility` — which items a person may raise an indent for.
+
+    ONE row per (item, scope). An item tagged to nothing is available to EVERYONE;
+    an item with any row at all is available only to a requester who matches one of
+    them. That default is deliberate and matches how the rest of masters behaves —
+    `mst_brand_general_names` falls back to every brand for an unmapped general name
+    for exactly the same reason: the mapping starts empty, and reading an empty
+    mapping as "deny" would stop every indent in the company the moment this shipped.
+
+    Two kinds of scope, because the business asks the question both ways:
+
+      ROLE    the requester's RBAC role (`rbac_roles.id`) — a Driver may raise fuel
+              and consumables, not laboratory reagents.
+      REGION  the requester's location (`hcm_employees.office_id`, which is what
+              `indents.service` already stamps on `ind_indents.region_id`) — a
+              district stocks what that district actually runs.
+
+    A requester matching EITHER passes. They are alternatives, not both-required:
+    tagging an item to two regions and one role would otherwise be unsatisfiable.
+    """
+    __tablename__ = "mst_item_eligibility"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"),
+                     index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)      # snapshot, for the register
+    item_name = Column(String(300), nullable=True)     # snapshot
+    #: "ROLE" or "REGION" — see `shared.enums.ItemScope`.
+    scope_type = Column(String(20), nullable=False, index=True)
+    #: `rbac_roles.id` for ROLE, `hcm_offices.id` for REGION. Soft: the two id spaces
+    #: are different tables, so no single FK can express it.
+    scope_id = Column(BigIntPortable, nullable=False, index=True)
+    scope_name = Column(String(200), nullable=True)    # snapshot, so the row reads
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+
+# One tag per item per scope. Checked in Python as well (see `indents.eligibility`),
+# because MySQL counts NULLs as distinct and this index cannot express the intent on
+# its own if a column ever becomes nullable.
+Index("uq_item_eligibility", ItemEligibility.item_id,
+      ItemEligibility.scope_type, ItemEligibility.scope_id, unique=True)

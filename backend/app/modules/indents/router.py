@@ -477,5 +477,25 @@ async def reject_allocation(allocation_id: int, body: AllocActionIn,
         db, allocation_id, ApprovalAction.REJECTED.value, user, body.comments)
 
 
+@indent_router.get("/eligible-items")
+async def eligible_items(search: str | None = None, limit: int = 500,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.INDENT_CREATE))):
+    """The items THIS requester may raise an indent for.
+
+    Its own endpoint rather than a filter on `/api/masters/items`: that one is the
+    shared item master, read by masters screens, procurement and the warehouse, and
+    narrowing it for everybody would break every one of them. This narrows only the
+    indent picker.
+
+    Gated on `indent.create` — the list answers "what may I ask for", so it is exactly
+    as sensitive as raising an indent. It NARROWS the master and never widens it, and
+    the write path checks again (`eligibility.assert_items_allowed`), because the
+    picker is advice and the server is the gate (rule 6).
+    """
+    return await service.eligible_items(db, user, search=search,
+                                        limit=min(max(limit, 1), 1000))
+
+
 router.include_router(indent_router)
 router.include_router(alloc_router)

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, Check, X } from "lucide-react";
 import { Button, Can, Card, PageHeader, StatusPill } from "@/shared/components";
+import { LoadingRows } from "../components/PageStates";
 import { fmtDateTime } from "@/shared/datetime";
 import {
   approveAllocationsBatch, getAllocationApprovalBatches, getAllocationHistories,
@@ -135,7 +136,7 @@ export function AllocationCycleApprovalPage() {
     },
   });
 
-  if (batches.isLoading) return <Card className="p-6 text-sm text-muted">Loading…</Card>;
+  if (batches.isLoading) return <Card className="p-2"><LoadingRows rows={4} className="p-0" /></Card>;
   if (!batch) {
     return (
       <div>

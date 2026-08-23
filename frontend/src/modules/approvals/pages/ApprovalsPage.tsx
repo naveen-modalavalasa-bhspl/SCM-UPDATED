@@ -8,12 +8,15 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
-  Button, Card, ErrorBanner, PageHeader, ResponsiveList, StatCard, type Column,
-  ResponsiveGrid,
+  Button, Card, ErrorBanner, PageHeader, ResponsiveList, type Column,
+  FILTER_FIELD, FILTER_RAIL, FILTER_TOGGLE, FILTER_TOGGLE_OFF, FILTER_TOGGLE_ON,
+  Select,
 } from "@/shared/components";
 import { fmtDate, fmtDateTime, fmtRelative, parseIst } from "@/shared/datetime";
 import { approvalsApi } from "../api";
 import { approvalDocumentPath } from "../documentRoutes";
+import { docTypeLabel } from "../docTypes";
+import { Kpi } from "../components/ApprovalPulse";
 import { approvalTypeCounts, raisedWindow, type RaisedRange } from "../filters";
 import { ApprovalCorrectionPage } from "./CorrectionPage";
 import { IndentApprovalReviewPage } from "./IndentApprovalReviewPage";
@@ -21,16 +24,6 @@ import { ApprovalReportsPage } from "./ReportsPage";
 import { ApprovalPager } from "../components/Pager";
 import type { PendingApproval } from "../types";
 
-const LABELS: Record<string, string> = {
-  INDENT: "Indent", ALLOCATION: "Stock allocation", MR: "Material request",
-  PO: "Purchase order", GRN: "Goods receipt", ISSUE: "Material issue",
-  WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
-  OWN_STOCK_ALLOCATION: "Allocation from my point",
-  DISPATCH: "Dispatch", PURCHASE_RETURN: "Purchase return",
-  QC_OUTWARD: "Outward QC",
-  REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
-  RFQ: "Request for quotation", CARRIER_AWARD: "Carrier award",
-};
 
 /** Document types this screen can sign without opening them.
  *
@@ -75,7 +68,8 @@ const familyOf = (type: string) =>
   FAMILY[type] ?? { icon: FileText, tint: "bg-neutral-bg text-neutral" };
 
 const refOf = (row: PendingApproval) => `${row.doc_type}:${row.doc_id}`;
-const label = (value: string) => LABELS[value] ?? value.replace(/_/g, " ");
+// The table moved to ../docTypes so the dashboard names a type the same way.
+const label = docTypeLabel;
 const DAY = 86_400_000;
 
 /* Every timestamp goes through `parseIst`, never `new Date` directly: the API
@@ -154,51 +148,20 @@ function Chip({
   tone?: "brand" | "danger";
   children: ReactNode;
 }) {
-  const on = tone === "danger"
-    ? "border-bad/40 bg-bad-bg text-bad"
-    : "border-brand bg-brand text-white shadow-sm";
+  const on = tone === "danger" ? "border-bad/40 bg-bad-bg text-bad" : FILTER_TOGGLE_ON;
   return (
     <button
       type="button"
       onClick={onClick}
       title={title}
       aria-pressed={active}
-      className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-sm font-semibold transition-colors ${
-        active ? on : "border-line bg-content1 text-body hover:border-brand/40 hover:text-brand"
-      }`}
+      className={`${FILTER_TOGGLE} ${active ? on : FILTER_TOGGLE_OFF}`}
     >
       {children}
     </button>
   );
 }
 
-/** A KPI that is also the filter it names — the number an approver reads first is the
- *  one they want to act on. Wraps the shared StatCard; it is not restyled. */
-function QueueTile({
-  label: text, value, icon, tone, active, title, onClick,
-}: {
-  label: string;
-  value: ReactNode;
-  icon: ReactNode;
-  tone?: string;
-  active?: boolean;
-  title: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      aria-pressed={active}
-      className={`block w-full rounded-[14px] text-left transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 active:scale-[0.99] ${
-        active ? "ring-2 ring-brand/50" : "hover:ring-1 hover:ring-brand/25"
-      }`}
-    >
-      <StatCard label={text} value={value} icon={icon} tone={tone} />
-    </button>
-  );
-}
 
 /** A tick with 44px around it, and a click that never reaches the row behind it. */
 function Tick({
@@ -229,12 +192,19 @@ export function ApprovalsPage() {
   const queryClient = useQueryClient();
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
-  const [docType, setDocType] = useState("");
-  const [pastDueOnly, setPastDueOnly] = useState(false);
+  /* Seeded from the URL, once, so the Overview can hand this screen a question
+     rather than just a door: /approvals?doc_type=INDENT&overdue=1. Read at mount
+     only — after that the controls own the state, and re-reading the params on
+     every render would fight the user's own clicks. */
+  const [docType, setDocType] = useState(() => params.get("doc_type") ?? "");
+  const [pastDueOnly, setPastDueOnly] = useState(() => params.get("overdue") === "1");
   const [raisedRange, setRaisedRange] = useState<RaisedRange>("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [sort, setSort] = useState<Sort>("newest");
+  const [sort, setSort] = useState<Sort>(() => {
+    const asked = params.get("sort");
+    return SORTS.some((option) => option.value === asked) ? asked as Sort : "newest";
+  });
   const [page, setPage] = useState(1);
   const size = 20;
   const serverWindow = raisedWindow(raisedRange, dateFrom, dateTo);
@@ -465,35 +435,39 @@ export function ApprovalsPage() {
     {/* The three numbers this screen is opened for — each one also the filter it
         names. Reading "3 past due" and then hunting for the control that shows those
         three rows is the step this removes. */}
-    <ResponsiveGrid cols={3} className="mb-4">
-      <QueueTile
+    {/* The same tiles the dashboard draws, from ../components/ApprovalPulse — one
+        component, so the two screens cannot end up reporting the same queue in two
+        shapes. Here each one is also the FILTER it names: reading "3 past due" and
+        then hunting for the control that shows those three rows is the step this
+        removes, which is why they set state rather than navigate. */}
+    <section aria-label="Approval queues" className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <Kpi
         label="Waiting on you"
         value={queue.length}
-        icon={<Inbox size={16} />}
-        title="Show the whole queue"
-        onClick={clear}
+        icon={Inbox}
+        tint="bg-brand-050 text-brand"
+        muted={queue.length === 0}
+        onOpen={clear}
       />
-      <QueueTile
+      <Kpi
         label="Past due"
         value={pastDue}
-        icon={<TriangleAlert size={16} />}
-        tone={pastDue ? "text-danger" : "text-muted"}
-        active={pastDueOnly}
-        title="Show only what is past its due date"
-        onClick={() => setPastDueOnly(!pastDueOnly)}
+        icon={TriangleAlert}
+        tint="bg-bad-bg text-bad"
+        muted={pastDue === 0}
+        onOpen={() => setPastDueOnly(!pastDueOnly)}
       />
-      <QueueTile
+      <Kpi
         label="Longest wait"
         value={queue.length ? `${oldest}d` : "—"}
-        icon={<AlarmClock size={16} />}
-        tone={oldest > 3 ? "text-warning" : "text-muted"}
-        active={sort === "oldest"}
-        title="Put the longest-waiting request first"
-        onClick={() => setSort("oldest")}
+        icon={AlarmClock}
+        tint="bg-warn-bg text-warn"
+        muted={queue.length === 0}
+        onOpen={() => setSort("oldest")}
       />
-    </ResponsiveGrid>
+    </section>
 
-    <Card className="mb-4 divide-y divide-line/70">
+    <Card className={`mb-4 divide-y divide-line/70 !p-0 ${FILTER_RAIL}`}>
       {/* Band one: what it says, how far back, in what order, and the one narrowing
           that is none of those — four controls on a single laptop row, wrapping on a
           phone. As three separate bands this card put the first document 590px down
@@ -502,7 +476,7 @@ export function ApprovalsPage() {
         <div className="relative min-w-60 flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
-            className="h-11 w-full rounded-xl border border-line bg-content1 pl-9 pr-10 text-sm text-ink outline-none transition-colors placeholder:text-muted focus:border-brand"
+            className={`${FILTER_FIELD} pl-9 pr-10`}
             aria-label="Search approvals"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -512,35 +486,38 @@ export function ApprovalsPage() {
             type="button"
             aria-label="Clear search"
             onClick={() => setSearch("")}
-            className="absolute right-1 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-lg text-muted hover:text-ink"
+            className="absolute right-1.5 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-full text-muted transition hover:bg-bad-bg hover:text-bad"
           ><X className="h-4 w-4" /></button>}
         </div>
         {/* Every option says the word "Raised", so the control needs no label beside
             it — a bare "7 days" sitting next to a sort box could mean either one. */}
-        <select
-          aria-label="Raised within"
-          value={raisedRange}
-          onChange={(event) => {
-            const value = event.target.value as RaisedRange;
-            setRaisedRange(value);
-            if (value !== "custom") { setDateFrom(""); setDateTo(""); }
-          }}
-          className="h-11 rounded-xl border border-line bg-content1 px-3 text-sm font-medium text-ink outline-none focus:border-brand"
-        >
-          {RAISED_RANGES.map((range) => (
-            <option key={range.value || "any"} value={range.value}>Raised: {range.label}</option>
-          ))}
-        </select>
-        <select
-          aria-label="Sort approvals"
-          value={sort}
-          onChange={(event) => setSort(event.target.value as Sort)}
-          className="h-11 rounded-xl border border-line bg-content1 px-3 text-sm font-medium text-ink outline-none focus:border-brand"
-        >
-          {SORTS.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
-        </select>
+        {/* The shared Select — HeroUI, the same control Logistics filters with and
+            the same one the dropdowns beside it are. These were native <select>s,
+            which no amount of CSS makes match: the browser draws the box. */}
+        <div className="w-full sm:w-52">
+          <Select
+            ariaLabel="Raised within"
+            placeholder="Raised: Any time"
+            value={raisedRange}
+            onChange={(next) => {
+              const value = next as RaisedRange;
+              setRaisedRange(value);
+              if (value !== "custom") { setDateFrom(""); setDateTo(""); }
+            }}
+            options={RAISED_RANGES.filter((range) => range.value !== "").map((range) => ({
+              value: range.value,
+              label: `Raised: ${range.label}`,
+            }))}
+          />
+        </div>
+        <div className="w-full sm:w-56">
+          <Select
+            ariaLabel="Sort approvals"
+            value={sort}
+            onChange={(next) => setSort(next as Sort)}
+            options={SORTS.map((option) => ({ value: option.value, label: option.label }))}
+          />
+        </div>
         <Chip
           active={pastDueOnly}
           tone="danger"
@@ -555,14 +532,14 @@ export function ApprovalsPage() {
             <input
               type="date" value={dateFrom} max={dateTo || undefined}
               onChange={(event) => setDateFrom(event.target.value)}
-              className="ml-1 h-11 rounded-xl border border-line bg-content1 px-2 text-sm text-ink"
+              className="ml-1 h-11 rounded-xl border-2 border-line bg-content1 px-3 text-sm font-medium text-ink outline-none transition-colors hover:border-ink/40 focus:border-ink"
             />
           </label>
           <label className="text-xs text-muted">To
             <input
               type="date" value={dateTo} min={dateFrom || undefined}
               onChange={(event) => setDateTo(event.target.value)}
-              className="ml-1 h-11 rounded-xl border border-line bg-content1 px-2 text-sm text-ink"
+              className="ml-1 h-11 rounded-xl border-2 border-line bg-content1 px-3 text-sm font-medium text-ink outline-none transition-colors hover:border-ink/40 focus:border-ink"
             />
           </label>
         </div>}

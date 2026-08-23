@@ -196,6 +196,22 @@ export const indentApi = {
       params: toSearchParams(params),
       signal,
     }).then((r) => r.data),
+  /**
+   * The items THIS requester may raise an indent for.
+   *
+   * Not `masterApi.items()`, which is the shared item master read by procurement, the
+   * warehouse and the masters screens — narrowing that would change all of them. This
+   * endpoint narrows only the indent picker, and returns exactly the master's contents
+   * until an administrator tags an item (see `modules/indents/eligibility.py`).
+   *
+   * The picker is advice, not the gate: the server checks again on create and on
+   * update, because the request body carries whatever item id the caller sent.
+   */
+  eligibleItems: (search?: string) =>
+    api.get<{ id: number; code: string; name: string; uom_code?: string | null;
+              category_name?: string | null }[]>(
+      "/api/indents/eligible-items", { params: { search: search || undefined } },
+    ).then((r) => r.data),
   offices: () => api.get<{ items: Option[] }>("/api/indents/options/offices").then((r) => r.data.items),
   /**
    * The Region/Location values actually present on the caller's visible indents —

@@ -151,7 +151,7 @@ export default function Dispatch() {
           { label: "In transit", statuses: ["DISPATCHED", "IN_TRANSIT"] },
           // A released consignment reads APPROVED, and it is just as much awaiting
           // gate-out as a packed one that never needed a signature.
-          { label: "Awaiting gate-out", statuses: ["PACKED", "APPROVED"], tone: "text-warn" },
+          { label: "Awaiting gate-out", statuses: ["PACKED", "APPROVED"], tone: "warn" },
         ]}
         kpis={(rows) => [
           {
@@ -161,7 +161,7 @@ export default function Dispatch() {
             // what would make it exact.
             label: "Late",
             value: rows.filter((r) => (daysUntil(r.expected_delivery) ?? 1) < 0 && !SETTLED.includes(r.status)).length,
-            tone: "text-bad",
+            tone: "bad",
           },
           { label: "Packages out", value: rows.reduce((s, r) => s + (r.total_packages ?? 0), 0) },
         ]}

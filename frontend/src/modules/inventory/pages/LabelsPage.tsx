@@ -5,6 +5,7 @@ import { QRCodeSVG } from "qrcode.react";
 import { Printer, Check, Info } from "lucide-react";
 import { Button, Card, PageHeader } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
+import { LoadingRows } from "../components/PageStates";
 import { getStockBalances, getWarehouses } from "../api";
 import type { StockBalanceItem } from "../types";
 
@@ -159,7 +160,7 @@ export function LabelsPage() {
           </div>
 
           {isLoading ? (
-            <p className="p-4 text-sm text-muted">Loading stock…</p>
+            <LoadingRows rows={5} className="p-0" />
           ) : rows.length === 0 ? (
             <p className="p-4 text-sm text-muted">No stock rows match.</p>
           ) : (

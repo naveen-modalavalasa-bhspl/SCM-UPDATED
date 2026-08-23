@@ -328,14 +328,8 @@ export const carrierPortalApi = {
    *  desk fills on a leg it settles itself. One press: the service writes the vehicle
    *  and the driver, then accepts the award, so a shipment can never reach READY with
    *  nobody named against it. */
-  /** Which carriages this arrangement can be made under — the desk's table read the
-   *  other way. The arrangement was settled before the tender went out, so the only
-   *  part of "how does this travel" left for the winner is what it travels on. */
-  carriageModes: (mode: string) =>
-    api.get<CarriageRule[]>(`${PORTAL}/transport-carriage-modes`, { params: { mode } })
-      .then((r) => r.data),
   acknowledge: (id: number, data: {
-    driver_name: string; vehicle_number: string; carriage_mode?: string | null;
+    driver_name: string; vehicle_number: string;
     driver_phone?: string | null;
     driver_licence_no?: string | null; lr_no?: string | null;
     docket_no?: string | null; tracking_url?: string | null;

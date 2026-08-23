@@ -3,6 +3,11 @@
 @plugin "../hero.ts";
 @source "../node_modules/@heroui/theme/dist/**/*.{js,ts,jsx,tsx}";
 
+/* Class-based dark mode: `html.dark` drives both Tailwind's dark: variant and
+ * HeroUI's dark theme. Tokens flip at runtime below — utilities compile to
+ * var() references, so no component needs a dark: class of its own. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* ---- Operations-console design tokens (coexist with HeroUI's) ---- */
 @theme {
   --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
@@ -33,6 +38,70 @@
   --color-info-bg: #e8edfb;
   --color-neutral: #5a6377;
   --color-neutral-bg: #eceef3;
+
+  /* Height of the tab strip's horizontal scrollbar. Read twice: once to draw the
+     bar, once to reserve its lane so the header does not change height with it. */
+  --nav-scrollbar-h: 6px;
+
+  /* A third decision outcome that is neither good nor bad. `returned` cannot wear
+     the warn amber: against the reject red it measures ΔE 14.2 to normal vision and
+     5.0 under deutan — below the floor at which two fills are tellable apart at all.
+     This violet clears both (20.3 / 23.0). Verified with the dataviz validator, not
+     by eye. */
+  --color-chart-returned: #7b5ea7;
+
+  /* Categorical slots for a donut whose slices are IDENTITIES (document types), not
+     states. Deliberately NOT the status tokens: reusing ok/bad/warn for "series 4"
+     teaches the eye that green means good in one chart and "purchase orders" in the
+     next. Assigned in fixed order and never cycled — a 7th type folds into "Other".
+     Validated with the dataviz palette script against the #ffffff card surface:
+     lightness band, chroma floor, CVD separation, normal-vision floor and contrast
+     all pass. Do not re-pick these by eye. */
+  --color-cat-1: #3e63dd;
+  --color-cat-2: #0d9488;
+  --color-cat-3: #b45309;
+  --color-cat-4: #7c3aed;
+  --color-cat-5: #be185d;
+  --color-cat-6: #4d7c0f;
+}
+
+/* Dark theme = the same tokens, re-pointed. Only values change; every utility
+ * (text-ink, bg-line, text-ok…) keeps working untouched. */
+.dark {
+  --color-ink: #edf1fa;
+  --color-ink-700: #d6dded;
+  --color-ink-500: #b7c1d8;
+  --color-surface: #0a0e18;
+  --color-line: #272e42;
+  --color-body: #c3ccdf;
+  --color-muted: #808ba7;
+
+  --color-brand: #7d97ff;
+  --color-brand-600: #96abff;
+  --color-brand-050: #1b2444;
+
+  --color-ok: #2fc487;
+  --color-ok-bg: #10281f;
+  --color-warn: #e0aa4b;
+  --color-warn-bg: #2b2110;
+  --color-bad: #f07580;
+  --color-bad-bg: #33151c;
+  --color-info: #859dff;
+  --color-info-bg: #171f3d;
+  --color-neutral: #97a1b8;
+  --color-neutral-bg: #232a3d;
+
+  /* Re-stepped for the dark surface, not lightened automatically. */
+  --color-chart-returned: #a78bfa;
+
+  /* Re-STEPPED for the dark surface, not auto-lightened: the light steps sit above
+     the dark lightness band. Validated against #121828, same five checks. */
+  --color-cat-1: #6d8cf5;
+  --color-cat-2: #0f9e8f;
+  --color-cat-3: #c07a22;
+  --color-cat-4: #9370e8;
+  --color-cat-5: #e0559b;
+  --color-cat-6: #7a9830;
 }
 
 * {
@@ -73,6 +142,13 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+.dark body {
+  background:
+    radial-gradient(1100px 460px at 100% -10%, #171d33 0%, transparent 55%),
+    radial-gradient(900px 420px at -10% 0%, #101a26 0%, transparent 50%),
+    var(--color-surface);
+}
+
 h1,
 h2,
 h3,
@@ -107,6 +183,18 @@ h3,
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
   transition: scrollbar-color 0.15s ease;
+  /*
+   * Reserve the scrollbar's lane whether or not this strip overflows.
+   *
+   * The bar is pure layout: it appears only when the tabs are wider than the
+   * header and pushes the strip 6px taller when it does, so Settings (seven
+   * tabs) sat lower in the header than Indents (five) and the header height
+   * tracked tab count. Forcing the box to tab-height + bar makes both cases the
+   * same number — an overflowing strip spends the 6px on the bar, the rest
+   * spend it on nothing. Hiding the bar instead would have been cheaper and
+   * wrong: it is how a mouse drags this strip sideways.
+   */
+  min-height: calc(2.75rem + var(--nav-scrollbar-h));
 }
 
 .nav-scroll:hover,
@@ -115,7 +203,7 @@ h3,
 }
 
 .nav-scroll::-webkit-scrollbar {
-  height: 6px;
+  height: var(--nav-scrollbar-h);
 }
 
 .nav-scroll::-webkit-scrollbar-track {
@@ -134,4 +222,20 @@ h3,
 
 .nav-scroll::-webkit-scrollbar-thumb:hover {
   background: var(--color-muted);
+}
+
+/* Filter/menu popovers: a 140ms rise-and-settle so a panel reads as opened,
+ * not as having always been there. One class, shared by every popup. */
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.pop-in {
+  animation: pop-in 0.14s cubic-bezier(0.2, 0.8, 0.3, 1);
+  transform-origin: top;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pop-in { animation: none; }
 }

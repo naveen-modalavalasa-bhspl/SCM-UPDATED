@@ -37,13 +37,14 @@ async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
                      include_zero: bool = False, expiring_in_days: int | None = None,
                      expiry_status: str | None = None, expiry_from: date | None = None,
                      expiry_to: date | None = None, expired_in_last_days: int | None = None,
-                     below_reorder: bool = False, db: AsyncSession = Depends(get_db),
+                     below_reorder: bool = False, stock_view: str | None = None,
+                     db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.STOCK_VIEW))):
     return await service.list_stock(db, params, item_id, warehouse_id, project_id,
                                     bin_id, search, category_id, batch_no,
                                     include_zero, expiring_in_days, expiry_status,
                                     expiry_from, expiry_to, expired_in_last_days,
-                                    below_reorder, user=user)
+                                    below_reorder, stock_view=stock_view, user=user)
 
 
 @stock_router.get("/summary", response_model=StockSummaryOut)
@@ -54,13 +55,14 @@ async def stock_summary(item_id: int | None = None,
                         include_zero: bool = False, expiring_in_days: int | None = None,
                         expiry_status: str | None = None, expiry_from: date | None = None,
                         expiry_to: date | None = None, expired_in_last_days: int | None = None,
-                        below_reorder: bool = False, db: AsyncSession = Depends(get_db),
+                        below_reorder: bool = False, stock_view: str | None = None,
+                        db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.STOCK_VIEW))):
     return await service.stock_summary(db, item_id, warehouse_id, project_id,
                                        bin_id, search, category_id, batch_no,
                                        include_zero, expiring_in_days, expiry_status,
                                        expiry_from, expiry_to, expired_in_last_days,
-                                       below_reorder, user=user)
+                                       below_reorder, stock_view=stock_view, user=user)
 
 
 @stock_router.get("/movements", response_model=Page[MovementRow])

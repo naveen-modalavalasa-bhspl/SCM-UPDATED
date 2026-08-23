@@ -10,11 +10,10 @@ import {
   DropdownTrigger,
   Select,
   SelectItem,
-  Tab,
-  Tabs,
 } from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { MenuIcon } from "@/shared/layout/icons";
+import { ModuleTabs } from "@/shared/layout/ModuleTabs";
 import { ForbiddenPage } from "@/pages/NotFoundPage";
 import { NotificationBell } from "@/shared/layout/NotificationBell";
 import type { MenuItem } from "@/shared/types";
@@ -175,6 +174,39 @@ export function AppLayout() {
     .sort((a, b) => b.child.path.length - a.child.path.length)[0];
   const activeRoot = best?.root ?? menu[0];
   const tabs = activeRoot?.children ?? [];
+  /* Which slot the tab strip goes in. Read from matchMedia rather than duplicated
+     and hidden with CSS — see the note on `moduleTabs`. Matches Tailwind's `lg`. */
+  const [wide, setWide] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const sync = () => setWide(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
+  /* Indents carries its own tab strip (IndentsNav) rather than the data-driven one. */
+  const isIndents = activeRoot?.code === "grp_indents";
+
+  /* The module's tab strip, built ONCE and then placed by width — inline beside the
+     module name when there is room, on its own row when there is not. Rendering it
+     in both slots and hiding one with CSS would put two tablists carrying the same
+     labels in the accessibility tree, and both would still be in the tab order. */
+  const moduleTabs = isIndents ? (
+    <IndentsNav embedded />
+  ) : tabs.length > 0 ? (
+    <ModuleTabs
+      ariaLabel="Module sections"
+      layoutId={`module-nav-${activeRoot?.code ?? "none"}`}
+      embedded
+      items={tabs.map((c) => ({
+        path: c.path,
+        label: c.name,
+        icon: <MenuIcon name={c.icon} className="h-4 w-4" />,
+      }))}
+    />
+  ) : null;
 
   // A URL the login was not granted. The API already refuses its data, so this is
   // about not rendering a screen that can only ever show errors. It used to bounce
@@ -305,17 +337,32 @@ export function AppLayout() {
         }`}
       >
         <header className="sticky top-0 z-20 border-b border-line bg-content1/80 backdrop-blur">
-          <div className="flex items-center justify-between gap-2 px-4 py-3 md:px-8">
+          {/* One header row, every module (2026-08-22). The module name and its tab
+              strip used to be two stacked rows — ~108px of chrome before a screen's
+              own header even started. Wide enough, they share one line: name, a rule,
+              tabs, then the bell and the avatar. Below lg the tabs take their own row,
+              because five labels and an avatar do not fit on one. */}
+          <div className={`flex items-center justify-between gap-2 px-4 md:px-8 ${moduleTabs ? "py-2" : "py-3"}`}>
             {/* Phone: the mark only. The wordmark plus a position dropdown plus the
                 bell and avatar do not fit on 360px, and the avatar — the only way to
                 sign out down here — is what fell off the edge. */}
             <div className="shrink-0 md:hidden">
               <Brand compact />
             </div>
-            <div className="hidden items-center gap-2 md:flex">
+            <div className="hidden shrink-0 items-center gap-2 md:flex">
               <MenuIcon name={activeRoot?.icon} className="h-4 w-4 text-brand" />
               <span className="font-display text-lg font-bold text-ink">{activeRoot?.name}</span>
             </div>
+            {moduleTabs && wide && (
+              /* pb-0: the strip's own bottom padding lifts the active underline off
+                 the baseline, which reads as misalignment once it shares a row. */
+              <div
+                className="ml-5 hidden min-w-0 flex-1 self-stretch border-l-[3px] border-ink/20 pl-5 lg:block [&_nav]:pb-0 [&_[role=tablist]]:pb-0"
+                onWheel={wheelToScroll}
+              >
+                {moduleTabs}
+              </div>
+            )}
             <div className="flex min-w-0 items-center justify-end gap-2">
               {/* The rail owns this when expanded; collapsed it has nowhere to
                   live, so surface it here rather than lose position switching. */}
@@ -370,43 +417,10 @@ export function AppLayout() {
             </div>
           </div>
 
-          {/* Module options surface here as tabs */}
-          {activeRoot?.code === "grp_indents" && (
-            <div className="px-2 md:px-6" onWheel={wheelToScroll}>
-              <IndentsNav embedded />
-            </div>
-          )}
-          {tabs.length > 0 && activeRoot?.code !== "grp_indents" && (
+          {/* Not wide enough to share the row — the strip takes its own. */}
+          {moduleTabs && !wide && (
             <div className="min-w-0 px-2 md:px-6" onWheel={wheelToScroll}>
-              <Tabs
-                aria-label="Module sections"
-                variant="underlined"
-                color="primary"
-                selectedKey={best?.child.path ?? tabs[0].path}
-                onSelectionChange={(k) => nav(String(k))}
-                classNames={{
-                  // HeroUI tabs are `w-full` by default. In a horizontal navigation
-                  // strip that makes every item viewport-wide and pushes all but the
-                  // first one off-screen. Keep the base constrained to the header,
-                  // let the list own overflow, and size each tab to its label.
-                  base: "block w-full min-w-0",
-                  tabList: "nav-scroll w-full justify-start gap-4 overflow-x-auto pb-1",
-                  cursor: "bg-brand",
-                  tab: "h-11 w-auto min-w-max shrink-0 px-1",
-                }}
-              >
-                {tabs.map((c) => (
-                  <Tab
-                    key={c.path}
-                    title={
-                      <span className="flex items-center gap-1.5 text-sm font-medium">
-                        <MenuIcon name={c.icon} className="h-4 w-4" />
-                        {c.name}
-                      </span>
-                    }
-                  />
-                ))}
-              </Tabs>
+              {moduleTabs}
             </div>
           )}
         </header>

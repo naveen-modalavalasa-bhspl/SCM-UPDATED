@@ -463,3 +463,23 @@ export interface MasterItemSpec {
   shelf_life_days?: number | null;
   image_url?: string | null;
 }
+
+/** One item-eligibility tag: this item, for this role or this region.
+ *
+ *  An item with NO tags is requestable by everyone — only a tagged item is ever
+ *  narrowed. See `backend/app/modules/indents/eligibility.py`. */
+export interface MasterItemEligibility {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  scope_type: "ROLE" | "REGION";
+  scope_id: number;
+  scope_name?: string | null;
+  is_active: boolean;
+}
+
+export interface ItemEligibilityScopes {
+  roles: { id: number; name: string }[];
+  regions: { id: number; name: string }[];
+}

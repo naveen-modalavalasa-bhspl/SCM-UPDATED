@@ -140,7 +140,7 @@ const CARRIAGE_FALLBACK: CarriageMode[] = ["ROAD", "RAIL", "AIR", "SEA"];
  *
  *  The same ten seconds the Dispatch queue polls on, and for the same reason: the next
  *  thing that happens to this shipment does not happen in this tab. The awarded carrier
- *  acknowledges it in their own portal — filling in the carriage, the vehicle, the
+ *  acknowledges it in their own portal — filling in the vehicle, the
  *  driver and the LR — and a desk still standing on this page would otherwise read
  *  "awaiting the provider" until somebody thought to reload. */
 const LIVE_MS = 10_000;

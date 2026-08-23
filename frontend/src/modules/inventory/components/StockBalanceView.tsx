@@ -2,9 +2,10 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpreadsheet, ScanLine, X } from "lucide-react";
+import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpreadsheet, MapPin, ScanLine, X } from "lucide-react";
 import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
-import { FilterBar, FilterSelect, FilterToggle } from "./FilterBar";
+import { FilterBar, FilterSelect, FilterToggle, FilterSelect as FilterMenu,
+} from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { UnitCell, UnitsPanel } from "./UnitsPanel";
 import {
@@ -36,6 +37,51 @@ function stockState(r: StockBalanceItem) {
   if (r.reorder_level > 0 && r.available_qty < r.reorder_level)
     return { label: "Below reorder", color: "warning" as const };
   return { label: "In stock", color: "success" as const };
+}
+
+/** Colored initial tile, so rows scan by shape before they read by name. */
+const TILE_TONES = [
+  "bg-brand-050 text-brand",
+  "bg-ok-bg text-ok",
+  "bg-warn-bg text-warn",
+  "bg-info-bg text-info",
+];
+function ItemTile({ name }: { name: string }) {
+  const tone = TILE_TONES[(name.charCodeAt(0) || 0) % TILE_TONES.length];
+  return (
+    <span
+      aria-hidden
+      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg font-display text-sm font-bold ${tone}`}
+    >
+      {(name.charAt(0) || "?").toUpperCase()}
+    </span>
+  );
+}
+
+/** How much of what is on the shelf is free vs spoken for. Render-only picture of
+ *  available/(available+reserved); no number here is new. */
+function LevelBar({ r }: { r: StockBalanceItem }) {
+  const total = r.available_qty + r.reserved_qty;
+  if (total <= 0) return null;
+  const freePct = Math.round((r.available_qty / total) * 100);
+  return (
+    <div className="mt-1 flex h-1.5 w-20 overflow-hidden rounded-full bg-content2" aria-hidden>
+      <div className="bg-brand transition-all" style={{ width: `${freePct}%` }} />
+      {r.reserved_qty > 0 && <div className="bg-warn" style={{ width: `${100 - freePct}%` }} />}
+    </div>
+  );
+}
+
+/** Expiry as a coloured chip — red gone, amber close, quiet otherwise. */
+function ExpiryChip({ date }: { date?: string }) {
+  const left = daysTo(date);
+  if (!date) return <span className="text-[11px] text-muted">No expiry</span>;
+  const color = left !== null && left <= 0 ? "danger" : left !== null && left <= 30 ? "warning" : "default";
+  return (
+    <Chip size="sm" variant="flat" color={color}>
+      {date}
+    </Chip>
+  );
 }
 
 const EXPIRY_WINDOWS = [
@@ -117,7 +163,11 @@ export function StockBalanceView() {
   const [expiringIn, setExpiringIn] = useState("");
   const [expiryFrom, setExpiryFrom] = useState("");
   const [expiryTo, setExpiryTo] = useState("");
-  const [includeZero, setIncludeZero] = useState(false);
+  /* What the grid is showing. Was a single "Include zero / fully reserved" toggle,
+     which asked two questions at once and answered neither: "there is none left" and
+     "there is some but it is all committed" are different problems with different
+     fixes, and the toggle lumped them together with the ordinary rows. */
+  const [stockView, setStockView] = useState("");
   const [belowReorder, setBelowReorder] = useState(false);
   const [selected, setSelected] = useState<StockBalanceItem | null>(null);
 
@@ -157,7 +207,7 @@ export function StockBalanceView() {
     expired_in_last_days: expiringIn.startsWith("expired_") ? Number(expiringIn.split("_")[1]) : undefined,
     expiry_from: expiringIn === "custom" ? expiryFrom : undefined,
     expiry_to: expiringIn === "custom" ? expiryTo : undefined,
-    include_zero: includeZero,
+    stock_view: stockView || undefined,
     below_reorder: belowReorder,
     page,
     size,
@@ -243,7 +293,7 @@ export function StockBalanceView() {
 
   const activeFilters =
     [search, warehouseId, expiringIn, expiryFrom, expiryTo].filter(Boolean).length +
-    (includeZero ? 1 : 0) +
+    (stockView ? 1 : 0) +
     (belowReorder ? 1 : 0);
 
   const hit = hitDismissed ? null : unitHit;
@@ -252,7 +302,7 @@ export function StockBalanceView() {
     setHitDismissed(false);
     setSearch(""); setWarehouseId(""); setExpiringIn("");
     setExpiryFrom(""); setExpiryTo("");
-    setIncludeZero(false); setBelowReorder(false);
+    setStockView(""); setBelowReorder(false);
     setPage(1);
   };
 
@@ -290,10 +340,13 @@ export function StockBalanceView() {
       key: "item",
       header: "Item",
       render: (r) => (
-        <div className="min-w-0">
-          <div className="truncate font-medium text-ink">{r.item_name}</div>
-          <div className="font-mono text-[11px] text-muted">
-            {r.item_code}{r.category_name ? ` · ${r.category_name}` : ""}
+        <div className="flex items-center gap-2.5">
+          <ItemTile name={r.item_name} />
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-ink">{r.item_name}</div>
+            <div className="font-mono text-[11px] text-muted">
+              {r.item_code}{r.category_name ? ` · ${r.category_name}` : ""}
+            </div>
           </div>
         </div>
       ),
@@ -302,10 +355,13 @@ export function StockBalanceView() {
       key: "location",
       header: "Location",
       render: (r) => (
-        <div className="min-w-0">
-          <div className="truncate text-sm text-body">{r.warehouse_name}</div>
-          <div className="text-[11px] text-muted">
-            {r.bin_code || "No bin"}{r.project_name ? ` · ${r.project_name}` : ""}
+        <div className="flex min-w-0 items-start gap-1.5">
+          <MapPin size={14} className="mt-0.5 shrink-0 text-muted" />
+          <div className="min-w-0">
+            <div className="truncate text-sm text-body">{r.warehouse_name}</div>
+            <div className="text-[11px] text-muted">
+              {r.bin_code || "No bin"}{r.project_name ? ` · ${r.project_name}` : ""}
+            </div>
           </div>
         </div>
       ),
@@ -315,9 +371,11 @@ export function StockBalanceView() {
       header: "Batch / Expiry",
       hideOnNarrow: true,
       render: (r) => (
-        <div className="min-w-0">
-          <div className="truncate font-mono text-xs text-body">{r.batch_number || "—"}</div>
-          <div className="text-[11px] text-muted">{r.expiry_date || "No expiry"}</div>
+        <div className="flex min-w-0 flex-col items-start gap-1">
+          <span className="truncate rounded-md bg-content2/70 px-2 py-0.5 font-mono text-[11px] font-semibold text-body">
+            {r.batch_number || "No batch"}
+          </span>
+          <ExpiryChip date={r.expiry_date} />
         </div>
       ),
     },
@@ -325,14 +383,19 @@ export function StockBalanceView() {
       key: "available",
       header: "Available",
       className: "text-right",
-      render: (r) => <span className="font-semibold text-ink">{qty(r.available_qty, uomOf(r))}</span>,
+      render: (r) => (
+        <div className="inline-flex flex-col items-end">
+          <span className="font-display text-base font-bold tabular text-ink">{qty(r.available_qty, uomOf(r))}</span>
+          <LevelBar r={r} />
+        </div>
+      ),
     },
     {
       key: "reserved",
       header: "Reserved",
       className: "text-right",
       render: (r) => (
-        <span className={r.reserved_qty > 0 ? "text-warning" : "text-muted"}>{r.reserved_qty}</span>
+        <span className={r.reserved_qty > 0 ? "font-semibold text-warn" : "text-muted"}>{r.reserved_qty}</span>
       ),
     },
     {
@@ -540,7 +603,7 @@ export function StockBalanceView() {
               max={expiryTo || undefined}
               onChange={(e) => setExpiryFrom(e.target.value)}
               aria-label="From expiry date"
-              className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
+              className="h-11 rounded-xl border border-line/60 bg-content1 px-3 text-sm text-ink shadow-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/25"
             />
             <input
               type="date"
@@ -548,7 +611,7 @@ export function StockBalanceView() {
               min={expiryFrom || undefined}
               onChange={(e) => setExpiryTo(e.target.value)}
               aria-label="To expiry date"
-              className="h-11 rounded-lg border border-line bg-content1 px-3 text-sm text-ink outline-none focus:border-brand"
+              className="h-11 rounded-xl border border-line/60 bg-content1 px-3 text-sm text-ink shadow-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/25"
             />
           </>
         )}
@@ -556,6 +619,9 @@ export function StockBalanceView() {
           value={size.toString()}
           onChange={(val) => { setSize(Number(val)); setPage(1); }}
           placeholder="20 per page"
+          // A page size must always hold a value: the shared pill offers a "Show all"
+          // row by default, and picking it here set the size to "" -> Number("") -> 0.
+          allowEmpty={false}
           options={[
             { value: "20", label: "20 per page" },
             { value: "50", label: "50 per page" },
@@ -567,7 +633,16 @@ export function StockBalanceView() {
         {summary?.reorder_configured !== false && (
           <FilterToggle active={belowReorder} onChange={setBelowReorder}>Below reorder</FilterToggle>
         )}
-        <FilterToggle active={includeZero} onChange={setIncludeZero}>Include zero / fully reserved</FilterToggle>
+        <FilterMenu
+          placeholder="Available stock"
+          value={stockView}
+          onChange={setStockView}
+          options={[
+            { value: "all", label: "All stock" },
+            { value: "zero", label: "Zero stock" },
+            { value: "reserved", label: "Fully reserved" },
+          ]}
+        />
       </FilterBar>
 
       <Card className="p-2">
@@ -593,7 +668,10 @@ export function StockBalanceView() {
             return (
               <div className="space-y-1.5">
                 <div className="flex items-start justify-between gap-2">
-                  <span className="font-semibold text-ink">{r.item_name}</span>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <ItemTile name={r.item_name} />
+                    <span className="truncate font-semibold text-ink">{r.item_name}</span>
+                  </div>
                   <Chip size="sm" variant="flat" color={s.color}>{s.label}</Chip>
                 </div>
                 <div className="font-mono text-[11px] text-muted">{r.item_code}</div>

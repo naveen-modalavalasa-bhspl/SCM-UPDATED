@@ -206,16 +206,12 @@ export function StockingPointsPage() {
     },
   ];
 
-  const field = "min-h-11 w-full rounded-xl border border-line bg-content1 px-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand-500";
+  const field = "min-h-11 w-full rounded-xl border border-line/60 bg-content1 px-3 text-sm text-ink shadow-sm outline-none placeholder:text-muted focus:border-brand focus:ring-2 focus:ring-brand/25";
 
   return <>
     <PageHeader eyebrow="Inventory" title="Stocking points" />
-    <p className="mb-4 text-sm text-body">
-      Which points each position draws from. A position can hold several — one OE
-      covering two MDPs is normal. The tier comes from the warehouse's own type, so it
-      is set once on the warehouse and never contradicted here. Everything else reads
-      these rows: who sees whose stock, and whether a move is an issue, a transfer or
-      a bin change.
+    <p className="mb-4 text-sm text-muted">
+      Who draws from which point. Tag a person to a point below; stock screens follow automatically.
     </p>
 
     {/* Counted by the server over the WHOLE filtered set. Search an employee code and

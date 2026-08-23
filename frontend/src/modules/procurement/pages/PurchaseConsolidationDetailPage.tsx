@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatCard,
+  Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
   StatusPill, useAction,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
+import { DetailShell, SectionCard, RailStat } from "../components/DetailKit";
 import { money } from "./RequisitionListPage";
 
 const EDITABLE = ["DRAFT"];
@@ -124,131 +125,122 @@ export function PurchaseConsolidationDetailPage() {
       <ErrorBanner error={saveLines.error ?? submit.error ?? approve.error
         ?? doReject.error ?? cancel.error} />
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Status" value={<StatusPill status={doc.status} />} />
-        <StatCard label="Requisitions" value={doc.source_count} />
-        <StatCard label="Item lines" value={doc.total_items} />
-        <StatCard label="Estimated" value={money(doc.estimated_value)} />
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-4">
-        <Card className="space-y-3 p-5 lg:col-span-3">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="font-display text-lg font-semibold text-ink">
-              {doc.title ?? "Consolidated demand"}
-            </h2>
-            {doc.period_label && (
-              <span className="text-sm text-muted">{doc.period_label}</span>
+      <DetailShell
+        main={(
+          <SectionCard
+            title={doc.title ?? "Consolidated demand"}
+            action={doc.period_label
+              ? <span className="text-sm text-muted">{doc.period_label}</span>
+              : undefined}
+          >
+            {trimmed && (
+              <p className="mb-3 rounded-lg border border-info/30 bg-info-bg px-3 py-2 text-sm text-info">
+                Trimmed below what was requested — only the approved quantity is tendered.
+              </p>
             )}
-          </div>
 
-          {trimmed && (
-            <p className="rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:bg-sky-900/20 dark:text-sky-200">
-              Some lines have been trimmed below what was requested. Only the approved
-              quantity will be tendered.
-            </p>
-          )}
-
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[680px] text-sm">
-              <thead>
-                <tr className="border-b border-line text-left text-xs text-muted">
-                  <th className="py-2">Item</th>
-                  <th className="py-2 text-right">Requested</th>
-                  <th className="py-2 text-right">To buy</th>
-                  <th className="py-2 text-right">Rate</th>
-                  <th className="py-2 text-right">Value</th>
-                  <th className="py-2">Needed by</th>
-                  <th className="py-2">Asked by</th>
-                </tr>
-              </thead>
-              <tbody>
-                {doc.items.map((line) => (
-                  <tr key={line.id} className="border-b border-line/50 align-top">
-                    <td className="py-2">
-                      <div className="text-ink">{line.item_name ?? "—"}</div>
-                      <div className="font-mono text-[11px] text-muted">
-                        {line.item_code}
-                      </div>
-                    </td>
-                    <td className="py-2 text-right">
-                      {Number(line.quantity)} {line.uom_code}
-                    </td>
-                    <td className="py-2 text-right">
-                      {editable ? (
-                        <div className="ml-auto w-24">
-                          <Input
-                            type="number"
-                            value={edits[line.id] ?? ""}
-                            max={Number(line.quantity)}
-                            onChange={(e) => setEdits({ ...edits, [line.id]: e.target.value })}
-                          />
-                        </div>
-                      ) : (
-                        <span className="font-semibold text-ink">
-                          {Number(line.approved_qty)}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-2 text-right">{money(line.estimated_rate)}</td>
-                    <td className="py-2 text-right font-semibold text-ink">
-                      {money(line.estimated_amount)}
-                    </td>
-                    <td className="py-2">{fmtDate(line.required_date)}</td>
-                    <td className="py-2">
-                      <span className="text-[11px] text-muted">
-                        {line.sources ?? `${line.source_count} requisition(s)`}
-                      </span>
-                    </td>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-sm">
+                <thead>
+                  <tr className="border-b border-line text-left">
+                    {["Item", "Requested", "To buy", "Rate", "Value", "Needed by", "Asked by"].map((head, i) => (
+                      <th
+                        key={head}
+                        className={`whitespace-nowrap px-3 py-2 text-[11px] font-bold uppercase tracking-[0.06em] text-muted ${
+                          i >= 1 && i <= 4 ? "text-right" : ""
+                        }`}
+                      >
+                        {head}
+                      </th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
+                </thead>
+                <tbody>
+                  {doc.items.map((line) => (
+                    <tr key={line.id} className="border-b border-line/50 align-top transition-colors hover:bg-content2/40">
+                      <td className="px-3 py-3">
+                        <div className="font-medium text-ink">{line.item_name ?? "—"}</div>
+                        <div className="font-mono text-[11px] text-muted">{line.item_code}</div>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3 text-right text-body">
+                        {Number(line.quantity)} {line.uom_code}
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        {editable ? (
+                          <div className="ml-auto w-24">
+                            <Input
+                              type="number"
+                              value={edits[line.id] ?? ""}
+                              max={Number(line.quantity)}
+                              onChange={(e) => setEdits({ ...edits, [line.id]: e.target.value })}
+                            />
+                          </div>
+                        ) : (
+                          <span className="font-semibold text-ink">{Number(line.approved_qty)}</span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-body">
+                        {money(line.estimated_rate)}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3 text-right font-semibold tabular-nums text-ink">
+                        {money(line.estimated_amount)}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3 text-body">{fmtDate(line.required_date)}</td>
+                      <td className="px-3 py-3 text-[11px] text-muted">
+                        {line.sources ?? `${line.source_count} requisition(s)`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </SectionCard>
+        )}
+        rail={(
+          <>
+            <SectionCard>
+              <div className="mb-4 flex items-center justify-between gap-2 border-b border-line/60 pb-4">
+                <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">Status</span>
+                <StatusPill status={doc.status} />
+              </div>
+              <RailStat label="Estimated" value={money(doc.estimated_value)} />
+              <div className="mt-4 grid grid-cols-2 gap-4 border-t border-line/60 pt-4">
+                <RailStat label="Requisitions" value={doc.source_count} />
+                <RailStat label="Item lines" value={doc.total_items} />
+              </div>
+            </SectionCard>
 
-        <Card className="space-y-3 p-5">
-          <h2 className="font-display text-lg font-semibold text-ink">
-            Rolled up from
-          </h2>
-          {(sources ?? []).length === 0 ? (
-            <p className="text-sm text-muted">No requisitions linked.</p>
-          ) : (
-            <ul className="space-y-2">
-              {(sources ?? []).map((source) => (
-                <li key={source.id} className="border-b border-line/50 pb-2 last:border-0">
-                  <button
-                    className="text-left"
-                    onClick={() => nav(`/procurement/requisitions/${source.requisition_id}`)}
-                  >
-                    <div className="font-mono text-xs font-semibold text-ink">
-                      {source.requisition_no}
-                    </div>
-                    <div className="text-[11px] text-muted">
-                      {source.project_name ?? "—"} · {source.item_count} line
-                      {source.item_count === 1 ? "" : "s"} ·{" "}
-                      {money(source.estimated_value)}
-                    </div>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+            <SectionCard title="Rolled up from">
+              {(sources ?? []).length === 0
+                ? <p className="text-sm text-muted">No requisitions linked.</p>
+                : (
+                  <ul className="space-y-0.5">
+                    {(sources ?? []).map((source) => (
+                      <li key={source.id}>
+                        <button
+                          type="button"
+                          onClick={() => nav(`/procurement/requisitions/${source.requisition_id}`)}
+                          className="w-full rounded-lg px-2 py-2 text-left transition-colors hover:bg-content2/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                        >
+                          <div className="font-mono text-[13px] font-semibold text-brand">
+                            {source.requisition_no}
+                          </div>
+                          <div className="mt-0.5 truncate text-[11px] text-muted">
+                            {source.project_name ?? "—"} · {source.item_count} line
+                            {source.item_count === 1 ? "" : "s"} · {money(source.estimated_value)}
+                          </div>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+            </SectionCard>
 
-          {doc.approved_by_name && (
-            <p className="pt-2 text-xs text-muted">
-              Approved by {doc.approved_by_name}
-            </p>
-          )}
-          {doc.current_approver_name && (
-            <p className="pt-2 text-xs text-muted">
-              With {doc.current_approver_name}
-            </p>
-          )}
-        </Card>
-      </div>
+            <ApprovalTrail docType="CONSOLIDATION" docId={Number(id)} />
+          </>
+        )}
+      />
 
-      <ApprovalTrail docType="CONSOLIDATION" docId={Number(id)} />
 
       <ConfirmModal
         isOpen={reject}

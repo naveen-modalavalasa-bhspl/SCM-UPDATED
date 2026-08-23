@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { alerts } from "@/modules/alerts";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
+import { ErrorNote } from "./PageStates";
 // offer COUNT_VARIANCE and FOUND, which are not in that enum — the reason went
 // unvalidated, so they were stored and reported on as if they were real categories.
 const REASONS = [
@@ -175,9 +176,7 @@ export function StockAdjustmentsView() {
         }
       />
 
-      {error && (
-        <div className="mb-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>
-      )}
+      {error && <div className="mb-3"><ErrorNote message={error} /></div>}
 
       <Card className="p-2">
         <ResponsiveList

@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Calendar, Check, ChevronDown, Filter, MapPin, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
+import { Chip } from "@heroui/react";
 import {
-  Button as HButton, Chip, Dropdown, DropdownItem, DropdownMenu, DropdownSection, DropdownTrigger,
-} from "@heroui/react";
+  FILTER_BADGE, FILTER_CLEAR, FILTER_FIELD, FILTER_IDLE, FILTER_ON, FILTER_PANEL,
+  FILTER_RAIL, FILTER_ROW, FILTER_ROW_OFF, FILTER_ROW_ON, FILTER_SHELL, FILTER_TRIGGER,
+} from "@/shared/components";
 import {
   INDENT_QUERY_GC_TIME,
   indentApi,
@@ -45,6 +48,8 @@ type ActiveMenu = "status" | "priority" | "region" | "date" | "raisedDate" | "re
 
 /** Region/Location is nullable, so "no location" needs a filter value of its own. */
 export const UNASSIGNED_REGION_LABEL = "No location";
+/** Sentinel for that row inside menus — never a real region id. */
+const UNASSIGNED_REGION_KEY = "__unassigned__";
 
 const MOVEMENT_OPTIONS = [
   { value: "OUTWARD", label: "Outward" },
@@ -72,6 +77,24 @@ const REQUIRED_BY_PRESETS: { key: RequiredByPreset; label: string }[] = [
 ];
 
 const RANGE_ERROR = "To date must be the same as or later than From date.";
+
+/* The look is NOT decided here — it comes from shared/components/filterChrome,
+ * which the inventory, procurement and warehouse bars read too. These aliases
+ * keep this file's call sites short; change the design in filterChrome. */
+const PILL_BASE = `${FILTER_SHELL} gap-2 px-3.5`;
+const PILL_IDLE = FILTER_IDLE;
+const PILL_ON = FILTER_ON;
+const PILL_QUIET = "border-transparent bg-transparent text-muted hover:bg-bad-bg hover:text-bad";
+const PILL_SHELL = FILTER_SHELL;
+const PILL_TRIGGER = FILTER_TRIGGER;
+const PILL_CLEAR = FILTER_CLEAR;
+const POPUP_SHELL = `${FILTER_PANEL} absolute top-full z-50 mt-2`;
+const COUNT_BADGE = FILTER_BADGE;
+const CHIP_CLASSNAMES = {
+  base: "h-7 rounded-lg border border-line/70 bg-content1 px-2 shadow-[0_1px_1.5px_rgba(14,20,36,0.04)]",
+  content: "text-[12px] font-semibold text-body",
+  closeButton: "text-muted opacity-100 hover:text-bad",
+} as const;
 
 function localDateValue(value: Date) {
   const year = value.getFullYear();
@@ -238,37 +261,51 @@ function DateRangeFilterControl<P extends string>({
 
   return (
     <div className={mobileFullWidth ? "relative min-w-0 flex-1 sm:flex-none" : "relative"}>
-      <HButton
-        ref={triggerRef}
-        variant="bordered"
-        size="sm"
-        aria-expanded={isOpen}
-        aria-controls={popupId}
-        onClick={() => onOpenChange(!isOpen)}
-        className={`h-10 border-line bg-content2 text-xs ${mobileFullWidth ? "w-full sm:w-auto" : ""} ${isActive ? "border-brand text-brand" : "text-body"}`}
-        startContent={<Calendar className="h-3.5 w-3.5 text-muted" />}
-        endContent={<ChevronDown className="h-3.5 w-3.5 text-muted" />}
-      >
-        {label}
-      </HButton>
+      <div className={`${PILL_SHELL} ${mobileFullWidth ? "w-full sm:w-auto" : ""} ${isActive ? PILL_ON : PILL_IDLE}`}>
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-expanded={isOpen}
+          aria-controls={popupId}
+          onClick={() => onOpenChange(!isOpen)}
+          className={`${PILL_TRIGGER} ${mobileFullWidth ? "flex-1 justify-between" : ""} pl-3 ${isActive ? "pr-2" : "pr-3"}`}
+        >
+          <Calendar className={`h-4 w-4 ${isActive ? "text-brand" : "text-muted"}`} />
+          {label}
+          <ChevronDown className={`h-3.5 w-3.5 opacity-60 transition-transform duration-150 ${isOpen ? "rotate-180" : ""}`} />
+        </button>
+        {isActive && (
+          <button
+            type="button"
+            aria-label={`Clear ${label.toLowerCase()}`}
+            onClick={() => {
+              onClear();
+              onOpenChange(false);
+            }}
+            className={PILL_CLEAR}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
 
       {isOpen && (
         <div
           id={popupId}
           role="dialog"
           aria-label={`${label} filter`}
-          className="absolute right-0 top-full z-50 mt-2 max-h-[min(75vh,36rem)] w-[calc(100vw-2rem)] max-w-96 overflow-y-auto rounded-lg border border-line bg-content1 p-4 text-xs shadow-xl sm:w-96"
+          className={`${POPUP_SHELL} right-0 max-h-[min(75vh,36rem)] w-[calc(100vw-2rem)] max-w-96 overflow-y-auto p-3.5 text-xs sm:w-96`}
         >
           <div className="mb-3 flex items-start justify-between gap-4 border-b border-line/60 pb-3">
             <div>
-              <h3 className="font-semibold text-ink">{label}</h3>
-              <p className="mt-1 text-xs leading-5 text-muted">{description}</p>
+              <h3 className="text-sm font-bold tracking-tight text-ink">{label}</h3>
+              <p className="mt-0.5 text-[11px] leading-4 text-muted">{description}</p>
             </div>
             <button
               type="button"
               aria-label={`Close ${label} filter`}
               onClick={() => onOpenChange(false)}
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-muted hover:bg-content2 hover:text-ink"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-content2 hover:text-ink"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -280,8 +317,10 @@ function DateRangeFilterControl<P extends string>({
                 key={option.key}
                 type="button"
                 onClick={() => selectPreset(option.key)}
-                className={`flex min-h-10 items-center justify-between rounded-lg px-3 py-2 text-left font-medium transition ${
-                  draftPreset === option.key ? "bg-brand text-white" : "bg-content2 text-body hover:bg-content3"
+                className={`flex min-h-10 items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] font-semibold ring-1 ring-inset transition-all duration-150 ${
+                  draftPreset === option.key
+                    ? "bg-brand text-white ring-brand shadow-[0_2px_8px_-2px_rgba(62,99,221,0.45)]"
+                    : "bg-content2/70 text-body ring-transparent hover:bg-content2 hover:ring-line"
                 }`}
               >
                 <span>{option.label}</span>
@@ -291,7 +330,7 @@ function DateRangeFilterControl<P extends string>({
           </div>
 
           {isCustom && (
-            <div className="mt-4 rounded-lg border border-line/60 bg-content2/70 p-3">
+            <div className="mt-3 rounded-xl border border-line/60 bg-surface/60 p-3">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid={`${idPrefix}-date-grid`}>
                 <label className="space-y-1">
                   <span className="block text-[11px] font-semibold uppercase tracking-wider text-muted">From</span>
@@ -301,7 +340,7 @@ function DateRangeFilterControl<P extends string>({
                     value={draftFrom}
                     max={draftTo || undefined}
                     onChange={(event) => changeFrom(event.target.value)}
-                    className="h-10 w-full rounded-lg border border-line bg-content1 px-2 text-xs text-body outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                    className="h-10 w-full rounded-lg border-0 bg-content1 px-2.5 text-xs font-medium text-body outline-none ring-1 ring-inset ring-line transition focus:ring-2 focus:ring-brand/50"
                   />
                 </label>
                 <label className="space-y-1">
@@ -314,7 +353,7 @@ function DateRangeFilterControl<P extends string>({
                     value={draftTo}
                     min={draftFrom || undefined}
                     onChange={(event) => changeTo(event.target.value)}
-                    className={`h-10 w-full rounded-lg border bg-content1 px-2 text-xs text-body outline-none focus:ring-2 ${rangeError ? "border-bad focus:border-bad focus:ring-bad/20" : "border-line focus:border-brand focus:ring-brand/20"}`}
+                    className={`h-10 w-full rounded-lg border-0 bg-content1 px-2.5 text-xs font-medium text-body outline-none ring-1 ring-inset transition focus:ring-2 ${rangeError ? "ring-bad focus:ring-bad/60" : "ring-line focus:ring-brand/50"}`}
                   />
                 </label>
               </div>
@@ -333,7 +372,7 @@ function DateRangeFilterControl<P extends string>({
                 setRangeError("");
                 onOpenChange(false);
               }}
-              className="min-h-10 rounded-lg px-4 font-semibold text-muted transition hover:bg-content2 hover:text-bad"
+              className="min-h-10 rounded-xl px-4 text-[13px] font-semibold text-muted transition hover:bg-bad-bg hover:text-bad"
             >
               Clear
             </button>
@@ -345,7 +384,7 @@ function DateRangeFilterControl<P extends string>({
                 onApply(draftPreset, draftFrom, draftTo);
                 onOpenChange(false);
               }}
-              className="min-h-10 rounded-lg bg-brand px-4 font-semibold text-white transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-40"
+              className="min-h-10 rounded-xl bg-brand px-5 text-[13px] font-semibold text-white shadow-[0_2px_10px_-2px_rgba(62,99,221,0.5)] transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
             >
               Apply
             </button>
@@ -370,6 +409,174 @@ function dateDescription(mode: FilterMode) {
   if (mode === "activity") return "When the activity happened.";
   if (mode === "notifications") return "When the notification was created.";
   return "When the indent was created or raised.";
+}
+
+interface FilterMenuGroup {
+  label?: string;
+  options: { value: string; label: string }[];
+}
+
+/**
+ * One typable multi-select filter: pill trigger + a panel with its own search
+ * box, so long lists (locations, statuses) are narrowed by typing rather than
+ * scrolled. Replaces the HeroUI dropdowns, which could not be typed into.
+ *
+ * The accessible name of the trigger carries the count — "Status (2)" — so the
+ * bar reads the same to a screen reader as it looks on screen.
+ */
+function MultiSelectMenu({
+  idPrefix, label, icon, groups, selected, isOpen, onOpenChange, onToggle, onClear,
+  closeOnSelect = false,
+}: {
+  idPrefix: string;
+  label: string;
+  icon: ReactNode;
+  groups: FilterMenuGroup[];
+  selected: string[];
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+  onToggle: (value: string) => void;
+  onClear: () => void;
+  /** A single-choice menu has nothing left to ask once a row is picked, and
+   *  leaving it open turns the next press on the trigger into a close. */
+  closeOnSelect?: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const menuId = `${idPrefix}-filter-menu`;
+  const count = selected.length;
+
+  useEffect(() => {
+    if (!isOpen) setQuery("");
+    else searchRef.current?.focus();
+  }, [isOpen]);
+
+  const needle = query.trim().toLowerCase();
+  const visibleGroups = useMemo(() => (
+    needle
+      ? groups
+        .map((group) => ({
+          ...group,
+          options: group.options.filter((option) => option.label.toLowerCase().includes(needle)),
+        }))
+        .filter((group) => group.options.length > 0)
+      : groups
+  ), [groups, needle]);
+  const totalVisible = visibleGroups.reduce((sum, group) => sum + group.options.length, 0);
+
+  return (
+    <div className="relative">
+      <div className={`${PILL_SHELL} ${count > 0 ? PILL_ON : PILL_IDLE}`}>
+        <button
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={isOpen}
+          aria-controls={isOpen ? menuId : undefined}
+          aria-label={count > 0 ? `${label} (${count})` : undefined}
+          onClick={() => onOpenChange(!isOpen)}
+          className={`${PILL_TRIGGER} pl-3.5 ${count > 0 ? "pr-2" : "pr-3"}`}
+        >
+          <span className={count > 0 ? "text-brand" : "text-muted"}>{icon}</span>
+          {label}
+          {count > 0 && <span className={COUNT_BADGE}>{count}</span>}
+          <ChevronDown className={`h-3.5 w-3.5 opacity-60 transition-transform duration-150 ${isOpen ? "rotate-180" : ""}`} />
+        </button>
+        {count > 0 && (
+          <button
+            type="button"
+            aria-label={`Clear ${label.toLowerCase()}`}
+            onClick={() => {
+              onClear();
+              setQuery("");
+              onOpenChange(false);
+            }}
+            className={PILL_CLEAR}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      {isOpen && (
+        <div
+          id={menuId}
+          role="menu"
+          aria-label={`${label} filters`}
+          className={`${POPUP_SHELL} right-0 w-[calc(100vw-2rem)] max-w-80 overflow-hidden text-[13px] sm:w-80`}
+        >
+          <div className="border-b border-line/60 p-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+              <input
+                ref={searchRef}
+                type="text"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={`Search ${label.toLowerCase()}…`}
+                aria-label={`Search ${label.toLowerCase()} options`}
+                className={`${FILTER_FIELD} h-10 pl-8 pr-3 text-[13px]`}
+              />
+            </div>
+          </div>
+
+          <div className="max-h-72 overflow-y-auto overscroll-contain p-1.5">
+            {visibleGroups.map((group, index) => (
+              <div key={group.label ?? `group-${index}`}>
+                {group.label && (
+                  <div className="px-2.5 pb-1 pt-2.5 text-[10px] font-bold uppercase tracking-[0.08em] text-muted">
+                    {group.label}
+                  </div>
+                )}
+                {group.options.map((option) => {
+                  const on = selected.includes(option.value);
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        onToggle(option.value);
+                        if (closeOnSelect) onOpenChange(false);
+                      }}
+                      className={`${FILTER_ROW} ${on ? FILTER_ROW_ON : FILTER_ROW_OFF}`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-md border transition-all duration-150 ${
+                          on ? "border-brand bg-brand text-white shadow-[0_1px_4px_-1px_rgba(62,99,221,0.6)]" : "border-line bg-content1"
+                        }`}
+                      >
+                        {on && <Check className="h-3 w-3" />}
+                      </span>
+                      <span className="truncate">{option.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {totalVisible === 0 && (
+              <p className="px-2.5 py-3 font-medium text-muted">No match for “{needle}”.</p>
+            )}
+          </div>
+
+          {count > 0 && (
+            <div className="border-t border-line/60 p-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  onClear();
+                  setQuery("");
+                }}
+                className="min-h-10 w-full rounded-lg px-3 font-semibold text-muted transition hover:bg-bad-bg hover:text-bad"
+              >
+                Clear {label.toLowerCase()}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function IndentFilterBar({
@@ -442,7 +649,6 @@ export function IndentFilterBar({
     () => new Map(regionOptions.map((option) => [option.id, option.name])),
     [regionOptions],
   );
-  const regionFilterCount = selectedRegions.length + (includeUnassignedRegion ? 1 : 0);
 
   const [localSearch, setLocalSearch] = useState(search);
   const [activeMenu, setActiveMenu] = useState<ActiveMenu>(null);
@@ -505,20 +711,30 @@ export function IndentFilterBar({
   }, [hasRequiredByFilter]);
 
   return (
-    <section ref={containerRef} className="mb-5 rounded-lg border border-line/70 bg-content1 p-3 shadow-sm">
+    /* No backdrop-blur here: a filter on the container opens a stacking context
+     * and this bar's own popups then paint UNDER the cards below it.
+     *
+     * z-10, NOT z-20: the app header is `sticky top-0 z-20`, and this bar sits
+     * later in the DOM — on the same layer it won the tie and scrolled OVER the
+     * header instead of under it. Ten still beats the unpositioned cards below,
+     * which is all the popups need. */
+    <section
+      ref={containerRef}
+      className={`mb-5 ${FILTER_RAIL}`}
+    >
       <div className="flex flex-wrap items-center gap-2">
         <div className={isSimplePageFilter
           ? "relative min-w-0 flex-1 basis-full sm:min-w-[220px] sm:basis-72"
           : "relative min-w-[220px] flex-1 basis-72"}
         >
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
             type="search"
             aria-label={searchAriaLabel}
             value={localSearch}
             onChange={(event) => setLocalSearch(event.target.value)}
             placeholder={searchPlaceholder}
-            className="h-10 w-full rounded-lg border border-line bg-content2 pl-9 pr-9 text-sm text-ink outline-none transition [&::-webkit-search-cancel-button]:hidden focus:border-brand focus:ring-2 focus:ring-brand/20"
+            className={`${FILTER_FIELD} pl-10 pr-9`}
           />
           {localSearch && (
             <button
@@ -528,16 +744,19 @@ export function IndentFilterBar({
                 setLocalSearch("");
                 setSearch("");
               }}
-              className="absolute right-2.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full text-muted hover:bg-content3 hover:text-ink"
+              className="absolute right-2.5 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg text-muted transition hover:bg-content3 hover:text-ink"
             >
               <X className="h-3.5 w-3.5" />
             </button>
           )}
         </div>
 
+        {/* A hairline splits the rail into "what am I looking for" and "narrow it
+            down" — only where the row does not wrap, since a divider that lands
+            mid-wrap reads as a stray line. */}
         <div className={isSimplePageFilter
-          ? "flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto"
-          : "ml-auto flex flex-wrap items-center gap-2"}
+          ? "flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto xl:border-l xl:border-line/70 xl:pl-2.5"
+          : "ml-auto flex flex-wrap items-center gap-2 xl:border-l xl:border-line/70 xl:pl-2.5"}
         >
         {showDate && separateDateFilters && (
           <DateRangeFilterControl
@@ -581,26 +800,47 @@ export function IndentFilterBar({
 
         {showDate && !separateDateFilters && (
         <div className="relative">
-          <HButton
-            variant="bordered"
-            size="sm"
-            onClick={() => setActiveMenu((current) => (current === "date" ? null : "date"))}
-            className={`h-10 border-line bg-content2 text-xs ${hasAnyDateFilter ? "border-brand text-brand" : "text-body"}`}
-            startContent={<Calendar className="h-3.5 w-3.5 text-muted" />}
-            endContent={<ChevronDown className="h-3.5 w-3.5 text-muted" />}
-          >
-            Date{hasAnyDateFilter ? " *" : ""}
-          </HButton>
+          <div className={`${PILL_SHELL} ${hasAnyDateFilter ? PILL_ON : PILL_IDLE}`}>
+            <button
+              type="button"
+              aria-expanded={activeMenu === "date"}
+              onClick={() => setActiveMenu((current) => (current === "date" ? null : "date"))}
+              className={`${PILL_TRIGGER} pl-3.5 ${hasAnyDateFilter ? "pr-2" : "pr-3"}`}
+            >
+              <Calendar className={`h-4 w-4 ${hasAnyDateFilter ? "text-brand" : "text-muted"}`} />
+              Date
+              {hasAnyDateFilter && (
+                <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
+              )}
+              <ChevronDown className={`h-3.5 w-3.5 opacity-60 transition-transform duration-150 ${activeMenu === "date" ? "rotate-180" : ""}`} />
+            </button>
+            {hasAnyDateFilter && (
+              <button
+                type="button"
+                aria-label="Clear date"
+                onClick={() => {
+                  setDatePreset("all");
+                  setRequiredByFrom("");
+                  setRequiredByTo("");
+                  setShowRequiredByRange(false);
+                  setActiveMenu(null);
+                }}
+                className={PILL_CLEAR}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
 
           {activeMenu === "date" && (
-            <div className="absolute left-0 top-full z-50 mt-2 max-h-[min(75vh,34rem)] w-[calc(100vw-2rem)] max-w-80 overflow-y-auto rounded-lg border border-line bg-content1 p-4 text-xs shadow-xl sm:w-80">
+            <div className={`${POPUP_SHELL} left-0 max-h-[min(75vh,34rem)] w-[calc(100vw-2rem)] max-w-80 overflow-y-auto p-3.5 text-xs sm:w-80`}>
               <div className="mb-3 flex items-center justify-between border-b border-line/60 pb-2">
-                <span className="font-semibold uppercase tracking-wider text-muted">{dateLabel}</span>
+                <span className="text-[10px] font-bold uppercase tracking-[0.08em] text-muted">{dateLabel}</span>
                 <button
                   type="button"
                   aria-label="Close date filters"
                   onClick={() => setActiveMenu(null)}
-                  className="grid h-6 w-6 place-items-center rounded-full text-muted hover:bg-content2 hover:text-ink"
+                  className="grid h-7 w-7 place-items-center rounded-lg text-muted transition hover:bg-content2 hover:text-ink"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -618,8 +858,10 @@ export function IndentFilterBar({
                         setActiveMenu(null);
                       }
                     }}
-                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-left font-medium transition ${
-                      datePreset === preset.key ? "bg-brand text-white" : "bg-content2 text-body hover:bg-content3"
+                    className={`flex min-h-10 items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] font-semibold ring-1 ring-inset transition-all duration-150 ${
+                      datePreset === preset.key
+                        ? "bg-brand text-white ring-brand shadow-[0_2px_8px_-2px_rgba(62,99,221,0.45)]"
+                        : "bg-content2/70 text-body ring-transparent hover:bg-content2 hover:ring-line"
                     }`}
                   >
                     <span>{preset.label}</span>
@@ -629,7 +871,7 @@ export function IndentFilterBar({
               </div>
 
               {datePreset === "custom" && (
-                <div className="mt-4 rounded-lg border border-line/60 bg-content2/70 p-3">
+                <div className="mt-3 rounded-xl border border-line/60 bg-surface/60 p-3">
                   <div className="grid grid-cols-2 gap-3">
                     <label className="space-y-1">
                       <span className="block text-[11px] font-semibold uppercase tracking-wider text-muted">From</span>
@@ -638,7 +880,7 @@ export function IndentFilterBar({
                         type="date"
                         value={startDate}
                         onChange={(event) => setStartDate(event.target.value)}
-                        className="h-9 w-full rounded-lg border border-line bg-content1 px-2 text-xs text-body outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                        className="h-10 w-full rounded-lg border-0 bg-content1 px-2.5 text-xs font-medium text-body outline-none ring-1 ring-inset ring-line transition focus:ring-2 focus:ring-brand/50"
                       />
                     </label>
                     <label className="space-y-1">
@@ -648,7 +890,7 @@ export function IndentFilterBar({
                         type="date"
                         value={endDate}
                         onChange={(event) => setEndDate(event.target.value)}
-                        className="h-9 w-full rounded-lg border border-line bg-content1 px-2 text-xs text-body outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                        className="h-10 w-full rounded-lg border-0 bg-content1 px-2.5 text-xs font-medium text-body outline-none ring-1 ring-inset ring-line transition focus:ring-2 focus:ring-brand/50"
                       />
                     </label>
                   </div>
@@ -668,7 +910,7 @@ export function IndentFilterBar({
                       setShowRequiredByRange(true);
                     }
                   }}
-                  className="mt-4 flex w-full items-center justify-between rounded-lg border border-dashed border-line bg-content2 px-3 py-2 text-left text-xs font-semibold text-brand transition hover:border-brand hover:bg-content3"
+                  className="mt-3 flex min-h-10 w-full items-center justify-between rounded-xl border border-dashed border-line bg-content2/60 px-3 text-left text-[13px] font-semibold text-brand transition hover:border-brand hover:bg-brand-050"
                 >
                   <span>Add required-by filter</span>
                   {hasRequiredByFilter && <span aria-hidden="true" title="Required-by filter active" className="h-2 w-2 rounded-full bg-brand" />}
@@ -678,7 +920,7 @@ export function IndentFilterBar({
               {showRequiredBy && showRequiredByRange && (
                 <div className="mt-4 border-t border-line/60 pt-3">
                   <div className="mb-2 flex items-center justify-between">
-                    <span className="font-semibold uppercase tracking-wider text-muted">Required-by date</span>
+                    <span className="text-[10px] font-bold uppercase tracking-[0.08em] text-muted">Required-by date</span>
                     {hasRequiredByFilter && (
                       <button
                         type="button"
@@ -700,7 +942,7 @@ export function IndentFilterBar({
                         type="date"
                         value={requiredByFrom}
                         onChange={(event) => setRequiredByFrom(event.target.value)}
-                        className="h-9 w-full rounded-lg border border-line bg-content2 px-2 text-xs text-body outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                        className="h-10 w-full rounded-lg border-0 bg-content1 px-2.5 text-xs font-medium text-body outline-none ring-1 ring-inset ring-line transition focus:ring-2 focus:ring-brand/50"
                       />
                     </label>
                     <label className="space-y-1">
@@ -710,7 +952,7 @@ export function IndentFilterBar({
                         type="date"
                         value={requiredByTo}
                         onChange={(event) => setRequiredByTo(event.target.value)}
-                        className="h-9 w-full rounded-lg border border-line bg-content2 px-2 text-xs text-body outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                        className="h-10 w-full rounded-lg border-0 bg-content1 px-2.5 text-xs font-medium text-body outline-none ring-1 ring-inset ring-line transition focus:ring-2 focus:ring-brand/50"
                       />
                     </label>
                   </div>
@@ -722,171 +964,99 @@ export function IndentFilterBar({
         )}
 
         {showStatus && (
-          <Dropdown
+          <MultiSelectMenu
+            idPrefix="status"
+            label={statusLabel}
+            icon={<Filter className="h-3.5 w-3.5" />}
             isOpen={activeMenu === "status"}
             onOpenChange={(open) => setActiveMenu(open ? "status" : null)}
-            closeOnSelect={false}
-          >
-            <DropdownTrigger>
-              <HButton
-                variant="bordered"
-                size="sm"
-                className={`h-10 border-line bg-content2 text-xs ${selectedStatuses.length ? "border-brand text-brand" : "text-body"}`}
-                startContent={<Filter className="h-3.5 w-3.5 text-muted" />}
-                endContent={<ChevronDown className="h-3.5 w-3.5 text-muted" />}
-              >
-                {statusLabel}{selectedStatuses.length ? ` (${selectedStatuses.length})` : ""}
-              </HButton>
-            </DropdownTrigger>
-            <DropdownMenu aria-label={`${statusLabel} filters`}>
-              {statusFilterOptions
-                ? statusFilterOptions.map((option) => {
-                    const selected = selectedStatuses.includes(option.value);
-                    return (
-                      <DropdownItem
-                        key={option.value}
-                        onPress={() => {
-                          applyStatuses(
-                            selected
-                              ? selectedStatuses.filter((status) => status !== option.value)
-                              : singleStatusSelection
-                                ? [option.value]
-                              : [...selectedStatuses, option.value],
-                          );
-                        }}
-                        startContent={selected ? <Check className="h-3.5 w-3.5" /> : <span className="h-3.5 w-3.5" />}
-                      >
-                        {option.label}
-                      </DropdownItem>
-                    );
-                  })
-                : statusGroups.map((group) => (
-                  <DropdownSection key={group.label} title={group.label}>
-                    {group.options.map((option) => {
-                    const selected = selectedStatuses.includes(option.value);
-                    return (
-                      <DropdownItem
-                        key={option.value}
-                        onPress={() => {
-                          applyStatuses(
-                            selected
-                              ? selectedStatuses.filter((status) => status !== option.value)
-                              : [...selectedStatuses, option.value],
-                          );
-                        }}
-                        startContent={selected ? <Check className="h-3.5 w-3.5" /> : <span className="h-3.5 w-3.5" />}
-                      >
-                        {option.label}
-                      </DropdownItem>
-                    );
-                    })}
-                  </DropdownSection>
-                ))}
-            </DropdownMenu>
-          </Dropdown>
+            groups={statusFilterOptions
+              ? [{ options: statusFilterOptions }]
+              : statusGroups.map((group) => ({ label: group.label, options: group.options }))}
+            selected={selectedStatuses}
+            onToggle={(value) => {
+              const isSelected = selectedStatuses.includes(value);
+              applyStatuses(
+                isSelected
+                  ? selectedStatuses.filter((status) => status !== value)
+                  : singleStatusSelection
+                    ? [value]
+                    : [...selectedStatuses, value],
+              );
+            }}
+            onClear={() => applyStatuses([])}
+            closeOnSelect={singleStatusSelection}
+          />
         )}
 
         {showPriority && (
-          <Dropdown
+          <MultiSelectMenu
+            idPrefix="priority"
+            label="Priority"
+            icon={<Filter className="h-3.5 w-3.5" />}
             isOpen={activeMenu === "priority"}
             onOpenChange={(open) => setActiveMenu(open ? "priority" : null)}
-            closeOnSelect={false}
-          >
-            <DropdownTrigger>
-              <HButton
-                variant="bordered"
-                size="sm"
-                className={`h-10 border-line bg-content2 text-xs ${selectedPriorities.length ? "border-brand text-brand" : "text-body"}`}
-                startContent={<Filter className="h-3.5 w-3.5 text-muted" />}
-                endContent={<ChevronDown className="h-3.5 w-3.5 text-muted" />}
-              >
-                Priority{selectedPriorities.length ? ` (${selectedPriorities.length})` : ""}
-              </HButton>
-            </DropdownTrigger>
-            <DropdownMenu aria-label="Priority filters">
-              {INDENT_PRIORITY_OPTIONS.map((option) => (
-                <DropdownItem
-                  key={option.value}
-                  onPress={() => togglePriority(option.value)}
-                  startContent={selectedPriorities.includes(option.value) ? <Check className="h-3.5 w-3.5" /> : <span className="h-3.5 w-3.5" />}
-                >
-                  {option.label}
-                </DropdownItem>
-              ))}
-            </DropdownMenu>
-          </Dropdown>
+            groups={[{ options: INDENT_PRIORITY_OPTIONS }]}
+            selected={selectedPriorities}
+            onToggle={togglePriority}
+            onClear={() => selectedPriorities.forEach(togglePriority)}
+          />
         )}
 
         {showRegion && (
-          <Dropdown
+          <MultiSelectMenu
+            idPrefix="region"
+            label="Region"
+            icon={<MapPin className="h-3.5 w-3.5" />}
             isOpen={activeMenu === "region"}
             onOpenChange={(open) => setActiveMenu(open ? "region" : null)}
-            closeOnSelect={false}
-          >
-            <DropdownTrigger>
-              <HButton
-                variant="bordered"
-                size="sm"
-                className={`h-10 border-line bg-content2 text-xs ${regionFilterCount ? "border-brand text-brand" : "text-body"}`}
-                startContent={<MapPin className="h-3.5 w-3.5 text-muted" />}
-                endContent={<ChevronDown className="h-3.5 w-3.5 text-muted" />}
-              >
-                Region{regionFilterCount ? ` (${regionFilterCount})` : ""}
-              </HButton>
-            </DropdownTrigger>
-            <DropdownMenu
-              aria-label="Region filters"
-              className="max-h-80 overflow-y-auto"
-              emptyContent="No locations on these indents yet."
-            >
-              {[
-                <DropdownItem
-                  key="region-unassigned"
-                  onPress={() => setIncludeUnassignedRegion(!includeUnassignedRegion)}
-                  startContent={includeUnassignedRegion ? <Check className="h-3.5 w-3.5" /> : <span className="h-3.5 w-3.5" />}
-                >
-                  {UNASSIGNED_REGION_LABEL}
-                </DropdownItem>,
-                ...regionOptions.map((option) => (
-                  <DropdownItem
-                    key={`region-${option.id}`}
-                    onPress={() => toggleRegion(option.id)}
-                    startContent={selectedRegions.includes(option.id) ? <Check className="h-3.5 w-3.5" /> : <span className="h-3.5 w-3.5" />}
-                  >
-                    {option.name}
-                  </DropdownItem>
-                )),
-              ]}
-            </DropdownMenu>
-          </Dropdown>
+            groups={[{
+              options: [
+                { value: UNASSIGNED_REGION_KEY, label: UNASSIGNED_REGION_LABEL },
+                ...regionOptions.map((option) => ({ value: String(option.id), label: option.name })),
+              ],
+            }]}
+            selected={[
+              ...selectedRegions.map((id) => String(id)),
+              ...(includeUnassignedRegion ? [UNASSIGNED_REGION_KEY] : []),
+            ]}
+            onToggle={(value) => {
+              if (value === UNASSIGNED_REGION_KEY) setIncludeUnassignedRegion(!includeUnassignedRegion);
+              else toggleRegion(Number(value));
+            }}
+            onClear={() => {
+              setSelectedRegions([]);
+              setIncludeUnassignedRegion(false);
+            }}
+          />
         )}
 
         {hasMoreFilters && (
-          <HButton
-            variant="bordered"
-            size="sm"
+          <button
+            type="button"
+            aria-expanded={showMoreFilters}
             onClick={() => setShowMoreFilters((current) => !current)}
-            className={`h-10 border-line bg-content2 text-xs ${activeMoreFilterCount ? "border-brand text-brand" : "text-body"}`}
-            startContent={<SlidersHorizontal className="h-3.5 w-3.5 text-muted" />}
-            endContent={<ChevronDown className="h-3.5 w-3.5 text-muted" />}
+            className={`${PILL_BASE} ${activeMoreFilterCount ? PILL_ON : PILL_IDLE}`}
           >
-            More filters{activeMoreFilterCount ? ` (${activeMoreFilterCount})` : ""}
-          </HButton>
+            <SlidersHorizontal className={`h-4 w-4 ${activeMoreFilterCount ? "text-brand" : "text-muted"}`} />
+            More filters
+            {activeMoreFilterCount > 0 && <span className={COUNT_BADGE}>{activeMoreFilterCount}</span>}
+            <ChevronDown className={`h-3.5 w-3.5 opacity-60 transition-transform duration-150 ${showMoreFilters ? "rotate-180" : ""}`} />
+          </button>
         )}
 
         {activeFilterCount > 0 && (
-          <HButton
-            variant="light"
-            size="sm"
+          <button
+            type="button"
             onClick={() => {
               resetFilters();
               setShowRequiredByRange(false);
             }}
-            className="h-10 px-2 text-xs text-muted hover:text-bad"
-            startContent={<RotateCcw className="h-3.5 w-3.5" />}
+            className={`${PILL_BASE} ${PILL_QUIET}`}
           >
+            <RotateCcw className="h-4 w-4" />
             Clear all
-          </HButton>
+          </button>
         )}
         </div>
       </div>
@@ -894,37 +1064,33 @@ export function IndentFilterBar({
       {hasMoreFilters && showMoreFilters && (
         <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line/50 pt-3">
           {showTransaction && (
-            <Dropdown isOpen={activeMenu === "transaction"} onOpenChange={(open) => setActiveMenu(open ? "transaction" : null)}>
-              <DropdownTrigger>
-                <HButton variant="bordered" size="sm" className={`h-10 border-line bg-content2 text-xs ${transactionType ? "border-brand text-brand" : "text-body"}`}>
-                  Transaction
-                </HButton>
-              </DropdownTrigger>
-              <DropdownMenu aria-label="Transaction filters">
-                {INDENT_ACTIVITY_TRANSACTION_OPTIONS.map((option) => (
-                  <DropdownItem key={option.value} onPress={() => setTransactionType(transactionType === option.value ? "" : option.value)}>
-                    {option.label}
-                  </DropdownItem>
-                ))}
-              </DropdownMenu>
-            </Dropdown>
+            <MultiSelectMenu
+              idPrefix="transaction"
+              label="Transaction"
+              icon={<SlidersHorizontal className="h-3.5 w-3.5" />}
+              isOpen={activeMenu === "transaction"}
+              onOpenChange={(open) => setActiveMenu(open ? "transaction" : null)}
+              groups={[{ options: INDENT_ACTIVITY_TRANSACTION_OPTIONS }]}
+              selected={transactionType ? [transactionType] : []}
+              onToggle={(value) => setTransactionType(transactionType === value ? "" : value)}
+              onClear={() => setTransactionType("")}
+              closeOnSelect
+            />
           )}
 
           {showMovement && (
-            <Dropdown isOpen={activeMenu === "movement"} onOpenChange={(open) => setActiveMenu(open ? "movement" : null)}>
-              <DropdownTrigger>
-                <HButton variant="bordered" size="sm" className={`h-10 border-line bg-content2 text-xs ${direction ? "border-brand text-brand" : "text-body"}`}>
-                  Movement
-                </HButton>
-              </DropdownTrigger>
-              <DropdownMenu aria-label="Movement filters">
-                {MOVEMENT_OPTIONS.map((option) => (
-                  <DropdownItem key={option.value} onPress={() => setDirection(direction === option.value ? "" : option.value)}>
-                    {option.label}
-                  </DropdownItem>
-                ))}
-              </DropdownMenu>
-            </Dropdown>
+            <MultiSelectMenu
+              idPrefix="movement"
+              label="Movement"
+              icon={<SlidersHorizontal className="h-3.5 w-3.5" />}
+              isOpen={activeMenu === "movement"}
+              onOpenChange={(open) => setActiveMenu(open ? "movement" : null)}
+              groups={[{ options: MOVEMENT_OPTIONS }]}
+              selected={direction ? [direction] : []}
+              onToggle={(value) => setDirection(direction === value ? "" : value)}
+              onClear={() => setDirection("")}
+              closeOnSelect
+            />
           )}
 
           {showItem && (
@@ -934,7 +1100,7 @@ export function IndentFilterBar({
               value={itemId}
               onChange={(event) => setItemId(event.target.value.replace(/\D/g, ""))}
               placeholder="Item ID"
-              className="h-10 w-24 rounded-lg border border-line bg-content2 px-3 text-xs text-body outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              className="h-10 w-24 rounded-xl border-0 bg-surface/70 px-3 text-[13px] font-medium text-body outline-none ring-1 ring-inset ring-line/80 transition focus:bg-content1 focus:ring-2 focus:ring-brand/50"
             />
           )}
         </div>
@@ -943,12 +1109,12 @@ export function IndentFilterBar({
       {activeFilterCount > 0 && (
         <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line/50 pt-3">
           {search && (
-            <Chip size="sm" variant="flat" onClose={() => setSearch("")}>
+            <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setSearch("")}>
               {isSimplePageFilter ? `Search: “${search}”` : `Search: ${search}`}
             </Chip>
           )}
           {hasDateFilter && separateDateFilters && (
-            <Chip size="sm" variant="flat" onClose={clearRaisedDate}>
+            <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={clearRaisedDate}>
               {dateChipLabel(
                 isSimplePageFilter ? dateLabel : "Raised",
                 datePreset,
@@ -958,19 +1124,20 @@ export function IndentFilterBar({
               )}
             </Chip>
           )}
-          {hasDateFilter && !separateDateFilters && <Chip size="sm" variant="flat" onClose={() => setDatePreset("all")}>Date: {startDate || "Any"} to {endDate || "Any"}</Chip>}
+          {hasDateFilter && !separateDateFilters && <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setDatePreset("all")}>Date: {startDate || "Any"} to {endDate || "Any"}</Chip>}
           {hasRequiredByFilter && separateDateFilters && (
-            <Chip size="sm" variant="flat" onClose={clearRequiredByDate}>
+            <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={clearRequiredByDate}>
               {dateChipLabel("Required by", requiredByPreset, requiredByFrom, requiredByTo, REQUIRED_BY_PRESETS)}
             </Chip>
           )}
-          {hasRequiredByFilter && !separateDateFilters && <Chip size="sm" variant="flat" onClose={() => { setRequiredByFrom(""); setRequiredByTo(""); }}>Required-by: {requiredByFrom || "Any"} to {requiredByTo || "Any"}</Chip>}
+          {hasRequiredByFilter && !separateDateFilters && <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => { setRequiredByFrom(""); setRequiredByTo(""); }}>Required-by: {requiredByFrom || "Any"} to {requiredByTo || "Any"}</Chip>}
           {isSimplePageFilter
             ? selectedStatuses.map((status) => (
               <Chip
                 key={status}
                 size="sm"
                 variant="flat"
+              classNames={CHIP_CLASSNAMES}
                 onClose={() => applyStatuses(
                   selectedStatuses.filter((value) => value !== status),
                 )}
@@ -979,18 +1146,18 @@ export function IndentFilterBar({
               </Chip>
             ))
             : selectedStatuses.length > 0 && (
-              <Chip size="sm" variant="flat" onClose={() => setSelectedStatuses([])}>
+              <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setSelectedStatuses([])}>
                 Status: {joinLabel(selectedStatuses, statusOptions)}
               </Chip>
             )}
-          {selectedPriorities.length > 0 && <Chip size="sm" variant="flat" onClose={() => selectedPriorities.forEach(togglePriority)}>Priority: {joinLabel(selectedPriorities, INDENT_PRIORITY_OPTIONS)}</Chip>}
+          {selectedPriorities.length > 0 && <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => selectedPriorities.forEach(togglePriority)}>Priority: {joinLabel(selectedPriorities, INDENT_PRIORITY_OPTIONS)}</Chip>}
           {showRegion && includeUnassignedRegion && (
-            <Chip size="sm" variant="flat" onClose={() => setIncludeUnassignedRegion(false)}>
+            <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setIncludeUnassignedRegion(false)}>
               Region: {UNASSIGNED_REGION_LABEL}
             </Chip>
           )}
           {showRegion && selectedRegions.length > 0 && (
-            <Chip size="sm" variant="flat" onClose={() => setSelectedRegions([])}>
+            <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setSelectedRegions([])}>
               {/* The id is the fallback: a region can be filtered from a shared URL
                   before the options list has arrived, and dropping the chip then
                   would leave an invisible filter narrowing the results. */}
@@ -999,9 +1166,9 @@ export function IndentFilterBar({
                 .join(", ")}
             </Chip>
           )}
-          {transactionType && <Chip size="sm" variant="flat" onClose={() => setTransactionType("")}>Transaction: {joinLabel([transactionType], INDENT_ACTIVITY_TRANSACTION_OPTIONS)}</Chip>}
-          {showMovement && direction && <Chip size="sm" variant="flat" onClose={() => setDirection("")}>Movement: {joinLabel([direction], MOVEMENT_OPTIONS)}</Chip>}
-          {itemId && <Chip size="sm" variant="flat" onClose={() => setItemId("")}>Item: {itemId}</Chip>}
+          {transactionType && <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setTransactionType("")}>Transaction: {joinLabel([transactionType], INDENT_ACTIVITY_TRANSACTION_OPTIONS)}</Chip>}
+          {showMovement && direction && <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setDirection("")}>Movement: {joinLabel([direction], MOVEMENT_OPTIONS)}</Chip>}
+          {itemId && <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setItemId("")}>Item: {itemId}</Chip>}
         </div>
       )}
     </section>

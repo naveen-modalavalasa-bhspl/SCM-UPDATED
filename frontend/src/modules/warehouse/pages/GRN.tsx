@@ -134,14 +134,14 @@ export default function GRN() {
       deleteLabel="GRN"
       labelOf={(r) => r.grn_no ?? `GRN ${r.id}`}
       kpiCounts={[
-        { label: "Awaiting QC", statuses: ["PENDING_QC"], tone: "text-warn" },
+        { label: "Awaiting QC", statuses: ["PENDING_QC"], tone: "warn" },
       ]}
       kpis={(rows) => [
         { label: "Not posted", value: rows.filter((r) => !r.is_stock_posted && r.status !== "CANCELLED").length },
         {
           label: "Rejected qty",
           value: fmtQty(rows.reduce((s, r) => s + Number(r.total_rejected_qty ?? 0), 0)),
-          tone: "text-bad",
+          tone: "bad",
         },
         { label: "Value", value: `₹ ${fmtMoneyShort(rows.reduce((s, r) => s + Number(r.total_value ?? 0), 0))}` },
       ]}

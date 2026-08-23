@@ -21,6 +21,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, synonym
 
 from app.core.database import Base
+from app.platform.workflow import doc_registry
+from app.shared.enums import DocType
 from app.modules.warehouse.enums import (
     BatchStatus,
     DispatchStatus,
@@ -855,3 +857,25 @@ class OutboundInspectionItem(Base):
     serial_numbers = Column(JSON, nullable=True)
 
     inspection = relationship("OutboundInspection", back_populates="items")
+
+# --------------------------------------------------------------------------- #
+# Where these documents keep their "waiting on" snapshot.
+#
+# Declared HERE, beside the models, because this file is the only place that knows
+# the table and column names. `platform.workflow.engine.move_to_workflow` reads the
+# registry when an admin moves a document onto another ladder version — that is the
+# one transition with no module on the other end to update the row afterwards, and
+# before this the document went on naming the approver from the version it had just
+# been taken off. See `platform/workflow/doc_registry.py`.
+#
+# Modules -> platform, never the reverse (rule 5): this passes plain strings, so the
+# platform never imports a model.
+# --------------------------------------------------------------------------- #
+doc_registry.register(DocType.QC_OUTWARD.value, "whs_inspections")
+doc_registry.register(DocType.DISPATCH.value, "out_dispatches")
+# The three issue ladders all sit on `out_issues` — which of them a given issue is
+# filed under is decided per document by `service._issue_doc_type`, so all three have
+# to point at the same table or a Move would update one kind of issue and not another.
+doc_registry.register(DocType.WH_ISSUE.value, "out_issues")
+doc_registry.register(DocType.OWN_STOCK_ISSUE.value, "out_issues")
+doc_registry.register(DocType.FORWARD_ISSUE.value, "out_issues")

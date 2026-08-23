@@ -50,6 +50,7 @@ from app.modules.indents.enums import (
     ConsolidationStatus, DocType, IndentActivityType, IndentItemStatus, IndentStatus,
     IndentType, InstanceStatus, MRStatus, MaterialDirection, Priority, RuleActionType,
 )
+from app.modules.indents import eligibility
 from app.modules.indents.models import Consolidation, Indent, IndentItem
 from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
 from app.shared.time import now as ist_now, today as ist_today
@@ -320,6 +321,13 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     missing = {line.item_id for line in data.items} - set(items_map)
     if missing:
         raise ValidationError(f"Unknown item ids: {sorted(missing)}")
+
+    # Role/region item tagging. Runs on the WRITE path, not only in the picker: the
+    # picker narrows what is offered, but the request body carries whatever item id
+    # the caller sent, so this is the check that decides (rule 6). No-op until an
+    # administrator tags an item — see `eligibility` for why the default is open.
+    await eligibility.assert_items_allowed(
+        db, user, [line.item_id for line in data.items])
 
     # Ahead of next_number(): a rejected vehicle must not burn a document number.
     vehicle_id, vehicle_number = await _resolve_vehicle(
@@ -1330,6 +1338,10 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
     if data.items is not None:
         if not data.items:
             raise ValidationError("Indent must have at least one item")
+        # Same gate as create: an edit can introduce a line the requester may not ask
+        # for, and it arrives by the same JSON route.
+        await eligibility.assert_items_allowed(
+            db, user, [line.item_id for line in data.items])
         _validate_item_quantities(data.items)
         _validate_unique_item_ids(data.items)
         items_map = await _items_by_id(db, [l.item_id for l in data.items])
@@ -6191,7 +6203,8 @@ async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
     item = await db.get(Item, item_id)
     proposal = await allocations.propose(db, 0, [
         {"indent_item_id": 0, "item_id": item_id, "project_id": None}])
-    stock = proposal[0] if proposal else {"available_total": 0, "warehouses": []}
+    stock = proposal[0] if proposal else {
+        "available_total": 0, "main_available_qty": 0, "warehouses": []}
 
     uom_decimals = await uom.decimals_by_code(db, [item.uom_code if item else None])
 
@@ -6204,6 +6217,14 @@ async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
         "uom_decimals": uom_decimals.get(
             item.uom_code if item else None, uom.MAX_DECIMALS),
         "available_total": float(stock["available_total"]),
+        # What the WAREHOUSE can serve, LIP and MDP excluded. FIXED 2026-08-22 — the
+        # single-indent screen has read this since BUG_SCM_016 and the batch desk never
+        # got it, so a line with 5 sitting at one LIP and nothing anywhere else read as
+        # "39 to procurement, 5 still in stock". A LIP is a distribution ENDPOINT: its
+        # stock is real and an allocator may still draw on it, but it is not stock the
+        # warehouse can fill an indent from, and counting it silently kept 5 units off
+        # the material request. See `allocations.propose`, which already computes it.
+        "main_available_qty": float(stock["main_available_qty"]),
         "warehouses": [{**w, "available_qty": float(w["available_qty"])}
                        for w in stock["warehouses"]],
         # A line approved at zero is owed nothing, so it is not demand and is left
@@ -7000,3 +7021,31 @@ async def submit_monthly_cycle(db: AsyncSession, user, indent_ids: list[int]) ->
         "submitted_count": len(submitted),
         "failed_count": len(failed),
     }
+
+
+async def eligible_items(db: AsyncSession, user, *, search: str | None = None,
+                         limit: int = 500) -> list[dict]:
+    """The item catalogue as the indent form should see it — narrowed to what this
+    requester may actually ask for.
+
+    Untagged items are open to everyone, so on a system where nothing has been tagged
+    this returns exactly what the item master returns (see `eligibility`). The shared
+    `/api/masters/items` endpoint is deliberately left alone: procurement, the
+    warehouse and the masters screens all read it, and narrowing it there would change
+    every one of them.
+    """
+    stmt = select(Item).where(Item.is_active.is_(True))
+    clause = await eligibility.eligible_filter(db, user)
+    if clause is not None:
+        stmt = stmt.where(clause)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        stmt = stmt.where(or_(Item.code.ilike(term), Item.name.ilike(term)))
+    rows = (await db.execute(stmt.order_by(Item.name).limit(limit))).scalars().all()
+    return [{
+        "id": row.id,
+        "code": row.code,
+        "name": row.name,
+        "uom_code": row.uom_code,
+        "category_name": row.category_name,
+    } for row in rows]

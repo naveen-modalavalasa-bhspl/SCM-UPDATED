@@ -136,9 +136,9 @@ export default function Putaway() {
       deleteLabel="put-away task"
       labelOf={(r) => r.putaway_no ?? `Task ${r.id}`}
       kpiCounts={[
-        { label: "Pending", statuses: ["pending"], tone: "text-warn" },
+        { label: "Pending", statuses: ["pending"], tone: "warn" },
         { label: "In progress", statuses: ["in_progress"] },
-        { label: "Skipped", statuses: ["skipped"], tone: "text-bad" },
+        { label: "Skipped", statuses: ["skipped"], tone: "bad" },
       ]}
       kpis={(rows) => [
         {

@@ -852,3 +852,126 @@ export interface ProcurementLedgerFilters {
   vendors: string[];
 }
 
+
+/* --- KPI strips (2026-08-23) ---------------------------------------------- *
+ *
+ * One shape per document family, matching `backend/app/modules/procurement/stats.py`.
+ * Deliberately NOT one combined shape: each is served by its own endpoint gated on
+ * the view code of the documents it counts, so a login that holds three of the five
+ * gets three strips and no error.
+ *
+ * `awaiting_me` is never "how many are pending approval" — it is how many are pending
+ * on THIS login, straight off the workflow engine.
+ * ------------------------------------------------------------------------- */
+
+export interface ReqStats {
+  awaiting_me: number;
+  pending_approval: number;
+  approved: number;
+  draft: number;
+  rejected: number;
+  total: number;
+  this_month: number;
+  open_value: number;
+  total_lines: number;
+  by_status: Record<string, number>;
+  /** What each tile OPENS, keyed by the bucket it sits on — SERVED, so the number a
+   *  tile shows and the rows its press brings back cannot drift apart. The screen
+   *  passes these straight into the URL and never builds a filter of its own. */
+  filters: Record<string, Record<string, string>>;
+}
+
+export interface ConsolidationStats {
+  awaiting_me: number;
+  pending_approval: number;
+  approved: number;
+  draft: number;
+  total: number;
+  this_month: number;
+  requisitions_rolled: number;
+  total_items: number;
+  estimated_value: number;
+  by_status: Record<string, number>;
+  /** What each tile OPENS, keyed by the bucket it sits on — SERVED, so the number a
+   *  tile shows and the rows its press brings back cannot drift apart. The screen
+   *  passes these straight into the URL and never builds a filter of its own. */
+  filters: Record<string, Record<string, string>>;
+}
+
+export interface RFQStats {
+  awaiting_me: number;
+  pending_approval: number;
+  out_to_vendors: number;
+  ready_to_award: number;
+  draft: number;
+  awarded: number;
+  total: number;
+  closing_soon: number;
+  vendors_invited: number;
+  quotes_received: number;
+  by_status: Record<string, number>;
+  /** What each tile OPENS, keyed by the bucket it sits on — SERVED, so the number a
+   *  tile shows and the rows its press brings back cannot drift apart. The screen
+   *  passes these straight into the URL and never builds a filter of its own. */
+  filters: Record<string, Record<string, string>>;
+}
+
+export interface QuoteStats {
+  to_compare: number;
+  revised: number;
+  accepted: number;
+  not_selected: number;
+  draft: number;
+  total: number;
+  this_month: number;
+  rfqs_covered: number;
+  vendors_quoting: number;
+  quoted_value: number;
+  by_status: Record<string, number>;
+  /** What each tile OPENS, keyed by the bucket it sits on — SERVED, so the number a
+   *  tile shows and the rows its press brings back cannot drift apart. The screen
+   *  passes these straight into the URL and never builds a filter of its own. */
+  filters: Record<string, Record<string, string>>;
+}
+
+export interface POStats {
+  awaiting_me: number;
+  pending_approval: number;
+  to_send: number;
+  at_vendor: number;
+  awaiting_vendor: number;
+  draft: number;
+  received: number;
+  total: number;
+  this_month: number;
+  month_value: number;
+  open_commitment: number;
+  by_status: Record<string, number>;
+  /** What each tile OPENS, keyed by the bucket it sits on — SERVED, so the number a
+   *  tile shows and the rows its press brings back cannot drift apart. The screen
+   *  passes these straight into the URL and never builds a filter of its own. */
+  filters: Record<string, Record<string, string>>;
+}
+
+/** One item's sanctioned, unbought demand. `open_qty` is the remainder across every
+ *  requisition line the caller may read, so buying in rounds shrinks it by itself. */
+export interface DemandPoolRow {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  open_qty: number;
+  estimated_value: number;
+  requisition_count: number;
+  project_count: number;
+  earliest_required?: string | null;
+}
+
+/** The buying trail's own strip — one count per document kind, under the same filters
+ *  the register is showing. `filters` is served for the same reason it is on the five
+ *  document strips: the count and the press must be decided by the same code. */
+export interface LedgerStats {
+  by_kind: Record<string, number>;
+  total: number;
+  filters: Record<string, Record<string, string>>;
+}

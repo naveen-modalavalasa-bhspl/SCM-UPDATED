@@ -2,11 +2,12 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
-  ArrowRight, CalendarDays, CheckCircle2, ChevronRight, CircleX,
+  ArrowRight, CheckCircle2, ChevronRight, CircleX,
   FilePlus2, LayoutGrid, PackageCheck, TriangleAlert, Warehouse,
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/shared/auth/AuthContext";
+import { Select } from "@/shared/components";
 import { MenuIcon } from "@/shared/layout/icons";
 import { homeApi, homeKeys } from "../api";
 import { fmtTime, parseIst } from "@/shared/datetime";
@@ -209,22 +210,21 @@ export function HomePage() {
             Here&apos;s what&apos;s happening in your supply chain today.
           </p>
         </div>
-        <label className="w-full sm:w-auto">
-          <span className="mb-1 block text-xs font-medium text-muted">Date range</span>
-          <span className="flex h-10 items-center gap-2 rounded-lg border border-line bg-content1 px-3">
-            <CalendarDays className="h-4 w-4 text-muted" />
-            <select
-              aria-label="Date range"
-              value={dateRange}
-              onChange={(event) => setDateRange(event.target.value as HomeDateRange)}
-              className="min-w-28 bg-transparent text-sm text-ink outline-none"
-            >
-              <option value="week">This Week</option>
-              <option value="month">This Month</option>
-              <option value="quarter">This Quarter</option>
-            </select>
-          </span>
-        </label>
+        {/* The shared Select — HeroUI, the same control every filter in the app is
+            now. The "Date range" caption went with the hand-rolled box it labelled:
+            every option already names the period. */}
+        <div className="w-full sm:w-48">
+          <Select
+            ariaLabel="Date range"
+            value={dateRange}
+            onChange={(next) => setDateRange(next as HomeDateRange)}
+            options={[
+              { value: "week", label: "This Week" },
+              { value: "month", label: "This Month" },
+              { value: "quarter", label: "This Quarter" },
+            ]}
+          />
+        </div>
       </div>
 
       {isError && (

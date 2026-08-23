@@ -59,7 +59,7 @@ PAGES: list[PageDef] = [
     # the module's front door — and on a backend that predates its endpoint, opening
     # the whole module then 404s. New screens go at the end of their group.
     PageDef("rbac_job_profiles", "/rbac/job-profiles", "Job Profiles",
-            parent="grp_rbac", module="rbac", sort_order=83),
+            parent="grp_rbac", module="rbac", icon="user-cog", sort_order=83),
     # The ONE approval-configuration screen. Catalogued so it gets a
     # `page.admin_approval_flow.view` of its own instead of borrowing
     # `admin.workflow.manage` — see permissions.INHERITS_GRANTS_FROM, which hands the
@@ -75,29 +75,37 @@ PAGES: list[PageDef] = [
     PageDef("admin_integrations", "/admin/integrations", "Integrations",
             parent="grp_settings", module="integrations", icon="plug",
             sort_order=103),
+    # The approvals landing page. sort_order 20 puts it FIRST in its group, which
+    # makes it the module's front door — deliberate here, and safe, because it calls
+    # no endpoint that did not already exist (/pending/summary, /reports/summary,
+    # /allocation-cycles). The warning at the top of this list is about NEW endpoints.
+    PageDef("approval_overview", "/approvals/overview", "Overview",
+            parent="approvals", module="approvals", icon="layout-dashboard",
+            sort_order=20),
     # Returns — a module of its own, so the group row comes first and the screens
     # hang off it. sort_order 60 puts it after Warehouse and before Reports.
     PageDef("grp_returns", "/returns", "Returns", module="returns",
             icon="corner-up-left", sort_order=60),
     PageDef("returns_overview", "/returns/dashboard", "Overview",
-            parent="grp_returns", module="returns", sort_order=1),
+            parent="grp_returns", module="returns", icon="layout-dashboard",
+            sort_order=1),
     PageDef("returns_register", "/returns", "All Returns",
-            parent="grp_returns", module="returns", sort_order=2),
+            parent="grp_returns", module="returns", icon="list", sort_order=2),
     PageDef("returns_mine", "/returns/mine", "My Returns",
-            parent="grp_returns", module="returns", sort_order=3),
+            parent="grp_returns", module="returns", icon="rotate-ccw", sort_order=3),
     PageDef("returns_approvals", "/returns/approvals", "Approvals",
-            parent="grp_returns", module="returns", sort_order=4),
+            parent="grp_returns", module="returns", icon="check-circle", sort_order=4),
     # The two desks. Separate rows because they are separate backlogs held by
     # different people, even though one component serves both.
     PageDef("returns_decisions", "/returns/decisions", "Decision Desk",
-            parent="grp_returns", module="returns", sort_order=5),
+            parent="grp_returns", module="returns", icon="scale", sort_order=5),
     PageDef("returns_sign_off", "/returns/sign-off", "Sign-off",
-            parent="grp_returns", module="returns", sort_order=6),
+            parent="grp_returns", module="returns", icon="pen-line", sort_order=6),
     PageDef("returns_purchase", "/returns/purchase", "Purchase Returns",
-            parent="grp_returns", module="returns", sort_order=7),
+            parent="grp_returns", module="returns", icon="package-x", sort_order=7),
     PageDef("returns_receiving_config", "/returns/settings/receiving",
             "Receiving Points", parent="grp_returns", module="returns",
-            sort_order=8),
+            icon="map-pin", sort_order=8),
     # The module row itself, listed only to rename it: the menu said "Purchasing"
     # while the permission catalogue, the backend package and the table prefix all
     # said procurement, and the RBAC screen needed a hard-coded alias to reconcile
@@ -119,12 +127,43 @@ PAGES: list[PageDef] = [
     # These sort BELOW po_list's existing 31 rather than renumbering po_list, which is
     # a seed.py row this file does not manage. Requisitions becomes the module's front
     # door, which is the intent — the left rail opens a module on its FIRST child.
+    # The module's front door (2026-08-23): the buying chain on one board — what is
+    # waiting on ME, what each rung is holding, and the demand pool underneath. It
+    # sorts at 24, BELOW Requisitions' 25, because the left rail opens a module on its
+    # first child and a board is the right thing to open on: a buyer arriving at
+    # Procurement wants to know what needs a decision before they want a register.
+    #
+    # Every strip on it is a separate request on the view code of the documents it
+    # counts (`requisition.view`, `consolidation.view`, `rfq.view`, `rfq.compare`,
+    # `po.view`), so the page's own permission means only "may open the board" — a
+    # login that holds one of the five sees one strip, not an error.
+    PageDef("pro_overview", "/procurement/overview", "Overview",
+            parent="grp_purchasing", module="procurement", icon="layout-dashboard",
+            sort_order=24),
     PageDef("pro_requisitions", "/procurement/requisitions", "Requisitions",
-            parent="grp_purchasing", module="procurement", sort_order=25),
+            parent="grp_purchasing", module="procurement", icon="file-text",
+            sort_order=25),
     PageDef("pro_rfqs", "/procurement/rfqs", "RFQs",
-            parent="grp_purchasing", module="procurement", sort_order=27),
+            parent="grp_purchasing", module="procurement", icon="gavel",
+            sort_order=27),
     PageDef("pro_quotations", "/procurement/quotations", "Quotations",
-            parent="grp_purchasing", module="procurement", sort_order=28),
+            parent="grp_purchasing", module="procurement", icon="handshake",
+            sort_order=28),
+    # Document traceability: one number in, the whole chain out. Under Reports
+    # because it crosses every module and writes nothing — the same reason the
+    # package it lives in sits outside the import chain. LAST in the group, so it
+    # never becomes the module's front door (the rail opens a module on its first
+    # child, and this screen is useless without a number typed into it).
+    PageDef("rep_traceability", "/reports/traceability", "Document Trail",
+            parent="grp_reports", module="reports", icon="git-branch",
+            sort_order=79),
+    # The company mailbox: Inbox, Sent and Compose. Under Settings because it is one
+    # shared account for the whole deployment, not a per-user inbox — and because the
+    # same mailbox is what sends every password-reset link. Admin-only until granted:
+    # its permission has no INHERITS_GRANTS_FROM entry, so nobody receives it by
+    # accident on deploy.
+    PageDef("settings_mail", "/settings/mail", "Mail", parent="grp_settings",
+            module="admin", icon="send", sort_order=105),
     # Who outside the company can sign in. Under Settings, not Procurement: it mints
     # an identity, which is an administrator's act rather than a buyer's. Carriers
     # ride on this screen too — a transport provider is a vendor row, so it is the
@@ -135,7 +174,8 @@ PAGES: list[PageDef] = [
     # The consolidated buying sheet — between the requisitions it gathers and the RFQ
     # it feeds, which is where it sits in the flow.
     PageDef("pro_consolidations", "/procurement/consolidations", "Consolidation",
-            parent="grp_purchasing", module="procurement", sort_order=26),
+            parent="grp_purchasing", module="procurement", icon="layers",
+            sort_order=26),
     # The buying trail: every requisition, RFQ, quotation and order in one register.
     # LAST in the group (sort_order 32, after po_list's 31) — a ledger is where you go
     # to look something up, never the module's front door, and the left rail opens a
@@ -186,9 +226,9 @@ PAGES: list[PageDef] = [
     # the same paths under /logistics. The warehouse rows keep their own codes, paths
     # and permissions and are not touched.
     PageDef("logistics_consignments", "/logistics/consignments", "Consignments",
-            parent="grp_logistics", module="logistics", sort_order=1),
+            parent="grp_logistics", module="logistics", icon="boxes", sort_order=1),
     PageDef("logistics_dispatch", "/logistics/dispatch", "Dispatch",
-            parent="grp_logistics", module="logistics", sort_order=2),
+            parent="grp_logistics", module="logistics", icon="truck", sort_order=2),
     # "Shipments", not "Transport Requests": the row is not a request for long. The
     # screen carries the leg from DRAFT through IN_TRANSIT, DELIVERED and CLOSED, and
     # lists the lane, the load, the LR/docket and the freight — a register of what is
@@ -197,13 +237,13 @@ PAGES: list[PageDef] = [
     # picks both up on the next start; the code stays `logistics_transport` so every
     # `page.logistics_transport.view` grant already issued keeps working.
     PageDef("logistics_transport", "/logistics/shipments", "Shipments",
-            parent="grp_logistics", module="logistics", sort_order=3),
+            parent="grp_logistics", module="logistics", icon="route", sort_order=3),
     # Provider Selection is the RFQ desk: Dispatch asks several partners to price the
     # SAME consignment, and this is where those prices come back, sit side by side and
     # one of them is awarded. No screen of its own — a tender is not a document, it is
     # the question "who is taking this", and that question already had a page.
     PageDef("logistics_providers", "/logistics/providers", "Provider Selection",
-            parent="grp_logistics", module="logistics", sort_order=4),
+            parent="grp_logistics", module="logistics", icon="users", sort_order=4),
     # What happened, to which shipment, in the order it happened — one register in
     # place of the three tabs that each drew a slice of it. Shipment Tracking answered
     # "where is it now", Exceptions answered "what went wrong", and neither said who
@@ -212,7 +252,7 @@ PAGES: list[PageDef] = [
     # derived from the documents (`transport.activity_ledger`), so it can only ever
     # show events that were actually recorded.
     PageDef("logistics_activity", "/logistics/activity", "Activity Ledger",
-            parent="grp_logistics", module="logistics", sort_order=5),
+            parent="grp_logistics", module="logistics", icon="history", sort_order=5),
     # Shipment Tracking, Acknowledgements and Exceptions are NOT listed here any more,
     # and that is deliberate rather than an omission.
     #
@@ -452,13 +492,21 @@ async def sync_pages(db: AsyncSession) -> dict:
             # sort_order is refreshed too: it decides which child a module opens on,
             # so a wrong one is a broken module, not a cosmetic detail — and it has
             # to be correctable by deploying rather than by hand-editing the row.
+            # `icon` is refreshed too (2026-08-23). It was the one presentation field
+            # this loop set on INSERT and never again, so eighteen catalogued pages
+            # that shipped without one — every procurement, returns and logistics
+            # screen — kept a NULL forever, and `MenuIcon` drew its default box for
+            # all of them. A rail where six screens share one glyph is a rail nobody
+            # can scan, and it could only be fixed by hand-editing rows.
             changed = (
                 page.path != spec.path or page.name != spec.name
+                or page.icon != spec.icon
                 or page.sort_order != spec.sort_order
                 or page.parent_id != (parent.id if parent else None)
             )
             page.path = spec.path
             page.name = spec.name
+            page.icon = spec.icon
             page.module = spec.module
             page.sort_order = spec.sort_order
             page.parent_id = parent.id if parent else None

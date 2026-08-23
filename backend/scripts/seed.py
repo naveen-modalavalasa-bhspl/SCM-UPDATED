@@ -123,6 +123,8 @@ PAGE_TREE = [
      P.page_view_code("ind_notifications"), 16, "grp_indents"),
 
     ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
+    ("approval_overview", "/approvals/overview", "Overview", "layout-dashboard",
+     P.page_view_code("approval_overview"), 20, "approvals"),
     ("approval_waiting", "/approvals", "Waiting for Me", "check-circle", P.INDENT_VIEW, 21, "approvals"),
     # Built, routed and working since the monthly-cycle work, but no row ever pointed
     # at it — the only way in was to type the URL. Gated on INDENT_APPROVE because that

@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getAllocationApprovalBatches } from "../api";
 import { Pagination } from "@heroui/react";
+import { ClipboardList, Hourglass } from "lucide-react";
 import {
   Button, Card, PageHeader, ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
@@ -201,14 +202,18 @@ export function AllocationApprovalsPage({ embedded = false }: { embedded?: boole
 
       <div className="mb-4 grid grid-cols-2 gap-2">
         <div className="rounded-xl border border-line/70 bg-content1 p-3 text-left">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Total Approvals</div>
-          <div className="text-2xl font-bold text-ink">{queue.isLoading ? "…" : rows.length}</div>
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+            <ClipboardList size={12} /> Total Approvals
+          </div>
+          <div className="text-2xl font-bold text-brand">{queue.isLoading ? "…" : rows.length}</div>
         </div>
         <div className="rounded-xl border border-line/70 bg-content1 p-3 text-left">
           {/* Was "total lines", which only counted the rows whose detail happened to
               be loaded. Still pending is the number this screen is actually for. */}
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Still Pending</div>
-          <div className="text-2xl font-bold text-ink">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+            <Hourglass size={12} /> Still Pending
+          </div>
+          <div className="text-2xl font-bold text-warn">
             {queue.isLoading
               ? "…"
               : rows.filter((r) => r.status === "PENDING_APPROVAL").length}

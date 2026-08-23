@@ -1,9 +1,7 @@
-import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
 import {
-  Card, ErrorBanner, FilterMenu, PageHeader, ResponsiveList, StatusPill, Input,
+  Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill,
   type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
@@ -11,8 +9,13 @@ import { rfqApi } from "../api";
 import { money } from "./RequisitionListPage";
 import type { QuoteListRow } from "../types";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
+import { QuotationKpis } from "../components/ProcurementKpis";
+import { useUrlFilters } from "../urlFilters";
 
 const SIZE = 20;
+
+/** Every filter this screen owns, so Clear knows what to drop. */
+const FILTER_KEYS = ["status", "search", "vendor"];
 
 /**
  * Every quotation across every RFQ.
@@ -22,25 +25,26 @@ const SIZE = 20;
  */
 export function QuotationListPage() {
   const nav = useNavigate();
-  const [search, setSearch] = useState("");
-  // Filtered in the BROWSER, not on the server: this list is capped at 20 rows a page
-  // and the endpoint takes no status or vendor parameter, so adding one would be a
-  // backend change for a screen that already has the page in hand. Vendor options are
-  // built from the rows themselves — a vendor who has never quoted is not a filter.
-  const [status, setStatus] = useState("");
-  const [vendor, setVendor] = useState("");
+  // Filters live in the URL — see `../urlFilters`. The KPI strip above sets them.
+  const { get, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const search = get("search");
+  // Status is a SERVER filter now (2026-08-23): a KPI tile counts every row in a
+  // bucket, and filtering in the browser would only have narrowed the twenty rows in
+  // hand — so the tile said 41 and the list showed 6. Vendor stays in the browser:
+  // its options are built from the rows themselves, and a vendor who has never quoted
+  // is not a filter worth offering.
+  const status = get("status");
+  const vendor = get("vendor");
   // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
-  const [page, setPage] = useState(1);
-
-  // Automatically reset to the first page whenever the search query changes
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedSearch]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["quotations", debouncedSearch, page],
-    queryFn: () => rfqApi.quotations({ search: debouncedSearch || undefined, page, size: SIZE }),
+    queryKey: ["quotations", debouncedSearch, status, page],
+    queryFn: () => rfqApi.quotations({
+      search: debouncedSearch || undefined,
+      status: status || undefined,
+      page, size: SIZE,
+    }),
   });
 
   const all = data?.items ?? [];
@@ -51,9 +55,7 @@ export function QuotationListPage() {
     .sort((a, b) => a.label.localeCompare(b.label));
   const statusOptions = [...new Set(all.map((r) => r.status).filter(Boolean))]
     .map((v) => ({ value: v as string, label: (v as string).replace(/_/g, " ") }));
-  const rows = all.filter((r) =>
-    (!status || r.status === status)
-    && (!vendor || String(r.vendor_id) === vendor));
+  const rows = all.filter((r) => !vendor || String(r.vendor_id) === vendor);
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
 
   const columns: Column<QuoteListRow>[] = [
@@ -94,27 +96,25 @@ export function QuotationListPage() {
     <div>
       <PageHeader eyebrow="Procurement" title="Quotations" />
 
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
-        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search quotation, vendor or RFQ no..."
-            className="pl-9"
-          />
-        </div>
-        <FilterMenu label="Status" value={status} onChange={setStatus} options={statusOptions} />
-        <FilterMenu label="Vendor" value={vendor} onChange={setVendor} options={vendorOptions} />
-        {(search || status || vendor) && (
-          <button
-            onClick={() => { setSearch(""); setStatus(""); setVendor(""); }}
-            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
-          >
-            Clear
-          </button>
-        )}
+      {/* The KPI strip. Gated inside the component on `rfq.compare` — the same code
+          this screen's endpoint checks, because these numbers are vendor PRICES. */}
+      <div className="mb-4">
+        <QuotationKpis />
       </div>
+
+      {/* Shared filter strip — see RequisitionListPage for why the local copies went. */}
+      <FilterBar
+        search={search}
+        onSearch={(value) => set({ search: value })}
+        searchPlaceholder="Search quotation, vendor or RFQ no…"
+        active={activeCount(FILTER_KEYS)}
+        onClear={() => clear(FILTER_KEYS)}
+      >
+        <FilterMenu label="Status" value={status}
+                    onChange={(value) => set({ status: value })} options={statusOptions} />
+        <FilterMenu label="Vendor" value={vendor}
+                    onChange={(value) => set({ vendor: value })} options={vendorOptions} />
+      </FilterBar>
 
       <ErrorBanner error={error} />
 

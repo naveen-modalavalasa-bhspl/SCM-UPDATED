@@ -1634,3 +1634,13 @@ class MovementOrderAction(BaseModel):
     action: str
     comments: str = ""
 
+
+
+class UnitCodeQuery(BaseModel):
+    """Identities the caller already holds, asking what else each unit carries.
+
+    A POST for a read, deliberately: one stock-ledger page can name a couple of
+    thousand units, and a query string that long is refused by the proxy long before
+    it reaches us.
+    """
+    codes: list[str] = Field(default_factory=list)

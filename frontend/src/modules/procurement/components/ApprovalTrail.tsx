@@ -109,7 +109,15 @@ export function ApprovalTrail({
     queryKey: approvalTrailKey(docType, docId),
     queryFn: () => approvalTrailApi.get(docType, docId),
     enabled: Number.isFinite(docId) && docId > 0,
-    staleTime: 30_000,
+    /* No staleTime, and always refetch on mount. This is live ENGINE state: it can
+       change from the approvals inbox, from another approver's session, or from a
+       ladder edit — none of which this page hears about. Held for 30 seconds it
+       showed a rung the document had already left, and only a browser reload put
+       it right. The endpoint is one row plus its history; re-reading it is cheaper
+       than being wrong about who a document is with. */
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   if (isLoading) return <Skeleton className="h-32 rounded-2xl" />;
@@ -125,7 +133,7 @@ export function ApprovalTrail({
     <Card>
       <CardBody className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
+          <h2 className="text-[11px] font-bold uppercase tracking-[0.08em] text-muted">
             Approvals
           </h2>
           {data.instance_status && <StatusPill status={data.instance_status} />}
@@ -136,11 +144,39 @@ export function ApprovalTrail({
             Not submitted for approval yet.
           </p>
         ) : waiting.length > 0 ? (
-          <p className="rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-            <span className="font-semibold">Waiting with</span>{" "}
-            {waiting.join(", ")}
-            {data.stage_name ? ` · ${data.stage_name}` : ""}
-          </p>
+          /* Who is holding this document is the single most-read fact on the page,
+             so it gets a panel rather than a line of amber prose. Same treatment as
+             an indent's pending badge: warn tint, the RUNG as a chip, and the PERSON
+             in full ink — a name is what somebody goes looking for, and it was
+             previously the same weight and colour as the words around it. */
+          <div className="rounded-xl border border-warn/30 bg-warn-bg p-3">
+            <div className="flex items-center gap-2">
+              <Clock className="h-4 w-4 shrink-0 text-warn" aria-hidden="true" />
+              <span className="text-[11px] font-bold uppercase tracking-[0.08em] text-warn">
+                Waiting with
+              </span>
+              {data.stage_name && (
+                <span className="ml-auto rounded-md bg-warn/15 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-warn">
+                  {data.stage_name}
+                </span>
+              )}
+            </div>
+            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+              {waiting.map((name) => (
+                <li key={name} className="flex items-center gap-2">
+                  {/* Initials, not an avatar: HCM serves no photographs, and a
+                      coloured disc is what makes a row of names scannable. */}
+                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-warn/20 text-[11px] font-bold uppercase text-warn">
+                    {name.trim().charAt(0)}
+                  </span>
+                  {/* Names come from HCM and can be long — truncate, never abbreviate. */}
+                  <span className="max-w-56 truncate text-sm font-semibold text-ink" title={name}>
+                    {name}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
         ) : (
           <p className="text-sm text-muted">
             {/* No pending row and a finished instance is the normal end state. A
@@ -153,7 +189,7 @@ export function ApprovalTrail({
         )}
 
         {data.history.length > 0 && (
-          <ol className="mt-1">
+          <ol className="mt-1" aria-label="Approval history">
             {data.history.map((event, index) => (
               <EventRow
                 key={`${event.stage_sequence ?? 0}-${event.acted_at ?? index}-${index}`}

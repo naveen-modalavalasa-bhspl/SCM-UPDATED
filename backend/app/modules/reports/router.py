@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.pagination import PageParams
-from app.modules.reports import service
+from app.modules.reports import service, traceability
 from app.modules.reports.schemas import ReportLedgerInfo, ReportRows
 from app.platform.rbac import permissions as perms
 
@@ -58,6 +58,39 @@ async def export_ledger(ledger: str, request: Request, format: str = "xlsx",
         content=body, media_type=XLSX_MEDIA,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Document traceability — one number in, the whole chain out.
+#
+# Declared ABOVE `/{ledger}`, which is a catch-all string path: a literal segment
+# registered after it never matches, so "traceability" would be read as the name of a
+# ledger and 404.
+# --------------------------------------------------------------------------- #
+
+@router.get("/traceability/kinds")
+async def traceability_kinds(user=Depends(require_permission(perms.REPORT_VIEW))):
+    """What the trail can find. Served so the screen's filter cannot drift from the
+    document types the walker actually knows about."""
+    return traceability.doc_kinds()
+
+
+@router.get("/traceability/search")
+async def traceability_search(q: str, limit: int = 25,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.REPORT_VIEW))):
+    """Every document whose number matches, across every kind on the trail. A partial
+    number is enough — somebody reading a printed gate pass types the tail of it."""
+    return await traceability.search(db, q, limit=min(max(limit, 1), 50))
+
+
+@router.get("/traceability/chain")
+async def traceability_chain(kind: str, doc_id: int,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.REPORT_VIEW))):
+    """The whole chain around one document — both directions, each node with its
+    status and its full approval history."""
+    return await traceability.trace(db, kind, doc_id)
 
 
 @router.get("/{ledger}", response_model=ReportRows)

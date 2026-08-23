@@ -665,3 +665,31 @@ class ScopeRung(str, Enum):
 #: offers a courier alongside three bandage suppliers invites a tender nobody can fill
 #: — and shared may not import a module (rule 5). `logistics.enums` re-exports it.
 CARRIER_VENDOR_TYPES = ("TRANSPORT", "LOGISTICS", "COURIER")
+
+
+class MailStatus(str, Enum):
+    """`sys_mail_messages.status`. A row is written QUEUED before the send is
+    attempted, so a message lost to a crash mid-send is still visible afterwards
+    rather than leaving no trace at all."""
+    QUEUED = "QUEUED"
+    SENT = "SENT"
+    FAILED = "FAILED"
+
+
+class MailKind(str, Enum):
+    """What raised a message. `PASSWORD_RESET` is logged WITHOUT its body — that body
+    carries a live reset link and the Sent tab is readable by anyone with `mail.view`."""
+    MANUAL = "MANUAL"
+    PASSWORD_RESET = "PASSWORD_RESET"
+
+
+class ItemScope(str, Enum):
+    """`mst_item_eligibility.scope_type` — how an item is tagged to who may ask for it.
+
+    ROLE reads `rbac_roles.id`; REGION reads `hcm_offices.id`, which is what
+    `indents.service` already stamps on `ind_indents.region_id`. A requester matching
+    EITHER kind passes — they are alternatives, not both-required, or an item tagged to
+    two regions and one role could never be raised by anybody.
+    """
+    ROLE = "ROLE"
+    REGION = "REGION"

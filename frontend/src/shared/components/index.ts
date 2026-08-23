@@ -10,8 +10,18 @@ export { FormActions } from "./FormActions";
 export { Placeholder } from "./Placeholder";
 export { SubNav, type SubNavItem } from "./SubNav";
 export { Can } from "./Can";
+export { Alert, type AlertTone } from "./Alert";
 export { ErrorBanner, EmptyState, ConfirmModal } from "./Feedback";
 export { ToastProvider, useToast } from "./Toast";
 export { useAction } from "./useAction";
 export { PrintTemplate } from "./PrintTemplate";
-export { FilterMenu } from "./FilterMenu";
+export { FilterMenu, type FilterOption } from "./FilterMenu";
+export * from "./filterChrome";
+export { FilterBar, SearchField, FilterToggle, FilterDateRange } from "./FilterBar";
+
+// The clickable KPI strip every module's overview leads with. One definition, so a
+// tile means the same thing and looks the same wherever it appears.
+export {
+  KpiTile, KpiTiles, ContextStrip, TONES, shortMoney, shortQty,
+} from "./KpiStrip";
+export type { KpiTileSpec, ContextStatSpec, Tone } from "./KpiStrip";

@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.exceptions import ValidationError
-from app.modules.inventory import allocations
+from app.modules.inventory import allocations, service
 from app.modules.warehouse import service as warehouse_service
 from app.modules.warehouse.models import MaterialIssue, MaterialIssueLine
 from app.modules.inventory.models import (
@@ -30,7 +30,7 @@ from app.shared.enums import (
     AllocationStatus, ApprovalAction, MRStatus, RefType, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item, Uom
+from app.shared.models.master import Item, Project, Uom
 from app.shared.models.warehouse import Warehouse
 
 
@@ -355,3 +355,88 @@ async def test_the_decision_is_recorded_with_who_made_it(db, actor):
     assert saved.remarks == "holding 20 for Eluru on Monday"
     assert saved.items[0].quantity == Decimal("40")
     assert saved.items[0].requested_qty == Decimal("100")
+
+
+# ---------------- whose project a hand-raised request belongs to ----------------
+#
+# FIXED 2026-08-22. `create_mr_manual` stamped `user.project_id` on the header, so a
+# request raised off the allocation screen was filed against whichever project the
+# STOREKEEPER's own HCM post sits in rather than the one the indent is serving.
+# BHS/104/2026-27/IND0007 (104-MMU) raised BHS/SUP/2026-27/MR0002 because the inventory
+# manager who pressed Raise MR belongs to SUPPLY CHAIN MANAGEMENT.
+#
+# Not cosmetic: the project renders {PROJECT} in the document number and is inherited
+# by the requisition raised behind the request, so a wrong one opens a running counter
+# under the wrong project and puts the spend on the wrong cost centre.
+
+
+async def _projects(db):
+    indent_project = Project(code="AP-104-MMU", name="104-MMU", is_active=True)
+    raiser_project = Project(code="SCM", name="SUPPLY CHAIN MANAGEMENT", is_active=True)
+    db.add_all([indent_project, raiser_project])
+    await db.flush()
+    return indent_project, raiser_project
+
+
+def _raiser(admin, project):
+    """An inventory manager whose own post sits in a DIFFERENT project."""
+    return SimpleNamespace(id=admin.id, full_name="Inventory Manager",
+                           project_id=project.id, project_name=project.name,
+                           department_id=None, department_name=None,
+                           active_position_id=None)
+
+
+async def test_manual_mr_takes_the_indents_project_not_the_raisers(db):
+    """The line carries the indent's project; that is what the header must use."""
+    stocked, _bare, _main, _lip, admin = await _world(db)
+    indent_project, raiser_project = await _projects(db)
+
+    mr = await service.create_mr_manual(db, {
+        "indent_id": 4242, "indent_no": "BHS/104/2026-27/IND0007",
+        "items": [{"item_id": stocked.id, "quantity": 12,
+                   "project_id": indent_project.id, "indent_item_id": 1}],
+    }, _raiser(admin, raiser_project))
+
+    assert mr.project_id == indent_project.id
+    assert mr.project_name == "104-MMU"
+    # The visible half of the bug: the project renders into the number.
+    assert "/104/" in mr.mr_no and "SUP" not in mr.mr_no
+
+
+async def test_manual_mr_falls_back_to_the_allocations_project(db, actor):
+    """An older screen that sends no project per line still must not use the login's.
+
+    The allocation is inventory's own mirror of the indent — the only place this module
+    is allowed to read the indent's project from (rule 5).
+    """
+    stocked, _bare, main, _lip, admin = await _world(db)
+    indent_project, raiser_project = await _projects(db)
+    await _stock(db, stocked, main, 5)
+
+    alloc = await allocations.create(db, 4243, "BHS/104/2026-27/IND0008", [
+        {"indent_item_id": 1, "item_id": stocked.id, "item_code": stocked.code,
+         "item_name": stocked.name, "uom_code": stocked.uom_code,
+         "requested_qty": Decimal("5"), "quantity": Decimal("5"),
+         "warehouse_id": main.id, "project_id": indent_project.id}], actor)
+    assert alloc is not None
+
+    mr = await service.create_mr_manual(db, {
+        "indent_id": 4243,
+        "items": [{"item_id": stocked.id, "quantity": 3, "indent_item_id": 2}],
+    }, _raiser(admin, raiser_project))
+
+    assert mr.project_id == indent_project.id
+    assert mr.project_name == "104-MMU"
+
+
+async def test_free_standing_mr_still_belongs_to_the_login(db):
+    """No indent, no allocation: a buy nobody indented IS the raiser's own project."""
+    stocked, _bare, _main, _lip, admin = await _world(db)
+    _indent_project, raiser_project = await _projects(db)
+
+    mr = await service.create_mr_manual(db, {
+        "items": [{"item_id": stocked.id, "quantity": 4}],
+    }, _raiser(admin, raiser_project))
+
+    assert mr.project_id == raiser_project.id
+    assert mr.project_name == "SUPPLY CHAIN MANAGEMENT"

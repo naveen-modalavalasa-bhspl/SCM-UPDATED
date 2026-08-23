@@ -23,14 +23,17 @@ const INDENT = {
   created_at: "2026-07-20T09:00:00Z",
 };
 
+/** The queue is `/api/indents` with `has_remainder` (owed) and no status — status is
+ *  an optional narrowing, never what defines the list. */
+const isQueueCall = (_url: string, cfg: any) => !!cfg?.params?.has_remainder;
+
 beforeEach(() => {
   mockGet.mockReset();
-  mockGet.mockImplementation((_url: string, cfg: any) =>
+  mockGet.mockImplementation((url: string, cfg: any) =>
     Promise.resolve({
-      data:
-        cfg?.params?.status === "AWAITING_ALLOCATION"
-          ? { items: [INDENT], total: 1, page: 1, size: 100 }
-          : { items: [], total: 0, page: 1, size: 100 },
+      data: isQueueCall(url, cfg)
+        ? { items: [INDENT], total: 1, page: 1, size: 100 }
+        : { items: [], total: 0, page: 1, size: 100 },
     }),
   );
 });
@@ -70,10 +73,9 @@ describe("FulfillmentQueuePage", () => {
         });
       }
       return Promise.resolve({
-        data:
-          cfg?.params?.status === "AWAITING_ALLOCATION"
-            ? { items: [INDENT], total: 1, page: 1, size: 100 }
-            : { items: [], total: 0, page: 1, size: 100 },
+        data: isQueueCall(url, cfg)
+          ? { items: [INDENT], total: 1, page: 1, size: 100 }
+          : { items: [], total: 0, page: 1, size: 100 },
       });
     });
 

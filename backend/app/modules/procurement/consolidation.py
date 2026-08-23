@@ -94,6 +94,7 @@ async def get_consolidation(db: AsyncSession, cons_id: int,
 async def list_consolidations(db: AsyncSession, params: PageParams,
                               status: str | None = None,
                               project_id: int | None = None,
+                              pending_for_me: bool = False,
                               user=None) -> dict:
     """FIXED 2026-08-20 — was unscoped. A consolidation sheet gathers many requisitions
     and carries the estimated spend for all of them, so with no rung the register put
@@ -118,6 +119,13 @@ async def list_consolidations(db: AsyncSession, params: PageParams,
         stmt = stmt.where(PurchaseConsolidation.status.in_(wanted))
     if project_id:
         stmt = stmt.where(PurchaseConsolidation.project_id == project_id)
+    if pending_for_me and user is not None:
+        # What is waiting on THIS login, off `wf_pending` rather than off the status:
+        # PENDING_APPROVAL says somebody has to sign, and only the engine says who.
+        # `[0]` for the empty case — "no rows", not "every row".
+        ids = [row["doc_id"] for row in await engine.pending_for_user(
+            db, user, doc_types=[DocType.CONSOLIDATION.value])]
+        stmt = stmt.where(PurchaseConsolidation.id.in_(ids or [0]))
     page = await paginate(
         db, stmt.order_by(PurchaseConsolidation.id.desc()), params)
     # `current_approver_name` is never written on a consolidation — only cleared — so

@@ -495,15 +495,6 @@ async def carrier_transport_summary(db: AsyncSession = Depends(get_db),
     return await service.carrier_summary(db, account.vendor_id)
 
 
-# The carriages this arrangement can be made under, for the acknowledgement screen.
-# Served rather than derived in the portal, and off the same table the desk's own
-# Dispatch screen narrows by, so the carrier can never be offered a routing that
-# screen would refuse. Its own path segment, so it never collides with /transport/{id}.
-@carrier_router.get("/transport-carriage-modes", response_model=list[dict])
-async def carrier_carriage_modes(mode: str, account=Depends(get_current_vendor)):
-    return service.carrier_carriage_options(mode)
-
-
 @carrier_router.get("/transport/{tr_id}", response_model=TROut)
 async def carrier_get_transport(tr_id: int, db: AsyncSession = Depends(get_db),
                                 account=Depends(get_current_vendor)):

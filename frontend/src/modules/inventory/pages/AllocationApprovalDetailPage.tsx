@@ -3,6 +3,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, RefreshCw, XCircle } from "lucide-react";
 import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import { LoadingRows } from "../components/PageStates";
 import {
   approveAllocation, getAllocation, getAllocationAvailability, getAllocationHistory,
   getPendingInventoryApprovals, rejectAllocation,
@@ -154,7 +155,7 @@ export function AllocationApprovalDetailPage() {
       />
 
       {allocation.isLoading ? (
-        <p className="p-6 text-sm text-muted">Loading allocation…</p>
+        <LoadingRows rows={6} className="p-0" />
       ) : allocation.error || !a ? (
         <div className="rounded-lg bg-bad-bg p-4 text-sm text-bad">
           {(allocation.error as Error)?.message ?? "Allocation not found"}
@@ -287,7 +288,7 @@ export function AllocationApprovalDetailPage() {
             <h3 className="mb-2 text-sm font-semibold text-ink">Approval history</h3>
             <div className="divide-y divide-line rounded-xl border border-line">
               {history.isLoading && (
-                <p className="p-3 text-sm text-muted">Loading history…</p>
+                 <LoadingRows rows={3} className="p-0" />
               )}
               {(history.data ?? []).map((row, index) => (
                 <div key={`${row.stage_sequence}-${index}`} className="p-3">

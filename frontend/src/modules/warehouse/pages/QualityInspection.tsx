@@ -116,14 +116,14 @@ export default function QualityInspection({
       deleteLabel="inspection"
       labelOf={(r) => r.inspection_no ?? `Inspection ${r.id}`}
       kpiCounts={[
-        { label: "In progress", statuses: ["IN_PROGRESS"], tone: "text-warn" },
+        { label: "In progress", statuses: ["IN_PROGRESS"], tone: "warn" },
         { label: "Completed", statuses: ["COMPLETED"] },
       ]}
       kpis={(rows) => {
         const passed = rows.reduce((s, r) => s + r.passed_items, 0);
         const failed = rows.reduce((s, r) => s + r.failed_items, 0);
         return [
-          { label: "Failed lines", value: failed, tone: "text-bad" },
+          { label: "Failed lines", value: failed, tone: "bad" },
           {
             ratio: true,
             // Over lines that have actually been judged, not over every line raised.

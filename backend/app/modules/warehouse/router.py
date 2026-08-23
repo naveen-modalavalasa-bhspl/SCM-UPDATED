@@ -776,6 +776,16 @@ async def serial_summary(item_ids: str, warehouse_ids: str | None = None,
         db, item_ids=ids(item_ids), warehouse_ids=ids(warehouse_ids) or None, user=user)}
 
 
+@router.post("/serials/codes")
+async def serial_codes(payload: s.UnitCodeQuery, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(STOCK_VIEW))):
+    """What else the named units carry — serial, IMEI, asset and consumable code.
+
+    The stock ledger names the units that MOVED and needs their codes; the codes live
+    on this module's per-unit rows, which inventory may not read (rule 5)."""
+    return {"items": await service.unit_codes(db, payload.codes, user=user)}
+
+
 @router.get("/batches", response_model=Page[s.BatchRead])
 async def list_batches(params: PageParams = Depends(), item_id: int | None = None,
                        expiring_days: int | None = None, search: str | None = None,

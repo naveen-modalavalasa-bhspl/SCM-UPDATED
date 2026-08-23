@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Lock } from "lucide-react";
 import { PageHeader } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FulfillmentQueuePage } from "./FulfillmentQueuePage";
@@ -68,18 +69,15 @@ export function FulfilmentDeskPage() {
   return (
     <div>
       <PageHeader eyebrow="Inventory" title="Fulfilment Desk" />
-      <p className="mb-4 max-w-[75ch] text-sm text-body">
-        What every indent is still owed, and the stock to answer it with. Decide how
-        much to give and out of which point; that raises an allocation, which is signed
-        on the next tab if this project's approval flow asks for a signature. Nothing
-        moves until the warehouse material issue.
+      <p className="mb-4 max-w-[75ch] text-sm text-muted">
+        Decide what to give, then sign it. Nothing moves until warehouse issue.
       </p>
 
       {tabs.length > 1 && (
         <div
           role="tablist"
           aria-label="Fulfilment Desk"
-          className="mb-4 flex gap-1 border-b border-line/70"
+          className="mb-4 inline-flex gap-1 rounded-xl border border-line/70 bg-content2/60 p-1"
         >
           {tabs.map((tab) => (
             <button
@@ -89,16 +87,18 @@ export function FulfilmentDeskPage() {
               aria-selected={active === tab.key}
               onClick={() => select(tab.key)}
               // 44px tap target (rule 12).
-              className={`-mb-px flex min-h-[44px] items-center gap-2 border-b-2 px-4
+              className={`flex min-h-[44px] items-center gap-2 rounded-lg px-4
                 text-sm font-semibold transition-colors ${
                 active === tab.key
-                  ? "border-brand text-brand"
-                  : "border-transparent text-muted hover:text-ink"
+                  ? "bg-brand text-white shadow-sm"
+                  : "text-muted hover:text-ink"
               }`}
             >
               {tab.label}
               {tab.badge ? (
-                <span className="rounded-full bg-brand/15 px-2 py-0.5 text-[11px] font-bold text-brand">
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                  active === tab.key ? "bg-white/25 text-white" : "bg-brand/15 text-brand"
+                }`}>
                   {tab.badge}
                 </span>
               ) : null}
@@ -115,12 +115,16 @@ export function FulfilmentDeskPage() {
         // Neither permission. The page permission and the action permissions are
         // granted separately, so a profile can reach the screen holding neither — say
         // so rather than painting an empty tab strip over nothing.
-        <p className="rounded-lg border border-line/70 bg-content1 p-4 text-sm text-muted">
-          You can open this screen but not act on it. Allocating needs
-          <code className="mx-1 rounded bg-content2 px-1">allocation.create</code>
-          and signing needs
-          <code className="mx-1 rounded bg-content2 px-1">allocation.approve</code>.
-        </p>
+        <div className="flex items-start gap-2 rounded-lg border border-line/70 bg-content1 p-4 text-sm text-muted">
+          <Lock size={16} className="mt-0.5 shrink-0" />
+          <span>
+            You can view this screen, but acting needs
+            <code className="mx-1 rounded bg-content2 px-1">allocation.create</code>
+            or
+            <code className="mx-1 rounded bg-content2 px-1">allocation.approve</code>.
+            Ask your admin if this looks wrong.
+          </span>
+        </div>
       )}
     </div>
   );

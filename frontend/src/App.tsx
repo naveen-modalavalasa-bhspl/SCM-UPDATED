@@ -4,7 +4,10 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useHr
 import { HeroUIProvider } from "@heroui/react";
 import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
+import { MailPage } from "@/modules/admin/pages/MailPage";
+import { TraceabilityPage } from "@/modules/reports/pages/TraceabilityPage";
 import { LoginPage } from "@/pages/LoginPage";
+import { ForgotPasswordPage, ResetPasswordPage } from "@/pages/PasswordResetPages";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { HomePage } from "@/modules/home/pages/HomePage";
@@ -21,6 +24,7 @@ import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPa
 import {
   ApprovalCorrectionPage, ApprovalsPage, ConsolidationDetailPage, ConsolidationIssuePage,
   ConsolidationItemPage, ConsolidationPage, MyDecisionsPage,
+  ApprovalOverviewPage,
 } from "@/modules/approvals";
 import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
 import { POListPage } from "@/modules/procurement/pages/POListPage";
@@ -96,6 +100,7 @@ import {
   CarrierLayout, CarrierLoginPage, CarrierJobsPage, CarrierJobPage,
   CarrierAckPage,
 } from "@/modules/logistics";
+import { ProcurementOverviewPage } from "@/modules/procurement/pages/ProcurementOverviewPage";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
 import { ProcurementLedgerPage } from "@/modules/procurement/pages/ProcurementLedgerPage";
 import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
@@ -172,6 +177,14 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={me ? <Navigate to="/" replace /> : <LoginPage />} />
+      {/* Both PUBLIC — somebody who cannot sign in is the only caller they have.
+          Safe because the request endpoint answers 204 whatever happens, so
+          neither screen can be used to find out which addresses are real.
+          Reachable while signed in too: the reset link may be opened in a
+          browser that still holds a session, and bouncing it to Home would
+          strand somebody who genuinely wants a new password. */}
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
 
       {/* The supplier portal. Outside the employee shell entirely — a vendor holds no
           RBAC role, so there is no menu to build and no <Can> to apply. It is gated on
@@ -297,6 +310,9 @@ function AppRoutes() {
         <Route path="indents/:id" element={<IndentDetailPage />} />
         {/* Reports and the indent review screen are reached from the inbox via
             ?view=reports / ?reviewIndent=, so they need no route of their own. */}
+        {/* The module's landing page. /approvals stays the inbox — every existing
+            link, notification and bookmark points there. */}
+        <Route path="approvals/overview" element={<ApprovalOverviewPage />} />
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="approvals/decisions" element={<MyDecisionsPage />} />
         {/* Team Queue is retired. The route stays so an old link, a bookmark or a
@@ -321,6 +337,11 @@ function AppRoutes() {
         <Route path="pos/:id" element={<PODetailPage />} />
         {/* The buying chain upstream of a PO: requisition -> RFQ -> quotation. */}
         {/* The buying trail, all four document types in one register. */}
+        {/* The module's front door: what is waiting on me, where the chain
+            is, and the demand pool. Every section on it is gated on the
+            documents it reads, so it is safe as a landing page for a
+            module whose five registers are granted separately. */}
+        <Route path="procurement/overview" element={<ProcurementOverviewPage />} />
         <Route path="procurement/ledger" element={<ProcurementLedgerPage />} />
         <Route path="procurement/requisitions" element={<RequisitionListPage />} />
         <Route path="procurement/requisitions/new" element={<RequisitionFormPage />} />
@@ -468,6 +489,10 @@ function AppRoutes() {
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/settings" element={<SettingsPage />} />
         <Route path="admin/code-formats" element={<CodeFormatsPage />} />
+        {/* The company mailbox: Inbox, Sent, Compose. Gated by
+            `page.settings_mail.view`, and the Compose tab additionally by
+            `mail.send` — the server checks both independently. */}
+        <Route path="settings/mail" element={<MailPage />} />
         {/* Under Settings, beside Supplier & Carrier Logins: naming a logistics
             partner and issuing them a way in is an administrator's act, not a
             dispatcher's. The screen itself lives in the logistics module. */}
@@ -506,6 +531,9 @@ function AppRoutes() {
         <Route path="masters" element={<MastersPage />} />
         {/* /reports lands on the first ledger so the rail entry always has a screen. */}
         <Route path="reports" element={<Navigate to="/reports/indents" replace />} />
+        {/* Above `:ledger`, which is a catch-all string param — a literal
+            segment after it would be read as a ledger name. */}
+        <Route path="reports/traceability" element={<TraceabilityPage />} />
         <Route path="reports/:ledger" element={<ReportLedgerPage />} />
         {/* An address with no screen says so. It used to render Home, which made a
             typo look like the app had simply ignored the click. */}

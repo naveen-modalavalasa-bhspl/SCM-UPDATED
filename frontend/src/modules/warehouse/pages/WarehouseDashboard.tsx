@@ -1,10 +1,13 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   ArrowLeftRight, ClipboardCheck, IndianRupee, PackageCheck, PackageOpen, Send, Truck,
 } from "lucide-react";
-import { Card, ErrorBanner, PageHeader, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
+import {
+  Card, ContextStrip, ErrorBanner, KpiTiles, PageHeader, ResponsiveList, StatusPill,
+  type Column, type ContextStatSpec, type KpiTileSpec, type Tone,
+} from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { getDashboard, warehouseOptions } from "../api";
 import { fmtDate, fmtMoneyShort, normaliseStatus } from "../format";
@@ -29,7 +32,8 @@ interface Tile {
   label: string;
   to: string;
   icon: typeof PackageOpen;
-  tone?: string;
+  /** A shared KPI tone, not a raw text colour — the strip owns the palette. */
+  tone?: Tone;
   /** The permission that opens the queue behind the tile. A tile whose list the
    *  user cannot open is a dead link and a number they were never meant to read —
    *  the data is already scoped, but scoping is about WHOSE rows, not WHICH queues. */
@@ -39,7 +43,7 @@ interface Tile {
 const TILES: Tile[] = [
   { key: "pending_gate_entries", label: "At the gate", to: "transactions/material-inward", icon: PackageOpen, can: "receipt.view" },
   { key: "pending_grn", label: "GRN to raise", to: "transactions/grn", icon: PackageCheck, can: "receipt.view" },
-  { key: "pending_inspections", label: "Awaiting QC", to: "transactions/quality-inspection", icon: ClipboardCheck, tone: "text-warn", can: "inspection.view" },
+  { key: "pending_inspections", label: "Awaiting QC", to: "transactions/quality-inspection", icon: ClipboardCheck, tone: "warn", can: "inspection.view" },
   { key: "pending_putaways", label: "To put away", to: "transactions/putaway", icon: ArrowLeftRight, can: "putaway.view" },
   { key: "open_picklists", label: "Open fulfilments", to: "transactions/fulfilment", icon: ClipboardCheck, can: "picking.view" },
   { key: "pending_issues", label: "Issues pending", to: "transactions/material-issues", icon: Send, can: "issue.view" },
@@ -57,6 +61,7 @@ const DOC_ROUTE: Record<string, string> = {
 };
 
 export default function WarehouseDashboard() {
+  const nav = useNavigate();
   const pointLabel = usePointLabel();
   const { can } = useAuth();
   // Only the queues this login can actually open. Scoping the numbers was half the
@@ -110,6 +115,26 @@ export default function WarehouseDashboard() {
     },
   ];
 
+  // Queue tiles: the number IS the button, and it opens the list that clears it.
+  const kpiTiles: KpiTileSpec[] = tiles.map((tile) => ({
+    key: String(tile.key),
+    label: tile.label,
+    icon: tile.icon,
+    tone: tile.tone ?? "brand",
+    // `undefined` while loading — the strip draws a skeleton. Passing 0 would render
+    // a real zero and read as "nothing waiting", which is a different fact.
+    value: isLoading ? undefined : Number(data?.[tile.key] ?? 0),
+    onPress: () => nav(tile.to),
+  }));
+
+  // The quiet numbers underneath: read, not acted on.
+  const contextStats: ContextStatSpec[] = [
+    { key: "value", label: "Stock value on hand", icon: IndianRupee,
+      value: isLoading ? "–" : `₹ ${fmtMoneyShort(data?.stock_value)}` },
+    { key: "bins", label: "Bin utilisation", icon: PackageOpen,
+      value: isLoading ? "–" : `${Math.round(data?.bin_utilisation_percent ?? 0)}%` },
+  ];
+
   return (
     <div>
       <PageHeader eyebrow={pointLabel} title="Overview" />
@@ -127,34 +152,13 @@ export default function WarehouseDashboard() {
 
       <ErrorBanner error={error} />
 
-      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {tiles.map((t) => (
-          <Link key={t.key} to={t.to} className="block focus-visible:outline-none">
-            <StatCard
-              label={t.label}
-              value={isLoading ? "—" : Number(data?.[t.key] ?? 0)}
-              icon={<t.icon className="h-4 w-4" />}
-              tone={t.tone}
-            />
-          </Link>
-        ))}
-      </div>
+      {/* The shared KPI strip (2026-08-23), the same one Indents, Approvals and
+          Procurement lead with — one app, one shape for "here is a queue". Pressing a
+          tile still opens the list that clears it; `undefined` while loading draws a
+          skeleton rather than a "—" that reads like a real zero. */}
+      <KpiTiles label="Warehouse queues" tiles={kpiTiles} className="mb-5" />
 
-      {can("stock.view") && (
-      <div className="mb-5 grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <StatCard
-          label="Stock value on hand"
-          value={isLoading ? "—" : `₹ ${fmtMoneyShort(data?.stock_value)}`}
-          icon={<IndianRupee className="h-4 w-4" />}
-        />
-        <StatCard
-          label="Bin utilisation"
-          value={isLoading ? "—" : `${Math.round(data?.bin_utilisation_percent ?? 0)}%`}
-          icon={<PackageOpen className="h-4 w-4" />}
-          tone={(data?.bin_utilisation_percent ?? 0) >= 90 ? "text-bad" : undefined}
-        />
-      </div>
-      )}
+      {can("stock.view") && <ContextStrip stats={contextStats} className="mb-5" />}
 
       <Card className="p-4 sm:p-5">
         <h2 className="mb-4 font-display text-base font-bold text-ink">Latest activity</h2>

@@ -68,6 +68,10 @@ vi.mock("../api", async () => {
     },
     indentApi: {
       get: vi.fn(),
+      // The form reads the NARROWED picker, not the shared item master: an item
+      // tagged to another role or region is never offered. Same rows here, because
+      // nothing in these fixtures is tagged — which is also the deploy-day state.
+      eligibleItems: vi.fn(() => Promise.resolve(mockItems)),
       offices: vi.fn(() => Promise.resolve([
         { id: 701, name: "Main Office" },
         { id: 702, name: "Branch Office" },
@@ -173,7 +177,7 @@ function queryTextForItem(name: RegExp | string) {
 async function selectItemInRow(rowIndex: number, name: RegExp | string) {
   const items = await screen.findAllByRole("combobox", { name: "Item" });
   const item = items[rowIndex];
-  await waitFor(() => expect(masterApi.items).toHaveBeenCalledWith());
+  await waitFor(() => expect(indentApi.eligibleItems).toHaveBeenCalled());
   fireEvent.focus(item);
   fireEvent.change(item, { target: { value: queryTextForItem(name) } });
   fireEvent.click(await screen.findByRole("option", { name }));
@@ -327,7 +331,7 @@ describe("IndentFormPage", () => {
   it("loads the existing item list when the form opens", async () => {
     renderForm();
 
-    await waitFor(() => expect(masterApi.items).toHaveBeenCalledWith());
+    await waitFor(() => expect(indentApi.eligibleItems).toHaveBeenCalled());
     expect(screen.getByText("Indents")).toBeInTheDocument();
     expect(screen.queryByText("Attachments")).not.toBeInTheDocument();
     expect(screen.queryByText("Stock availability not checked")).not.toBeInTheDocument();
@@ -411,13 +415,15 @@ describe("IndentFormPage", () => {
     renderForm();
 
     const item = await screen.findByRole("combobox", { name: "Item" });
-    await waitFor(() => expect(masterApi.items).toHaveBeenCalledWith());
+    await waitFor(() => expect(indentApi.eligibleItems).toHaveBeenCalled());
     fireEvent.focus(item);
     fireEvent.change(item, { target: { value: "Sy" } });
 
     expect(await screen.findByRole("option", { name: /Syrup/i })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Powder/i })).not.toBeInTheDocument();
-    expect(masterApi.items).toHaveBeenCalledTimes(1);
+    // Fetched ONCE and filtered in the browser — the point of the test. The source
+    // moved to the narrowed picker; the one-fetch contract did not change.
+    expect(indentApi.eligibleItems).toHaveBeenCalledTimes(1);
   });
 
   it.each([

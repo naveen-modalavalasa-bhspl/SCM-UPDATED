@@ -20,6 +20,23 @@ export default heroui({
         danger: { DEFAULT: "#e5484d", foreground: "#ffffff" },
       },
     },
+    dark: {
+      colors: {
+        background: "#0a0e18",
+        foreground: "#e6ebf7",
+        divider: "#272e42",
+        focus: "#7d97ff",
+        content1: "#121828",
+        content2: "#1a2134",
+        content3: "#232b42",
+        default: { DEFAULT: "#1f2639", foreground: "#e6ebf7" },
+        primary: { DEFAULT: "#5b76e6", foreground: "#ffffff" },
+        secondary: { DEFAULT: "#2a3350", foreground: "#ffffff" },
+        success: { DEFAULT: "#2fa96f", foreground: "#ffffff" },
+        warning: { DEFAULT: "#c78f22", foreground: "#ffffff" },
+        danger: { DEFAULT: "#d64550", foreground: "#ffffff" },
+      },
+    },
   },
   layout: {
     radius: { small: "8px", medium: "12px", large: "18px" },

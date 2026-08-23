@@ -18,6 +18,7 @@ import {
   AttributesTab, CategoryTaggingTab, FeaturesTab, PackagingTab, SpecsTab,
 } from "../tabs/attributeTabs";
 import { BomGroupsTab, BomsTab, ItemGroupsTab } from "../tabs/bomTabs";
+import { ItemEligibilityTab } from "../tabs/eligibilityTabs";
 const TABS = [
   "items", "categories", "general-names", "item-classes", "item-sub-classes",
   "brands", "manufacturers", "dosage-forms", "hsn-codes",
@@ -25,7 +26,7 @@ const TABS = [
   "attributes", "specs", "category-tags",
   "uom", "conversions", "warehouses",
   "projects", "vendors", "vendor-items", "boms", "bom-groups",
-  "departments", "facilities",
+  "departments", "facilities", "item-eligibility",
 ] as const;
 
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
@@ -39,6 +40,7 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   projects: "Projects", vendors: "Vendors", "vendor-items": "Vendor Rates",
   boms: "BOM", "bom-groups": "BOM Groups",
   departments: "Departments", facilities: "Facilities",
+  "item-eligibility": "Item Eligibility",
 };
 
 /** Which tabs actually need each shared dropdown source. Without this the screen
@@ -50,7 +52,7 @@ const NEEDS: Record<string, readonly string[]> = {
   categories: ["items", "categories", "category-tags"],
   facilities: ["warehouses", "facilities"],
   projects: ["boms", "projects"],
-  items: ["item-groups", "vendor-items", "boms"],
+  items: ["item-groups", "vendor-items", "boms", "item-eligibility"],
 };
 
 export function MastersPage() {
@@ -145,6 +147,9 @@ export function MastersPage() {
       {tab === "projects" && <ProjectsTab />}
       {tab === "vendors" && <VendorsTab />}
       {tab === "vendor-items" && <VendorItemsTab items={itemOpts} />}
+      {/* Which items a role or a region may raise an indent for. Untagged
+          items stay open to everyone, so this screen only ever narrows. */}
+      {tab === "item-eligibility" && <ItemEligibilityTab items={itemOpts} />}
       {tab === "departments" && (
         <ReadOnlyTab<RefRow>
           title="Departments" fetchList={mastersApi.departments}

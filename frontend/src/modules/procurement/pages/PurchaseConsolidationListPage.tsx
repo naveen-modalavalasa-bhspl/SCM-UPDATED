@@ -1,17 +1,20 @@
-import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
 import {
-  Button, Can, Card, ErrorBanner, FilterMenu, Input, PageHeader, ResponsiveList, StatCard,
+  Button, Can, Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList,
   StatusPill, type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
 import { money } from "./RequisitionListPage";
 import type { ConsolidationListRow } from "../types";
+import { ConsolidationKpis } from "../components/ProcurementKpis";
+import { useUrlFilters } from "../urlFilters";
 
 const SIZE = 20;
+
+/** Every filter this screen owns, so Clear knows what to drop. */
+const FILTER_KEYS = ["status", "search", "project", "pending_for_me"];
 
 const STATUSES = [
   { value: "", label: "All statuses" },
@@ -33,25 +36,24 @@ const STATUSES = [
  */
 export function PurchaseConsolidationListPage() {
   const nav = useNavigate();
-  const [status, setStatus] = useState("");
+  // Filters live in the URL — see `../urlFilters`. The KPI strip above sets them.
+  const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  const status = get("status");
   // The register had a status dropdown and NO search box at all, so finding one sheet
   // among a period's worth meant paging. Search and project are filtered in the
   // browser over the page already in hand — the endpoint takes neither, and adding
   // them server-side is a backend change this screen does not need at 20 rows a page.
-  const [search, setSearch] = useState("");
-  const [project, setProject] = useState("");
-  const [page, setPage] = useState(1);
+  const search = get("search");
+  const project = get("project");
+  const pendingForMe = getBool("pending_for_me");
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["consolidations", status, page],
+    queryKey: ["consolidations", status, pendingForMe, page],
     queryFn: () => consolidationApi.list({
-      status: status || undefined, page, size: SIZE,
+      status: status || undefined,
+      pending_for_me: pendingForMe || undefined,
+      page, size: SIZE,
     }),
-  });
-
-  const { data: waiting } = useQuery({
-    queryKey: ["consolidation-candidates-count"],
-    queryFn: () => consolidationApi.candidates({ size: 1 }),
   });
 
   const all = data?.items ?? [];
@@ -135,41 +137,33 @@ export function PurchaseConsolidationListPage() {
         }
       />
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2">
-        <StatCard
-          label="Requisitions waiting to be consolidated"
-          value={waiting?.total ?? 0}
-        />
-        <StatCard label="Sheets on the register" value={data?.total ?? 0} />
+      {/* The KPI strip replaced the two StatCards (2026-08-23). They were read-outs:
+          "Requisitions waiting to be consolidated" cost a second request and could not
+          be clicked, and "Sheets on the register" restated the pager. These four count
+          the same register and each one filters it. Gated inside the component on
+          `consolidation.view`, the code this screen's endpoint checks. */}
+      <div className="mb-4">
+        <ConsolidationKpis />
       </div>
 
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
-        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search sheet no., title, project or period..."
-            className="pl-9"
-          />
-        </div>
+      {/* Shared filter strip — see RequisitionListPage for why the local copies went. */}
+      <FilterBar
+        search={search}
+        onSearch={(value) => set({ search: value })}
+        searchPlaceholder="Search sheet no., title, project or period…"
+        active={activeCount(FILTER_KEYS)}
+        onClear={() => clear(FILTER_KEYS)}
+      >
         <FilterMenu
           label="Status"
           value={status}
-          onChange={(value) => { setStatus(value); setPage(1); }}
+          onChange={(value) => set({ status: value })}
           options={STATUSES.filter((o) => o.value)}
         />
-        <FilterMenu label="Project" value={project} onChange={setProject}
+        <FilterMenu label="Project" value={project}
+                    onChange={(value) => set({ project: value })}
                     options={projectOptions} />
-        {(search || status || project) && (
-          <button
-            onClick={() => { setSearch(""); setStatus(""); setProject(""); setPage(1); }}
-            className="h-11 rounded-lg px-3 text-sm font-medium text-muted hover:bg-content2 hover:text-ink"
-          >
-            Clear
-          </button>
-        )}
-      </div>
+      </FilterBar>
 
       <ErrorBanner error={error} />
 
@@ -184,9 +178,11 @@ export function PurchaseConsolidationListPage() {
           totalPages={totalPages}
           onPageChange={setPage}
           empty={
-            status || project || search
-              ? "No sheets match these filters."
-              : "No consolidated sheets yet. Roll approved requisitions into one to tender them together."
+            pendingForMe
+              ? "Nothing is waiting for your signature."
+              : status || project || search
+                ? "No sheets match these filters."
+                : "No consolidated sheets yet. Roll approved requisitions into one to tender them together."
           }
           renderCard={(r) => (
             <div className="space-y-1.5">

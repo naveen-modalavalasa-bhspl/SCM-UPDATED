@@ -79,6 +79,9 @@ export interface StockBalanceFilter {
   search?: string;
   batch_no?: string;
   include_zero?: boolean;
+  /** Which rows the stock grid wants: "" / "available" (drawable now), "all",
+   *  "zero" (nothing on hand), "reserved" (on hand, all of it committed). */
+  stock_view?: string;
   below_reorder?: boolean;
   expiring_in_days?: number;
   expiry_status?: string;
@@ -192,6 +195,11 @@ export interface StockLedgerItem {
   total_value: number | null;
   /** Serial / IMEI on the line, and the code the same unit carries. */
   serial_number?: string;
+  /** The units this MOVEMENT carried, exactly as `stk_ledger.serial_numbers` holds
+   *  them. Load-bearing since 2026-08-22: a row that names its own units must never
+   *  fall back to the units standing in that lot right now, which is a different
+   *  question (and answered a movement of 2 with the 198 on the shelf behind it). */
+  serial_numbers?: string[];
   asset_code?: string;
   consumable_code?: string;
   reference_no?: string;
@@ -363,6 +371,18 @@ export interface MovementRow {
   created_at: string;
 }
 
+/** What one physical unit carries, looked up by any identity the caller holds.
+ *  Served by `POST /api/warehouse/serials/codes`. */
+export interface UnitCodeRow {
+  serial_number: string | null;
+  imei: string | null;
+  asset_code: string | null;
+  consumable_code: string | null;
+  item_id: number;
+  warehouse_id: number | null;
+  status: string | null;
+}
+
 export interface MaterialRequestItem {
   id: number;
   line_no: number;
@@ -454,6 +474,9 @@ export interface AllocationProposalLine {
    *  stock exists but not in the warehouse — the case Raise MR is offered for. */
   main_available_qty: number;
   competing_demand: number;
+  /** The INDENT's project, not the reader's. Sent back when Raise MR is pressed so the
+   *  request is filed against the project that asked for the material. */
+  project_id: number | null;
   warehouses: AllocationWarehouseOption[];
 }
 
@@ -1037,10 +1060,25 @@ export interface BatchDemandItem {
   urgent_count: number;
   total_demand: number;
   available_total: number;
+  /** What the WAREHOUSE tier can serve — `available_total` less anything sitting at a
+   *  LIP or an MDP. THE number the shortfall is worked out from (2026-08-22): a LIP is
+   *  where stock ends up, not a shelf an indent is filled from, so 5 units parked at
+   *  one LIP must not quietly keep 5 units off the material request. Optional because
+   *  an older API build does not send it; the screen falls back to `available_total`,
+   *  which is the behaviour it had before. */
+  main_available_qty?: number;
   shortfall: number;
   /** Where the stock actually sits, fullest first — "give 50" is only half the
-   *  decision; the other half is which shelf it leaves. */
-  warehouses: { warehouse_id: number; warehouse_name: string; available_qty: number }[];
+   *  decision; the other half is which shelf it leaves. `warehouse_type` says which
+   *  tier the point is on, so the picker can put the warehouses above the LIP/MDP
+   *  points instead of offering whichever one the stock query happened to return
+   *  first. The backend has always sent it; nothing read it. */
+  warehouses: {
+    warehouse_id: number;
+    warehouse_name: string;
+    available_qty: number;
+    warehouse_type?: string | null;
+  }[];
   demand: BatchDemandLine[];
 }
 

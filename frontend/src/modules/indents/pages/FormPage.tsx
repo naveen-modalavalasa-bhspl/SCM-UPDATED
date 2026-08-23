@@ -6,7 +6,7 @@ import { CardBody, Skeleton } from "@heroui/react";
 import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import {
-  indentApi, indentKeys, isIndentModuleQuery, masterApi,
+  indentApi, indentKeys, isIndentModuleQuery,
   useIndentAccountCacheIsolation, useIndentAccountScope,
 } from "../api";
 import { ItemCombobox } from "../components/ItemCombobox";
@@ -117,9 +117,12 @@ export function IndentFormPage() {
       : null;
   const visibleRequiredDateError = hasAttemptedSubmit ? requiredDateError : null;
 
+  // The narrowed picker, not the whole item master: an item tagged to another role or
+  // region is not offered here. Until an administrator tags something this returns
+  // exactly what the master returned, so nothing changes on deploy.
   const { data: items = [], error: itemCatalogError } = useQuery({
-    queryKey: indentKeys.items(accountScope, "form"),
-    queryFn: () => masterApi.items(),
+    queryKey: indentKeys.items(accountScope, "form-eligible"),
+    queryFn: () => indentApi.eligibleItems(),
   });
 
   const { data: offices = [] } = useQuery({

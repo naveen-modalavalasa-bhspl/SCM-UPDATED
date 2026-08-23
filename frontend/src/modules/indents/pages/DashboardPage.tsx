@@ -1,8 +1,12 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarDays, CheckCircle2, Clock, FileText, Package, PencilLine, XCircle } from "lucide-react";
-import { Card, StatCard } from "@/shared/components";
+import {
+  CalendarDays, CheckCircle2, ChevronRight, Clock, FileText, Package,
+  Percent, PencilLine, XCircle,
+} from "lucide-react";
+import type { ReactNode } from "react";
+import { Card } from "@/shared/components";
 import {
   INDENT_QUERY_GC_TIME,
   INDENT_QUERY_STALE_TIME,
@@ -13,10 +17,118 @@ import {
   useIndentAccountScope,
 } from "../api";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
+import { getRaisedDateRange } from "../components/IndentFilterBar";
 import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge";
 import { StatusBreakdownChart } from "../components/StatusBreakdownChart";
 import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
 import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
+
+/* ---------------------------------------------------------------------------
+ * The Overview answers two questions only: what needs MY action (the four
+ * queue tiles, each opening its own pre-filtered worklist), and how is the
+ * pipeline shaped right now (context strip + status breakdown). Everything
+ * else is decoration and was removed.
+ *
+ * The tiles are navigation, never permission bypasses: they deep-link into the
+ * same /indents list, whose rows and actions stay gated exactly as before.
+ * ------------------------------------------------------------------------- */
+
+interface Queue {
+  key: keyof Awaited<ReturnType<typeof indentApi.stats>>;
+  label: string;
+  icon: ReactNode;
+  /** Chip tint = the urgency colour the rest of the app already uses. */
+  chip: string;
+  /** Pre-filtered worklist the tile opens. Empty → opens the unfiltered list. */
+  statuses?: string[];
+}
+
+const QUEUES: Queue[] = [
+  {
+    key: "awaiting_approval",
+    label: "Awaiting approval",
+    icon: <Clock className="h-5 w-5" />,
+    chip: "bg-warn-bg text-warn",
+    statuses: ["PENDING_APPROVAL", "RETURNED_FOR_CORRECTION"],
+  },
+  {
+    key: "approved_active",
+    label: "Approved active",
+    icon: <CheckCircle2 className="h-5 w-5" />,
+    chip: "bg-ok-bg text-ok",
+    statuses: ["AWAITING_ALLOCATION", "ALLOCATED", "PARTIALLY_FULFILLED"],
+  },
+  {
+    key: "draft",
+    label: "In draft",
+    icon: <PencilLine className="h-5 w-5" />,
+    chip: "bg-neutral-bg text-neutral",
+    statuses: ["DRAFT"],
+  },
+  {
+    key: "rejected",
+    label: "Rejected",
+    icon: <XCircle className="h-5 w-5" />,
+    chip: "bg-bad-bg text-bad",
+    statuses: ["REJECTED"],
+  },
+];
+
+/** One tappable work queue: the number IS the button. */
+function QueueTile({ queue, value, onOpen }: {
+  queue: Queue;
+  value: number | undefined;
+  onOpen: (statuses?: string[]) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(queue.statuses)}
+      aria-label={`${queue.label}: ${value ?? 0}. Show these indents`}
+      className="group flex min-h-20 w-full items-center gap-3 rounded-xl border border-line/70 bg-content1 p-4 text-left shadow-sm transition duration-150 hover:-translate-y-px hover:border-brand/40 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 active:translate-y-0 active:scale-[0.99]"
+    >
+      <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl ${queue.chip}`}>
+        {queue.icon}
+      </span>
+      <span className="min-w-0">
+        <span className="block font-display text-[26px] font-bold leading-none tabular text-ink">
+          {value ?? "–"}
+        </span>
+        <span className="mt-1 block truncate text-xs font-medium text-muted">{queue.label}</span>
+      </span>
+      <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-brand opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+    </button>
+  );
+}
+
+/** Quiet context numbers under the queues. `to` builds the one deep-link that
+ * is a date range rather than a status ("raised this month"). */
+function ContextStat({ label, value, icon, onClick }: {
+  label: string;
+  value: ReactNode;
+  icon: ReactNode;
+  onClick?: () => void;
+}) {
+  const body = (
+    <>
+      <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+        <span className="text-muted/80">{icon}</span>
+        {label}
+      </span>
+      <span className="mt-0.5 block text-lg font-bold tabular text-ink">{value}</span>
+    </>
+  );
+  if (!onClick) return <div className="min-w-0 px-1 py-2 sm:px-4">{body}</div>;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="min-w-0 rounded-lg px-1 py-2 text-left transition hover:bg-content2 sm:px-4"
+    >
+      {body}
+    </button>
+  );
+}
 
 function IndentDashboardContent() {
   const nav = useNavigate();
@@ -61,7 +173,6 @@ function IndentDashboardContent() {
   const {
     data: stats,
     isLoading: statsLoading,
-    isFetching: statsFetching,
     error: statsError,
   } = useQuery({
     queryKey: indentKeys.stats(accountScope, filterParams),
@@ -74,7 +185,6 @@ function IndentDashboardContent() {
   const {
     data: recent,
     isLoading: recentLoading,
-    isFetching: recentFetching,
     error: recentError,
   } = useQuery({
     queryKey: indentKeys.recent(accountScope, filterParams),
@@ -84,9 +194,24 @@ function IndentDashboardContent() {
     gcTime: INDENT_QUERY_GC_TIME,
   });
   const recentIndents = recent?.items ?? [];
-  const isFetching = statsFetching || recentFetching;
-  const isRefreshing = isFetching && Boolean(stats || recent);
-  const handleViewAll = () => nav("/indents");
+
+  const openQueue = (statuses?: string[]) => {
+    if (!statuses?.length) {
+      nav("/indents");
+      return;
+    }
+    const params = new URLSearchParams();
+    statuses.forEach((status) => params.append("status", status));
+    nav(`/indents?${params.toString()}`);
+  };
+  const openThisMonth = () => {
+    const range = getRaisedDateRange("this_month");
+    if (!range.from || !range.to) {
+      nav("/indents");
+      return;
+    }
+    nav(`/indents?date_preset=this_month&date_from=${range.from}&date_to=${range.to}`);
+  };
 
   return (
     <>
@@ -97,39 +222,54 @@ function IndentDashboardContent() {
         searchPlaceholder="Search by indent no., requester, department or status..."
       />
 
-      <section className="relative" aria-label="Overview results" aria-busy={isFetching}>
-        <div
-          role="status"
-          aria-live="polite"
-          className={`pointer-events-none absolute right-3 top-2 z-20 rounded-full bg-content1/95 px-2.5 py-1 text-xs font-medium text-muted shadow-sm transition-opacity duration-150 ${isRefreshing ? "opacity-100" : "opacity-0"}`}
-        >
-          {isRefreshing ? "Updating results…" : ""}
-        </div>
-        <div className={`transition-opacity duration-150 ${isRefreshing ? "opacity-70" : "opacity-100"}`}>
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Total indents" tone="text-ink" icon={<FileText className="h-4 w-4" />} value={stats?.total ?? "-"} />
-        <StatCard label="Awaiting approval" tone="text-warn" icon={<Clock className="h-4 w-4" />} value={stats?.awaiting_approval ?? "-"} />
-        <StatCard label="Approved active" tone="text-ok" icon={<CheckCircle2 className="h-4 w-4" />} value={stats?.approved_active ?? "-"} />
-        <StatCard label="Raised this month" tone="text-brand" icon={<CalendarDays className="h-4 w-4" />} value={stats?.this_month ?? "-"} />
-        <StatCard label="In draft" tone="text-muted" icon={<PencilLine className="h-4 w-4" />} value={stats?.draft ?? "-"} />
-        <StatCard label="Units requested" tone="text-info" icon={<Package className="h-4 w-4" />} value={stats?.total_qty ?? "-"} />
-        <StatCard label="Rejected" tone="text-bad" icon={<XCircle className="h-4 w-4" />} value={stats?.rejected ?? "-"} />
-        <StatCard label="Approval rate" tone="text-ok" icon={<CheckCircle2 className="h-4 w-4" />} value={stats ? `${stats.approval_rate}%` : "-"} />
-      </div>
+      {/* Work queues first — this is what a person came here to do. */}
+      <section aria-label="Work queues" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        {QUEUES.map((queue) => (
+          <QueueTile
+            key={queue.key}
+            queue={queue}
+            value={stats?.[queue.key] as number | undefined}
+            onOpen={openQueue}
+          />
+        ))}
+      </section>
 
       {statsError && (
-        <p className="mt-4 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">
+        <p role="alert" className="mt-3 rounded-xl border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">
           {statsError.message}
         </p>
       )}
 
-      <div className="mt-5 grid gap-5 lg:grid-cols-3">
+      {/* Context strip: the totals that inform but need no decision. */}
+      <Card className="mt-3 grid grid-cols-2 gap-y-1 px-3 py-2 sm:grid-cols-4 sm:gap-0 sm:divide-x sm:divide-line/60">
+        <ContextStat
+          label="Total indents"
+          value={stats?.total ?? "–"}
+          icon={<FileText className="h-3.5 w-3.5" />}
+          onClick={() => nav("/indents")}
+        />
+        <ContextStat
+          label="Raised this month"
+          value={stats?.this_month ?? "–"}
+          icon={<CalendarDays className="h-3.5 w-3.5" />}
+          onClick={openThisMonth}
+        />
+        <ContextStat
+          label="Units requested"
+          value={stats?.total_qty ?? "–"}
+          icon={<Package className="h-3.5 w-3.5" />}
+        />
+        <ContextStat
+          label="Approval rate"
+          value={stats ? `${stats.approval_rate}%` : "–"}
+          icon={<Percent className="h-3.5 w-3.5" />}
+        />
+      </Card>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-3">
         <Card className="p-5 lg:col-span-2">
-          <div className="mb-4">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">STATUS BREAKDOWN</h2>
-            <p className="mt-1 text-xs text-muted">Current distribution by workflow status</p>
-          </div>
-          {statsLoading && <p className="py-4 text-sm text-muted">Loading status breakdown...</p>}
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted">STATUS BREAKDOWN</h2>
+          {statsLoading && <p className="py-4 text-sm text-muted">Loading…</p>}
           {stats && (
             <StatusBreakdownChart
               byStatus={stats.by_status}
@@ -139,41 +279,39 @@ function IndentDashboardContent() {
         </Card>
 
         <Card className="p-5">
-          <div className="mb-3 flex items-center justify-between gap-4">
+          <div className="mb-2 flex items-center justify-between gap-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-muted">Recent Indents</h3>
             <button
               type="button"
-              onClick={handleViewAll}
+              onClick={() => nav("/indents")}
               className="shrink-0 cursor-pointer rounded text-sm font-semibold text-brand transition-colors hover:text-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
             >
               View all
             </button>
           </div>
           {recentError && <p className="py-4 text-sm text-bad">{recentError.message}</p>}
-          {recentLoading && <p className="py-4 text-sm text-muted">Loading recent indents...</p>}
+          {recentLoading && <p className="py-4 text-sm text-muted">Loading…</p>}
           <div className="divide-y divide-line/70">
             {recentIndents.slice(0, 5).map((indent) => (
               <button
                 key={indent.id}
                 type="button"
                 onClick={() => nav(`/indents/${indent.id}`)}
-                className="flex w-full items-center justify-between rounded-lg px-2 py-2.5 text-left transition-colors hover:bg-content2"
+                className="flex min-h-12 w-full items-center justify-between gap-3 rounded-lg px-2 py-2 text-left transition-colors hover:bg-content2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
               >
-                <span>
-                  <span className="mono block text-sm font-semibold text-ink">{indent.indent_no}</span>
-                  <span className="text-xs text-muted">{indent.requested_by_name || indent.department_name || "Unknown"}</span>
+                <span className="min-w-0">
+                  <span className="mono block truncate text-sm font-semibold text-ink">{indent.indent_no}</span>
+                  <span className="block truncate text-xs text-muted">{indent.requested_by_name || indent.department_name || "Unknown"}</span>
                 </span>
                 <IndentSummaryStatusBadge status={indent.status} />
               </button>
             ))}
             {!recentLoading && recent?.items.length === 0 && (
-              <p className="py-4 text-center text-sm text-muted">No indents match active filters.</p>
+              <p className="py-6 text-center text-sm text-muted">Nothing here matches the filters.</p>
             )}
           </div>
         </Card>
       </div>
-        </div>
-      </section>
     </>
   );
 }

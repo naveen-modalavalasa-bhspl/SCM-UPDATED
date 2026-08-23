@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Save } from "lucide-react";
+import { Monitor, Moon, Save, Sun } from "lucide-react";
 import { Button, Card, Field, Input, PageHeader, Select } from "@/shared/components";
+import { getTheme, setTheme, THEME_OPTIONS, type ThemeChoice } from "@/shared/theme";
 import { mastersApi } from "@/modules/masters/api";
 import { settingsApi } from "../api";
 import { alerts } from "@/modules/alerts";
@@ -36,6 +37,44 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted">{title}</h2>
       <div className="grid gap-4 md:grid-cols-2">{children}</div>
     </Card>
+  );
+}
+
+const THEME_ICONS: Record<ThemeChoice, React.ReactNode> = {
+  light: <Sun className="h-4 w-4" />,
+  dark: <Moon className="h-4 w-4" />,
+  system: <Monitor className="h-4 w-4" />,
+};
+
+/** Appearance is per-device (this browser), not company data — it applies the
+ * moment it is pressed and is never part of the saved settings form. */
+function ThemePicker() {
+  const [choice, setChoice] = useState<ThemeChoice>(() => getTheme());
+  return (
+    <div className="flex flex-wrap gap-2 md:col-span-2">
+      {THEME_OPTIONS.map((option) => {
+        const active = choice === option.value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => {
+              setChoice(option.value);
+              setTheme(option.value);
+            }}
+            className={`flex min-h-11 items-center gap-2 rounded-xl border px-4 text-sm font-semibold transition ${
+              active
+                ? "border-brand/40 bg-brand-050 text-brand"
+                : "border-line bg-content1 text-body hover:bg-content2"
+            }`}
+          >
+            {THEME_ICONS[option.value]}
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -94,6 +133,10 @@ export function SettingsPage() {
       />
 
       <div className="space-y-4">
+        <Section title="Appearance">
+          <ThemePicker />
+        </Section>
+
         <Section title="Company">
           <Field label="Company name">
             <Input value={form.company.name} onChange={(e) => set("company", "name", e.target.value)} />

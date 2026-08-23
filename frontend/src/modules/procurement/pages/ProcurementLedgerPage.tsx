@@ -1,16 +1,18 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Pagination } from "@heroui/react";
-import { Search } from "lucide-react";
 import {
-  Button, Card, FilterMenu, Input, PageHeader, ResponsiveList, StatusPill,
+  Card, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill,
   type Column,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { ledgerApi } from "../api";
 import type { ProcurementLedgerRow } from "../types";
 import { money } from "./RequisitionListPage";
+import { FileText, Gavel, Handshake, ShoppingCart } from "lucide-react";
+import { KpiTiles, type KpiTileSpec } from "@/shared/components";
+import { useUrlFilters } from "../urlFilters";
 
 /**
  * The buying trail: requisition -> RFQ -> quotation -> purchase order, in one register.
@@ -41,18 +43,48 @@ const KIND_LABEL: Record<string, string> = {
   REQUISITION: "Requisition", RFQ: "RFQ", QUOTATION: "Quotation", PO: "Order",
 };
 
+/** Every filter this screen owns, so Clear knows what to drop. */
+const FILTER_KEYS = ["doc_kind", "status", "project", "vendor", "search"];
+
+/** One glyph per rung of the buying chain. The LABELS come from the server
+ *  (`ledger.DOC_KINDS`), so the strip cannot offer a kind the register does not
+ *  carry; only the icon and the tint are decided here. */
+const KIND_ICON: Record<string, KpiTileSpec["icon"]> = {
+  REQUISITION: FileText, RFQ: Gavel, QUOTATION: Handshake, PO: ShoppingCart,
+};
+const KIND_TONE: Record<string, KpiTileSpec["tone"]> = {
+  REQUISITION: "info", RFQ: "brand", QUOTATION: "warn", PO: "ok",
+};
+
 export function ProcurementLedgerPage() {
   const nav = useNavigate();
-  const [page, setPage] = useState(1);
-  const [docKind, setDocKind] = useState("");
-  const [status, setStatus] = useState("");
-  const [project, setProject] = useState("");
-  const [vendor, setVendor] = useState("");
-  const [search, setSearch] = useState("");
+  // Filters live in the URL — see `../urlFilters`. The KPI strip above sets
+  // `doc_kind`, and every screen in the module reads its filters the same way.
+  const { get, set, clear, toggle, isActive, page, setPage, activeCount } =
+    useUrlFilters();
+  const docKind = get("doc_kind");
+  const status = get("status");
+  const project = get("project");
+  const vendor = get("vendor");
+  const search = get("search");
 
   const filters = useQuery({
     queryKey: ["procurement-ledger-filters"],
     queryFn: () => ledgerApi.filters(),
+  });
+
+  // Every filter EXCEPT doc_kind — that is the one the tiles set, so the four counts
+  // always add up to the total shown beside the search box.
+  const stripParams = {
+    status: status || undefined,
+    project: project || undefined,
+    vendor: vendor || undefined,
+    search: search.trim() || undefined,
+  };
+  const strip = useQuery({
+    queryKey: ["procurement-ledger-stats", stripParams],
+    queryFn: ({ signal }) => ledgerApi.stats(stripParams, signal),
+    placeholderData: (previous) => previous,
   });
 
   const rows = useQuery({
@@ -60,12 +92,24 @@ export function ProcurementLedgerPage() {
     queryFn: () => ledgerApi.rows({
       page, size: SIZE,
       doc_kind: docKind || undefined,
-      status: status || undefined,
-      project: project || undefined,
-      vendor: vendor || undefined,
-      search: search.trim() || undefined,
+      ...stripParams,
     }),
   });
+
+  // Built from what the SERVER says the register holds, keyed by the same names it
+  // counted — so a tile can never filter to something it did not count.
+  const kindTiles: KpiTileSpec[] = (filters.data?.doc_kinds ?? []).map((kind) => ({
+    key: kind.value,
+    label: kind.label,
+    icon: KIND_ICON[kind.value] ?? FileText,
+    tone: KIND_TONE[kind.value] ?? "neutral",
+    value: strip.data?.by_kind[kind.value],
+    // A count that never arrived draws a dash and stops filtering, rather than
+    // pulsing forever — see `KpiStrip.display`.
+    failed: Boolean(strip.error),
+    onPress: () => toggle(strip.data?.filters[kind.value] ?? { doc_kind: kind.value }),
+    active: isActive({ doc_kind: kind.value }),
+  }));
 
   const opts = (values: string[] | undefined) =>
     (values ?? []).map((v) => ({ value: v, label: v }));
@@ -127,12 +171,6 @@ export function ProcurementLedgerPage() {
   ], []);
 
   const total = rows.data?.total ?? 0;
-  const active = [docKind, status, project, vendor, search].filter(Boolean).length;
-  const reset = () => {
-    setDocKind(""); setStatus(""); setProject(""); setVendor("");
-    setSearch(""); setPage(1);
-  };
-  const pick = (set: (v: string) => void) => (v: string) => { set(v); setPage(1); };
 
   return (
     <div>
@@ -144,41 +182,41 @@ export function ProcurementLedgerPage() {
         a single order can be traced back to the request that started it.
       </p>
 
+      {/* One tile per rung of the buying chain, counting what the register is showing
+          under every OTHER filter — so the four always add up to the total beside the
+          search box, and pressing one narrows to exactly the rows it counted. Same
+          `po.view` as the register itself; there is nothing extra to grant. */}
+      <div className="mb-4">
+        <KpiTiles label="Document kinds" tiles={kindTiles} />
+      </div>
+
       {/* Same filter idiom as the PO list beside it — the shared FilterMenu, not a
           second bar invented here. Every option list comes from the server so it can
           only ever offer values the register actually contains. */}
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-line/70 bg-content1 p-2">
-        <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-          <Input
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search any document number, vendor or project..."
-            className="pl-9"
-          />
-        </div>
-        <FilterMenu
-          label="Document"
-          value={docKind}
-          onChange={pick(setDocKind)}
-          options={(filters.data?.doc_kinds ?? []).map(
-            (k: { value: string; label: string }) => ({
-              value: k.value, label: k.label,
-            }))}
-        />
-        <FilterMenu label="Status" value={status} onChange={pick(setStatus)}
+      <FilterBar
+        search={search}
+        onSearch={(value) => set({ search: value })}
+        searchPlaceholder="Search any document number, vendor or project…"
+        active={activeCount(FILTER_KEYS)}
+        onClear={() => clear(FILTER_KEYS)}
+        right={
+          <span className="text-xs text-muted">
+            {rows.isLoading ? "…" : `${total} document${total === 1 ? "" : "s"}`}
+          </span>
+        }
+      >
+        {/* Document kind is on the strip above; repeating it here would be two
+            controls for one filter, disagreeing the moment either is pressed. */}
+        <FilterMenu label="Status" value={status}
+                    onChange={(value) => set({ status: value })}
                     options={opts(filters.data?.statuses)} />
-        <FilterMenu label="Project" value={project} onChange={pick(setProject)}
+        <FilterMenu label="Project" value={project}
+                    onChange={(value) => set({ project: value })}
                     options={opts(filters.data?.projects)} />
-        <FilterMenu label="Vendor" value={vendor} onChange={pick(setVendor)}
+        <FilterMenu label="Vendor" value={vendor}
+                    onChange={(value) => set({ vendor: value })}
                     options={opts(filters.data?.vendors)} />
-        {active > 0 && (
-          <Button variant="ghost" onClick={reset}>Clear</Button>
-        )}
-        <span className="ml-auto pr-1 text-xs text-muted">
-          {rows.isLoading ? "…" : `${total} document${total === 1 ? "" : "s"}`}
-        </span>
-      </div>
+      </FilterBar>
 
       {rows.error ? (
         <p className="rounded-lg border border-danger/40 bg-danger/10 p-4 text-sm text-danger">
