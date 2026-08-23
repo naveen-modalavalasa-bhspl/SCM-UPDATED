@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { Calendar, Search, SlidersHorizontal, X } from "lucide-react";
 import { selectOnFocus } from "./ui";
 import {
@@ -20,11 +20,18 @@ import {
  */
 export function FilterBar({
   search, onSearch, searchPlaceholder = "Search…", searchLabel,
-  children, onClear, active = 0, right, className = "",
+  children, onClear, active = 0, right, className = "", searchClassName,
 }: {
   search?: string;
   onSearch?: (v: string) => void;
   searchPlaceholder?: string;
+  /** Width AND flex behaviour of the search box — the caller decides whether it
+   *  holds a fixed width or grows into whatever the pills beside it leave over. A
+   *  strip carrying several pills wants a fixed box, or the pills get pushed to the
+   *  far edge as an afterthought; a strip carrying one or two wants the box to take
+   *  up the slack, since a field that stops halfway across with dead space after it
+   *  looks like the row failed to load the rest of itself. */
+  searchClassName?: string;
   /** Accessible name, when the placeholder is a long sentence ("Scan or type a…"). */
   searchLabel?: string;
   children?: ReactNode;
@@ -46,7 +53,7 @@ export function FilterBar({
             onChange={onSearch}
             placeholder={searchPlaceholder}
             label={searchLabel}
-            className="min-w-[220px] flex-1 sm:max-w-sm"
+            className={searchClassName ?? "min-w-[220px] flex-1 sm:max-w-sm"}
           />
         )}
         {children}
@@ -82,10 +89,29 @@ export function SearchField({
   className?: string;
   autoFocus?: boolean;
 }) {
+  const box = useRef<HTMLInputElement>(null);
+
+  // "/" puts the cursor in the box, the way every console search does, so a desk
+  // working a queue never has to reach for the mouse to narrow it. Guarded against
+  // firing while somebody is typing into a form field somewhere else on the screen —
+  // otherwise the shortcut eats a slash out of an address or a document number.
+  useEffect(() => {
+    const jump = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
+      e.preventDefault();
+      box.current?.focus();
+    };
+    document.addEventListener("keydown", jump);
+    return () => document.removeEventListener("keydown", jump);
+  }, []);
+
   return (
     <div className={`relative ${className}`}>
       <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
       <input
+        ref={box}
         type="search"
         value={value}
         autoFocus={autoFocus}

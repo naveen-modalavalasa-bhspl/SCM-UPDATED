@@ -7369,6 +7369,54 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
     await _close_indents_on_issue(db, issue, user)
 
 
+# On the road: the units are genuinely out and can be credited as they are confirmed.
+# DRAFT/PACKED consignments are still being built — nothing has physically moved, and
+# stamping a delivery on one would invent an arrival. ACKNOWLEDGED is deliberately out
+# too: that consignment was counted and signed for line by line, and a short delivery
+# recorded there is evidence a later receipt must not quietly write over.
+_STAMPABLE_DISPATCH_STATUSES = (
+    DispatchStatus.DISPATCHED.value, DispatchStatus.IN_TRANSIT.value,
+    DispatchStatus.DELIVERED.value,
+)
+
+
+def _stamp_confirmed_delivery(dispatch: m.Dispatch,
+                              caps: dict[int, Decimal]) -> bool:
+    """Book what the requester has confirmed onto the consignment's own lines.
+
+    `credit_arrival` reads `delivered_qty` — it credits what ARRIVED, never what was
+    loaded — and on a partial receipt nothing had written that column yet: it is
+    stamped when the issue finally settles (`_apply_issue_acknowledgement`), when a
+    DELIVERED event is recorded, or when the consignment is acknowledged line by line.
+    So the partial credit added alongside `_issue_confirmation_caps` capped a base
+    quantity of zero and posted nothing: 1 of 2 confirmed left `delivered_qty` at 0,
+    no DISPATCH IN row on `stk_ledger`, and no stock at the destination until the
+    second unit turned up.
+
+    The confirmation IS the arrival evidence for those units, so it is written here,
+    spending each item's confirmed quantity across that item's lines in packing order
+    — the same greedy per-item spend `credit_arrival` runs over the lots, so the two
+    can never disagree on a total. Only ever upward: a line already carrying a
+    delivered quantity (a counted acknowledgement, a delivery event) keeps it, because
+    a receipt trickling in must never talk a recorded arrival back down.
+
+    Returns whether anything moved, so the caller stamps `delivered_at` only on a
+    consignment that really did land something.
+    """
+    remaining = {item_id: _d(qty) for item_id, qty in caps.items()}
+    stamped = False
+    for line in dispatch.items:
+        left = remaining.get(line.item_id, ZERO)
+        if left <= ZERO:
+            continue
+        booked = min(_d(line.quantity), left)
+        remaining[line.item_id] = left - booked
+        if booked > _d(line.delivered_qty):
+            line.delivered_qty = booked
+            stamped = True
+    return stamped
+
+
 async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
                                       user, *, condition: str | None = None,
                                       remarks: str | None = None,
@@ -7432,8 +7480,16 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
         if not caps or all(_d(v) <= ZERO for v in caps.values()):
             continue
         dispatch = await _dispatch_for_issue(db, issue.id)
-        if dispatch is not None:
-            await credit_arrival(db, dispatch, user, cap_by_item=caps)
+        if dispatch is None:
+            continue
+        # The confirmed units are the ones that arrived; write them onto the
+        # consignment before crediting, because `credit_arrival` credits
+        # `delivered_qty` and on a partial receipt nobody had written it yet.
+        # See `_stamp_confirmed_delivery`.
+        if (dispatch.status in _STAMPABLE_DISPATCH_STATUSES
+                and _stamp_confirmed_delivery(dispatch, caps)):
+            dispatch.delivered_at = dispatch.delivered_at or utcnow()
+        await credit_arrival(db, dispatch, user, cap_by_item=caps)
 
     signed += await _sign_transport_for_indent(
         db, indent_id, user, condition=condition, remarks=remarks,

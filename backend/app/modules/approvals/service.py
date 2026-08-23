@@ -54,6 +54,52 @@ async def _monthly_indent_ids(db: AsyncSession, indent_ids: list[int]) -> set[in
     return set(rows)
 
 
+async def _document_numbers(
+    db: AsyncSession, wanted: dict[str, set[int]],
+) -> dict[tuple[str, int], str]:
+    """The real document number for rows whose approval row never snapshotted one.
+
+    `wf_pending.doc_no` / `wf_instances.doc_no` are written at submit time from the
+    module's own context. Every procurement document raised before those submits
+    started passing it holds NULL, and the queue then printed "#9" for
+    PO/2026-27/00009 — an internal row id the approver has never seen on any other
+    screen. Read from the document itself, display only: nothing is written back, and
+    a row that already carries its number is not touched (so the search box, which
+    still reads the stored column, is unaffected either way).
+    """
+    wanted = {doc_type: ids for doc_type, ids in wanted.items() if ids}
+    if not wanted:
+        return {}
+    from app.modules.procurement.models import PurchaseOrder, RFQ, Requisition
+    sources = {
+        DocType.PO.value: (PurchaseOrder.id, PurchaseOrder.po_no),
+        DocType.RFQ.value: (RFQ.id, RFQ.rfq_no),
+        DocType.REQUISITION.value: (Requisition.id, Requisition.req_no),
+    }
+    numbers: dict[tuple[str, int], str] = {}
+    for doc_type, ids in wanted.items():
+        source = sources.get(doc_type)
+        if source is None:
+            continue
+        id_column, no_column = source
+        rows = (await db.execute(
+            select(id_column, no_column).where(id_column.in_(ids))
+        )).all()
+        numbers.update({
+            (doc_type, doc_id): doc_no for doc_id, doc_no in rows if doc_no
+        })
+    return numbers
+
+
+def _missing_numbers(rows: Iterable) -> dict[str, set[int]]:
+    """doc_type -> ids, for the rows that came back without a document number."""
+    wanted: dict[str, set[int]] = defaultdict(set)
+    for doc_type, doc_id, doc_no in rows:
+        if not doc_no:
+            wanted[doc_type].add(doc_id)
+    return wanted
+
+
 async def pending_for_user(db: AsyncSession, user) -> list[dict]:
     rows = await engine.pending_for_user(db, user)
     monthly_ids = await _monthly_indent_ids(
@@ -63,8 +109,13 @@ async def pending_for_user(db: AsyncSession, user) -> list[dict]:
         row for row in rows
         if not (row["doc_type"] == DocType.INDENT.value and row["doc_id"] in monthly_ids)
     ]
+    numbers = await _document_numbers(db, _missing_numbers(
+        (row["doc_type"], row["doc_id"], row["doc_no"]) for row in rows
+    ))
     for row in rows:
         row["approver_name"] = user.full_name
+        if not row["doc_no"]:
+            row["doc_no"] = numbers.get((row["doc_type"], row["doc_id"]))
     return rows
 
 
@@ -182,12 +233,15 @@ async def pending_page(
         .offset((page - 1) * size)
         .limit(size)
     )).all()
+    numbers = await _document_numbers(db, _missing_numbers(
+        (pending.doc_type, pending.doc_id, pending.doc_no) for pending, _ in rows
+    ))
     items = [{
         "instance_id": pending.instance_id,
         "doc_type": pending.doc_type,
         "doc_id": pending.doc_id,
         "stage_sequence": pending.stage_sequence,
-        "doc_no": pending.doc_no,
+        "doc_no": pending.doc_no or numbers.get((pending.doc_type, pending.doc_id)),
         "summary": pending.doc_summary,
         "requested_by_name": pending.requested_by_name,
         "amount": float(pending.amount) if pending.amount is not None else None,
@@ -210,7 +264,8 @@ DECISION_VALUES = {
 }
 
 
-def _decision_output(action: Action, instance: Instance, user) -> dict:
+def _decision_output(action: Action, instance: Instance, user,
+                     numbers: dict[tuple[str, int], str] | None = None) -> dict:
     duration_hours = None
     if action.acted_at and instance.started_at:
         duration_hours = round(
@@ -220,7 +275,8 @@ def _decision_output(action: Action, instance: Instance, user) -> dict:
         "id": action.id,
         "doc_type": instance.doc_type,
         "doc_id": instance.doc_id,
-        "doc_no": instance.doc_no,
+        "doc_no": instance.doc_no or (numbers or {}).get(
+            (instance.doc_type, instance.doc_id)),
         "stage_sequence": action.stage_sequence,
         "stage_name": action.stage_name,
         "decision": action.action,
@@ -278,7 +334,11 @@ async def _decision_query(db: AsyncSession, user):
 
 async def decisions_for_user(db: AsyncSession, user) -> list[dict]:
     rows = (await db.execute(await _decision_query(db, user))).all()
-    return [_decision_output(action, instance, user) for action, instance in rows]
+    numbers = await _document_numbers(db, _missing_numbers(
+        (instance.doc_type, instance.doc_id, instance.doc_no) for _, instance in rows
+    ))
+    return [_decision_output(action, instance, user, numbers)
+            for action, instance in rows]
 
 
 async def decisions_page(
@@ -305,8 +365,12 @@ async def decisions_page(
         .where(*conditions).order_by(Action.acted_at.desc(), Action.id.desc())
         .offset((page - 1) * size).limit(size)
     )).all()
+    numbers = await _document_numbers(db, _missing_numbers(
+        (instance.doc_type, instance.doc_id, instance.doc_no) for _, instance in rows
+    ))
     return {
-        "items": [_decision_output(action, instance, user) for action, instance in rows],
+        "items": [_decision_output(action, instance, user, numbers)
+                  for action, instance in rows],
         "total": total,
         "page": page,
         "size": size,

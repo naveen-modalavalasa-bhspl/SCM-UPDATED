@@ -9,7 +9,7 @@ import {
 import { ConfirmModal, ErrorBanner, useToast } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FilterBar, FilterSelect } from "./FilterBar";
-import { warehouseOptions } from "../api";
+import { allWarehouseOptions, warehouseOptions } from "../api";
 import type { ListParams, Page } from "../types";
 import { usePointLabel } from "../usePointLabel";
 
@@ -20,6 +20,9 @@ const POINT_LABEL: Record<string, string> = {
   MDP: "MDP",
   LIP: "LIP",
 };
+
+const pointLabelOf = (warehouseType?: string | null) =>
+  POINT_LABEL[(warehouseType ?? "").trim().toUpperCase()];
 
 /**
  * The scaffold behind every warehouse document list.
@@ -62,7 +65,9 @@ export interface DocumentListProps<T> {
    *  documenting what their box is expected to match. */
   searchIn?: (row: T) => (string | null | undefined)[];
   searchPlaceholder?: string;
-  statuses?: { value: string; label: string }[];
+  /** `dot` tints the row in the Status menu to match the list's own status
+   *  colours; omit it and the menu draws the row plain, as before. */
+  statuses?: { value: string; label: string; dot?: string }[];
   /** Extra server-side filters merged into the request. */
   extraParams?: Record<string, unknown>;
   /** Tiles that are a straight count of documents in one or more statuses.
@@ -109,6 +114,11 @@ export interface DocumentListProps<T> {
   children?: ReactNode;
   /** Hides the warehouse dropdown for lists that are not per-site. */
   warehouseFilter?: boolean;
+  /** Which stocking points feed the warehouse dropdown — the ones this user can
+   *  see, or every one of them. */
+  warehouseOptionsScope?: "visible" | "all";
+  /** Width and flex behaviour of the free-text search box. */
+  searchClassName?: string;
   /**
    * Clearing abandoned drafts.
    *
@@ -150,6 +160,8 @@ export function DocumentList<T>({
   empty = "Nothing here yet.",
   children,
   warehouseFilter = true,
+  warehouseOptionsScope = "visible",
+  searchClassName,
   onDelete,
   canDelete,
   deletePermission,
@@ -178,8 +190,9 @@ export function DocumentList<T>({
   }, [debouncedSearch, status, warehouse]);
 
   const { data: houses = [] } = useQuery({
-    queryKey: ["wh-lookup", "warehouses", ""],
-    queryFn: () => warehouseOptions(),
+    queryKey: ["wh-lookup", "warehouses", warehouseOptionsScope],
+    queryFn: () =>
+      warehouseOptionsScope === "all" ? allWarehouseOptions() : warehouseOptions(),
     staleTime: 5 * 60_000,
     enabled: warehouseFilter,
   });
@@ -389,6 +402,8 @@ export function DocumentList<T>({
         search={search}
         onSearch={setSearch}
         placeholder={searchPlaceholder}
+        searchClassName={searchClassName}
+        active={Boolean(search || status || warehouse)}
         onReset={() => {
           setSearch("");
           setStatus("");
@@ -407,13 +422,13 @@ export function DocumentList<T>({
             // A stocking point is called what it IS: an MDP-holder should never be
             // asked to pick a "warehouse" when the thing they hold is an MDP. The
             // type comes from the warehouse row, so the label can never disagree
-            // with the tier the classifier reads.
+            // with the tier the classifier reads — and it rides as a `hint`, a tag
+            // pinned to the right of the row, rather than trailing the name where a
+            // long one pushed it out of the menu.
             options={houses.map((w) => ({
               value: w.id,
-              label: [
-                w.code ? `${w.code} — ${w.name}` : w.name,
-                POINT_LABEL[(w as { warehouse_type?: string }).warehouse_type ?? ""],
-              ].filter(Boolean).join(" · "),
+              label: w.code ? `${w.code} — ${w.name}` : w.name,
+              hint: pointLabelOf((w as { warehouse_type?: string }).warehouse_type),
             }))}
             className="min-w-[220px]"
           />

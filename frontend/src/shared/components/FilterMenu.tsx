@@ -9,6 +9,10 @@ export interface FilterOption {
   label: string;
   /** Optional second line — a code, a count, a warehouse's town. */
   hint?: string;
+  /** Fill class for a small colour dot at the head of the row, so a menu of
+   *  statuses wears the same colours as the Status column it filters — picking
+   *  "In transit" and reading it back ought to look like the same thing. */
+  dot?: string;
   /** The "show all" row. Picking it clears the filter. */
   reset?: boolean;
 }
@@ -90,9 +94,14 @@ export function FilterMenu({
     >
       {(option: FilterOption) => (
         <AutocompleteItem key={String(option.value)} textValue={option.label}>
-          <span className="block truncate" title={option.label}>
-            {option.label}
-            {option.hint && <span className="ml-2 text-xs text-muted">{option.hint}</span>}
+          <span className="flex items-center gap-2 truncate" title={option.label}>
+            {option.dot && (
+              <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${option.dot}`} />
+            )}
+            <span className="truncate">{option.label}</span>
+            {option.hint && (
+              <span className="ml-auto shrink-0 pl-2 text-xs text-muted">{option.hint}</span>
+            )}
           </span>
         </AutocompleteItem>
       )}

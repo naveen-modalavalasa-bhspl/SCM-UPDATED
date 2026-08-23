@@ -52,8 +52,14 @@ export type IssueStatus =
   | "DISPATCHED" | "ACKNOWLEDGED" | "PARTIALLY_RETURNED" | "RETURNED"
   | "CANCELLED";
 
+// REJECTED was missing. The backend has always been able to set it (a release turned
+// down on Approvals lands there), so the queue could hold a row this union said was
+// impossible: the Status column fell to its grey fallback and the status filter had no
+// such option. Any rung `DispatchStatus` gains needs a tone in
+// `components/ConsignmentStatusPill` and a value in `pages/Consignments` STATUS_VALUES,
+// or it renders grey and cannot be filtered on.
 export type DispatchStatus =
-  | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "PACKED" | "DISPATCHED"
+  | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "PACKED" | "DISPATCHED"
   | "IN_TRANSIT" | "DELIVERED" | "ACKNOWLEDGED" | "CANCELLED";
 
 export type ReturnStatus =

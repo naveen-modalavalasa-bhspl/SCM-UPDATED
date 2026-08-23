@@ -99,6 +99,11 @@ export const INDENT_REQUEST_STATUS_FILTER_OPTIONS: { value: string; label: strin
   { value: INDENT_STATUS.RETURNED_FOR_CORRECTION, label: "Returned for correction" },
   { value: INDENT_STATUS.REJECTED, label: "Rejected" },
   { value: INDENT_STATUS.AWAITING_ALLOCATION, label: "Awaiting allocation" },
+  // Procurement sits INSIDE the allocation leg, not after it: the goods were not on a
+  // shelf, so the requirement is being bought. Leaving it out of this filter meant the
+  // one question a requester whose indent has stalled actually asks — "which of mine
+  // are out of stock?" — was the one the board could not be asked.
+  { value: INDENT_STATUS.PENDING_PROCUREMENT, label: "Pending procurement" },
   { value: INDENT_STATUS.PARTIALLY_FULFILLED, label: "Partially fulfilled" },
   { value: INDENT_STATUS.CLOSED, label: "Fulfilled" },
 ];

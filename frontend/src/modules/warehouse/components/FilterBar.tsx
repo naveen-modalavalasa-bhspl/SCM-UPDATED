@@ -6,6 +6,14 @@ import type { ReactNode } from "react";
 export interface SelectOption {
   value: string | number;
   label: string;
+  /** A short tag shown to the RIGHT of the row — a stocking point's tier, a
+   *  document's type — so the tag never eats into the name's width. Folding it into
+   *  the label instead is what made the stocking point list read
+   *  "WH0142 — Kadapa District Store · LIP" and then run out of menu. */
+  hint?: string;
+  /** Fill class for a colour dot at the head of the row, so a list of statuses in
+   *  the menu wears the same colours as the Status column it filters. */
+  dot?: string;
 }
 
 /**
@@ -21,26 +29,37 @@ export function FilterBar({
   search,
   onSearch,
   placeholder = "Search…",
+  searchClassName,
   children,
   onReset,
   right,
+  active,
 }: {
   search?: string;
   onSearch?: (value: string) => void;
   placeholder?: string;
+  /** Width and flex behaviour of the search box, handed straight to the shared
+   *  strip. Left undefined it keeps the shared default. */
+  searchClassName?: string;
   children?: ReactNode;
   onReset?: () => void;
   right?: ReactNode;
+  /** Whether anything is actually narrowing the list. A "Clear" sitting there with
+   *  nothing to clear is a button that does nothing, which is how a filter strip
+   *  stops being trusted. Left undefined the button always shows, as it used to. */
+  active?: boolean;
 }) {
   return (
     <SharedFilterBar
       search={search}
       onSearch={onSearch}
       searchPlaceholder={placeholder}
+      searchClassName={searchClassName}
       onClear={onReset}
-      /* Warehouse screens never counted their set filters, and Clear has always been
-         on show here whether or not anything is set. `active={1}` keeps that. */
-      active={onReset ? 1 : 0}
+      /* Warehouse screens never counted their set filters, so this is a boolean
+         dressed as the shared strip's count. A caller that says nothing keeps the
+         old behaviour — Clear on show whenever there is a reset to run. */
+      active={onReset && (active ?? true) ? 1 : 0}
       right={right}
     >
       {children}

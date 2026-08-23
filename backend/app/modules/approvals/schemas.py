@@ -256,16 +256,27 @@ class ConsolidationFilters:
         raised_from: date | None = Query(None),
         raised_to: date | None = Query(None),
     ):
-        self.search = search.strip() if isinstance(search, str) else ""
-        self.raised_from = raised_from if isinstance(raised_from, date) else None
-        self.raised_to = raised_to if isinstance(raised_to, date) else None
-        self.cycle = cycle if isinstance(cycle, str) else None
-        self.region_id = region_id if isinstance(region_id, int) else None
-        self.project_id = project_id if isinstance(project_id, int) else None
-        self.vehicle_id = vehicle_id if isinstance(vehicle_id, int) else None
-        self.office_id = office_id if isinstance(office_id, int) else None
-        self.requester_id = requester_id if isinstance(requester_id, int) else None
-        self.item_id = item_id if isinstance(item_id, int) else None
+        # FIXED 2026-08-21 — these assignments were each wrapped in an
+        # `isinstance(...) else None` guard, defending against a type FastAPI has
+        # already enforced by the time `__init__` runs: the annotations above ARE the
+        # validation, and a bad `?project_id=abc` is refused with a 422 long before
+        # this line. The guards silently swallowed nothing and cost a reader ten lines
+        # of "what else could get in here?". Do not add them back — if a value needs a
+        # constraint, it belongs on the `Query(...)` above where the error reaches the
+        # caller. Only the two normalisations that ARE real survive: a blank search box
+        # sends `?search=`, and an "all cycles" dropdown sends `?cycle=`; both mean "do
+        # not narrow on this", so they collapse to "" and None rather than filtering on
+        # the empty string.
+        self.search = (search or "").strip()
+        self.raised_from = raised_from
+        self.raised_to = raised_to
+        self.cycle = cycle or None
+        self.region_id = region_id
+        self.project_id = project_id
+        self.vehicle_id = vehicle_id
+        self.office_id = office_id
+        self.requester_id = requester_id
+        self.item_id = item_id
 
     def as_dict(self) -> dict:
         return {

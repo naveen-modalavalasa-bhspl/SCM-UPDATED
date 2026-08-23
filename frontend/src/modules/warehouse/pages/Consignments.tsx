@@ -1,22 +1,50 @@
 import { useNavigate } from "react-router-dom";
-import { Chip } from "@heroui/react";
 import { FileText } from "lucide-react";
-import { StatusPill, type Column } from "@/shared/components";
+import { type Column } from "@/shared/components";
+import { ConsignmentStatusPill, statusTone } from "../components/ConsignmentStatusPill";
 import { DocumentList } from "../components/DocumentList";
 import { listConsignments, deleteDispatch, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtDate, fmtQty, humanise, num } from "../format";
 import type { Dispatch } from "../types";
 
-const STATUSES = [
-  { value: "PACKED", label: "Ready" },
-  { value: "PENDING_APPROVAL", label: "Awaiting release" },
-  { value: "APPROVED", label: "Released" },
-  { value: "DISPATCHED", label: "Dispatched" },
-  { value: "IN_TRANSIT", label: "In transit" },
-  { value: "DELIVERED", label: "Delivered" },
-  { value: "ACKNOWLEDGED", label: "Acknowledged" },
-  { value: "CANCELLED", label: "Cancelled" },
-];
+/**
+ * Status filter values mirror the Status column exactly. "Ready" stays a KPI bucket;
+ * it is not a stored status on the consignment row.
+ *
+ * The list used to hold eight hand-picked labels ("Ready", "Awaiting release",
+ * "Released") and left DRAFT and REJECTED out entirely, so two of the ten rungs a
+ * consignment travels could be READ in the Status column and not FILTERED on: a desk
+ * looking for its unfinished drafts had to page the whole queue. The friendly labels
+ * made it worse — the column said DISPATCHED and the filter said "Released", so it was
+ * not obvious they were the same set.
+ *
+ * Derived from one list of values now, and every value is a real `DispatchStatus`, so
+ * a rung cannot be added to the type and quietly missed here. Do not reintroduce a
+ * display-only entry: "Ready" is `PACKED || APPROVED`, which the server cannot filter
+ * on, so putting it back gives a menu row that returns nothing.
+ */
+const STATUS_VALUES = [
+  "DRAFT",
+  "PACKED",
+  "PENDING_APPROVAL",
+  "APPROVED",
+  "REJECTED",
+  "DISPATCHED",
+  "IN_TRANSIT",
+  "DELIVERED",
+  "ACKNOWLEDGED",
+  "CANCELLED",
+] as const;
+
+const statusLabel = (status: string) => status.replace(/_/g, " ");
+
+// The menu wears the column's own colours: the dot beside a row is the same fill
+// the pill carries, so filtering to a status and reading it back look alike.
+const STATUSES = STATUS_VALUES.map((status) => ({
+  value: status,
+  label: statusLabel(status),
+  dot: statusTone(status)[1],
+}));
 
 const destinationOf = (row: Dispatch) =>
   row.destination_office_name
@@ -76,13 +104,7 @@ export default function Consignments() {
     {
       key: "status",
       header: "Status",
-      render: (row) => (
-        <div className="flex flex-wrap items-center gap-2">
-          <StatusPill status={row.status} />
-          {(row.status === "PACKED" || row.status === "APPROVED")
-            && <Chip size="sm" variant="flat" color="success">Ready</Chip>}
-        </div>
-      ),
+      render: (row) => <ConsignmentStatusPill status={row.status} />,
     },
     {
       key: "actions",
@@ -123,8 +145,12 @@ export default function Consignments() {
           row.vendor_name,
           row.delivery_address,
         ]}
-        searchPlaceholder="Search consignment, material issue or destination..."
+        searchPlaceholder="Search consignment, issue or destination..."
+        // Two pills sit beside it, so the box takes whatever they leave: the strip
+        // reads as one filled row rather than a short field with a gap after it.
+        searchClassName="sm:w-auto sm:min-w-[18rem] sm:flex-1"
         statuses={STATUSES}
+        warehouseOptionsScope="all"
         createTo="new"
         createLabel="New consignment"
         createPermission="dispatch.create"
@@ -150,7 +176,7 @@ export default function Consignments() {
             <div className="flex items-center justify-between gap-2">
               <span className="font-mono text-xs font-semibold text-ink">{row.dispatch_no}</span>
               <div className="flex items-center gap-2">
-                <StatusPill status={row.status} />
+                <ConsignmentStatusPill status={row.status} />
                 <button
                   type="button"
                   className="text-muted hover:text-ink p-1"

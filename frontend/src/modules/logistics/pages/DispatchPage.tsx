@@ -9,6 +9,7 @@ import {
 import { fmtDate, fmtTime } from "@/shared/datetime";
 import { consignmentApi, transportApi } from "../api";
 import { carriageLabel, carriageTint, load, modeLabel, modeTint, money } from "../components/modeCopy";
+import { SearchField } from "../components/SearchField";
 import type { Consignment, ConsignmentLink, TransportRequest } from "../transportTypes";
 
 const SIZE = 20;
@@ -363,13 +364,11 @@ export function DispatchPage() {
         <StatCard label="Booked or gone" value={moving} />
       </div>
 
-      <div className="mb-4 max-w-xs">
-        <Input
-          value={search}
-          placeholder="Consignment, issue or destination…"
-          onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-        />
-      </div>
+      <SearchField
+        value={search}
+        placeholder="Search consignment, issue or destination..."
+        onChange={(value) => { setSearch(value); setPage(1); }}
+      />
 
       <ErrorBanner error={error ?? accept.error ?? askAgain.error} />
 
