@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, MapPin, X } from "lucide-react";
+import { AlertTriangle, List, MapPin, ScrollText, TriangleAlert, X } from "lucide-react";
 import {
-  Card, ErrorBanner, Field, Input, PageHeader, ResponsiveList, Select, StatCard,
-  type Column,
+  Card, ErrorBanner, Field, Input, KpiTiles, PageHeader, ResponsiveList, Select,
+  type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { transportApi } from "../api";
 import { modeLabel, modeTint, money } from "../components/modeCopy";
@@ -246,25 +246,27 @@ export function LogisticsActivityPage() {
         awarded, picked up, delivered, signed for and claimed.
       </p>
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <StatCard label={scoped ? "Events on this consignment" : "Events"} value={total} />
-        {/* A tile that is also the filter: "3 open claims" is read and then acted on
-            in the same breath, which is the whole of what the Exceptions desk did. */}
-        <button
-          type="button"
-          onClick={toggleClaims}
-          aria-pressed={claimsOnly}
-          className={`w-full rounded-2xl text-left transition ${
-            claimsOnly ? "ring-2 ring-rose-300" : "hover:opacity-90"}`}
-        >
-          <StatCard
-            label={claimsOnly ? "Open claims · showing claims" : "Open claims"}
-            value={openClaims?.total ?? 0}
-            tone={openClaims?.total ? "text-rose-600" : "text-ink"}
-          />
-        </button>
-        <StatCard label="On this page" value={rows.length} />
-      </div>
+      {/* The claims tile was already a filter — hand-wrapped in a button with its own
+          ring, because the shared strip did not exist when it was written. It is the
+          strip's own `onPress`/`active` now, so it looks and announces itself like
+          every other pressable tile in the app instead of like a card someone taped a
+          button around. "Events" is the unfiltered whole and clears it; "on this page"
+          is a read-out — a page count is not a set anything can be narrowed to. */}
+      <KpiTiles label="Activity summary" className="mb-4" tiles={[
+        {
+          key: "events", label: scoped ? "Events on this consignment" : "Events",
+          value: total, icon: ScrollText, tone: "brand", active: !claimsOnly,
+          hint: "Every event in this view. Press to clear the claims filter.",
+          onPress: () => { if (claimsOnly) toggleClaims(); },
+        },
+        {
+          key: "claims", label: "Open claims", value: openClaims?.total ?? 0,
+          icon: TriangleAlert, tone: openClaims?.total ? "bad" : "neutral",
+          active: claimsOnly, onPress: toggleClaims,
+        },
+        { key: "page", label: "On this page", value: rows.length, icon: List,
+          tone: "info" },
+      ] satisfies KpiTileSpec[]} />
 
       {scoped && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface/60 px-4 py-2.5">

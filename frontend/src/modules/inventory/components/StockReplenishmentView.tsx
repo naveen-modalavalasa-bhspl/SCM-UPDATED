@@ -4,9 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import { TrendingDown, Clock, FilePlus2, Info, Trash2, Plus, TriangleAlert } from "lucide-react";
 import {
-  Button, Card, ConfirmModal, Field, Input, PageHeader, ResponsiveList, Select,
-  StatCard, useAction, type Column,
-  ResponsiveGrid,
+  Button, Card, ConfirmModal, Field, Input, KpiTiles, PageHeader, ResponsiveList,
+  Select, useAction, type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import {
@@ -278,6 +277,10 @@ export function StockReplenishmentView() {
   const [search, setSearch] = useState("");
   const [warehouseId, setWarehouseId] = useState("");
   const [criticality, setCriticality] = useState("");
+  // The two KPIs the server cannot filter on. `?criticality=` takes ONE value and
+  // "Critical / High" is two; lead time is not a filter at all. Both read off rows
+  // already in memory, so the tile narrows exactly what it counted.
+  const [flag, setFlag] = useState<"" | "critical" | "longLead">("");
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
 
@@ -305,6 +308,16 @@ export function StockReplenishmentView() {
     const longLead = rows.filter((r) => (r.lead_time_days ?? 0) > 14).length;
     return { critical, longLead };
   }, [rows]);
+
+  // What the table shows. Kept apart from `rows` on purpose: the tiles count `rows`,
+  // so pressing one must not change the numbers printed on the tiles themselves.
+  const visible = useMemo(() => {
+    if (flag === "critical") {
+      return rows.filter((r) => ["CRITICAL", "HIGH"].includes(r.criticality));
+    }
+    if (flag === "longLead") return rows.filter((r) => (r.lead_time_days ?? 0) > 14);
+    return rows;
+  }, [rows, flag]);
 
   const raiseIndent = (r: Row) =>
     navigate(`/indents/new?item_id=${r.item_id}&quantity=${Math.ceil(r.suggested_order_qty || 0)}`);
@@ -388,11 +401,30 @@ export function StockReplenishmentView() {
         <RulesPanel warehouses={warehouses} />
       ) : (
       <>
-      <ResponsiveGrid cols={3} className="mb-4">
-        <StatCard label="Items Below Reorder" value={rows.length} icon={<TrendingDown size={16} />} tone={rows.length ? "text-danger" : "text-muted"} />
-        <StatCard label="Critical / High" value={kpis.critical} icon={<TriangleAlert size={16} />} tone={kpis.critical ? "text-danger" : "text-muted"} />
-        <StatCard label="Lead Time > 14 days" value={kpis.longLead} icon={<Clock size={16} />} />
-      </ResponsiveGrid>
+      {/* Pressing a tile narrows the table to the rows it counted; pressing it again
+          clears. "Items below reorder" is the whole shortfall list, so it reads as the
+          way back to everything. */}
+      <KpiTiles label="Replenishment queues" className="mb-4" tiles={[
+        {
+          key: "all", label: "Items below reorder", value: rows.length,
+          icon: TrendingDown, tone: rows.length ? "bad" : "neutral",
+          active: flag === "",
+          hint: "Every item under its reorder level. Press to clear the tile filters.",
+          onPress: () => setFlag(""),
+        },
+        {
+          key: "critical", label: "Critical / high", value: kpis.critical,
+          icon: TriangleAlert, tone: kpis.critical ? "bad" : "neutral",
+          active: flag === "critical",
+          onPress: () => setFlag((on) => (on === "critical" ? "" : "critical")),
+        },
+        {
+          key: "lead", label: "Lead time > 14 days", value: kpis.longLead,
+          icon: Clock, tone: kpis.longLead ? "warn" : "neutral",
+          active: flag === "longLead",
+          onPress: () => setFlag((on) => (on === "longLead" ? "" : "longLead")),
+        },
+      ] satisfies KpiTileSpec[]} />
 
       <FilterBar
         search={search}
@@ -417,7 +449,7 @@ export function StockReplenishmentView() {
 
       <Card className="p-2">
         <ResponsiveList
-          data={rows}
+          data={visible}
           columns={columns}
           keyOf={(r) => `${r.item_id}-${r.warehouse_id ?? 0}`}
           loading={isLoading}

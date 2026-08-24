@@ -120,7 +120,8 @@ export function POFormPage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Procurement" title="New purchase order" />
+      <PageHeader
+        back={{ to: "/pos", label: "Back to Purchase orders" }} eyebrow="Procurement" title="New purchase order" />
 
       <ErrorBanner error={save.error} />
       {problem && <ErrorBanner error={problem} />}

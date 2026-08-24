@@ -3,7 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { Clock, Plus, TriangleAlert } from "lucide-react";
-import { Button, Can, PageHeader, Card, ResponsiveGrid, ResponsiveList, StatCard, StatusPill, type Column } from "@/shared/components";
+import {
+  Button, Can, PageHeader, Card, KpiTiles, ResponsiveList, StatusPill,
+  type Column, type KpiTileSpec,
+} from "@/shared/components";
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { listMaterialRequests } from "../api";
 import type { MaterialRequestListRow } from "../types";
@@ -36,6 +39,11 @@ const dueIn = (s?: string | null) =>
 export function MaterialRequestsPage() {
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
+  // The two KPIs that are not a status. `priority` and "past needed-by" are not
+  // columns the endpoint filters on, and both are read off rows already in memory, so
+  // the tile narrows the same list the tile counted rather than asking for a filter
+  // the server does not have.
+  const [flag, setFlag] = useState<"" | "urgent" | "overdue">("");
   const nav = useNavigate();
 
   const { data, isLoading, error } = useQuery({
@@ -47,13 +55,18 @@ export function MaterialRequestsPage() {
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return all;
-    return all.filter((r) =>
+    let out = all;
+    if (flag === "urgent") out = out.filter((r) => r.priority === "URGENT");
+    if (flag === "overdue") {
+      out = out.filter((r) => (dueIn(r.required_by) ?? 1) < 0 && r.status !== "ORDERED");
+    }
+    if (!q) return out;
+    return out.filter((r) =>
       r.mr_no?.toLowerCase().includes(q) ||
       r.indent_no?.toLowerCase().includes(q) ||
       r.department_name?.toLowerCase().includes(q) ||
       r.requested_by_name?.toLowerCase().includes(q));
-  }, [all, search]);
+  }, [all, search, flag]);
 
   const kpis = useMemo(() => ({
     pending: all.filter((r) => r.status === "PENDING_APPROVAL").length,
@@ -139,18 +152,38 @@ export function MaterialRequestsPage() {
         Buy requests for what stock could not serve. Procurement picks them up here.
       </p>
 
-      <ResponsiveGrid cols={3} className="mb-4">
-        <StatCard label="In Approval" value={kpis.pending} icon={<Clock size={16} />} tone={kpis.pending ? "text-warning" : "text-muted"} />
-        <StatCard label="Urgent" value={kpis.urgent} icon={<TriangleAlert size={16} />} tone={kpis.urgent ? "text-danger" : "text-muted"} />
-        <StatCard label="Past Needed-By" value={kpis.overdue} icon={<Clock size={16} />} tone={kpis.overdue ? "text-danger" : "text-muted"} />
-      </ResponsiveGrid>
+      {/* THE NUMBER IS THE BUTTON — pressing a tile applies the filter it counted and
+          pressing it again clears it. "In approval" is a server-side status; the other
+          two narrow the rows already loaded. The three are mutually exclusive, so
+          turning one on turns the others off rather than intersecting to nothing. */}
+      <KpiTiles label="Material request queues" className="mb-4" tiles={[
+        {
+          key: "pending", label: "In approval", value: kpis.pending, icon: Clock,
+          tone: kpis.pending ? "warn" : "neutral",
+          active: status === "PENDING_APPROVAL",
+          onPress: () => {
+            setFlag("");
+            setStatus((on) => (on === "PENDING_APPROVAL" ? "" : "PENDING_APPROVAL"));
+          },
+        },
+        {
+          key: "urgent", label: "Urgent", value: kpis.urgent, icon: TriangleAlert,
+          tone: kpis.urgent ? "bad" : "neutral", active: flag === "urgent",
+          onPress: () => { setStatus(""); setFlag((on) => (on === "urgent" ? "" : "urgent")); },
+        },
+        {
+          key: "overdue", label: "Past needed-by", value: kpis.overdue, icon: Clock,
+          tone: kpis.overdue ? "bad" : "neutral", active: flag === "overdue",
+          onPress: () => { setStatus(""); setFlag((on) => (on === "overdue" ? "" : "overdue")); },
+        },
+      ] satisfies KpiTileSpec[]} />
 
       <FilterBar
         search={search}
         onSearch={setSearch}
         searchPlaceholder="Search request, indent, requester or department…"
-        onClear={() => { setSearch(""); setStatus(""); }}
-        active={[search, status].filter(Boolean).length}
+        onClear={() => { setSearch(""); setStatus(""); setFlag(""); }}
+        active={[search, status, flag].filter(Boolean).length}
       >
         <FilterSelect value={status} onChange={setStatus} placeholder="All statuses" options={STATUSES} />
       </FilterBar>

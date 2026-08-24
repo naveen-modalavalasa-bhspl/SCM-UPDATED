@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer } from "recharts";
 import { ChevronRight, type LucideIcon } from "lucide-react";
 
@@ -66,6 +66,16 @@ export function colourFor(index: number, key: string) {
  * A donut and not a bar chart because the question is "what is this queue MADE
  * of" — a part-to-whole — and the total in the middle is half the answer. Every
  * legend row is clickable straight through to that slice's own list.
+ *
+ * MATCHED to the Indents donut, 2026-08-23 (`indents/components/StatusBreakdownChart`).
+ * The two sit one rail apart and answer the same shape of question, and they were
+ * drawn to different geometry — a 62%/100% ring with 2 degrees of padding here
+ * against 69%/90% with none there — so the same data read as a different KIND of
+ * chart depending on which module you were in. Same ring, same 12 o'clock start,
+ * same clockwise sweep, same centre type, and the same "dim what you are not
+ * pointing at" hover. Deliberately NOT a copy of that file: it carries a bespoke
+ * `<Sector>` with an anchored tooltip this card has no room for. The GEOMETRY is
+ * what had to agree, not the implementation.
  */
 export function BreakdownDonut({
   slices, total, totalLabel, onPick, emptyText = "Nothing to show.",
@@ -85,6 +95,24 @@ export function BreakdownDonut({
     fill: colourFor(index, slice.key),
   }));
 
+  return <DonutBody data={data} total={total} totalLabel={totalLabel} onPick={onPick} />;
+}
+
+function DonutBody({
+  data, total, totalLabel, onPick,
+}: {
+  data: (Slice & { fill: string })[];
+  total: number;
+  totalLabel: string;
+  onPick?: (key: string) => void;
+}) {
+  // Which slice the pointer is on, from EITHER the ring or its legend row — the two
+  // are one control, so pointing at a legend lights its slice and the other way
+  // round. Same 0.45 dim the Indents donut uses for everything you are not asking
+  // about. Its own component because a hook cannot sit below the caller's early
+  // return for an empty queue.
+  const [hovered, setHovered] = useState<string | null>(null);
+
   return (
     <div className="flex flex-col items-center gap-4 sm:flex-row sm:gap-6">
       <div className="relative h-52 w-52 shrink-0">
@@ -94,25 +122,46 @@ export function BreakdownDonut({
               data={data}
               dataKey="count"
               nameKey="label"
-              innerRadius="62%"
-              outerRadius="100%"
-              // A 2px gap so adjacent fills never touch: two slices sharing an edge
-              // read as one shape at small sizes, which is the whole point of a donut
-              // lost.
-              paddingAngle={2}
+              cx="50%"
+              cy="50%"
+              // The Indents geometry, exactly. A thinner ring inside a wider margin
+              // reads as the same object across the two modules.
+              innerRadius="69%"
+              outerRadius="90%"
+              // No padding and no rounding: the separation comes from the fills, and
+              // 2 degrees of gap on a queue with one dominant slice showed as a wedge
+              // missing out of the ring rather than as a boundary.
+              paddingAngle={0}
+              cornerRadius={0}
+              // Twelve o'clock, clockwise — the direction a reader expects a
+              // part-to-whole to run, and what the Indents donut already did.
+              startAngle={90}
+              endAngle={-270}
               stroke="none"
               isAnimationActive={false}
             >
-              {data.map((slice) => <Cell key={slice.key} fill={slice.fill} />)}
+              {data.map((slice) => (
+                <Cell
+                  key={slice.key}
+                  fill={slice.fill}
+                  fillOpacity={hovered && hovered !== slice.key ? 0.45 : 1}
+                  className="transition-opacity duration-200"
+                  onMouseEnter={() => setHovered(slice.key)}
+                  onMouseLeave={() => setHovered(null)}
+                  {...(onPick ? { onClick: () => onPick(slice.key),
+                                  style: { cursor: "pointer" } } : {})}
+                />
+              ))}
             </Pie>
           </PieChart>
         </ResponsiveContainer>
         {/* The hole is not decoration — it carries the total the slices sum to. */}
-        <div className="pointer-events-none absolute inset-0 grid place-items-center text-center">
-          <div>
-            <div className="font-display text-3xl font-bold leading-none text-ink">{total}</div>
-            <div className="mt-1 text-xs text-muted">{totalLabel}</div>
-          </div>
+        <div
+          aria-label={`${total} ${totalLabel}`}
+          className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center text-center"
+        >
+          <span className="text-3xl font-bold leading-none tabular-nums text-ink">{total}</span>
+          <span className="mt-1 text-xs font-medium text-muted">{totalLabel}</span>
         </div>
       </div>
 
@@ -126,7 +175,11 @@ export function BreakdownDonut({
                   type: "button" as const,
                   onClick: () => onPick(slice.key),
                 } : {})}
-                className={`flex min-h-9 w-full items-center gap-2.5 rounded-lg px-2 text-left ${
+                onMouseEnter={() => setHovered(slice.key)}
+                onMouseLeave={() => setHovered(null)}
+                className={`flex min-h-9 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-opacity ${
+                  hovered && hovered !== slice.key ? "opacity-45" : ""
+                } ${
                   onPick ? "transition-colors hover:bg-content2/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand" : ""
                 }`}
               >

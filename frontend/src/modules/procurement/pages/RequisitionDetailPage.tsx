@@ -107,6 +107,7 @@ export function RequisitionDetailPage() {
   return (
     <div>
       <PageHeader
+        back={{ to: "/procurement/requisitions", label: "Back to Requisitions" }}
         eyebrow="Procurement"
         title={req?.req_no ?? "Requisition"}
         actions={

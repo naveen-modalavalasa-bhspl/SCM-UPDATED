@@ -1,10 +1,12 @@
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, ScrollText } from "lucide-react";
+import {
+  Clock, IndianRupee, Package, RefreshCw, ScrollText, Truck,
+} from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
-  ResponsiveList, StatCard, StatusPill, useAction, type Column,
+  KpiTiles, ResponsiveList, StatusPill, useAction, type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDate, fmtTime } from "@/shared/datetime";
 import { consignmentApi, transportApi } from "../api";
@@ -60,6 +62,10 @@ export function DispatchPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  // Which queue the tiles have narrowed the page to. Client-side because these are
+  // states of the SHIPMENT (`links`), not of the consignment the endpoint pages over —
+  // there is no `?status=` on the dispatch queue that would mean this.
+  const [queue, setQueue] = useState<"" | "QUOTING" | "AWAITING_CARRIER" | "MOVING">("");
 
   const [asking, setAsking] = useState<ConsignmentLink | null>(null);
   const [askNote, setAskNote] = useState("");
@@ -310,6 +316,14 @@ export function DispatchPage() {
     },
   ];
 
+  // Rows the tiles have narrowed to. `linkOf` is the same lookup the table uses, so
+  // a tile can never select a row the row itself would describe differently.
+  const visible = queue === "" ? rows : rows.filter((row) => {
+    const status = linkOf(row)?.status;
+    if (!status) return false;
+    return queue === "MOVING" ? ["READY", "IN_TRANSIT"].includes(status) : status === queue;
+  });
+
   const waitingOnPrice = (links ?? []).filter((l) => l.status === "QUOTING").length;
   // Priced and accepted, waiting on the provider's yes. Counted apart from "booked"
   // on purpose: these are the ones a chased phone call turns into a truck.
@@ -349,20 +363,34 @@ export function DispatchPage() {
         }
       />
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Packed, on this page" value={rows.length} />
-        <StatCard
-          label="Waiting on a price"
-          value={waitingOnPrice}
-          tone={waitingOnPrice ? "text-amber-600" : "text-ink"}
-        />
-        <StatCard
-          label="Awaiting the provider"
-          value={awaitingCarrier}
-          tone={awaitingCarrier ? "text-amber-600" : "text-ink"}
-        />
-        <StatCard label="Booked or gone" value={moving} />
-      </div>
+      {/* Each tile narrows the queue below to the shipments it counted; pressing the
+          one already on clears it. "Packed, on this page" is the unfiltered page, so it
+          is the way back to everything. */}
+      <KpiTiles label="Dispatch queues" className="mb-4" tiles={[
+        {
+          key: "all", label: "Packed, on this page", value: rows.length,
+          icon: Package, tone: "brand", active: queue === "",
+          hint: "Every consignment on this page. Press to clear the tile filters.",
+          onPress: () => setQueue(""),
+        },
+        {
+          key: "quoting", label: "Waiting on a price", value: waitingOnPrice,
+          icon: IndianRupee, tone: waitingOnPrice ? "warn" : "neutral",
+          active: queue === "QUOTING",
+          onPress: () => setQueue((on) => (on === "QUOTING" ? "" : "QUOTING")),
+        },
+        {
+          key: "carrier", label: "Awaiting the provider", value: awaitingCarrier,
+          icon: Clock, tone: awaitingCarrier ? "warn" : "neutral",
+          active: queue === "AWAITING_CARRIER",
+          onPress: () => setQueue((on) => (on === "AWAITING_CARRIER" ? "" : "AWAITING_CARRIER")),
+        },
+        {
+          key: "moving", label: "Booked or gone", value: moving,
+          icon: Truck, tone: moving ? "ok" : "neutral", active: queue === "MOVING",
+          onPress: () => setQueue((on) => (on === "MOVING" ? "" : "MOVING")),
+        },
+      ] satisfies KpiTileSpec[]} />
 
       <SearchField
         value={search}
@@ -374,7 +402,7 @@ export function DispatchPage() {
 
       <Card className="p-2">
         <ResponsiveList
-          data={rows}
+          data={visible}
           columns={columns}
           keyOf={(row) => row.id}
           loading={isLoading}

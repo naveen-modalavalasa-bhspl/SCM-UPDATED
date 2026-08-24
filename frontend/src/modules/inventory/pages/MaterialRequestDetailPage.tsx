@@ -147,6 +147,14 @@ export function MaterialRequestDetailPage() {
   if (!data) return null;
 
   const open = data.status === "PENDING_APPROVAL";
+  // FIXED 2026-08-23 — the decision block used to render off `open` alone, so anybody
+  // who could READ a request in approval was shown live Approve and Reject buttons.
+  // For the common case where one person holds two rungs of the same ladder — an
+  // inventory manager who is also the SCM head — those buttons could only ever answer
+  // "Switch to the approval position before acting". The screen already knew; it just
+  // was not asking. `can_act` is the server's own answer to the same question
+  // `engine.act` decides on, so the two cannot drift.
+  const mine = open && data.can_act === true;
 
   /** What the box should show: the pending edit if there is one, else the saved value. */
   const shown = (row: MaterialRequestItem) =>
@@ -248,6 +256,7 @@ export function MaterialRequestDetailPage() {
   return (
     <>
       <PageHeader
+        back={{ to: "/inventory/material-requests", label: "Back to Material requests" }}
         eyebrow="Material request"
         title={data.mr_no}
         // The rung, not the person: "Pending at Regional Manager" is what tells a
@@ -392,7 +401,15 @@ export function MaterialRequestDetailPage() {
         </Card>
       )}
 
-      {open && (
+      {open && !mine && (
+        <p className="mt-4 text-sm text-muted">
+          Waiting on {data.current_stage_name ?? "the next approver"}
+          {data.current_approver_name ? ` · ${data.current_approver_name}` : ""}. There
+          is nothing for you to do here under the position you are working as.
+        </p>
+      )}
+
+      {mine && (
         <div className="mt-4 space-y-3">
           <Field label="Comments">
             <Input

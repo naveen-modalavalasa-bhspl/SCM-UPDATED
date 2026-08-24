@@ -352,6 +352,7 @@ export function IndentFormPage() {
   return (
     <>
       <PageHeader
+        back={{ to: "/indents", label: "Back to All indents" }}
         eyebrow="Indents"
         title={isCorrectionEdit
           ? `Edit correction ${draft?.indent_no ?? "indent"}`

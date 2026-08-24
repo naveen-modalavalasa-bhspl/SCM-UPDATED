@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Truck } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, Send, Truck } from "lucide-react";
 import {
-  Button, Card, ErrorBanner, Input, PageHeader, ResponsiveList, StatCard, StatusPill,
-  type Column,
+  Button, Card, ErrorBanner, Input, KpiTiles, PageHeader, ResponsiveList, StatusPill,
+  type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { transportApi } from "../api";
@@ -94,6 +94,9 @@ export function ProviderSelectionPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [viewKey, setViewKey] = useState<ViewKey>("open");
+  // A narrower question INSIDE the open view, set by the KPI strip. Not a `?status=`:
+  // that parameter already carries the view's whole status list.
+  const [queue, setQueue] = useState<"" | "QUOTING" | "AWAITING_CARRIER" | "SETTLED">("");
 
   const view = VIEWS.find((v) => v.key === viewKey) ?? VIEWS[0];
   const openId = Number(params.get("tr") ?? 0);
@@ -113,6 +116,12 @@ export function ProviderSelectionPage() {
   // READY and everything past it: the provider question is answered. Counted this way
   // rather than as READY alone so the card means the same thing on every view.
   const settled = rows.filter((r) => SETTLED_STATUSES.has(r.status)).length;
+
+  // What the register shows. Separate from `rows` so the tiles keep counting the whole
+  // view — pressing a tile must not change the number printed on it.
+  const visible = queue === "" ? rows : rows.filter((r) => (
+    queue === "SETTLED" ? SETTLED_STATUSES.has(r.status) : r.status === queue
+  ));
 
   const open = (trId: number) => setParams({ tr: String(trId) });
   const closeSheet = () => setParams({});
@@ -205,15 +214,30 @@ export function ProviderSelectionPage() {
       <PageHeader eyebrow="Logistics" title="Provider Selection" />
       <p className="-mt-2 mb-4 text-sm text-muted">{view.blurb}</p>
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-3">
-        <StatCard label="Out to partners" value={quoting} />
-        <StatCard
-          label="Awaiting the carrier"
-          value={awaiting}
-          tone={awaiting ? "text-amber-600" : "text-ink"}
-        />
-        <StatCard label="Provider fixed" value={settled} />
-      </div>
+      {/* Each tile narrows the register to the shipments it counted. Client-side:
+          `?status=` on this endpoint is the VIEW's whole status list, and a tile asks a
+          narrower question inside whichever view is open. Pressing the one already on
+          clears it, so the strip can never disagree with the list. */}
+      <KpiTiles label="Provider queues" className="mb-4" tiles={[
+        {
+          key: "quoting", label: "Out to partners", value: quoting, icon: Send,
+          tone: quoting ? "brand" : "neutral", active: queue === "QUOTING",
+          onPress: () => { setQueue((on) => (on === "QUOTING" ? "" : "QUOTING")); setPage(1); },
+        },
+        {
+          key: "awaiting", label: "Awaiting the carrier", value: awaiting, icon: Clock,
+          tone: awaiting ? "warn" : "neutral", active: queue === "AWAITING_CARRIER",
+          onPress: () => {
+            setQueue((on) => (on === "AWAITING_CARRIER" ? "" : "AWAITING_CARRIER"));
+            setPage(1);
+          },
+        },
+        {
+          key: "settled", label: "Provider fixed", value: settled, icon: CheckCircle2,
+          tone: settled ? "ok" : "neutral", active: queue === "SETTLED",
+          onPress: () => { setQueue((on) => (on === "SETTLED" ? "" : "SETTLED")); setPage(1); },
+        },
+      ] satisfies KpiTileSpec[]} />
 
       <ErrorBanner error={error} />
 
@@ -243,7 +267,7 @@ export function ProviderSelectionPage() {
           </div>
         </div>
         <ResponsiveList
-          data={rows}
+          data={visible}
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}

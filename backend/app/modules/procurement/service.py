@@ -13,7 +13,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from datetime import date
-from sqlalchemy import func, select, true, or_
+from sqlalchemy import exists, func, select, true, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -36,6 +36,8 @@ from app.modules.procurement.schemas import (
 )
 from app.modules.procurement import consolidation, ledger
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
+from app.platform.mail import service as mail_service
+from app.platform.mail.schemas import MailSendIn
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.service import get_user_permissions
 from app.platform.settings.service import get_setting, write_audit
@@ -99,11 +101,25 @@ async def _apply_po_header(db: AsyncSession, po: PurchaseOrder, data) -> None:
     if getattr(data, "project_id", None):
         po.project_id = data.project_id
         _, po.project_name = await _place_names(db, None, data.project_id)
+    # FIXED 2026-08-23 — this wrote all six unconditionally, so a caller that did not
+    # mention a term BLANKED it. The PO detail screen opened its header form empty and
+    # sent those blanks straight back, which meant opening a saved order and pressing
+    # Save or Amend silently destroyed every term and address on it. The rule the
+    # docstring above already claims for `project_id` now actually holds for all of
+    # them: absent (None) leaves what is on the order, and an explicit "" clears it,
+    # so a buyer can still take a term back off.
     for field in ("payment_terms", "delivery_terms", "material_terms",
                   "logistics_terms", "billing_address", "shipping_address"):
-        setattr(po, field, getattr(data, field, None) or None)
-    po.discount_amount = _d(getattr(data, "discount_amount", 0) or 0)
-    po.freight_amount = _d(getattr(data, "freight_amount", 0) or 0)
+        value = getattr(data, field, None)
+        if value is None:
+            continue
+        setattr(po, field, value.strip() or None)
+    # Both columns are NOT NULL, so these are assigned only when the caller named a
+    # number. Omitted, the order keeps what it had (or the column default on create).
+    if getattr(data, "discount_amount", None) is not None:
+        po.discount_amount = _d(data.discount_amount)
+    if getattr(data, "freight_amount", None) is not None:
+        po.freight_amount = _d(data.freight_amount)
 
 
 def _apply_po_totals(po: PurchaseOrder, sub_total: Decimal, tax_total: Decimal) -> None:
@@ -554,6 +570,9 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
             item_code=line.item_code, item_name=line.item_name,
             uom_code=line.uom_code, quantity=quantity, rate=_d(line.rate),
             tax_percent=_d(line.tax_percent or 0), amount=amount,
+            # What the vendor promised on this line, kept with the line rather than
+            # summarised into the header date above.
+            delivery_days=line.delivery_days,
         ))
 
     # The offer's own document-level money, carried across so the order comes to the
@@ -568,6 +587,25 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         po.freight_amount = _d(quote.freight_amount or 0)
     if not _d(po.discount_amount or 0):
         po.discount_amount = _d(quote.discount_amount or 0)
+
+    # FIXED 2026-08-23 — the offer's PROMISES, carried across the same way its money
+    # already was. The vendor states both on the portal quotation form, and neither
+    # reached the order: a PO raised from an award came out with no payment terms and
+    # no expected date, and the buyer retyped what the vendor had already committed to
+    # — or, more often, did not, and the order went out silent on when it is due.
+    #
+    # `RFQDetailPage` raises the PO with an EMPTY body (`createFromQuotation(id)`), so
+    # in practice the caller never says anything here and the quote always wins. The
+    # "only if the caller stayed silent" guard is still the right rule: a buyer who
+    # typed a figure has negotiated it, and an acceptance must not overwrite them.
+    if not (po.payment_terms or "").strip():
+        po.payment_terms = (quote.payment_terms or "").strip() or None
+    if po.expected_date is None:
+        # The date the vendor said they can deliver by. `delivery_days` is per line and
+        # is a DURATION, not a date — rolling it up here would invent a promise the
+        # quotation never made, so only the explicit date is used.
+        po.expected_date = quote.expected_delivery_date
+
     _apply_po_totals(po, sub_total, tax_total)
 
     if requisition is not None:
@@ -881,7 +919,19 @@ async def send_to_vendor(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
     po.vendor_response_note = None
     await db.commit()
     await db.refresh(po)
-    return po
+
+    # NEW 2026-08-23 — the supplier gets their COPY of the order, not just a row in a
+    # portal they have to remember to open. Sent from here and nowhere else: this is
+    # the one moment an approved order is committed to a vendor, so an amended order
+    # is emailed again when it is re-sent, and a revision still sitting in our own
+    # approval is never mailed out. Re-read first because the body prints the lines
+    # and `refresh` above only reloads the header.
+    #
+    # Deliberately after the commit and unable to raise — the order HAS been sent, and
+    # a mailbox being down must not roll that back or fail the request.
+    sent = await get_po(db, po_id, user)
+    await email_po_copy(db, sent, user)
+    return sent
 
 
 # --------------------------------------------------------------------------- #
@@ -990,6 +1040,42 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
             f"({despatched}). Amend after the goods are received, or ask the vendor to "
             "cancel that despatch note first."
         )
+    # REVISED 2026-08-23 — amendment has a WINDOW, and it opens at the vendor's yes:
+    #
+    #     accepted  ->  ...amendable...  ->  first despatch (closed by the check above)
+    #
+    # Before the acceptance there is nothing to amend. An order still in our own
+    # approval, or approved and not yet sent, has never been agreed by anybody, so
+    # changing it is just EDITING it — the way to do that is reject and re-raise, which
+    # is the audit trail doing its job. Offering Amend there produced a revision of a
+    # document no counterparty had ever seen, and dropped it back to DRAFT to be
+    # re-approved for a change nobody outside had been told about.
+    #
+    # And an order sitting unanswered with the supplier is not ours to rewrite
+    # underneath them: they are being asked about THIS version, and changing it while
+    # the question is open means their yes lands on something else.
+    #
+    # The one allowance is legacy: orders SENT before the acceptance rung existed carry
+    # no answer at all (`vendor_status` NULL) and are genuinely out with a vendor, so
+    # they stay amendable. The same allowance `_require_accepted` already makes, on the
+    # same test, for the same reason.
+    accepted = po.vendor_status == POVendorStatus.ACCEPTED.value
+    legacy_sent = (po.vendor_status is None
+                   and po.status == POStatus.SENT_TO_VENDOR.value)
+    if not (accepted or legacy_sent):
+        if po.vendor_status == POVendorStatus.PENDING.value:
+            raise ValidationError(
+                f"{po.po_no} is with {po.vendor_name or 'the supplier'} and has not "
+                "been answered yet. Amend it once they accept it, or cancel the order "
+                "and raise a new one.")
+        if po.vendor_status == POVendorStatus.REJECTED.value:
+            raise ValidationError(
+                f"{po.po_no} was declined by {po.vendor_name or 'the supplier'}, so "
+                "there is no agreement to amend. Raise a new order instead.")
+        raise ValidationError(
+            f"{po.po_no} has not been accepted by a supplier yet (it is {po.status}), "
+            "so there is no agreement to amend. Change it while it is a draft, or "
+            "reject it and raise it again.")
     if not (data.reason or "").strip():
         raise ValidationError("Say why the order is being amended")
 
@@ -1099,6 +1185,111 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
                 previous_status, ", vendor had accepted" if was_accepted else "",
                 po.amendment_reason)
     return await get_po(db, po.id, user)
+
+
+def _po_copy_html(po: PurchaseOrder) -> str:
+    """The order, as the supplier's own copy of it.
+
+    Built from the stored document and nothing else, so the email cannot say something
+    the PO does not. Plain inline-styled HTML rather than a PDF: there is no
+    server-side renderer (the print view is a React route, `/pos/:id/print`, which only
+    exists behind a login the vendor does not have) and the mail client attaches
+    nothing today. A copy they can read in their inbox is the thing that was asked for;
+    a PDF attachment is a bigger change and can replace this body later without moving
+    anything else.
+    """
+    def esc(value) -> str:
+        return (str(value if value is not None else "")
+                .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    def money(value) -> str:
+        return f"{float(value or 0):,.2f}"
+
+    rows = "".join(
+        f"<tr>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee'>{esc(line.item_code)}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee'>{esc(line.item_name)}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>"
+        f"{money(line.quantity)} {esc(line.uom_code)}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>"
+        f"{money(line.rate)}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>"
+        f"{money(line.amount)}</td>"
+        f"</tr>"
+        for line in po.items
+    )
+    terms = "".join(
+        f"<p style='margin:2px 0'><b>{esc(label)}:</b> {esc(text)}</p>"
+        for label, text in (
+            ("Payment terms", po.payment_terms),
+            ("Delivery terms", po.delivery_terms),
+            ("Material terms", po.material_terms),
+            ("Logistics terms", po.logistics_terms),
+            ("Bill to", po.billing_address),
+            ("Ship to", po.shipping_address),
+        ) if text
+    )
+    revised = (f"<p style='color:#b45309'><b>Revision {po.revision_no}</b>"
+               f"{' — ' + esc(po.amendment_reason) if po.amendment_reason else ''}</p>"
+               if (po.revision_no or 0) > 0 else "")
+    return (
+        f"<div style='font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111'>"
+        f"<h2 style='margin:0 0 4px'>Purchase order {esc(po.po_no)}</h2>"
+        f"{revised}"
+        f"<p style='margin:2px 0'><b>Date:</b> {esc(po.po_date)}"
+        f"{f' &nbsp;·&nbsp; <b>Expected:</b> {esc(po.expected_date)}' if po.expected_date else ''}</p>"
+        f"<p style='margin:2px 0'><b>To:</b> {esc(po.vendor_name)}</p>"
+        f"{terms}"
+        f"<table style='border-collapse:collapse;width:100%;margin-top:12px'>"
+        f"<thead><tr style='background:#f5f5f5'>"
+        f"<th style='padding:6px 8px;text-align:left'>Code</th>"
+        f"<th style='padding:6px 8px;text-align:left'>Item</th>"
+        f"<th style='padding:6px 8px;text-align:right'>Qty</th>"
+        f"<th style='padding:6px 8px;text-align:right'>Rate</th>"
+        f"<th style='padding:6px 8px;text-align:right'>Amount</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table>"
+        f"<p style='margin-top:12px;text-align:right'>"
+        f"Sub-total {money(po.sub_total)}<br>"
+        f"Discount {money(po.discount_amount)}<br>"
+        f"Tax {money(po.tax_amount)}<br>"
+        f"Freight {money(po.freight_amount)}<br>"
+        f"<b style='font-size:16px'>Total {money(po.total_amount)}</b></p>"
+        f"{f'<p><b>Remarks:</b> {esc(po.remarks)}</p>' if po.remarks else ''}"
+        f"<p style='color:#666;font-size:12px;margin-top:16px'>"
+        f"Accept or decline this order in your supplier portal.</p></div>"
+    )
+
+
+async def email_po_copy(db: AsyncSession, po: PurchaseOrder, user) -> bool:
+    """Email the supplier their copy of the order. Returns whether it went.
+
+    NEVER raises, for the same reason `notify_vendor` does not: the order has already
+    been sent (or amended) and committed by the time this runs, and a mailbox that is
+    down, unconfigured, or holds no address for this vendor must not undo that. Every
+    failure is logged, and `platform.mail` writes its own row to the Sent log either
+    way, so a buyer asking "did they get it?" has somewhere to look.
+
+    No new permission: this is a side effect of `po.send` and `po.edit`, never its own
+    route, so nothing here widens what anybody can do.
+    """
+    try:
+        vendor = await db.get(Vendor, po.vendor_id) if po.vendor_id else None
+        address = (getattr(vendor, "email", None) or "").strip()
+        if not address:
+            logger.info("no email on file for vendor %s; %s not sent",
+                        po.vendor_name or po.vendor_id, po.po_no)
+            return False
+        subject = f"Purchase order {po.po_no}"
+        if (po.revision_no or 0) > 0:
+            subject += f" — revision {po.revision_no}"
+        await mail_service.send_mail(
+            db, MailSendIn(to=[address], subject=subject,
+                           body=_po_copy_html(po)), user)
+        logger.info("%s emailed to %s", po.po_no, address)
+        return True
+    except Exception as exc:  # noqa: BLE001 - a courtesy must not cost the order
+        logger.warning("could not email %s to the vendor: %s", po.po_no, exc)
+        return False
 
 
 async def notify_vendor(db: AsyncSession, vendor_id: int | None, *, title: str,
@@ -3151,8 +3342,60 @@ _VENDOR_READABLE = _DESPATCHABLE + (
 )
 
 
+def _was_issued_to_vendor():
+    """Has this order ever been shown to the vendor?
+
+    True when a filed revision was taken at a vendor-readable status — proof the order
+    left the building at least once. That is what separates an order being REVISED
+    from an internal draft the vendor was never told about, and it is read off
+    `pro_po_revisions`, which `amend_po` writes before it touches anything.
+    """
+    return exists().where(
+        PORevision.po_id == PurchaseOrder.id,
+        PORevision.status.in_(_VENDOR_READABLE),
+    )
+
+
+def _vendor_visible():
+    """What a vendor may SEE: an order they hold, or one being revised on them.
+
+    NEW 2026-08-23. `amend_po` drops an order back to DRAFT and clears the answer, and
+    DRAFT is not vendor-readable — so an amendment made the order VANISH off the
+    supplier's portal until somebody internally re-approved and re-sent it, at which
+    point it reappeared and read as a brand new order. Worse, `amend_po` notifies the
+    vendor with a deep link to the very order they could no longer open, so the one
+    message telling them anything had changed led to a 404. That is the whole of
+    "the supplier isn't told their order was amended".
+
+    Widened for READS ONLY. `_vendor_po` below is unchanged and still guards every
+    write, so a vendor can watch a revision happen and can neither answer it nor
+    despatch against it until we re-issue it.
+    """
+    return or_(PurchaseOrder.status.in_(_VENDOR_READABLE), _was_issued_to_vendor())
+
+
+async def _vendor_po_visible(db: AsyncSession, vendor_id: int,
+                             po_id: int) -> PurchaseOrder:
+    """One order a vendor may READ. Never a write path — see `_vendor_po`."""
+    po = (await db.execute(
+        select(PurchaseOrder).where(
+            PurchaseOrder.id == po_id,
+            PurchaseOrder.vendor_id == vendor_id,
+            _vendor_visible(),
+        )
+    )).scalars().first()
+    if po is None:
+        raise NotFoundError(f"Purchase order {po_id} not found")
+    return po
+
+
 async def _vendor_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOrder:
-    """One order, only if it belongs to this vendor and they have been sent it."""
+    """One order a vendor may ACT on — belongs to them, and is currently issued.
+
+    Deliberately NOT widened to orders under revision: answering or despatching
+    against a version we have taken back into approval is exactly what must not
+    happen. Reads go through `_vendor_po_visible`.
+    """
     po = (await db.execute(
         select(PurchaseOrder).where(
             PurchaseOrder.id == po_id,
@@ -3237,8 +3480,7 @@ async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams,
                           status: str | None = None) -> dict:
     """The orders this vendor has been sent. Never anyone else's, never a draft."""
     stmt = (select(PurchaseOrder)
-            .where(PurchaseOrder.vendor_id == vendor_id,
-                   PurchaseOrder.status.in_(_VENDOR_READABLE)))
+            .where(PurchaseOrder.vendor_id == vendor_id, _vendor_visible()))
 
     # Apply real-time search filtering for the supplier portal if a search query is
     # provided. Over the order number and the RFQ/quotation numbers snapshotted on it
@@ -3251,8 +3493,7 @@ async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams,
     # Narrowing only, and only WITHIN what this vendor may already read: an unknown or
     # internal status filters to nothing rather than widening the scope.
     if status:
-        stmt = stmt.where(PurchaseOrder.status == status,
-                          PurchaseOrder.status.in_(_VENDOR_READABLE))
+        stmt = stmt.where(PurchaseOrder.status == status, _vendor_visible())
     stmt = stmt.order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc())
     page = await paginate(db, stmt, params)
     counts = dict((await db.execute(
@@ -3263,12 +3504,22 @@ async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams,
     )).all())
     for row in page["items"]:
         row.despatch_note_count = counts.get(row.id, 0)
+        # Derived, never stored: the row is on the board because it was issued once,
+        # but its CURRENT status is not one the vendor holds — it is back with us
+        # being revised, and nothing may be done against it until we re-issue it.
+        row.under_revision = row.status not in _VENDOR_READABLE
     return page
 
 
 async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOrder:
-    """One order with what is still owed on each line, and the notes filed so far."""
-    po = await _vendor_po(db, vendor_id, po_id)
+    """One order with what is still owed on each line, and the notes filed so far.
+
+    Read scope, so an order being revised still opens — that is where the amendment
+    notification points, and `revision_no` / `amendment_reason` on the payload say what
+    changed and why. `under_revision` tells the portal to show it read-only.
+    """
+    po = await _vendor_po_visible(db, vendor_id, po_id)
+    po.under_revision = po.status not in _VENDOR_READABLE
     already = await _despatched_by_po_item(db, po.id)
 
     po.lines = [
@@ -3293,7 +3544,7 @@ async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> Purchas
 
 async def vendor_po_revisions(db: AsyncSession, vendor_id: int, po_id: int) -> list:
     """The vendor gets to see the revisions for an order sent to them."""
-    await _vendor_po(db, vendor_id, po_id)  # Auth check
+    await _vendor_po_visible(db, vendor_id, po_id)  # Auth check (read scope)
     return list((await db.execute(
         select(PORevision).where(PORevision.po_id == po_id)
         .order_by(PORevision.revision_no.desc(), PORevision.id.desc())

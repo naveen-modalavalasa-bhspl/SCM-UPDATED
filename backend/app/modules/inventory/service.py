@@ -971,6 +971,11 @@ async def get_mr(db: AsyncSession, mr_id: int, user=None) -> MaterialRequest:
         link = chain[index] if 0 <= index < len(chain) else None
         if isinstance(link, dict):
             mr.current_stage_name = link.get("role_name") or link.get("position_name")
+        # Same question `engine.act` asks before it accepts a decision, asked early so
+        # the screen can decline to offer a button it would refuse. Only ever computed
+        # while the request IS in approval — there is no turn to be yours otherwise.
+        if user is not None:
+            mr.can_act = await engine.can_act_now(db, DocType.MR.value, mr.id, user)
     return mr
 
 

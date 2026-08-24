@@ -1,5 +1,6 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
-import { ArrowDownRight, ArrowUpRight } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { ArrowDownRight, ArrowLeft, ArrowUpRight } from "lucide-react";
 import {
   Autocomplete,
   AutocompleteItem,
@@ -65,8 +66,31 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
   );
 }
 
-export function PageHeader({ eyebrow: _eyebrow, title, actions }: { eyebrow?: string; title: string; actions?: ReactNode }) {
+export function PageHeader({ eyebrow: _eyebrow, title, actions, back }: {
+  eyebrow?: string;
+  title: string;
+  actions?: ReactNode;
+  /** The way out of a screen you arrived AT rather than navigated to.
+   *
+   *  NEW 2026-08-23. Indents grew this by hand (`indents/pages/DetailPage`) — a
+   *  muted, 44px-tall labelled link sitting just above the title — and every other
+   *  module's detail and form screens had nothing, so the only way back off a
+   *  requisition, an RFQ, a consolidation or a shipment was the browser button or the
+   *  rail, which drops you at the module's first tab rather than the list you came
+   *  from. Defined here rather than copied a fourteenth time, so the placement and
+   *  the tap target are one decision.
+   *
+   *  It names its destination — "Back to All indents", never a bare arrow: an arrow
+   *  alone makes the reader guess where it lands, and on a form that has unsaved work
+   *  in it that guess is expensive.
+   *
+   *  A screen reached from the rail does not take one. Nothing to go back TO is not
+   *  the same as going back to the dashboard. */
+  back?: { to: string; label: string };
+}) {
   return (
+    <>
+      {back && <BackLink to={back.to} label={back.label} />}
     <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
       {/* The eyebrow is accepted and deliberately not drawn (2026-08-22). The sticky
           header names the module and the tab strip beside it names the screen, so a
@@ -78,6 +102,23 @@ export function PageHeader({ eyebrow: _eyebrow, title, actions }: { eyebrow?: st
        * sideways without it. The outer div already wraps; this one has to as well. */}
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>
+    </>
+  );
+}
+
+/** The back link itself, exported so a screen computing its destination at render
+ *  time (Indents' detail page picks between four, depending on where the reader came
+ *  from) can place it without going through `PageHeader`. */
+export function BackLink({ to, label }: { to: string; label: string }) {
+  const nav = useNavigate();
+  return (
+    <button
+      type="button"
+      onClick={() => nav(to)}
+      className="mb-3 inline-flex min-h-11 items-center gap-1.5 text-sm font-medium text-muted transition-colors hover:text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30 rounded"
+    >
+      <ArrowLeft className="h-4 w-4" /> {label}
+    </button>
   );
 }
 

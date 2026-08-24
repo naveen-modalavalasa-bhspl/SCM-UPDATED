@@ -2,8 +2,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, FileSpreadsheet, MapPin, ScanLine, X } from "lucide-react";
-import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
+import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, Download, MapPin, ScanLine, X } from "lucide-react";
+import {
+  Button, Card, KpiTiles, PageHeader, ResponsiveGrid, ResponsiveList,
+  type Column, type KpiTileSpec,
+} from "@/shared/components";
 import { FilterBar, FilterSelect, FilterToggle, FilterSelect as FilterMenu,
 } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
@@ -238,8 +241,11 @@ export function StockBalanceView() {
     queryKey: ["stock-summary", summaryFilters],
     queryFn: () => getStockSummary(summaryFilters),
   });
+  // `undefined`, not "—", while the count is in flight: the KPI strip draws a skeleton
+  // for undefined and an em dash only when the request actually FAILED, and those are
+  // different things to tell a reader. 0 stays 0 — a real answer, never a blank.
   const stat = (n?: number) =>
-    summaryLoading || n === undefined ? "—" : n.toLocaleString("en-IN");
+    summaryLoading || n === undefined ? undefined : n.toLocaleString("en-IN");
 
   // Per-unit identity for the rows on screen. A balance row is a LOT, and its single
   // serial_number column cannot hold the 88 units a lot can contain, so the codes are
@@ -471,53 +477,64 @@ export function StockBalanceView() {
         title="Stock Balance"
         actions={
           <>
-            {/* `subtle` rendered as unstyled grey text next to the filters and read as
-                disabled. Export is a real action — give it the secondary treatment. */}
-            <Button variant="secondary" disabled={rows.length === 0} onClick={exportCsv}>
-              <FileSpreadsheet size={14} /> Export CSV
+            {/* Header actions are `ghost` with a 16px icon, app-wide (2026-08-23). The same
+                Export button was `primary` on Stock Ledger, `secondary` here and
+                `subtle` on Adjustments — three weights for one action, so the eye
+                read them as three different levels of importance. Approvals' Export
+                is the reference; a solid fill in the header competes with the one
+                button on the page that CREATES something. */}
+            <Button variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
+              <Download className="h-4 w-4" /> Export CSV
             </Button>
-            <Button variant="primary" onClick={() => navigate("/inventory/labels")}>
-              <TagIcon size={14} /> Labels & Printing
+            <Button variant="ghost" onClick={() => navigate("/inventory/labels")}>
+              <TagIcon className="h-4 w-4" /> Labels & Printing
             </Button>
           </>
         }
       />
 
-      {/* An em dash while the count is in flight. Rendering 0 0 0 0 read as a real
-          answer — "no stock, nothing expiring" — on a screen that was still loading. */}
-      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
-        {/* On hand is the figure Stocking Points puts on its own card, counted by the
-            same query over the same rows. It is first because it is the number the two
-            screens get read against each other on; without it here the only comparable
-            figure was a row count, which is not a quantity. */}
-        <StatCard
-          label="On Hand"
-          value={summaryLoading || summary?.total_qty === undefined
-            ? "—"
-            : summary.total_qty.toLocaleString("en-IN", { maximumFractionDigits: 3 })}
-          icon={<Boxes size={16} />}
-        />
-        <StatCard label="Stock Lines" value={stat(summary?.stock_lines)} icon={<Layers size={16} />} />
-        <StatCard label="Distinct Items" value={stat(summary?.distinct_items)} icon={<Boxes size={16} />} />
-        {/* Hidden, not zeroed, when no item in the master carries a reorder level: a
-            "Below Reorder 0" tile reads as "nothing needs ordering" when the truth is
-            that nobody has said what low means yet. Comes back on its own the moment a
-            reorder level is set on any item. */}
-        {summary?.reorder_configured !== false && (
-          <StatCard
-            label="Below Reorder"
-            value={stat(summary?.below_reorder)}
-            icon={<TriangleAlert size={16} />}
-            tone={summary?.below_reorder ? "text-danger" : "text-muted"}
-          />
-        )}
-        <StatCard
-          label="Expiring ≤30d"
-          value={stat(summary?.expiring_30_days)}
-          icon={<CalendarClock size={16} />}
-          tone={summary?.expiring_30_days ? "text-warning" : "text-muted"}
-        />
-      </div>
+      {/* `undefined` while a count is in flight — the strip draws a skeleton for it.
+          Rendering 0 0 0 0 read as a real answer ("no stock, nothing expiring") on a
+          screen that was still loading.
+
+          The first three are READ-OUTS and say so by taking no `onPress`: "on hand" is
+          a quantity, not a set of rows, and narrowing the list to "distinct items"
+          means nothing. The last two ARE sets, and each is the filter it counts. A
+          tile that cannot filter must not pretend it can — a press that does nothing
+          is worse than no press at all. */}
+      <KpiTiles label="Stock summary" className="mb-4" tiles={[
+        {
+          key: "on_hand", label: "On hand", icon: Boxes, tone: "brand",
+          // Counted by the same query over the same rows as Stocking Points, and first
+          // because it is the number the two screens get read against each other on.
+          value: summaryLoading || summary?.total_qty === undefined
+            ? undefined
+            : summary.total_qty.toLocaleString("en-IN", { maximumFractionDigits: 3 }),
+        },
+        { key: "lines", label: "Stock lines", value: stat(summary?.stock_lines),
+          icon: Layers, tone: "info" },
+        { key: "items", label: "Distinct items", value: stat(summary?.distinct_items),
+          icon: Boxes, tone: "info" },
+        // Hidden, not zeroed, when no item in the master carries a reorder level: a
+        // "Below reorder 0" tile reads as "nothing needs ordering" when the truth is
+        // that nobody has said what low means yet. Comes back on its own the moment a
+        // reorder level is set on any item.
+        ...(summary?.reorder_configured === false ? [] : [{
+          key: "reorder", label: "Below reorder", value: stat(summary?.below_reorder),
+          icon: TriangleAlert, tone: summary?.below_reorder ? "bad" : "neutral",
+          active: belowReorder,
+          onPress: () => { setBelowReorder((on) => !on); setPage(1); },
+        } as KpiTileSpec]),
+        {
+          key: "expiring", label: "Expiring ≤30d", value: stat(summary?.expiring_30_days),
+          icon: CalendarClock, tone: summary?.expiring_30_days ? "warn" : "neutral",
+          active: expiringIn === "30",
+          onPress: () => {
+            setExpiringIn((on) => (on === "30" ? "" : "30"));
+            setPage(1);
+          },
+        },
+      ] satisfies KpiTileSpec[]} />
 
       {/* One unit, found by whatever identity is printed on it. This is the answer to
           "where is THIS thing", which a list of lots cannot give. */}

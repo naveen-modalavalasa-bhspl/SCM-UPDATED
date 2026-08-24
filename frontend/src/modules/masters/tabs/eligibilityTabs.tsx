@@ -52,9 +52,46 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
     staleTime: 5 * 60_000,
   });
 
+  /**
+   * The pickable scopes.
+   *
+   * A ROLE row carries its CODE and how many people hold it, because the name alone
+   * is not an identity here: `rbac_roles` holds a dozen rows called some variant of
+   * "Store Keeper" — the HCM-mirrored one, the job-profile one, and whatever an HCM
+   * re-key left behind — and only the code says which is which.
+   *
+   * `holders` is the number that matters. Eligibility resolves through the grants a
+   * person actually has, so tagging a role nobody holds restricts the item to an
+   * audience of zero. That is not hypothetical: every item in the catalogue was once
+   * tagged to three 0-holder Store Keeper rows at once, and the picker went empty for
+   * the whole company with nothing on screen to explain it.
+   *
+   * Shown, never filtered out. Hiding the empty roles would drop a real role that
+   * simply has not been granted yet, and would have explained none of the above.
+   */
   const scopeOptions = useMemo(() => (
-    kind === "ROLE" ? (scopes.data?.roles ?? []) : (scopes.data?.regions ?? [])
-  ).map((row) => ({ value: String(row.id), label: row.name })), [kind, scopes.data]);
+    kind === "ROLE"
+      ? (scopes.data?.roles ?? []).map((row) => {
+          // Folded into the LABEL rather than a second line: `SelectOption` is
+          // {value,label} and giving the shared control a `hint` slot means changing
+          // it for all ~30 call sites, which is a bigger change than this screen has
+          // earned. The row still says the two things that matter.
+          const code = row.code && row.code.toLowerCase() !== row.name.toLowerCase()
+            ? ` · ${row.code}` : "";
+          const held = row.holders === undefined ? ""
+            : row.holders === 0 ? " — nobody holds this"
+              : ` — ${row.holders} ${row.holders === 1 ? "person" : "people"}`;
+          return { value: String(row.id), label: `${row.name}${code}${held}` };
+        })
+      : (scopes.data?.regions ?? []).map((row) => ({
+          value: String(row.id), label: row.name,
+        }))
+  ), [kind, scopes.data]);
+
+  /** The role currently picked, so the screen can say plainly when it is a dead one. */
+  const pickedRole = kind === "ROLE"
+    ? (scopes.data?.roles ?? []).find((r) => String(r.id) === scopeId)
+    : undefined;
 
   const current = useQuery({
     queryKey: ["masters", "item-eligibility", "assignments", kind, scopeId],
@@ -168,6 +205,17 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
             placeholder={kind === "ROLE" ? "Pick a role…" : "Pick a region…"}
             className="min-w-64 flex-1"
           />
+          {/* Said out loud, not just implied by "— nobody holds this" in the dropdown
+              row that is now closed. Tagging items to a role no one holds hides them
+              from EVERYONE, which is the opposite of what the person doing it intends,
+              and it is invisible afterwards: the items simply stop appearing. */}
+          {pickedRole?.holders === 0 && (
+            <p className="w-full text-xs font-medium text-warn">
+              Nobody currently holds <strong>{pickedRole.name}</strong>
+              {pickedRole.code ? ` (${pickedRole.code})` : ""}. Items tagged to it will
+              be hidden from every requester until somebody is granted this role.
+            </p>
+          )}
           <div className="ml-auto flex items-center gap-2">
             {dirty && (
               <span className="text-xs font-medium text-warn">Unsaved changes</span>

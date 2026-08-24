@@ -175,11 +175,8 @@ export function ProcurementLedgerPage() {
   return (
     <div>
       <PageHeader eyebrow="Procurement" title="Procurement Ledger" />
-      <p className="mb-4 max-w-[75ch] text-sm text-body">
-        Every requisition, RFQ, quotation and purchase order, newest first. Read-only —
-        nothing is written for this register, so it can only ever show what the
-        documents themselves carry. Raised from is what each one came off, which is how
-        a single order can be traced back to the request that started it.
+      <p className="mb-4 text-sm text-muted">
+        Every requisition, RFQ, quotation and purchase order, newest first.
       </p>
 
       {/* One tile per rung of the buying chain, counting what the register is showing

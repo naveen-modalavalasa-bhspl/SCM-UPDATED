@@ -32,8 +32,12 @@ class POHeaderIn(BaseModel):
     logistics_terms: str | None = None
     billing_address: str | None = None
     shipping_address: str | None = None
-    discount_amount: float = Field(ge=0, default=0)
-    freight_amount: float = Field(ge=0, default=0)
+    # None means "say nothing about this", not zero. They defaulted to 0, which made
+    # a payload that simply omitted them indistinguishable from one asking for no
+    # discount — so every save that did not carry them reset both to zero. An explicit
+    # 0 still clears them; the columns are NOT NULL, so None is never written through.
+    discount_amount: float | None = Field(ge=0, default=None)
+    freight_amount: float | None = Field(ge=0, default=None)
 
 
 class POCreate(POHeaderIn):
@@ -163,6 +167,8 @@ class POItemOut(BaseModel):
     rate: float
     tax_percent: float
     amount: float
+    # Days the vendor quoted for this line; None on a PO with no quotation behind it.
+    delivery_days: int | None = None
     received_quantity: float
 
 
@@ -890,6 +896,10 @@ class VendorPOOut(BaseModel):
     vendor_response_note: str | None = None
     revision_no: int = 0
     amendment_reason: str | None = None
+    # Derived, never stored: the order was issued to this vendor once and has since
+    # been amended, so it is back with the buyer being re-approved. Read-only to them
+    # until it is re-issued — see `_vendor_visible` in service.py.
+    under_revision: bool = False
     payment_terms: str | None = None
     delivery_terms: str | None = None
     material_terms: str | None = None
@@ -911,6 +921,7 @@ class VendorPOListRow(BaseModel):
     status: str
     total_amount: float
     despatch_note_count: int = 0
+    under_revision: bool = False
 
 
 class VendorNotificationOut(BaseModel):

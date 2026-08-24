@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch,
@@ -10,11 +9,9 @@ import {
   StatCard, useAction, type Column,
 } from "@/shared/components";
 import { rbacApi } from "../api";
-import { PermissionMatrix } from "../components/PermissionMatrix";
 import { ReportingView } from "../components/ReportingView";
 import { AccessLookup } from "../components/AccessLookup";
-// Aliased: the component below is also called PageAccessMatrix.
-import type { AdminUserRow, GrantResult, PageAccessMatrix as PageAccessData } from "../types";
+import type { AdminUserRow, GrantResult } from "../types";
 
 const PAGE_SIZE = 50;
 /** Departments and posts move only when HCM syncs — long enough that re-reading them
@@ -28,8 +25,19 @@ const HCM_STALE_MS = 5 * 60 * 1000;
  */
 export function UsersPage() {
   const qc = useQueryClient();
+  // REMOVED 2026-08-23 — "pages", "features" and "matrix". Those three tabs granted
+  // against an HCM ROLE, and HCM role 29 "MANAGER" covers fifteen unrelated jobs, so
+  // ticking Inventory on that row gave Inventory to all fifteen. Job Profiles replaced
+  // them (see `pages/JobProfilesPage`), which is the same grant made against the real
+  // job — but the old tabs stayed on screen beside it, so this page offered three
+  // routes to a wrong answer next to one route to the right one.
+  //
+  // The COMPONENTS are still in this file and still exported nowhere else; nothing is
+  // deleted and no endpoint or permission changed, so putting a tab back is one line.
+  // The Job profiles link goes too: it is a menu row of its own in the rail above, and
+  // a tab strip that repeats what the nav already says is the nav saying it twice.
   const [view, setView] = useState<
-    "users" | "pages" | "features" | "matrix" | "reporting" | "lookup">("users");
+    "users" | "reporting" | "lookup">("users");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "with" | "without">("all");
   const [roleId, setRoleId] = useState<number | null>(null);
@@ -150,9 +158,6 @@ export function UsersPage() {
       <div className="mb-5 flex gap-6 border-b border-line">
         {([
           ["users", "Users & roles"],
-          ["pages", "Page access"],
-          ["features", "Feature controls"],
-          ["matrix", "Permission matrix"],
           ["reporting", "Reporting"],
           ["lookup", "Access lookup"],
         ] as const).map(
@@ -170,17 +175,6 @@ export function UsersPage() {
             </button>
           ),
         )}
-        {/* Job Profiles is a route, not one of the local views above — it replaces the
-         *  HCM role as the grant unit and sits beside the old screens rather than
-         *  folded into them. Shipped in v1.3, so it is no longer dev-only; the menu
-         *  entry is gated by rbac_pages and its permission like every other screen. */}
-        <Link
-          to="/rbac/job-profiles"
-          className="border-b-2 border-transparent px-1 pb-3 text-sm font-semibold
-                     text-muted hover:text-body"
-        >
-          Job profiles
-        </Link>
       </div>
 
       {view === "users" ? (
@@ -313,16 +307,10 @@ export function UsersPage() {
         </div>
       )}
         </>
-      ) : view === "pages" ? (
-        <PageAccessMatrix />
-      ) : view === "matrix" ? (
-        <PermissionMatrix />
       ) : view === "reporting" ? (
         <ReportingView />
-      ) : view === "lookup" ? (
-        <AccessLookup />
       ) : (
-        <FeatureAccessMatrix />
+        <AccessLookup />
       )}
 
       <Modal isOpen={selected !== null} onOpenChange={() => setSelected(null)}
@@ -484,278 +472,17 @@ export function UsersPage() {
 }
 
 
-type AccessPage = PageAccessData["pages"][number];
-
-/** Pages that are granted and revoked together, because they share one permission. */
-interface PageGroup {
-  permission: string | null;
-  pages: AccessPage[];
-  alwaysOn: boolean;
-}
-
-/**
- * Pages sharing a `required_permission` are one switch, not many.
+/* REMOVED 2026-08-23 — `PageAccessMatrix` and `FeatureAccessMatrix` (and the
+ * AccessPage/PageGroup helpers only they used) lived here, behind the Page access
+ * and Feature controls tabs. Both granted against an HCM ROLE, and HCM role 29
+ * "MANAGER" covers fifteen unrelated jobs — ticking Inventory there gave Inventory
+ * to all fifteen. RBAC > Job Profiles makes the same grant against the real job and
+ * has its own menu row, so these were three doors to a wrong answer standing beside
+ * one door to the right one.
  *
- * Access is stored only as role -> permission (`rbac_role_permissions`); there is no
- * per-page grant table. Twelve pages hang off `indent.view` alone. A column per page
- * therefore promised something the data cannot do: unticking one of the twelve left
- * the permission in place — because the other eleven still needed it — and the box
- * came straight back on the next refetch. The screen looked frozen.
- *
- * Grouping makes the control match what is actually stored, so every click sticks.
+ * The ENDPOINTS they called (/api/rbac/page-access, /api/rbac/feature-access) and
+ * their types are untouched — `rbacApi` still carries both, and the types are used
+ * by tests. Nothing server-side changed and no permission moved; this is a screen
+ * that stopped being offered, not access that stopped being possible.
  */
-export function groupPagesByPermission(pages: AccessPage[]): PageGroup[] {
-  const groups = new Map<string, PageGroup>();
-  pages.forEach((page) => {
-    // Always-on pages have no permission to share; each stands alone and is read-only.
-    const key = page.always_on ? `always:${page.code}` : `perm:${page.required_permission}`;
-    const existing = groups.get(key);
-    if (existing) existing.pages.push(page);
-    else groups.set(key, {
-      permission: page.required_permission ?? null,
-      pages: [page],
-      alwaysOn: page.always_on,
-    });
-  });
-  return [...groups.values()];
-}
 
-function PageAccessMatrix() {
-  const matrix = useQuery({
-    queryKey: ["rbac", "page-access"],
-    queryFn: rbacApi.pageAccess,
-  });
-  const update = useAction({
-    run: ({ roleId, pageCodes }: { roleId: number; pageCodes: string[] }) =>
-      rbacApi.setPageAccess(roleId, pageCodes),
-    success: "Page access updated",
-    invalidates: [["rbac", "page-access"]],
-  });
-
-  if (matrix.isLoading) {
-    return <div className="rounded-2xl border border-line bg-content1 p-8 text-sm text-muted">
-      Loading page access…
-    </div>;
-  }
-  if (!matrix.data) {
-    return <div className="rounded-2xl border border-line bg-content1 p-8 text-sm text-bad">
-      Page access could not be loaded.
-    </div>;
-  }
-
-  const groups = groupPagesByPermission(matrix.data.pages);
-
-  /** Every page in the group moves together — the permission behind them is one row. */
-  const toggle = (roleId: number, held: string[], group: PageGroup) => {
-    const codes = group.pages.map((page) => page.code);
-    const on = codes.every((code) => held.includes(code));
-    const next = on
-      ? held.filter((code) => !codes.includes(code))
-      : [...held, ...codes.filter((code) => !held.includes(code))];
-    update.mutate({ roleId, pageCodes: next });
-  };
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-line bg-content1">
-      <div className="border-b border-line px-5 py-4">
-        <h2 className="text-base font-semibold text-ink">Page access by role</h2>
-        <p className="mt-1 text-sm text-muted">
-          HCM roles are listed first. My Desk and other public pages are always available.
-          Pages that share a permission are granted together and are shown as one column.
-        </p>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-max border-collapse text-sm">
-          <thead className="bg-content2">
-            <tr>
-              <th className="sticky left-0 z-10 min-w-56 bg-content2 px-4 py-3 text-left font-semibold text-ink">
-                Role
-              </th>
-              {groups.map((group) => (
-                <th key={group.permission ?? group.pages[0].code}
-                    className="max-w-44 px-3 py-3 align-bottom text-center text-xs font-semibold text-body">
-                  <div className="uppercase tracking-wide">
-                    {group.pages.map((page) => page.name).join(" · ")}
-                  </div>
-                  {group.permission && (
-                    <div className="mt-1 font-mono text-[10px] font-normal normal-case text-muted">
-                      {group.permission}
-                      {group.pages.length > 1 && ` · ${group.pages.length} pages`}
-                    </div>
-                  )}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {matrix.data.roles.map((role) => (
-              <tr key={role.id} className="border-t border-line">
-                <td className="sticky left-0 z-10 bg-content1 px-4 py-3">
-                  <div className="font-semibold text-ink">{role.name}</div>
-                  <div className="text-[11px] font-medium text-muted">{role.source}</div>
-                </td>
-                {groups.map((group) => {
-                  const checked = group.alwaysOn
-                    || group.pages.every((page) => role.page_codes.includes(page.code));
-                  return (
-                    <td key={group.permission ?? group.pages[0].code} className="px-3 py-3 text-center">
-                      <button
-                        type="button"
-                        disabled={group.alwaysOn || update.isPending}
-                        title={
-                          group.alwaysOn
-                            ? "Always on"
-                            : `${role.name}: ${group.permission} — ${group.pages.map((p) => p.name).join(", ")}`
-                        }
-                        onClick={() => toggle(role.id, role.page_codes, group)}
-                        className={`inline-flex h-6 w-6 items-center justify-center rounded-md border transition ${
-                          checked
-                            ? group.alwaysOn
-                              ? "border-line bg-content2 text-muted"
-                              : "border-brand bg-brand text-white"
-                            : "border-line bg-content1 text-transparent hover:border-brand"
-                        }`}
-                      >
-                        <Check className="h-4 w-4" />
-                      </button>
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {update.isError && (
-        <div className="border-t border-line bg-bad-bg px-5 py-3 text-sm text-bad">
-          {(update.error as Error).message}
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-function FeatureAccessMatrix() {
-  const qc = useQueryClient();
-  const [search, setSearch] = useState("");
-  const matrix = useQuery({
-    queryKey: ["rbac", "feature-access"],
-    queryFn: rbacApi.featureAccess,
-  });
-  const update = useMutation({
-    mutationFn: ({
-      roleId, permissionCodes,
-    }: { roleId: number; permissionCodes: string[] }) =>
-      rbacApi.setFeatureAccess(roleId, permissionCodes),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rbac", "feature-access"] }),
-  });
-
-  if (matrix.isLoading) {
-    return <div className="rounded-2xl border border-line bg-content1 p-8 text-sm text-muted">
-      Loading feature controls…
-    </div>;
-  }
-  if (!matrix.data) {
-    return <div className="rounded-2xl border border-line bg-content1 p-8 text-sm text-bad">
-      Feature controls could not be loaded.
-    </div>;
-  }
-
-  const needle = search.trim().toLowerCase();
-  const features = matrix.data.features.filter((feature) =>
-    !needle
-    || feature.code.toLowerCase().includes(needle)
-    || feature.module.toLowerCase().includes(needle)
-    || feature.description.toLowerCase().includes(needle));
-  const toggle = (roleId: number, held: string[], permissionCode: string) => {
-    const next = held.includes(permissionCode)
-      ? held.filter((code) => code !== permissionCode)
-      : [...held, permissionCode];
-    update.mutate({ roleId, permissionCodes: next });
-  };
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-line bg-content1">
-      <div className="border-b border-line px-5 py-4">
-        <h2 className="text-base font-semibold text-ink">Feature controls by role</h2>
-        <p className="mt-1 text-sm text-muted">
-          Control actions such as raising, editing, submitting and approving indents.
-        </p>
-        <div className="relative mt-4 max-w-md">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-          <input
-            value={search}
-            onFocus={selectOnFocus}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search feature, e.g. Create indents"
-            className="h-10 w-full rounded-xl border border-line bg-content1 pl-9 pr-3 text-sm outline-none focus:border-brand"
-          />
-        </div>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-max border-collapse text-sm">
-          <thead className="bg-content2">
-            <tr>
-              <th className="sticky left-0 z-10 min-w-56 bg-content2 px-4 py-3 text-left font-semibold text-ink">
-                Role
-              </th>
-              {features.map((feature) => (
-                <th key={feature.code}
-                    title={feature.code}
-                    className="max-w-44 px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-body">
-                  <div>{feature.description}</div>
-                  <div className="mt-0.5 text-[10px] font-normal normal-case text-muted">
-                    {feature.module}
-                  </div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {matrix.data.roles.map((role) => (
-              <tr key={role.id} className="border-t border-line">
-                <td className="sticky left-0 z-10 bg-content1 px-4 py-3">
-                  <div className="font-semibold text-ink">{role.name}</div>
-                  <div className="text-[11px] font-medium text-muted">{role.source}</div>
-                </td>
-                {features.map((feature) => {
-                  const checked = role.permission_codes.includes(feature.code);
-                  return (
-                    <td key={feature.code} className="px-3 py-3 text-center">
-                      <button
-                        type="button"
-                        disabled={update.isPending}
-                        title={`${role.name}: ${feature.description}`}
-                        onClick={() => toggle(
-                          role.id, role.permission_codes, feature.code,
-                        )}
-                        className={`inline-flex h-6 w-6 items-center justify-center rounded-md border transition ${
-                          checked
-                            ? "border-brand bg-brand text-white"
-                            : "border-line bg-content1 text-transparent hover:border-brand"
-                        }`}
-                      >
-                        <Check className="h-4 w-4" />
-                      </button>
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {!features.length && (
-        <div className="border-t border-line px-5 py-6 text-sm text-muted">
-          No feature controls match that search.
-        </div>
-      )}
-      {update.isError && (
-        <div className="border-t border-line bg-bad-bg px-5 py-3 text-sm text-bad">
-          {(update.error as Error).message}
-        </div>
-      )}
-    </div>
-  );
-}

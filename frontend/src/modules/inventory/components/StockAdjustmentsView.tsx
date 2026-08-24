@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip, Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { Plus, Check, X, RefreshCw, FileSpreadsheet } from "lucide-react";
+import { Plus, Check, X, RefreshCw, Download } from "lucide-react";
 import {
   Button, Can, Card, Field, Input, PageHeader, ResponsiveList, Select, StatusPill, type Column,
 } from "@/shared/components";
@@ -165,8 +165,9 @@ export function StockAdjustmentsView() {
         title="Stock Adjustments"
         actions={
           <>
-            <Button variant="subtle" disabled={rows.length === 0} onClick={exportCsv}>
-              <FileSpreadsheet size={14} /> Export CSV
+            {/* ghost + 16px icon, the app-wide header-action shape. See StockBalanceView. */}
+            <Button variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
+              <Download className="h-4 w-4" /> Export CSV
             </Button>
             <Button variant="subtle" onClick={refresh}><RefreshCw size={14} /> Refresh</Button>
             <Can do="stock.adjust">

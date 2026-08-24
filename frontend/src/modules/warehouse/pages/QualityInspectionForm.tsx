@@ -1,5 +1,5 @@
 import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
@@ -16,6 +16,7 @@ import {
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
 import { alerts } from "@/modules/alerts";
+import { useAuth } from "@/shared/auth/AuthContext";
 import type {
   Inspection, InspectionItemWrite, InspectionParameter, InspectionWrite, Receipt,
 } from "../types";
@@ -76,6 +77,20 @@ export default function QualityInspectionForm({
   const [pulled, setPulled] = useState<Receipt | null>(null);
   const [paramsFor, setParamsFor] = useState<number | null>(null);
   const [serialsFor, setSerialsFor] = useState<number | null>(null);
+
+  /* The inspector is whoever is standing at the bench. Left at "pick one" it was a
+   * list of every active employee in HCM with the person actually inspecting somewhere
+   * in it, so a signed inspection could carry anybody's name. Prefilled from the
+   * login, and once only — same rule as the receiving point: clearing it to name a
+   * colleague must not have it written straight back. Still editable; a bench where
+   * one person inspects and another signs off is a real arrangement. */
+  const { me } = useAuth();
+  const prefilledInspector = useRef(false);
+  useEffect(() => {
+    if (editing || prefilledInspector.current || form.inspector_id || !me) return;
+    prefilledInspector.current = true;
+    setForm((f) => ({ ...f, inspector_id: me.employee.id }));
+  }, [editing, form.inspector_id, me]);
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-inspection", id],
@@ -511,6 +526,14 @@ export default function QualityInspectionForm({
               load={employeeOptions}
               value={form.inspector_id ?? ""}
               isDisabled={locked}
+              // The options list is capped, so the signed-in inspector is not
+              // guaranteed to be in it — without this their own name renders as the
+              // placeholder on a document that plainly has one.
+              fallback={me ? [{
+                id: me.employee.id,
+                code: me.employee.code ?? "",
+                name: me.employee.name,
+              }] : undefined}
               onChange={(v) => set("inspector_id", v === "" ? null : v)}
               placeholder="Inspector"
             />

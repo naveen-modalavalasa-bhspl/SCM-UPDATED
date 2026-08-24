@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { ArrowDownLeft, ArrowUpRight, FileSpreadsheet, History } from "lucide-react";
-import { Button, Card, PageHeader, ResponsiveGrid, ResponsiveList, StatCard, type Column } from "@/shared/components";
+import { ArrowDownLeft, ArrowUpRight, Download, History } from "lucide-react";
+import {
+  Button, Card, KpiTiles, PageHeader, ResponsiveList, type Column, type KpiTileSpec,
+} from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { UnitCell } from "./UnitsPanel";
@@ -448,18 +450,35 @@ export function StockLedgerView() {
       <PageHeader
         eyebrow="Inventory"
         title="Stock Ledger"
+        // ghost + 16px icon, the app-wide header-action shape. See StockBalanceView.
         actions={
-          <Button variant="primary" disabled={rows.length === 0} onClick={exportCsv}>
-            <FileSpreadsheet size={14} /> Export CSV
+          <Button variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
+            <Download className="h-4 w-4" /> Export CSV
           </Button>
         }
       />
 
-      <ResponsiveGrid cols={3} className="mb-4">
-        <StatCard label="Movements" value={num(totals?.movements)} icon={<History size={16} />} />
-        <StatCard label="Total In" value={signed(totals?.total_in, "+")} icon={<ArrowDownLeft size={16} />} tone="text-success" />
-        <StatCard label="Total Out" value={signed(totals?.total_out, "−")} icon={<ArrowUpRight size={16} />} tone="text-danger" />
-      </ResponsiveGrid>
+      {/* Each tile IS the direction filter it counts: In and Out set `direction`,
+          Movements is the unfiltered whole and clears it. Pressing the tile already on
+          clears it too, so the strip can never show a state the register is not in. */}
+      <KpiTiles label="Movement totals" className="mb-4" tiles={[
+        {
+          key: "movements", label: "Movements", value: num(totals?.movements),
+          icon: History, tone: "brand", active: direction === "",
+          hint: "Every movement, in and out. Press to clear the direction filter.",
+          onPress: () => { setDirection(""); setPage(1); },
+        },
+        {
+          key: "in", label: "Total in", value: signed(totals?.total_in, "+"),
+          icon: ArrowDownLeft, tone: "ok", active: direction === "IN",
+          onPress: () => { setDirection((on) => (on === "IN" ? "" : "IN")); setPage(1); },
+        },
+        {
+          key: "out", label: "Total out", value: signed(totals?.total_out, "−"),
+          icon: ArrowUpRight, tone: "bad", active: direction === "OUT",
+          onPress: () => { setDirection((on) => (on === "OUT" ? "" : "OUT")); setPage(1); },
+        },
+      ] satisfies KpiTileSpec[]} />
 
       <FilterBar
         search={search}

@@ -181,6 +181,7 @@ export function RFQFormPage() {
   return (
     <div>
       <PageHeader
+        back={{ to: "/procurement/rfqs", label: "Back to RFQs" }}
         eyebrow="Procurement"
         title={editing ? `Edit ${existing?.rfq_no ?? "RFQ"}` : "New RFQ"}
       />

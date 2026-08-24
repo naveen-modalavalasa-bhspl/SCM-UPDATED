@@ -1,11 +1,13 @@
 import {
-  ArrowLeftRight, BarChart3, Bell, Boxes, Bug, CheckCircle, ClipboardList,
+  ArrowLeftRight, BarChart3, Bell, Boxes, Braces, Briefcase, Bug, Building2,
+  CheckCircle, ClipboardCheck, ClipboardList,
   Columns3, CornerUpLeft, Database, FileStack, FileText, Gavel, GitBranch,
-  Handshake, Hash, History, Home, IndianRupee, Key, LayoutDashboard, Layers,
+  Handshake, Hash, History, Home, Inbox, IndianRupee, Key, LayoutDashboard, Layers,
   List, ListChecks, ListOrdered, MapPin, Move, Package, PackageCheck, PackageX,
-  PenLine, Plug, Printer, RefreshCw, RotateCcw, Route, Scale, ScrollText, Send,
-  Settings, Shield, ShoppingCart, SlidersHorizontal, Sparkles, Split, Truck,
-  UserCog, Users, Warehouse, type LucideIcon,
+  PenLine, Plug, Printer, Receipt, RefreshCw, RotateCcw, Route, Scale, ScrollText,
+  SearchCheck, Send,
+  Settings, Shield, ShoppingCart, SlidersHorizontal, Sparkles, Split, TrendingUp,
+  Truck, Undo2, UserCog, Users, Warehouse, type LucideIcon,
 } from "lucide-react";
 
 /**
@@ -74,6 +76,23 @@ const MAP: Record<string, LucideIcon> = {
   scale: Scale,
   sparkles: Sparkles,
   split: Split,
+  // ADDED 2026-08-23, for the de-duplication pass. A glyph is only worth drawing if
+  // it tells one row from the one under it: seven pages shared `check-circle` and
+  // four shared `truck`, so a rail of ten warehouse screens read as three repeated
+  // shapes. These carry the distinctions the existing table had no way to make.
+  "search-check": SearchCheck,
+  "clipboard-check": ClipboardCheck,
+  "trending-up": TrendingUp,
+  briefcase: Briefcase,
+  building: Building2,
+  braces: Braces,
+  inbox: Inbox,
+  receipt: Receipt,
+  // `wh_material_returns` has named this since it was added and the table never
+  // carried it, so Material Returns drew the default box — the fifteenth case of
+  // the same gap `assertKnownIcon` exists to catch, found by auditing the tree
+  // against this table rather than by anybody reporting it.
+  "undo-2": Undo2,
 };
 
 /** Names already reported, so one missing glyph does not log on every render. */

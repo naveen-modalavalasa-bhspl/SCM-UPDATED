@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Boxes, Building2, MapPin, Star, Trash2 } from "lucide-react";
 import {
-  Button, Card, PageHeader, ResponsiveList, Select, StatCard, StatusPill, type Column,
+  Button, Card, KpiTiles, PageHeader, ResponsiveList, Select, StatusPill,
+  type Column, type KpiTileSpec,
 } from "@/shared/components";
 import {
   listStockingPointTags, tagStockingPoint, untagStockingPoint, classifyMove,
@@ -217,24 +218,30 @@ export function StockingPointsPage() {
     {/* Counted by the server over the WHOLE filtered set. Search an employee code and
         these four become that person's answer: how many MDPs, how many LIPs, and what
         is sitting on them altogether. */}
-    <div className="mb-2 grid grid-cols-2 gap-3 lg:grid-cols-4">
-      <StatCard label="Warehouses" value={byTier.warehouses} icon={<Building2 className="h-4 w-4" />} />
-      <StatCard label="MDPs" value={byTier.mdps} icon={<MapPin className="h-4 w-4" />} />
-      <StatCard label="LIPs" value={byTier.lips} icon={<MapPin className="h-4 w-4" />} />
-      <StatCard
-        label="Stock on hand"
-        // The breakdown rides inside the value: a bare quantity reads as "one number
-        // about something", and the two figures that qualify it — how many items, and
-        // how many points are actually holding any — are the ones asked for next.
-        value={<>
-          {qty(tags.data?.stock_qty ?? 0)}
-          <span className="block text-xs font-normal tracking-normal text-muted">
-            {tags.data?.stock_items ?? 0} items · {tags.data?.stock_points ?? 0} points stocked
-          </span>
-        </>}
-        icon={<Boxes className="h-4 w-4" />}
-      />
-    </div>
+    {/* The three tier tiles ARE the tier filter — pressing one narrows the list to
+        that rung and pressing it again clears it. "Stock on hand" is a quantity, not a
+        set of rows, so it takes no press: there is no list a total can open. */}
+    <KpiTiles label="Stocking point tiers" className="mb-2" tiles={[
+      ...([
+        ["wh", "Warehouses", byTier.warehouses, Building2, "brand", "1"],
+        ["mdp", "MDPs", byTier.mdps, MapPin, "warn", "2"],
+        ["lip", "LIPs", byTier.lips, MapPin, "ok", "3"],
+      ] as const).map(([key, label, value, icon, tone, tier]) => ({
+        key, label, value, icon, tone,
+        active: tierFilter === tier,
+        onPress: () => { setTierFilter((on) => (on === tier ? "" : tier)); setPage(1); },
+      })),
+      // A quantity, not a set of rows — so no press. There is no list a total opens,
+      // and a tile that looks pressable and does nothing is worse than a plain one.
+      // The two figures that qualify it ride in the label, where the old card carried
+      // them in a second line inside the value.
+      {
+        key: "qty",
+        label: `Stock on hand · ${tags.data?.stock_items ?? 0} items · ${
+          tags.data?.stock_points ?? 0} points stocked`,
+        value: qty(tags.data?.stock_qty ?? 0), icon: Boxes, tone: "info",
+      },
+    ] satisfies KpiTileSpec[]} />
     {/* A zero here is a real state, not a loading one, and it is worth naming: the
         screen lists TAGGINGS, so a warehouse nobody is tagged to is not on it. Said
         plainly, because the alternative is reading the card as a missing warehouse. */}

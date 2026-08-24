@@ -99,6 +99,7 @@ import {
   LogisticsActivityPage, LogisticsVendorsPage,
   CarrierLayout, CarrierLoginPage, CarrierJobsPage, CarrierJobPage,
   CarrierAckPage,
+  LogisticsOverviewPage,
 } from "@/modules/logistics";
 import { ProcurementOverviewPage } from "@/modules/procurement/pages/ProcurementOverviewPage";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
@@ -368,7 +369,12 @@ function AppRoutes() {
          * Consignments is the SAME screen the warehouse serves, mounted here as well
          * as under /warehouse/* — one implementation, two front doors. Dispatch is
          * this module's own: mode, provider, go. */}
-        <Route path="logistics" element={<Navigate to="/logistics/consignments" replace />} />
+        {/* The module has its own Overview now, so /logistics lands on it rather
+            than bouncing into Consignments. The old redirect is gone, not kept
+            alongside — two answers to "what is /logistics" is how a rail ends up
+            highlighting one row and showing another. */}
+        <Route path="logistics" element={<LogisticsOverviewPage />} />
+        <Route path="logistics/overview" element={<LogisticsOverviewPage />} />
         <Route path="logistics/consignments" element={<ConsignmentsScreen />} />
         <Route path="logistics/consignments/new" element={<ConsignmentFormScreen />} />
         <Route path="logistics/consignments/:id" element={<ConsignmentFormScreen />} />

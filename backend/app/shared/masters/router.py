@@ -3,7 +3,7 @@ written by hand here are the two HCM mirrors (read-only, rule 10) and item specs
 whose primary key is item_id rather than a surrogate id."""
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -306,16 +306,41 @@ async def item_eligibility_scope_options(
     user=Depends(require_permission(perms.MASTER_ITEM_MANAGE)),
 ):
     from app.platform.hcm.models import HcmOffice
-    from app.platform.rbac.models import Role
+    from app.platform.rbac.models import Role, UserRole
 
+    # REVISED 2026-08-23 — each role now carries HOW MANY PEOPLE HOLD IT.
+    #
+    # The list is `rbac_roles`, which mixes four populations: the seed roles, the
+    # HCM-mirrored ones, the duplicates an HCM re-key leaves behind (`driver_161`,
+    # `storekeeper`) and the job-profile ones (`jp_22_store_keeper`). Twelve names are
+    # duplicated across them, and 53 of 59 are held by nobody at all — so the screen
+    # offered a dozen plausible-looking "Store Keeper" rows of which none would ever
+    # match a real login. Every one of the 87 items ended up tagged to three of those
+    # dead rows, which restricted the whole catalogue to an audience of zero.
+    #
+    # The count is the fix. `holders: 0` is the one fact that distinguishes a role that
+    # will work from one that cannot, and it is shown rather than filtered on: hiding
+    # the empty ones would silently drop a role that is real but not yet granted, and
+    # would have explained nothing about why the last attempt did nothing.
+    #
+    # Eligibility resolves through `rbac_user_roles` (and a job profile where the
+    # position has one), which is exactly what this counts — so a non-zero number here
+    # means at least one person really does match the tag.
+    held = dict((await db.execute(
+        select(UserRole.role_id, func.count(func.distinct(UserRole.employee_id)))
+        .group_by(UserRole.role_id))).all())
     roles = (await db.execute(
-        select(Role.id, Role.name).where(Role.is_active.is_(True))
+        select(Role.id, Role.name, Role.code).where(Role.is_active.is_(True))
         .order_by(Role.name))).all()
     offices = (await db.execute(
         select(HcmOffice.id, HcmOffice.name).where(HcmOffice.is_active.is_(True))
         .order_by(HcmOffice.name))).all()
     return {
-        "roles": [{"id": r[0], "name": r[1]} for r in roles],
+        # `code` rides along because the NAME alone cannot tell three "Store Keeper"
+        # rows apart — `store_keeper`, `jp_22_store_keeper` and `storekeeper` are
+        # different ids and only the code says which is which.
+        "roles": [{"id": r[0], "name": r[1], "code": r[2],
+                   "holders": int(held.get(r[0], 0))} for r in roles],
         "regions": [{"id": o[0], "name": o[1]} for o in offices],
     }
 

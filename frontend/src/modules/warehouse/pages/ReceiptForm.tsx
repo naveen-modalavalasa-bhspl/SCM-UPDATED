@@ -1,5 +1,5 @@
 import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ScanLine, Send } from "lucide-react";
@@ -464,13 +464,24 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   /* A new receipt opens at the point the person is standing in. Left at "pick one",
    * a storekeeper tagged to a single LIP inwarded a delivery into an unrelated MDP,
    * and the stock posted correctly to a point his own screens are scoped away from —
-   * every inventory page read empty with the goods sitting in the room. */
+   * every inventory page read empty with the goods sitting in the room.
+   *
+   * FIXED 2026-08-24 — it prefilled whenever the field was EMPTY, and clearing the
+   * picker to choose another point is exactly that. The effect re-ran on the cleared
+   * value and wrote the default straight back, so the field could never be changed:
+   * clear, it returns; clear again, it returns. It is an OPENING value, so it is
+   * written once per form and the ref remembers that it has been.
+   */
   const { primary_warehouse_id: myPoint } = useMyPoint().data ?? {};
+  const prefilledPoint = useRef(false);
   useEffect(() => {
-    if (editing || form.warehouse_id) return;
+    if (editing || prefilledPoint.current || form.warehouse_id) return;
     const fallback = warehouses.length === 1 ? warehouses[0].id : null;
     const mine = myPoint ?? fallback;
-    if (mine) setForm((f) => ({ ...f, warehouse_id: mine }));
+    if (mine) {
+      prefilledPoint.current = true;
+      setForm((f) => ({ ...f, warehouse_id: mine }));
+    }
   }, [editing, form.warehouse_id, myPoint, warehouses]);
 
   const set = <K extends keyof ReceiptWrite>(key: K, value: ReceiptWrite[K]) =>
@@ -529,6 +540,41 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     }
   }, [editing, isLocalPoint, form.receipt_type]);
 
+  /* A quantity box opens EMPTY on purpose — a storekeeper types what came off the
+   * vehicle, and a pre-filled 0 is a number nobody counted. Empty is not 0 though, so
+   * it is posted as "" and the server's decimal parser rejects it: what reached this
+   * banner was `items.0.received_qty: Input should be a valid decimal`, which names a
+   * field the screen does not have and a rule the storekeeper cannot act on. Caught
+   * here instead, by line and by item name, in the words of the column they left
+   * blank. */
+  const blankQty = (value: unknown) =>
+    value === "" || value === null || value === undefined;
+
+  /** The lines the storekeeper has not counted yet — read by the Save check and by
+   *  the red border on the box, so both say the same thing about the same cell. */
+  const uncountedLines = useMemo(() => form.items.reduce<
+    { index: number; field: "received" | "accepted"; name: string }[]
+  >((acc, line, index) => {
+    const name = savedLine(index)?.item_name ?? line.item_name ?? "";
+    if (blankQty(line.received_qty)) acc.push({ index, field: "received", name });
+    // Only a GRN takes an accepted figure. On a gate entry the column is disabled and
+    // mirrors what was received, so it can never be the box that was missed.
+    else if (isGrn && blankQty(line.accepted_qty)) acc.push({ index, field: "accepted", name });
+    return acc;
+  }, []), [form.items, isGrn, doc]);
+
+  const validateQuantities = () => {
+    if (uncountedLines.length === 0) return;
+    const where = uncountedLines
+      .map((l) => `line ${l.index + 1}${l.name ? ` (${l.name})` : ""}`)
+      .join(", ");
+    const column = uncountedLines.every((l) => l.field === "accepted")
+      ? "Accepted" : "Received";
+    throw new Error(
+      `${column} quantity is blank on ${where}. Enter what came off the vehicle — `
+      + "0 if none of it did.");
+  };
+
   /** Only "not more serials than units" is checked now.
    *
    *  A GRN used to demand the full set, which stopped a lorry of unlabelled goods
@@ -575,6 +621,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
   const save = useMutation({
     mutationFn: async () => {
+      validateQuantities();
       validateSerialLines();
       const saved = await (async () => {
         if (editing) return updateReceipt(Number(id), form);
@@ -614,6 +661,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
      * only updates the grid — was silently dropped, and the line reached inspection
      * without the serials the storekeeper had just scanned. */
     mutationFn: async (what: "submit" | "complete") => {
+      // Same check as Save, and for the same reason: this posts the whole form, so a
+      // box cleared since the last save fails on the server's parser rather than here.
+      if (!locked) validateQuantities();
       validateSerialLines();
       if (!locked) await updateReceipt(Number(id), form);
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
@@ -755,6 +805,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           ariaLabel={`Received quantity, line ${i + 1}`}
           value={l.received_qty}
           disabled={locked}
+          invalid={touched && blankQty(l.received_qty)}
           onChange={(v) => patchLine(i, { received_qty: v, accepted_qty: v })}
         />
       ),
@@ -789,7 +840,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           value={l.accepted_qty ?? 0}
           max={num(l.received_qty)}
           disabled={locked || !isGrn}
-          invalid={num(l.accepted_qty) > num(l.received_qty)}
+          invalid={num(l.accepted_qty) > num(l.received_qty)
+            || (touched && isGrn && blankQty(l.accepted_qty))}
           onChange={(v) => patchLine(i, { accepted_qty: v })}
         />
       ),
@@ -1071,7 +1123,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               />
             </Field>
           )}
-          <Field label={pointLabel}>
+          <Field label={pointLabel} required>
             <Lookup
               name="my-warehouses"
               load={myWarehouseOptions}
@@ -1371,7 +1423,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         confirmLabel="Submit"
         busy={act.isPending}
         error={act.error}
-        onConfirm={() => act.mutate("submit")}
+        onConfirm={() => { setTouched(true); act.mutate("submit"); }}
         onClose={() => setConfirming(null)}
       />
 
@@ -1383,7 +1435,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         danger
         busy={act.isPending}
         error={act.error}
-        onConfirm={() => act.mutate("complete")}
+        onConfirm={() => { setTouched(true); act.mutate("complete"); }}
         onClose={() => setConfirming(null)}
       />
     </div>

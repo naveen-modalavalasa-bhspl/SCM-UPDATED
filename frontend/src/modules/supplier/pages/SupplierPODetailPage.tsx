@@ -191,6 +191,13 @@ export function SupplierPODetailPage() {
   // answer at all and are left alone.
   const awaitingAnswer = po.vendor_status === "PENDING";
   const declined = po.vendor_status === "REJECTED";
+  // NEW 2026-08-23 — the buyer has amended this order, so it has gone back into their
+  // approval and the version on screen is not one anybody is being asked about yet.
+  // Before this the order simply DISAPPEARED off the portal at that moment and came
+  // back later looking like a new one, and the "your order was amended" notification
+  // pointed at a page that would not open. It stays visible and read-only instead:
+  // the answer and the dispatch note are both asked for again once it is re-issued.
+  const underRevision = Boolean(po.under_revision);
 
   const steps: Step[] = (() => {
     const vs = po.vendor_status;
@@ -234,7 +241,8 @@ export function SupplierPODetailPage() {
             {/* Not offered until the order has been accepted: a despatch note is a
               * claim against an agreement, so there has to be one. The server refuses
               * it too — this only stops the vendor filling in a form for nothing. */}
-            {!composing && !nothingLeft && !awaitingAnswer && !declined && (
+            {!composing && !nothingLeft && !awaitingAnswer && !declined
+              && !underRevision && (
               <Button onClick={startNew}>
                 <Truck className="h-4 w-4" /> File a dispatch note
               </Button>
@@ -246,6 +254,25 @@ export function SupplierPODetailPage() {
       <div className="mb-6 -mx-2 sm:mx-0">
         <Stepper steps={steps} className="bg-surface-2/50 rounded-xl" />
       </div>
+
+      {underRevision && (
+        <Card className="mb-6 border-l-4 border-l-warn bg-warn-bg/40 p-4">
+          <p className="text-sm font-semibold text-ink">
+            This order is being revised{po.revision_no ? ` — revision ${po.revision_no}` : ""}
+          </p>
+          {po.amendment_reason && (
+            <p className="mt-1 border-l-2 border-line pl-2.5 text-sm italic text-body">
+              {po.amendment_reason}
+            </p>
+          )}
+          <p className="mt-2 text-sm text-body">
+            The buyer has changed it and it is back with them for approval. Nothing can
+            be accepted or despatched against it until they send it to you again — you
+            will be asked to accept the new version then. The figures below are the
+            revised ones.
+          </p>
+        </Card>
+      )}
 
       <ErrorBanner error={save.error ?? submit.error ?? cancel.error} />
 
@@ -438,7 +465,7 @@ export function SupplierPODetailPage() {
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Field label="Invoice no">
+            <Field label="Invoice no" required>
               <Input
                 value={header.invoice_no ?? ""}
                 onChange={(e) => setHeader((h) => ({ ...h, invoice_no: e.target.value }))}
@@ -463,7 +490,7 @@ export function SupplierPODetailPage() {
                 }))}
               />
             </Field>
-            <Field label="E-way bill no">
+            <Field label="E-way bill no" required>
               <Input
                 value={header.eway_bill_no ?? ""}
                 onChange={(e) => setHeader((h) => ({ ...h, eway_bill_no: e.target.value }))}

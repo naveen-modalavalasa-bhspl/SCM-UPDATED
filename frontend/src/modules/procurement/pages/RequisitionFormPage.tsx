@@ -110,6 +110,7 @@ export function RequisitionFormPage() {
   return (
     <div>
       <PageHeader
+        back={{ to: "/procurement/requisitions", label: "Back to Requisitions" }}
         eyebrow="Procurement"
         title={editing ? `Edit ${existing?.req_no ?? "requisition"}` : "New requisition"}
       />

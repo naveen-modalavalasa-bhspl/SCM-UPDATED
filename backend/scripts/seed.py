@@ -125,7 +125,7 @@ PAGE_TREE = [
     ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
     ("approval_overview", "/approvals/overview", "Overview", "layout-dashboard",
      P.page_view_code("approval_overview"), 20, "approvals"),
-    ("approval_waiting", "/approvals", "Waiting for Me", "check-circle", P.INDENT_VIEW, 21, "approvals"),
+    ("approval_waiting", "/approvals", "Waiting for Me", "inbox", P.INDENT_VIEW, 21, "approvals"),
     # Built, routed and working since the monthly-cycle work, but no row ever pointed
     # at it — the only way in was to type the URL. Gated on INDENT_APPROVE because that
     # is what GET /api/approvals/consolidation already requires; a viewer who cannot
@@ -140,7 +140,7 @@ PAGE_TREE = [
     # redirects to the inbox. Existing wf_delegations rows are left as history.
 
     ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
-    ("po_list", "/pos", "Purchase Orders", "shopping-cart", P.PO_VIEW, 31, "grp_purchasing"),
+    ("po_list", "/pos", "Purchase Orders", "receipt", P.PO_VIEW, 31, "grp_purchasing"),
 
     # Every working screen is its own menu entry. A single "Transactions" entry that
     # hid six screens behind in-page tabs meant nobody could reach a screen from the
@@ -149,14 +149,18 @@ PAGE_TREE = [
     # is invisible to page-access control.
     # Ordered the way the floor works: goods in (inward -> receipt -> QC -> put-away),
     # then goods out (picklist -> issue -> dispatch), then returns.
-    ("grp_warehouse", "/warehouse", "Warehouse", "truck", P.STOCK_VIEW, 40, None),
-    ("wh_dashboard", "/warehouse", "Dashboard", "layout-dashboard",
+    ("grp_warehouse", "/warehouse", "Warehouse", "warehouse", P.STOCK_VIEW, 40, None),
+    # "Overview", not "Dashboard": the page heading has always said Overview, and
+    # every other module's first child is called Overview too (ind_dashboard,
+    # approval_overview, inv_overview). The row was the only thing still saying
+    # Dashboard, so the rail and the screen disagreed on the name of the same page.
+    ("wh_dashboard", "/warehouse", "Overview", "layout-dashboard",
      P.STOCK_VIEW, 41, "grp_warehouse"),
     ("wh_inward", "/warehouse/material-inward", "Material Inward", "truck",
      P.RECEIPT_VIEW, 42, "grp_warehouse"),
     ("wh_grn", "/warehouse/grn", "Goods Receipt", "file-text",
      P.RECEIPT_VIEW, 43, "grp_warehouse"),
-    ("wh_qc", "/warehouse/quality-inspection", "Quality Inspection", "check-circle",
+    ("wh_qc", "/warehouse/quality-inspection", "Quality Inspection", "search-check",
      P.INSPECTION_VIEW, 44, "grp_warehouse"),
     ("wh_putaway", "/warehouse/putaway", "Put-away", "package",
      P.PUTAWAY_VIEW, 45, "grp_warehouse"),
@@ -178,7 +182,7 @@ PAGE_TREE = [
     # inbound QC code would put it on every inspector's rail pointing at a 403. New
     # capability, so it lands fail-closed and an admin ticks it on — which matches
     # page_registry.PAGES and migration 96dd19ed80c2, the other two writers of this row.
-    ("wh_qc_outward", "/warehouse/qc-outward", "Outward QC", "check-circle",
+    ("wh_qc_outward", "/warehouse/qc-outward", "Outward QC", "clipboard-check",
      P.page_view_code("wh_qc_outward"), 51, "grp_warehouse"),
     # Consignments and Dispatch moved to LOGISTICS (2026-08-20). Left commented rather
     # than deleted: seed_pages sets is_active = True for everything in PAGE_TREE, so a
@@ -189,7 +193,7 @@ PAGE_TREE = [
     # ("wh_dispatch", "/warehouse/dispatch", "Dispatch", "truck",
     #  P.DISPATCH_VIEW, 54, "grp_warehouse"),
     ("wh_ack", "/warehouse/acknowledge-delivery", "Acknowledge Delivery",
-     "check-circle", P.DISPATCH_ACKNOWLEDGE, 55, "grp_warehouse"),
+     "package-check", P.DISPATCH_ACKNOWLEDGE, 55, "grp_warehouse"),
     # Outward Labelling and Purchase Returns were dropped from the module
     # on 2026-08-13: not part of the flow this business runs. The endpoints and their
     # tables are still there, unreachable — nothing routes to them.
@@ -233,7 +237,7 @@ PAGE_TREE = [
     # seed_pages sets is_active = True for everything in PAGE_TREE, so leaving the
     # rows here would put the screens back on the rail at the next seed. The routes
     # and page code are still in the frontend — restore a row here to bring one back.
-    # ("inv_demand", "/inventory/demand", "Demand by Item", "boxes",
+    # ("inv_demand", "/inventory/demand", "Demand by Item", "trending-up",
     #  P.ALLOCATION_VIEW, 58, "grp_inventory"),
     ("inv_mr", "/inventory/material-requests", "Material Requests", "file-text",
      P.MR_VIEW, 59, "grp_inventory"),
@@ -259,19 +263,19 @@ PAGE_TREE = [
      P.REPORT_VIEW, 74, "grp_reports"),
 
     ("grp_rbac", "/rbac/access", "RBAC", "shield", P.ADMIN_ROLES_MANAGE, 80, None),
-    ("rbac_access", "/rbac/access", "Roles & Access", "shield",
+    ("rbac_access", "/rbac/access", "Roles & Access", "key",
      P.ADMIN_ROLES_MANAGE, 81, "grp_rbac"),
     ("rbac_groups", "/rbac/groups", "User Groups", "users",
      P.ADMIN_GROUPS_MANAGE, 82, "grp_rbac"),
     # Built and routed, but no row ever pointed at it — the screen that grants access
     # was itself only reachable by typing the URL. Same permission as Roles & Access:
     # both write the same grants, so anything that can open one can open the other.
-    ("rbac_job_profiles", "/rbac/job-profiles", "Job Profiles", "users",
+    ("rbac_job_profiles", "/rbac/job-profiles", "Job Profiles", "briefcase",
      P.ADMIN_ROLES_MANAGE, 83, "grp_rbac"),
 
     ("grp_settings", "/admin", "Settings", "settings", P.ADMIN_ROLES_MANAGE, 90, None),
-    ("admin", "/admin", "HCM & Config", "settings", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
-    ("admin_settings", "/admin/settings", "Company Settings", "settings",
+    ("admin", "/admin", "HCM & Config", "user-cog", P.ADMIN_ROLES_MANAGE, 91, "grp_settings"),
+    ("admin_settings", "/admin/settings", "Company Settings", "building",
      P.ADMIN_SETTINGS_MANAGE, 92, "grp_settings"),
     ("admin_rules", "/admin/rules", "Rules Engine", "git-branch",
      P.ADMIN_RULES_MANAGE, 96, "grp_settings"),
@@ -295,7 +299,7 @@ PAGE_TREE = [
      P.ADMIN_AUDIT_VIEW, 101, "grp_settings"),
     # The asset / consumable code formula. Also in page_registry.PAGES so a live
     # database picks it up on startup without a reseed.
-    ("admin_code_formats", "/admin/code-formats", "Code Formats", "hash",
+    ("admin_code_formats", "/admin/code-formats", "Code Formats", "braces",
      P.ADMIN_CODE_FORMATS_MANAGE, 102, "grp_settings"),
 ]
 

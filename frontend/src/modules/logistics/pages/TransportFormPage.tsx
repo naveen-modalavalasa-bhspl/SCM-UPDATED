@@ -348,6 +348,7 @@ export function TransportFormPage() {
   return (
     <div className="pb-24">
       <PageHeader
+        back={{ to: "/logistics/shipments", label: "Back to Shipments" }}
         eyebrow="Logistics"
         title={editing
           ? `Edit ${existing?.tr_no ?? "shipment"}`

@@ -2,8 +2,8 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ArrowRight, Calendar, CheckCircle2, Clock, MapPin, Truck } from "lucide-react";
 import {
-  Button, Card, PageHeader, ResponsiveList, StatCard, StatusPill, type Column,
-  ResponsiveGrid,
+  Button, Card, KpiTiles, PageHeader, ResponsiveList, StatusPill, type Column,
+  type KpiTileSpec,
 } from "@/shared/components";
 import { FilterBar, FilterMenu } from "./FilterBar";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
@@ -158,11 +158,22 @@ export function StockTransferView() {
 
       <MovementKindStrip />
 
-      <ResponsiveGrid cols={3} className="mb-4">
-        <StatCard label="Awaiting Approval" value={counts.pending} icon={<Clock size={16} />} tone={counts.pending ? "text-warning" : "text-muted"} />
-        <StatCard label="In Transit" value={counts.inTransit} icon={<Truck size={16} />} tone={counts.inTransit ? "text-brand" : "text-muted"} />
-        <StatCard label="Received" value={counts.done} icon={<CheckCircle2 size={16} />} tone="text-success" />
-      </ResponsiveGrid>
+      {/* Each tile sets the status it counts, and pressing the one already on clears
+          it — the strip is the fastest filter on the screen rather than a read-out
+          above a list that ignores it. */}
+      <KpiTiles label="Transfer queues" className="mb-4" tiles={([
+        ["pending", "Awaiting approval", counts.pending, Clock, "warn", "PENDING_APPROVAL"],
+        // DISPATCHED, not IN_TRANSIT: that is the status the count above reads, and the
+        // filter has to ask for the same rows the tile counted or pressing it empties
+        // the list it was describing.
+        ["transit", "In transit", counts.inTransit, Truck, "brand", "DISPATCHED"],
+        ["done", "Received", counts.done, CheckCircle2, "ok", "RECEIVED"],
+      ] as const).map(([key, label, value, icon, tone, code]) => ({
+        key, label, value, icon,
+        tone: value ? tone : "neutral",
+        active: status === code,
+        onPress: () => setStatus((on) => (on === code ? "" : code)),
+      })) satisfies KpiTileSpec[]} />
 
       {error && <div className="mb-3"><ErrorNote message={error} /></div>}
 

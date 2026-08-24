@@ -469,6 +469,21 @@ def _single_allowed_position(link: dict | None) -> int | None:
     return allowed[0] if len(allowed) == 1 else None
 
 
+async def _position_name(db: AsyncSession, position_id: int | None) -> str | None:
+    """An HCM position's name, or None when there is not one to give.
+
+    Never raises and never blocks a submit: this is the label on a history row, and a
+    document must not fail to start because a position could not be read.
+    """
+    if position_id is None:
+        return None
+    try:
+        position = await hcm_service.get_position(db, position_id)
+    except Exception:  # noqa: BLE001 - a display label is not worth failing a submit
+        return None
+    return getattr(position, "name", None)
+
+
 def _reliable_actor_position(link: dict | None, actor_id: int | None) -> int | None:
     """Only pin a correction to a position when the rung leaves no doubt which one.
 
@@ -579,10 +594,26 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
     )
     await db.flush()
 
+    # FIXED 2026-08-23 — this read ONLY `requester_position_name`, and indents are the
+    # only caller that passes it (`indents/service.py`). Material requests and stock
+    # allocations pass `requester_position_id` and no name, so every one of their
+    # submit rows rendered as "Position unavailable" on the approval history — a
+    # document that plainly HAS a raiser, reported as though the record were damaged.
+    #
+    # Resolved here rather than patched into each caller: the position is already
+    # loaded from the id a few lines down for the same purpose on `act`, so the engine
+    # can answer this itself and any future doc type gets it without knowing to ask.
+    # A caller that DOES pass a name still wins — an indent snapshots the position the
+    # raiser held at submit, which is the truer answer once somebody moves posts.
+    submitted_position = context.get("requester_position_name")
+    if not submitted_position:
+        submitted_position = await _position_name(
+            db, context.get("requester_position_id")
+            or getattr(user, "active_position_id", None))
     db.add(Action(
         instance_id=instance.id, stage_sequence=0, stage_name="Submitted",
         actor_id=user.id, actor_name=user.full_name,
-        actor_position=context.get("requester_position_name"),
+        actor_position=submitted_position,
         action=ApprovalAction.SUBMITTED.value,
     ))
     await db.flush()
@@ -598,7 +629,7 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
             instance_id=instance.id, stage_sequence=0,
             stage_name=ladder.DOC_TYPE_LABEL.get(doc_type, doc_type),
             actor_id=user.id, actor_name=user.full_name,
-            actor_position=context.get("requester_position_name"),
+            actor_position=submitted_position,
             action=ApprovalAction.APPROVED.value, comments=SELF_APPROVED_COMMENT,
         ))
         instance.status = InstanceStatus.APPROVED.value
@@ -1257,6 +1288,49 @@ async def current_stage_rank(db, doc_type: str, doc_id: int) -> str | None:
         return None
     link = _link(instance) or {}
     return (link.get("role_name") or link.get("position_name") or "").strip() or None
+
+
+async def can_act_now(db, doc_type: str, doc_id: int, user) -> bool:
+    """Is it THIS login's turn on this document, under the position they are wearing?
+
+    NEW 2026-08-23, and deliberately the same two tests `act` performs before it
+    accepts a decision — read them together, because a screen that disagrees with the
+    gate is worse than one that does not ask:
+
+      1. the login is among the current approvers, and
+      2. where the rung pins positions, the ACTIVE position is one of them.
+
+    Test 2 is the one that matters here. One person commonly holds two rungs of the
+    same ladder — an inventory manager who is also the SCM head — so being named as
+    the approver is not the same as being able to sign right now. Approve and Reject
+    were rendered off the document's STATUS alone, so that person was shown live
+    buttons that could only ever answer "Switch to the approval position before
+    acting": the screen invited a press it already knew it would refuse.
+
+    Never raises. A screen asking "may I?" must degrade to hiding the buttons, never
+    to failing the page — the server is still the gate either way (rule 6).
+    """
+    try:
+        instance = await _load_instance(db, doc_type, doc_id)
+        # Only a ladder document can answer this: `_link` reads the frozen
+        # `resolved_chain`, which is what `_act_ladder` guards against. A stage-based
+        # instance has no position pinning to check, so it falls through to the
+        # permission the route already carries.
+        if (instance is None
+                or instance.status != InstanceStatus.IN_PROGRESS.value
+                or not instance.resolved_chain):
+            return False
+        link = _link(instance)
+    except Exception:  # noqa: BLE001 - a UI hint is not worth failing a read
+        return False
+    if not link:
+        return False
+    if getattr(user, "id", None) not in link.get("approver_ids", []):
+        return False
+    allowed_positions = ladder.allowed_position_ids(link)
+    if not allowed_positions:
+        return True
+    return getattr(user, "active_position_id", None) in allowed_positions
 
 
 async def current_approver_label(db, doc_type: str, doc_id: int) -> str | None:

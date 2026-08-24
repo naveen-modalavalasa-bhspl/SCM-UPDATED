@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Clock, Gavel, Hourglass, PenLine, PencilLine, Send, Truck, type LucideIcon,
@@ -72,7 +72,13 @@ const QUEUES: {
  */
 export function TransportRequestsPage() {
   const nav = useNavigate();
-  const [status, setStatus] = useState("");
+  // Seeded from the URL so a link can open this register already narrowed. The
+  // Logistics Overview's tiles are the reason: a tile that counts READY has to be able
+  // to hand the reader the READY queue, not the whole register and a shrug. Read ONCE,
+  // as the initial value — the filter stays local state after that, so changing it on
+  // screen does not push history entries the back button then has to walk through.
+  const [params] = useSearchParams();
+  const [status, setStatus] = useState(params.get("status") ?? "");
   const [mode, setMode] = useState("");
   // Which way the legs in this list run. A return is the same document backwards, so
   // it belongs in this register rather than in a second one — but "show me only the

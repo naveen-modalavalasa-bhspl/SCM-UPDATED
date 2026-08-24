@@ -111,7 +111,10 @@ export default function PutawayForm() {
   if (isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
   if (!task) return <div className="py-16 text-center text-muted">Task not found.</div>;
 
-  const done = task.status === "completed";
+  // Case-insensitive: the backend answers COMPLETED on some paths and completed on
+  // others, and a strict match left "Confirm putaway" on screen after the task was
+  // already done — a second press against a finished task.
+  const done = task.status?.toLowerCase() === "completed";
   const overriding = !!task.suggested_bin_id && binId !== "" && Number(binId) !== task.suggested_bin_id;
 
   return (

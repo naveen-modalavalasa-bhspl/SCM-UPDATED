@@ -77,6 +77,7 @@ export function MaterialRequestFormPage() {
   return (
     <div>
       <PageHeader
+        back={{ to: "/inventory/material-requests", label: "Back to Material requests" }}
         eyebrow="Inventory"
         title="New Material Request"
         actions={

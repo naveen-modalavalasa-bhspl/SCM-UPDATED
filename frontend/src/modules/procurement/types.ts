@@ -8,6 +8,9 @@ export interface POItem {
   rate: number;
   tax_percent: number;
   amount: number;
+  /** Days the vendor quoted for THIS line, carried off the winning quotation. Null on
+   *  a PO raised from an indent — nobody quoted, so nobody promised. */
+  delivery_days?: number | null;
   received_quantity: number;
 }
 
@@ -746,6 +749,10 @@ export interface VendorPO {
   vendor_response_note?: string | null;
   revision_no?: number;
   amendment_reason?: string | null;
+  /** The order was issued to this vendor once and has since been amended, so it
+   *  is back with the buyer being re-approved. Read-only to them until it is
+   *  re-issued — see `_vendor_visible` in procurement/service.py. */
+  under_revision?: boolean;
   payment_terms?: string | null;
   delivery_terms?: string | null;
   material_terms?: string | null;
@@ -766,6 +773,7 @@ export interface VendorPOListRow {
   status: string;
   total_amount: number;
   despatch_note_count: number;
+  under_revision?: boolean;
 }
 
 

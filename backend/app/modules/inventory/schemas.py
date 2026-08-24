@@ -162,6 +162,11 @@ class MROut(MRListRow):
     # The ladder rung the request is waiting on ("Regional Manager"), computed on read
     # from the frozen chain — not a column, and not the approver's name.
     current_stage_name: str | None = None
+    # Whether THIS login, under the position it is currently wearing, is the one the
+    # request is waiting on. Not "am I an approver" — one person often holds two rungs
+    # of the same ladder, and the screen has to know which hat is on. Advice for the
+    # buttons only; `engine.act` re-checks and is the gate (rule 6).
+    can_act: bool = False
     project_name: str | None = None
     remarks: str | None = None
     approved_at: datetime | None = None

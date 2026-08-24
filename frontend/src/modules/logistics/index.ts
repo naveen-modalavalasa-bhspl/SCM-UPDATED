@@ -26,6 +26,9 @@ export {
  *  moving, what is waiting on a price) and `DispatchConfirmPage` is the press —
  *  consignment, gate pass, mode, provider. The confirm screen is where BOTH front
  *  doors land, the queue and the consignment itself, so the decision exists once. */
+/** The module's front page. Reads `/api/transport/summary` and nothing else, so it
+ *  cannot disagree with the Shipments register that lives on the same call. */
+export { LogisticsOverviewPage } from "./pages/LogisticsOverviewPage";
 export { DispatchPage } from "./pages/DispatchPage";
 export { DispatchConfirmPage } from "./pages/DispatchConfirmPage";
 /** The gate pass that press produces, as paper. Mounted outside the app shell in

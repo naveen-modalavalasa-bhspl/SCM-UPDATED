@@ -150,6 +150,12 @@ class POItem(Base):
     rate = Column(Numeric(14, 2), nullable=False, default=0)
     tax_percent = Column(Numeric(5, 2), nullable=False, default=0)
     amount = Column(Numeric(16, 2), nullable=False, default=0)
+    # How many days the vendor said THIS line takes, carried off the quotation line
+    # that won. Per line because a quotation states it per line: one order commonly
+    # mixes something on the shelf with something built to order, and a single header
+    # date cannot say that. Nullable — a PO raised from an indent has no quotation
+    # behind it and nobody promised anything.
+    delivery_days = Column(Integer, nullable=True)
     received_quantity = Column(Numeric(14, 3), nullable=False, default=0)
 
     po = relationship("PurchaseOrder", back_populates="items")

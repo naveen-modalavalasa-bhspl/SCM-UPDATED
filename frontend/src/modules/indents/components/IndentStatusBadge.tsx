@@ -96,8 +96,18 @@ export function IndentStatusBadge({ status, journey }: { status: string; journey
       color={status === INDENT_STATUS.REJECTED ? "danger" : "warning"}
       classNames={{ content: `text-[11px] font-semibold uppercase tracking-wide ${status === INDENT_STATUS.RETURNED_FOR_CORRECTION ? "normal-case" : ""}` }}
     >
-      {/* Names come from HCM and can be long — truncate, never abbreviate. */}
-      <span className="block max-w-56 truncate" title={label}>{label}</span>
+      {/* Names come from HCM and can be long — truncate, never abbreviate.
+        *
+        * WIDENED 2026-08-23. The cap was a flat 224px, which is narrower than the
+        * ordinary case: "Pending at Final Approval - SCM HEAD" is a configured rung
+        * name, not a long person's name, and it lost its last word on every screen
+        * wide enough to have shown it twice over. A badge that ends in an ellipsis
+        * where the room was there anyway just hides the answer it exists to give.
+        *
+        * Responsive rather than simply bigger: 224px is right on a phone, where the
+        * badge shares a row with the document number, and the ellipsis is the correct
+        * behaviour there. `title` still carries the full text at every width. */}
+      <span className="block max-w-56 truncate sm:max-w-md" title={label}>{label}</span>
     </Chip>
   );
 }

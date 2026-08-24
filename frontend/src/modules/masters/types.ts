@@ -480,6 +480,9 @@ export interface MasterItemEligibility {
 }
 
 export interface ItemEligibilityScopes {
-  roles: { id: number; name: string }[];
+  /** `code` tells three identically-named "Store Keeper" rows apart, and `holders`
+   *  says how many people actually hold the role — a tag on a 0-holder role restricts
+   *  the item to nobody, which is how the whole catalogue once ended up invisible. */
+  roles: { id: number; name: string; code?: string; holders?: number }[];
   regions: { id: number; name: string }[];
 }

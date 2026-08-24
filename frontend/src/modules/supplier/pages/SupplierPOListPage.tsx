@@ -15,6 +15,17 @@ import { VENDOR_PO_STATUS_OPTIONS, vendorPoLabel } from "../status";
 
 const SIZE = 20;
 
+/** An order the buyer has amended is back in THEIR approval, so its raw status is
+ *  DRAFT — a word that means nothing to a supplier and reads as if the order was
+ *  never sent. It stays on the board (it is the same order, not a new one) wearing
+ *  what is actually true of it. See `_vendor_visible` in procurement/service.py. */
+function PoStatus({ row }: { row: VendorPOListRow }) {
+  if (row.under_revision) {
+    return <StatusPill status="PENDING_APPROVAL" label="Being revised" />;
+  }
+  return <StatusPill status={row.status} label={vendorPoLabel(row.status)} />;
+}
+
 const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
 }).format(value ?? 0);
@@ -84,7 +95,7 @@ export function SupplierPOListPage() {
     },
     {
       key: "status", header: "",
-      render: (r) => <StatusPill status={r.status} label={vendorPoLabel(r.status)} />,
+      render: (r) => <PoStatus row={r} />,
     },
   ];
 
@@ -137,7 +148,7 @@ export function SupplierPOListPage() {
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">
                 <span className="font-mono text-sm font-semibold text-ink">{formatPONo(r.po_no, r.revision_no)}</span>
-                <StatusPill status={r.status} label={vendorPoLabel(r.status)} />
+                <PoStatus row={r} />
               </div>
               <div className="text-xs text-muted">
                 {fmtDate(r.po_date)} · ₹ {money(r.total_amount)}

@@ -214,6 +214,7 @@ export function RFQDetailPage() {
   return (
     <div>
       <PageHeader
+        back={{ to: "/procurement/rfqs", label: "Back to RFQs" }}
         eyebrow="Procurement"
         title={rfq?.rfq_no ?? "RFQ"}
         actions={

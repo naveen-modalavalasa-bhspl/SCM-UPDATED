@@ -110,9 +110,12 @@ export function LabelsPage() {
       <PageHeader
         eyebrow="Inventory"
         title="Labels & Printing"
+        // Stays the page's PRIMARY action, unlike Export elsewhere: printing is what
+        // this screen exists to do, so it is the one solid button on it. Only the icon
+        // is standardised, to the 16px every other header action uses.
         actions={
           <Button disabled={sheet.length === 0} onClick={() => print?.()}>
-            <Printer size={14} /> Print {sheet.length || ""} label{sheet.length === 1 ? "" : "s"}
+            <Printer className="h-4 w-4" /> Print {sheet.length || ""} label{sheet.length === 1 ? "" : "s"}
           </Button>
         }
       />

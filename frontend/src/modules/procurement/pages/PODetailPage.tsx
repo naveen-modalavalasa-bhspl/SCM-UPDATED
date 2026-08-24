@@ -45,6 +45,21 @@ export function PODetailPage() {
     queryFn: () => poApi.get(poId),
     enabled: Number.isFinite(poId) && poId > 0,
   });
+
+  // FIXED 2026-08-23 — `poHeaderFrom` was imported and never called, so this form
+  // opened BLANK on an order that had terms and addresses stored. Two bugs in one:
+  // the buyer could not see what was agreed, and because Save and Amend both send
+  // `poHeaderPayload(header)`, pressing either wrote those blanks over the real
+  // values. The server no longer accepts a wipe by omission, but the screen still has
+  // to show what is on the document.
+  //
+  // Keyed on the order and its revision, never on `po.data` itself: the query refetches
+  // after every mutation and re-seeding on each one would yank a field out from under
+  // somebody mid-edit. A new revision IS a new set of values, so that re-seeds.
+  useEffect(() => {
+    if (po.data) setHeader(poHeaderFrom(po.data));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [po.data?.id, po.data?.revision_no]);
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["purchase-order", poId] });
     qc.invalidateQueries({ queryKey: ["pos"] });
@@ -198,6 +213,11 @@ export function PODetailPage() {
   // means the worst case is the pre-2026-08-20 behaviour (a button that 403s), never
   // a document nobody can sign.
   const canDecide = po.data.awaiting_me ?? (po.data.status === "PENDING_APPROVAL");
+  // Mirrors `amend_po`'s own window. Kept as one named value rather than inline so
+  // the button and the server's refusal cannot drift apart silently.
+  const canAmend = po.data.vendor_status === "ACCEPTED"
+    || (po.data.vendor_status == null && po.data.status === "SENT_TO_VENDOR");
+
   const isDraft = po.data.status === "DRAFT";
   // Nothing left to change: the goods are in and the paperwork is closed, or the order
   // never became one. The server refuses an amendment on these too.
@@ -269,7 +289,18 @@ export function PODetailPage() {
           * server draws in `_UNAMENDABLE`, so the button never offers what the API
           * would refuse. SENT_TO_VENDOR stays in: every order raised before the
           * acceptance rung existed sits on it. */}
-        {!isDraft && !isFinished && <Can do="po.edit">
+        {/* Amendment has a WINDOW: it opens at the vendor's acceptance and closes at
+          * their first despatch. Before the yes there is no agreement to amend — an
+          * order in our own approval, or approved and unsent, has never been seen by a
+          * counterparty, so changing it is editing it, and the way to do that is
+          * reject and re-raise. After the despatch the paperwork has to describe what
+          * actually went out.
+          *
+          * Legacy orders sent before the acceptance rung existed carry no answer at
+          * all and are genuinely out with a vendor, so they stay amendable — the same
+          * allowance `amend_po` makes on the same test, so the button never offers
+          * what the API would refuse, and never hides what it would allow. */}
+        {!isFinished && (canAmend) && <Can do="po.edit">
           <Button variant="subtle" onClick={startAmending}>
             <FilePen className="h-4 w-4" /> Amend
           </Button>
@@ -344,6 +375,16 @@ export function PODetailPage() {
                 <strong className="text-ink">{item.item_name ?? "—"}</strong>
                 {isNew && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">New Item</span>}
                 <p className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</p>
+                {/* What the vendor promised for THIS line, off the quotation that won.
+                    Under the item rather than in a column of its own: most orders
+                    carry one lead time or none, and a mostly-empty column costs every
+                    row its width. Absent on a PO raised from an indent — nobody
+                    quoted, so nobody promised. */}
+                {item.delivery_days != null && (
+                  <p className="text-xs text-muted">
+                    Vendor quoted {item.delivery_days} day{item.delivery_days === 1 ? "" : "s"} to deliver
+                  </p>
+                )}
               </td>
               <td className="p-3 text-right">
                 {prev && prev.quantity !== item.quantity && (

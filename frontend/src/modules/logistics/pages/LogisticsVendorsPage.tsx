@@ -6,8 +6,8 @@ import {
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, EmptyState, ErrorBanner, Field, Input, PageHeader,
-  ResponsiveGrid, ResponsiveList, Select, StatCard, StatusPill, useAction,
-  type Column,
+  KpiTiles, ResponsiveList, Select, StatusPill, useAction,
+  type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { logisticsVendorApi } from "../api";
@@ -85,6 +85,10 @@ const clean = (form: LogisticsVendorInput): LogisticsVendorInput =>
 export function LogisticsVendorsPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  // Which slice of the register the KPI strip has narrowed to. Client-side over the
+  // page already loaded: these are flags on the row, not parameters the list endpoint
+  // takes, and inventing query params the server does not have would 422.
+  const [slice, setSlice] = useState<"" | "dispatchable" | "with_login" | "without_login">("");
   const [form, setForm] = useState<LogisticsVendorInput | null>(null);
   const [editing, setEditing] = useState<LogisticsVendor | null>(null);
   const [confirmOff, setConfirmOff] = useState<LogisticsVendor | null>(null);
@@ -104,6 +108,16 @@ export function LogisticsVendorsPage() {
   });
   const { data: types = [] } = useQuery({
     queryKey: ["logistics-vendor-types"], queryFn: logisticsVendorApi.types,
+  });
+
+  // What the register shows, once the KPI strip has had its say. The tiles keep
+  // counting the SUMMARY, which is the whole register rather than this page, so
+  // pressing one never changes the number printed on it.
+  const visible = (data?.items ?? []).filter((row) => {
+    if (slice === "dispatchable") return Boolean(row.dispatchable);
+    if (slice === "with_login") return Boolean(row.has_login);
+    if (slice === "without_login") return !row.has_login;
+    return true;
   });
 
   const invalidates = [KEY, SUMMARY_KEY, ["transport-carriers"]];
@@ -362,21 +376,42 @@ export function LogisticsVendorsPage() {
         ?? toggleLogin.error ?? deactivate.error} />
 
       {/* Four identical grey numbers said nothing about which one mattered. Each tile
-          now carries its own mark and colour, and the last one only turns amber when
-          there is actually something to chase. */}
-      <ResponsiveGrid className="mb-4">
-        <StatCard label="Partners" value={summary?.total ?? 0}
-          icon={<Truck className="h-4.5 w-4.5" />} />
-        <StatCard label="Offered on Dispatch" value={summary?.dispatchable ?? 0}
-          icon={<CheckCircle2 className="h-4.5 w-4.5" />} tone="text-ok" />
-        <StatCard label="Can sign in" value={summary?.with_login ?? 0}
-          icon={<ShieldCheck className="h-4.5 w-4.5" />} tone="text-brand" />
-        {/* The one that costs a day: a partner is on the dropdown, gets sent a job,
-            and has no way to answer it. */}
-        <StatCard label="Awaiting a login" value={summary?.without_login ?? 0}
-          icon={<AlertTriangle className="h-4.5 w-4.5" />}
-          tone={summary?.without_login ? "text-warn" : "text-muted"} />
-      </ResponsiveGrid>
+          carries its own mark and colour, the last only turns amber when there is
+          something to chase, and every one of them now narrows the register to the
+          partners it counted — "3 awaiting a login" is read and acted on in the same
+          breath. "Partners" is the whole register and clears the others. */}
+      <KpiTiles label="Partner summary" className="mb-4" tiles={[
+        {
+          key: "total", label: "Partners", value: summary?.total, icon: Truck,
+          tone: "brand", active: slice === "",
+          hint: "Every active partner. Press to clear the tile filters.",
+          onPress: () => { setSlice(""); setPage(1); },
+        },
+        {
+          key: "dispatchable", label: "Offered on Dispatch", value: summary?.dispatchable,
+          icon: CheckCircle2, tone: "ok", active: slice === "dispatchable",
+          onPress: () => {
+            setSlice((on) => (on === "dispatchable" ? "" : "dispatchable")); setPage(1);
+          },
+        },
+        {
+          key: "with_login", label: "Can sign in", value: summary?.with_login,
+          icon: ShieldCheck, tone: "info", active: slice === "with_login",
+          onPress: () => {
+            setSlice((on) => (on === "with_login" ? "" : "with_login")); setPage(1);
+          },
+        },
+        // The one that costs a day: a partner is on the dropdown, gets sent a job, and
+        // has no way to answer it.
+        {
+          key: "without_login", label: "Awaiting a login", value: summary?.without_login,
+          icon: AlertTriangle, tone: summary?.without_login ? "warn" : "neutral",
+          active: slice === "without_login",
+          onPress: () => {
+            setSlice((on) => (on === "without_login" ? "" : "without_login")); setPage(1);
+          },
+        },
+      ] satisfies KpiTileSpec[]} />
 
       <Card className="mb-4 p-3">
         <div className="relative">
@@ -394,7 +429,7 @@ export function LogisticsVendorsPage() {
 
       <Card className="p-2">
         <ResponsiveList
-          data={data?.items ?? []}
+          data={visible}
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}

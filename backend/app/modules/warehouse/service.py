@@ -5402,6 +5402,31 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
     return await _decorate_issue_destination(db, issue)
 
 
+#: An issue whose goods actually went OUT to the requester.
+#:
+#: FIXED 2026-08-23. Both running totals below used to count any issue that was
+#: `is_stock_posted`, which only says the stock came OFF THE SHELF — not that it ever
+#: reached anybody. Issues were assumed to be delivered in creation order, and they are
+#: not: a storekeeper commonly raises one issue, leaves it sitting, then raises and
+#: hand-delivers a second.
+#:
+#: That is exactly what happened on IND0011. WHI0008 (10 units) was raised first and
+#: never dispatched; WHI0009 (5 units) was raised second and hand-delivered. Confirming
+#: those 5 computed `5 confirmed - 10 already delivered = -5`, clamped to zero, so the
+#: cap came out empty, `credit_arrival` was never reached, and 15 units sat on the
+#: ledger as OUT with no matching IN anywhere. The stock existed on no shelf.
+#:
+#: ISSUED is deliberately NOT here: it means picked and posted, still in the warehouse.
+#: The rungs below are the ones that say it left — and a return only happens to
+#: something that arrived, so both return states count too.
+_GONE_OUT_STATUSES = (
+    IssueStatus.DISPATCHED.value,
+    IssueStatus.ACKNOWLEDGED.value,
+    IssueStatus.PARTIALLY_RETURNED.value,
+    IssueStatus.RETURNED.value,
+)
+
+
 async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
     """Has the indent raiser said this issue's goods reached them?
 
@@ -5443,7 +5468,14 @@ async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
                    [line.indent_item_id for line in lines]),
                m.MaterialIssue.direction == IssueDirection.OUT.value,
                m.MaterialIssue.is_stock_posted.is_(True),
-               m.MaterialIssue.id <= issue.id,
+               # This issue always counts — it is the one being tested. An EARLIER one
+               # counts only if it actually went out; see `_GONE_OUT_STATUSES`. Written
+               # as an OR rather than a status filter over the whole set because
+               # excluding the subject itself would make an undelivered issue trivially
+               # "confirmed" and acknowledge it on the spot.
+               or_(m.MaterialIssue.id == issue.id,
+                   and_(m.MaterialIssue.id < issue.id,
+                        m.MaterialIssue.status.in_(_GONE_OUT_STATUSES))),
                ~_relayed_onward())
         .group_by(m.MaterialIssueLine.indent_item_id)
     )).all())
@@ -5469,6 +5501,15 @@ async def _issue_confirmation_caps(db: AsyncSession, issue: m.MaterialIssue) -> 
     if not lines:
         return {}
 
+    # An issue that has not gone out yet credits NOTHING, however much the requester
+    # has confirmed. Without this the running total stops partitioning: excluding
+    # undelivered issues from `delivered_before` (below) means an undelivered one no
+    # longer subtracts from a later delivered one, so BOTH would claim the same
+    # confirmed units and the arrival would be credited twice. An issue still sitting
+    # in the warehouse has delivered nothing, so zero is also simply the true answer.
+    if issue.status not in _GONE_OUT_STATUSES:
+        return {}
+
     from app.modules.indents.models import IndentItem
 
     confirmed = dict((await db.execute(
@@ -5485,7 +5526,10 @@ async def _issue_confirmation_caps(db: AsyncSession, issue: m.MaterialIssue) -> 
                    [line.indent_item_id for line in lines]),
                m.MaterialIssue.direction == IssueDirection.OUT.value,
                m.MaterialIssue.is_stock_posted.is_(True),
+               # Only what actually LEFT counts against this issue's share of the
+               # confirmation — see `_GONE_OUT_STATUSES`.
                m.MaterialIssue.id < issue.id,
+               m.MaterialIssue.status.in_(_GONE_OUT_STATUSES),
                ~_relayed_onward())
         .group_by(m.MaterialIssueLine.indent_item_id)
     )).all())

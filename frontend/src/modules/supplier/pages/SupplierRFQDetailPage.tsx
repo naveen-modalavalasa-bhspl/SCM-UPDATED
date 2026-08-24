@@ -179,6 +179,7 @@ export function SupplierRFQDetailPage() {
   return (
     <div>
       <PageHeader
+        back={{ to: "/supplier/rfqs", label: "Back to Your RFQs" }}
         eyebrow="Supplier"
         title={rfq?.rfq_no ?? "Request"}
         actions={
@@ -261,7 +262,7 @@ export function SupplierRFQDetailPage() {
                     onChange={(e) => set(index, { quantity: e.target.value })}
                   />
                 </Field>
-                <Field label="Rate">
+                <Field label="Rate" required>
                   <Input
                     type="number" min="0" step="0.01" value={line.rate} disabled={!open}
                     onChange={(e) => set(index, { rate: e.target.value })}
@@ -316,7 +317,7 @@ export function SupplierRFQDetailPage() {
                   </>
                 )}
 
-                <Field label="Delivery days">
+                <Field label="Delivery days" required>
                   <Input
                     type="number" min="0" value={line.delivery_days} disabled={!open}
                     onChange={(e) => set(index, { delivery_days: e.target.value })}
@@ -357,13 +358,13 @@ export function SupplierRFQDetailPage() {
               onChange={(e) => setHeader({ ...header, vendor_ref_no: e.target.value })}
             />
           </Field>
-          <Field label="Valid until">
+          <Field label="Valid until" required>
             <Input
               type="date" min={todayIst()} value={header.valid_till} disabled={!open}
               onChange={(e) => setHeader({ ...header, valid_till: e.target.value })}
             />
           </Field>
-          <Field label="Can deliver by">
+          <Field label="Can deliver by" required>
             <Input
               type="date" min={todayIst()} value={header.expected_delivery_date} disabled={!open}
               onChange={(e) => setHeader({ ...header, expected_delivery_date: e.target.value })}

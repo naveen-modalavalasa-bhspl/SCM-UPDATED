@@ -50,16 +50,28 @@ export const poHeaderFrom = (po: PurchaseOrder): POHeaderValue => ({
   freight: String(po.freight_amount ?? 0),
 });
 
-/** What goes on the wire. Blank text says nothing rather than blanking a field. */
+/** What goes on the wire.
+ *
+ * REVISED 2026-08-23. The six term/address fields now send "" rather than null when
+ * the box is empty, because the server draws its line there: null means "this payload
+ * says nothing about that field, keep what is on the order", and "" means "the buyer
+ * cleared it". Sending null for a blank box was what let a screen that had not loaded
+ * its values wipe every term on the document just by pressing Save — and now that the
+ * server ignores null, "" is the only way a buyer can still take a term back OFF.
+ * See `_apply_po_header` in procurement/service.py; the two halves must agree.
+ *
+ * `discount` and `freight` are always sent: they are the form's own numbers, an empty
+ * box genuinely means zero, and both columns are NOT NULL.
+ */
 export const poHeaderPayload = (v: POHeaderValue): POHeader => ({
   project_id: v.projectId === "" ? null : Number(v.projectId),
   remarks: v.remarks || null,
-  payment_terms: v.payment_terms || null,
-  delivery_terms: v.delivery_terms || null,
-  material_terms: v.material_terms || null,
-  logistics_terms: v.logistics_terms || null,
-  billing_address: v.billing_address || null,
-  shipping_address: v.shipping_address || null,
+  payment_terms: v.payment_terms ?? "",
+  delivery_terms: v.delivery_terms ?? "",
+  material_terms: v.material_terms ?? "",
+  logistics_terms: v.logistics_terms ?? "",
+  billing_address: v.billing_address ?? "",
+  shipping_address: v.shipping_address ?? "",
   discount_amount: Number(v.discount || 0),
   freight_amount: Number(v.freight || 0),
 });

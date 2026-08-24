@@ -164,6 +164,7 @@ export function TransportDetailPage() {
   return (
     <div>
       <PageHeader
+        back={{ to: "/logistics/shipments", label: "Back to Shipments" }}
         eyebrow={doc.consignment_no
           ? `Logistics · Consignment ${doc.consignment_no}`
           : "Logistics"}

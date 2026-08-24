@@ -59,7 +59,7 @@ PAGES: list[PageDef] = [
     # the module's front door — and on a backend that predates its endpoint, opening
     # the whole module then 404s. New screens go at the end of their group.
     PageDef("rbac_job_profiles", "/rbac/job-profiles", "Job Profiles",
-            parent="grp_rbac", module="rbac", icon="user-cog", sort_order=83),
+            parent="grp_rbac", module="rbac", icon="briefcase", sort_order=83),
     # The ONE approval-configuration screen. Catalogued so it gets a
     # `page.admin_approval_flow.view` of its own instead of borrowing
     # `admin.workflow.manage` — see permissions.INHERITS_GRANTS_FROM, which hands the
@@ -69,7 +69,7 @@ PAGES: list[PageDef] = [
             sort_order=91),
     # The asset / consumable code formula. Last in Settings for the reason above.
     PageDef("admin_code_formats", "/admin/code-formats", "Code Formats",
-            parent="grp_settings", module="admin", icon="hash", sort_order=102),
+            parent="grp_settings", module="admin", icon="braces", sort_order=102),
     # The API console. Under Settings, last, for the same reason as Code Formats —
     # a new screen must never become a module's front door.
     PageDef("admin_integrations", "/admin/integrations", "Integrations",
@@ -225,10 +225,23 @@ PAGES: list[PageDef] = [
     # same flow) the warehouse serves; these are separate rbac_pages rows pointing at
     # the same paths under /logistics. The warehouse rows keep their own codes, paths
     # and permissions and are not touched.
+    # NEW 2026-08-23. The module's front page, and its FIRST child, so /logistics opens
+    # on it. Every other module leads with an Overview; logistics redirected straight
+    # into Consignments, which asked the desk to start reading the queue before anything
+    # had told them the shape of the day.
+    #
+    # It reads `/api/transport/summary` and writes nothing, so it is guarded by the
+    # transport code the Shipments register already needs — no new permission, and
+    # `page.logistics_overview.view` inherits from `page.logistics_transport.view` (see
+    # permissions.INHERITS_GRANTS_FROM) so the desk that works Shipments gets it without
+    # anybody re-granting.
+    PageDef("logistics_overview", "/logistics", "Overview",
+            parent="grp_logistics", module="logistics", icon="layout-dashboard",
+            sort_order=0),
     PageDef("logistics_consignments", "/logistics/consignments", "Consignments",
             parent="grp_logistics", module="logistics", icon="boxes", sort_order=1),
     PageDef("logistics_dispatch", "/logistics/dispatch", "Dispatch",
-            parent="grp_logistics", module="logistics", icon="truck", sort_order=2),
+            parent="grp_logistics", module="logistics", icon="send", sort_order=2),
     # "Shipments", not "Transport Requests": the row is not a request for long. The
     # screen carries the leg from DRAFT through IN_TRANSIT, DELIVERED and CLOSED, and
     # lists the lane, the load, the LR/docket and the freight — a register of what is
@@ -284,9 +297,12 @@ PAGES: list[PageDef] = [
     # module to its first child, so a low order here would make the vendor register the
     # front door of Logistics for anyone holding it, which is exactly what putting it
     # under Settings was avoiding.
+    # handshake, not truck: grp_logistics itself is the truck, and a child wearing the
+    # parent's glyph is the one pair the rail always shows side by side. This row is
+    # about the PARTNER, not the vehicle.
     PageDef("settings_logistics_vendors", "/logistics/vendors",
             "Logistics Vendors", parent="grp_logistics", module="logistics",
-            icon="truck", sort_order=8),
+            icon="handshake", sort_order=8),
 
     # ------------------------------------------------------------------ #
     #  Warehouse — Outward QC
@@ -304,7 +320,7 @@ PAGES: list[PageDef] = [
     # can never become the front door the left rail opens Warehouse on.
     PageDef("wh_qc_outward", "/warehouse/qc-outward", "Outward QC",
             parent="grp_warehouse", module="warehouse",
-            icon="check-circle", sort_order=51),
+            icon="clipboard-check", sort_order=51),
 ]
 
 
@@ -424,6 +440,19 @@ RETIRED_PAGES: list[str] = [
     # desk that worked the queue yesterday opens the new screen today.
     "inv_fulfillment",
     "inv_allocation_approvals",
+    # RETIRED 2026-08-23 — Settings carried three rows for configuring approvals.
+    # `admin_approvals_config` was parked already; these two are the rest of the same
+    # duplication. Approval Flow (`admin_approval_flow`) is THE approval-configuration
+    # screen and is catalogued as such, so a second and third door onto the same
+    # decision is how two admins end up configuring a ladder in two places and neither
+    # of them being the one the engine reads.
+    #
+    # Parked, never deleted, exactly like every row above: `retire_pages` only sets
+    # is_active = 0, so every grant survives and an admin can switch them back on. The
+    # ROUTES stay registered too — a bookmark still opens the screen, and nothing that
+    # already reads these tables changes behaviour.
+    "admin_rules",
+    "admin_policies",
 ]
 
 

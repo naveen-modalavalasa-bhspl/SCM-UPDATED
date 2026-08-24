@@ -635,6 +635,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # Every code here already existed as an auto-created row except the last two;
     # listing them changes no module, resource or action, only who may refresh them.
     ("grp_logistics", "logistics", "Logistics"),
+    ("logistics_overview", "logistics", "Logistics · Overview"),
     ("logistics_consignments", "logistics", "Logistics · Consignments"),
     ("logistics_dispatch", "logistics", "Logistics · Dispatch"),
     ("logistics_transport", "logistics", "Logistics · Shipments"),
@@ -714,6 +715,12 @@ INHERITS_GRANTS_FROM.update({
     # shows the same events, off the same documents, and taking the board away without
     # handing over the screen that replaced it would leave that desk with nothing.
     page_view_code("logistics_activity"): page_view_code("logistics_tracking"),
+    # The module's new front page (2026-08-23). It reads the SAME summary endpoint
+    # the Shipments register lives on and writes nothing, so anybody who can work
+    # Shipments can read the overview of them — minting it fail-closed to Admin
+    # would put a landing page on the rail that the whole logistics desk gets a
+    # locked door from.
+    page_view_code("logistics_overview"): page_view_code("logistics_transport"),
     # Not a split but a late catalogue entry, which needs the same treatment: the
     # screen has been reachable on these two codes for months, and minting its page
     # permission fail-closed would silently retire a screen people work every day.

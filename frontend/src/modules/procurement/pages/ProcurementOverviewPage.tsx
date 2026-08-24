@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -50,8 +50,13 @@ import {
  * so plainly rather than rendering an empty scaffold.
  */
 
-/** How many items the demand pool shows before sending the reader to the register. */
+/** How many items the demand pool shows at rest. */
 const DEMAND_POOL_ROWS = 5;
+/** How many it shows once opened out. Capped rather than unbounded: the pool is the
+ *  whole company's unbought demand and can run to hundreds, and a card that grows
+ *  without limit stops being a card. Past this the register is the right screen, and
+ *  the footer says so. */
+const DEMAND_POOL_EXPANDED = 50;
 
 /* --- The buying chain ------------------------------------------------------ */
 
@@ -217,10 +222,22 @@ export function ProcurementOverviewPage() {
   /* --- the demand pool ----------------------------------------------------- */
   const [search, setSearch] = useState("");
   const debounced = useDebouncedValue(search);
-  // Five, not a page of twenty: the Overview answers "what is the company short of",
-  // and the whole list is one click away on the register. A board that scrolls is a
-  // board nobody reads to the bottom of.
-  const poolParams = { search: debounced || undefined, size: DEMAND_POOL_ROWS };
+  // Five at rest: the Overview answers "what is the company short of", and a board
+  // that scrolls is a board nobody reads to the bottom of.
+  //
+  // REVISED 2026-08-23 — the footer used to NAVIGATE to the requisition register.
+  // Reading one more row cost the reader the whole dashboard, and the register is a
+  // different question (which requisitions?) from the one they were asking (what are
+  // we short of?). It opens out in place now, and the register link is kept for the
+  // case that genuinely needs it: more demand than this card should ever hold.
+  const [expanded, setExpanded] = useState(false);
+  // Narrowing the pool puts the reader back at the top of a short list; leaving it
+  // opened out to fifty rows of a two-row search result is just empty card.
+  useEffect(() => { setExpanded(false); }, [debounced]);
+  const poolParams = {
+    search: debounced || undefined,
+    size: expanded ? DEMAND_POOL_EXPANDED : DEMAND_POOL_ROWS,
+  };
   const pool = useQuery({
     queryKey: procurementStatsKeys.demandPool(poolParams),
     queryFn: ({ signal }) => procurementStatsApi.demandPool(poolParams, signal),
@@ -347,6 +364,9 @@ export function ProcurementOverviewPage() {
             </div>
 
             {pool.error && <ErrorBanner error={pool.error} />}
+            {/* Opened out, the list scrolls inside the card rather than pushing the
+                money strip and the chain off the bottom of the page. */}
+            <div className={expanded ? "max-h-[26rem] overflow-y-auto pr-1" : undefined}>
             <ResponsiveList
               columns={poolColumns}
               data={pool.data?.items ?? []}
@@ -386,16 +406,40 @@ export function ProcurementOverviewPage() {
                 </div>
               )}
             />
-            {(pool.data?.total ?? 0) > (pool.data?.items.length ?? 0) && (
-              <button
-                type="button"
-                onClick={() => nav("/procurement/requisitions")}
-                className="mt-3 rounded text-xs font-medium text-muted transition-colors hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
-              >
-                Showing the {pool.data?.items.length} largest of {pool.data?.total} items
-                — open the requisition register
-              </button>
-            )}
+            </div>
+            {(() => {
+              const shown = pool.data?.items.length ?? 0;
+              const total = pool.data?.total ?? 0;
+              if (total <= shown && !expanded) return null;
+              // More than this card will ever hold: the register is the honest answer,
+              // and it is the same link that has always been here.
+              const overflowing = expanded && total > shown;
+              return (
+                <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  {(total > shown || expanded) && (
+                    <button
+                      type="button"
+                      aria-expanded={expanded}
+                      onClick={() => setExpanded((open) => !open)}
+                      className="rounded text-xs font-medium text-muted transition-colors hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
+                    >
+                      {expanded
+                        ? `Show the ${DEMAND_POOL_ROWS} largest`
+                        : `Showing the ${shown} largest of ${total} items — show all`}
+                    </button>
+                  )}
+                  {overflowing && (
+                    <button
+                      type="button"
+                      onClick={() => nav("/procurement/requisitions")}
+                      className="rounded text-xs font-medium text-muted transition-colors hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
+                    >
+                      {total - shown} more — open the requisition register
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
           </Card>
         )}
 

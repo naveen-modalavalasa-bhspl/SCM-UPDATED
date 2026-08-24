@@ -110,6 +110,7 @@ export function PurchaseConsolidationFormPage() {
   return (
     <div>
       <PageHeader
+        back={{ to: "/procurement/consolidations", label: "Back to Purchase sheets" }}
         eyebrow="Procurement"
         title="New consolidated sheet"
         actions={
