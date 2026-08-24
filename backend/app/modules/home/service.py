@@ -450,16 +450,24 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
             "create_po", "New Purchase Order", "/pos", "shopping-cart", "purple",
         ))
     if perms.RECEIPT_CREATE in permissions:
+        # The gate entry, NOT the GRN. Both tiles pointed at /warehouse/grn/new, so
+        # Home offered the same screen twice under two names and the first step of the
+        # inbound leg — the lorry at the gate — had no door on the dashboard at all.
+        # Mirrors the warehouse rail, which has run inward -> receipt -> QC -> put-away
+        # since the screens were split (`wh_inward` @42, `wh_grn` @43).
         actions.append(_action(
-            "goods_receipt", "Goods Receipt", "/warehouse/grn/new",
-            "package-down", "cyan",
+            "goods_receipt", "Material Inward", "/warehouse/material-inward/new",
+            "truck", "cyan",
         ))
     if perms.STOCK_TRANSFER in permissions:
         actions.append(_action(
             "stock_transfer", "Stock Transfer", "/inventory/transfers",
             "arrow-left-right", "orange",
         ))
-    if perms.GRN_CREATE in permissions:
+    # RECEIPT_CREATE, not GRN_CREATE: /api/warehouse/receipts is gated on receipt.create
+    # throughout, so gating the tile on grn.create offered the button to a profile the
+    # backend then refused. Same mismatch fixed on the two receipt screens themselves.
+    if perms.RECEIPT_CREATE in permissions:
         actions.append(_action(
             "create_grn", "Create GRN", "/warehouse/grn/new", "file-plus", "red",
         ))

@@ -1016,19 +1016,19 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
             {!locked && (
-              <Can do="grn.create">
+              <Can do="receipt.create">
                 <Button variant="soft" onClick={submitSave} disabled={save.isPending}>
                   {save.isPending ? "Saving…" : "Save"}
                 </Button>
               </Can>
             )}
             {editing && isGrn && doc?.status === "DRAFT" && (
-              <Can do="grn.create">
+              <Can do="receipt.create">
                 <Button onClick={() => setConfirming("submit")}>Submit for QC</Button>
               </Can>
             )}
             {editing && !isGrn && doc?.status === "GATE_ENTRY" && (
-              <Can do="grn.create">
+              <Can do="receipt.create">
                 <Button
                   onClick={() => convert.mutate()}
                   disabled={convert.isPending}

@@ -323,3 +323,68 @@ class ExtEndpointOut(BaseModel):
     searchable: bool
     max_size: int
     updated_since_supported: bool
+
+
+# --------------------------------------------------------------------------- #
+#  Platform links — what THIS app connects out to
+# --------------------------------------------------------------------------- #
+class LinkFieldOut(BaseModel):
+    """One configuration line. `is_secret` rows carry a MASKED value and there is no
+    route that returns the real one — see `platform_links._mask`."""
+    label: str
+    value: str | None = None
+    is_secret: bool = False
+    is_set: bool = False
+    hint: str | None = None
+
+
+class LinkActivityOut(BaseModel):
+    at: datetime | None = None
+    status: str | None = None
+    detail: str | None = None
+
+
+class PlatformLinkOut(BaseModel):
+    code: str
+    name: str
+    kind: str
+    direction: str
+    icon: str | None = None
+    endpoint: str | None = None
+    configured: bool
+    summary: str
+    fields: list[LinkFieldOut] = []
+    log_label: str | None = None
+    has_log: bool = False
+    last_activity: LinkActivityOut | None = None
+
+
+class LinkLogRow(BaseModel):
+    """One line of a link's own log, normalised so HCM syncs and sent mail render in
+    the same table."""
+    id: int
+    at: datetime | None = None
+    status: str
+    subject: str | None = None
+    detail: str | None = None
+    error: str | None = None
+    actor: str | None = None
+
+
+class LinkTestOut(BaseModel):
+    code: str
+    ok: bool
+    ms: int
+    detail: str
+
+
+class RevealedFieldOut(BaseModel):
+    """One credential in the clear. Returned ONLY by the reveal route, which is a POST
+    on `integration.keys.manage` and writes an audit row — never by a list or a get."""
+    label: str
+    value: str
+
+
+class LinkRevealOut(BaseModel):
+    code: str
+    fields: list[RevealedFieldOut] = []

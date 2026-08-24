@@ -25,10 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.pagination import PageParams
-from app.modules.integrations import adapters, introspect, service
+from app.modules.integrations import adapters, introspect, platform_links, service
 from app.modules.integrations.schemas import (
     CallLogOut, ClientOut, ClientWrite, ColumnOut, EndpointOut, EndpointWrite,
-    ExtEndpointOut, ExtPage, KeyIssuedOut, KeyOut, KeyWrite, PreviewOut, TableOut,
+    ExtEndpointOut, ExtPage, KeyIssuedOut, KeyOut, KeyWrite, LinkLogRow,
+    LinkRevealOut, LinkTestOut, PlatformLinkOut, PreviewOut, TableOut,
     UsageOut,
 )
 from app.modules.integrations.security import Caller, require_api_key
@@ -209,6 +210,73 @@ async def read(slug: str, request: Request, db: AsyncSession = Depends(get_db),
     return await service.serve_logged(
         db, slug, caller, dict(request.query_params),
         ip=request.client.host if request.client else None)
+
+
+# --------------------------------------------------------------------------- #
+#  Platform links — what THIS app connects out to
+# --------------------------------------------------------------------------- #
+# The mirror of the console above: that half is "who calls us", this half is "who do
+# we call". Same router, same `integration.view` gate, so a job profile that can read
+# the API console can read this and nothing new has to be granted.
+#
+# Every secret these routes return is MASKED in `platform_links` and there is no
+# endpoint that unmasks one. `/test` is how "is the credential right" gets answered
+# without ever sending the credential to a browser.
+#
+# Read-only throughout: no route here writes a business table, and none enters a
+# workflow — configuration is not a document and has no approval ladder.
+
+@console.get("/platform", response_model=list[PlatformLinkOut])
+async def list_platform_links(db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(VIEW))):
+    """Every outbound link. Makes no network call — opening a settings screen must not
+    hang on a dead SMTP host; `/test` is the button that does."""
+    return await platform_links.list_links(db)
+
+
+@console.get("/platform/{code}", response_model=PlatformLinkOut)
+async def get_platform_link(code: str, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(VIEW))):
+    return await platform_links.get_link(db, code)
+
+
+@console.get("/platform/{code}/logs")
+async def platform_link_logs(code: str, params: PageParams = Depends(),
+                             status: str | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(VIEW))):
+    """The link's own log — `sys_hcm_sync_log` or `sys_mail_messages` — normalised to
+    one row shape. Nothing is written for this screen's benefit."""
+    return await platform_links.link_logs(db, code, params, status)
+
+
+@console.get("/platform/{code}/log-stats", response_model=dict)
+async def platform_link_log_stats(code: str, db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(VIEW))):
+    return await platform_links.link_stats(db, code)
+
+
+@console.post("/platform/{code}/reveal", response_model=LinkRevealOut)
+async def reveal_platform_link(code: str, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(KEYS))):
+    """The real credentials for one link, in the clear.
+
+    On KEYS (`integration.keys.manage`), not the VIEW the rest of this panel uses:
+    reading a credential is the same class of act as issuing one, and the two codes
+    can be granted apart. A POST rather than a GET so a secret can never arrive as a
+    side effect of opening a screen, being prefetched, or sitting in a URL. Writes an
+    audit row naming the reader and the link — see `platform_links.reveal_secrets`.
+    """
+    return await platform_links.reveal_secrets(db, code, user)
+
+
+@console.post("/platform/{code}/test", response_model=LinkTestOut)
+async def test_platform_link(code: str, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(VIEW))):
+    """One live call against the configured credentials. Nothing is sent, nothing is
+    written: the mail probe authenticates and hangs up, and the HCM probe reads one
+    row. A failure is the answer, not a 500."""
+    return await platform_links.test_link(db, code)
 
 
 router = APIRouter()

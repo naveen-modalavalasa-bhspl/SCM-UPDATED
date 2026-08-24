@@ -83,7 +83,9 @@ import {
   ReceivingConfigPage, DecisionQueuePage, PurchaseReturnsPage,
 } from "@/modules/returns";
 // The API console — build an API from the screen over any table in the database.
-import { ApiClientsPage, ApiClientDetailPage } from "@/modules/integrations";
+import {
+  ApiClientsPage, ApiClientDetailPage, PlatformLinksPage,
+} from "@/modules/integrations";
 // `PurchaseConsolidation*`, not `Consolidation*`: the approvals module already owns
 // that name for INDENT consolidation, which is a different document entirely.
 import { PurchaseConsolidationListPage } from "@/modules/procurement/pages/PurchaseConsolidationListPage";
@@ -104,6 +106,7 @@ import {
 import { ProcurementOverviewPage } from "@/modules/procurement/pages/ProcurementOverviewPage";
 import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
 import { ProcurementLedgerPage } from "@/modules/procurement/pages/ProcurementLedgerPage";
+import { SuppliersPage } from "@/modules/procurement/pages/SuppliersPage";
 import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
 import { MRConsolidationPage } from "@/modules/procurement/pages/MRConsolidationPage";
 import { RequisitionDetailPage } from "@/modules/procurement/pages/RequisitionDetailPage";
@@ -344,6 +347,10 @@ function AppRoutes() {
             module whose five registers are granted separately. */}
         <Route path="procurement/overview" element={<ProcurementOverviewPage />} />
         <Route path="procurement/ledger" element={<ProcurementLedgerPage />} />
+        {/* The supplier register — who we buy from, and the login each one answers
+            an RFQ with. Inside the employee shell like every other procurement
+            screen; /supplier/* is the vendors' own portal and stays outside it. */}
+        <Route path="procurement/suppliers" element={<SuppliersPage />} />
         <Route path="procurement/requisitions" element={<RequisitionListPage />} />
         <Route path="procurement/requisitions/new" element={<RequisitionFormPage />} />
         {/* Both literals before `:id`, which is read as a number. */}
@@ -533,6 +540,11 @@ function AppRoutes() {
             follows the menu, not the other way round. */}
         <Route path="admin/integrations" element={<ApiClientsPage />} />
         {/* Child screen, reached by opening a row — no menu entry of its own. */}
+        {/* App Integrations: what THIS app connects OUT to — HCM, mail, the database
+            — beside the console that lists who calls IN. Its own path rather than a
+            child of /admin/integrations, which ends in a catch-all `:code` that would
+            read any literal segment as a client code. */}
+        <Route path="admin/app-links" element={<PlatformLinksPage />} />
         <Route path="admin/integrations/:code" element={<ApiClientDetailPage />} />
         <Route path="masters" element={<MastersPage />} />
         {/* /reports lands on the first ledger so the rail entry always has a screen. */}

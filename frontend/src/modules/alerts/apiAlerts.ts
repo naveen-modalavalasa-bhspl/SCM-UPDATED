@@ -65,8 +65,12 @@ export function installApiAlerts(): void {
         const url = String(error.config?.url ?? "");
         const isLoginPost = url.includes("/api/auth/login")
           || url.includes("/api/supplier/login");
-        const isVendorCall = url.startsWith("/api/supplier")
-          || url.startsWith("/api/carrier");
+        // Segment-matched, for the same reason as `isSupplierCall` in the shared
+        // client: /api/supplier-accounts and /api/suppliers are INTERNAL screens an
+        // employee opens, and reading their 401 against the vendor token told the
+        // wrong half of the app its session had expired.
+        const isVendorCall = /^\/api\/(supplier|carrier)(\/|$)/.test(
+          url.split(/[?#]/)[0]);
         const wasSignedIn = isVendorCall
           ? Boolean(vendorToken())
           : Boolean(localStorage.getItem("token"));

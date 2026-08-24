@@ -1073,6 +1073,48 @@ async def _transfer_for_receipt(
 _LEAVES_THE_COMPANY = (DispatchType.CUSTOMER.value, DispatchType.VENDOR_RETURN.value)
 
 
+def _guard_leaves_the_company(dispatch_type, to_wh, issue=None) -> None:
+    """A consignment cannot both leave the company and land on a shelf of ours.
+
+    FIXED 2026-08-24 (P1) — the loss this stops. A consignment serving IND0019 was
+    typed CUSTOMER while addressed to our own LIP: `credit_arrival` skips every type in
+    `_LEAVES_THE_COMPANY` (rightly — it must never book a sale back onto our stock), so
+    the issue posted its OUT at the source, the requester acknowledged the delivery,
+    the indent CLOSED, and no IN row was ever written. Seven units left the books
+    entirely, and nothing anywhere said so.
+
+    Two contradictions, both impossible to mean honestly:
+
+      * a MATERIAL ISSUE serves an indent one of our own points raised — `IssueType`
+        has no customer or sale member at all — so an issue-linked consignment is
+        internal by construction, whatever the type dropdown was left on;
+      * a destination warehouse of ours on a consignment that leaves.
+
+    Says so at the door instead of silently dropping the credit. Raised BEFORE the
+    document is written, so nothing half-formed is left behind, and it touches neither
+    permissions nor the approval ladder: a consignment still gets approved and released
+    exactly as it did, this only refuses a type its own contents contradict.
+    """
+    if getattr(dispatch_type, "value", dispatch_type) not in _LEAVES_THE_COMPANY:
+        return
+    label = "customer" if getattr(dispatch_type, "value",
+                                  dispatch_type) == DispatchType.CUSTOMER.value         else "vendor return"
+    if issue is not None:
+        raise ValidationError(
+            f"{issue.issue_no} is a material issue serving one of our own points, so "
+            f"its consignment cannot be a {label} — those leave the company and their "
+            "stock is never credited back to us. Use Project delivery or Stock "
+            "transfer."
+        )
+    if to_wh is not None:
+        raise ValidationError(
+            f"This consignment is addressed to {to_wh.name}, one of our own "
+            f"warehouses, so it cannot be a {label} — those leave the company and "
+            "their stock is never credited back to us. Use Project delivery or Stock "
+            "transfer, or clear the destination warehouse."
+        )
+
+
 def _dispatch_lots(lines, qty_field: str) -> list[tuple[int, int | None, Decimal]]:
     """A consignment's lines, rolled up into one entry per lot it moves.
 
@@ -8243,6 +8285,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         raise ValidationError("A stock transfer consignment needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
         raise ValidationError("A transfer cannot have the same origin and destination")
+    _guard_leaves_the_company(data.dispatch_type, to_wh, issue)
     # Nothing to carry. The issue came OUT of the very point that raised the indent —
     # an OE serving his own LIP — so the goods are already on the requester's shelf.
     # Left to run, this wrote a consignment with a blank destination, and a blank
@@ -8335,6 +8378,7 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
         raise ValidationError("A stock transfer consignment needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
         raise ValidationError("A transfer cannot have the same origin and destination")
+    _guard_leaves_the_company(data.dispatch_type, to_wh, issue)
     _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
@@ -8425,6 +8469,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         raise ValidationError("A stock transfer needs a destination warehouse")
     if to_wh is not None and to_wh.id == wh.id:
         raise ValidationError("A transfer cannot have the same origin and destination")
+    _guard_leaves_the_company(data.dispatch_type, to_wh, ref_issue)
 
     dispatch = m.Dispatch(
         # See create_issue. All three are delete-orphan collections, so the flush wants
@@ -8501,6 +8546,10 @@ async def update_dispatch(db: AsyncSession, dispatch_id: int, data: s.DispatchWr
         if ref_issue.warehouse_id != wh.id:
             raise ValidationError(f"{ref_issue.issue_no} belongs to another warehouse")
     dispatch.ref_no = ref_issue.issue_no if ref_issue else None
+    # After `ref_issue` is resolved, so an issue-linked edit is judged on what the
+    # consignment is actually carrying. Nothing is committed until the end of this
+    # function, so raising here leaves the row exactly as it was.
+    _guard_leaves_the_company(data.dispatch_type, to_wh, ref_issue)
     _, destination_office_name = await _issue_destination(db, ref_issue)
     dispatch.delivery_address = data.delivery_address or destination_office_name
     dispatch.transport_mode = data.transport_mode

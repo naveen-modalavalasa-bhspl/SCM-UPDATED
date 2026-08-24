@@ -5,7 +5,7 @@ import {
   Handshake, Hash, History, Home, Inbox, IndianRupee, Key, LayoutDashboard, Layers,
   List, ListChecks, ListOrdered, MapPin, Move, Package, PackageCheck, PackageX,
   PenLine, Plug, Printer, Receipt, RefreshCw, RotateCcw, Route, Scale, ScrollText,
-  SearchCheck, Send,
+  SearchCheck, Send, Store,
   Settings, Shield, ShoppingCart, SlidersHorizontal, Sparkles, Split, TrendingUp,
   Truck, Undo2, UserCog, Users, Warehouse, type LucideIcon,
 } from "lucide-react";
@@ -93,6 +93,10 @@ const MAP: Record<string, LucideIcon> = {
   // the same gap `assertKnownIcon` exists to catch, found by auditing the tree
   // against this table rather than by anybody reporting it.
   "undo-2": Undo2,
+  // `pro_suppliers` names this (2026-08-24). The sixteenth case of the same gap:
+  // without an entry the Suppliers tab drew the generic box, which in the procurement
+  // rail sat next to seven glyphs that all meant something.
+  store: Store,
 };
 
 /** Names already reported, so one missing glyph does not log on every render. */

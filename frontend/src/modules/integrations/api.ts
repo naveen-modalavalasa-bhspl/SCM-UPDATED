@@ -1,7 +1,8 @@
 import { api } from "@/shared/api/client";
 import type {
   ApiClient, ApiEndpoint, ApiKey, CallLog, ClientWrite, EndpointWrite, IssuedKey,
-  KeyWrite, Page, Preview, SourceColumn, SourceTable, Usage,
+  KeyWrite, LinkLogRow, LinkLogStats, LinkReveal, LinkTest, Page, PlatformLink,
+  Preview, SourceColumn, SourceTable, Usage,
 } from "./types";
 
 /** API-console HTTP layer. Every call hits a real endpoint and every error propagates. */
@@ -74,4 +75,33 @@ export const integrationsApi = {
 
   usage: async (code: string): Promise<Usage> =>
     (await api.get(`${BASE}/clients/${code}/usage`)).data,
+};
+
+/** What THIS app connects out to — HCM, mail, the database — and their own logs.
+ *
+ *  Every secret these return is masked server-side; there is no unmask route. `test`
+ *  is how a credential is checked without the credential ever reaching the browser. */
+export const platformLinksApi = {
+  list: async (): Promise<PlatformLink[]> =>
+    (await api.get(`${BASE}/platform`)).data,
+
+  get: async (code: string): Promise<PlatformLink> =>
+    (await api.get(`${BASE}/platform/${code}`)).data,
+
+  logs: async (code: string, params: { page?: number; size?: number; status?: string } = {})
+    : Promise<Page<LinkLogRow>> =>
+    (await api.get(`${BASE}/platform/${code}/logs`, { params: clean(params) })).data,
+
+  logStats: async (code: string): Promise<LinkLogStats> =>
+    (await api.get(`${BASE}/platform/${code}/log-stats`)).data,
+
+  /** One live call against the configured credentials. Sends nothing, writes nothing. */
+  test: async (code: string): Promise<LinkTest> =>
+    (await api.post(`${BASE}/platform/${code}/test`)).data,
+
+  /** The credentials in the clear. A POST, on `integration.keys.manage`, audited
+   *  server-side — so it is never fetched as a side effect of opening the screen. The
+   *  values are held in component state only and are gone on reload. */
+  reveal: async (code: string): Promise<LinkReveal> =>
+    (await api.post(`${BASE}/platform/${code}/reveal`)).data,
 };

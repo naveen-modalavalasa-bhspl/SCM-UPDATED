@@ -3356,8 +3356,16 @@ def _was_issued_to_vendor():
     )
 
 
-def _vendor_visible():
+def _vendor_visible_po():
     """What a vendor may SEE: an order they hold, or one being revised on them.
+
+    NAMED `_vendor_visible_po`, not `_vendor_visible`: an RFQ predicate of that exact
+    name already exists earlier in this module, and a second module-level def silently
+    REPLACED it. Every vendor RFQ query then filtered on purchase-order status against
+    an unjoined `pro_purchase_orders`, which cross-joined the RFQ list (836 rows where
+    34 were owed, one copy per matching PO) and dropped the RFQ status filter
+    altogether, so DRAFT RFQs the company had not decided to send reached the portal.
+    Keep the two names distinct.
 
     NEW 2026-08-23. `amend_po` drops an order back to DRAFT and clears the answer, and
     DRAFT is not vendor-readable — so an amendment made the order VANISH off the
@@ -3381,7 +3389,7 @@ async def _vendor_po_visible(db: AsyncSession, vendor_id: int,
         select(PurchaseOrder).where(
             PurchaseOrder.id == po_id,
             PurchaseOrder.vendor_id == vendor_id,
-            _vendor_visible(),
+            _vendor_visible_po(),
         )
     )).scalars().first()
     if po is None:
@@ -3480,7 +3488,7 @@ async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams,
                           status: str | None = None) -> dict:
     """The orders this vendor has been sent. Never anyone else's, never a draft."""
     stmt = (select(PurchaseOrder)
-            .where(PurchaseOrder.vendor_id == vendor_id, _vendor_visible()))
+            .where(PurchaseOrder.vendor_id == vendor_id, _vendor_visible_po()))
 
     # Apply real-time search filtering for the supplier portal if a search query is
     # provided. Over the order number and the RFQ/quotation numbers snapshotted on it
@@ -3493,7 +3501,7 @@ async def vendor_list_pos(db: AsyncSession, vendor_id: int, params: PageParams,
     # Narrowing only, and only WITHIN what this vendor may already read: an unknown or
     # internal status filters to nothing rather than widening the scope.
     if status:
-        stmt = stmt.where(PurchaseOrder.status == status, _vendor_visible())
+        stmt = stmt.where(PurchaseOrder.status == status, _vendor_visible_po())
     stmt = stmt.order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc())
     page = await paginate(db, stmt, params)
     counts = dict((await db.execute(

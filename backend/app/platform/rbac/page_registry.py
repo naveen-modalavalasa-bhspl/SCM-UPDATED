@@ -75,6 +75,16 @@ PAGES: list[PageDef] = [
     PageDef("admin_integrations", "/admin/integrations", "Integrations",
             parent="grp_settings", module="integrations", icon="plug",
             sort_order=103),
+    # The other half of the same question, right beside it: the console lists who
+    # calls US, this lists what WE call — HCM, mail, the database — with each
+    # credential masked and each link's own log readable for the first time. A failed
+    # HCM sync wrote `sys_hcm_sync_log` and surfaced nowhere once the run was over.
+    #
+    # Gated on `integration.view` like the console (see INHERITS_GRANTS_FROM below), so
+    # whoever can read the API console reads this and nothing new is granted.
+    PageDef("admin_app_links", "/admin/app-links", "App Integrations",
+            parent="grp_settings", module="integrations", icon="plug",
+            sort_order=104),
     # The approvals landing page. sort_order 20 puts it FIRST in its group, which
     # makes it the module's front door — deliberate here, and safe, because it calls
     # no endpoint that did not already exist (/pending/summary, /reports/summary,
@@ -149,6 +159,18 @@ PAGES: list[PageDef] = [
     PageDef("pro_quotations", "/procurement/quotations", "Quotations",
             parent="grp_purchasing", module="procurement", icon="handshake",
             sort_order=28),
+    # The supplier register: who sells us material, and whether they can actually sign
+    # in to answer an RFQ. Under PURCHASING rather than Settings, unlike its carrier
+    # twin — a buyer who finds no vendor on the RFQ picker is one click from the list
+    # that feeds it, and the routes are guarded by `vendor.portal.manage` either way,
+    # so the menu position widens nothing.
+    #
+    # sort_order 33 keeps it LAST among the purchasing children (the ledger is 32).
+    # The left rail opens a module on its FIRST child, and a register of vendors must
+    # never become the front door of Procurement.
+    PageDef("pro_suppliers", "/procurement/suppliers", "Suppliers",
+            parent="grp_purchasing", module="procurement", icon="store",
+            sort_order=33),
     # Document traceability: one number in, the whole chain out. Under Reports
     # because it crosses every module and writes nothing — the same reason the
     # package it lives in sits outside the import chain. LAST in the group, so it

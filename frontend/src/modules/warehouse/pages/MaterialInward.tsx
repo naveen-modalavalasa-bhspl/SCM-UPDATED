@@ -112,7 +112,10 @@ export default function MaterialInward() {
       statuses={STATUSES}
       createTo="new"
       createLabel="New gate entry"
-      createPermission="grn.create"
+      // `receipt.create`, not `grn.create`: every /api/warehouse/receipts route is
+      // gated on receipt.create, so a profile holding only grn.create was shown this
+      // button and got a 403 on press.
+      createPermission="receipt.create"
       // A converted entry is a GRN now; opening it in the gate form would offer to edit
       // it as something it no longer is.
       onRowClick={(r) => nav(isDraft(r) ? String(r.id) : `../grn/${r.id}`)}

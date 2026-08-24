@@ -680,6 +680,14 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # from `transport.view` (the Dispatch dropdown reads /api/transport/carriers), so
     # leaving this one Admin-only takes no button away from the logistics desk.
     ("settings_logistics_vendors", "logistics", "Settings · Logistics Vendors"),
+    # The material twin of the row above, filed under Procurement. Catalogued here so
+    # it can inherit below rather than landing Admin-only: every route behind it is
+    # already gated on `vendor.portal.manage`, so a desk that holds that code and
+    # cannot see the screen has a permission it can do nothing with.
+    ("pro_suppliers", "procurement", "Procurement » Suppliers"),
+    # App Integrations — the outbound half of the API console. Catalogued so it can
+    # inherit the console's own grant below rather than landing Admin-only.
+    ("admin_app_links", "integrations", "Settings · App Integrations"),
 ]
 
 
@@ -738,6 +746,17 @@ INHERITS_GRANTS_FROM.update({
     # can open it. Fail-closed would retire a landing page nobody granted yet.
     page_view_code("approval_overview"): page_view_code("approval_waiting"),
     page_view_code("inv_stocking_points"): STOCK_POINTS_MANAGE,
+    # The supplier register (2026-08-24). Not fail-closed: every route behind it is
+    # already gated on `vendor.portal.manage`, the code that has governed minting a
+    # vendor login since the portal landed, so whoever holds it today opens the screen
+    # today. Granting the page to somebody WITHOUT that code would show them a list
+    # whose every button 403s, which is the failure this whole screen exists to end.
+    page_view_code("pro_suppliers"): VENDOR_PORTAL_MANAGE,
+    # Same screen, same audience: App Integrations reads the configuration and logs
+    # behind the console anybody holding `integration.view` already opens, and every
+    # route on it is gated by that code. Fail-closed would put a Settings row on the
+    # rail that the one desk meant to use it gets a locked door from.
+    page_view_code("admin_app_links"): INTEGRATION_VIEW,
     # The four inbound warehouse screens, same story: catalogued late (2026-08-20), so
     # each inherits the action code that has been gating it since the module landed.
     page_view_code("wh_inward"): RECEIPT_VIEW,

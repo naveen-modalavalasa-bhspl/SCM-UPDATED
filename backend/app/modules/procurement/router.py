@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
-from app.modules.procurement import service, stats
+from app.modules.procurement import service, stats, suppliers
 from app.modules.procurement.schemas import (
     ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
@@ -31,7 +31,8 @@ from app.modules.procurement.schemas import (
     POAmendIn, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
     PORevisionOut, POVendorResponseIn, QuoteListRow,
     QuoteOut, QuoteSubmit, ReqCreate, ReqFromMRsIn, ReqListRow,
-    ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
+    ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate,
+    SupplierCreate, SupplierLoginIn, SupplierOut, SupplierUpdate, VendorAccountIn,
     LedgerRow,
     VendorAccountOut, VendorLoginIn, VendorNotificationOut, VendorPasswordIn,
     VendorProfileOut,
@@ -862,6 +863,101 @@ async def cancel_consolidation(cons_id: int, body: ActionIn,
     return await service.cancel_consolidation(db, cons_id, user, body.comments)
 
 
+# --------------------------------------------------------------------------- #
+#  The supplier register - Procurement > Suppliers
+# --------------------------------------------------------------------------- #
+# The material mirror of /api/logistics-vendors. Every route is guarded by
+# VENDOR_PORTAL_MANAGE, the permission that already governs minting a vendor login -
+# no new code, so every job profile that could issue a supplier account yesterday can
+# work this screen today and nobody else gains anything by it.
+#
+# `suppliers._supplier` refuses any vendor row whose type is a carrier, so this
+# permission can never reach a transport provider's record or their password. Nothing
+# here enters a workflow: an account is not a document and has no approval ladder.
+supplier_register = APIRouter(prefix="/api/suppliers", tags=["suppliers"])
+
+
+@supplier_register.get("/types", response_model=list[dict])
+async def supplier_type_options(
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    """Served, not duplicated in the screen - a type the form offers that the register
+    then filters out would create a supplier the page cannot show."""
+    return suppliers.supplier_types()
+
+
+@supplier_register.get("/summary", response_model=dict)
+async def supplier_register_summary(
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.supplier_summary(db)
+
+
+@supplier_register.get("", response_model=Page[SupplierOut])
+async def list_suppliers(
+        params: PageParams = Depends(), search: str | None = None,
+        vendor_type: str | None = None, active_only: bool = False,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.list_suppliers(db, params, search, vendor_type, active_only)
+
+
+@supplier_register.post("", response_model=SupplierOut, status_code=201)
+async def create_supplier(
+        body: SupplierCreate, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.create_supplier(db, body, user)
+
+
+@supplier_register.get("/{vendor_id}", response_model=SupplierOut)
+async def get_supplier(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.get_supplier(db, vendor_id)
+
+
+@supplier_register.put("/{vendor_id}", response_model=SupplierOut)
+async def update_supplier(
+        vendor_id: int, body: SupplierUpdate, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.update_supplier(db, vendor_id, body, user)
+
+
+@supplier_register.delete("/{vendor_id}", response_model=SupplierOut)
+async def deactivate_supplier(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.deactivate_supplier(db, vendor_id, user)
+
+
+@supplier_register.post("/{vendor_id}/login", response_model=SupplierOut)
+async def issue_supplier_login(
+        vendor_id: int, body: SupplierLoginIn = SupplierLoginIn(),
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.issue_login(db, vendor_id, body.username, user)
+
+
+@supplier_register.post("/{vendor_id}/login/reset", response_model=SupplierOut)
+async def reset_supplier_login(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.reset_login(db, vendor_id, user)
+
+
+@supplier_register.post("/{vendor_id}/login/disable", response_model=SupplierOut)
+async def disable_supplier_login(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.set_login_active(db, vendor_id, False, user)
+
+
+@supplier_register.post("/{vendor_id}/login/enable", response_model=SupplierOut)
+async def enable_supplier_login(
+        vendor_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.VENDOR_PORTAL_MANAGE))):
+    return await suppliers.set_login_active(db, vendor_id, True, user)
+
+
 # One router for main.py, six underneath. The parent adds no prefix of its own, so
 # every path stays exactly where it was - no existing PO URL moves.
 router = APIRouter()
@@ -871,4 +967,5 @@ router.include_router(consolidations)
 router.include_router(rfqs)
 router.include_router(ledger_api)
 router.include_router(accounts)
+router.include_router(supplier_register)
 router.include_router(supplier)

@@ -628,6 +628,13 @@ class NotificationChannel(str, Enum):
 class AuditAction(str, Enum):
     CREATE = "CREATE"
     UPDATE = "UPDATE"
+    # A row that is genuinely gone, not retired. Only settings-backed collections use
+    # it — a master is DEACTIVATEd so what points at it still resolves. Added
+    # 2026-08-24: `inventory.delete_replenishment_rule` already wrote it, and with the
+    # member missing every delete raised AttributeError AFTER `set_setting` had
+    # committed — the rule vanished and the caller got a 500 saying it had not.
+    # `sys_audit_log.action` is a plain String(30), so no migration is owed.
+    DELETE = "DELETE"
     DEACTIVATE = "DEACTIVATE"
     ACTIVATE = "ACTIVATE"
     LOGIN = "LOGIN"

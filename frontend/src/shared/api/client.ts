@@ -66,7 +66,23 @@ export const vendorHome = () =>
 export const vendorPasswordPath = () =>
   vendorPortal() === "carrier" ? "/carrier/password" : "/supplier/password";
 
-const isSupplierCall = (url?: string) => Boolean(url?.startsWith("/api/supplier"));
+/** Is this the vendor's OWN portal talking, and therefore a vendor-token call?
+ *
+ *  The boundary matters. `startsWith("/api/supplier")` also matched every INTERNAL
+ *  endpoint whose name merely begins that way — `/api/supplier-accounts` and
+ *  `/api/suppliers`, both `require_permission` routes an employee calls — so the
+ *  employee token was withheld, a missing vendor token was sent instead, and the 401
+ *  bounced an administrator out to the vendor login. That is why Supplier & Carrier
+ *  Logins never worked from the admin shell.
+ *
+ *  Matched on the SEGMENT: `/api/supplier` exactly, or anything under `/api/supplier/`.
+ *  Every real portal call is `${PORTAL}/...` (see logistics/api.ts), so nothing the
+ *  vendor's browser sends stops being recognised. The carrier portal is served under
+ *  the same prefix on purpose — one account, one token, two doors. */
+const isSupplierCall = (url?: string) => {
+  const path = (url ?? "").split(/[?#]/)[0];
+  return path === "/api/supplier" || path.startsWith("/api/supplier/");
+};
 
 /** Where they are standing beats what they last logged in as — a carrier looking at a
  *  /carrier screen goes back to the carrier door even on a fresh browser. */

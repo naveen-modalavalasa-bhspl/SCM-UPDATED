@@ -983,3 +983,64 @@ export interface LedgerStats {
   total: number;
   filters: Record<string, Record<string, string>>;
 }
+
+// --------------------------------------------------------------------------- //
+//  The supplier register — /api/suppliers
+// --------------------------------------------------------------------------- //
+// A supplier IS a `mst_vendors` row; these types describe that row with its portal
+// account flattened onto it, exactly as `LogisticsVendor` does for a carrier. The two
+// registers are deliberately symmetrical — one vendor master, two desks.
+
+export interface Supplier {
+  id: number;
+  code?: string | null;
+  name: string;
+  vendor_type: string;
+  contact_person?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  city?: string | null;
+  state?: string | null;
+  gstin?: string | null;
+  payment_terms_days?: number | null;
+  is_active: boolean;
+  is_approved: boolean;
+  is_blacklisted: boolean;
+  has_login: boolean;
+  username?: string | null;
+  login_is_active?: boolean | null;
+  must_change_password?: boolean | null;
+  last_login_at?: string | null;
+  /** Whether an RFQ can actually be sent to them: active, approved, not blacklisted. */
+  quotable: boolean;
+}
+
+export interface SupplierInput {
+  name: string;
+  code?: string | null;
+  vendor_type: string;
+  contact_person?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  pincode?: string | null;
+  gstin?: string | null;
+  pan?: string | null;
+  payment_terms_days?: number | null;
+  issue_login?: boolean;
+  username?: string | null;
+}
+
+export interface SupplierSummary {
+  total: number;
+  quotable: number;
+  with_login: number;
+  without_login: number;
+}
+
+export interface SupplierType {
+  value: string;
+  label: string;
+}

@@ -123,7 +123,8 @@ export default function GRN() {
       statuses={STATUSES}
       createTo="new"
       createLabel="New GRN"
-      createPermission="grn.create"
+      // See MaterialInward: the receipt routes are gated on receipt.create.
+      createPermission="receipt.create"
       onRowClick={(r) => nav(String(r.id))}
       empty="No receipts match these filters."
       // A half-typed GRN is a draft: nothing has been received against it and no

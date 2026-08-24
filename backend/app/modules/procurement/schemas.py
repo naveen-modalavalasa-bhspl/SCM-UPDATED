@@ -1076,3 +1076,76 @@ class LedgerStatsOut(BaseModel):
     by_kind: dict[str, int] = {}
     total: int = 0
     filters: dict[str, dict[str, str]] = {}
+
+
+# --------------------------------------------------------------------------- #
+#  Supplier register — the material counterpart of logistics' PartnerCreate set
+# --------------------------------------------------------------------------- #
+class SupplierCreate(BaseModel):
+    """Adding a material supplier. Only the name is required — the code is derived and
+    the type defaults to MATERIAL, because a form that demands a vendor code before it
+    will accept "3M India" is why the register stayed half-filled."""
+    name: str = Field(min_length=1, max_length=200)
+    code: str | None = Field(default=None, max_length=50)
+    vendor_type: str = "MATERIAL"
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    pincode: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
+    payment_terms_days: int | None = Field(default=None, ge=0, le=365)
+    #: Name them and let them in, in one press. A supplier with no account cannot
+    #: answer the RFQ they are about to be sent.
+    issue_login: bool = True
+    username: str | None = None
+
+
+class SupplierUpdate(BaseModel):
+    """Every field optional: the screen sends what the row changed. `code` is absent on
+    purpose — RFQs, quotations and orders snapshot the vendor against it."""
+    name: str | None = Field(default=None, max_length=200)
+    vendor_type: str | None = None
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    pincode: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
+    payment_terms_days: int | None = Field(default=None, ge=0, le=365)
+    is_active: bool | None = None
+    is_blacklisted: bool | None = None
+
+
+class SupplierLoginIn(BaseModel):
+    username: str | None = None
+
+
+class SupplierOut(BaseModel):
+    id: int
+    code: str | None = None
+    name: str
+    vendor_type: str
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    city: str | None = None
+    state: str | None = None
+    gstin: str | None = None
+    payment_terms_days: int | None = None
+    is_active: bool
+    is_approved: bool
+    is_blacklisted: bool
+    # The portal account, flattened onto the supplier row.
+    has_login: bool
+    username: str | None = None
+    login_is_active: bool | None = None
+    must_change_password: bool | None = None
+    last_login_at: datetime | None = None
+    quotable: bool

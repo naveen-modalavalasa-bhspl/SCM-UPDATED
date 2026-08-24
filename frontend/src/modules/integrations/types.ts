@@ -147,3 +147,70 @@ export interface Usage {
   since_restart: boolean;
   by_endpoint: { slug: string; calls: number; rows: number; last_called_at?: string }[];
 }
+
+// --------------------------------------------------------------------------- //
+//  Platform links — what THIS app connects out to
+// --------------------------------------------------------------------------- //
+// The mirror of the console types above: those describe applications that call US,
+// these describe HCM, mail and the database, which we call.
+
+export interface LinkField {
+  label: string;
+  /** MASKED for `is_secret` rows — the real value never leaves the server. */
+  value?: string | null;
+  is_secret: boolean;
+  /** Carried separately so "not configured" is never inferred from a blank value. */
+  is_set: boolean;
+  hint?: string | null;
+}
+
+export interface LinkActivity {
+  at?: string | null;
+  status?: string | null;
+  detail?: string | null;
+}
+
+export interface PlatformLink {
+  code: string;
+  name: string;
+  kind: string;
+  direction: string;
+  icon?: string | null;
+  endpoint?: string | null;
+  configured: boolean;
+  summary: string;
+  fields: LinkField[];
+  log_label?: string | null;
+  has_log: boolean;
+  last_activity?: LinkActivity | null;
+}
+
+/** One line of a link's own log, normalised so HCM syncs and sent mail share a table. */
+export interface LinkLogRow {
+  id: number;
+  at?: string | null;
+  status: string;
+  subject?: string | null;
+  detail?: string | null;
+  error?: string | null;
+  actor?: string | null;
+}
+
+export interface LinkTest {
+  code: string;
+  ok: boolean;
+  ms: number;
+  detail: string;
+}
+
+export interface LinkLogStats {
+  by_status: Record<string, number>;
+  total: number;
+}
+
+/** The real credentials, from the reveal route only — a POST on
+ *  `integration.keys.manage` that writes an audit row. Never present on a list. */
+export interface LinkReveal {
+  code: string;
+  fields: { label: string; value: string }[];
+}

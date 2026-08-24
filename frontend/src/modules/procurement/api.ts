@@ -11,6 +11,7 @@ import type {
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
   ProcurementLedgerFilters, ProcurementLedgerRow,
   VendorNotification, VendorToken,
+  Supplier, SupplierInput, SupplierSummary, SupplierType,
   ConsolidationStats, DemandPoolRow, LedgerStats, POStats, QuoteStats, ReqStats,
   RFQStats,
 } from "./types";
@@ -388,3 +389,42 @@ export const procurementStatsKeys = {
 /** KPIs are a summary, not a document: a few seconds of staleness is invisible, and
  *  refetching five endpoints on every tab focus is not. */
 export const STATS_STALE_TIME = 30_000;
+
+// --------------------------------------------------------------------------- //
+//  The supplier register
+// --------------------------------------------------------------------------- //
+const SUPPLIERS = "/api/suppliers";
+
+/** The material mirror of `logisticsVendorApi` — the INTERNAL desk that maintains the
+ *  supplier register and their logins. Named `supplierRegisterApi` because
+ *  `supplierApi` above is the vendor's OWN browser calling the portal with a supplier
+ *  token; these two speak to opposite ends of the same account. */
+export const supplierRegisterApi = {
+  /** Served, not a constant here — the register filters on the same list. */
+  types: () => api.get<SupplierType[]>(`${SUPPLIERS}/types`).then((r) => r.data),
+  summary: () =>
+    api.get<SupplierSummary>(`${SUPPLIERS}/summary`).then((r) => r.data),
+  list: (params: {
+    search?: string; vendor_type?: string; active_only?: boolean;
+    page?: number; size?: number;
+  } = {}) =>
+    api.get<Paginated<Supplier>>(SUPPLIERS, { params }).then((r) => r.data),
+  create: (data: SupplierInput) =>
+    api.post<Supplier>(SUPPLIERS, data).then((r) => r.data),
+  update: (id: number, data: Partial<SupplierInput> & {
+    is_active?: boolean; is_blacklisted?: boolean;
+  }) => api.put<Supplier>(`${SUPPLIERS}/${id}`, data).then((r) => r.data),
+  deactivate: (id: number) =>
+    api.delete<Supplier>(`${SUPPLIERS}/${id}`).then((r) => r.data),
+
+  /** Their way in. The same `pro_vendor_users` account, the same default password and
+   *  the same /supplier portal a carrier uses — there is one kind of vendor login. */
+  issueLogin: (id: number, username?: string) =>
+    api.post<Supplier>(`${SUPPLIERS}/${id}/login`,
+      { username: username || null }).then((r) => r.data),
+  resetLogin: (id: number) =>
+    api.post<Supplier>(`${SUPPLIERS}/${id}/login/reset`).then((r) => r.data),
+  setLoginActive: (id: number, active: boolean) =>
+    api.post<Supplier>(
+      `${SUPPLIERS}/${id}/login/${active ? "enable" : "disable"}`).then((r) => r.data),
+};
