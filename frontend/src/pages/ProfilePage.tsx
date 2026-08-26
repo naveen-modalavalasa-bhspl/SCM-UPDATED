@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Avatar, Chip, Spinner } from "@heroui/react";
-import { LogOut } from "lucide-react";
+import { LogOut, Monitor, Moon, Sun } from "lucide-react";
 import { CardBody } from "@heroui/react";
 import { api } from "@/shared/api/client";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -9,6 +9,7 @@ import {
   Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
 import { fmtDate, fmtDateTime } from "@/shared/datetime";
+import { getTheme, setTheme, THEME_OPTIONS, type ThemeChoice } from "@/shared/theme";
 
 /** Everything `/api/auth/profile` returns. Read-only: hcm_* is a mirror. */
 type ProfilePosition = {
@@ -202,6 +203,127 @@ function ChangePassword({ mustChange }: { mustChange: boolean }) {
 }
 
 
+/**
+ * Where this person's password-reset link is delivered.
+ *
+ * NEW 2026-08-26. HCM carries no email address for anybody — not on the employees
+ * list, not on the detail record — so all 1,933 mirrored employees held NULL, and
+ * "forgot password" matched nobody and sent nothing while still answering 204. Until
+ * an address is set here, that flow cannot work for this account.
+ *
+ * Self-service by construction: `PUT /api/auth/profile/email` takes no employee id and
+ * writes only the token holder's row, so nobody can point somebody else's reset link
+ * at their own inbox.
+ */
+function ResetEmailCard({ email }: { email?: string | null }) {
+  const toast = useToast();
+  const qc = useQueryClient();
+  const [value, setValue] = useState(email ?? "");
+
+  const save = useMutation({
+    mutationFn: async (address: string) =>
+      (await api.put<Profile>("/api/auth/profile/email", { email: address })).data,
+    onSuccess: (row) => {
+      qc.invalidateQueries({ queryKey: ["auth", "profile"] });
+      toast.success(`Reset links will go to ${row.email}`);
+    },
+  });
+
+  const changed = value.trim().toLowerCase() !== (email ?? "").toLowerCase();
+
+  return (
+    <Card>
+      <CardBody className="p-4 sm:p-5">
+        <h2 className="mb-1 font-display text-base font-bold text-ink">Recovery email</h2>
+        <p className="mb-3 text-sm text-muted">
+          {email
+            ? "Where a “forgot password” link is sent. Only you can change this."
+            : "You have no recovery email. Until one is set, “forgot password” cannot "
+              + "reach you — ask an administrator to reset it instead."}
+        </p>
+
+        <ErrorBanner error={save.error} />
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <Field label="Email address">
+              <Input
+                type="email"
+                value={value}
+                placeholder="name@company.com"
+                onChange={(e) => setValue(e.target.value)}
+              />
+            </Field>
+          </div>
+          <Button
+            disabled={!changed || !value.trim() || save.isPending}
+            onClick={() => save.mutate(value.trim())}
+          >
+            {save.isPending ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
+const THEME_ICONS: Record<ThemeChoice, React.ReactNode> = {
+  light: <Sun className="h-4 w-4" />,
+  dark: <Moon className="h-4 w-4" />,
+  system: <Monitor className="h-4 w-4" />,
+};
+
+/**
+ * Appearance — MOVED HERE from Company Settings (2026-08-26).
+ *
+ * The choice is per-device: `shared/theme` keeps it in this browser's localStorage,
+ * it is never sent to the server and never shared with anyone. On Company Settings it
+ * sat behind `admin.settings.manage`, so every employee in the company was locked out
+ * of their own display preference and an admin was editing a personal setting on a
+ * company screen. Profile needs no permission, which is the right gate for it.
+ *
+ * Applies on press and is not part of any saved form.
+ */
+function AppearanceCard() {
+  const [choice, setChoice] = useState<ThemeChoice>(() => getTheme());
+  return (
+    <Card>
+      <CardBody className="p-4 sm:p-5">
+        <h2 className="mb-1 text-sm font-semibold uppercase tracking-wider text-muted">
+          Appearance
+        </h2>
+        <p className="mb-3 text-xs text-muted">
+          Applies to this browser only. Everyone starts on Light.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {THEME_OPTIONS.map((option) => {
+            const active = choice === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={active}
+                onClick={() => {
+                  setChoice(option.value);
+                  setTheme(option.value);
+                }}
+                className={`flex min-h-11 items-center gap-2 rounded-xl border px-4 text-sm font-semibold transition ${
+                  active
+                    ? "border-brand/40 bg-brand-050 text-brand"
+                    : "border-line bg-content1 text-body hover:bg-content2"
+                }`}
+              >
+                {THEME_ICONS[option.value]}
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
 export function ProfilePage() {
   const { logout } = useAuth();
   const { data, isLoading, error } = useQuery({
@@ -332,6 +454,10 @@ export function ProfilePage() {
           <Row label="Locked" value={data.account?.is_locked ? "Yes" : "No"} />
           <Row label="Last HCM sync" value={when(data.synced_at)} />
         </Section>
+
+        <ResetEmailCard email={data.email} />
+
+        <AppearanceCard />
 
         <ChangePassword mustChange={!!data.account?.must_change_password} />
 

@@ -9,6 +9,7 @@ from app.platform.auth.schemas import (
     MeOut,
     PasswordChangeIn,
     PositionSwitchIn,
+    ProfileEmailIn,
     ProfileOut,
     TokenOut,
 )
@@ -32,6 +33,19 @@ async def me(db: AsyncSession = Depends(get_db), user=Depends(get_current_user))
 async def profile(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     # No require_permission: the subject is the caller, so there is nothing to gate.
     return await service.build_profile(db, user)
+
+
+@router.put("/profile/email", response_model=ProfileOut)
+async def set_profile_email(body: ProfileEmailIn, db: AsyncSession = Depends(get_db),
+                            user=Depends(get_current_user)):
+    """Record where this employee's password-reset link should go.
+
+    No permission code, exactly like `/profile` and `change-password`: the subject is
+    the token holder and there is no id to pass, so one employee can never set — or
+    redirect — another's address. HCM serves no email for anybody, which is why
+    "forgot password" silently matched nobody until this existed.
+    """
+    return await service.set_own_email(db, user, body.email)
 
 
 @router.post("/switch-position", response_model=TokenOut)

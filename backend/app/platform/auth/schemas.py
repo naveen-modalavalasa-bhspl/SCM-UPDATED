@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 
 class TokenOut(BaseModel):
@@ -144,6 +144,16 @@ class ProfileOut(BaseModel):
     permissions: list[str] = []
     warehouse_label: str = "Warehouse"
     account: ProfileAccount | None = None
+
+
+class ProfileEmailIn(BaseModel):
+    """The address the caller's password-reset link should be delivered to.
+
+    Self-service, like `PasswordChangeIn` below: no employee id, because the token
+    names the only row this can write. `EmailStr` so a typo is refused here rather
+    than becoming a reset link nobody receives.
+    """
+    email: EmailStr
 
 
 class PasswordChangeIn(BaseModel):

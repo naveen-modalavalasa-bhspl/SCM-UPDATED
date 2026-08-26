@@ -12,9 +12,17 @@ export const THEME_OPTIONS: { value: ThemeChoice; label: string }[] = [
   { value: "system", label: "System" },
 ];
 
+/** LIGHT is the default, not "system" (changed 2026-08-26).
+ *
+ *  Following the OS meant an employee whose phone was in dark mode was handed a dark
+ *  ERP they never asked for, on a screen where the theme switch was two permissions
+ *  away — see the picker on Profile. Nothing stored now means light; "system" is still
+ *  offered, but only when somebody chooses it. */
 export function getTheme(): ThemeChoice {
   const stored = localStorage.getItem(STORAGE_KEY);
-  return stored === "light" || stored === "dark" ? stored : "system";
+  return stored === "light" || stored === "dark" || stored === "system"
+    ? stored
+    : "light";
 }
 
 function systemPrefersDark() {
@@ -27,9 +35,11 @@ export function applyTheme(choice: ThemeChoice = getTheme()) {
   document.documentElement.classList.toggle("dark", dark);
 }
 
+/** "system" is now STORED rather than cleared. With light as the fallback, clearing the
+ *  key would read back as "light" — the System button would not stay pressed and the
+ *  OS would stop being followed the moment the page reloaded. */
 export function setTheme(choice: ThemeChoice) {
-  if (choice === "system") localStorage.removeItem(STORAGE_KEY);
-  else localStorage.setItem(STORAGE_KEY, choice);
+  localStorage.setItem(STORAGE_KEY, choice);
   applyTheme(choice);
 }
 

@@ -5,6 +5,7 @@ from sqlalchemy.orm import aliased
 
 from app.core.exceptions import (
     AuthenticationError,
+    NotFoundError,
     PermissionError_,
     ValidationError,
 )
@@ -119,6 +120,52 @@ def _position_row(row) -> dict:
         "parent_position_name": row.parent_name,
         "valid_from": assignment.valid_from, "valid_to": assignment.valid_to,
     }
+
+
+async def set_own_email(db: AsyncSession, user: HcmEmployee, email: str) -> dict:
+    """The caller records the address their password-reset link should go to.
+
+    NEW 2026-08-26, and the reason "forgot password" never sent anything: the flow
+    finds an account by `hcm_employees.email` (mail/service.request_reset), and HCM
+    serves no email at ALL — not on the employees list, not on the detail record, not
+    under any key. All 1,933 mirrored employees therefore held NULL, every reset
+    request matched nobody, and the route's deliberate unconditional 204 made that
+    indistinguishable from a mail that was sent and lost.
+
+    A DELIBERATE, NARROW EXCEPTION to rule 10 (`hcm_*` is written only by sync), taken
+    rather than adding a table because the mirror is already built to allow exactly
+    this: `mappers.map_employee` OMITS the `email` key when the feed does not carry one
+    — see its docstring — and `sync._upsert` writes only the keys it is handed, so an
+    address stored here SURVIVES every sync instead of being blanked. If HCM ever does
+    start serving emails, its value wins on the next sync, which is the right
+    precedence.
+
+    Self only. There is no id parameter and no permission code, for the same reason
+    `/profile` and `change-password` have none: the token names the one row this can
+    touch. Nobody can set anybody else's address, so nobody can redirect anybody
+    else's reset link — which is the whole security question here.
+    """
+    address = (email or "").strip().lower()
+    if not address:
+        raise ValidationError("Enter the email address your reset link should go to")
+
+    clash = (await db.execute(
+        select(HcmEmployee).where(func.lower(HcmEmployee.email) == address,
+                                  HcmEmployee.id != user.id)
+    )).scalars().first()
+    if clash is not None:
+        # `request_reset` takes the FIRST match, so two people sharing an address means
+        # one of them silently gets the other's reset mail forever.
+        raise ValidationError(
+            "That address already belongs to another employee. A reset link can only "
+            "be delivered to one account.")
+
+    employee = await db.get(HcmEmployee, user.id)
+    if employee is None:
+        raise NotFoundError(f"Employee {user.id} not found")
+    employee.email = address
+    await db.commit()
+    return await build_profile(db, employee)
 
 
 async def build_profile(db: AsyncSession, user: HcmEmployee) -> dict:
