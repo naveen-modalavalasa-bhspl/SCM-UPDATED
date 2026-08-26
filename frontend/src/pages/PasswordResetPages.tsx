@@ -67,6 +67,7 @@ function BackToSignIn() {
 /* --------------------------------------------------------------------------- */
 
 export function ForgotPasswordPage() {
+  const [empCode, setEmpCode] = useState("");
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
@@ -75,7 +76,11 @@ export function ForgotPasswordPage() {
     event.preventDefault();
     setBusy(true);
     try {
-      await api.post("/api/auth/forgot-password", { email });
+      // The emp code is what names the ACCOUNT; the address is only where the link
+      // should go, and is not trusted until an admin confirms it (see
+      // `platform/mail/service.request_reset`). HCM serves no employee email, so
+      // there is nothing to identify an account by on its own.
+      await api.post("/api/auth/forgot-password", { emp_code: empCode, email });
     } catch {
       // Swallowed ON PURPOSE, and this is the security of the feature rather than
       // sloppiness. The endpoint already answers 204 for an unknown address; if this
@@ -98,10 +103,20 @@ export function ForgotPasswordPage() {
         <div className="mt-6 flex items-start gap-3 rounded-xl border border-line/70 bg-ok-bg/50 p-4">
           <MailCheck className="mt-0.5 h-5 w-5 shrink-0 text-ok" />
           <div className="text-sm text-body">
-            <p className="font-semibold text-ink">We have sent a link to {email}</p>
+            <p className="font-semibold text-ink">Your request for {email} is in</p>
+            {/* Deliberately does NOT promise a mail is on its way. The first time an
+                address is used for an account it waits for an administrator to
+                confirm it is really yours, and saying "sent" would be a lie for that
+                case — but the wording cannot reveal WHICH case this was either, or it
+                becomes a way to test whether an address is already on an account. */}
             <p className="mt-1 text-muted">
-              It works once and stops working after 30 minutes. If nothing arrives,
-              check the spam folder, then ask your administrator.
+              If it is already the address on your account, a link is on its way — it
+              works once and stops working after 30 minutes. The first time you use a
+              new address, your administrator confirms it belongs to you before the
+              link goes out.
+            </p>
+            <p className="mt-1 text-muted">
+              If nothing arrives, check the spam folder, then ask your administrator.
             </p>
           </div>
         </div>
@@ -114,9 +129,25 @@ export function ForgotPasswordPage() {
     <AuthShell
       eyebrow="Password reset"
       title="Forgot your password?"
-      subtitle="Enter your work email and we will send you a link to set a new one."
+      subtitle="Enter your employee code and the work email your link should go to."
     >
       <form onSubmit={submit} className="mt-6 flex flex-col gap-4">
+        <Input
+          label="Employee code"
+          aria-label="Employee code"
+          variant="bordered"
+          radius="md"
+          value={empCode}
+          onValueChange={setEmpCode}
+          autoFocus
+          autoComplete="username"
+          autoCapitalize="characters"
+          autoCorrect="off"
+          spellCheck="false"
+          placeholder="HR-EMP-09561"
+          description="The same code you sign in with."
+          isRequired
+        />
         <Input
           label="Work email"
           aria-label="Work email"
@@ -125,12 +156,12 @@ export function ForgotPasswordPage() {
           radius="md"
           value={email}
           onValueChange={setEmail}
-          autoFocus
           autoComplete="email"
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck="false"
           placeholder="you@company.com"
+          description="Used the first time? Your administrator confirms it is yours before the link is sent."
           isRequired
         />
         <Button
@@ -138,7 +169,7 @@ export function ForgotPasswordPage() {
           color="primary"
           radius="md"
           isLoading={busy}
-          isDisabled={!email.trim()}
+          isDisabled={!empCode.trim() || !email.trim()}
           endContent={!busy && <ArrowRight className="h-4 w-4" />}
           className="mt-1 h-11 w-full font-semibold"
         >

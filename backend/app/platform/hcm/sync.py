@@ -226,7 +226,23 @@ def _rescuable(position_id: int, known: dict) -> bool:
     return isinstance(raw, dict) and "employee" in raw
 
 
-def _stale_position_ids(live_ids: set[int], existing: dict) -> list[int]:
+async def _last_employee_sync_start(db: AsyncSession) -> datetime | None:
+    """When the last SUCCESSFUL employees sync began, or None if there has never been one.
+
+    Used as the cutoff below. A SUCCESS row is required on purpose: a run that failed
+    part-way never reached most employee records, so its start time would condemn every
+    post those records would have re-stamped.
+    """
+    return await db.scalar(
+        select(HcmSyncLog.started_at)
+        .where(HcmSyncLog.entity == "employees", HcmSyncLog.status == "SUCCESS",
+               HcmSyncLog.started_at.is_not(None))
+        .order_by(HcmSyncLog.id.desc()).limit(1)
+    )
+
+
+def _stale_position_ids(live_ids: set[int], existing: dict,
+                        rescued_cutoff: datetime | None = None) -> list[int]:
     """Positions the mirror still calls active that the feed has stopped serving.
 
     A sync only ever upserts, so until now a post HCM deleted stayed active here for
@@ -234,16 +250,47 @@ def _stale_position_ids(live_ids: set[int], existing: dict) -> list[int]:
     to it. Two FLOOR INCHARGE posts carrying a role HCM had already dropped outlived it
     that way, and only a hand-run of scripts/hcm_cutover.py would have cleared them.
 
-    Rows the employee feed rescued are left alone. The positions feed never lists them
-    (see _rescuable), so their absence from it says nothing about them at all.
+    Rows the employee feed rescued are left alone WHILE AN EMPLOYEE RECORD STILL NAMES
+    THEM. The positions feed never lists a rescued post (see _rescuable), so its silence
+    about one says nothing — but the employee feed's silence does. `synced_at` is the
+    difference: every employees sync re-stamps each post it can still rescue, so a
+    rescued row whose stamp predates the last successful employees run was offered to
+    that feed and not claimed. Nothing in HCM references it any more, and it retires
+    like any other.
+
+    FIXED 2026-08-26. The exemption used to be unconditional, and a post that entered
+    the mirror through the employee feed could NEVER be retired afterwards. Live case:
+    position 2144 "WARE HOUSE MANAGER" (role MANAGER, WM@SCM). HCM deleted it from the
+    positions feed and later from its holder's record, yet on any database whose row
+    came from the employee side it stayed active for good — carrying a whole Job
+    Profile ("23:MANAGER") for a post that no longer exists, and offering grants
+    against it. Which database it bit was pure history: a mirror synced while the post
+    was still in the positions feed holds the positions-feed payload and retires it
+    normally; one first synced after the deletion holds the employee-feed payload and
+    is stuck with it.
+
+    `rescued_cutoff=None` keeps the old unconditional exemption, and is what a caller
+    with no successful employees sync behind it passes — with nothing to compare
+    against, every rescued row reads as unclaimed, and retiring on that would empty the
+    mirror of exactly the posts the positions feed never covers. A row with no stamp is
+    kept for the same reason.
 
     An empty id set means the fetch came back empty, not that HCM has no posts —
     retiring the whole mirror on that would strand every ladder, so it retires nothing.
     """
     if not live_ids:
         return []
+
+    def retirable(pid: int, row) -> bool:
+        if not _rescuable(pid, existing):
+            return True                       # the positions feed owns it, and dropped it
+        if rescued_cutoff is None:
+            return False
+        synced_at = getattr(row, "synced_at", None)
+        return synced_at is not None and synced_at < rescued_cutoff
+
     return [pid for pid, row in existing.items()
-            if pid not in live_ids and row.is_active and not _rescuable(pid, existing)]
+            if pid not in live_ids and row.is_active and retirable(pid, row)]
 
 
 async def _retire_positions(db: AsyncSession, stale: list[int]) -> int:
@@ -427,9 +474,15 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
                 "taken from the employee records instead", rescued,
             )
         if entity_key == "positions":
+            # The cutoff comes from the PREVIOUS employees run, because this one has
+            # not happened yet — positions sync first (see NEEDED_ENTITIES). A post
+            # HCM dropped this morning therefore survives one more cycle before it
+            # retires, which is the right way round: a stale row costs a line on a
+            # screen, retiring a live one costs somebody their access.
             retired = await _retire_positions(db, _stale_position_ids(
                 {r.get("id") for r in rows if r.get("id") is not None},
                 existing_by_id,
+                await _last_employee_sync_start(db),
             ))
             if retired:
                 logger.warning(

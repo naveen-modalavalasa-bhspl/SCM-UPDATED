@@ -27,14 +27,16 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import ValidationError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.core.security import hash_password, verify_password
 from app.platform.hcm.models import HcmEmployee
 from app.platform.mail import client
 from app.platform.mail.schemas import MailSendIn
-from app.platform.settings.models import MailMessage, PasswordReset, UserCredential
-from app.shared.enums import MailKind, MailStatus
+from app.platform.settings.models import (
+    EmailClaim, MailMessage, PasswordReset, UserCredential,
+)
+from app.shared.enums import EmailClaimStatus, MailKind, MailStatus
 from app.shared.models.base import utcnow
 
 log = logging.getLogger(__name__)
@@ -161,23 +163,66 @@ def _reset_email(name: str, link: str, minutes: int) -> tuple[str, str]:
     return subject, body
 
 
-async def request_reset(db: AsyncSession, email: str,
+def domain_allowed(address: str) -> bool:
+    """Is this address inside the one domain resets may be delivered to?
+
+    `PASSWORD_RESET_EMAIL_DOMAIN` unset means no restriction — a deployment whose
+    staff are not all on one domain must not be locked out of its own reset flow.
+    """
+    allowed = (settings.PASSWORD_RESET_EMAIL_DOMAIN or "").strip().lower().lstrip("@")
+    if not allowed:
+        return True
+    return address.rsplit("@", 1)[-1] == allowed
+
+
+async def _find_employee(db: AsyncSession, emp_code: str) -> HcmEmployee | None:
+    """The account a reset is being asked for, by employee code or numeric id.
+
+    The same two handles `auth.service.authenticate` accepts, minus email — the
+    address is what is being ESTABLISHED here, so it cannot also be the way in.
+    """
+    handle = (emp_code or "").strip()
+    if not handle:
+        return None
+    employee_id = int(handle) if handle.isdigit() else None
+    return (await db.execute(
+        select(HcmEmployee).where(or_(
+            HcmEmployee.emp_code == handle,
+            HcmEmployee.id == employee_id if employee_id is not None else False,
+        ))
+    )).scalars().first()
+
+
+async def request_reset(db: AsyncSession, emp_code: str, email: str,
                         ip_address: str | None = None) -> None:
     """Start a reset. Returns None in EVERY case, including failure.
 
     See the module docstring: the caller is unauthenticated, so any difference between
     "sent" and "no such account" tells a stranger which addresses are real. The route
     answers 204 unconditionally and this function never raises.
+
+    TWO WAYS OUT, and which one a request takes is never visible to the caller:
+
+      * the address already on the employee's row matches what was typed — the account
+        is proven, and the link goes out now;
+      * it does not — the address is FILED as a claim (`sys_email_claims`) and nothing
+        is sent until an admin confirms it belongs to that person.
+
+    The second path is the whole reason this takes an emp code at all. HCM serves no
+    employee email, so the mirror starts empty and there is nothing to match against;
+    trusting the typed address on sight would mean knowing somebody's emp code — which
+    is printed on every user list, approval and document — was enough to have their
+    reset link delivered to your own inbox. Once a claim is approved the address is on
+    the row, and every later reset for that person takes the first path.
     """
     address = (email or "").strip().lower()
-    if not address:
+    if not address or not domain_allowed(address):
+        log.info("password reset requested for an address outside the allowed domain")
         return
 
-    employee = (await db.execute(
-        select(HcmEmployee).where(func.lower(HcmEmployee.email) == address)
-    )).scalars().first()
+    employee = await _find_employee(db, emp_code)
     if employee is None or not employee.is_active:
-        log.info("password reset requested for unknown or inactive address")
+        log.info("password reset requested for unknown or inactive employee")
         return
 
     # No local credential means this person signs in some other way. Minting one here
@@ -192,6 +237,56 @@ async def request_reset(db: AsyncSession, email: str,
         log.warning("password reset requested but no mailbox is configured")
         return
 
+    if (employee.email or "").strip().lower() != address:
+        await _file_email_claim(db, employee, address, ip_address)
+        return
+
+    await _send_reset_link(db, employee, ip_address)
+
+
+async def _file_email_claim(db: AsyncSession, employee: HcmEmployee, address: str,
+                            ip_address: str | None) -> None:
+    """Hold an unproven address for an admin to confirm. Sends nothing.
+
+    One live claim per (employee, address): asking twice must not queue the same
+    decision twice for an admin to work through. A claim for a DIFFERENT address on
+    the same account is its own row on purpose — two people claiming one account is
+    exactly what the queue exists to show.
+    """
+    address_taken = (await db.execute(
+        select(HcmEmployee).where(func.lower(HcmEmployee.email) == address,
+                                  HcmEmployee.id != employee.id)
+    )).scalars().first()
+    if address_taken is not None:
+        # Already proven to belong to somebody else. Approving it would silently
+        # redirect that person's future reset links to this account's claimant.
+        log.warning("reset claim for employee %s used an address already on employee %s",
+                    employee.id, address_taken.id)
+        return
+
+    existing = (await db.execute(
+        select(EmailClaim).where(EmailClaim.employee_id == employee.id,
+                                 func.lower(EmailClaim.email) == address,
+                                 EmailClaim.status == EmailClaimStatus.PENDING.value)
+    )).scalars().first()
+    if existing is not None:
+        return
+
+    db.add(EmailClaim(
+        employee_id=employee.id,
+        employee_code=employee.emp_code,
+        employee_name=employee.full_name,
+        email=address,
+        status=EmailClaimStatus.PENDING.value,
+        requested_ip=ip_address,
+    ))
+    await db.commit()
+    log.info("reset address for employee %s filed for confirmation", employee.id)
+
+
+async def _send_reset_link(db: AsyncSession, employee: HcmEmployee,
+                           ip_address: str | None = None) -> None:
+    """Issue a token for a PROVEN address and mail the link. Never raises."""
     # Every earlier unused link for this account dies now. Otherwise asking twice
     # leaves two working takeover links in an inbox, and only one of them gets used.
     now = utcnow()
@@ -235,6 +330,95 @@ async def request_reset(db: AsyncSession, email: str,
         # `_log_and_send` already committed the FAILED row and the token with it. The
         # token is harmless on its own — it only ever left in the mail that did not go.
         return
+
+
+def _claim_out(claim: EmailClaim) -> dict:
+    return {
+        "id": claim.id,
+        "employee_id": claim.employee_id,
+        "employee_code": claim.employee_code,
+        "employee_name": claim.employee_name,
+        "email": claim.email,
+        "status": claim.status,
+        "requested_ip": claim.requested_ip,
+        "created_at": claim.created_at,
+        "decided_at": claim.decided_at,
+        "decided_by_name": claim.decided_by_name,
+    }
+
+
+async def list_email_claims(db: AsyncSession, params: PageParams,
+                            status: str | None = None) -> dict:
+    """The confirmation queue. PENDING first, newest first inside that."""
+    stmt = select(EmailClaim)
+    if status:
+        stmt = stmt.where(EmailClaim.status == status)
+    stmt = stmt.order_by(
+        (EmailClaim.status == EmailClaimStatus.PENDING.value).desc(),
+        EmailClaim.created_at.desc(),
+    )
+    page = await paginate(db, stmt, params)
+    page["items"] = [_claim_out(c) for c in page["items"]]
+    return page
+
+
+async def decide_email_claim(db: AsyncSession, claim_id: int, approve: bool,
+                             actor) -> dict:
+    """Confirm or refuse an address, and on confirmation send the link.
+
+    Approving does BOTH halves in one press on purpose. The address is written onto
+    the employee row — which is what makes every later reset for that person immediate
+    — and only then is a token issued, so the link is minted against an address an
+    admin has just vouched for rather than one sitting in a queue.
+
+    The token is created HERE rather than when the claim was filed: a link issued at
+    request time would have burned most of its `PASSWORD_RESET_MINUTES` waiting for a
+    human, and would have arrived expired.
+    """
+    claim = await db.get(EmailClaim, claim_id)
+    if claim is None:
+        raise NotFoundError("That request no longer exists")
+    if claim.status != EmailClaimStatus.PENDING.value:
+        raise ValidationError("That request has already been decided")
+
+    now = utcnow()
+    claim.decided_at = now
+    claim.decided_by_id = getattr(actor, "id", None)
+    claim.decided_by_name = getattr(actor, "full_name", None)
+
+    if not approve:
+        claim.status = EmailClaimStatus.REJECTED.value
+        await db.commit()
+        return _claim_out(claim)
+
+    employee = await db.get(HcmEmployee, claim.employee_id)
+    if employee is None or not employee.is_active:
+        raise ValidationError("That employee is no longer active")
+
+    address = claim.email.strip().lower()
+    taken = (await db.execute(
+        select(HcmEmployee).where(func.lower(HcmEmployee.email) == address,
+                                  HcmEmployee.id != employee.id)
+    )).scalars().first()
+    if taken is not None:
+        # Checked again at decision time, not only when the claim was filed: the
+        # address may have been approved for somebody else while this one queued, and
+        # `request_reset` takes the FIRST match — two rows sharing an address means
+        # one of those people silently receives the other's reset links forever.
+        raise ValidationError(
+            f"{claim.email} already belongs to another employee. A reset link can "
+            "only be delivered to one account.")
+
+    claim.status = EmailClaimStatus.APPROVED.value
+    # A DELIBERATE, NARROW exception to rule 10 (`hcm_*` is written only by sync), and
+    # a safe one: `mappers.map_employee` omits the `email` key when the feed does not
+    # carry one, and `sync._upsert` writes only the keys it is handed, so the address
+    # survives every sync. If HCM ever serves emails, its value wins — right way round.
+    employee.email = address
+    await db.commit()
+
+    await _send_reset_link(db, employee, claim.requested_ip)
+    return _claim_out(claim)
 
 
 async def reset_password(db: AsyncSession, token: str, new_password: str) -> None:

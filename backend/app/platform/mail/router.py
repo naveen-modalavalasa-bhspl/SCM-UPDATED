@@ -21,8 +21,8 @@ from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
 from app.platform.mail import service
 from app.platform.mail.schemas import (
-    ForgotPasswordIn, InboxMessageOut, MailMessageOut, MailSendIn, MailboxStatusOut,
-    ResetPasswordIn,
+    EmailClaimDecisionIn, EmailClaimOut, ForgotPasswordIn, InboxMessageOut,
+    MailMessageOut, MailSendIn, MailboxStatusOut, ResetPasswordIn,
 )
 from app.platform.rbac import permissions as perms
 
@@ -70,14 +70,37 @@ async def forgot_password(body: ForgotPasswordIn, request: Request,
                           db: AsyncSession = Depends(get_db)):
     """Always 204, whatever happens.
 
-    An unknown address, a disabled employee, an account with no local login and a
-    mailbox that refused the message all answer identically. Anything else would let
-    a stranger walk a list of addresses and learn which ones are real.
+    An unknown emp code, a disabled employee, an account with no local login, an
+    address outside the allowed domain, one held for an admin to confirm and a mailbox
+    that refused the message all answer identically. Anything else would let a stranger
+    walk a list of codes and learn which ones are real — or, worse, learn whether an
+    address is already the one on file for an account.
     """
     await service.request_reset(
-        db, body.email,
+        db, body.emp_code, body.email,
         ip_address=request.client.host if request.client else None,
     )
+
+
+# --------------------------------------------------------------------------- #
+#  The confirmation queue — an admin says an address really is that person's
+# --------------------------------------------------------------------------- #
+
+@router.get("/email-claims", response_model=Page[EmailClaimOut])
+async def list_email_claims(params: PageParams = Depends(), status: str | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.ADMIN_USERS_MANAGE))):
+    """Addresses waiting to be confirmed. Gated on `admin.users.manage` rather than
+    `mail.view`: deciding this is deciding who can take over an account, which is the
+    users right, not the mailbox one."""
+    return await service.list_email_claims(db, params, status)
+
+
+@router.post("/email-claims/{claim_id}/decide", response_model=EmailClaimOut)
+async def decide_email_claim(claim_id: int, body: EmailClaimDecisionIn,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.ADMIN_USERS_MANAGE))):
+    return await service.decide_email_claim(db, claim_id, body.approve, user)
 
 
 @auth_router.post("/reset-password", status_code=204)

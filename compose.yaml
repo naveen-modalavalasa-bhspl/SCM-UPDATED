@@ -40,6 +40,36 @@ services:
       HCM_API_KEY: ${HCM_API_KEY:?HCM_API_KEY is required}
       HCM_TIMEOUT_SECONDS: ${HCM_TIMEOUT_SECONDS:-5}
       HCM_RETRIES: ${HCM_RETRIES:-3}
+      # Everything below was MISSING until 2026-08-26, and this list is the whole
+      # reason two features were dead on the deployed app while working locally.
+      # `backend/.env` is in .dockerignore and there is no `env_file:` here, so a
+      # setting that is not named on this list does not exist inside the container,
+      # whatever `.env.deploy` says.
+      #
+      # Without the MAIL_* block `settings.mail_configured` is false, so every
+      # "forgot password" returned its deliberate 204 and sent nothing at all.
+      MAIL_SMTP_HOST: ${MAIL_SMTP_HOST:-}
+      MAIL_SMTP_PORT: ${MAIL_SMTP_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-SCM ERP}
+      MAIL_STARTTLS: ${MAIL_STARTTLS:-true}
+      MAIL_SMTP_SSL: ${MAIL_SMTP_SSL:-false}
+      MAIL_IMAP_HOST: ${MAIL_IMAP_HOST:-}
+      MAIL_IMAP_PORT: ${MAIL_IMAP_PORT:-993}
+      MAIL_IMAP_SSL: ${MAIL_IMAP_SSL:-true}
+      # Where a reset link points. Defaults to localhost IN CODE, which is useless in
+      # a container — the link is opened by a person on their own machine. Falls back
+      # to the public browser origin, which is what it almost always is; NOT declared
+      # required, so an existing deployment still comes up without editing .env.deploy.
+      APP_BASE_URL: ${APP_BASE_URL:-${CORS_ORIGINS}}
+      PASSWORD_RESET_MINUTES: ${PASSWORD_RESET_MINUTES:-30}
+      # The only domain a reset link may be delivered to, e.g. bhspl.in.
+      PASSWORD_RESET_EMAIL_DOMAIN: ${PASSWORD_RESET_EMAIL_DOMAIN:-}
+      # Unset means an HCM joiner gets NO login and an admin has to cut one by hand.
+      # That is a deliberate choice, not a default — see .env.deploy.example.
+      NEW_USER_DEFAULT_PASSWORD: ${NEW_USER_DEFAULT_PASSWORD:-}
     depends_on:
       db:
         condition: service_healthy

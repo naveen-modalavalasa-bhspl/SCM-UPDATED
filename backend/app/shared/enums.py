@@ -690,6 +690,23 @@ class MailKind(str, Enum):
     PASSWORD_RESET = "PASSWORD_RESET"
 
 
+class EmailClaimStatus(str, Enum):
+    """`sys_email_claims.status` — an address somebody typed into "forgot password",
+    waiting for an admin to say it really is theirs.
+
+    It exists because HCM serves no employee email (only the MANAGER's, under
+    `position.reporting_to[0].employee_email`), so the mirror holds none and the reset
+    flow has nothing to match a typed address against. Letting the typist's address be
+    trusted on sight would make knowing somebody's emp code enough to receive their
+    reset link, so the first address for an account is CONFIRMED by a human before any
+    mail goes out. Once approved it is on the employee row and later resets are
+    immediate.
+    """
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class ItemScope(str, Enum):
     """`mst_item_eligibility.scope_type` — how an item is tagged to who may ask for it.
 

@@ -4,6 +4,7 @@ from sqlalchemy import (
 )
 
 from app.core.database import Base
+from app.shared.enums import EmailClaimStatus
 from app.shared.models.base import utcnow
 
 
@@ -212,6 +213,47 @@ class PasswordReset(Base):
     #: of requests against one account can be read after the fact.
     requested_ip = Column(String(45), nullable=True)
     created_at = Column(DateTime, nullable=False, default=utcnow)
+
+
+class EmailClaim(Base):
+    """`sys_email_claims` — an address a person typed into "forgot password", waiting
+    for an admin to confirm it is theirs.
+
+    THE REASON THIS TABLE EXISTS. `request_reset` finds the account by
+    `hcm_employees.email`, and the rebuilt HCM serves no employee email at all — the
+    only address anywhere in its payload is `position.reporting_to[0].employee_email`,
+    which belongs to the person's MANAGER. All 1,933 mirrored employees therefore hold
+    NULL, so every reset request matched nobody and the deliberate unconditional 204
+    made that look exactly like a mail that was sent and lost.
+
+    The obvious repair — take the address the typist supplies — is an account takeover:
+    emp codes are on every user list, approval and document in the app, so anyone could
+    enter somebody else's code with their OWN address and be handed that person's reset
+    link. So the FIRST address for an account is held here until a human says it
+    belongs to them. Approving writes it onto the employee row, and every later reset
+    for that person is immediate because the address then matches on sight.
+
+    Rows are kept after a decision rather than deleted: a rejected claim is the record
+    of somebody trying to point another person's reset link at their own inbox, which
+    is the one thing here worth being able to read back.
+    """
+    __tablename__ = "sys_email_claims"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    employee_id = Column(BigInteger, index=True, nullable=False)
+    #: Snapshot, so the queue reads as a person rather than an id even after a sync
+    #: re-keys the mirror (CLAUDE.md rule 10: display fields are stamped at creation).
+    employee_code = Column(String(50), nullable=True)
+    employee_name = Column(String(200), nullable=True)
+    email = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, index=True,
+                    default=EmailClaimStatus.PENDING.value)
+    #: Where the request came from. Decides nothing — recorded so a run of claims
+    #: against different accounts from one address can be read after the fact.
+    requested_ip = Column(String(45), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+    decided_at = Column(DateTime, nullable=True)
+    decided_by_id = Column(BigInteger, nullable=True)
+    decided_by_name = Column(String(200), nullable=True)
 
 
 class MailMessage(Base):

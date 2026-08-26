@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     #: How long a reset link lives. Short on purpose: it is a bearer secret in an
     #: inbox, and a long window is the whole risk of the feature.
     PASSWORD_RESET_MINUTES: int = 30
+    #: The only mail domain "forgot password" will deliver to, e.g. `bhspl.in`.
+    #: An address outside it is refused before a claim is even filed, so nobody can
+    #: point an account's reset link at a mailbox the company does not control.
+    #: Unset = no restriction, which is the right default for a deployment whose
+    #: staff are not all on one domain. Never a literal in code (rule 13).
+    PASSWORD_RESET_EMAIL_DOMAIN: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

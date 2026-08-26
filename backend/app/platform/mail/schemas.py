@@ -69,6 +69,11 @@ class InboxMessageOut(BaseModel):
 # --------------------------------------------------------------------------- #
 
 class ForgotPasswordIn(BaseModel):
+    #: Employee code (HR-EMP-09561) or the numeric employee id — the same handles
+    #: sign-in accepts, minus email. The address cannot also be the way in: it is the
+    #: thing being established, and the mirror starts with none (see
+    #: `service.request_reset`).
+    emp_code: str = Field(min_length=1, max_length=50)
     email: EmailStr
 
 
@@ -76,3 +81,22 @@ class ResetPasswordIn(BaseModel):
     token: str = Field(min_length=16, max_length=200)
     #: Matches `PasswordChangeIn` — one rule for a password, wherever it is set.
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class EmailClaimOut(BaseModel):
+    id: int
+    employee_id: int
+    employee_code: str | None = None
+    employee_name: str | None = None
+    email: str
+    status: str
+    requested_ip: str | None = None
+    created_at: datetime | None = None
+    decided_at: datetime | None = None
+    decided_by_name: str | None = None
+
+
+class EmailClaimDecisionIn(BaseModel):
+    #: True confirms the address belongs to that person AND sends the link; False
+    #: refuses it and sends nothing.
+    approve: bool

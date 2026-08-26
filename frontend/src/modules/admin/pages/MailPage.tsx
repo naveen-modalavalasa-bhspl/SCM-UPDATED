@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, CheckCircle2, Clock, Inbox, Mail, PenLine, Search, Send, XCircle,
+  AlertTriangle, CheckCircle2, Clock, Inbox, Mail, PenLine, Search, Send, ShieldCheck,
+  XCircle,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Button, Input, Textarea } from "@heroui/react";
@@ -42,6 +43,9 @@ import type { Paginated } from "@/shared/types";
  */
 
 const SEND_PERM = "mail.send";
+//: Confirming a reset address is a USERS decision, not a mailbox one — approving one
+//  is deciding who may take over an account. Matches the route's own dependency.
+const CLAIMS_PERM = "admin.users.manage";
 
 interface MailboxStatus {
   can_send: boolean;
@@ -75,6 +79,23 @@ interface SentMessage {
   created_at?: string | null;
 }
 
+/** An address somebody typed into "forgot password", waiting to be confirmed as
+ *  theirs. See `platform/mail/service.request_reset` for why it is not taken on
+ *  trust: emp codes are on every user list, so the typed address alone would let
+ *  anyone have somebody else's reset link delivered to their own inbox. */
+interface EmailClaim {
+  id: number;
+  employee_id: number;
+  employee_code?: string | null;
+  employee_name?: string | null;
+  email: string;
+  status: string;
+  requested_ip?: string | null;
+  created_at?: string | null;
+  decided_at?: string | null;
+  decided_by_name?: string | null;
+}
+
 const mailApi = {
   status: () => api.get<MailboxStatus>("/api/mail/status").then((r) => r.data),
   inbox: (search?: string) =>
@@ -87,6 +108,13 @@ const mailApi = {
     }).then((r) => r.data),
   send: (body: { to: string[]; cc: string[]; subject: string; body: string }) =>
     api.post<SentMessage>("/api/mail", body).then((r) => r.data),
+  claims: (status?: string) =>
+    api.get<Paginated<EmailClaim>>("/api/mail/email-claims", {
+      params: { status: status || undefined, size: 50 },
+    }).then((r) => r.data),
+  decideClaim: (id: number, approve: boolean) =>
+    api.post<EmailClaim>(`/api/mail/email-claims/${id}/decide`, { approve })
+      .then((r) => r.data),
 };
 
 /** Comma or semicolon separated, trimmed, blanks dropped. Splitting is the SCREEN's
@@ -153,10 +181,24 @@ export function MailPage() {
     staleTime: 30_000,
   });
 
+  // Gated on the USERS right, not a mail one, and the server agrees: deciding this
+  // is deciding who may take over an account.
+  const canDecideClaims = can(CLAIMS_PERM);
+  const claims = useQuery({
+    queryKey: ["mail", "claims"],
+    queryFn: () => mailApi.claims(),
+    enabled: tab === "claims" && canDecideClaims,
+    staleTime: 15_000,
+  });
+  const pendingClaims = (claims.data?.items ?? [])
+    .filter((c) => c.status === "PENDING").length;
+
   const tabs = [
     ...(canRead ? [{ key: "inbox", label: "Inbox", icon: Inbox }] : []),
     { key: "sent", label: "Sent", icon: Send },
     ...(canSend ? [{ key: "compose", label: "Compose", icon: PenLine }] : []),
+    ...(canDecideClaims
+      ? [{ key: "claims", label: "Reset requests", icon: ShieldCheck }] : []),
   ];
   // The mailbox may be send-only, in which case Inbox is not offered and the default
   // tab has to move — otherwise the screen opens on a tab that is not in the strip.
@@ -341,8 +383,213 @@ export function MailPage() {
         </>
       )}
 
+      {activeTab === "claims" && (
+        <ClaimsTab
+          claims={claims.data?.items ?? []}
+          loading={claims.isLoading}
+          error={claims.error}
+          pending={pendingClaims}
+          canSend={Boolean(status.data?.can_send)}
+          onDecided={() => {
+            queryClient.invalidateQueries({ queryKey: ["mail", "claims"] });
+            // Approving SENDS a link, so the Sent log has a new row.
+            queryClient.invalidateQueries({ queryKey: ["mail", "sent"] });
+          }}
+        />
+      )}
+
       {open && <MessageDetail message={open} onClose={() => setOpen(null)} />}
     </div>
+  );
+}
+
+/**
+ * Reset requests — confirm that an address really belongs to the person asking.
+ *
+ * WHY A HUMAN IS IN THIS LOOP. `request_reset` finds the account by
+ * `hcm_employees.email`, and HCM serves no employee email at all (the only address in
+ * its payload belongs to the person's MANAGER), so the mirror starts with none and
+ * there is nothing to match a typed address against. Taking the typed address on
+ * trust would be an account takeover: emp codes are printed on every user list,
+ * approval and document, so anyone could enter somebody else's code with their own
+ * address and be handed that person's reset link.
+ *
+ * Approve does BOTH halves — records the address on the employee and sends the link —
+ * so there is no state where an address is trusted but the person is still stuck.
+ * Every later reset for that person then skips this queue entirely.
+ *
+ * Two rows for one employee with DIFFERENT addresses is the case this screen exists
+ * to make visible. Read them together before approving either.
+ */
+function ClaimsTab({ claims, loading, error, pending, canSend, onDecided }: {
+  claims: EmailClaim[];
+  loading: boolean;
+  error: unknown;
+  pending: number;
+  canSend: boolean;
+  onDecided: () => void;
+}) {
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [failed, setFailed] = useState<unknown>(null);
+
+  const decide = useMutation({
+    mutationFn: ({ id, approve }: { id: number; approve: boolean }) =>
+      mailApi.decideClaim(id, approve),
+    onMutate: ({ id }) => { setBusyId(id); setFailed(null); },
+    onError: (err) => setFailed(err),
+    onSettled: () => setBusyId(null),
+    onSuccess: onDecided,
+  });
+
+  //: More than one live claim on one account. Not an error — it is the shape an
+  //  attempted takeover takes, and the reason to read before pressing.
+  const contested = new Set(
+    claims
+      .filter((c) => c.status === "PENDING")
+      .map((c) => c.employee_id)
+      .filter((id, i, all) => all.indexOf(id) !== i),
+  );
+
+  const columns: Column<EmailClaim>[] = [
+    {
+      key: "who",
+      header: "Employee",
+      render: (row) => (
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-ink">
+            {row.employee_name || `Employee ${row.employee_id}`}
+          </div>
+          <div className="truncate text-[11px] text-muted">{row.employee_code}</div>
+        </div>
+      ),
+    },
+    {
+      key: "email",
+      header: "Address asked for",
+      render: (row) => (
+        <div className="min-w-0">
+          <div className="truncate text-sm text-ink">{row.email}</div>
+          {contested.has(row.employee_id) && row.status === "PENDING" && (
+            <span className="mt-0.5 inline-flex items-center gap-1 rounded bg-warn-bg px-1.5 py-0.5 text-[11px] font-semibold text-warn">
+              <AlertTriangle className="h-3 w-3" />
+              more than one address claimed
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "asked",
+      header: "Asked",
+      render: (row) => (
+        <div className="text-xs text-muted">
+          <div>{fmtDateTime(row.created_at ?? undefined)}</div>
+          {row.requested_ip && <div>from {row.requested_ip}</div>}
+        </div>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      render: (row) => (
+        row.status === "PENDING"
+          ? <StatusChip status="QUEUED" />
+          : (
+            <div className="text-xs">
+              <StatusChip status={row.status === "APPROVED" ? "SENT" : "FAILED"} />
+              {row.decided_by_name && (
+                <div className="mt-0.5 text-muted">by {row.decided_by_name}</div>
+              )}
+            </div>
+          )
+      ),
+    },
+    {
+      key: "decide",
+      header: "",
+      render: (row) => (
+        row.status !== "PENDING" ? null : (
+          <div className="flex justify-end gap-2">
+            <Button
+              size="sm" variant="bordered" radius="md"
+              isDisabled={busyId === row.id}
+              onPress={() => decide.mutate({ id: row.id, approve: false })}
+            >
+              Not theirs
+            </Button>
+            <Button
+              size="sm" color="primary" radius="md"
+              isLoading={busyId === row.id}
+              onPress={() => decide.mutate({ id: row.id, approve: true })}
+            >
+              Confirm &amp; send
+            </Button>
+          </div>
+        )
+      ),
+    },
+  ];
+
+  return (
+    <>
+      {!canSend && (
+        <div className="mb-4 flex items-start gap-2 rounded-xl border border-warn/40 bg-warn-bg/60 p-3 text-sm text-body">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warn" />
+          <span>
+            No mailbox is configured, so confirming a request records the address but
+            the link cannot be delivered. Set the SMTP settings first.
+          </span>
+        </div>
+      )}
+      <div className="mb-4 text-sm text-muted">
+        {pending === 0
+          ? "Nothing is waiting to be confirmed."
+          : `${pending} ${pending === 1 ? "request is" : "requests are"} waiting. ` +
+            "Confirm only an address you know belongs to that person — approving sends " +
+            "them a link that sets a new password."}
+      </div>
+      <ErrorBanner error={failed ?? error} />
+      <Card className="p-2">
+        <ResponsiveList
+          data={claims}
+          columns={columns}
+          keyOf={(row) => row.id}
+          loading={loading}
+          empty="Nobody has asked for a password reset yet."
+          renderCard={(row) => (
+            <div className="space-y-1">
+              <div className="flex items-start justify-between gap-2">
+                <span className="truncate text-sm font-medium text-ink">
+                  {row.employee_name || `Employee ${row.employee_id}`}
+                </span>
+                <StatusChip status={row.status === "PENDING" ? "QUEUED"
+                  : row.status === "APPROVED" ? "SENT" : "FAILED"} />
+              </div>
+              <div className="text-xs text-body">{row.email}</div>
+              <div className="text-xs text-muted">{row.employee_code}</div>
+              {row.status === "PENDING" && (
+                <div className="flex gap-2 pt-1">
+                  <Button
+                    size="sm" variant="bordered" radius="md" className="flex-1"
+                    isDisabled={busyId === row.id}
+                    onPress={() => decide.mutate({ id: row.id, approve: false })}
+                  >
+                    Not theirs
+                  </Button>
+                  <Button
+                    size="sm" color="primary" radius="md" className="flex-1"
+                    isLoading={busyId === row.id}
+                    onPress={() => decide.mutate({ id: row.id, approve: true })}
+                  >
+                    Confirm &amp; send
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        />
+      </Card>
+    </>
   );
 }
 
