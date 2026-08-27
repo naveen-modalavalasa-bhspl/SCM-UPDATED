@@ -216,6 +216,24 @@ def map_section(row: dict) -> dict:
     }
 
 
+def map_role(row: dict) -> dict:
+    """Map the role catalogue rather than deriving it only from occupied posts."""
+    status = row.get("status")
+    return {
+        "id": row.get("id"),
+        "code": row.get("code"),
+        "name": row.get("name") or f"Role {row.get('id')}",
+        "description": row.get("description"),
+        "role_type_id": row.get("role_type_id") or row.get("role_type"),
+        "role_type_name": row.get("role_type_name"),
+        "job_family_id": row.get("job_family_id"),
+        "job_family_name": row.get("job_family_name"),
+        "project_id": row.get("project_id") or row.get("project"),
+        "project_name": row.get("project_name"),
+        "is_active": True if status is None else _active(status),
+    }
+
+
 def map_position_level(row: dict) -> dict:
     return {
         "id": row.get("id"),
@@ -308,7 +326,9 @@ def position_from_employee(row: dict) -> tuple[dict, dict] | None:
     columns = {
         "id": pos.get("id"),
         "code": pos.get("code"),
-        "name": pos.get("name"),
+        # Older nested employee payloads can carry only the position id. The rescued
+        # mirror row still needs a stable display value because name is NOT NULL.
+        "name": pos.get("name") or f"Position {pos.get('id')}",
         "level_id": pos.get("level_id"),
         "parent_position_id": parent,
         "department_id": pos.get("department_id"),
@@ -329,7 +349,7 @@ def position_from_employee(row: dict) -> tuple[dict, dict] | None:
         "employee_id": emp.get("id"),
         "employee_name": emp.get("name"),
         "position_id": pos.get("id"),
-        "position_name": pos.get("name"),
+        "position_name": pos.get("name") or f"Position {pos.get('id')}",
         "department_id": pos.get("department_id"),
         "office_id": office.get("id"),
         "is_primary": True,

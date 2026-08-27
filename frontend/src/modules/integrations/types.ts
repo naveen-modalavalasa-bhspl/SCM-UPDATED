@@ -249,6 +249,8 @@ export interface Webhook {
   description?: string | null;
   events: string[];
   handler: string;
+  /** The API client whose key may push here. Blank means any live key. */
+  client_code: string;
   require_signature: boolean;
   /** Whether a secret exists — never the secret itself. */
   has_secret: boolean;
@@ -259,6 +261,9 @@ export interface Webhook {
   updated_at?: string | null;
   last_received_at?: string | null;
   received_count: number;
+  /** Where the HCM event stream has reached. Null until the first push, and after a
+   *  reset. Only an `hcm_mirror` webhook carries one. */
+  last_sequence?: number | null;
 }
 
 export interface WebhookWrite {
@@ -267,6 +272,7 @@ export interface WebhookWrite {
   description?: string | null;
   events: string[];
   handler: string;
+  client_code: string;
   require_signature: boolean;
   is_active: boolean;
 }

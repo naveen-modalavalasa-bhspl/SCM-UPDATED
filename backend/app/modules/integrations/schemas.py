@@ -189,9 +189,21 @@ class WebhookWrite(BaseModel):
     #: cannot be told apart from a misconfigured one.
     events: list[str] = Field(min_length=1, max_length=50)
     handler: str = "record"
+    #: The API client whose key may push here. BLANK MEANS ANY LIVE KEY, which is how
+    #: every webhook behaved before this field existed, so an existing registration is
+    #: unchanged by its arrival. Set it and the mirror is reachable by one application
+    #: only — hiding the URL is not the control, this is.
+    client_code: str = Field(default="", max_length=50)
     #: Off only while two sides are being wired together, and it is recorded when it is.
     require_signature: bool = True
     is_active: bool = True
+
+    @field_validator("client_code")
+    @classmethod
+    def _client_code(cls, value: str) -> str:
+        # Upper-cased exactly as ClientWrite.code is, so the binding matches the code
+        # the caller actually authenticates under rather than a look-alike of it.
+        return (value or "").strip().upper().replace(" ", "_")
 
 
 class WebhookOut(BaseModel):
@@ -200,6 +212,8 @@ class WebhookOut(BaseModel):
     description: str | None = None
     events: list[str] = []
     handler: str = "record"
+    #: Blank means any live key may push. Never a secret, so it is safe on the list.
+    client_code: str = ""
     require_signature: bool = True
     #: Whether a secret exists, never the secret. Same posture as an API key.
     has_secret: bool = False
@@ -210,6 +224,7 @@ class WebhookOut(BaseModel):
     updated_at: str | None = None
     last_received_at: str | None = None
     received_count: int = 0
+    last_sequence: int | None = None
 
 
 class WebhookSecretOut(BaseModel):
