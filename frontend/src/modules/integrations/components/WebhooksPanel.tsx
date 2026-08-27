@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { AlertTriangle, KeyRound, Plus, Radio, ShieldCheck } from "lucide-react";
+import { AlertTriangle, KeyRound, Plus, Radio, RotateCcw, ShieldCheck } from "lucide-react";
 import {
   Button, Card, EmptyState, ErrorBanner, Field, Input, ResponsiveList, Select,
   StatusPill, useToast, type Column,
 } from "@/shared/components";
-import { webhooksApi } from "../api";
+import { integrationsApi, webhooksApi } from "../api";
 import { EventPicker } from "./EventPicker";
 import { WebhookDocsModal } from "./WebhookDocsModal";
 import { fmtDateTime } from "@/shared/datetime";
@@ -14,7 +14,7 @@ import type { Webhook, WebhookSecret, WebhookWrite } from "../types";
 
 const BLANK: WebhookWrite = {
   source: "", name: "", description: "", events: [], handler: "record",
-  require_signature: true, is_active: true,
+  client_code: "", require_signature: true, is_active: true,
 };
 
 /**
@@ -91,6 +91,12 @@ export function WebhooksPanel() {
   const eventNames = useQuery({
     queryKey: ["apis", "webhook-events"], queryFn: webhooksApi.eventNames,
   });
+  // The applications a webhook can be bound to. Same list the API console shows;
+  // fetched here so the picker offers codes that actually authenticate.
+  const clients = useQuery({
+    queryKey: ["apis", "clients", "for-webhooks"],
+    queryFn: () => integrationsApi.listClients({ size: 100 }),
+  });
   const deliveries = useQuery({
     queryKey: ["apis", "webhook-deliveries", showLog],
     queryFn: () => webhooksApi.deliveries(showLog ?? undefined),
@@ -131,6 +137,17 @@ export function WebhooksPanel() {
     onError: () => toast.error("That secret could not be issued."),
   });
 
+  // Reopens a stream a refused push wedged. The sender may then send any number;
+  // the one it sends becomes the new cursor.
+  const resetSeq = useMutation({
+    mutationFn: (source: string) => webhooksApi.resetSequence(source),
+    onSuccess: (hook) => {
+      refresh();
+      toast.success(`${hook.source} will accept any sequence on the next push`);
+    },
+    onError: () => toast.error("That sequence could not be reset."),
+  });
+
   const open = (hook?: Webhook) => {
     setProblem("");
     setEditing(hook?.source ?? null);
@@ -138,6 +155,7 @@ export function WebhooksPanel() {
       ? {
         source: hook.source, name: hook.name ?? "", description: hook.description ?? "",
         events: hook.events, handler: hook.handler,
+        client_code: hook.client_code ?? "",
         require_signature: hook.require_signature, is_active: hook.is_active,
       }
       : { ...BLANK });
@@ -189,12 +207,25 @@ export function WebhooksPanel() {
       ),
     },
     {
+      key: "caller",
+      header: "Who may push",
+      // A signed webhook left unbound is reachable by EVERY live key, not just the
+      // partner it was registered for. That is the difference between "signed" and
+      // "only they can reach it", and the row said nothing about it.
+      render: (row) => (
+        row.client_code
+          ? <code className="text-xs text-ink">{row.client_code}</code>
+          : <span className="text-xs text-warn">any registered key</span>
+      ),
+    },
+    {
       key: "received",
       header: "Received",
       render: (row) => (
         <div className="text-xs text-muted">
           <div className="text-ink">{row.received_count}</div>
           {row.last_received_at && <div>last {fmtDateTime(row.last_received_at)}</div>}
+          {row.last_sequence != null && <div>seq {row.last_sequence}</div>}
         </div>
       ),
     },
@@ -223,6 +254,15 @@ export function WebhooksPanel() {
             <KeyRound className="h-3.5 w-3.5" />
             {row.has_secret ? "New secret" : "Issue secret"}
           </Button>
+          {/* Only where a cursor exists, because only an hcm_mirror webhook has one
+            * and it is meaningless before the first push. */}
+          {row.last_sequence != null && (
+            <Button variant="ghost"
+                    disabled={resetSeq.isPending}
+                    onClick={() => resetSeq.mutate(row.source)}>
+              <RotateCcw className="h-3.5 w-3.5" /> Reset sequence
+            </Button>
+          )}
           {row.is_active && (
             <Button variant="ghost" onClick={() => disable.mutate(row.source)}>
               Switch off
@@ -342,6 +382,21 @@ export function WebhooksPanel() {
                     }))}
                   />
                 </Field>
+                <Field
+                  label="Who may push"
+                  hint="The one application whose API key is accepted here. Leave it on any key only while wiring two sides together — every other registered client can reach this webhook until you set it."
+                >
+                  <Select
+                    value={draft.client_code}
+                    onChange={(value) => setDraft({ ...draft, client_code: value })}
+                    options={[
+                      { value: "", label: "Any registered key" },
+                      ...(clients.data?.items ?? []).map((c) => ({
+                        value: c.code, label: `${c.code} — ${c.name}`,
+                      })),
+                    ]}
+                  />
+                </Field>
                 <Field label="Description" hint="Optional.">
                   <Input value={draft.description ?? ""}
                          onChange={(e) => setDraft({
@@ -387,8 +442,11 @@ export function WebhooksPanel() {
             />
             <p className="text-xs text-muted">
               They send it back as{" "}
-              <code className="text-ink">{issued?.signature_header}: sha256=&lt;HMAC-SHA256 of the raw body&gt;</code>,
-              along with their API key. Rotating again invalidates this one immediately.
+              <code className="text-ink">{issued?.signature_header}: sha256=&lt;HMAC-SHA256 of &lt;timestamp&gt;.&lt;raw body&gt;&gt;</code>{" "}
+              with the same Unix seconds in{" "}
+              <code className="text-ink">X-Webhook-Timestamp</code>, along with their
+              API key. Details has the worked example. Rotating again invalidates this
+              one immediately.
             </p>
           </ModalBody>
           <ModalFooter>

@@ -21,7 +21,7 @@ from app.platform.hcm import mappers
 from app.platform.hcm.client import HcmClient
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmFacility, HcmFacilityType, HcmOffice,
-    HcmPosition, HcmPositionAssignment, HcmPositionLevel, HcmSection,
+    HcmPosition, HcmPositionAssignment, HcmPositionLevel, HcmRole, HcmSection,
 )
 from app.platform.settings.models import HcmSyncLog
 from app.shared.models.base import utcnow
@@ -45,6 +45,7 @@ PLAN: list[tuple[str, str, type, Callable[[dict], dict]]] = [
     ("facilities", "facilities", HcmFacility, mappers.map_facility),
     ("departments", "departments", HcmDepartment, mappers.map_department),
     ("sections", "sections", HcmSection, mappers.map_section),
+    ("roles", "roles", HcmRole, mappers.map_role),
     ("position_levels", "position-levels", HcmPositionLevel, mappers.map_position_level),
     ("positions", "positions", HcmPosition, mappers.map_position),
     ("employees", "employees", HcmEmployee, mappers.map_employee),
@@ -318,7 +319,7 @@ async def _retire_positions(db: AsyncSession, stale: list[int]) -> int:
     return len(stale)
 
 
-async def _issue_missing_logins(db: AsyncSession) -> int:
+async def _issue_missing_logins(db: AsyncSession, *, commit: bool = True) -> int:
     """Give every active employee without one a login, on the configured password.
 
     HCM is the joiner feed: someone hired today appears in the mirror on the next sync
@@ -350,7 +351,10 @@ async def _issue_missing_logins(db: AsyncSession) -> int:
     db.add_all(UserCredential(employee_id=employee_id, password_hash=digest,
                               must_change=False)
                for employee_id in missing)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     logger.warning("hcm sync: issued %s new logins on the default password",
                    len(missing))
     return len(missing)
@@ -557,7 +561,7 @@ async def sync_all(db: AsyncSession, client: HcmClient | None = None) -> list[Hc
 # HCM's own assignment ids share a range with its position ids, so pulling that feed
 # as well would have the two overwrite each other by id and silently reseat people.
 NEEDED_ENTITIES = [
-    "offices", "departments", "sections", "position_levels", "projects",
+    "offices", "departments", "sections", "roles", "position_levels", "projects",
     "positions", "employees",
 ]
 

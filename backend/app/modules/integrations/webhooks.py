@@ -31,12 +31,14 @@ import json
 import logging
 import re
 import secrets
+import time
 from typing import Any, Mapping
 
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
-    AuthenticationError, ConflictError, NotFoundError, ValidationError,
+    AuthenticationError, ConflictError, NotFoundError, PermissionError_, ValidationError,
 )
 from app.modules.integrations import store
 from app.shared.time import now as ist_now
@@ -58,7 +60,9 @@ MAX_STORED_PAYLOAD = 40_000
 
 SOURCE_PATTERN = r"^[a-z][a-z0-9-]{1,38}$"
 SIGNATURE_HEADER = "X-Webhook-Signature"
+TIMESTAMP_HEADER = "X-Webhook-Timestamp"
 SIGNATURE_ALGO = "sha256"
+MAX_CLOCK_SKEW_SECONDS = 300
 
 
 # --------------------------------------------------------------------------- #
@@ -104,7 +108,12 @@ async def _handle_record(db: AsyncSession, hook: dict, payload: Any) -> dict:
 HCM_ENTITIES = {
     "employee": "employees",
     "position": "positions",
+    "position_assignment": "position_assignments",
+    "position_level": "position_levels",
+    "role": "roles",
     "office": "offices",
+    "facility": "facilities",
+    "facility_type": "facility_types",
     "department": "departments",
     "project": "projects",
     "section": "sections",
@@ -125,7 +134,8 @@ async def _handle_hcm(db: AsyncSession, hook: dict, payload: Any) -> dict:
     """
     from app.platform.hcm import mappers, sync
     from app.platform.hcm.models import (
-        HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmSection,
+        HcmDepartment, HcmEmployee, HcmFacility, HcmFacilityType, HcmOffice,
+        HcmPosition, HcmPositionAssignment, HcmPositionLevel, HcmRole, HcmSection,
     )
 
     event = str(payload.get("event") or "")
@@ -143,7 +153,13 @@ async def _handle_hcm(db: AsyncSession, hook: dict, payload: Any) -> dict:
     plan = {
         "employees": (HcmEmployee, mappers.map_employee),
         "positions": (HcmPosition, mappers.map_position),
+        "position_assignments": (HcmPositionAssignment,
+                                 mappers.map_position_assignment),
+        "position_levels": (HcmPositionLevel, mappers.map_position_level),
+        "roles": (HcmRole, mappers.map_role),
         "offices": (HcmOffice, mappers.map_office),
+        "facilities": (HcmFacility, mappers.map_facility),
+        "facility_types": (HcmFacilityType, mappers.map_facility_type),
         "departments": (HcmDepartment, mappers.map_department),
         "sections": (HcmSection, mappers.map_section),
     }
@@ -151,11 +167,19 @@ async def _handle_hcm(db: AsyncSession, hook: dict, payload: Any) -> dict:
         cols = mappers.map_project(record)
         if not await sync._upsert_project(db, cols):
             return {"handled": "rejected", "note": "the record carries no id or name"}
-        await db.commit()
         return {"handled": "upserted", "entity": entity, "id": cols.get("id")}
 
     model, mapper = plan[entity]
     cols = mapper(record)
+    if entity == "position_assignments" and cols.get("position_id") is None:
+        return {"handled": "rejected",
+                "note": "the assignment carries no position id"}
+    if entity == "position_assignments":
+        # The mirror's assignment key is the position id: HCM's assignment ids share
+        # the same numeric range and can otherwise overwrite an unrelated derived
+        # seat. One position has one current holder; history remains in webhook
+        # deliveries and the periodic positions pull remains the recovery source.
+        cols["id"] = cols["position_id"]
     row_id = cols.get("id")
     if row_id is None:
         return {"handled": "rejected",
@@ -170,31 +194,64 @@ async def _handle_hcm(db: AsyncSession, hook: dict, payload: Any) -> dict:
         # A post nobody holds any more takes its seats with it, exactly as
         # `sync._retire_positions` does.
         if entity == "positions":
-            from app.platform.hcm.models import HcmPositionAssignment
-            from sqlalchemy import update as sa_update
             await db.execute(
                 sa_update(HcmPositionAssignment)
                 .where(HcmPositionAssignment.position_id == row_id,
                        HcmPositionAssignment.is_active.is_(True))
                 .values(is_active=False)
                 .execution_options(synchronize_session=False))
-        await db.commit()
+        elif entity == "employees":
+            await db.execute(
+                sa_update(HcmPositionAssignment)
+                .where(HcmPositionAssignment.employee_id == row_id,
+                       HcmPositionAssignment.is_active.is_(True))
+                .values(is_active=False)
+                .execution_options(synchronize_session=False))
+        if entity == "roles":
+            from app.platform.rbac.service import sync_hcm_roles
+            await sync_hcm_roles(db)
         log.info("webhook retired %s %s", entity, row_id)
         return {"handled": "retired", "entity": entity, "id": row_id}
 
+    if entity == "employees":
+        await sync._release_emp_code(db, cols)
     await sync._upsert(db, model, cols, record)
     outcome = {"handled": "upserted", "entity": entity, "id": row_id}
+
+    if entity == "positions":
+        assignment = mappers.position_assignment_from_position(record)
+        if assignment:
+            await sync._upsert(db, HcmPositionAssignment, assignment, record)
+            outcome["assignment_updated"] = True
+        elif "assigned_employee" in record:
+            result = await db.execute(
+                sa_update(HcmPositionAssignment)
+                .where(HcmPositionAssignment.position_id == row_id,
+                       HcmPositionAssignment.is_active.is_(True))
+                .values(is_active=False)
+                .execution_options(synchronize_session=False))
+            outcome["assignments_released"] = result.rowcount or 0
 
     if entity == "employees":
         # A row is not a login. Credentials are minted by a sync FOLLOW-UP step, so a
         # handler that stopped here would leave the joiner existing but unable to sign
         # in — which is exactly the defect that had every new starter waiting on an
         # admin. Only ever ADDS, and it is off unless NEW_USER_DEFAULT_PASSWORD is set.
-        await db.commit()
-        issued = await sync._issue_missing_logins(db)
+        rescued = mappers.position_from_employee(record)
+        if rescued:
+            position_cols, assignment = rescued
+            existing = await db.get(HcmPosition, position_cols["id"])
+            if sync._rescuable(position_cols["id"], {position_cols["id"]: existing}):
+                await sync._upsert(db, HcmPosition, position_cols, record)
+                await sync._upsert(db, HcmPositionAssignment, assignment, record)
+                outcome["assignment_updated"] = True
+        issued = await sync._issue_missing_logins(db, commit=False)
         outcome["logins_issued"] = issued
 
-    await db.commit()
+    if entity == "roles":
+        from app.platform.rbac.service import sync_hcm_roles
+        outcome["rbac_roles_added"] = await sync_hcm_roles(db)
+
     log.info("webhook %s %s %s", outcome["handled"], entity, row_id)
     return outcome
 
@@ -215,7 +272,13 @@ HANDLERS = {
 SUGGESTED_EVENTS = [
     "employee.created", "employee.updated", "employee.deactivated",
     "position.created", "position.updated", "position.deactivated",
+    "position_assignment.created", "position_assignment.updated",
+    "position_assignment.deactivated",
+    "position_level.created", "position_level.updated",
+    "role.created", "role.updated", "role.deactivated",
     "office.created", "office.updated",
+    "facility.created", "facility.updated", "facility.deactivated",
+    "facility_type.created", "facility_type.updated",
     "department.created", "department.updated",
     "project.created", "project.updated",
 ]
@@ -257,6 +320,7 @@ def _public(doc: Mapping[str, Any]) -> dict:
         "description": doc.get("description"),
         "events": list(doc.get("events") or []),
         "handler": doc.get("handler", "record"),
+        "client_code": str(doc.get("client_code") or ""),
         "require_signature": bool(doc.get("require_signature", True)),
         "has_secret": bool(doc.get("secret_hmac_key")),
         "is_active": bool(doc.get("is_active", True)),
@@ -266,6 +330,8 @@ def _public(doc: Mapping[str, Any]) -> dict:
         "updated_at": doc.get("updated_at"),
         "last_received_at": doc.get("last_received_at"),
         "received_count": int(doc.get("received_count") or 0),
+        "last_sequence": (int(doc["last_sequence"])
+                          if doc.get("last_sequence") is not None else None),
     }
 
 
@@ -285,8 +351,18 @@ _SAMPLE_RECORDS = {
     },
     "position": {"id": 55163, "name": "SCM HEAD", "code": "SCM-01",
                  "role_id": 186, "role_name": "SCM HEAD", "status": "Active"},
+    "position_assignment": {"id": 711, "employee_id": 17099,
+                            "position_id": 55163, "is_primary": True,
+                            "status": "Active"},
+    "position_level": {"id": 7, "name": "DISTRICT OFFICE", "rank": 7},
+    "role": {"id": 186, "code": "SCM-HEAD", "name": "SCM HEAD",
+             "status": "Active"},
     "office": {"id": 1549, "name": "CENTRAL WAREHOUSE-1", "code": "CW-01",
                "level_name": "CIRCLE OFFICE", "status": "Active"},
+    "facility": {"id": 4001, "name": "Central Warehouse", "office_id": 1549,
+                 "facility_type_id": 3, "status": "Active"},
+    "facility_type": {"id": 3, "code": "WH", "name": "Warehouse",
+                      "status": "Active"},
     "department": {"id": 1235, "name": "CENTRAL WARE HOUSE DEPARTMENT-1",
                    "status": "Active"},
     "project": {"id": 23, "name": "SUPPLY CHAIN MANAGEMENT", "code": "SCM",
@@ -295,11 +371,14 @@ _SAMPLE_RECORDS = {
 }
 
 
-def sample_body(event: str) -> dict:
+def sample_body(event: str, sequence: int | None = None) -> dict:
     """A body the sender can copy, for one of the events this webhook accepts."""
     head = str(event).partition(".")[0]
     record = _SAMPLE_RECORDS.get(head, {"id": 1, "name": "..."})
-    return {"event": event, "event_id": f"{head}-2026-08-27-0001", **record}
+    body = {"event": event, "event_id": f"{head}-2026-08-27-0001", **record}
+    if sequence is not None:
+        body["sequence"] = sequence
+    return body
 
 
 async def connection_docs(db: AsyncSession, source: str, base_url: str = "") -> dict:
@@ -310,6 +389,27 @@ async def connection_docs(db: AsyncSession, source: str, base_url: str = "") -> 
     events = list(doc.get("events") or [])
     label, _handler = HANDLERS.get(doc.get("handler", "record"),
                                    ("Record only", None))
+    is_hcm = doc.get("handler") == "hcm_mirror"
+    envelope = [
+        {"field": "event",
+         "note": "One of the accepted events. Anything else is refused, with the "
+                 "list of what is taken."},
+        {"field": "event_id",
+         "note": f"Unique per push, {MAX_EVENT_ID} characters or fewer. A repeat "
+                 f"is answered `duplicate` and changes nothing, so retrying is "
+                 f"always safe."},
+    ]
+    if is_hcm:
+        envelope.append({
+            "field": "sequence",
+            "note": "A positive, globally increasing HCM event number. After the "
+                    "first accepted push SCM requires the exact next number.",
+        })
+    envelope.append({
+        "field": "<the record>",
+        "note": "The entity itself, either at the top level or under `data`. "
+                "Both shapes are read.",
+    })
     return {
         "source": source,
         "name": doc.get("name") or source,
@@ -324,22 +424,14 @@ async def connection_docs(db: AsyncSession, source: str, base_url: str = "") -> 
             {"name": "X-API-Key",
              "note": "The key issued for the calling application."},
             {"name": SIGNATURE_HEADER,
-             "note": f"{SIGNATURE_ALGO}=<HMAC-{SIGNATURE_ALGO.upper()} of the RAW "
-                     f"request body, using the shared secret>"},
+             "note": f"{SIGNATURE_ALGO}=<HMAC-{SIGNATURE_ALGO.upper()} of "
+                     f"timestamp + '.' + RAW request body>"},
+            {"name": TIMESTAMP_HEADER,
+             "note": f"Current Unix seconds; accepted within {MAX_CLOCK_SKEW_SECONDS} "
+                     f"seconds."},
             {"name": "Content-Type", "note": "application/json"},
         ],
-        "envelope": [
-            {"field": "event",
-             "note": "One of the accepted events. Anything else is refused, with the "
-                     "list of what is taken."},
-            {"field": "event_id",
-             "note": f"Unique per push, {MAX_EVENT_ID} characters or fewer. A repeat "
-                     f"is answered `duplicate` and changes nothing, so retrying is "
-                     f"always safe."},
-            {"field": "<the record>",
-             "note": "The entity itself, either at the top level or under `data`. "
-                     "Both shapes are read."},
-        ],
+        "envelope": envelope,
         "answers": [
             {"status": 200, "body": {"ok": True, "event_id": "...",
                                      "received_at": "..."},
@@ -350,11 +442,19 @@ async def connection_docs(db: AsyncSession, source: str, base_url: str = "") -> 
                                     "does not match the body."},
             {"status": 422, "note": "An event this webhook does not accept, or a body "
                                     "that is not a JSON object."},
+            {"status": 409, "note": "The HCM event sequence is stale or has a gap. "
+                                    "Re-send the missing number to close it. If SCM "
+                                    "itself refused that number (401/422), it can "
+                                    "never be consumed — ask SCM to reset the cursor, "
+                                    "then send any number to start again."},
             {"status": 404, "note": "No such webhook, or it has been switched off."},
         ],
-        "samples": [{"event": event, "body": sample_body(event)} for event in events],
+        "samples": [{"event": event,
+                     "body": sample_body(event, index if is_hcm else None)}
+                    for index, event in enumerate(events, 1)],
         "signing_note": (
-            "The HMAC is over the RAW bytes of the body, before any re-serialising. "
+            "The HMAC input is the ASCII timestamp, one period, then the RAW bytes "
+            "of the body, before any re-serialising. "
             "Signing a re-encoded copy produces a signature for a document that was "
             "never sent, and it will be refused."),
     }
@@ -407,6 +507,7 @@ async def create_hook(db: AsyncSession, data, user) -> dict:
         "description": data.description,
         "events": data.events,
         "handler": data.handler,
+        "client_code": data.client_code,
         "require_signature": data.require_signature,
         "is_active": data.is_active,
         "created_at": ist_now().isoformat(),
@@ -429,6 +530,7 @@ async def update_hook(db: AsyncSession, source: str, data, user) -> dict:
         "description": data.description,
         "events": data.events,
         "handler": data.handler,
+        "client_code": data.client_code,
         "require_signature": data.require_signature,
         "is_active": data.is_active,
         "updated_at": ist_now().isoformat(),
@@ -445,6 +547,35 @@ async def delete_hook(db: AsyncSession, source: str) -> dict:
     doc["updated_at"] = ist_now().isoformat()
     await store.put(db, hook_key(source), doc)
     await db.commit()
+    return _public(doc)
+
+
+async def reset_sequence(db: AsyncSession, source: str, user) -> dict:
+    """Clear the HCM sequence cursor so the next push starts the stream again.
+
+    A gap is normally the SENDER's to close, by re-sending what SCM never took — and
+    that is the whole point of refusing one, so this is not a way to wave gaps through.
+
+    But a delivery SCM ITSELF refused never consumed its number: an event name this
+    webhook does not accept, or a body that would not parse, is turned away before the
+    cursor moves. The sender cannot close that gap by retrying, because the retry is
+    refused for the same reason it was the first time, and every later push then reads
+    as a gap and answers 409 for good. Without this the only way out is editing
+    `sys_settings` by hand.
+
+    Deliberately an admin act, and logged as one. It is not the endpoint quietly
+    forgiving the reordering it exists to catch.
+    """
+    doc = await _raw(db, source)
+    was = doc.get("last_sequence")
+    doc["last_sequence"] = None
+    doc["updated_at"] = ist_now().isoformat()
+    doc["sequence_reset_at"] = ist_now().isoformat()
+    doc["sequence_reset_by_name"] = getattr(user, "full_name", None)
+    await store.put(db, hook_key(source), doc, f"Inbound webhook {source}")
+    await db.commit()
+    log.warning("webhook %s sequence cursor cleared (was %s) by %s", source, was,
+                doc["sequence_reset_by_name"] or "?")
     return _public(doc)
 
 
@@ -491,8 +622,9 @@ def json_body(body: bytes) -> dict:
     return raw
 
 
-def expected_signature(secret: bytes, body: bytes) -> str:
-    return f"{SIGNATURE_ALGO}={hmac.new(secret, body, hashlib.sha256).hexdigest()}"
+def expected_signature(secret: bytes, timestamp: str, body: bytes) -> str:
+    signed = timestamp.encode("ascii") + b"." + body
+    return f"{SIGNATURE_ALGO}={hmac.new(secret, signed, hashlib.sha256).hexdigest()}"
 
 
 def _secret_bytes(doc: Mapping[str, Any]) -> bytes | None:
@@ -506,8 +638,9 @@ def _secret_bytes(doc: Mapping[str, Any]) -> bytes | None:
         return None
 
 
-def verify(doc: Mapping[str, Any], body: bytes, header: str | None) -> None:
-    """401 unless the header carries an HMAC of exactly these bytes.
+def verify(doc: Mapping[str, Any], body: bytes, header: str | None,
+           timestamp: str | None, *, now: float | None = None) -> None:
+    """401 unless a fresh timestamp and its raw-body HMAC are present.
 
     Over the RAW body, before parsing: re-serialising the JSON and signing that would
     compare a signature against a document the sender never sent.
@@ -525,8 +658,54 @@ def verify(doc: Mapping[str, Any], body: bytes, header: str | None) -> None:
             "Settings > Integrations before sending to it.")
     if not header:
         raise AuthenticationError(f"Missing {SIGNATURE_HEADER} header")
-    if not hmac.compare_digest(expected_signature(secret, body), header.strip()):
-        raise AuthenticationError("Signature does not match the request body")
+    if not timestamp:
+        raise AuthenticationError(f"Missing {TIMESTAMP_HEADER} header")
+    try:
+        sent_at = int(timestamp)
+    except (TypeError, ValueError) as exc:
+        raise AuthenticationError(f"{TIMESTAMP_HEADER} must be Unix seconds") from exc
+    current = time.time() if now is None else now
+    if abs(current - sent_at) > MAX_CLOCK_SKEW_SECONDS:
+        raise AuthenticationError(
+            f"{TIMESTAMP_HEADER} is outside the {MAX_CLOCK_SKEW_SECONDS}-second window")
+    try:
+        wanted = expected_signature(secret, timestamp, body)
+    except UnicodeEncodeError as exc:
+        raise AuthenticationError(f"{TIMESTAMP_HEADER} must contain ASCII digits") from exc
+    if not hmac.compare_digest(wanted, header.strip()):
+        raise AuthenticationError("Signature does not match the timestamp and request body")
+
+
+def _sequence(doc: Mapping[str, Any], payload: Mapping[str, Any]) -> int | None:
+    """Validate the monotonic HCM stream and report the accepted sequence.
+
+    The first delivery establishes the cursor. Afterwards only the exact next number
+    is accepted; a gap is retriable after the missing delivery or a recovery sync.
+    """
+    if doc.get("handler") != "hcm_mirror":
+        return None
+    raw = payload.get("sequence")
+    if isinstance(raw, bool):
+        raise ValidationError("`sequence` must be a positive integer")
+    try:
+        sequence = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("`sequence` is required and must be a positive integer") from exc
+    if sequence < 1 or str(raw).strip() != str(sequence):
+        raise ValidationError("`sequence` must be a positive integer")
+    last = int(doc.get("last_sequence") or 0)
+    if last and sequence != last + 1:
+        relation = "stale" if sequence <= last else "gap"
+        raise ConflictError(
+            f"HCM sequence {relation}: received {sequence}, expected {last + 1}")
+    return sequence
+
+
+def _storable_payload(doc: Mapping[str, Any], payload: dict) -> dict:
+    if doc.get("handler") != "hcm_mirror":
+        return payload
+    from app.platform.hcm.mappers import scrub_raw
+    return scrub_raw(payload)
 
 
 async def _prune(db: AsyncSession) -> None:
@@ -540,20 +719,28 @@ async def _prune(db: AsyncSession) -> None:
 
 
 async def receive(db: AsyncSession, source: str, body: bytes, signature: str | None,
-                  payload: dict, client_code: str | None) -> dict:
+                  timestamp: str | None, payload: dict,
+                  client_code: str | None) -> dict:
     """Authenticate, de-duplicate, record, hand to the handler. Never partial.
 
     The order matters and mirrors the B-CAMS path: the signature is checked BEFORE the
     event id is looked up, so an unsigned caller cannot learn which event ids exist by
     watching which ones answer `duplicate`.
     """
-    doc = await store.get(db, hook_key(source))
+    # Serialize one source's cursor and delivery writes. This closes the race where
+    # two workers could both see an unseen event id or the same next sequence.
+    doc = await store.get(db, hook_key(source), for_update=True)
     if doc is None or not doc.get("is_active"):
         # The same answer for "no such webhook" and "switched off", and deliberately
         # not "unauthorised": neither tells a stranger which names are real.
         raise NotFoundError(f"No webhook named {source}")
 
-    verify(doc, body, signature)
+    bound_client = str(doc.get("client_code") or "")
+    if bound_client and client_code != bound_client:
+        raise PermissionError_(
+            f"This webhook is reserved for API client {bound_client}")
+
+    verify(doc, body, signature, timestamp)
 
     event = str(payload.get("event") or "").strip()
     event_id = str(payload.get("event_id") or "").strip()
@@ -575,31 +762,41 @@ async def receive(db: AsyncSession, source: str, body: bytes, signature: str | N
         return {"ok": True, "duplicate": True, "event_id": event_id,
                 "received_at": already.get("received_at")}
 
+    sequence = _sequence(doc, payload)
+
     fits = len(body) <= MAX_STORED_PAYLOAD
+    safe_payload = _storable_payload(doc, payload)
     delivery = {
         "source": source,
         "event": event,
         "event_id": event_id,
         "received_at": ist_now().isoformat(),
         "client_code": client_code,
+        "timestamp": timestamp,
+        "sequence": sequence,
         "body_sha256": hashlib.sha256(body).hexdigest(),
-        "payload": payload if fits else None,
+        "payload": safe_payload if fits else None,
         "payload_truncated": not fits,
     }
     if not fits:
-        log.warning("webhook %s %s: %d bytes exceeds the %d-byte store; body logged",
+        log.warning("webhook %s %s: %d bytes exceeds the %d-byte store; payload omitted",
                     source, event_id, len(body), MAX_STORED_PAYLOAD)
-        log.info("webhook payload %s: %s", event_id, body.decode("utf-8", "replace"))
 
-    _label, handler = HANDLERS[doc.get("handler", "record")]
-    delivery["outcome"] = await handler(db, doc, payload)
+    try:
+        _label, handler = HANDLERS[doc.get("handler", "record")]
+        delivery["outcome"] = await handler(db, doc, payload)
 
-    await store.put(db, key, delivery, f"{source} {event}")
-    doc["last_received_at"] = delivery["received_at"]
-    doc["received_count"] = int(doc.get("received_count") or 0) + 1
-    await store.put(db, hook_key(source), doc)
-    await _prune(db)
-    await db.commit()
+        await store.put(db, key, delivery, f"{source} {event}")
+        doc["last_received_at"] = delivery["received_at"]
+        doc["received_count"] = int(doc.get("received_count") or 0) + 1
+        if sequence is not None:
+            doc["last_sequence"] = sequence
+        await store.put(db, hook_key(source), doc)
+        await _prune(db)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     log.info("webhook %s accepted %s (%s)", source, event_id, event)
     return {"ok": True, "event_id": event_id,
             "received_at": delivery["received_at"]}

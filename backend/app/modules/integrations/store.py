@@ -63,10 +63,11 @@ async def put(db: AsyncSession, key: str, payload: dict, description: str = "") 
             row.description = description[:500]
 
 
-async def get(db: AsyncSession, key: str) -> dict | None:
-    row = (await db.execute(
-        select(Setting).where(Setting.setting_key == key)
-    )).scalar_one_or_none()
+async def get(db: AsyncSession, key: str, *, for_update: bool = False) -> dict | None:
+    stmt = select(Setting).where(Setting.setting_key == key)
+    if for_update:
+        stmt = stmt.with_for_update()
+    row = (await db.execute(stmt)).scalar_one_or_none()
     return _load(row)
 
 

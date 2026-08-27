@@ -756,3 +756,68 @@ async def test_role_changes_are_audited(client, make_user, login):
         f"/api/admin/audit?entity=rbac_roles&entity_id={created['id']}",
         headers=headers)).json()
     assert audit["total"] == 1
+
+
+def test_only_a_repeated_role_name_is_qualified():
+    """The seven roles the org talks about day to day must keep reading as they did.
+
+    The HCM role CATALOGUE is per project, so it repeats names the position feed never
+    did — five PROCUREMENT MANAGERs, two Regional Managers. A ladder rung IS one of
+    these ids (rule 8), and a picker offering the same words five times is a rung
+    assigned by coin toss.
+    """
+    from app.platform.rbac.service import _role_label
+
+    by_id = {
+        55: ("COO", "108-MMU"),                       # unique — left alone
+        11: ("PROCUREMENT MANAGER", "108-MMU"),
+        12: ("PROCUREMENT MANAGER", "104-MMU"),
+        13: ("PROCUREMENT MANAGER", None),            # no project to tell it apart
+        14: ("PROCUREMENT MANAGER", None),
+        21: ("Regional Manager", "108-MMU"),
+        22: ("Regional Manager", "104-MMU"),
+    }
+    label = lambda rid: _role_label(rid, *by_id[rid], by_id)  # noqa: E731
+
+    assert label(55) == "COO"
+    assert label(11) == "PROCUREMENT MANAGER (108-MMU)"
+    assert label(12) == "PROCUREMENT MANAGER (104-MMU)"
+    # Project cannot separate these two, so the id does rather than leaving a twin.
+    assert label(13) == "PROCUREMENT MANAGER (13)"
+    assert label(14) == "PROCUREMENT MANAGER (14)"
+    assert label(21) == "Regional Manager (108-MMU)"
+    assert len({label(rid) for rid in by_id}) == len(by_id)
+
+
+async def test_the_role_catalogue_keeps_a_role_no_position_holds(db):
+    """A rung can only be configured for a role the picker offers, and the position
+    feed only knows the roles somebody currently sits in."""
+    from sqlalchemy import select
+
+    from app.platform.hcm.models import HcmPosition, HcmRole
+    from app.platform.rbac.models import Role
+    from app.platform.rbac.service import sync_hcm_roles
+    from app.shared.models.base import utcnow
+
+    db.add_all([
+        HcmPosition(id=801, name="Held Post", role_id=91, role_name="Store Keeper",
+                    is_active=True, synced_at=utcnow()),
+        # Same id as the position carries: the catalogue wins, and brings the project.
+        HcmRole(id=91, name="Store Keeper", project_name="SCM", is_active=True,
+                synced_at=utcnow()),
+        # Nobody holds this one, and it must still be pickable.
+        HcmRole(id=92, name="Store Keeper", project_name="104-MMU", is_active=True,
+                synced_at=utcnow()),
+    ])
+    await db.flush()
+    await sync_hcm_roles(db)
+
+    names = {
+        row.description: row.name
+        for row in (await db.execute(
+            select(Role).where(Role.description.in_(
+                ["HCM role ID: 91", "HCM role ID: 92"]))
+        )).scalars().all()
+    }
+    assert names == {"HCM role ID: 91": "Store Keeper (SCM)",
+                     "HCM role ID: 92": "Store Keeper (104-MMU)"}

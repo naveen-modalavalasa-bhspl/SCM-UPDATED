@@ -41,6 +41,23 @@ class HcmEmployee(Base):
     raw = _raw()
     synced_at = _synced()
 
+    @property
+    def position_id(self) -> int | None:
+        """Compatibility view of the primary position; assignments remain canonical."""
+        if not isinstance(self.raw, dict):
+            return None
+        nested = self.raw.get("position")
+        if isinstance(nested, dict):
+            return nested.get("id")
+        details = self.raw.get("positions_details") or []
+        wanted = self.raw.get("primary_position")
+        for position in details:
+            if isinstance(position, dict) and (
+                not wanted or position.get("name") == wanted
+            ):
+                return position.get("id")
+        return None
+
 
 class HcmOffice(Base):
     __tablename__ = "hcm_offices"
@@ -108,6 +125,23 @@ class HcmSection(Base):
     raw = _raw()
     synced_at = _synced()
 
+
+class HcmRole(Base):
+    """HCM organisation roles, including roles with no current position holder."""
+    __tablename__ = "hcm_roles"
+    id = _pk()
+    code = Column(String(50), nullable=True)
+    name = Column(String(200), nullable=False)
+    description = Column(String(500), nullable=True)
+    role_type_id = Column(BigInteger, index=True, nullable=True)
+    role_type_name = Column(String(200), nullable=True)
+    job_family_id = Column(BigInteger, nullable=True)
+    job_family_name = Column(String(200), nullable=True)
+    project_id = Column(BigInteger, index=True, nullable=True)
+    project_name = Column(String(200), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    raw = _raw()
+    synced_at = _synced()
 
 class HcmPositionLevel(Base):
     __tablename__ = "hcm_position_levels"

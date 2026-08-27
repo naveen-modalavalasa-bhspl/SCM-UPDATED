@@ -133,6 +133,11 @@ export const webhooksApi = {
   rotateSecret: async (source: string): Promise<WebhookSecret> =>
     (await api.post(`${BASE}/webhooks/${source}/secret`)).data,
 
+  /** Clear the HCM sequence cursor. Needed when a push SCM itself refused left a gap
+   *  the sender can never close, which wedges every later push on 409. */
+  resetSequence: async (source: string): Promise<Webhook> =>
+    (await api.post(`${BASE}/webhooks/${source}/reset-sequence`)).data,
+
   /** What you send the system that will push to us. Derived from the registration,
    *  so it cannot drift from what the endpoint will actually accept. */
   docs: async (source: string): Promise<WebhookDocs> =>

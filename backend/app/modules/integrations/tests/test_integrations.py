@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.core.exceptions import PermissionError_, ValidationError
+from app.core.exceptions import ConflictError, PermissionError_, ValidationError
 from app.modules.integrations import introspect, security, service, store
 from app.modules.integrations.enums import KeyState
 from app.modules.integrations.schemas import ClientWrite, EndpointWrite, FieldIn, JoinIn
@@ -540,29 +540,73 @@ def test_the_signature_is_over_the_raw_bytes():
     """Re-serialising the JSON and signing that would compare a signature against a
     document the sender never sent."""
     secret = b"s3cret"
+    timestamp = "1787800000"
     body = b'{"event":"employee.updated","event_id":"a"}'
-    assert webhooks.expected_signature(secret, body) == (
-        "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest())
+    signed = timestamp.encode() + b"." + body
+    assert webhooks.expected_signature(secret, timestamp, body) == (
+        "sha256=" + hmac.new(secret, signed, hashlib.sha256).hexdigest())
     # One byte different anywhere and it does not match.
-    assert webhooks.expected_signature(secret, body + b" ") != \
-        webhooks.expected_signature(secret, body)
+    assert webhooks.expected_signature(secret, timestamp, body + b" ") != \
+        webhooks.expected_signature(secret, timestamp, body)
 
 
 def test_an_unsigned_push_is_refused_when_a_secret_exists():
     doc = {"source": "hcm", "secret_hmac_key": b"k".hex(), "require_signature": True}
     with pytest.raises(AuthenticationError):
-        webhooks.verify(doc, b"{}", None)
+        webhooks.verify(doc, b"{}", None, None)
     with pytest.raises(AuthenticationError):
-        webhooks.verify(doc, b"{}", "sha256=wrong")
+        webhooks.verify(doc, b"{}", "sha256=wrong", "1787800000",
+                        now=1787800000)
+
+
+def test_a_signed_push_requires_a_fresh_timestamp():
+    secret = b"k"
+    doc = {"source": "hcm", "secret_hmac_key": secret.hex(),
+           "require_signature": True}
+    body = b"{}"
+    current = 1787800000
+    current_text = str(current)
+    signature = webhooks.expected_signature(secret, current_text, body)
+    webhooks.verify(doc, body, signature, current_text, now=current)
+    with pytest.raises(AuthenticationError):
+        webhooks.verify(doc, body, signature, None, now=current)
+    stale = str(current - webhooks.MAX_CLOCK_SKEW_SECONDS - 1)
+    with pytest.raises(AuthenticationError):
+        webhooks.verify(doc, body,
+                        webhooks.expected_signature(secret, stale, body), stale,
+                        now=current)
 
 
 def test_a_webhook_with_no_secret_refuses_rather_than_waving_through():
     """Fail closed. The one exception is an explicit, recorded decision to run
     unsigned while two sides are being wired together."""
     with pytest.raises(AuthenticationError):
-        webhooks.verify({"source": "hcm", "require_signature": True}, b"{}", None)
+        webhooks.verify({"source": "hcm", "require_signature": True}, b"{}", None,
+                        None)
     # Explicitly opted out — allowed, and logged as a warning where it happens.
-    webhooks.verify({"source": "hcm", "require_signature": False}, b"{}", None)
+    webhooks.verify({"source": "hcm", "require_signature": False}, b"{}", None,
+                    None)
+
+
+def test_hcm_history_is_scrubbed_before_it_is_stored():
+    payload = {"event": "employee.updated", "pan_number": "ABCDE1234F",
+               "employee": {"id": 7, "name": "Person",
+                            "bank_details": {"account_number": "123"}}}
+    safe = webhooks._storable_payload({"handler": "hcm_mirror"}, payload)
+    assert safe["employee"] == {"id": 7, "name": "Person"}
+    assert "pan_number" not in safe
+    assert "ABCDE1234F" not in json.dumps(safe)
+
+
+def test_hcm_sequence_detects_replays_and_gaps():
+    doc = {"handler": "hcm_mirror", "last_sequence": 41}
+    assert webhooks._sequence(doc, {"sequence": 42}) == 42
+    with pytest.raises(ConflictError, match="stale"):
+        webhooks._sequence(doc, {"sequence": 41})
+    with pytest.raises(ConflictError, match="gap"):
+        webhooks._sequence(doc, {"sequence": 44})
+    with pytest.raises(ValidationError):
+        webhooks._sequence(doc, {})
 
 
 def test_a_body_that_is_not_a_json_object_is_refused():
@@ -599,7 +643,12 @@ def test_the_hcm_handler_is_offered_and_is_not_the_default():
     ("employee.updated", "employees"),
     ("employee.deactivated", "employees"),
     ("position.updated", "positions"),
+    ("position_assignment.updated", "position_assignments"),
+    ("position_level.updated", "position_levels"),
+    ("role.updated", "roles"),
     ("office.updated", "offices"),
+    ("facility.updated", "facilities"),
+    ("facility_type.updated", "facility_types"),
     ("department.updated", "departments"),
     ("project.updated", "projects"),
     ("section.updated", "sections"),

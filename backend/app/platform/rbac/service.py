@@ -11,6 +11,7 @@ from app.core.pagination import PageParams, paginate
 from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
+    HcmRole,
 )
 from app.platform.rbac.models import (
     Page, Permission, Role, RolePermission, UserGroup, UserGroupMember, UserRole,
@@ -55,6 +56,34 @@ def hcm_role_code(name: str, role_id: int) -> str:
     return (code or f"hcm_role_{role_id}")[:50]
 
 
+def _role_label(role_id: int, name: str, project: str | None,
+                by_id: dict[int, tuple[str, str | None]]) -> str:
+    """What an admin reads in the rung and job-profile pickers.
+
+    The role CATALOGUE is per project, so it repeats names the position feed never
+    did: five PROCUREMENT MANAGERs, two Regional Managers, two District Managers. A
+    ladder rung IS one of these ids (rule 8), and a picker offering the same words
+    five times is a rung assigned by coin toss — one of which routes every request in
+    a region to a post nobody holds.
+
+    Only a name that actually repeats is qualified, so the seven roles the org talks
+    about day to day keep reading exactly as they did. The project is the thing that
+    tells them apart; the id is the fallback for the case where even that is shared.
+    """
+    name = (name or "").strip()
+    twins = [other_id for other_id, (other_name, _project) in by_id.items()
+             if (other_name or "").strip() == name]
+    if len(twins) < 2:
+        return name
+    project = (project or "").strip()
+    if project and sum(
+        1 for other_id in twins
+        if (by_id[other_id][1] or "").strip() == project
+    ) == 1:
+        return f"{name} ({project})"
+    return f"{name} ({role_id})"
+
+
 async def sync_hcm_roles(db: AsyncSession) -> int:
     """Mirror HCM identities into RBAC so page permissions can target them.
 
@@ -74,7 +103,12 @@ async def sync_hcm_roles(db: AsyncSession) -> int:
     historical grant name a role id and must still resolve to a name; `is_active` is
     already the flag every reader filters on.
     """
-    hcm_rows = (await db.execute(
+    role_rows = (await db.execute(
+        select(HcmRole.id, HcmRole.name, HcmRole.project_name)
+        .where(HcmRole.is_active.is_(True))
+        .order_by(HcmRole.id)
+    )).all()
+    position_rows = (await db.execute(
         select(HcmPosition.role_id, HcmPosition.role_name)
         .where(
             HcmPosition.role_id.isnot(None),
@@ -84,23 +118,33 @@ async def sync_hcm_roles(db: AsyncSession) -> int:
         .group_by(HcmPosition.role_id, HcmPosition.role_name)
         .order_by(HcmPosition.role_id)
     )).all()
+    # Position data remains a fallback during rollout. The catalogue wins when both
+    # carry an id, and also preserves valid roles that currently have no holder.
+    by_id = {role_id: (name, None) for role_id, name in position_rows}
+    by_id.update({role_id: (name, project)
+                  for role_id, name, project in role_rows})
+    hcm_rows = [(role_id, name, _role_label(role_id, name, project, by_id))
+                for role_id, (name, project) in sorted(by_id.items())]
     existing = (await db.execute(select(Role))).scalars().all()
     by_description = {r.description: r for r in existing if r.description}
     used_codes = {r.code.lower() for r in existing}
     added = retired = 0
-    for hcm_role_id, name in hcm_rows:
+    for hcm_role_id, name, label in hcm_rows:
         description = hcm_role_description(hcm_role_id)
         role = by_description.get(description)
         if role is not None:
-            role.name = name
+            role.name = label
             role.is_active = True
             continue
+        # The CODE stays off the plain name: it is matched on and typed, and a project
+        # suffix in it would churn on any HCM rename. Collisions are settled below by
+        # the role id, exactly as they were before labels existed.
         base = hcm_role_code(name, hcm_role_id)
         code = base
         if code.lower() in used_codes:
             suffix = f"_{hcm_role_id}"
             code = f"{base[:50 - len(suffix)]}{suffix}"
-        db.add(Role(code=code, name=name, description=description,
+        db.add(Role(code=code, name=label, description=description,
                     is_system=True, is_active=True))
         used_codes.add(code.lower())
         added += 1
@@ -109,7 +153,7 @@ async def sync_hcm_roles(db: AsyncSession) -> int:
     # the locally seeded roles (ADMIN, SCM Head, …) and the per-profile roles
     # (`PROFILE:<id>:<name>`) are never touched — neither comes from this feed and
     # neither would ever appear in `live_ids`.
-    live_ids = {role_id for role_id, _ in hcm_rows}
+    live_ids = {role_id for role_id, _name, _label in hcm_rows}
     for role in existing:
         description = role.description or ""
         if not description.startswith(HCM_ROLE_DESCRIPTION_PREFIX):

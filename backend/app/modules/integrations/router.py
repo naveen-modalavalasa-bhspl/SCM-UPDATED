@@ -387,6 +387,16 @@ async def webhook_docs(source: str, request: Request,
     return await webhooks.connection_docs(db, source, base)
 
 
+@console.post("/webhooks/{source}/reset-sequence", response_model=WebhookOut)
+async def reset_webhook_sequence(source: str, db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(CONSOLE))):
+    """Clear the HCM sequence cursor when a number SCM refused has wedged the stream.
+
+    `integration.manage` rather than the key permission: this reopens a feed, it does
+    not mint anything a partner signs with."""
+    return await webhooks.reset_sequence(db, source, user)
+
+
 @console.post("/webhooks/{source}/secret", response_model=WebhookSecretOut,
               status_code=201)
 async def rotate_webhook_secret(source: str, db: AsyncSession = Depends(get_db),
@@ -421,6 +431,7 @@ async def receive_webhook(source: str, request: Request,
     body = await request.body()
     return await webhooks.receive(
         db, source, body, request.headers.get(webhooks.SIGNATURE_HEADER),
+        request.headers.get(webhooks.TIMESTAMP_HEADER),
         webhooks.json_body(body), caller.client_code,
     )
 
