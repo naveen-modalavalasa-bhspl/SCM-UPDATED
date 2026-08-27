@@ -1,13 +1,18 @@
 """Taking a write from B-CAMS: signature, de-duplication, storage.
 
 **What this does and does not do.** It authenticates the caller, proves the body was
-not altered in flight, refuses a replay, validates the payload and records it. It does
-NOT post the numbers onto `out_issues`, `stk_balance` or anything else. That is on
-purpose and it is the honest boundary: physical stock changes only through
-`inventory.service.move_stock()` and an issue's status only through the warehouse
-module (rules 7 and 9), and neither of those may be reached around from here. What
-lands is a durable, ordered, de-duplicated queue of field events for those modules to
-consume when the work to apply them is done.
+not altered in flight, refuses a replay, validates the payload and records it.
+
+Two of the five events then POST (2026-08-26): `facility.consumption` and
+`facility.wastage` deduct what the field reported, so SCM's stock reflects what was
+actually used at each LIP/MDP. That work is in `apply.py` and it goes through
+`inventory.service.move_stock_out()` like every other movement in the system — nothing
+here assigns to `stk_balance` and nothing writes a ledger row of its own (rule 7).
+
+The other three still only record. An issue's status belongs to the warehouse module
+(rule 9) and a field stock-balance report is a statement about somebody else's shelf,
+not a movement of ours; both stay a durable, ordered, de-duplicated queue for those
+modules to consume when the work to apply them is done.
 
 **Storage.** `sys_settings`, as documents under `apis.cams.`, the same store the
 console keeps its clients and keys in — this module owns no tables. The column is a
@@ -27,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthenticationError, ValidationError
 from app.modules.integrations import store
+from app.modules.integrations.adapters.cams import apply
 from app.modules.integrations.adapters.cams.enums import (
     CONFIG_KEY, EVENT_PREFIX, MAX_EVENTS, MAX_STORED_PAYLOAD, SIGNATURE_ALGO,
 )
@@ -246,7 +252,41 @@ async def accept(db: AsyncSession, body: bytes, signature: str | None, model,
         return duplicate(already)
     receipt = await record(db, payload, body, client_code=client_code,
                            rows=count(payload))
+
+    # NEW 2026-08-26 — consumption and wastage now DEDUCT. The receipt is recorded and
+    # committed FIRST, above, and the posting is a second transaction on purpose:
+    #
+    #   * de-duplication has to hold even if the posting fails. If the two shared one
+    #     transaction, a rollback would take the receipt with it and the client's retry
+    #     would be accepted as new — posting the same consumption twice, which is the
+    #     one outcome worth designing against.
+    #   * a line that cannot post is not a failed request. The push arrived, was
+    #     stored, and is answered `ok`; what could not be deducted is parked on the
+    #     receipt for somebody to reconcile (see apply.apply_event).
+    #
+    # Every other event type falls straight through, exactly as before.
+    outcome = await apply.apply_event(db, payload.event, payload, payload.event_id)
+    if outcome["posted"] or outcome["skipped"]:
+        await _save_outcome(db, payload.event_id, outcome)
     return ok(receipt)
+
+
+async def _save_outcome(db: AsyncSession, event_id: str, outcome: dict) -> None:
+    """Write what the posting did back onto the stored receipt.
+
+    Its own commit, and swallowed if it fails: the stock movements are already
+    committed by this point, and losing the note about them must not roll those back
+    or turn an accepted push into an error the client will retry.
+    """
+    try:
+        receipt = await seen(db, event_id)
+        if receipt is None:
+            return
+        await store.put(db, event_key(event_id), {**receipt, "posting": outcome})
+        await db.commit()
+    except Exception:  # noqa: BLE001 — a note about the work is not the work
+        await db.rollback()
+        log.exception("could not record the posting outcome for %s", event_id)
 
 
 # --------------------------------------------------------------------------- #

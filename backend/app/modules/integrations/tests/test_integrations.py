@@ -429,3 +429,206 @@ class TestRouting:
     def test_the_external_url_carries_no_host(self):
         # Rule 13: the host is the deployment's, never a literal in code.
         assert service.endpoint_url("billing-stock") == "/api/ext/v1/billing-stock"
+
+
+# --------------------------------------------------------------------------- #
+#  Moving an API surface between deployments (2026-08-26)
+# --------------------------------------------------------------------------- #
+#
+# Composing 122 endpoints by hand on one machine and again on the next is not a
+# migration. What matters is that the clip is DATA, not a trust boundary: it can name
+# a table this deployment does not have, or one on the blocked list, and neither may
+# get through just because it arrived as JSON.
+
+def test_a_clip_carries_no_key_and_no_local_history():
+    doc = endpoint()
+    doc.update({"created_by_name": "Somebody Else", "created_at": "2026-01-01",
+                "updated_at": "2026-01-02"})
+    stripped = {k: v for k, v in doc.items()
+                if k not in service._LOCAL_ONLY_FIELDS}
+
+    assert "created_by_name" not in stripped
+    assert "created_at" not in stripped
+    assert "client_code" not in stripped
+    # There is nothing to leak: only a hash of a key is ever stored.
+    assert not any("key" in k for k in stripped)
+
+
+def test_a_clip_from_another_version_is_refused():
+    with pytest.raises(ValidationError):
+        service._read_clip({"kind": service.CLIP_KIND, "v": 99, "endpoints": [{}]})
+
+
+def test_something_that_is_not_a_clip_is_refused():
+    with pytest.raises(ValidationError):
+        service._read_clip({"hello": "world"})
+    with pytest.raises(ValidationError):
+        service._read_clip({"kind": "something-else", "v": 1, "endpoints": [{}]})
+
+
+def test_an_empty_clip_is_refused():
+    with pytest.raises(ValidationError):
+        service._read_clip({"kind": service.CLIP_KIND, "v": 1, "endpoints": []})
+
+
+def test_a_readable_clip_returns_its_endpoints():
+    rows = [endpoint(), endpoint(slug="items")]
+    assert service._read_clip(
+        {"kind": service.CLIP_KIND, "v": 1, "endpoints": rows}) == rows
+
+
+def test_the_tables_a_clip_can_never_reintroduce():
+    """A blocked table is blocked on the way IN as well. `import_endpoints` runs the
+    console's own `validate()` per endpoint, and these are what it refuses."""
+    for table in ("sys_local_credentials", "sys_settings", "sys_password_resets",
+                  "sys_email_claims", "sys_mail_messages"):
+        assert table in introspect.BLOCKED_TABLES
+
+
+# --------------------------------------------------------------------------- #
+#  Inbound webhooks (2026-08-26)
+# --------------------------------------------------------------------------- #
+#
+# The whole security question here is what an ADMIN can configure. A screen that could
+# point an inbound feed at a business table would be a way around every module's own
+# service — and around rule 7 for stock in particular — so the set of things a webhook
+# can DO is closed, and the secret never comes back out.
+
+import hashlib
+import hmac
+import json
+
+from app.core.exceptions import AuthenticationError
+from app.modules.integrations import webhooks
+
+
+def test_a_webhook_can_only_do_what_the_server_offers():
+    """`handler` names one of a closed set. There is no table name, no column mapping
+    and no SQL on a webhook document, and adding a handler is a code change."""
+    with pytest.raises(ValidationError):
+        webhooks._validate("hcm", ["employee.updated"], "write_to_stk_balance")
+    # The one that exists writes nothing at all.
+    webhooks._validate("hcm", ["employee.updated"], "record")
+
+
+def test_a_webhook_must_name_the_events_it_accepts():
+    """One that accepts anything cannot be told apart from a misconfigured one."""
+    with pytest.raises(ValidationError):
+        webhooks._validate("hcm", [], "record")
+
+
+@pytest.mark.parametrize("source", [
+    "", "a", "HCM", "1hcm", "hcm_feed", "hcm feed", "hcm/feed", "x" * 40,
+])
+def test_a_webhook_name_that_cannot_be_a_url_segment_is_refused(source):
+    with pytest.raises(ValidationError):
+        webhooks._validate(source, ["e"], "record")
+
+
+def test_the_secret_never_comes_back_out():
+    """Same posture as an API key: the screen learns THAT one is set, never what it is."""
+    public = webhooks._public({
+        "source": "hcm", "events": ["employee.updated"],
+        "secret_hmac_key": "deadbeef", "is_active": True,
+    })
+    assert public["has_secret"] is True
+    assert "secret_hmac_key" not in public
+    assert "deadbeef" not in json.dumps(public)
+
+
+def test_the_signature_is_over_the_raw_bytes():
+    """Re-serialising the JSON and signing that would compare a signature against a
+    document the sender never sent."""
+    secret = b"s3cret"
+    body = b'{"event":"employee.updated","event_id":"a"}'
+    assert webhooks.expected_signature(secret, body) == (
+        "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest())
+    # One byte different anywhere and it does not match.
+    assert webhooks.expected_signature(secret, body + b" ") != \
+        webhooks.expected_signature(secret, body)
+
+
+def test_an_unsigned_push_is_refused_when_a_secret_exists():
+    doc = {"source": "hcm", "secret_hmac_key": b"k".hex(), "require_signature": True}
+    with pytest.raises(AuthenticationError):
+        webhooks.verify(doc, b"{}", None)
+    with pytest.raises(AuthenticationError):
+        webhooks.verify(doc, b"{}", "sha256=wrong")
+
+
+def test_a_webhook_with_no_secret_refuses_rather_than_waving_through():
+    """Fail closed. The one exception is an explicit, recorded decision to run
+    unsigned while two sides are being wired together."""
+    with pytest.raises(AuthenticationError):
+        webhooks.verify({"source": "hcm", "require_signature": True}, b"{}", None)
+    # Explicitly opted out — allowed, and logged as a warning where it happens.
+    webhooks.verify({"source": "hcm", "require_signature": False}, b"{}", None)
+
+
+def test_a_body_that_is_not_a_json_object_is_refused():
+    with pytest.raises(ValidationError):
+        webhooks.json_body(b"not json")
+    with pytest.raises(ValidationError):
+        webhooks.json_body(b'["a list"]')
+    assert webhooks.json_body(b'{"event":"x"}') == {"event": "x"}
+
+
+def test_a_delivery_key_cannot_collide_across_sources():
+    assert webhooks.delivery_key("hcm", "1") != webhooks.delivery_key("cams", "1")
+
+
+# --------------------------------------------------------------------------- #
+#  The HCM mirror handler (2026-08-27)
+# --------------------------------------------------------------------------- #
+#
+# webhook -> fresh, sync -> correct. The handler closes the gap between two syncs; it
+# does not replace the sync, because a push that never arrives leaves no trace and a
+# feed that only ever adds cannot say what it missed.
+
+def test_the_hcm_handler_is_offered_and_is_not_the_default():
+    """Registering a webhook must not start writing to the mirror by accident."""
+    assert "hcm_mirror" in webhooks.HANDLERS
+    # The default is the one that writes nothing, so registering a webhook can never
+    # start updating the mirror because somebody left a dropdown alone.
+    from app.modules.integrations.schemas import WebhookWrite
+    assert WebhookWrite.model_fields["handler"].default == "record"
+
+
+@pytest.mark.parametrize("event,entity", [
+    ("employee.created", "employees"),
+    ("employee.updated", "employees"),
+    ("employee.deactivated", "employees"),
+    ("position.updated", "positions"),
+    ("office.updated", "offices"),
+    ("department.updated", "departments"),
+    ("project.updated", "projects"),
+    ("section.updated", "sections"),
+])
+def test_every_event_prefix_names_a_mirror_table(event, entity):
+    head = event.partition(".")[0]
+    assert webhooks.HCM_ENTITIES[head] == entity
+
+
+def test_a_suffix_that_retires_is_told_apart_from_one_that_upserts():
+    """Retire, not delete: `wf_instances.resolved_chain` and every historical approval
+    name these ids and must still resolve to a name."""
+    for suffix in ("deactivated", "deleted", "removed", "terminated"):
+        assert suffix in webhooks.RETIRING
+    for suffix in ("created", "updated"):
+        assert suffix not in webhooks.RETIRING
+
+
+def test_an_event_outside_the_mirror_is_recorded_not_guessed_at():
+    """`payment.settled` names nothing in hcm_*, so it is kept and NOT forced into a
+    table that happens to sort first."""
+    assert "payment" not in webhooks.HCM_ENTITIES
+    assert "stock" not in webhooks.HCM_ENTITIES
+
+
+def test_the_suggested_events_are_all_routable():
+    """Every name the picker offers must actually reach a table, or the suggestion is
+    a trap: it would be accepted at push time and then only recorded."""
+    for event in webhooks.SUGGESTED_EVENTS:
+        head, _, tail = event.partition(".")
+        assert head in webhooks.HCM_ENTITIES, event
+        assert tail in ("created", "updated") or tail in webhooks.RETIRING, event

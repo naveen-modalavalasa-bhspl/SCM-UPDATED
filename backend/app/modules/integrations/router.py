@@ -25,12 +25,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.pagination import PageParams
-from app.modules.integrations import adapters, introspect, platform_links, service
+from app.modules.integrations import (
+    adapters, introspect, platform_links, service, webhooks,
+)
 from app.modules.integrations.schemas import (
-    CallLogOut, ClientOut, ClientWrite, ColumnOut, EndpointOut, EndpointWrite,
-    ExtEndpointOut, ExtPage, KeyIssuedOut, KeyOut, KeyWrite, LinkLogRow,
-    LinkRevealOut, LinkTestOut, PlatformLinkOut, PreviewOut, TableOut,
-    UsageOut,
+    CallLogOut, ClientOut, ClientWrite, ColumnOut, EndpointImportIn, EndpointOut,
+    EndpointWrite, ExtEndpointOut, ExtPage, ImportResultOut, KeyIssuedOut, KeyOut,
+    KeyWrite, LinkLogRow, LinkRevealOut, LinkTestOut, PlatformLinkOut, PreviewOut,
+    TableOut, UsageOut, WebhookOut, WebhookSecretOut, WebhookWrite,
 )
 from app.modules.integrations.security import Caller, require_api_key
 from app.platform.rbac import permissions as perms
@@ -169,6 +171,45 @@ async def delete_endpoint(slug: str, db: AsyncSession = Depends(get_db),
     return await service.delete_endpoint(db, slug)
 
 
+@console.get("/clients/{code}/docs")
+async def connection_docs(code: str, request: Request,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(VIEW))):
+    """What you send a partner so they can start: base URL, auth, and every endpoint
+    with what it accepts and what it returns. DERIVED from the endpoint documents —
+    a doc kept in step by hand is wrong by the second week."""
+    base = str(request.base_url).rstrip("/")
+    return await service.connection_docs(db, code, base)
+
+
+@console.get("/endpoints/{slug}/sample")
+async def endpoint_sample(slug: str, rows: int = 2,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(VIEW))):
+    """A real response from this endpoint, so its shape is seen rather than imagined.
+    Runs it exactly as an API key would, with a small page."""
+    return await service.endpoint_sample(db, slug, rows)
+
+
+@console.get("/clients/{code}/endpoints/export")
+async def export_endpoints(code: str, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(CONSOLE))):
+    """This application's whole endpoint set, as a clip to paste into another
+    deployment. Carries NO keys — only a hash of those is ever stored, and a key that
+    worked on two deployments could not be revoked on either."""
+    return await service.export_endpoints(db, code)
+
+
+@console.post("/clients/{code}/endpoints/import", response_model=ImportResultOut)
+async def import_endpoints(code: str, body: EndpointImportIn,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(CONSOLE))):
+    """Apply an exported set here. All-or-nothing, and every endpoint is re-validated
+    against THIS database, so a clip cannot introduce a table or column this
+    deployment does not have — or one on the blocked list."""
+    return await service.import_endpoints(db, code, body.clip, user, body.replace)
+
+
 # --------------------------------------------------------------------------- #
 # Usage
 # --------------------------------------------------------------------------- #
@@ -279,11 +320,117 @@ async def test_platform_link(code: str, db: AsyncSession = Depends(get_db),
     return await platform_links.test_link(db, code)
 
 
+# --------------------------------------------------------------------------- #
+# Inbound webhooks — who may push into SCM, configured rather than written
+# --------------------------------------------------------------------------- #
+#
+# The console half carries `integration.manage` like the endpoint builder, except the
+# secret, which is `integration.keys.manage`: minting the value a partner signs with is
+# the same class of act as issuing an API key.
+
+@console.get("/webhooks", response_model=list[WebhookOut])
+async def list_webhooks(db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(VIEW))):
+    return await webhooks.list_hooks(db)
+
+
+@console.get("/webhook-handlers")
+async def webhook_handlers(user=Depends(require_permission(VIEW))):
+    """What a webhook may DO with what it receives — a closed set, served so the screen
+    offers exactly what the server will accept rather than a list that can drift."""
+    return webhooks.handler_choices()
+
+
+@console.get("/webhook-events")
+async def webhook_events(db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(VIEW))):
+    """Event names to offer in the picker. Suggestions, not a whitelist — a partner's
+    own name is accepted too. What it saves is the typo, which otherwise reads as a
+    silent afternoon of nothing arriving."""
+    return await webhooks.event_suggestions(db)
+
+
+@console.post("/webhooks", response_model=WebhookOut, status_code=201)
+async def create_webhook(body: WebhookWrite, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(CONSOLE))):
+    return await webhooks.create_hook(db, body, user)
+
+
+@console.get("/webhooks/{source}", response_model=WebhookOut)
+async def get_webhook(source: str, db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(VIEW))):
+    return await webhooks.get_hook(db, source)
+
+
+@console.put("/webhooks/{source}", response_model=WebhookOut)
+async def update_webhook(source: str, body: WebhookWrite,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(CONSOLE))):
+    return await webhooks.update_hook(db, source, body, user)
+
+
+@console.delete("/webhooks/{source}", response_model=WebhookOut)
+async def delete_webhook(source: str, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(CONSOLE))):
+    """Deactivates rather than deletes, so the deliveries it took keep their meaning."""
+    return await webhooks.delete_hook(db, source)
+
+
+@console.get("/webhooks/{source}/docs")
+async def webhook_docs(source: str, request: Request,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(VIEW))):
+    """What you send the system that will push to us: the URL, the two headers, the
+    signing recipe, the events it may send and a body per event. Derived from the
+    registration, so it cannot drift from what the endpoint will actually accept."""
+    base = str(request.base_url).rstrip("/")
+    return await webhooks.connection_docs(db, source, base)
+
+
+@console.post("/webhooks/{source}/secret", response_model=WebhookSecretOut,
+              status_code=201)
+async def rotate_webhook_secret(source: str, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(KEYS))):
+    """Mint the secret this source signs its pushes with. Shown once."""
+    return await webhooks.rotate_secret(db, source, user)
+
+
+@console.get("/webhook-deliveries")
+async def webhook_deliveries(params: PageParams = Depends(), source: str = "",
+                             event: str = "", db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(VIEW))):
+    return await webhooks.deliveries(db, params, source or None, event or None)
+
+
+@console.get("/webhook-deliveries/{source}/{event_id}")
+async def webhook_delivery(source: str, event_id: str,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(VIEW))):
+    return await webhooks.delivery(db, source, event_id)
+
+
+hooks = APIRouter(prefix="/api/ext/v1/hooks", tags=["external-api"])
+
+
+@hooks.post("/{source}")
+async def receive_webhook(source: str, request: Request,
+                          db: AsyncSession = Depends(get_db),
+                          caller: Caller = Depends(require_api_key)):
+    """Where a registered system pushes. API key AND a signature over the raw body:
+    the key says who is calling, the signature says the body is what they sent."""
+    body = await request.body()
+    return await webhooks.receive(
+        db, source, body, request.headers.get(webhooks.SIGNATURE_HEADER),
+        webhooks.json_body(body), caller.client_code,
+    )
+
+
 router = APIRouter()
-# Adapters BEFORE `external`: that router ends in `/{slug}`, which would otherwise
-# swallow every one-segment path under /api/ext/v1 — including each adapter's own
-# prefix. Whatever `adapters.discover()` finds is mounted; no system is named here.
+# Adapters and `hooks` BEFORE `external`: that router ends in `/{slug}`, which would
+# otherwise swallow every one-segment path under /api/ext/v1 — including each adapter's
+# own prefix. Whatever `adapters.discover()` finds is mounted; no system is named here.
 for _adapter_router in adapters.routers():
     router.include_router(_adapter_router)
+router.include_router(hooks)
 router.include_router(console)
 router.include_router(external)

@@ -38,6 +38,14 @@ BLOCKED_TABLES: frozenset[str] = frozenset({
     "sys_sessions",            # live JWT ids
     "sys_settings",            # where THIS module stores its API keys
     "alembic_version",
+    # ADDED 2026-08-26. These were on offer in the picker and are not business data.
+    # The column filter alone is not enough for them: it strips `token_hash`, but the
+    # rest of a reset row — which account, from which IP, still live or not — is a map
+    # of who is currently able to take over an account, and a claim row is an
+    # employee's personal address. Neither belongs behind an outside application's key.
+    "sys_password_resets",     # live password-reset attempts
+    "sys_email_claims",        # staff personal addresses awaiting confirmation
+    "sys_mail_messages",       # everything this app has sent, bodies included
 })
 
 # Applied to every column of every table. Substring match on a lower-cased name.

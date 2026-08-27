@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { Copy, Play, Plus, Trash2 } from "lucide-react";
+import { Copy, Download, Play, Plus, Trash2, Upload } from "lucide-react";
 import {
   Button, Card, EmptyState, ErrorBanner, Field, Input, ResponsiveList, ScrollBox,
   Select, StatusPill, useToast, type Column,
@@ -31,6 +31,8 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
   const [filterValue, setFilterValue] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
   const [problem, setProblem] = useState("");
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveText, setMoveText] = useState("");
 
   const list = useQuery({
     queryKey: ["apis", "endpoints", clientCode],
@@ -106,6 +108,69 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
     });
     return out;
   }, [columns.data, draft, joinColumns]);
+
+  /* ---- Moving a whole surface between deployments ------------------------- *
+   * The box is what makes this work at all on a plain-http host, where
+   * `navigator.clipboard` does not exist — the same reason the Job Profiles
+   * copy/paste keeps one. The OS clipboard is a convenience on top, never the
+   * carrier.
+   */
+  const clipCount = useMemo(() => {
+    if (!moveText.trim()) return null;
+    try {
+      const parsed = JSON.parse(moveText);
+      return Array.isArray(parsed?.endpoints) ? parsed.endpoints.length : null;
+    } catch { return null; }
+  }, [moveText]);
+
+  const exportSet = useMutation({
+    mutationFn: () => integrationsApi.exportEndpoints(clientCode),
+    onSuccess: (clip) => {
+      const text = JSON.stringify(clip, null, 2);
+      setMoveText(text);
+      setMoveOpen(true);
+      const done = `${clip.endpoints.length} APIs copied — open the other deployment`
+        + " and paste them there.";
+      const written = navigator.clipboard?.writeText(text);
+      // `?.` short-circuits the whole chain when the API is missing, so the toast has
+      // to be raised on both paths or a plain-http host gets no feedback at all.
+      if (!written) { toast.success(done); return; }
+      written.then(() => toast.success(done),
+                   () => toast.success(`${done} They are in the box below.`));
+    },
+    onError: () => toast.error("Those APIs could not be copied."),
+  });
+
+  const importSet = useMutation({
+    mutationFn: ({ clip, replace }: { clip: unknown; replace: boolean }) =>
+      integrationsApi.importEndpoints(clientCode, clip, replace),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["apis", "endpoints", clientCode] });
+      setMoveOpen(false);
+      setProblem("");
+      toast.success(
+        `${result.created} added, ${result.updated} updated`
+        + (result.retired ? `, ${result.retired} switched off` : ""),
+      );
+    },
+    // The server refuses the WHOLE clip when any one API does not fit, and says which
+    // ones — that message is the useful part, so it is surfaced rather than replaced.
+    onError: (error) => setProblem(
+      (error as { response?: { data?: { error?: string } } })?.response?.data?.error
+      || "Those APIs could not be applied here.",
+    ),
+  });
+
+  const runImport = (replace: boolean) => {
+    let clip: unknown;
+    try {
+      clip = JSON.parse(moveText);
+    } catch {
+      setProblem("That is not a copied set of APIs.");
+      return;
+    }
+    importSet.mutate({ clip, replace });
+  };
 
   const save = useMutation({
     mutationFn: (body: EndpointWrite) =>
@@ -274,10 +339,59 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
           Any table in the database can be served. A caller can narrow what an endpoint
           returns; it can never widen past it.
         </p>
-        <Button onClick={() => open()}>
-          <Plus className="h-4 w-4" /> Build an API
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Moving a surface between deployments. 122 endpoints composed by hand on
+            * one machine and composed again by hand on the next is not a migration,
+            * it is a week of clicking with a typo in it. */}
+          <Button variant="ghost" onClick={() => exportSet.mutate()}
+                  disabled={exportSet.isPending || !(list.data ?? []).length}>
+            <Download className="h-4 w-4" /> Copy all APIs
+          </Button>
+          <Button variant="ghost" onClick={() => setMoveOpen((v) => !v)}>
+            <Upload className="h-4 w-4" /> Paste APIs
+          </Button>
+          <Button onClick={() => open()}>
+            <Plus className="h-4 w-4" /> Build an API
+          </Button>
+        </div>
       </div>
+
+      {moveOpen && (
+        <Card className="mb-4 space-y-2 border-brand/40 p-3">
+          <p className="text-sm font-semibold text-ink">
+            {clipCount !== null
+              ? `${clipCount} API${clipCount === 1 ? "" : "s"} in the box`
+              : "Move APIs between deployments"}
+          </p>
+          <p className="text-xs text-muted">
+            Copy on one deployment, paste on the next. Keys never travel — each
+            deployment issues its own. Nothing is applied unless every API in the box
+            fits this database, so a paste either lands whole or not at all.
+          </p>
+          <textarea
+            value={moveText}
+            onChange={(event) => setMoveText(event.target.value)}
+            placeholder="Paste a copied set of APIs here"
+            spellCheck={false}
+            className="min-h-32 w-full rounded-lg border border-line bg-content1 p-3
+                       font-mono text-xs text-ink"
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button disabled={!moveText.trim() || importSet.isPending}
+                    onClick={() => runImport(false)}>
+              Add to this application
+            </Button>
+            {/* Switches off what the clip omits. Second, and never the default: a
+              * partial paste must not silently retire the rest. */}
+            <Button variant="ghost"
+                    disabled={!moveText.trim() || importSet.isPending}
+                    onClick={() => runImport(true)}>
+              Replace everything here
+            </Button>
+            <Button variant="ghost" onClick={() => setMoveOpen(false)}>Close</Button>
+          </div>
+        </Card>
+      )}
 
       {list.error && <ErrorBanner error="Endpoints could not be loaded." />}
 

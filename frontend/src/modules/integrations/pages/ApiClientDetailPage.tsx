@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowLeft, KeyRound, Link2 } from "lucide-react";
+import { BookOpen, Activity, ArrowLeft, KeyRound, Link2 } from "lucide-react";
 import {
   Button, Card, ErrorBanner, PageHeader, StatusPill, SubNav, type SubNavItem,
 } from "@/shared/components";
 import { integrationsApi } from "../api";
+import { ConnectionDocsPanel } from "../components/ConnectionDocsPanel";
 import { EndpointsPanel } from "../components/EndpointsPanel";
 import { KeysPanel } from "../components/KeysPanel";
 import { UsagePanel } from "../components/UsagePanel";
@@ -15,6 +16,9 @@ const TABS: SubNavItem[] = [
   { key: "endpoints", label: "APIs", icon: Link2 },
   { key: "keys", label: "Keys", icon: KeyRound },
   { key: "usage", label: "Usage", icon: Activity },
+  // What you send the partner. Last, because it is read once at the start
+  // of an integration and rarely after.
+  { key: "docs", label: "Connection details", icon: BookOpen },
 ];
 
 /** One application: the APIs built for it, its credentials, and what it has been doing. */
@@ -67,6 +71,7 @@ export default function ApiClientDetailPage() {
       <SubNav label="Application" items={TABS} value={tab} onChange={setTab} />
 
       {tab === "endpoints" && <EndpointsPanel clientCode={code} />}
+      {tab === "docs" && <ConnectionDocsPanel clientCode={code} />}
       {tab === "keys" && <KeysPanel clientCode={code} />}
       {tab === "usage" && <UsagePanel clientCode={code} />}
     </div>

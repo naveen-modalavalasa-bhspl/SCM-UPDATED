@@ -214,3 +214,125 @@ export interface LinkReveal {
   code: string;
   fields: { label: string; value: string }[];
 }
+
+/** An exported endpoint set, for moving an API surface between deployments.
+ *  Deliberately carries no keys: only a hash of those is ever stored, and one key
+ *  live on two deployments could not be revoked on either. */
+export interface EndpointClip {
+  v: number;
+  kind: string;
+  client_code: string;
+  client_name: string;
+  exported_at: string;
+  endpoints: EndpointWrite[];
+}
+
+export interface ImportResult {
+  created: number;
+  updated: number;
+  retired: number;
+  total: number;
+}
+
+/* ---- Inbound webhooks ---------------------------------------------------- */
+
+/** What a webhook may DO with what arrives. A closed set on the server — adding one
+ *  is a code change on purpose, because each handler is answerable for its writes. */
+export interface WebhookHandler {
+  key: string;
+  label: string;
+}
+
+export interface Webhook {
+  source: string;
+  name?: string | null;
+  description?: string | null;
+  events: string[];
+  handler: string;
+  require_signature: boolean;
+  /** Whether a secret exists — never the secret itself. */
+  has_secret: boolean;
+  is_active: boolean;
+  url: string;
+  created_at?: string | null;
+  created_by_name?: string | null;
+  updated_at?: string | null;
+  last_received_at?: string | null;
+  received_count: number;
+}
+
+export interface WebhookWrite {
+  source: string;
+  name: string;
+  description?: string | null;
+  events: string[];
+  handler: string;
+  require_signature: boolean;
+  is_active: boolean;
+}
+
+export interface WebhookSecret {
+  source: string;
+  shared_secret: string;
+  signature_header: string;
+  note: string;
+}
+
+export interface WebhookDelivery {
+  source: string;
+  event: string;
+  event_id: string;
+  received_at: string;
+  client_code?: string | null;
+  body_sha256?: string | null;
+  payload_truncated?: boolean;
+  outcome?: Record<string, unknown> | null;
+}
+
+/* ---- Connection details -------------------------------------------------- */
+
+export interface DocParam {
+  name: string;
+  kind: "filter" | "search" | "incremental" | "paging" | string;
+  note: string;
+}
+
+export interface DocEndpoint {
+  slug: string;
+  name: string;
+  path: string;
+  url: string;
+  returns: string[];
+  params: DocParam[];
+}
+
+/** What a partner needs to start calling. Derived on the server from the endpoint
+ *  documents — never a second, hand-maintained copy. */
+export interface ConnectionDocs {
+  client_code: string;
+  client_name: string;
+  base_url: string;
+  auth: { header: string; note: string };
+  conventions: Record<string, string>;
+  probe: { path: string; note: string };
+  directory: { path: string; note: string };
+  endpoints: DocEndpoint[];
+}
+
+/** Everything the sending system needs, derived from the webhook registration. */
+export interface WebhookDocs {
+  source: string;
+  name: string;
+  url: string;
+  method: string;
+  handler: string;
+  handler_label: string;
+  events: string[];
+  has_secret: boolean;
+  require_signature: boolean;
+  headers: { name: string; note: string }[];
+  envelope: { field: string; note: string }[];
+  answers: { status: number; body?: unknown; note: string }[];
+  samples: { event: string; body: unknown }[];
+  signing_note: string;
+}

@@ -514,3 +514,123 @@ class TestReplies:
         answer = ingest.duplicate(receipt)
         assert answer["ok"] is True and answer["duplicate"] is True
         assert answer["event_id"] == "ack-1"
+
+
+# --------------------------------------------------------------------------- #
+#  Posting a field event onto the shelf (2026-08-26)
+# --------------------------------------------------------------------------- #
+#
+# The feed used to be recorded and never applied, so nothing the field consumed came
+# off SCM's balance. It posts now. Two things are worth pinning: WHICH quantity each
+# event takes, and that a line nobody can post is kept with its reason rather than
+# lost. No database — `apply_event` reaches one only to look an item code up, and a
+# stub says "no such item" faster than the suite can build 85 tables.
+
+from types import SimpleNamespace
+
+from app.modules.integrations.adapters.cams import apply as cams_apply
+from app.modules.integrations.adapters.cams.enums import EventType
+from app.shared.enums import RefType
+
+
+class _NoSuchItem:
+    """A database in which no item code resolves. Enough for every path below: the
+    only query `apply_event` makes on its own is the item lookup, and a line that
+    fails it never reaches `move_stock_out`."""
+    async def scalar(self, *args, **kwargs):
+        return None
+
+
+def _line(**kw):
+    base = {"item_code": "101010-0004", "warehouse_id": 78,
+            "consumed_qty": Decimal("0"), "wastage_qty": Decimal("0")}
+    return SimpleNamespace(**{**base, **kw})
+
+
+def test_consumption_and_wastage_post_different_quantities():
+    """THE double-count guard. A consumption record repeats its wastage for reporting
+    and the same units arrive again on the wastage feed with a reason attached, so
+    each event takes its own field and never the sum. Getting this wrong deducts every
+    spoiled unit twice, and it would read as theft rather than as a bug."""
+    assert cams_apply.POSTING[EventType.CONSUMPTION.value] == (
+        "consumed_qty", RefType.CONSUMPTION.value)
+    assert cams_apply.POSTING[EventType.WASTAGE.value] == (
+        "wastage_qty", RefType.WASTAGE.value)
+
+
+def test_the_three_events_that_must_not_move_stock():
+    """An issue's status belongs to the warehouse module (rule 9) and a field
+    stock-balance report is a statement about somebody else's shelf, not a movement
+    of ours."""
+    for event in (EventType.ACK.value, EventType.STOCK_BALANCE.value,
+                  EventType.STOCK_TRANSFER.value):
+        assert event not in cams_apply.POSTING
+
+
+async def test_an_event_type_that_does_not_post_is_a_no_op():
+    out = await cams_apply.apply_event(
+        _NoSuchItem(), EventType.STOCK_BALANCE.value,
+        SimpleNamespace(records=[_line(consumed_qty=Decimal("9"))]), "evt-1")
+    assert out == {"posted": 0, "skipped": 0, "problems": []}
+
+
+async def test_a_line_with_no_warehouse_is_kept_with_its_reason():
+    """`warehouse_id` is the only key SCM matches a point on — `facility_name` is free
+    text and matches nothing."""
+    payload = SimpleNamespace(records=[_line(warehouse_id=None,
+                                             consumed_qty=Decimal("5"))])
+    out = await cams_apply.apply_event(
+        _NoSuchItem(), EventType.CONSUMPTION.value, payload, "evt-2")
+
+    assert out["posted"] == 0 and out["skipped"] == 1
+    assert "no warehouse_id" in out["problems"][0]
+
+
+async def test_an_unknown_item_code_is_kept_with_its_reason():
+    payload = SimpleNamespace(records=[_line(item_code="NOT-AN-ITEM",
+                                             consumed_qty=Decimal("5"))])
+    out = await cams_apply.apply_event(
+        _NoSuchItem(), EventType.CONSUMPTION.value, payload, "evt-3")
+
+    assert out["posted"] == 0 and out["skipped"] == 1
+    assert "item master" in out["problems"][0]
+
+
+async def test_a_zero_line_is_neither_posted_nor_a_problem():
+    """A zero row is how the field says 'this item was stocked and untouched today'."""
+    payload = SimpleNamespace(records=[_line(consumed_qty=Decimal("0"))])
+    out = await cams_apply.apply_event(
+        _NoSuchItem(), EventType.CONSUMPTION.value, payload, "evt-4")
+
+    assert out["posted"] == 0 and out["skipped"] == 0 and out["problems"] == []
+
+
+async def test_wastage_reads_its_own_field_not_the_consumption_one():
+    """A wastage event carrying consumed_qty must post the WASTAGE quantity."""
+    payload = SimpleNamespace(records=[_line(item_code="NOT-AN-ITEM",
+                                             consumed_qty=Decimal("99"),
+                                             wastage_qty=Decimal("3"))])
+    out = await cams_apply.apply_event(
+        _NoSuchItem(), EventType.WASTAGE.value, payload, "evt-5")
+    # It got as far as the item lookup, which means it read a non-zero wastage_qty
+    # rather than skipping the line as empty.
+    assert out["skipped"] == 1 and "item master" in out["problems"][0]
+
+
+async def test_one_bad_line_does_not_sink_the_rest_of_the_batch():
+    payload = SimpleNamespace(records=[
+        _line(warehouse_id=None, consumed_qty=Decimal("1")),
+        _line(item_code="NOT-AN-ITEM", consumed_qty=Decimal("1")),
+        _line(consumed_qty=Decimal("0")),
+    ])
+    out = await cams_apply.apply_event(
+        _NoSuchItem(), EventType.CONSUMPTION.value, payload, "evt-6")
+
+    assert out["skipped"] == 2 and len(out["problems"]) == 2
+
+
+def test_the_field_feed_never_claims_an_scm_identity():
+    """The person named on a B-CAMS record is a user SCM has never authenticated, so
+    the ledger says where the movement came from, not who they say they are."""
+    assert cams_apply.ACTOR.id is None
+    assert "B-CAMS" in cams_apply.ACTOR.full_name

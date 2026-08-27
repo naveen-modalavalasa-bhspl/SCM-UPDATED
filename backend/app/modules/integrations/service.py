@@ -240,6 +240,235 @@ async def save_endpoint(db: AsyncSession, code: str, data: EndpointWrite, user,
     return _endpoint_out(doc)
 
 
+# --------------------------------------------------------------------------- #
+#  Moving a whole API surface between deployments
+# --------------------------------------------------------------------------- #
+#
+# 122 endpoints composed by hand on one machine and then composed again by hand on
+# the next is not a migration, it is a week of clicking with a typo in it. The
+# definitions are already JSON documents (see store.py), so they travel as JSON.
+#
+# What deliberately does NOT travel:
+#
+#   * API KEYS. Only a hash is ever stored, so there is nothing to copy even if we
+#     wanted to — and a key that worked on two deployments would mean revoking it in
+#     one place left it live in the other. Each side mints its own.
+#   * `created_by_name` / `created_at` / usage. Those describe what happened on the
+#     machine the clip came FROM and would be a lie on the machine it lands on.
+#
+# An import validates every endpoint against the TARGET database through the same
+# `validate()` the console uses, so a clip can never introduce a table this
+# deployment does not have, a column it does not have, or a table on the blocked
+# list. A clip is data, not a trust boundary.
+
+CLIP_KIND = "scm-api-endpoints"
+CLIP_VERSION = 1
+
+#: Written by the machine the clip came from, meaningless on the one it lands on.
+_LOCAL_ONLY_FIELDS = ("client_code", "created_by_name", "created_at", "updated_at")
+
+
+async def export_endpoints(db: AsyncSession, code: str) -> dict:
+    """Every endpoint of one application, as a clip that can be pasted elsewhere."""
+    client = await _client(db, code)
+    docs = [e for e in await store.all_of(db, store.ENDPOINT)
+            if e.get("client_code") == code]
+    docs.sort(key=lambda d: str(d.get("slug", "")))
+    return {
+        "v": CLIP_VERSION,
+        "kind": CLIP_KIND,
+        "client_code": code,
+        "client_name": client.get("name") or code,
+        "exported_at": ist_now().isoformat(),
+        "endpoints": [
+            {k: v for k, v in doc.items() if k not in _LOCAL_ONLY_FIELDS}
+            for doc in docs
+        ],
+    }
+
+
+def _read_clip(clip: dict) -> list[dict]:
+    """The endpoint list out of a clip, or a plain-English reason it cannot be used."""
+    if not isinstance(clip, dict) or clip.get("kind") != CLIP_KIND:
+        raise ValidationError("That is not an exported set of API endpoints.")
+    if clip.get("v") != CLIP_VERSION:
+        raise ValidationError(
+            "That set was exported by a different version of the app.")
+    endpoints = clip.get("endpoints")
+    if not isinstance(endpoints, list) or not endpoints:
+        raise ValidationError("That set contains no endpoints.")
+    return endpoints
+
+
+async def import_endpoints(db: AsyncSession, code: str, clip: dict, user,
+                           replace: bool = False) -> dict:
+    """Apply an exported set to this deployment. ALL-OR-NOTHING.
+
+    Every endpoint is validated against THIS database first and a single bad one
+    rejects the whole clip with the full list of problems — the same rule the masters
+    importer follows, and for the same reason: a half-applied API surface cannot be
+    re-pasted safely, because the second attempt collides with the half that landed.
+
+    `replace=True` deactivates endpoints this application has that the clip does not
+    mention. Off by default: pasting a partial set must not silently switch off
+    everything it happens to omit.
+    """
+    await _client(db, code)
+    endpoints = _read_clip(clip)
+
+    parsed: list[EndpointWrite] = []
+    problems: list[str] = []
+    for index, raw in enumerate(endpoints, start=1):
+        slug = (raw or {}).get("slug") or f"#{index}"
+        try:
+            data = EndpointWrite(**{**raw, "client_code": code})
+            await validate(db, data)
+            parsed.append(data)
+        except ValidationError as exc:
+            problems.append(f"{slug}: {exc.message if hasattr(exc, 'message') else exc}")
+        except Exception as exc:  # noqa: BLE001 — a bad clip must read as a bad clip
+            problems.append(f"{slug}: {exc}")
+
+    # Another application already owning an address is a problem with the clip, not a
+    # thing to discover halfway through writing it.
+    for data in parsed:
+        existing = await store.get(db, store.endpoint_key(data.slug))
+        if existing is not None and existing.get("client_code") != code:
+            problems.append(
+                f"{data.slug}: that address already belongs to "
+                f"{existing.get('client_code')}")
+
+    if problems:
+        raise ValidationError(
+            f"{len(problems)} of {len(endpoints)} endpoints could not be imported, so "
+            f"none were: " + "; ".join(problems[:10])
+            + (f" (and {len(problems) - 10} more)" if len(problems) > 10 else ""))
+
+    now = ist_now().isoformat()
+    arriving = {data.slug for data in parsed}
+    created = updated = 0
+    for data in parsed:
+        previous = await store.get(db, store.endpoint_key(data.slug))
+        doc = {
+            **data.model_dump(),
+            "client_code": code,
+            # An endpoint that was already here keeps its own history; a new one is
+            # stamped with the person who pasted it, not whoever built it elsewhere.
+            "created_by_name": (previous or {}).get("created_by_name")
+                               or getattr(user, "full_name", None),
+            "created_at": (previous or {}).get("created_at") or now,
+            "updated_at": now,
+        }
+        await store.put(db, store.endpoint_key(data.slug), doc,
+                        f"API endpoint /{data.slug} for {code}")
+        if previous is None:
+            created += 1
+        else:
+            updated += 1
+
+    retired = 0
+    if replace:
+        for doc in await store.all_of(db, store.ENDPOINT):
+            if (doc.get("client_code") == code and doc.get("slug") not in arriving
+                    and doc.get("is_active")):
+                doc["is_active"] = False
+                doc["updated_at"] = now
+                await store.put(db, store.endpoint_key(doc["slug"]), doc)
+                retired += 1
+
+    await db.commit()
+    return {"created": created, "updated": updated, "retired": retired,
+            "total": len(parsed)}
+
+
+# --------------------------------------------------------------------------- #
+#  Connection details — what you send a partner so they can start
+# --------------------------------------------------------------------------- #
+#
+# Everything below is DERIVED from the endpoint documents. It is a view, never a
+# second copy: a doc that has to be kept in step by hand is a doc that is wrong by the
+# second week, and the whole point of composing endpoints in the console was that
+# nobody edits code to add one.
+
+async def connection_docs(db: AsyncSession, code: str, base_url: str = "") -> dict:
+    """Base URL, auth, and every endpoint with what it accepts and returns."""
+    client = await _client(db, code)
+    docs = [e for e in await store.all_of(db, store.ENDPOINT)
+            if e.get("client_code") == code and e.get("is_active")]
+    docs.sort(key=lambda d: str(d.get("slug", "")))
+
+    endpoints = []
+    for doc in docs:
+        returns = [f.get("label") or f.get("column")
+                   for f in (doc.get("fields") or [])]
+        for join in (doc.get("joins") or []):
+            for field in (join.get("fields") or []):
+                returns.append(field.get("label")
+                               or f"{join.get('table')}_{field.get('column')}")
+        params = []
+        for name in (doc.get("filterable") or []):
+            params.append({"name": name, "kind": "filter",
+                           "note": f"exact match on {name}"})
+        if doc.get("searchable"):
+            params.append({"name": "search", "kind": "search",
+                           "note": "partial match across "
+                                   + ", ".join(doc["searchable"])})
+        if doc.get("updated_column"):
+            params.append({"name": "updated_since", "kind": "incremental",
+                           "note": f"ISO date/time; returns rows whose "
+                                   f"{doc['updated_column']} is newer"})
+        params.append({"name": "page", "kind": "paging", "note": "1-based"})
+        params.append({"name": "size", "kind": "paging",
+                       "note": f"default {doc.get('default_size')}, "
+                               f"max {doc.get('max_size')}"})
+        endpoints.append({
+            "slug": doc.get("slug"),
+            "name": doc.get("name"),
+            "path": f"/api/ext/v1/{doc.get('slug')}",
+            "url": f"{base_url.rstrip('/')}/api/ext/v1/{doc.get('slug')}"
+                   if base_url else f"/api/ext/v1/{doc.get('slug')}",
+            "returns": returns,
+            "params": params,
+        })
+
+    return {
+        "client_code": code,
+        "client_name": client.get("name") or code,
+        "base_url": base_url.rstrip("/"),
+        "auth": {
+            "header": "X-API-Key",
+            "note": ("Every request carries the key issued for this application. "
+                     "It is shown once when issued and cannot be displayed again."),
+        },
+        "conventions": {
+            "paging": "Every list answers {items, total, page, size}.",
+            "incremental": ("Endpoints with an updated_since parameter can be pulled "
+                            "incrementally; the rest must be read in full."),
+            "errors": "A failure answers {success: false, error: \"...\"}.",
+        },
+        "probe": {
+            "path": "/api/ext/v1/_ping",
+            "note": "Confirms the key works and names the application it belongs to.",
+        },
+        "directory": {
+            "path": "/api/ext/v1/_endpoints",
+            "note": "Everything this key may call, read from the server.",
+        },
+        "endpoints": endpoints,
+    }
+
+
+async def endpoint_sample(db: AsyncSession, slug: str, rows: int = 2) -> dict:
+    """A real response from one saved endpoint, so the shape is seen and not imagined.
+
+    Runs the endpoint exactly as an API key would (`serve`), just with a small page —
+    a documented shape that is written by hand drifts from the one that is served, and
+    the drift is only ever found by the partner.
+    """
+    doc = await _endpoint(db, slug)
+    return await serve(db, doc, {"size": str(max(1, min(rows, 5)))})
+
+
 async def delete_endpoint(db: AsyncSession, slug: str) -> dict:
     """Deactivates rather than deletes, so usage entries keep their meaning."""
     doc = await _endpoint(db, slug)

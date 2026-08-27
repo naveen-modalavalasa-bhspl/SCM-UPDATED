@@ -174,6 +174,72 @@ class JoinIn(BaseModel):
         return _identifier(value, "Column")
 
 
+class WebhookWrite(BaseModel):
+    """Registering a system that pushes INTO SCM.
+
+    Note what is absent: no table, no column mapping, no SQL. `handler` names one of a
+    closed set (`webhooks.HANDLERS`), because a screen that could point an inbound feed
+    at a business table would be a way around every module's own service — and around
+    rule 7 for stock in particular.
+    """
+    source: str = Field(min_length=2, max_length=39)
+    name: str = Field(min_length=2, max_length=200)
+    description: str | None = Field(default=None, max_length=500)
+    #: The event names this source may send. Required: a webhook that accepts anything
+    #: cannot be told apart from a misconfigured one.
+    events: list[str] = Field(min_length=1, max_length=50)
+    handler: str = "record"
+    #: Off only while two sides are being wired together, and it is recorded when it is.
+    require_signature: bool = True
+    is_active: bool = True
+
+
+class WebhookOut(BaseModel):
+    source: str
+    name: str | None = None
+    description: str | None = None
+    events: list[str] = []
+    handler: str = "record"
+    require_signature: bool = True
+    #: Whether a secret exists, never the secret. Same posture as an API key.
+    has_secret: bool = False
+    is_active: bool = True
+    url: str
+    created_at: str | None = None
+    created_by_name: str | None = None
+    updated_at: str | None = None
+    last_received_at: str | None = None
+    received_count: int = 0
+
+
+class WebhookSecretOut(BaseModel):
+    source: str
+    shared_secret: str
+    signature_header: str
+    note: str
+
+
+class EndpointImportIn(BaseModel):
+    """An exported endpoint set, being pasted into this deployment.
+
+    `clip` is taken as a free-form dict rather than a typed model on purpose: it may
+    have come from another version, and the useful answer to that is
+    "exported by a different version of the app" from `service._read_clip`, not a 422
+    listing fields the person pasting has never heard of.
+    """
+    clip: dict
+    #: Deactivate endpoints this application has that the clip does not mention.
+    #: Off by default — pasting a partial set must not switch off what it omits.
+    replace: bool = False
+
+
+class ImportResultOut(BaseModel):
+    created: int
+    updated: int
+    retired: int
+    total: int
+
+
 class EndpointWrite(BaseModel):
     slug: str
     name: str = Field(min_length=2, max_length=200)

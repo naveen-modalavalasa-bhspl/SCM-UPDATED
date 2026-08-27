@@ -277,6 +277,13 @@ class RefType(str, Enum):
     WH_ISSUE = "WH_ISSUE"
     DISPATCH = "DISPATCH"
     PURCHASE_RETURN = "PURCHASE_RETURN"
+    # Reported from the field by the clinic application, not raised in SCM. Two heads,
+    # deliberately: a unit used on a patient and a unit spoiled cost against different
+    # things, and the feeds that carry them are separate. They must never be summed
+    # from one record — a consumption row repeats its wastage quantity for reporting,
+    # and posting both would deduct every spoiled unit twice.
+    CONSUMPTION = "CONSUMPTION"
+    WASTAGE = "WASTAGE"
     # Internal — no goods enter or leave the company
     TRANSFER = "TRANSFER"                # point to point
     STO = "STO"                          # stock transfer order

@@ -742,8 +742,19 @@ export function JobProfilesPage() {
     setShowHolders(false);
     setHolderSearch("");
     setOpen(new Set());
-    setPasteOpen(false);
-    setPasteText("");
+    // FIXED 2026-08-26 — this used to clear the paste box on every selection change,
+    // which broke the ONE thing copy/paste is for. The workflow is copy on profile A,
+    // MOVE TO profile B, paste; wiping the box on the move threw the clip away before
+    // it could ever be used, so "Copy permissions" looked like it did nothing.
+    //
+    // It survived locally because localhost is a secure context: `navigator.clipboard`
+    // works there, so the OS clipboard still held the clip and Ctrl+V into the box
+    // rescued it. The deployed app is served over plain http, where
+    // `navigator.clipboard` is undefined and the in-app box is the ONLY carrier — so
+    // there the copy was simply lost, which is exactly what was reported.
+    //
+    // The box is now left exactly as the admin left it. Nothing it holds can be saved
+    // by accident: pasting only fills the draft, and Save is still the only write.
   }, [selected]);
 
   const holders = useQuery({
@@ -906,16 +917,33 @@ export function JobProfilesPage() {
     };
   }, [data?.pages, data?.features, pageCodes, featureCodes]);
 
+  /** Which profile the text in the box was copied from, or null if it is not a clip
+   *  (empty box, or something the admin pasted in by hand that we cannot read). */
+  const clipOrigin = useMemo(() => {
+    if (!pasteText.trim()) return null;
+    const parsed = parseClip(pasteText);
+    return "clip" in parsed ? parsed.clip.from : null;
+  }, [pasteText]);
+
   /** Copy fills the box AND the OS clipboard: the box is what makes this work on a
-   *  plain-http LAN host, where navigator.clipboard is not available at all. */
+   *  plain-http LAN host, where navigator.clipboard is not available at all.
+   *
+   *  The success toast has to be raised on BOTH paths. `navigator.clipboard?.write…`
+   *  short-circuits the whole chain when the API is missing, so on the deployed
+   *  plain-http host the `.then` never ran and the button gave no feedback of any
+   *  kind — which is half of why it read as broken. */
   const copyAccess = () => {
     if (!selected) return;
     const text = buildClip(selected.name, scope, [...pageCodes], [...featureCodes]);
     setPasteText(text);
     setPasteOpen(true);
-    navigator.clipboard?.writeText(text).then(
-      () => toast.success(`${selected.name}'s permissions copied`),
-      () => toast.success("Copied into the box below — select it and copy"),
+    const done = `${selected.name}'s permissions copied — open another profile, then`
+      + " Add or Replace.";
+    const written = navigator.clipboard?.writeText(text);
+    if (!written) { toast.success(done); return; }
+    written.then(
+      () => toast.success(done),
+      () => toast.success(`${done} They are in the box below if you need them.`),
     );
   };
 
@@ -1503,8 +1531,17 @@ export function JobProfilesPage() {
                 {pasteOpen && (
                   <div className="mt-3 space-y-2 rounded-xl border border-brand/40
                                   bg-content2/50 p-3">
+                    {/* Names where the clip CAME FROM, not the profile being looked
+                      *  at. The box deliberately survives a change of profile — that
+                      *  move is the whole workflow — so labelling it with the current
+                      *  profile said "Permission set for B" over B's own contents and
+                      *  read as though pasting would do nothing. */}
                     <p className="text-sm font-semibold text-ink">
-                      Permission set for {selected.name}
+                      {clipOrigin
+                        ? (clipOrigin === selected.name
+                            ? `Copied from ${clipOrigin} — open another profile to paste it`
+                            : `Copied from ${clipOrigin} — Add or Replace applies it to ${selected.name}`)
+                        : `Paste a permission set to apply to ${selected.name}`}
                     </p>
                     <textarea
                       value={pasteText}

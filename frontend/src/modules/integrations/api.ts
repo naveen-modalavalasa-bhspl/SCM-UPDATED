@@ -1,8 +1,12 @@
 import { api } from "@/shared/api/client";
 import type {
-  ApiClient, ApiEndpoint, ApiKey, CallLog, ClientWrite, EndpointWrite, IssuedKey,
+  ApiClient, ApiEndpoint, ApiKey, CallLog, ClientWrite, EndpointClip, EndpointWrite,
+  ImportResult, IssuedKey,
   KeyWrite, LinkLogRow, LinkLogStats, LinkReveal, LinkTest, Page, PlatformLink,
-  Preview, SourceColumn, SourceTable, Usage,
+  ConnectionDocs, Preview, SourceColumn, SourceTable, Usage, Webhook,
+  WebhookDocs,
+  WebhookDelivery,
+  WebhookHandler, WebhookSecret, WebhookWrite,
 } from "./types";
 
 /** API-console HTTP layer. Every call hits a real endpoint and every error propagates. */
@@ -68,6 +72,26 @@ export const integrationsApi = {
   deleteEndpoint: async (slug: string): Promise<ApiEndpoint> =>
     (await api.delete(`${BASE}/endpoints/${slug}`)).data,
 
+  /** This application's whole endpoint set, to paste into another deployment.
+   *  Carries no keys — see the note on the backend route. */
+  exportEndpoints: async (code: string): Promise<EndpointClip> =>
+    (await api.get(`${BASE}/clients/${code}/endpoints/export`)).data,
+
+  /** All-or-nothing, and re-validated against the database it lands on. */
+  importEndpoints: async (code: string, clip: unknown, replace = false):
+    Promise<ImportResult> =>
+    (await api.post(`${BASE}/clients/${code}/endpoints/import`,
+                    { clip, replace })).data,
+
+  /** Base URL, auth and every endpoint with what it accepts and returns. Derived on
+   *  the server from the endpoint documents, so it cannot drift from what is served. */
+  docs: async (code: string): Promise<ConnectionDocs> =>
+    (await api.get(`${BASE}/clients/${code}/docs`)).data,
+
+  /** A real response from one endpoint — the shape seen rather than imagined. */
+  sample: async (slug: string, rows = 2): Promise<unknown> =>
+    (await api.get(`${BASE}/endpoints/${slug}/sample`, { params: { rows } })).data,
+
   logs: async (code: string,
                query: { page?: number; size?: number; errors_only?: boolean } = {}):
     Promise<Page<CallLog>> =>
@@ -75,6 +99,49 @@ export const integrationsApi = {
 
   usage: async (code: string): Promise<Usage> =>
     (await api.get(`${BASE}/clients/${code}/usage`)).data,
+};
+
+/** Inbound webhooks — who may push INTO SCM, registered from the screen.
+ *
+ *  `handlers` is SERVED rather than listed here: what a webhook may do with what it
+ *  receives is a closed set on the server (a screen that could point a feed at a
+ *  business table would be a way around every module's own service), so the picker
+ *  must offer exactly what the server will accept. */
+export const webhooksApi = {
+  handlers: async (): Promise<WebhookHandler[]> =>
+    (await api.get(`${BASE}/webhook-handlers`)).data,
+
+  /** Suggestions for the event picker, not a whitelist — a partner's own name is
+   *  accepted too. Served so the list grows as webhooks are registered. */
+  eventNames: async (): Promise<string[]> =>
+    (await api.get(`${BASE}/webhook-events`)).data,
+
+  list: async (): Promise<Webhook[]> =>
+    (await api.get(`${BASE}/webhooks`)).data,
+
+  create: async (body: WebhookWrite): Promise<Webhook> =>
+    (await api.post(`${BASE}/webhooks`, body)).data,
+
+  update: async (source: string, body: WebhookWrite): Promise<Webhook> =>
+    (await api.put(`${BASE}/webhooks/${source}`, body)).data,
+
+  /** Deactivates rather than deletes, so the deliveries it took keep their meaning. */
+  disable: async (source: string): Promise<Webhook> =>
+    (await api.delete(`${BASE}/webhooks/${source}`)).data,
+
+  /** The only response that carries the secret. Shown once, never retrievable. */
+  rotateSecret: async (source: string): Promise<WebhookSecret> =>
+    (await api.post(`${BASE}/webhooks/${source}/secret`)).data,
+
+  /** What you send the system that will push to us. Derived from the registration,
+   *  so it cannot drift from what the endpoint will actually accept. */
+  docs: async (source: string): Promise<WebhookDocs> =>
+    (await api.get(`${BASE}/webhooks/${source}/docs`)).data,
+
+  deliveries: async (source?: string): Promise<Page<WebhookDelivery>> =>
+    (await api.get(`${BASE}/webhook-deliveries`, {
+      params: clean({ source, size: 50 }),
+    })).data,
 };
 
 /** What THIS app connects out to — HCM, mail, the database — and their own logs.
@@ -87,6 +154,15 @@ export const platformLinksApi = {
 
   get: async (code: string): Promise<PlatformLink> =>
     (await api.get(`${BASE}/platform/${code}`)).data,
+
+  /** Base URL, auth and every endpoint with what it accepts and returns. Derived on
+   *  the server from the endpoint documents, so it cannot drift from what is served. */
+  docs: async (code: string): Promise<ConnectionDocs> =>
+    (await api.get(`${BASE}/clients/${code}/docs`)).data,
+
+  /** A real response from one endpoint — the shape seen rather than imagined. */
+  sample: async (slug: string, rows = 2): Promise<unknown> =>
+    (await api.get(`${BASE}/endpoints/${slug}/sample`, { params: { rows } })).data,
 
   logs: async (code: string, params: { page?: number; size?: number; status?: string } = {})
     : Promise<Page<LinkLogRow>> =>

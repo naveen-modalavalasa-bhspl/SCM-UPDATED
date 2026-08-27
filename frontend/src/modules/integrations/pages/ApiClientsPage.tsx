@@ -2,13 +2,22 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { Plug, Plus } from "lucide-react";
+import { Plug, Plus, Radio } from "lucide-react";
 import {
   Button, Card, EmptyState, ErrorBanner, Field, Input, PageHeader, ResponsiveList,
-  StatusPill, useToast, type Column,
+  StatusPill, SubNav, useToast, type Column,
 } from "@/shared/components";
 import { integrationsApi } from "../api";
+import { WebhooksPanel } from "../components/WebhooksPanel";
 import type { ApiClient, ClientWrite } from "../types";
+
+/** Out and in. Applications PULL from SCM through composed endpoints; webhooks are
+ *  systems that PUSH into it. Same screen because they are the same question — who is
+ *  connected, and on what terms. */
+const TABS = [
+  { key: "clients", label: "Applications", icon: Plug },
+  { key: "webhooks", label: "Webhooks", icon: Radio },
+];
 
 const BLANK: ClientWrite = {
   code: "", name: "", description: "", contact_person: "", contact_email: "",
@@ -26,6 +35,7 @@ export default function ApiClientsPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const queryClient = useQueryClient();
+  const [tab, setTab] = useState("clients");
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<ClientWrite | null>(null);
@@ -109,6 +119,16 @@ export default function ApiClientsPage() {
     },
   ];
 
+  if (tab === "webhooks") {
+    return (
+      <div>
+        <PageHeader eyebrow="APIS" title="Integrations" />
+        <SubNav label="Integrations" items={TABS} value={tab} onChange={setTab} />
+        <WebhooksPanel />
+      </div>
+    );
+  }
+
   return (
     <div>
       <PageHeader
@@ -123,6 +143,8 @@ export default function ApiClientsPage() {
           </Button>
         }
       />
+
+      <SubNav label="Integrations" items={TABS} value={tab} onChange={setTab} />
 
       <Card className="mb-4 p-3">
         <Input
