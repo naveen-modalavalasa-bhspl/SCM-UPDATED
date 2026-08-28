@@ -143,3 +143,69 @@ def test_the_cutoff_does_not_reprieve_a_positions_feed_post():
     recently it was stamped — the cutoff is only about rescued rows."""
     existing = {1: _Row(), 2: _Row(synced_at=datetime(2026, 8, 26, 9, 0, 0))}
     assert sync._stale_position_ids({1}, existing, _RUN) == [2]
+
+
+# --------------------------------------------------------------------------- #
+#  A re-keyed project must never take its documents down with it
+# --------------------------------------------------------------------------- #
+# HCM re-keys on a cutover, so the same project arrives under a new id carrying the
+# code the old row still holds. `mst_projects.code` is unique, so the code has to be
+# freed — but the old row is what every indent, stock balance and `PROFILE:<id>:<job>`
+# grant points at, and deactivating it is what made SUPPLY CHAIN MANAGEMENT and its
+# whole job-profile list disappear from a live deployment in one sync.
+
+_REKEYED = [{"id": 901, "code": "SCM", "name": "SUPPLY CHAIN MANAGEMENT",
+             "status": "Active"}]
+
+
+async def _old_scm_project(db):
+    from app.shared.models.master import Project
+
+    db.add(Project(id=900, code="SCM", name="SUPPLY CHAIN MANAGEMENT", is_active=True))
+    await db.commit()
+    return Project
+
+
+async def test_a_rekeyed_project_frees_the_code_but_keeps_a_used_row_alive(db):
+    Project = await _old_scm_project(db)
+    # An employee still carries the OLD project id — `profiles.profile_key` is built
+    # from exactly this column, so retiring the row here is retiring their access.
+    db.add(HcmEmployee(id=7001, full_name="MAHENDRA", emp_code="E7001",
+                       project_id=900, is_active=True, synced_at=utcnow()))
+    await db.commit()
+
+    await sync.sync_entity(db, "projects", FakeClient({"projects": _REKEYED}))
+
+    old = await db.get(Project, 900)
+    assert old.code == "SCM-OLD-900"     # freed, so the new row's insert can succeed
+    assert old.is_active is True         # ...but NOT retired: things point at it
+    new = await db.get(Project, 901)
+    assert (new.code, new.is_active) == ("SCM", True)
+
+
+async def test_a_rekeyed_project_retires_an_old_row_nothing_points_at(db):
+    Project = await _old_scm_project(db)
+
+    await sync.sync_entity(db, "projects", FakeClient({"projects": _REKEYED}))
+
+    old = await db.get(Project, 900)
+    assert old.code == "SCM-OLD-900"
+    assert old.is_active is False        # unused stale row retires exactly as before
+
+
+async def test_a_second_rekey_does_not_mint_a_duplicate_old_code(db):
+    """The suffix carries the id because a bare `-OLD` collides on the very unique
+    key it exists to protect."""
+    Project = await _old_scm_project(db)
+    db.add(Project(id=902, code="SCM-OLD-900-SPARE", name="Older still",
+                   is_active=False))
+    await db.commit()
+
+    await sync.sync_entity(db, "projects", FakeClient({"projects": _REKEYED}))
+    await sync.sync_entity(db, "projects", FakeClient({
+        "projects": [{"id": 903, "code": "SCM", "name": "SUPPLY CHAIN MANAGEMENT",
+                      "status": "Active"}]}))
+
+    assert (await db.get(Project, 900)).code == "SCM-OLD-900"
+    assert (await db.get(Project, 901)).code == "SCM-OLD-901"
+    assert (await db.get(Project, 903)).code == "SCM"

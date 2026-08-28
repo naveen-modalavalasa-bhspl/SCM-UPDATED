@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 from typing import Callable
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.platform.hcm import mappers
@@ -384,6 +384,48 @@ async def _release_emp_code(db: AsyncSession, cols: dict) -> None:
     )
 
 
+# Every column in THIS database that points at a project, discovered rather than
+# listed. 26 tables carry one today (ind_indents, stk_ledger, pro_purchase_orders,
+# wf_instances, inv_sto's two, …) and the list grows with every module, so a
+# hand-written one would go stale in exactly the direction that hurts: a table left
+# off it reads as "nobody points at this project" and the row gets deactivated anyway.
+#
+# Identifiers are interpolated below because an identifier cannot be a bind parameter.
+# They come from this database's own information_schema, never from a request —
+# the same reasoning `shared/masters/crud.row_usage` records for its usage counts.
+_PROJECT_REF_COLUMNS_SQL = text("""
+    SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND COLUMN_NAME IN ('project_id', 'from_project_id', 'to_project_id')
+      AND TABLE_NAME <> 'mst_projects'
+""")
+
+_project_ref_columns: list[tuple[str, str]] | None = None
+
+
+async def _project_referent(db: AsyncSession, project_id: int) -> str | None:
+    """The first place that points at this project, or None if nothing does.
+
+    Deliberately stops at the first hit: this answers "is it safe to deactivate", not
+    "how much is there", and the whole point is to be cheap enough to run on every
+    project of every sync.
+    """
+    global _project_ref_columns
+    if _project_ref_columns is None:
+        _project_ref_columns = [
+            (table, column)
+            for table, column in (await db.execute(_PROJECT_REF_COLUMNS_SQL)).all()
+        ]
+    for table, column in _project_ref_columns:
+        hit = await db.scalar(
+            text(f"SELECT 1 FROM {table} WHERE {column} = :pid LIMIT 1"),
+            {"pid": project_id},
+        )
+        if hit:
+            return f"{table}.{column}"
+    return None
+
+
 async def _upsert_project(db: AsyncSession, cols: dict) -> bool:
     """mst_projects has no raw/synced_at, and is_active is SCM's call once a project
     exists, so only HCM's identity fields are refreshed on an update."""
@@ -396,13 +438,45 @@ async def _upsert_project(db: AsyncSession, cols: dict) -> bool:
     # Same story as _release_emp_code: HCM re-keys, `mst_projects.code` is unique, and
     # the project arriving under a new id carries the code an older row still holds.
     # The old row keeps its id (documents point at it) and loses the code.
+    #
+    # FIXED 2026-08-28 — this used to free the code and set `is_active = 0` in one
+    # blind UPDATE, and that is the only place in the whole sync where HCM overrides
+    # SCM's call on `is_active`. On a deployment whose SUPPLY CHAIN MANAGEMENT row
+    # predated the HCM cutover, the project arriving under its new id demoted the row
+    # every indent, stock balance, workflow instance and `PROFILE:<id>:<job>` grant
+    # pointed at — the project and its whole job-profile list vanished from every
+    # screen at once, with nothing said and no way back: `mst_projects` is
+    # `read_only=True` in `masters/defs.py`, so no admin can reactivate it by hand.
+    #
+    # Freeing the code is the part the UNIQUE constraint actually requires.
+    # Deactivating is not, so it now happens ONLY when nothing points at the old row —
+    # a genuinely unused stale row still retires exactly as before, and one carrying
+    # live documents stays visible and says so loudly. A duplicate an admin can see is
+    # always better than a disappearance they cannot.
     if cols.get("code"):
-        await db.execute(
-            update(Project)
-            .where(Project.code == cols["code"], Project.id != row_id)
-            .values(code=f"{cols['code'][:40]}-OLD", is_active=False)
-            .execution_options(synchronize_session=False)
-        )
+        superseded = (await db.execute(
+            select(Project).where(Project.code == cols["code"], Project.id != row_id)
+        )).scalars().all()
+        for old in superseded:
+            # The id, not a bare "-OLD" suffix: a second re-key of the same code would
+            # otherwise mint a second `SCM-OLD` and die on the unique key it is here to
+            # protect. 35 + 5 + the id fits `code`'s String(50).
+            old.code = f"{old.code[:35]}-OLD-{old.id}"
+            referent = await _project_referent(db, old.id)
+            if referent is None:
+                old.is_active = False
+                logger.warning(
+                    "hcm sync: project %s (%s) was re-keyed to id %s; the old row is "
+                    "unused and has been retired", old.id, old.name, row_id,
+                )
+            else:
+                logger.error(
+                    "hcm sync: project %s (%s) was re-keyed to id %s, but %s still "
+                    "points at the old id — it has been left ACTIVE under code %s. "
+                    "Its documents and job profiles are keyed on the OLD id and will "
+                    "not follow the new one; move them before retiring it.",
+                    old.id, old.name, row_id, referent, old.code,
+                )
     existing = await db.get(Project, row_id)
     if existing is None:
         cols.setdefault("code", f"PRJ-{row_id}")
