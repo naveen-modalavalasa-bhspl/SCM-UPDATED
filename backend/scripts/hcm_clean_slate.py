@@ -157,14 +157,20 @@ async def reset_credentials(db) -> None:
 async def main() -> None:
     client = HcmClient()
     print(f"HCM: {client.base_url}")
-    live = {
-        "positions": {r["id"] for r in await client.fetch_all("positions") if r.get("id")},
-        "employees": {r["id"] for r in await client.fetch_all("employees") if r.get("id")},
-        "offices": {r["id"] for r in await client.fetch_all("offices") if r.get("id")},
-        "departments": {r["id"] for r in await client.fetch_all("departments") if r.get("id")},
-    }
+    # Checked, not plain: this prunes the mirror down to what the feeds list, and
+    # HCM's unordered pagination omits a different slice of a list on every walk.
+    # Pruning on one of those deletes live rows (see `HcmClient.fetch_all_checked`).
+    live, short = {}, []
+    for entity in ("positions", "employees", "offices", "departments"):
+        rows, complete = await client.fetch_all_checked(entity)
+        live[entity] = {r["id"] for r in rows if r.get("id")}
+        if not complete:
+            short.append(entity)
     if not all(live.values()):
         raise RuntimeError("HCM returned an empty feed — refusing to prune the mirror")
+    if short:
+        raise RuntimeError(f"HCM served an incomplete feed ({', '.join(short)}) - "
+                           f"refusing to prune the mirror against it")
     print({k: len(v) for k, v in live.items()})
 
     async with SessionLocal() as db:

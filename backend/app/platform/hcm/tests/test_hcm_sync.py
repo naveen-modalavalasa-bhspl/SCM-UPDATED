@@ -13,8 +13,13 @@ class FakeClient:
     def __init__(self, data: dict[str, list[dict]]):
         self.data = data
 
+    async def fetch_all_checked(self, entity: str, page_size: int = 100):
+        # (rows, complete) — canned data is by definition the whole feed.
+        return self.data.get(entity, []), True
+
     async def fetch_all(self, entity: str, page_size: int = 100):
-        return self.data.get(entity, [])
+        rows, _complete = await self.fetch_all_checked(entity, page_size)
+        return rows
 
 
 async def test_sync_employees_maps_nested_payload(db):
@@ -66,7 +71,7 @@ async def test_positions_derive_assignment_from_assigned_employee(db):
 
 async def test_failed_entity_is_logged_not_raised(db):
     class Boom:
-        async def fetch_all(self, entity, page_size=100):
+        async def fetch_all_checked(self, entity, page_size=100):
             raise RuntimeError("HCM down")
 
     log = await sync.sync_entity(db, "offices", Boom())
