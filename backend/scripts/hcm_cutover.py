@@ -121,11 +121,18 @@ async def main() -> None:
             print(f"  {log.entity:18} {log.status:8} fetched={log.records_fetched:<6} "
                   f"upserted={log.records_upserted:<6} {(log.error_message or '')[:80]}")
 
-        live_ids = {row["id"] for row in await client.fetch_all("positions")
-                    if row.get("id") is not None}
-        positions, assignments = await retire_absent_positions(db, live_ids)
-        print(f"\nretired {positions} positions and {assignments} assignments "
-              f"absent from the feed ({len(live_ids)} live)")
+        # Checked, not plain: retiring reads the feed's silence about a post as a
+        # deletion, and HCM's unordered pagination goes quiet about a different
+        # slice of the list on every walk (see `HcmClient.fetch_all_checked`).
+        live_rows, complete = await client.fetch_all_checked("positions")
+        live_ids = {row["id"] for row in live_rows if row.get("id") is not None}
+        if not complete:
+            print(f"\n!! the positions feed came up short ({len(live_ids)} read) "
+                  f"- retiring nothing, since its silence cannot be trusted")
+        else:
+            positions, assignments = await retire_absent_positions(db, live_ids)
+            print(f"\nretired {positions} positions and {assignments} assignments "
+                  f"absent from the feed ({len(live_ids)} live)")
 
         print("\nactive positions by section (the LIP/MDP stocking points):")
         for section, count, offices in await stocking_point_summary(db):

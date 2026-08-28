@@ -433,10 +433,11 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
         # Long paginated pulls can hit a transient network blip mid-way; retry the
         # whole entity a few times before giving up.
         rows = None
+        complete = False
         last_exc = None
         for attempt in range(4):
             try:
-                rows = await client.fetch_all(endpoint)
+                rows, complete = await client.fetch_all_checked(endpoint)
                 break
             except Exception as exc:  # noqa: BLE001 — retry on any fetch error
                 last_exc = exc
@@ -477,7 +478,18 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
                 "hcm sync: %s positions were missing from the positions feed and were "
                 "taken from the employee records instead", rescued,
             )
-        if entity_key == "positions":
+        if entity_key == "positions" and not complete:
+            # Retiring reads the feed's SILENCE about a post as a deletion, so it may
+            # only ever run on a pull the client could vouch for. HCM's unordered
+            # pagination drops a different slice of the list on every walk, and taking
+            # one of those for a deletion is what cost the Central Warehouse and
+            # Procurement desks their posts (see `HcmClient.fetch_all_checked`).
+            logger.warning(
+                "hcm sync: the positions feed came up short, so nothing was retired — "
+                "%s posts read, and the mirror keeps what this pull did not mention",
+                len(rows),
+            )
+        elif entity_key == "positions":
             # The cutoff comes from the PREVIOUS employees run, because this one has
             # not happened yet — positions sync first (see NEEDED_ENTITIES). A post
             # HCM dropped this morning therefore survives one more cycle before it
