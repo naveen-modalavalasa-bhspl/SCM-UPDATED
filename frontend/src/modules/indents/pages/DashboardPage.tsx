@@ -188,7 +188,7 @@ function IndentDashboardContent() {
     error: recentError,
   } = useQuery({
     queryKey: indentKeys.recent(accountScope, filterParams),
-    queryFn: ({ signal }) => indentApi.list({ ...filterParams, size: 6 }, signal),
+    queryFn: ({ signal }) => indentApi.list({ ...filterParams, size: 8 }, signal),
     placeholderData: (previousData) => previousData,
     staleTime: INDENT_QUERY_STALE_TIME,
     gcTime: INDENT_QUERY_GC_TIME,
@@ -219,6 +219,7 @@ function IndentDashboardContent() {
         title="Overview"
         statusFilterOptions={INDENT_REQUEST_STATUS_FILTER_OPTIONS}
         separateDateFilters
+        regionFilterLabel="Department"
         searchPlaceholder="Search by indent no., requester, department or status..."
       />
 
@@ -292,7 +293,7 @@ function IndentDashboardContent() {
           {recentError && <p className="py-4 text-sm text-bad">{recentError.message}</p>}
           {recentLoading && <p className="py-4 text-sm text-muted">Loading…</p>}
           <div className="divide-y divide-line/70">
-            {recentIndents.slice(0, 5).map((indent) => (
+            {recentIndents.slice(0, 7).map((indent) => (
               <button
                 key={indent.id}
                 type="button"
