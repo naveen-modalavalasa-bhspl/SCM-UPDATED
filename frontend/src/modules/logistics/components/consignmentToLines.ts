@@ -94,8 +94,20 @@ export function headerFromConsignment(doc: ConsignmentDetail): Partial<TRInput> 
     indent_no: indentNo,
     from_warehouse_id: doc.warehouse_id ?? null,
     from_warehouse_name: doc.warehouse_name ?? null,
-    to_location_name: doc.destination_office_name
-      ?? doc.to_warehouse_name ?? doc.customer_name ?? null,
+    // The consignment's OWN destination, never the indent's office.
+    //
+    // `destination_office_name` is derived from the indent (`_issue_destination`), so
+    // it always names the point that RAISED the request. On a direct WH -> LIP run
+    // that is also where the lorry goes, which is why reading it first survived; on a
+    // relay hop (WH -> MDP -> LIP) it is not, and the leg was stamped — and stored —
+    // with the final LIP while the load was driving to the MDP. `to_location_name` is
+    // written once at creation, so every shipment raised that way keeps the wrong
+    // destination for the rest of its life.
+    //
+    // The office name stays as the fallback for a dispatch with no receiving
+    // warehouse at all: a customer delivery or a vendor return.
+    to_location_name: doc.to_warehouse_name
+      ?? doc.destination_office_name ?? doc.customer_name ?? null,
     delivery_address: doc.delivery_address ?? null,
     contact_person: doc.contact_person ?? null,
     contact_phone: doc.contact_phone ?? null,

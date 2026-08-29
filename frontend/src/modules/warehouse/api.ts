@@ -358,7 +358,10 @@ export const issueApprovalHistory = async (id: number) => {
 
 /* ---------------------------------------------------------------- dispatch -- */
 
-export const listDispatches = (params: ListParams = {}) =>
+// `inbound` narrows the page to consignments ARRIVING at this login's own points —
+// the receiving desk's question, which the ordinary scope (keyed on the sending dock)
+// cannot answer. Only that one screen wants it, so it widens here, not in ListParams.
+export const listDispatches = (params: ListParams & { inbound?: boolean } = {}) =>
   get<Page<Dispatch>>(`${BASE}/dispatches`, params);
 
 export const getDispatch = (id: number) => get<Dispatch>(`${BASE}/dispatches/${id}`);

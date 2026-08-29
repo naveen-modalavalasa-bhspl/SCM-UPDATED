@@ -8156,8 +8156,34 @@ async def _apply_consignment_packages(
     _dispatch_totals(dispatch)
 
 
+# What an "on the way in" queue may hold. Anything past ACKNOWLEDGED has been signed
+# for already and anything before DISPATCHED has not left the sending dock.
+INBOUND_DISPATCH_STATUSES = (
+    DispatchStatus.DISPATCHED.value,
+    DispatchStatus.IN_TRANSIT.value,
+    DispatchStatus.DELIVERED.value,
+)
+
+
 async def list_dispatches(db: AsyncSession, params: PageParams, *, status: str | None = None,
-                          warehouse_id: int | None = None, search: str | None = None, user=None) -> dict:
+                          warehouse_id: int | None = None, search: str | None = None,
+                          inbound: bool = False, user=None) -> dict:
+    """Consignments this login may read; `inbound` narrows to the ones ARRIVING at it.
+
+    The ordinary scope answers "which consignments may you see", and it is keyed on
+    `warehouse_id` — the SENDING dock — because that is the point that owns the
+    document. A receiving desk needs the opposite question, and asking the first one
+    put every consignment in the company in front of a wide-scope login: the SCM head
+    was offered the signature for goods arriving at a point he is nowhere near, and a
+    receiver at an MDP was shown the consignments his own dock had sent out.
+
+    `inbound` therefore scopes on `to_warehouse_id` against the points the login is
+    actually attached to (`locations.location_ids_for_user` — their own posts and
+    their reportees'), NOT against their data scope. Reading a document company-wide
+    is a reporting question; signing for a lorry is a question of standing where it
+    stopped. A login attached to no stocking point gets an empty queue, which is the
+    honest answer — scanning a package still opens that consignment directly.
+    """
     stmt = select(m.Dispatch)
     if user is not None:
         stmt = stmt.where(await scope_condition(
@@ -8167,6 +8193,12 @@ async def list_dispatches(db: AsyncSession, params: PageParams, *, status: str |
             owner_col=m.Dispatch.created_by_id,
             project_col=m.Dispatch.project_id,
         ))
+    if inbound:
+        receivable = await stock_locations.location_ids_for_user(db, user) if user else set()
+        stmt = stmt.where(
+            m.Dispatch.to_warehouse_id.in_(receivable or {0}),
+            m.Dispatch.status.in_(INBOUND_DISPATCH_STATUSES),
+        )
     if status:
         stmt = stmt.where(m.Dispatch.status == status)
     if warehouse_id:

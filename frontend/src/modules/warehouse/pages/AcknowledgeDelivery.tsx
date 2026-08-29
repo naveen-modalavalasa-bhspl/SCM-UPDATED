@@ -37,12 +37,15 @@ export default function AcknowledgeDelivery() {
   const [remarks, setRemarks] = useState("");
   const [confirming, setConfirming] = useState(false);
 
+  /* `inbound` is the whole scoping rule and it belongs on the server: the ordinary
+   * dispatch scope is keyed on the SENDING dock, so asking for a plain page here put
+   * every consignment in the company in front of a wide-scope login and offered them
+   * the signature for goods arriving at a point they are nowhere near. It also came
+   * back as the first 100 rows filtered afterwards in the browser, so once there were
+   * more than 100 consignments a genuinely inbound one could simply fall off the end. */
   const { data: open = [] } = useQuery({
     queryKey: ["wh-dispatches-inbound"],
-    queryFn: async () => {
-      const page = await listDispatches({ size: 100 });
-      return page.items.filter((d) => ["DISPATCHED", "IN_TRANSIT", "DELIVERED"].includes(d.status));
-    },
+    queryFn: async () => (await listDispatches({ size: 100, inbound: true })).items,
   });
 
   const { data: doc, isLoading, error } = useQuery({
@@ -120,6 +123,123 @@ export default function AcknowledgeDelivery() {
   const lines = doc?.items ?? [];
   const shortLines = lines.filter((l) => (delivered[l.id] ?? num(l.quantity)) < num(l.quantity));
   const done = doc?.status === "ACKNOWLEDGED";
+
+  /* A serial-tracked item is one dispatch LINE per unit, so ten swabs in one carton
+   * arrive as ten rows of "1 NOS" — ten identical item names and ten boxes to type
+   * into for a single package the receiver opens once. The document is right; listing
+   * it that way is not what anyone counts.
+   *
+   * So the default view is one row per item and batch, carrying the lines it stands
+   * for. Batch is part of the key because two batches of the same item are two things
+   * to count, whatever the packing list did with them.
+   *
+   * The per-serial view stays one press away, and it is not decoration: a group that
+   * comes up short says how many are missing but not WHICH, and on serialised stock
+   * that difference is the whole record. Whoever is short opens the serials and marks
+   * the ones that did not turn up. */
+  const groups = (() => {
+    const out = new Map<string, { key: string; lines: typeof lines }>();
+    for (const line of lines) {
+      const key = `${line.item_id ?? line.item_code ?? "?"}|${line.batch_no ?? ""}`;
+      const bucket = out.get(key) ?? { key, lines: [] };
+      bucket.lines.push(line);
+      out.set(key, bucket);
+    }
+    return [...out.values()];
+  })();
+  const grouped = groups.length < lines.length;
+  const [bySerial, setBySerial] = useState(false);
+  const expanded = bySerial || !grouped;
+
+  const sentOf = (rows: typeof lines) => rows.reduce((t, l) => t + num(l.quantity), 0);
+  const receivedOf = (rows: typeof lines) =>
+    rows.reduce((t, l) => t + (delivered[l.id] ?? num(l.quantity)), 0);
+
+  /** Spread a group's received count back over its lines, filling each in turn.
+   *  Whole units, in packing-list order — the only defensible guess when the receiver
+   *  gave a count and not a list. Marking specific units is what the serial view is
+   *  for, and it overwrites this. */
+  const spread = (rows: typeof lines, total: number) =>
+    setDelivered((d) => {
+      const next = { ...d };
+      let left = total;
+      for (const line of rows) {
+        const take = Math.min(left, num(line.quantity));
+        next[line.id] = take;
+        left -= take;
+      }
+      return next;
+    });
+
+  type Group = { key: string; lines: DispatchItem[] };
+
+  const groupColumns: LineColumn<Group>[] = [
+    {
+      key: "item",
+      header: "Item",
+      render: (g) => {
+        const first = g.lines[0];
+        return (
+          <div className="min-w-0">
+            <div className="truncate font-mono text-xs font-semibold text-ink">{first.item_code ?? "—"}</div>
+            <div className="truncate text-xs text-muted">
+              {first.item_name ?? "—"}
+              {first.batch_no ? ` · ${first.batch_no}` : ""}
+              {g.lines.length > 1 ? ` · ${g.lines.length} serials` : ""}
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      key: "sent",
+      header: "Sent",
+      numeric: true,
+      width: "w-24",
+      render: (g) => (
+        <span className="tabular text-sm text-ink">
+          {fmtQty(sentOf(g.lines))} {g.lines[0].uom_code ?? ""}
+        </span>
+      ),
+    },
+    {
+      key: "delivered",
+      header: "Received",
+      numeric: true,
+      width: "w-28",
+      render: (g) => (
+        <QtyInput
+          ariaLabel={`Received quantity for ${g.lines[0].item_code ?? g.lines[0].item_id}`}
+          value={receivedOf(g.lines)}
+          max={sentOf(g.lines)}
+          disabled={done}
+          onChange={(v) => spread(g.lines, v)}
+        />
+      ),
+    },
+    {
+      key: "gap",
+      header: "Short",
+      numeric: true,
+      width: "w-24",
+      render: (g) => {
+        const gap = sentOf(g.lines) - receivedOf(g.lines);
+        return <span className={`tabular ${gap > 0 ? "font-semibold text-bad" : "text-muted"}`}>{fmtQty(gap)}</span>;
+      },
+    },
+    {
+      key: "serial",
+      header: "Serial",
+      hideOnNarrow: true,
+      render: (g) => (
+        <span className="font-mono text-xs text-muted">
+          {g.lines.length === 1
+            ? g.lines[0].serial_no ?? "—"
+            : `${g.lines[0].serial_no ?? "—"} + ${g.lines.length - 1} more`}
+        </span>
+      ),
+    },
+  ];
 
   const columns: LineColumn<DispatchItem>[] = [
     {
@@ -263,23 +383,55 @@ export default function AcknowledgeDelivery() {
           ) : null}
 
           <Section title="What arrived" hint="Enter what was actually counted, not what was sent.">
-            <LinesEditor
-              rows={lines}
-              columns={columns}
-              keyOf={(l) => l.id}
-              rowTone={(l) =>
-                (delivered[l.id] ?? num(l.quantity)) < num(l.quantity) ? "bg-bad-bg/40" : undefined
-              }
-              empty="This consignment has no lines."
-              footer={
-                <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
-                  <span className="text-muted">{lines.length} lines</span>
-                  <span className={shortLines.length > 0 ? "text-bad" : "text-ok"}>
-                    {shortLines.length > 0 ? `${shortLines.length} short` : "All complete"}
-                  </span>
-                </div>
-              }
-            />
+            {grouped && (
+              <div className="mb-3 flex items-center justify-between gap-3 text-sm">
+                <span className="text-muted">
+                  {groups.length} {groups.length === 1 ? "item" : "items"} · {lines.length} units
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setBySerial((v) => !v)}
+                  className="min-h-[44px] rounded-lg px-2 font-semibold text-brand outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand/60"
+                >
+                  {expanded ? "Group by item" : "Count each serial"}
+                </button>
+              </div>
+            )}
+            {expanded ? (
+              <LinesEditor
+                rows={lines}
+                columns={columns}
+                keyOf={(l) => l.id}
+                rowTone={(l) =>
+                  (delivered[l.id] ?? num(l.quantity)) < num(l.quantity) ? "bg-bad-bg/40" : undefined
+                }
+                empty="This consignment has no lines."
+                footer={
+                  <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
+                    <span className="text-muted">{lines.length} lines</span>
+                    <span className={shortLines.length > 0 ? "text-bad" : "text-ok"}>
+                      {shortLines.length > 0 ? `${shortLines.length} short` : "All complete"}
+                    </span>
+                  </div>
+                }
+              />
+            ) : (
+              <LinesEditor
+                rows={groups}
+                columns={groupColumns}
+                keyOf={(g) => g.key}
+                rowTone={(g) => (receivedOf(g.lines) < sentOf(g.lines) ? "bg-bad-bg/40" : undefined)}
+                empty="This consignment has no lines."
+                footer={
+                  <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
+                    <span className="text-muted">{groups.length} items · {lines.length} units</span>
+                    <span className={shortLines.length > 0 ? "text-bad" : "text-ok"}>
+                      {shortLines.length > 0 ? `${shortLines.length} short` : "All complete"}
+                    </span>
+                  </div>
+                }
+              />
+            )}
           </Section>
 
           {!done && (
