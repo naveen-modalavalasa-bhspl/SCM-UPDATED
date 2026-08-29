@@ -38,6 +38,8 @@ interface IndentFilterBarProps {
   showStatus?: boolean;
   showPriority?: boolean;
   showRegion?: boolean;
+  /** The rail calls the region filter something else on screens whose column says so. */
+  regionFilterLabel?: string;
   showTransaction?: boolean;
   showMovement?: boolean;
   showItem?: boolean;
@@ -592,6 +594,7 @@ export function IndentFilterBar({
   // Only the screens that filter over indents themselves: notifications read
   // from wf_actions, which carries no region.
   showRegion = mode === "indents" || mode === "activity",
+  regionFilterLabel = "Region",
   showTransaction = mode === "activity",
   showMovement = false,
   showItem = mode === "activity",
@@ -1006,7 +1009,7 @@ export function IndentFilterBar({
         {showRegion && (
           <MultiSelectMenu
             idPrefix="region"
-            label="Region"
+            label={regionFilterLabel}
             icon={<MapPin className="h-3.5 w-3.5" />}
             isOpen={activeMenu === "region"}
             onOpenChange={(open) => setActiveMenu(open ? "region" : null)}
@@ -1153,7 +1156,7 @@ export function IndentFilterBar({
           {selectedPriorities.length > 0 && <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => selectedPriorities.forEach(togglePriority)}>Priority: {joinLabel(selectedPriorities, INDENT_PRIORITY_OPTIONS)}</Chip>}
           {showRegion && includeUnassignedRegion && (
             <Chip size="sm" variant="flat" classNames={CHIP_CLASSNAMES} onClose={() => setIncludeUnassignedRegion(false)}>
-              Region: {UNASSIGNED_REGION_LABEL}
+              {regionFilterLabel}: {UNASSIGNED_REGION_LABEL}
             </Chip>
           )}
           {showRegion && selectedRegions.length > 0 && (
@@ -1161,7 +1164,7 @@ export function IndentFilterBar({
               {/* The id is the fallback: a region can be filtered from a shared URL
                   before the options list has arrived, and dropping the chip then
                   would leave an invisible filter narrowing the results. */}
-              Region: {selectedRegions
+              {regionFilterLabel}: {selectedRegions
                 .map((id) => regionNameById.get(id) ?? `#${id}`)
                 .join(", ")}
             </Chip>

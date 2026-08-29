@@ -26,6 +26,7 @@ interface IndentModuleHeaderProps {
   showStatus?: boolean;
   showPriority?: boolean;
   showRegion?: boolean;
+  regionFilterLabel?: string;
   showTransaction?: boolean;
   showMovement?: boolean;
   showItem?: boolean;
@@ -50,6 +51,7 @@ export function IndentModuleHeader({
   showStatus,
   showPriority,
   showRegion,
+  regionFilterLabel,
   showTransaction,
   showMovement,
   showItem,
@@ -88,6 +90,7 @@ export function IndentModuleHeader({
           showStatus={showStatus}
           showPriority={showPriority}
           showRegion={showRegion}
+          regionFilterLabel={regionFilterLabel}
           showTransaction={showTransaction}
           showMovement={showMovement}
           showItem={showItem}

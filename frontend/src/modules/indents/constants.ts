@@ -108,16 +108,6 @@ export const INDENT_REQUEST_STATUS_FILTER_OPTIONS: { value: string; label: strin
   { value: INDENT_STATUS.CLOSED, label: "Fulfilled" },
 ];
 
-export const INDENT_ACTIVITY_EVENT_FILTER_OPTIONS: { value: string; label: string }[] = [
-  { value: "RECEIPT_ACKNOWLEDGED", label: "Receipt acknowledged" },
-  { value: "MATERIAL_DISPATCHED", label: "Material dispatched" },
-  { value: "MATERIAL_ISSUED", label: "Material issued" },
-  { value: "STOCK_ALLOCATED", label: "Stock allocated" },
-  { value: "APPROVAL_COMPLETED", label: "Approval completed" },
-  { value: "REQUEST_SUBMITTED", label: "Request submitted" },
-  { value: "REQUEST_CREATED", label: "Request created" },
-];
-
 const groupStatuses = (values: readonly string[]) =>
   INDENT_STATUS_OPTIONS.filter((option) => values.includes(option.value));
 
@@ -181,3 +171,35 @@ export const INDENT_ACTIVITY_TRANSACTION_OPTIONS: { value: string; label: string
   { value: "BOOKMARK_ADDED", label: "Bookmark added" },
   { value: "BOOKMARK_REMOVED", label: "Bookmark removed" },
 ];
+
+/* The Event filter on the activity ledger offers EVERY type the EVENT column can
+   show — a filter narrower than the column silently hides rows a desk is looking
+   for. It is derived from the list above rather than kept as a second copy, which
+   is how rejected, returned, auto-routed, procurement and the bookmark events went
+   missing from it; anything added there is filterable the moment the ledger emits
+   it. */
+const ACTIVITY_EVENT_FILTER_ORDER: readonly string[] = [
+  "RECEIPT_ACKNOWLEDGED",
+  "MATERIAL_DISPATCHED",
+  "MATERIAL_ISSUED",
+  "PROCUREMENT_REQUEST_CREATED",
+  "STOCK_ALLOCATED",
+  "APPROVAL_COMPLETED",
+  "REQUEST_RETURNED",
+  "REQUEST_REJECTED",
+  "APPROVAL_ROUTED_AUTOMATICALLY",
+  "REQUEST_SUBMITTED",
+  "REQUEST_CREATED",
+  "BOOKMARK_ADDED",
+  "BOOKMARK_REMOVED",
+];
+
+/** Newest-first, the order the ledger itself reads. An unranked type sorts last. */
+const activityEventRank = (value: string) => {
+  const index = ACTIVITY_EVENT_FILTER_ORDER.indexOf(value);
+  return index === -1 ? ACTIVITY_EVENT_FILTER_ORDER.length : index;
+};
+
+export const INDENT_ACTIVITY_EVENT_FILTER_OPTIONS: { value: string; label: string }[] =
+  [...INDENT_ACTIVITY_TRANSACTION_OPTIONS]
+    .sort((a, b) => activityEventRank(a.value) - activityEventRank(b.value));

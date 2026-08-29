@@ -232,6 +232,7 @@ function IndentListContent({
         separateDateFilters
         searchPlaceholder="Search by indent no., requester, department or status..."
         showRegion
+        regionFilterLabel="Department"
       />
 
       {error && <p className="mb-4 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}

@@ -36,17 +36,24 @@ const EXPECTED_REQUEST_STATUS_FILTERS = [
 ] as const;
 
 // The journey read newest-first, which is the order the filter offers them in. The
-// outward leg — issued, dispatched, acknowledged — joined the ledger when the indent
-// stopped ending at allocation, so a request can now be asked what actually reached
-// the site. Mirrors `INDENT_ACTIVITY_EVENT_FILTER_OPTIONS` exactly.
+// filter carries EVERY event type the ledger's EVENT column can show — rejected,
+// returned, auto-routed, procurement and the bookmarks were missing from it, so a
+// desk could read those rows but never narrow to them.
+// Mirrors `INDENT_ACTIVITY_EVENT_FILTER_OPTIONS` exactly.
 const EXPECTED_ACTIVITY_EVENT_FILTERS = [
   ["Receipt acknowledged", "RECEIPT_ACKNOWLEDGED"],
   ["Material dispatched", "MATERIAL_DISPATCHED"],
   ["Material issued", "MATERIAL_ISSUED"],
+  ["Procurement request created", "PROCUREMENT_REQUEST_CREATED"],
   ["Stock allocated", "STOCK_ALLOCATED"],
   ["Approval completed", "APPROVAL_COMPLETED"],
+  ["Request returned", "REQUEST_RETURNED"],
+  ["Request rejected", "REQUEST_REJECTED"],
+  ["Approval routed automatically", "APPROVAL_ROUTED_AUTOMATICALLY"],
   ["Request submitted", "REQUEST_SUBMITTED"],
   ["Request created", "REQUEST_CREATED"],
+  ["Bookmark added", "BOOKMARK_ADDED"],
+  ["Bookmark removed", "BOOKMARK_REMOVED"],
 ] as const;
 
 class ResizeObserverMock implements ResizeObserver {
@@ -584,7 +591,7 @@ describe("indent UI shell", () => {
       "/indents/dashboard",
       () => {
         expect(indentApi.stats).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt" }), expect.anything());
-        expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", size: 6 }), expect.anything());
+        expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: "Bolt", size: 8 }), expect.anything());
       },
     ],
     [
@@ -620,7 +627,7 @@ describe("indent UI shell", () => {
     await waitFor(assertSearch);
   });
 
-  it("shows only the latest five recent indents in the existing API order", async () => {
+  it("shows only the latest seven recent indents in the existing API order", async () => {
     const indentNumbers = [
       "IND/RECENT/005",
       "IND/RECENT/002",
@@ -628,6 +635,8 @@ describe("indent UI shell", () => {
       "IND/RECENT/001",
       "IND/RECENT/006",
       "IND/RECENT/003",
+      "IND/RECENT/007",
+      "IND/RECENT/004",
     ];
     const recentIndents = indentNumbers.map((indentNo, index) => ({
       id: 100 + index,
@@ -644,17 +653,17 @@ describe("indent UI shell", () => {
       items: recentIndents,
       total: recentIndents.length,
       page: 1,
-      size: 6,
+      size: 8,
     });
 
     renderWithProviders(<IndentDashboardPage />, "/indents/dashboard");
 
-    await screen.findByText(recentIndents[4].indent_no);
+    await screen.findByText(recentIndents[6].indent_no);
     expect(screen.getAllByText(/^IND\/RECENT\//).map((node) => node.textContent)).toEqual(
-      recentIndents.slice(0, 5).map((indent) => indent.indent_no),
+      recentIndents.slice(0, 7).map((indent) => indent.indent_no),
     );
-    expect(screen.queryByText(recentIndents[5].indent_no)).not.toBeInTheDocument();
-    expect(indentApi.list).toHaveBeenCalledWith(expect.objectContaining({ size: 6 }), expect.anything());
+    expect(screen.queryByText(recentIndents[7].indent_no)).not.toBeInTheDocument();
+    expect(indentApi.list).toHaveBeenCalledWith(expect.objectContaining({ size: 8 }), expect.anything());
   });
 
   it("shows View all in the Recent Indents header and navigates to All Requests", async () => {
@@ -1067,7 +1076,7 @@ describe("indent UI shell", () => {
       fireEvent.click(within(menu).getByText(label));
       await waitFor(() => {
         expect(indentApi.stats).toHaveBeenLastCalledWith(expect.objectContaining({ status: [value] }), expect.anything());
-        expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ status: [value], size: 6 }), expect.anything());
+        expect(indentApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ status: [value], size: 8 }), expect.anything());
       });
       fireEvent.click(within(menu).getByText(label));
       await waitFor(() => expect(screen.getByRole("button", { name: "Status" })).toBeInTheDocument());
@@ -1316,7 +1325,7 @@ describe("indent UI shell", () => {
     expect(screen.getByText("Page 1 of 3 (45 total)")).toBeInTheDocument();
   });
 
-  it("shows exactly the seven Activity ledger event options and maps each label", async () => {
+  it("offers every Activity ledger event type as a filter and maps each label", async () => {
     renderWithProviders(<IndentReportsPage />, "/indents/reports");
 
     expect(await screen.findByRole("searchbox", { name: "Search indents" })).toHaveAttribute(
@@ -1335,6 +1344,11 @@ describe("indent UI shell", () => {
 
     for (const [label, eventType] of EXPECTED_ACTIVITY_EVENT_FILTERS) {
       const callsBeforeSelection = vi.mocked(indentApi.activity).mock.calls.length;
+      // The Event filter is single-select, so each pick closes the menu behind it.
+      if (screen.queryByRole("menu") === null) {
+        fireEvent.click(screen.getByRole("button", { name: /^Event/ }));
+        await screen.findByRole("menu");
+      }
       fireEvent.click(within(screen.getByRole("menu")).getByText(label));
       await waitFor(() => expect(indentApi.activity).toHaveBeenCalledTimes(callsBeforeSelection + 1));
       expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -1342,7 +1356,8 @@ describe("indent UI shell", () => {
         page: 1,
       }), expect.anything());
       expect(screen.getByText(`Event: ${label}`)).toBeInTheDocument();
-      expect(screen.getByRole("menu").querySelectorAll(".lucide-check")).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: /^Event/ }));
+      expect((await screen.findByRole("menu")).querySelectorAll(".lucide-check")).toHaveLength(1);
     }
   });
 
@@ -2422,7 +2437,7 @@ describe("indent UI shell", () => {
       required_by_from: expect.any(String),
       required_by_to: expect.any(String),
     }));
-    expect(listParams).toEqual(expect.objectContaining({ ...statsParams, size: 6 }));
+    expect(listParams).toEqual(expect.objectContaining({ ...statsParams, size: 8 }));
     expect(screen.getByText("Required by: Next 7 days")).toBeInTheDocument();
   });
 
@@ -3185,7 +3200,7 @@ describe("indent UI shell", () => {
   it("offers the HCM locations plus an explicit no-location choice", async () => {
     renderAllRequestsFlow("/indents");
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Department/ }));
 
     // The menu is portalled out of the filter bar, so it is looked up on screen —
     // the same way the sibling test picks a region to filter by.
@@ -3198,7 +3213,7 @@ describe("indent UI shell", () => {
   it("puts a chosen region into the URL so the filtered list can be shared", async () => {
     renderAllRequestsFlow("/indents");
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Department/ }));
     fireEvent.click(await screen.findByText("104-MMU-AP-Markapur"));
 
     await waitFor(() => expect(screen.getByLabelText("location"))
@@ -3213,7 +3228,7 @@ describe("indent UI shell", () => {
     expect(params).toMatchObject({ region_id: [654] });
   });
 
-  it("shows the Region of each activity ledger event", async () => {
+  it("shows the Department of each activity ledger event, and no Region column", async () => {
     vi.mocked(indentApi.activity).mockResolvedValueOnce({
       items: [{
         event_id: "indent:42",
@@ -3238,8 +3253,10 @@ describe("indent UI shell", () => {
 
     renderWithProviders(<IndentReportsPage />, "/indents/reports");
 
-    expect(await screen.findByRole("columnheader", { name: "REGION" })).toBeInTheDocument();
-    expect(await screen.findByText("104-MMU-AP-Hanumanthunipadu")).toBeInTheDocument();
+    expect(await screen.findByRole("columnheader", { name: "DEPARTMENT" })).toBeInTheDocument();
+    // Twice: ResponsiveList keeps the desktop table and the mobile card both mounted.
+    expect(await screen.findAllByText("Networking department")).toHaveLength(2);
+    expect(screen.queryByRole("columnheader", { name: "REGION" })).not.toBeInTheDocument();
   });
 
   it("sends the region filter to the statistics request", async () => {
@@ -3247,7 +3264,7 @@ describe("indent UI shell", () => {
 
     await waitFor(() => expect(indentApi.stats).toHaveBeenCalled());
     vi.mocked(indentApi.stats).mockClear();
-    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Department/ }));
     fireEvent.click(await screen.findByText("104-MMU-AP-Markapur"));
 
     await waitFor(() => {
