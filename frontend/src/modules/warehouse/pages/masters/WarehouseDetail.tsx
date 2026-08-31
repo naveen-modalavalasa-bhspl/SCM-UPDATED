@@ -420,25 +420,36 @@ export default function WarehouseDetail() {
                   </Field>
                 )}
                 {["BIN", "COLD_STORAGE_BIN"].includes(draft.bin_type) && (
-                  <>
-                    <Field label="Barcode">
-                      <Input
-                        value={draft.barcode ?? ""}
-                        onChange={(e) => setDraft({ ...draft, barcode: e.target.value })}
-                      />
-                    </Field>
-                    <Field label="Volume capacity">
-                      <Input
-                        type="number"
-                        value={draft.capacity_volume == null ? "" : String(draft.capacity_volume)}
-                        onChange={(e) => setDraft({
-                          ...draft,
-                          capacity_volume: e.target.value === "" ? null : Number(e.target.value),
-                        })}
-                      />
-                    </Field>
-                  </>
+                  <Field label="Barcode">
+                    <Input
+                      value={draft.barcode ?? ""}
+                      onChange={(e) => setDraft({ ...draft, barcode: e.target.value })}
+                    />
+                  </Field>
                 )}
+                {/* On any level, not just a bin. Stock only ever sits in a bin, but a
+                  * rack or a zone is a storage area with a size of its own, and the
+                  * warehouse rolls the bins beneath it up into that figure — so a
+                  * capacity here is a real limit, not a decoration. */}
+                <Field
+                  label="Volume capacity (m³)"
+                  hint={
+                    ["BIN", "COLD_STORAGE_BIN"].includes(draft.bin_type)
+                      ? "Cubic metres this holds. Put-away and material issue report how much of it is used. Blank for no limit."
+                      : "Cubic metres this whole area holds, counting everything stored under it. Blank for no limit."
+                  }
+                >
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    value={draft.capacity_volume == null ? "" : String(draft.capacity_volume)}
+                    onChange={(e) => setDraft({
+                      ...draft,
+                      capacity_volume: e.target.value === "" ? null : Number(e.target.value),
+                    })}
+                  />
+                </Field>
                 <label className="flex items-center gap-3">
                   <Switch
                     isSelected={!!draft.temperature_controlled}

@@ -34,6 +34,7 @@ from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation as stock_allocation
 from app.modules.inventory import locations as stock_locations
 from app.modules.inventory.service import move_stock, move_stock_out, take_units
+from app.modules.warehouse import capacity
 from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse.enums import (
@@ -462,8 +463,17 @@ async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
             "min_temperature_celsius": b.min_temperature_celsius,
             "max_temperature_celsius": b.max_temperature_celsius,
             "is_pickable": b.is_pickable, "is_active": b.is_active,
-            "occupied_qty": None, "children": [],
+            "occupied_qty": None,
+            # Filled by the roll-up below.
+            "occupied_volume": None, "free_volume": None,
+            "utilisation_pct": None, "capacity_status": None, "is_partial": None,
+            "children": [],
         }
+
+    # How full each of them is, in two queries for the whole warehouse. Stock only ever
+    # sits in a bin, so a rack's figure is the sum of the bins under it — rolled up
+    # after the tree is threaded rather than queried per node.
+    room = await capacity.bin_occupancy_map(db, rows)
 
     def describe(node: dict, depth: int, prefix: str) -> None:
         node["level"] = depth
@@ -477,8 +487,30 @@ async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
         # A location whose parent is missing (or points outside this warehouse) is shown
         # at the root rather than dropped — invisible data is worse than misplaced data.
         (parent["children"] if parent else roots).append(node)
+    def roll_up(node: dict) -> tuple[Decimal, bool]:
+        """Post-order: a node holds its own stock plus everything beneath it."""
+        own = room.get(node["id"], {})
+        total = _d(own.get("occupied_volume"))
+        partial = bool(own.get("is_partial"))
+        for child in node["children"]:
+            child_total, child_partial = roll_up(child)
+            total += child_total
+            partial = partial or child_partial
+
+        cap = _d(node["capacity_volume"])
+        cap = cap if cap > ZERO else None
+        node["occupied_volume"] = total
+        node["free_volume"] = None if cap is None else cap - total
+        node["utilisation_pct"] = (
+            None if cap is None else float(round(total * 100 / cap, 2))
+        )
+        node["capacity_status"] = capacity.fill_status(cap, total)
+        node["is_partial"] = partial
+        return total, partial
+
     for root in roots:
         describe(root, 1, "")
+        roll_up(root)
     return roots
 
 
@@ -570,6 +602,25 @@ async def list_locations(db: AsyncSession, warehouse_id: int) -> list[m.Warehous
         .where(m.WarehouseLocation.warehouse_id == warehouse_id)
         .order_by(m.WarehouseLocation.code)
     )).scalars().all()
+
+
+async def location_occupancy(db: AsyncSession, location_id: int, *,
+                             item_id: int | None = None, qty=None,
+                             direction: str = "IN") -> dict:
+    """How full one location is, and what a proposed move would do to it.
+
+    The arithmetic and the wording both live in `capacity` (a location's occupancy is
+    read, never stored — the module docstring says why). This is the service's door on
+    to it, so the router stays three lines like every other.
+    """
+    return await capacity.location_occupancy(
+        db, location_id, item_id=item_id, qty=qty, direction=direction)
+
+
+async def occupancy_preview(db: AsyncSession, data: s.OccupancyPreviewIn) -> list[dict]:
+    """One occupancy row per location a draft touches, netted over its lines."""
+    return await capacity.occupancy_preview(
+        db, [mv.model_dump() for mv in data.moves])
 
 
 async def list_storage_types(db: AsyncSession) -> list[m.StorageType]:
@@ -2965,11 +3016,12 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
     item = await db.get(Item, task.item_id)
     wh = await db.get(Warehouse, task.warehouse_id)
     batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
-    receipt = await get_receipt(db, task.grn_id) if task.grn_id else None
+    receipt = await db.get(m.Receipt, task.grn_id) if task.grn_id else None
     receipt_item = (
         await db.get(m.ReceiptItem, task.grn_item_id)
         if task.grn_item_id else None
     )
+    each_volume = capacity.unit_volume(item)
     return {
         "id": task.id, "putaway_no": task.putaway_no,
         "grn_id": task.grn_id, "grn_no": receipt.grn_no if receipt else None,
@@ -2986,6 +3038,13 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
             )
         ),
         "qty": task.qty,
+        # What this line will take up on a shelf. `_decorate_putaway` already has the
+        # item in hand, so both are free here; None means the item has never been
+        # measured, which the screen says rather than guessing at zero.
+        "unit_volume_cbm": each_volume,
+        "line_volume_cbm": (
+            None if each_volume is None else each_volume * _d(task.qty)
+        ),
         "suggested_bin_id": task.suggested_bin_id,
         "suggested_bin_code": await _bin_code(db, task.suggested_bin_id),
         "actual_bin_id": task.actual_bin_id,
@@ -3202,6 +3261,15 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
         raise ValidationError(
             f"This task is for {task.qty}; {qty} is more than was received.")
 
+    # Capacity is advice, NEVER a gate — `modules/warehouse/capacity.py` says why at
+    # length. The goods are standing on the floor whether or not the master data says
+    # they fit, and refusing the press only means they end up in a bin nobody wrote
+    # down. So: work out what this does to the shelf, carry on regardless, and record
+    # what was known at the moment it was pressed. Read BEFORE `move_stock`, because
+    # afterwards the stock is in the bin and "what did it look like before" is gone.
+    room = await capacity.location_occupancy(
+        db, target.id, item_id=task.item_id, qty=qty, direction=capacity.IN)
+
     receipt = await get_receipt(db, task.grn_id) if task.grn_id else None
     project_id = (receipt.project_id if receipt else None) or 0
     ref_no = task.putaway_no or f"PUT-{task.id}"
@@ -3266,6 +3334,15 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     task.scanned_by = getattr(user, "id", None)
     task.scanned_at = utcnow()
     task.remarks = data.remarks or task.remarks
+    if room["status"] == capacity.STATUS_OVER:
+        # On the task itself, not only in the audit row: the overflow is a fact about
+        # where this stock is standing, and the next person to open the task should
+        # read it without going to look for an audit trail.
+        # Plain "m3" rather than the superscript: this string is written to a column,
+        # and the API's own wording (capacity._describe) is the place for typography.
+        note = (f"Placed over capacity: {target.code} is {room['over_by']} m3 beyond "
+                f"its stated {room['capacity_volume']} m3.")
+        task.remarks = f"{task.remarks}. {note}" if task.remarks else note
     remainder = _d(task.qty) - qty
     task.status = PutawayStatus.COMPLETED.value
     task.completed_at = utcnow()
@@ -3295,7 +3372,15 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                       before={"status": PutawayStatus.IN_PROGRESS.value,
                               "suggested_bin_id": task.suggested_bin_id},
                       after={"status": task.status, "actual_bin_id": target.id,
-                             "qty": str(qty)})
+                             "qty": str(qty),
+                             # What the shelf was said to hold at the moment of the
+                             # press. Occupancy is recomputed from stock on every read,
+                             # so without this there is no way back to what the
+                             # storekeeper was actually shown.
+                             "capacity_status": room["status"],
+                             **{key: (None if room[key] is None else str(room[key]))
+                                for key in ("capacity_volume", "occupied_volume",
+                                            "move_volume", "over_by")}})
     if receipt is not None:
         open_tasks = await db.scalar(
             select(func.count()).select_from(m.PutawayTask).where(
@@ -3314,7 +3399,12 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             receipt.posted_at = utcnow()
             await _sync_po_receipt_status(db, receipt.po_id)
     await db.commit()
-    return await get_putaway(db, task_id)
+    placed = await get_putaway(db, task_id)
+    # The picture as it was when the press landed, so the screen can announce an
+    # overflow that has already happened. Recomputing it now would include the stock
+    # this putaway just added and answer a different question.
+    placed["capacity"] = room
+    return placed
 
 
 async def _place_serials(
@@ -3531,6 +3621,15 @@ async def _place_unit_codes(
     # code, so with no code there is nothing to record.
     if not codeformat.is_code_tracked(item, config):
         return
+
+    if units > 1000:
+        label = "Asset" if is_asset else "Consumable"
+        raise ValidationError(
+            f"Cannot generate individual {label} tracking codes for {int(units)} units "
+            f"of {item.code} at once. Please turn off '{label} Tracking' for this item "
+            f"under Masters > Items > Tracking, or reduce the putaway quantity."
+        )
+
     rows: list[m.SerialNumber] = []
     for _ in range(int(units)):
         row = m.SerialNumber(
@@ -4358,9 +4457,13 @@ async def list_stock_movements(db: AsyncSession, params: PageParams, user=None) 
     return page
 
 
-async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list[Bin]:
+async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list[dict]:
     """Bins worth offering for a task, best first: the ones already holding this item,
-    then any active pickable bin."""
+    then any active pickable bin.
+
+    Each one carries how much room it has left, so the chip a storekeeper taps says
+    what it is going to cost them. Dicts rather than ORM rows because free space is
+    computed, not a column."""
     from app.modules.inventory.models import Stock
 
     task = await _get(db, m.PutawayTask, task_id, "Putaway task")
@@ -4387,7 +4490,57 @@ async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list
                 Bin.bin_type.in_(m.BIN_TYPES), Bin.id.notin_(held_ids or [0]))
             .order_by(Bin.code).limit(remaining)
         )).scalars().all()
-    return [*preferred, *others]
+    rows = [*preferred, *others]
+
+    # How much room each one has left, in two queries for the whole list rather than a
+    # request per chip. "The bin that already holds this item" is only the best
+    # suggestion while it still has space, and until this the screen could not say.
+    room = await capacity.bin_occupancy_map(db, rows)
+
+    # Re-sort so bins with usable space come first. The preferred list is already the
+    # strongest signal, but a "preferred" bin that is full should not sit above an empty
+    # one: a storekeeper trusting the order would keep walking toward a full shelf.
+    # Sort key: OVER / FULL bins last, then by free_volume descending (more room = better).
+    _STATUS_RANK = {
+        capacity.STATUS_OK: 0, capacity.STATUS_TIGHT: 1,
+        capacity.STATUS_NO_CAPACITY: 2, capacity.STATUS_UNMEASURED: 2,
+        capacity.STATUS_FULL: 3, capacity.STATUS_OVER: 4,
+    }
+    from decimal import Decimal as _Dec
+    rows = sorted(
+        rows,
+        key=lambda b: (
+            _STATUS_RANK.get(room[b.id]["status"], 2),
+            -float(room[b.id]["free_volume"] or _Dec("0")),
+        ),
+    )
+
+    return [
+        {
+            "id": b.id, "warehouse_id": b.warehouse_id, "code": b.code, "name": b.name,
+            "description": b.description, "parent_id": b.parent_id,
+            "bin_type": b.bin_type, "storage_type_id": b.storage_type_id,
+            "barcode": b.barcode, "floor_level": b.floor_level,
+            "shelf_level": b.shelf_level, "path": None, "level": None,
+            "capacity_qty": b.capacity_qty, "capacity_volume": b.capacity_volume,
+            "max_weight_capacity": b.max_weight_capacity, "height_cm": b.height_cm,
+            "aisle_width_meters": b.aisle_width_meters,
+            "temperature_controlled": b.temperature_controlled,
+            "humidity_percentage": b.humidity_percentage,
+            "target_temperature_celsius": b.target_temperature_celsius,
+            "min_temperature_celsius": b.min_temperature_celsius,
+            "max_temperature_celsius": b.max_temperature_celsius,
+            "is_pickable": b.is_pickable, "is_active": b.is_active,
+            "occupied_qty": None,
+            "occupied_volume": room[b.id]["occupied_volume"],
+            "free_volume": room[b.id]["free_volume"],
+            "utilisation_pct": room[b.id]["utilisation_pct"],
+            "capacity_status": room[b.id]["status"],
+            "is_partial": room[b.id]["is_partial"],
+            "children": [],
+        }
+        for b in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -10644,24 +10797,56 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
                 current = parent
             return "/".join(reversed(parts))
 
+        # Volume occupancy for the whole set in two queries — the same pattern
+        # `bin_occupancy_map` uses for the putaway chips.
+        room = await capacity.bin_occupancy_map(db, list(bins))
+
         rows = []
         for b in bins:
             held = _d(await db.scalar(
                 select(func.coalesce(func.sum(Stock.total_qty), 0)).where(Stock.bin_id == b.id)))
-            capacity = _d(b.capacity_qty)
+            cap_qty = _d(b.capacity_qty)
+            occ = room.get(b.id, {})
+            cap_vol = occ.get("capacity_volume")    # Decimal | None
+            occ_vol = occ.get("occupied_volume") or _d(0)
+            free_vol = occ.get("free_volume")       # Decimal | None
+            vol_pct = occ.get("utilisation_pct")    # float | None
+            vol_status = occ.get("status", capacity.STATUS_NO_CAPACITY)
             rows.append({
-                "code": b.code, "name": b.name, "path": full_path(b.id),
-                "capacity_qty": float(capacity), "occupied_qty": float(held),
-                "utilisation": float(round(held * 100 / capacity, 2)) if capacity else 0.0,
+                "code": b.code,
+                "name": b.name,
+                "path": full_path(b.id),
+                # --- quantity dimension (existing, kept for backward compat) ---
+                "capacity_qty": float(cap_qty),
+                "occupied_qty": float(held),
+                "utilisation": float(round(held * 100 / cap_qty, 2)) if cap_qty else 0.0,
+                # --- volume dimension (new) ---
+                "capacity_volume": float(cap_vol) if cap_vol is not None else None,
+                "occupied_volume": float(occ_vol),
+                "free_volume": float(free_vol) if free_vol is not None else None,
+                "volume_utilisation_pct": float(round(vol_pct, 2)) if vol_pct is not None else None,
+                "volume_status": vol_status,
                 "is_pickable": "Yes" if b.is_pickable else "No",
             })
         return {
-            "columns": [_col("code", "Bin"), _col("name", "Name"), _col("path", "Path"),
-                        _col("capacity_qty", "Capacity", True),
-                        _col("occupied_qty", "Occupied", True),
-                        _col("utilisation", "Utilisation %", True),
-                        _col("is_pickable", "Pickable")],
-            "rows": rows, "total": len(rows),
+            "columns": [
+                _col("code", "Bin"),
+                _col("name", "Name"),
+                _col("path", "Path"),
+                # qty-based columns
+                _col("capacity_qty", "Cap. Qty", True),
+                _col("occupied_qty", "Occupied Qty", True),
+                _col("utilisation", "Qty Util %", True),
+                # volume-based columns
+                _col("capacity_volume", "Cap. Vol (m³)", True),
+                _col("occupied_volume", "Occupied Vol (m³)", True),
+                _col("free_volume", "Free Vol (m³)", True),
+                _col("volume_utilisation_pct", "Vol Util %", True),
+                _col("volume_status", "Vol Status"),
+                _col("is_pickable", "Pickable"),
+            ],
+            "rows": rows,
+            "total": len(rows),
         }
 
     if key == "batch-expiry":

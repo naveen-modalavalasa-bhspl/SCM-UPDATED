@@ -11,6 +11,7 @@ the seed is re-run. That is the correct failure mode — an ungranted permission
 the door rather than leaving it open.
 """
 from datetime import date
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -23,6 +24,7 @@ from app.core.pagination import Page, PageParams
 # warehouse evidence behind them (rule 5 forbids the join happening the other way).
 from app.modules.indents.schemas import AcknowledgementRow as IndentAcknowledgementRow
 from app.modules.indents.schemas import FulfilmentStep as IndentFulfilmentStep
+from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
 from app.platform.rbac.permissions import INDENT_VIEW
@@ -93,6 +95,36 @@ async def bin_tree(warehouse_id: int, db: AsyncSession = Depends(get_db),
 async def list_locations(warehouse_id: int, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_locations(db, warehouse_id)
+
+
+# Declared above `/bins/{bin_id}`-shaped routes for the usual reason: a path segment
+# that is not an int must be matched before the int one.
+@router.get("/locations/{location_id}/occupancy", response_model=s.LocationOccupancy)
+async def location_occupancy(location_id: int, item_id: int | None = None,
+                             qty: Decimal | None = None, direction: str = "IN",
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(STOCK_VIEW))):
+    """How full a storage location is, and what a proposed move would do to it.
+
+    One endpoint for both directions on purpose: putaway asks it with `direction=IN`
+    ("does this fit"), material issue with `direction=OUT` ("how much does this give
+    back"). Behind `stock.view` like the location tree beside it — reading how full a
+    shelf is is reading stock.
+    """
+    return await service.location_occupancy(db, location_id, item_id=item_id,
+                                            qty=qty, direction=direction)
+
+
+@router.post("/locations/occupancy-preview", response_model=list[s.LocationOccupancy])
+async def occupancy_preview(data: s.OccupancyPreviewIn,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(STOCK_VIEW))):
+    """The same answer for a whole draft, one row per location it touches.
+
+    POST because it carries the draft's lines, not because it writes anything — an
+    issue with twenty lines will not fit in a query string.
+    """
+    return await service.occupancy_preview(db, data)
 
 
 @router.post("/bins", response_model=s.BinRead, status_code=201)
@@ -786,6 +818,15 @@ async def serial_codes(payload: s.UnitCodeQuery, db: AsyncSession = Depends(get_
     The stock ledger names the units that MOVED and needs their codes; the codes live
     on this module's per-unit rows, which inventory may not read (rule 5)."""
     return {"items": await service.unit_codes(db, payload.codes, user=user)}
+
+
+@router.get("/stock-segregation/item-locations", response_model=list[s.ItemLocationsOut])
+async def item_locations(warehouse_id: int, item_id: int | None = None, location_id: int | None = None,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(STOCK_VIEW))):
+    """Every location holding stock in this warehouse, optionally filtered by item or location."""
+    return await inv_service.get_item_locations(
+        db, warehouse_id=warehouse_id, item_id=item_id, location_id=location_id, user=user)
 
 
 @router.get("/batches", response_model=Page[s.BatchRead])

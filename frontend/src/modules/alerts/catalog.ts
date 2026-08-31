@@ -309,6 +309,17 @@ const DEFINITIONS: AlertDef[] = [
     "{item} is now stored in {bin}.",
   ),
   alert(
+    // The stock IS in the bin — nothing was refused. Sticky because it is the only
+    // record the storekeeper sees of a shelf now over its stated capacity, and a
+    // message that vanishes after three seconds is a message nobody read.
+    "putaway.over_capacity", "warning", "Stored, but {bin} is over capacity",
+    "{item} is in {bin}. That puts it {over} m³ past the {capacity} m³ it is " +
+      "listed as holding — the placement is recorded on the task either way, so " +
+      "restack it or raise the location's capacity when you get a moment.",
+    undefined,
+    true,
+  ),
+  alert(
     "dispatch.gated_out", "success", "Dispatch gated out",
     "{number} has left the site.",
     "Track Dispatch",

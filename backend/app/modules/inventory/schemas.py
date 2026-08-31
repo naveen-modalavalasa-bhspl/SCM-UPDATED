@@ -588,7 +588,7 @@ class ItemAvailabilityOut(BaseModel):
     batches: list[BatchAvailabilityRow] = Field(default_factory=list)
 
 
-# ---------------- Ageing & Valuation Schemas ----------------
+# ---------------- Ageing & Valuation ------------------------
 
 class AgeingRow(BaseModel):
     stock_id: int

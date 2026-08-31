@@ -46,6 +46,16 @@ export interface MasterItem {
   storage_conditions?: string | null;
   requires_special_transport: boolean;
   transport_conditions?: string | null;
+  /**
+   * How much room one unit takes on a shelf. Either measure the three sides or state
+   * the figure — the warehouse prefers the figure when both are given. All optional:
+   * an item nobody has measured has NO volume rather than a volume of zero, which is
+   * the difference between "this bin has room" and "nobody has measured this yet".
+   */
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  unit_volume_cbm?: number | null;
   is_active: boolean;
 }
 

@@ -295,6 +295,19 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('doc_type', 'year', name='uq_doc_numbers')
     )
+    # sys_doc_series was a pre-Alembic table on the live server; on a fresh database
+    # it must be created here so subsequent migrations (a1b2c3d4e5f6+) can ALTER it.
+    op.create_table('sys_doc_series',
+    sa.Column('id', sa.BigInteger().with_variant(sa.Integer(), 'sqlite'), autoincrement=True, nullable=False),
+    sa.Column('doc_type', sa.String(length=30), nullable=False),
+    sa.Column('fiscal_year', sa.String(length=10), nullable=False),
+    sa.Column('prefix', sa.String(length=20), nullable=False),
+    sa.Column('pattern', sa.String(length=100), nullable=False),
+    sa.Column('last_number', sa.BigInteger(), nullable=False, server_default=sa.text('0')),
+    sa.Column('is_active', sa.Boolean(), nullable=False, server_default=sa.text('1')),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_sys_doc_series_doc_type'), 'sys_doc_series', ['doc_type'], unique=False)
     op.create_table('sys_hcm_sync_log',
     sa.Column('id', sa.BigInteger().with_variant(sa.Integer(), 'sqlite'), autoincrement=True, nullable=False),
     sa.Column('entity', sa.String(length=50), nullable=False),

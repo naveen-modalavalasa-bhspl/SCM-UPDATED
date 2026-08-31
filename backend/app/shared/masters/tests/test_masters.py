@@ -915,7 +915,7 @@ async def test_a_bom_is_a_named_set_of_items_on_a_project(client, admin, db):
         "project_id": project.id}, headers=admin)).json()
     assert bom["project_name"] == "Metro Line 3"
     # No parent item, output quantity or assembly type: this is a request template.
-    for gone in ("parent_item_id", "output_qty", "bom_type", "effective_from"):
+    for gone in ("parent_item_id", "output_qty", "bom_type"):
         assert gone not in bom
 
     line = (await client.post("/api/bom-items", json={

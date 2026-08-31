@@ -7,7 +7,8 @@ import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
-import { binOptions, confirmPutaway, getPutaway, startPutaway, suggestBins } from "../api";
+import { binOptions, confirmPutaway, getPutaway, locationOccupancy, startPutaway, suggestBins } from "../api";
+import { CapacityBadge, CapacityMeter, fmtVol, volume } from "../components/CapacityMeter";
 import { fmtDate, fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
 import { alerts } from "@/modules/alerts";
 import { usePointLabel } from "../usePointLabel";
@@ -49,6 +50,26 @@ export default function PutawayForm() {
     enabled: !!task && task.status !== "completed",
   });
 
+  /**
+   * What this putaway does to the chosen location. Keyed on the bin AND the quantity
+   * because both change the answer — a short putaway into a tight bin fits where the
+   * full one does not, and the storekeeper is entitled to see that before they press.
+   *
+   * `placeholderData` keeps the previous panel on screen while the next one loads, so
+   * typing in the quantity box does not make the meter flicker in and out.
+   */
+  const { data: room, isFetching: roomLoading } = useQuery({
+    queryKey: ["wh-location-occupancy", binId, qty, task?.item_id],
+    queryFn: () =>
+      locationOccupancy(Number(binId), {
+        item_id: task!.item_id,
+        qty: qty > 0 ? qty : undefined,
+        direction: "IN",
+      }),
+    enabled: !!task && binId !== "" && task.status !== "completed",
+    placeholderData: (previous) => previous,
+  });
+
   useEffect(() => {
     if (!task) return;
     setQty(Number(task.qty ?? 0));
@@ -71,11 +92,25 @@ export default function PutawayForm() {
         remarks: remarks || null,
         serial_numbers: serials,
       }),
-    onSuccess: () => {
-      void alerts.success("putaway.completed", {
-        item: task?.item_name ?? task?.item_code ?? "The item",
-        bin: task?.actual_bin_code ?? task?.suggested_bin_code ?? "the chosen bin",
-      });
+    onSuccess: (placed) => {
+      // The stock is in the bin either way — capacity never blocks a putaway. What
+      // changes is which of the two things we tell them, and the overflow one stays on
+      // screen until it is dismissed. Both codes come from the alert catalog.
+      const over = placed?.capacity?.status === "OVER";
+      const bin = placed?.actual_bin_code ?? task?.actual_bin_code
+        ?? task?.suggested_bin_code ?? "the chosen bin";
+      const item = task?.item_name ?? task?.item_code ?? "The item";
+      if (over) {
+        void alerts.warning("putaway.over_capacity", {
+          item,
+          bin,
+          // Trimmed the same way the meter trims them: 0.5, not 0.500000.
+          over: fmtVol(placed?.capacity?.over_by),
+          capacity: fmtVol(placed?.capacity?.capacity_volume),
+        });
+      } else {
+        void alerts.success("putaway.completed", { item, bin });
+      }
       invalidate();
       setConfirming(false);
       nav("/warehouse/putaway", { replace: true });
@@ -163,6 +198,14 @@ export default function PutawayForm() {
         <MetaRow label="Batch" value={task.batch_no} />
         <MetaRow label={task.is_asset ? "Warranty" : "Expiry"} value={fmtDate(task.expiry_date)} />
         <MetaRow label="Quantity" value={<span className="tabular">{fmtQty(task.qty)} {task.uom_code ?? ""}</span>} />
+        <MetaRow
+          label="Space needed"
+          value={
+            task.line_volume_cbm == null
+              ? "Not measured"
+              : <span className="tabular">{volume(task.line_volume_cbm)}</span>
+          }
+        />
         <MetaRow label="Directed" value={humanise(task.putaway_type)} />
         <MetaRow label="Assigned to" value={task.assigned_to_name} />
         <MetaRow label="Started" value={fmtDateTime(task.started_at)} />
@@ -242,6 +285,29 @@ export default function PutawayForm() {
             />
           </div>
 
+          {/* What this does to the shelf. Advice, never a gate: the goods are on the
+            * floor whether or not the master data says they fit, so a full location is
+            * announced loudly and the Confirm button stays live. */}
+          {binId !== "" && (
+            <CapacityMeter
+              className="mt-4"
+              data={room}
+              loading={roomLoading && !room}
+            />
+          )}
+
+          {/* An item nobody has measured cannot have a share of anything, and the meter
+            * says so — but it says it about the location. This says it about the item,
+            * beside the item, which is where the fix is. */}
+          {task.unit_volume_cbm == null && (
+            <div className="mt-3 rounded-lg border border-line bg-content2 px-3 py-2 text-xs text-muted">
+              {task.item_name ?? task.item_code} has no dimensions or unit volume on its
+              master record, so the space it takes cannot be worked out. Add them under
+              Masters &gt; Items and every location this item lands in starts reporting
+              its own fill.
+            </div>
+          )}
+
           {overriding && (
             <div className="mt-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-xs text-warn">
               This is not the suggested bin ({task.suggested_bin_code ?? "—"}). The override is recorded.
@@ -259,10 +325,30 @@ export default function PutawayForm() {
                     <Chip
                       size="sm"
                       variant={Number(binId) === b.id ? "solid" : "flat"}
-                      color={Number(binId) === b.id ? "primary" : "default"}
+                      color={
+                        Number(binId) === b.id
+                          ? "primary"
+                          : b.capacity_status === "FULL"
+                            ? "warning"
+                            : "default"
+                      }
                     >
-                      {b.code}
-                      {b.capacity_qty ? ` · cap ${fmtQty(b.capacity_qty)}` : ""}
+                      <span className="flex items-center gap-2">
+                        {b.code}
+                        {/* "The bin that already holds this item" is only the best
+                          * suggestion while it still has room, so each chip carries how
+                          * much it has left. */}
+                        <CapacityBadge
+                          capacity={b.capacity_volume}
+                          occupied={b.occupied_volume}
+                          status={b.capacity_status}
+                        />
+                        {b.capacity_volume == null && b.capacity_qty ? (
+                          <span className="text-[11px] text-muted">
+                            cap {fmtQty(b.capacity_qty)}
+                          </span>
+                        ) : null}
+                      </span>
                     </Chip>
                   </button>
                 ))}
@@ -313,8 +399,20 @@ export default function PutawayForm() {
 
       <ConfirmModal
         isOpen={confirming}
-        title="Confirm putaway?"
-        message={`${fmtQty(qty)} ${task.uom_code ?? ""} of ${task.item_name ?? task.item_code} moves into the chosen bin. This writes a stock movement and cannot be undone — a mistake is corrected with a transfer, not a delete.`}
+        title={
+          room?.status === "OVER" ? "Confirm putaway over capacity?" : "Confirm putaway?"
+        }
+        message={[
+          `${fmtQty(qty)} ${task.uom_code ?? ""} of ${task.item_name ?? task.item_code} moves into the chosen bin.`,
+          // Said again here on purpose: this is the last screen before the press, and
+          // the meter is behind the modal by then. It warns, it does not refuse.
+          room?.status === "OVER"
+            ? `${room.location_code} holds ${volume(room.capacity_volume)} and this takes it to ${volume(room.projected_volume)} — ${volume(room.over_by)} over. You can still place it; the overflow is recorded on the task.`
+            : room?.status === "FULL"
+              ? `${room.location_code} will be exactly full afterwards — nothing more fits there.`
+              : "",
+          "This writes a stock movement and cannot be undone — a mistake is corrected with a transfer, not a delete.",
+        ].filter(Boolean).join(" ")}
         confirmLabel="Confirm putaway"
         danger
         busy={confirm.isPending}

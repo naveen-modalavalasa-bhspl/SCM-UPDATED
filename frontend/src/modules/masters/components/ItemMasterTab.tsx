@@ -42,7 +42,11 @@ const empty = {
   requires_qi: false,
   dosage_form_id: "", valuation_method: "FIFO", requires_special_storage: false,
   storage_conditions: "", requires_special_transport: false,
-  transport_conditions: "", is_active: true,
+  transport_conditions: "",
+  // Kept as strings like every other input on this form; the backend coerces, and an
+  // empty box means "not measured" rather than zero.
+  length_cm: "", width_cm: "", height_cm: "", unit_volume_cbm: "",
+  is_active: true,
 };
 
 type Form = typeof empty;
@@ -360,6 +364,8 @@ export function ItemMasterTab() {
       manufacturer_id: row.manufacturer_id ?? "", item_class_id: row.item_class_id ?? "",
       item_sub_class_id: row.item_sub_class_id ?? "", uom_id: row.uom_id ?? "",
       hsn_id: row.hsn_id ?? "",
+      length_cm: row.length_cm ?? "", width_cm: row.width_cm ?? "",
+      height_cm: row.height_cm ?? "", unit_volume_cbm: row.unit_volume_cbm ?? "",
       dosage_form_id: row.dosage_form_id ?? "" } as Form);
     setHsnCode(row.hsn_code ?? "");
     setTagValues({}); setDraftComponents([]); setEditing(row); setTab("Basic");
@@ -601,6 +607,7 @@ export function ItemMasterTab() {
                 onChange={(v) => set("requires_special_transport", v)} />
               <Field label="Transport Conditions"><Input value={form.transport_conditions}
                 onChange={(e) => set("transport_conditions", e.target.value)} /></Field>
+              <div className="md:col-span-2"><ShelfSpace form={form} set={set} /></div>
             </div>}
           </ModalBody>
           <ModalFooter className="items-center">
@@ -620,6 +627,92 @@ export function ItemMasterTab() {
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <div className="rounded-xl bg-content2 p-5 text-sm text-body">{children}</div>;
+}
+
+/**
+ * `unit_volume_cbm` from L x W x H, in cubic metres. Mirrors
+ * `backend/app/modules/warehouse/capacity.unit_volume` — the same rule on both sides,
+ * because this box is a preview of what the warehouse will compute, and a preview that
+ * disagrees with the answer is worse than no preview.
+ */
+function derivedVolume(form: { length_cm: unknown; width_cm: unknown; height_cm: unknown }) {
+  const [l, w, h] = [form.length_cm, form.width_cm, form.height_cm].map(Number);
+  if (![l, w, h].every((n) => Number.isFinite(n) && n > 0)) return null;
+  return (l * w * h) / 1_000_000;
+}
+
+/**
+ * How much shelf one unit needs.
+ *
+ * Nothing here is required. An item nobody has measured has NO volume rather than a
+ * volume of zero — zero would report a packed bin as empty, which reads as "there is
+ * room". Leaving these blank simply means the warehouse screens say "not measured"
+ * against this item, which is the honest answer.
+ */
+function ShelfSpace({ form, set }: {
+  form: Form;
+  set: (key: keyof Form, value: string | boolean) => void;
+}) {
+  const derived = derivedVolume(form);
+  const typed = Number(form.unit_volume_cbm);
+  const explicit = Number.isFinite(typed) && typed > 0;
+  const effective = explicit ? typed : derived;
+
+  return (
+    <div className="rounded-xl border border-line bg-content2 p-4">
+      <div className="mb-1 font-display text-sm font-bold text-ink">Shelf space</div>
+      <p className="mb-3 text-xs leading-relaxed text-muted">
+        What one {form.uom_id ? "unit" : "unit"} takes up, so a storage location can say
+        how full it is during put-away and how much an issue frees. Measure the three
+        sides, or state the volume directly — the stated figure wins when both are
+        given. Leave blank if it has not been measured.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-4">
+        {([
+          ["length_cm", "Length (cm)"],
+          ["width_cm", "Width (cm)"],
+          ["height_cm", "Height (cm)"],
+        ] as const).map(([key, label]) => (
+          <Field key={key} label={label}>
+            <Input
+              type="number"
+              min="0"
+              value={String(form[key] ?? "")}
+              onChange={(e) => set(key, e.target.value)}
+            />
+          </Field>
+        ))}
+        <Field label="Unit volume (m³)">
+          <Input
+            type="number"
+            min="0"
+            step="0.000001"
+            placeholder={derived == null ? "" : derived.toPrecision(4)}
+            value={String(form.unit_volume_cbm ?? "")}
+            onChange={(e) => set("unit_volume_cbm", e.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="mt-3 text-xs">
+        {effective == null ? (
+          <span className="text-muted">
+            Not measured — locations holding this item will say so rather than counting
+            it as taking no room.
+          </span>
+        ) : (
+          <span className="text-ok">
+            One unit takes <b className="tabular">{effective.toPrecision(4)} m³</b>
+            {explicit && derived != null && Math.abs(derived - typed) > 1e-9 && (
+              <span className="text-muted">
+                {" "}— the stated figure, not the {derived.toPrecision(4)} m³ the
+                dimensions come to.
+              </span>
+            )}
+          </span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /** Renders whatever the category asked for. A LIST attribute becomes a dropdown of

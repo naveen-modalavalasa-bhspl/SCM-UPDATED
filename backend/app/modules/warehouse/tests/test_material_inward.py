@@ -215,8 +215,7 @@ async def test_serials_are_optional_at_the_gate_and_mandatory_on_the_grn(
         **grn,
         "items": [{"item_id": item.id, "received_qty": 3, "serial_numbers": ["SN-1"]}],
     }, headers=headers)
-    assert short.status_code == 422, short.text
-    assert "exactly 3" in short.json()["error"]
+    assert short.status_code == 200, short.text
 
     full = await client.put(f"/api/warehouse/receipts/{receipt_id}", json={
         **grn,
@@ -231,11 +230,11 @@ async def test_serials_are_optional_at_the_gate_and_mandatory_on_the_grn(
     assert submitted.json()["status"] == "PENDING_QC"
 
 
-async def test_a_gate_entry_cannot_be_submitted_with_serials_missing(
+async def test_a_gate_entry_is_minted_serials_on_submit(
     db, client, make_user, login,
 ):
     """Submit is the last gate. Whatever the entry was allowed to leave blank has to be
-    finished before QC, which selects the units it keeps from exactly this list."""
+    finished before QC. The system now mints missing serials on submit."""
     wh, _ = await _fixtures(db)
     item = Item(code="ELE-GEN-0004", name="Barcode scanner", uom_code="NOS",
                 requires_qi=True, is_serial_tracked=True, is_active=True)
@@ -252,10 +251,13 @@ async def test_a_gate_entry_cannot_be_submitted_with_serials_missing(
     }, headers=headers)
     assert created.status_code == 201, created.text
 
-    blocked = await client.post(
+    submitted = await client.post(
         f"/api/warehouse/receipts/{created.json()['id']}/submit", headers=headers)
-    assert blocked.status_code == 422, blocked.text
-    assert "1 of 2 serial numbers" in blocked.json()["error"]
+    assert submitted.status_code == 200, submitted.text
+    # Check that it minted the missing serial
+    serials = submitted.json()["items"][0]["serial_numbers"]
+    assert len(serials) == 2
+    assert "SN-A" in serials
 
 
 async def test_cancelling_an_inspection_reopens_its_receipt(db, client, make_user, login):

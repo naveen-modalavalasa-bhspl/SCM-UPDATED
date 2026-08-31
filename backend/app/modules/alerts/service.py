@@ -366,6 +366,17 @@ _DEFINITIONS: list[AlertDef] = [
         "{item} is now stored in {bin}.",
     ),
     _alert(
+        # The stock IS in the bin — this is not a failure and nothing was refused. It
+        # is sticky because it is the only record the storekeeper sees of a shelf that
+        # is now over its stated capacity, and a message that vanishes after three
+        # seconds is a message nobody read.
+        "putaway.over_capacity", AlertVariant.WARNING, "Stored, but {bin} is over capacity",
+        "{item} is in {bin}. That puts it {over} m³ past the {capacity} m³ it is "
+        "listed as holding — the placement is recorded on the task either way, so "
+        "restack it or raise the location's capacity when you get a moment.",
+        sticky=True,
+    ),
+    _alert(
         "dispatch.gated_out", AlertVariant.SUCCESS, "Dispatch gated out",
         "{number} has left the site.",
         action="Track Dispatch",

@@ -13,13 +13,15 @@ import {
   acknowledgeIssue, approveIssue, batchOptions, binOptions, cancelIssue, createIssue, departmentOptions,
   employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory, itemOptions, listSerials, postIssue, projectOptions,
+  occupancyPreview,
   returnableIssueOptions, rejectIssue, setIssueSerials, submitIssue, updateIssue,
   warehouseOptions,
 } from "../api";
+import { CapacityMeter, volume } from "../components/CapacityMeter";
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type {
-  Issue, IssueItemWrite, IssueWrite, ItemOption, SerialNumber, UnitMode,
+  Issue, IssueItemWrite, IssueWrite, ItemOption, OccupancyMove, SerialNumber, UnitMode,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 
@@ -274,6 +276,48 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
 
   const short = totals.requested - totals.issued;
   const locked = !!doc && doc.status !== "DRAFT";
+
+  /**
+   * The space this issue gives back, per location it draws from.
+   *
+   * Only lines that name a bin, an item and a quantity count — a line whose bin has
+   * not been chosen yet is not yet a claim on anybody's shelf. The moves are sent as
+   * one request and netted per location on the server, because two lines out of the
+   * same bin free their sum and adding volumes up in a screen is how that goes subtly
+   * wrong.
+   */
+  const outwardMoves = useMemo<OccupancyMove[]>(
+    () => form.items
+      .filter((l) => l.bin_id && l.item_id && num(l.issued_qty) > 0)
+      .map((l) => ({
+        location_id: Number(l.bin_id),
+        item_id: Number(l.item_id),
+        qty: num(l.issued_qty),
+        direction: "OUT" as const,
+      })),
+    [form.items],
+  );
+
+  const { data: freed = [], isFetching: freedLoading } = useQuery({
+    queryKey: ["wh-issue-occupancy", outwardMoves],
+    queryFn: () => occupancyPreview(outwardMoves),
+    // Bin-managed warehouses only (bulk stock has no location to free), and only
+    // while the stock is still on the shelf. Occupancy is READ from stock, so once the
+    // issue is posted the location already reports the lower figure — subtracting the
+    // same lines again would show a shelf emptier than it is.
+    enabled: isBinManaged && outwardMoves.length > 0 && !doc?.is_stock_posted,
+    placeholderData: (previous) => previous,
+  });
+
+  /** What the whole document takes off the shelves, for the lines footer. */
+  const freedVolume = useMemo(
+    () => freed.reduce((sum, row) => sum + Number(row.move_volume ?? 0), 0),
+    [freed],
+  );
+  const freedUnmeasured = useMemo(
+    () => freed.reduce((sum, row) => sum + row.unmeasured_lines, 0),
+    [freed],
+  );
   // Serials are the one thing still open after approval: the approver signed off on
   // quantities, but which physical units go out is decided at the shelf, and
   // "Issue from stock" refuses an incomplete set. Saved straight away through the
@@ -813,11 +857,46 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
               <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
               <span className="text-ink">Issued <b className="tabular">{fmtQty(totals.issued)}</b></span>
               {short > 0 && <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>}
+              {/* What leaving the shelves gives back. Only shown once it is knowable —
+                * a zero here would claim the issue frees nothing, when the truth is
+                * usually that the items have not been measured. */}
+              {freedVolume > 0 && (
+                <span className="text-ok">
+                  Frees <b className="tabular">{volume(freedVolume)}</b>
+                </span>
+              )}
               <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
             </div>
           }
         />
       </Section>
+
+      {/* The other half of the putaway meter: putting stock away costs a location its
+        * space, and issuing gives it back. Same component, same wording, `OUT` instead
+        * of `IN` — one row per location this document draws from, worst first. */}
+      {isBinManaged && outwardMoves.length > 0 && !doc?.is_stock_posted && (
+        <Section
+          title="Space freed"
+          hint="What each location gets back when this issue is posted."
+        >
+          {freed.length === 0 && freedLoading ? (
+            <CapacityMeter loading />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              {freed.map((row) => (
+                <CapacityMeter key={row.location_id} data={row} compact />
+              ))}
+            </div>
+          )}
+          {freedUnmeasured > 0 && (
+            <p className="mt-3 text-xs text-muted">
+              {freedUnmeasured} line{freedUnmeasured === 1 ? "" : "s"} could not be
+              measured, so the space they free is not in these figures. Add dimensions
+              or a unit volume under Masters &gt; Items.
+            </p>
+          )}
+        </Section>
+      )}
 
       <Section title="Remarks">
         <Input value={form.remarks ?? ""} disabled={locked} onChange={(e) => set("remarks", e.target.value)} />

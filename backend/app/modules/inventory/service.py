@@ -1903,6 +1903,137 @@ async def get_stock_detail(db: AsyncSession, stock_id: int, user=None) -> dict:
     }
 
 
+async def get_item_locations(
+    db: AsyncSession, 
+    warehouse_id: int, 
+    item_id: int | None = None, 
+    location_id: int | None = None, 
+    user=None
+) -> list[dict]:
+    """Every location holding this stock in this warehouse, complete with full hierarchy and batches."""
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    if warehouse_ids is not None and warehouse_id not in warehouse_ids:
+        raise PermissionError_("Warehouse is outside your assigned office")
+
+    warehouse = await db.get(Warehouse, warehouse_id)
+    if not warehouse:
+        raise NotFoundError(f"Warehouse {warehouse_id} not found")
+
+    locations = {
+        loc.id: loc for loc in (await db.execute(
+            select(WarehouseLocation)
+            .where(WarehouseLocation.warehouse_id == warehouse_id)
+        )).scalars().all()
+    }
+    
+    descendant_ids = None
+    if location_id is not None:
+        found: list[int] = [location_id]
+        seen: set[int] = {location_id}
+        frontier = [location_id]
+        while frontier:
+            children = [
+                row[0] for row in (await db.execute(
+                    select(WarehouseLocation.id).where(WarehouseLocation.parent_id.in_(frontier))
+                )).all()
+            ]
+            frontier = [cid for cid in children if cid not in seen]
+            seen.update(frontier)
+            found.extend(frontier)
+        descendant_ids = found
+
+    def path_to(bin_id: int) -> list[str]:
+        trail, current, guard = [], locations.get(bin_id), 0
+        while current is not None and guard < 20:
+            trail.append(current.name or current.code)
+            current, guard = locations.get(current.parent_id), guard + 1
+        return [warehouse.name, *reversed(trail)]
+
+    query = select(Stock).where(Stock.warehouse_id == warehouse_id, Stock.available_qty > 0)
+    if item_id is not None:
+        query = query.where(Stock.item_id == item_id)
+    if descendant_ids is not None:
+        query = query.where(Stock.bin_id.in_(descendant_ids))
+        
+    rows = (await db.execute(
+        query.order_by(Stock.item_id, Stock.bin_id, Stock.expiry_date.is_(None), Stock.expiry_date.asc())
+    )).scalars().all()
+
+    today = ist_today()
+    items_map = {}
+    
+    item_ids = {r.item_id for r in rows}
+    items = {
+        i.id: i for i in (await db.execute(
+            select(Item).where(Item.id.in_(item_ids))
+        )).scalars().all()
+    } if item_ids else {}
+
+    for r in rows:
+        if r.item_id not in items_map:
+            item = items.get(r.item_id)
+            items_map[r.item_id] = {
+                "item_id": r.item_id,
+                "item_code": item.code if item else None,
+                "item_name": item.name if item else None,
+                "uom_code": getattr(item, "uom_code", None) if item else None,
+                "warehouse_id": warehouse_id,
+                "warehouse_name": warehouse.name,
+                "total_available": Decimal("0"),
+                "total_reserved": Decimal("0"),
+                "total_on_hand": Decimal("0"),
+                "locations": {}
+            }
+
+        i_data = items_map[r.item_id]
+        i_data["total_available"] += (r.available_qty or Decimal("0"))
+        i_data["total_reserved"] += (r.reserved_qty or Decimal("0"))
+        i_data["total_on_hand"] += (r.total_qty or Decimal("0"))
+
+        locs_map = i_data["locations"]
+        if r.bin_id not in locs_map:
+            locs_map[r.bin_id] = {
+                "bin_id": r.bin_id,
+                "bin_code": r.bin_code,
+                "location_path": path_to(r.bin_id),
+                "total_available": Decimal("0"),
+                "total_reserved": Decimal("0"),
+                "total_on_hand": Decimal("0"),
+                "batches": [],
+            }
+
+        loc_data = locs_map[r.bin_id]
+        loc_data["total_available"] += (r.available_qty or Decimal("0"))
+        loc_data["total_reserved"] += (r.reserved_qty or Decimal("0"))
+        loc_data["total_on_hand"] += (r.total_qty or Decimal("0"))
+
+        loc_data["batches"].append({
+            "stock_id": r.id,
+            "batch_id": r.batch_id,
+            "batch_no": r.batch_no,
+            "expiry_date": r.expiry_date,
+            "days_to_expiry": (_as_date(r.expiry_date) - today).days if r.expiry_date else None,
+            "available_qty": float(r.available_qty or 0),
+            "reserved_qty": float(r.reserved_qty or 0),
+            "total_qty": float(r.total_qty or 0),
+            "project_name": r.project_name,
+            "serial_number": r.serial_number,
+            "asset_code": r.asset_code,
+        })
+
+    for i_data in items_map.values():
+        i_data["locations"] = list(i_data["locations"].values())
+        i_data["total_available"] = float(i_data["total_available"])
+        i_data["total_reserved"] = float(i_data["total_reserved"])
+        i_data["total_on_hand"] = float(i_data["total_on_hand"])
+        for loc in i_data["locations"]:
+            loc["total_available"] = float(loc["total_available"])
+            loc["total_reserved"] = float(loc["total_reserved"])
+            loc["total_on_hand"] = float(loc["total_on_hand"])
+
+    return list(items_map.values())
+
+
 # ---------------- replenishment rules (per item, per warehouse) ----------------
 #
 # ponytail: the rules live in one sys_settings JSON row, not a new table — the brief

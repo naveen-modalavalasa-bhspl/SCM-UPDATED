@@ -10,14 +10,17 @@ import {
   getStockAvailability,
   itemOptions,
   listStorageTypes,
-  warehouseOptions
+  warehouseOptions,
+  occupancyPreview
 } from "../api";
+import { CapacityMeter } from "../components/CapacityMeter";
 import { Lookup } from "../components/Lookup";
 import { Section } from "../components/DocumentMeta";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import { fmtQty, num } from "../format";
-import type { StockMovementOrderItemWrite } from "../types";
+import type { StockMovementOrderItemWrite, OccupancyMove } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { useMemo } from "react";
 
 export default function StockMovementForm() {
   const pointLabel = usePointLabel();
@@ -87,6 +90,46 @@ export default function StockMovementForm() {
     // Strict validation if it's a known serial-tracked line:
     (l as any)._is_serial_tracked && (l.serial_numbers?.length ?? 0) !== Math.floor(l.quantity)
   );
+
+  const outwardMoves = useMemo<OccupancyMove[]>(
+    () => lines
+      .filter((l) => l.source_bin_id && l.item_id && num(l.quantity) > 0)
+      .map((l) => ({
+        location_id: Number(l.source_bin_id),
+        item_id: Number(l.item_id),
+        qty: num(l.quantity),
+        direction: "OUT" as const,
+      })),
+    [lines]
+  );
+
+  const inwardMoves = useMemo<OccupancyMove[]>(
+    () => lines
+      .filter((l) => l.destination_bin_id && l.item_id && num(l.quantity) > 0)
+      .map((l) => ({
+        location_id: Number(l.destination_bin_id),
+        item_id: Number(l.item_id),
+        qty: num(l.quantity),
+        direction: "IN" as const,
+      })),
+    [lines]
+  );
+
+  const combinedMoves = useMemo(() => [...outwardMoves, ...inwardMoves], [outwardMoves, inwardMoves]);
+
+  const { data: capacityData = [], isFetching: capacityLoading } = useQuery({
+    queryKey: ["wh-movement-occupancy", combinedMoves],
+    queryFn: () => occupancyPreview(combinedMoves),
+    enabled: isBinManaged && combinedMoves.length > 0,
+    placeholderData: (previous) => previous,
+  });
+
+  const freedCapacity = useMemo(() => capacityData.filter((r) => outwardMoves.some(m => m.location_id === r.location_id)), [capacityData, outwardMoves]);
+  const consumedCapacity = useMemo(() => capacityData.filter((r) => inwardMoves.some(m => m.location_id === r.location_id)), [capacityData, inwardMoves]);
+
+  const freedUnmeasured = useMemo(() => freedCapacity.reduce((sum, row) => sum + row.unmeasured_lines, 0), [freedCapacity]);
+  const consumedUnmeasured = useMemo(() => consumedCapacity.reduce((sum, row) => sum + row.unmeasured_lines, 0), [consumedCapacity]);
+
 
   return (
     <div>
@@ -169,6 +212,52 @@ export default function StockMovementForm() {
           </div>
         )}
       </div>
+
+      {isBinManaged && outwardMoves.length > 0 && (
+        <Section
+          title="Space freed (Source locations)"
+          hint="What the source locations get back when this movement completes."
+        >
+          {freedCapacity.length === 0 && capacityLoading ? (
+            <CapacityMeter loading />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              {freedCapacity.map((row) => (
+                <CapacityMeter key={row.location_id} data={row} compact />
+              ))}
+            </div>
+          )}
+          {freedUnmeasured > 0 && (
+            <p className="mt-3 text-xs text-muted">
+              {freedUnmeasured} line{freedUnmeasured === 1 ? "" : "s"} could not be
+              measured, so the space they free is not in these figures.
+            </p>
+          )}
+        </Section>
+      )}
+
+      {isBinManaged && inwardMoves.length > 0 && (
+        <Section
+          title="Space required (Destination locations)"
+          hint="What the destination locations will hold after this movement."
+        >
+          {consumedCapacity.length === 0 && capacityLoading ? (
+            <CapacityMeter loading />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              {consumedCapacity.map((row) => (
+                <CapacityMeter key={row.location_id} data={row} compact />
+              ))}
+            </div>
+          )}
+          {consumedUnmeasured > 0 && (
+            <p className="mt-3 text-xs text-muted">
+              {consumedUnmeasured} line{consumedUnmeasured === 1 ? "" : "s"} could not be
+              measured, so the space they consume is not in these figures.
+            </p>
+          )}
+        </Section>
+      )}
     </div>
   );
 }

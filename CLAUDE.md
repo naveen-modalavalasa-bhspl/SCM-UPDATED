@@ -379,6 +379,7 @@ TR  DRAFT → PENDING_APPROVAL → QUOTING* → AWAITING_CARRIER* → READY
     from `VITE_API_URL` / `VITE_API_PROXY`, never a literal in code. No credentials,
     hosts, or keys baked into source. (Enums, permission codes, status maps are
     intentional constants, not config.)
+14. **Capacity and Occupancy.** Occupancy is read, never stored (it is computed on demand using dimensions and stock). Capacity warns, never blocks (a full bin shows warnings but still accepts stock, allowing exceptions to be logged instead of halting operations).
 
 ## Before finishing any task
 Run `pytest` (must pass) and `npm run build` (must compile). Don't create files

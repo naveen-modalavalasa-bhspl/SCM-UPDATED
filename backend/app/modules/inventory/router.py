@@ -203,6 +203,7 @@ async def item_availability(item_id: int, project_id: int | None = 0,
     )
 
 
+
 # STO Endpoints
 @stock_router.post("/sto", response_model=STOOut)
 async def create_sto(body: STOIn, db: AsyncSession = Depends(get_db),

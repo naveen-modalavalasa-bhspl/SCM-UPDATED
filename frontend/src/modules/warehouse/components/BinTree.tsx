@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Boxes, ChevronDown, ChevronRight, PackageOpen } from "lucide-react";
 import { Chip } from "@heroui/react";
 import { fmtQty, percent } from "../format";
+import { CapacityBadge, volume } from "./CapacityMeter";
 import type { Bin } from "../types";
 
 /**
@@ -32,6 +33,10 @@ function Node({
   const used = bin.occupied_qty;
   const fill = used != null && bin.capacity_qty ? percent(used, bin.capacity_qty) : null;
   const selected = selectedId === bin.id;
+  // Volume is the figure the put-away and issue screens work in, and the tree rolls
+  // the bins under a rack up into it — so a zone with a capacity reports its own fill,
+  // not a blank. Shown only where a capacity was actually set.
+  const hasVolume = bin.capacity_volume != null && bin.capacity_volume > 0;
 
   return (
     <div>
@@ -74,6 +79,18 @@ function Node({
         )}
         {!bin.is_pickable && bin.is_active && (
           <Chip size="sm" variant="flat" color="warning">No pick</Chip>
+        )}
+        {hasVolume && (
+          <span
+            className="shrink-0"
+            title={`${volume(bin.occupied_volume)} of ${volume(bin.capacity_volume)} used`}
+          >
+            <CapacityBadge
+              capacity={bin.capacity_volume}
+              occupied={bin.occupied_volume}
+              status={bin.capacity_status}
+            />
+          </span>
         )}
         {fill != null && (
           <span

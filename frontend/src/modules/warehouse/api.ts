@@ -19,9 +19,13 @@ import type {
   IssueDispatchSource,
   IssueWrite,
   ItemOption,
+  ItemLocationsOut,
   ListParams,
+  LocationOccupancy,
   Notification,
+  OccupancyMove,
   Option,
+
   Page,
   PackageWrite,
   Picking,
@@ -114,6 +118,28 @@ export const createBin = (body: BinWrite) => post<Bin>(`${BASE}/bins`, body);
 export const updateBin = (id: number, body: BinWrite) => put<Bin>(`${BASE}/bins/${id}`, body);
 
 export const deleteBin = (id: number) => del(`${BASE}/bins/${id}`);
+
+/**
+ * How full a storage location is, and what a proposed move would do to it.
+ *
+ * One call for both directions: putaway asks with `IN` ("does this fit"), material
+ * issue with `OUT` ("how much does this give back"). The wording comes back with the
+ * numbers — see `LocationOccupancy.headline` — so no screen writes its own.
+ */
+export const locationOccupancy = (
+  locationId: number,
+  params: { item_id?: number; qty?: number; direction?: "IN" | "OUT" } = {},
+) => get<LocationOccupancy>(`${BASE}/locations/${locationId}/occupancy`, params);
+
+/**
+ * The same answer for a whole draft, one row per location it touches.
+ *
+ * Asked in one request because an issue commonly takes several lines out of the same
+ * bin: the space that frees is their sum, netted on the server so no screen has to add
+ * volumes up and get it subtly wrong. POST carries the lines; it writes nothing.
+ */
+export const occupancyPreview = (moves: OccupancyMove[]) =>
+  post<LocationOccupancy[]>(`${BASE}/locations/occupancy-preview`, { moves });
 
 /** The physical layer behind the floor plan — `whs_locations`, with coordinates. */
 export const listLocations = (warehouseId: number) =>
@@ -456,6 +482,9 @@ export const listSerials = (
 
 export const listBatches = (params: ListParams & { item_id?: number; expiring_days?: number } = {}) =>
   get<Page<Batch>>(`${BASE}/batches`, params);
+
+export const getItemLocations = ({ warehouse_id, item_id, location_id }: { warehouse_id: number; item_id?: number | null; location_id?: number | null }) =>
+  get<ItemLocationsOut[]>(`${BASE}/stock-segregation/item-locations`, { warehouse_id, item_id, location_id });
 
 export interface ScanLine {
   item_code?: string | null;

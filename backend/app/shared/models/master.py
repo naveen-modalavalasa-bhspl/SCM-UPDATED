@@ -183,6 +183,21 @@ class Item(Base):
     storage_conditions = Column(String(300), nullable=True)
     requires_special_transport = Column(Boolean, nullable=False, default=False)
     transport_conditions = Column(String(300), nullable=True)
+
+    # How much room ONE unit of this item (in the item's own UOM) takes on a shelf.
+    # A bin's capacity is a volume, so nothing can be said about how full a bin is
+    # until the goods in it have one too.
+    #
+    # Two ways in, because a storekeeper measures a carton and a planner quotes a
+    # figure: the three dimensions, or `unit_volume_cbm` typed directly. The explicit
+    # figure wins when both are present — see `warehouse.capacity.unit_volume` — and
+    # an item with neither has NO volume rather than a volume of zero, which is the
+    # difference between "this bin has room" and "nobody has measured this yet".
+    length_cm = Column(Numeric(10, 2), nullable=True)
+    width_cm = Column(Numeric(10, 2), nullable=True)
+    height_cm = Column(Numeric(10, 2), nullable=True)
+    unit_volume_cbm = Column(Numeric(18, 6), nullable=True)
+
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = created_at_col()
     updated_at = updated_at_col()

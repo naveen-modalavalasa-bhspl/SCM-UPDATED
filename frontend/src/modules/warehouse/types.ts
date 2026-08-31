@@ -140,6 +140,98 @@ export interface Bin {
   children?: Bin[];
   /** Filled by the tree endpoint so a zone can show how full it is. */
   occupied_qty?: number | null;
+  /**
+   * Volume, in cubic metres, filled by the suggested-bins endpoint. Read from the
+   * stock standing in the bin, never stored — so it is absent (not zero) on the
+   * endpoints that do not work it out.
+   */
+  occupied_volume?: number | null;
+  free_volume?: number | null;
+  utilisation_pct?: number | null;
+  capacity_status?: CapacityStatus | null;
+  /** True when some of the stock here has no measured volume, so the figure is a floor. */
+  is_partial?: boolean | null;
+}
+
+/**
+ * What a location can be told about itself. Served by the backend
+ * (`modules/warehouse/capacity.py`) along with the words to say — a screen picks a
+ * colour from this and never writes the sentence.
+ */
+export type CapacityStatus =
+  | "OK"
+  | "TIGHT"
+  | "FULL"
+  | "OVER"
+  | "NO_CAPACITY"
+  | "UNMEASURED";
+
+/** One proposed movement's own share of a location's space. */
+export interface OccupancyLine {
+  item_id?: number | null;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  qty?: number | null;
+  direction: "IN" | "OUT";
+  unit_volume_cbm?: number | null;
+  /** Null when the item has never been measured — listed anyway, so it can be named. */
+  volume?: number | null;
+}
+
+/**
+ * How full one storage location is, and what a proposed move would do to it.
+ *
+ * Every volume is cubic metres. `capacity_volume` is null when the location has none
+ * configured — not zero, which would read as "no room at all". `headline` and
+ * `detail` are sentences from the server; the screen renders them rather than
+ * composing its own, so putaway and material issue say the same thing.
+ */
+export interface LocationOccupancy {
+  location_id: number;
+  location_code: string;
+  location_name?: string | null;
+  bin_type?: string | null;
+  is_pickable: boolean;
+  /** How many locations the figure sums over — 1 for a bin, more for a rack. */
+  counts_locations: number;
+
+  capacity_volume?: number | null;
+  occupied_volume: number;
+  free_volume?: number | null;
+  utilisation_pct?: number | null;
+
+  /** Stock here whose item has no measured volume, so the bar is a floor, not a total. */
+  unmeasured_items: number;
+  unmeasured_qty?: number | null;
+  measured_items: number;
+  unmeasured_lines: number;
+  is_partial: boolean;
+
+  item_id?: number | null;
+  item_name?: string | null;
+  unit_volume_cbm?: number | null;
+  qty?: number | null;
+  direction: "IN" | "OUT";
+  move_volume?: number | null;
+  lines: OccupancyLine[];
+
+  projected_volume?: number | null;
+  projected_free_volume?: number | null;
+  projected_pct?: number | null;
+  over_by?: number | null;
+
+  status: CapacityStatus;
+  headline: string;
+  detail: string;
+}
+
+/** One line of a draft, as the screen has it so far. */
+export interface OccupancyMove {
+  location_id: number;
+  item_id: number;
+  qty: number;
+  direction: "IN" | "OUT";
 }
 
 export interface BinWrite {
@@ -544,6 +636,16 @@ export interface Putaway {
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
   is_asset?: boolean;
+  /** Cubic metres one unit takes. Null when the item has never been measured. */
+  unit_volume_cbm?: number | null;
+  /** `unit_volume_cbm x qty` — what this whole line needs on a shelf. */
+  line_volume_cbm?: number | null;
+  /**
+   * Only on the response to `confirm`: the shelf as it was at the moment of the press,
+   * overflow included. A full bin never stops a putaway, so this is how the screen
+   * gets to announce one that has already happened.
+   */
+  capacity?: LocationOccupancy | null;
   created_at?: string;
 }
 
@@ -1238,6 +1340,44 @@ export interface Batch {
   status: string;
   recall_reason?: string | null;
 }
+
+export interface ItemLocationBatch {
+  stock_id: number;
+  batch_id: number;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  days_to_expiry?: number | null;
+  available_qty: number;
+  reserved_qty: number;
+  total_qty: number;
+  project_name?: string | null;
+  serial_number?: string | null;
+  asset_code?: string | null;
+}
+
+export interface ItemLocation {
+  bin_id: number;
+  bin_code: string;
+  location_path: string[];
+  total_available: number;
+  total_reserved: number;
+  total_on_hand: number;
+  batches: ItemLocationBatch[];
+}
+
+export interface ItemLocationsOut {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  total_available: number;
+  total_reserved: number;
+  total_on_hand: number;
+  locations: ItemLocation[];
+}
+
 
 /* ------------------------------------------------------------- supporting -- */
 

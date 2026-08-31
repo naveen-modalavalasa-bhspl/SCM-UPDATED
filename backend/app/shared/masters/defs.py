@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 import re
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -154,7 +154,33 @@ class ItemIn(BaseModel):
     storage_conditions: str | None = None
     requires_special_transport: bool = False
     transport_conditions: str | None = None
+    # How much room one unit takes on a shelf, which is what makes a bin's volume
+    # capacity readable at all. Either measure the three sides or state the figure;
+    # `warehouse.capacity.unit_volume` prefers the figure when both are given.
+    #
+    # All four are optional and there is no backfill, deliberately: an item nobody has
+    # measured has NO volume rather than a volume of zero, and the warehouse screens
+    # say "not measured" instead of reporting a packed bin as empty.
+    length_cm: float | None = None
+    width_cm: float | None = None
+    height_cm: float | None = None
+    unit_volume_cbm: float | None = None
     is_active: bool = True
+
+    @field_validator("length_cm", "width_cm", "height_cm", "unit_volume_cbm",
+                     mode="before")
+    @classmethod
+    def blank_to_none(cls, value):
+        """An empty cell in an imported sheet says nothing about the column; it does
+        not say zero. Zero would be a measurement, and a wrong one."""
+        return None if value == "" else value
+
+    @field_validator("length_cm", "width_cm", "height_cm", "unit_volume_cbm")
+    @classmethod
+    def not_negative(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("A dimension or volume cannot be negative")
+        return value
 
 
 def item_out(i: Item) -> dict:
@@ -189,6 +215,8 @@ def item_out(i: Item) -> dict:
             "storage_conditions": i.storage_conditions,
             "requires_special_transport": i.requires_special_transport,
             "transport_conditions": i.transport_conditions,
+            "length_cm": i.length_cm, "width_cm": i.width_cm,
+            "height_cm": i.height_cm, "unit_volume_cbm": i.unit_volume_cbm,
             "is_active": i.is_active}
 
 

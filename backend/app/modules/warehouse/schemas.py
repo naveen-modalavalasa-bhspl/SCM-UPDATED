@@ -101,6 +101,14 @@ class BinRead(_Read):
     is_pickable: bool
     is_active: bool
     occupied_qty: Decimal | None = None
+    # Volume, read never stored — see modules/warehouse/capacity.py. Present on the
+    # rows the suggestion list decorates and None everywhere else, so a screen can tell
+    # "this bin is empty" from "nobody worked it out for this row".
+    occupied_volume: Decimal | None = None
+    free_volume: Decimal | None = None
+    utilisation_pct: float | None = None
+    capacity_status: str | None = None
+    is_partial: bool | None = None
     children: list["BinRead"] = Field(default_factory=list)
 
 
@@ -148,6 +156,102 @@ class BinWrite(BaseModel):
     @classmethod
     def blank_to_none(cls, value):
         return None if value == "" else value
+
+
+class OccupancyLine(BaseModel):
+    """One proposed movement's own share of a location's space.
+
+    `volume` is None when the item has never been measured — the line is still listed
+    so the screen can name what it could not count, rather than quietly leaving it out
+    of a total that then reads as complete.
+    """
+    item_id: int | None = None
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    qty: Decimal | None = None
+    direction: str = "IN"
+    unit_volume_cbm: Decimal | None = None
+    volume: Decimal | None = None
+
+
+class LocationOccupancy(BaseModel):
+    """How full one storage location is, and what a proposed move would do to it.
+
+    Served by `capacity.location_occupancy`, which owns both the arithmetic and the
+    wording: `headline` and `detail` are sentences, not codes, so the putaway screen
+    and the issue screen say the same thing about the same state. A screen chooses a
+    colour from `status` and never writes the words itself.
+
+    Every volume is cubic metres. `capacity_volume` is None when the location has none
+    configured — not zero, which would read as "no room at all".
+    """
+    location_id: int
+    location_code: str
+    location_name: str | None = None
+    bin_type: str | None = None
+    is_pickable: bool
+    #: How many locations this figure sums over — 1 for a bin, more for a rack.
+    counts_locations: int
+
+    capacity_volume: Decimal | None = None
+    occupied_volume: Decimal
+    free_volume: Decimal | None = None
+    utilisation_pct: float | None = None
+
+    #: The honesty fields: stock whose item has no measured volume is counted in
+    #: neither `occupied_volume` nor the bar, so the screen must say so.
+    unmeasured_items: int = 0
+    unmeasured_qty: Decimal | None = None
+    measured_items: int = 0
+    #: Proposed lines whose item has no measured volume, so they are not in `move_volume`.
+    unmeasured_lines: int = 0
+    is_partial: bool = False
+
+    # The single-move fields. A document with several lines has no one item or
+    # quantity, so these stay None and the caller reads `lines` instead.
+    item_id: int | None = None
+    item_name: str | None = None
+    unit_volume_cbm: Decimal | None = None
+    qty: Decimal | None = None
+    direction: str = "IN"
+    move_volume: Decimal | None = None
+    lines: list["OccupancyLine"] = Field(default_factory=list)
+
+    projected_volume: Decimal | None = None
+    projected_free_volume: Decimal | None = None
+    projected_pct: float | None = None
+    over_by: Decimal | None = None
+
+    status: str
+    headline: str
+    detail: str
+
+
+class OccupancyMoveIn(BaseModel):
+    """One line of a draft, as the screen has it so far."""
+    location_id: int
+    item_id: int
+    qty: Decimal = Decimal("0")
+    direction: str = "IN"
+
+    @field_validator("direction")
+    @classmethod
+    def known_direction(cls, value: str) -> str:
+        value = (value or "IN").upper()
+        if value not in ("IN", "OUT"):
+            raise ValueError("direction must be IN or OUT")
+        return value
+
+
+class OccupancyPreviewIn(BaseModel):
+    """A whole draft at once.
+
+    Asked as one request rather than one per line because an issue commonly takes
+    several lines out of the SAME bin, and the space that frees is their sum — netted
+    on the server so no screen has to add volumes up and get it subtly wrong.
+    """
+    moves: list[OccupancyMoveIn] = Field(default_factory=list)
 
 
 class LocationRead(_Read):
@@ -612,6 +716,14 @@ class PutawayRead(_Read):
     imei_numbers: list[str] | None = None
     is_serial_tracked: bool = False
     is_asset: bool = False
+    # How much shelf this line needs. None means the item has never been measured —
+    # said plainly rather than shown as zero, which would read as "takes no room".
+    unit_volume_cbm: Decimal | None = None
+    line_volume_cbm: Decimal | None = None
+    # Filled only on the response to `confirm`: what the shelf looked like at the
+    # moment of the press, including an overflow if there was one. A full bin never
+    # stops a putaway, so this is how the screen gets to say it happened.
+    capacity: LocationOccupancy | None = None
     created_at: datetime | None = None
 
 
@@ -1644,3 +1756,42 @@ class UnitCodeQuery(BaseModel):
     it reaches us.
     """
     codes: list[str] = Field(default_factory=list)
+
+
+class ItemLocationBatch(BaseModel):
+    stock_id: int
+    batch_id: int
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    days_to_expiry: int | None = None
+    available_qty: float
+    reserved_qty: float
+    total_qty: float
+    project_name: str | None = None
+    serial_number: str | None = None
+    asset_code: str | None = None
+
+
+class ItemLocation(BaseModel):
+    bin_id: int
+    bin_code: str
+    location_path: list[str]
+    total_available: float
+    total_reserved: float
+    total_on_hand: float
+    batches: list[ItemLocationBatch]
+
+
+class ItemLocationsOut(BaseModel):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    total_available: float
+    total_reserved: float
+    total_on_hand: float
+    locations: list[ItemLocation]
+
+LocationOccupancy.model_rebuild()
