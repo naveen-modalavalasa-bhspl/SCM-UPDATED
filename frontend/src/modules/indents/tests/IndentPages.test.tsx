@@ -18,6 +18,8 @@ import { IndentBoardPage } from "../pages/BoardPage";
 import { IndentReportsPage } from "../pages/ReportsPage";
 import { IndentNotificationsPage } from "../pages/NotificationsPage";
 import { IndentDetailPage } from "../pages/DetailPage";
+import { AlertHost } from "@/modules/alerts/components/AlertHost";
+import { ToastProvider } from "@/shared/components";
 import { IndentJourneyPage } from "../pages/JourneyPage";
 import { groupJourneyHistory } from "../pages/JourneyPage";
 import { indentApi, indentKeys } from "../api";
@@ -195,15 +197,19 @@ function createTestQueryClient() {
 
 function renderWithProviders(ui: ReactElement, route = "/indents", client = createTestQueryClient()) {
   const result = render(
+    // ToastProvider because the app mounts one at its root and the detail screen
+    // announces a submit, a delete and a correction resubmit through it.
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[route]}>
-        <Routes>
-          <Route path="/indents/:id/journey" element={ui} />
-          <Route path="/indents/:id" element={ui} />
-          <Route path="/indents/*" element={ui} />
-          <Route path="*" element={ui} />
-        </Routes>
-      </MemoryRouter>
+      <ToastProvider>
+        <MemoryRouter initialEntries={[route]}>
+          <Routes>
+            <Route path="/indents/:id/journey" element={ui} />
+            <Route path="/indents/:id" element={ui} />
+            <Route path="/indents/*" element={ui} />
+            <Route path="*" element={ui} />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -238,6 +244,7 @@ function renderAllRequestsFlow(
 ) {
   const result = render(
     <QueryClientProvider client={client}>
+      <ToastProvider>
       <MemoryRouter initialEntries={[route]}>
         <LocationProbe />
         <Routes>
@@ -245,6 +252,7 @@ function renderAllRequestsFlow(
           <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
         </Routes>
       </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -256,6 +264,7 @@ function renderActivityLedgerFlow(
 ) {
   const result = render(
     <QueryClientProvider client={client}>
+      <ToastProvider>
       <MemoryRouter initialEntries={[route]}>
         <LocationProbe />
         <Routes>
@@ -263,6 +272,7 @@ function renderActivityLedgerFlow(
           <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
         </Routes>
       </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -274,6 +284,7 @@ function renderNotificationsFlow(
 ) {
   const result = render(
     <QueryClientProvider client={client}>
+      <ToastProvider>
       <MemoryRouter initialEntries={[route]}>
         <LocationProbe />
         <Routes>
@@ -281,6 +292,7 @@ function renderNotificationsFlow(
           <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
         </Routes>
       </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -1344,6 +1356,11 @@ describe("indent UI shell", () => {
 
     for (const [label, eventType] of EXPECTED_ACTIVITY_EVENT_FILTERS) {
       const callsBeforeSelection = vi.mocked(indentApi.activity).mock.calls.length;
+      // The Event filter is single-select, so each pick closes the menu behind it.
+      if (screen.queryByRole("menu") === null) {
+        fireEvent.click(screen.getByRole("button", { name: /^Event/ }));
+        await screen.findByRole("menu");
+      }
       fireEvent.click(within(screen.getByRole("menu")).getByText(label));
       await waitFor(() => expect(indentApi.activity).toHaveBeenCalledTimes(callsBeforeSelection + 1));
       expect(indentApi.activity).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -1351,7 +1368,8 @@ describe("indent UI shell", () => {
         page: 1,
       }), expect.anything());
       expect(screen.getByText(`Event: ${label}`)).toBeInTheDocument();
-      expect(screen.getByRole("menu").querySelectorAll(".lucide-check")).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: /^Event/ }));
+      expect((await screen.findByRole("menu")).querySelectorAll(".lucide-check")).toHaveLength(1);
     }
   });
 
@@ -3008,17 +3026,20 @@ describe("indent UI shell", () => {
       status: "DRAFT",
       can_submit: true,
     }));
-    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
-
     renderWithProviders(
       <>
         <IndentDetailPage />
+        <AlertHost />
         <LocationProbe />
       </>,
       "/indents/42",
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Delete Draft" }));
+
+    // The app's own confirm now, not the browser's grey box, so the question is
+    // answered on screen like every other destructive action in the app.
+    fireEvent.click(await screen.findByRole("button", { name: "Yes, Delete" }));
 
     await waitFor(() => expect(indentApi.delete).toHaveBeenCalledWith(42));
     await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents"));
@@ -3194,7 +3215,7 @@ describe("indent UI shell", () => {
   it("offers the HCM locations plus an explicit no-location choice", async () => {
     renderAllRequestsFlow("/indents");
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Department/ }));
 
     // The menu is portalled out of the filter bar, so it is looked up on screen —
     // the same way the sibling test picks a region to filter by.
@@ -3207,7 +3228,7 @@ describe("indent UI shell", () => {
   it("puts a chosen region into the URL so the filtered list can be shared", async () => {
     renderAllRequestsFlow("/indents");
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Department/ }));
     fireEvent.click(await screen.findByText("104-MMU-AP-Markapur"));
 
     await waitFor(() => expect(screen.getByLabelText("location"))
@@ -3248,7 +3269,8 @@ describe("indent UI shell", () => {
     renderWithProviders(<IndentReportsPage />, "/indents/reports");
 
     expect(await screen.findByRole("columnheader", { name: "DEPARTMENT" })).toBeInTheDocument();
-    expect(await screen.findByText("Networking department")).toBeInTheDocument();
+    // Twice: ResponsiveList keeps the desktop table and the mobile card both mounted.
+    expect(await screen.findAllByText("Networking department")).toHaveLength(2);
     expect(screen.queryByRole("columnheader", { name: "REGION" })).not.toBeInTheDocument();
   });
 
@@ -3257,7 +3279,7 @@ describe("indent UI shell", () => {
 
     await waitFor(() => expect(indentApi.stats).toHaveBeenCalled());
     vi.mocked(indentApi.stats).mockClear();
-    fireEvent.click(await screen.findByRole("button", { name: /^Region/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Department/ }));
     fireEvent.click(await screen.findByText("104-MMU-AP-Markapur"));
 
     await waitFor(() => {
@@ -3710,11 +3732,13 @@ describe("indent UI shell", () => {
     mockAccount.activePositionId = 20;
     view.rerender(
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={["/indents/42"]}>
-          <Routes>
-            <Route path="/indents/:id" element={<IndentDetailPage />} />
-          </Routes>
-        </MemoryRouter>
+        <ToastProvider>
+          <MemoryRouter initialEntries={["/indents/42"]}>
+            <Routes>
+              <Route path="/indents/:id" element={<IndentDetailPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
       </QueryClientProvider>,
     );
 

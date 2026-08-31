@@ -43,6 +43,19 @@ FINAL_REPORTING_STAGE_NAME = "Final authority"
 CORRECTION_KEY = "_correction"
 
 
+#: What a second press on an approval that has already been decided says.
+#:
+#: "No in-progress approval for this document" is a statement about a row in
+#: wf_instances. The person pressing Approve wants to know that somebody got there
+#: first and that nothing they just did was lost — the workflow ENGINE is the only
+#: place that knows it, and every module's approve/reject/return path comes through
+#: here, so saying it once covers all of them.
+ALREADY_DECIDED = (
+    "This request has already been decided — somebody acted on it before you did. "
+    "Refresh the screen to see where it stands now."
+)
+
+
 def _normalize_action(action: str) -> str:
     a = action.upper()
     return _ACTION_ALIASES.get(a, a)
@@ -117,7 +130,7 @@ async def _load_active_instance_for_update(
         .with_for_update()
     )).scalars().first()
     if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
-        raise ValidationError("No in-progress approval for this document")
+        raise ValidationError(ALREADY_DECIDED)
     return instance
 
 
@@ -982,7 +995,7 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
               context: dict | None = None, final: bool = False) -> Instance:
     instance = await _load_instance(db, doc_type, doc_id)
     if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
-        raise ValidationError("No in-progress approval for this document")
+        raise ValidationError(ALREADY_DECIDED)
 
     action = _normalize_action(action)
     context = context or {}

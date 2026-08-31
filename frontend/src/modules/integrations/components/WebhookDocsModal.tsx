@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import { Copy } from "lucide-react";
-import { Button, Card, ErrorBanner, ScrollBox, useToast } from "@/shared/components";
+import { Button, Card, ErrorBanner, useToast } from "@/shared/components";
 import { webhooksApi } from "../api";
 
 /**
@@ -103,7 +103,10 @@ export function WebhookDocsModal({ source, onClose }: {
         <ModalBody className="gap-3">
           <ErrorBanner error={docs.error} />
           {d && (
-            <ScrollBox className="max-h-[60vh]">
+            /* Plain overflow-y, not `ScrollBox`: that one is for wide TABLES and
+             * scrolls sideways only, so capping its height here clipped the docs
+             * dead — the example body was cut off with nothing to scroll. */
+            <div className="max-h-[60vh] overflow-y-auto overscroll-y-contain">
               <div className="space-y-4 pr-1">
                 <Card className="space-y-2 p-3">
                   <code className="block break-all text-sm text-ink">
@@ -184,7 +187,7 @@ export function WebhookDocsModal({ source, onClose }: {
                   </Section>
                 )}
               </div>
-            </ScrollBox>
+            </div>
           )}
         </ModalBody>
         <ModalFooter>

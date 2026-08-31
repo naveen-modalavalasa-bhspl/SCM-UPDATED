@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import axios, { AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { api } from "@/shared/api/client";
+import type { Notice } from "@/shared/api/errors";
 import { installApiAlerts } from "../apiAlerts";
 import { __resetAlerts, getSnapshot } from "../store";
 
@@ -55,25 +56,45 @@ describe("the shared client", () => {
 
     expect((error as AxiosError).response?.status).toBe(500);
     expect((error as AxiosError).config?.url).toBe("/api/test");
-    // Still the message every onError handler shows inline.
-    expect(error.message).toBe("boom");
+    // Still the message every onError handler shows inline — but a 5xx body is the
+    // one thing never repeated back, because it is the case where what is on the
+    // wire may not have been through the backend's own sanitising at all.
+    expect(error.message).not.toContain("boom");
+    expect(error.message).toContain("server problem");
   });
 
   it("explains an unreachable API in the message", async () => {
     noResponse();
     const error = await failingRequest();
 
-    expect(error.message).toContain("Cannot reach the API");
-    expect(error.message).toContain("/api/test");
+    // What a storekeeper can act on. The endpoint that failed is in sys_app_logs;
+    // "check that the frontend proxy is running" was an instruction for a developer.
+    expect(error.message).toContain("Unable to connect to the server");
+    expect(error.message).toContain("Nothing was saved");
+    expect(error.message).not.toContain("/api/test");
+  });
+
+  it("carries the structured notice for the surfaces that show a title", async () => {
+    serverError(403, { error: "Only the requester can edit this indent.",
+      error_code: "PERMISSION_DENIED", title: "You don't have permission" });
+    const error = await failingRequest() as AxiosError & { notice?: Notice };
+
+    expect(error.notice?.level).toBe("error");
+    expect(error.notice?.title).toBe("You don't have permission");
+    // The server's own reason survives — it says far more than the status does.
+    expect(error.notice?.message).toBe("Only the requester can edit this indent.");
   });
 });
 
 describe("the alert interceptor", () => {
-  it("announces a server error as a failure, not a dropped connection", async () => {
+  // Disabled by request, like the 403 below: a 500 raises no popup. The screen's own
+  // error surface shows it, worded by `shared/api/errors.ts`, and the re-reject
+  // carries it to every onError handler.
+  it("stays quiet on a server error", async () => {
     serverError(500);
     await failingRequest();
 
-    expect(raised()).toEqual(["Something went wrong"]);
+    expect(raised()).toEqual([]);
   });
 
   // Disabled by request: a 403 raises no popup, it only re-rejects.

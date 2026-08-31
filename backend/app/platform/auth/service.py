@@ -26,6 +26,12 @@ from app.platform.settings.models import UserCredential
 from app.shared.enums import AuditAction
 from app.shared.models.base import utcnow
 
+#: What every failed sign-in says, whatever actually went wrong behind it.
+BAD_CREDENTIALS = (
+    "The employee ID or password you entered is incorrect. Please try again."
+)
+
+
 async def authenticate(db: AsyncSession, username: str, password: str) -> tuple[HcmEmployee, str]:
     employee_id = int(username) if username.strip().isdigit() else None
     employee = (await db.execute(
@@ -37,12 +43,16 @@ async def authenticate(db: AsyncSession, username: str, password: str) -> tuple[
             )
         )
     )).scalars().first()
+    # One sentence for every way a sign-in can fail — no such employee, a retired
+    # one, no credential row, a wrong password. Saying which would tell somebody
+    # probing the form that an account exists, which is exactly the half of the
+    # answer they do not have.
     if not employee or not employee.is_active:
-        raise AuthenticationError("Invalid credentials")
+        raise AuthenticationError(BAD_CREDENTIALS, code="INVALID_CREDENTIALS")
 
     cred = await db.get(UserCredential, employee.id)
     if not cred or not verify_password(password, cred.password_hash):
-        raise AuthenticationError("Invalid credentials")
+        raise AuthenticationError(BAD_CREDENTIALS, code="INVALID_CREDENTIALS")
 
     cred.last_login_at = utcnow()
     await db.commit()

@@ -14,11 +14,11 @@ import logging
 from datetime import datetime
 from typing import Callable
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.platform.hcm import mappers
-from app.platform.hcm.client import HcmClient
+from app.platform.hcm.client import HcmClient, reset_breaker
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmFacility, HcmFacilityType, HcmOffice,
     HcmPosition, HcmPositionAssignment, HcmPositionLevel, HcmRole, HcmSection,
@@ -384,6 +384,48 @@ async def _release_emp_code(db: AsyncSession, cols: dict) -> None:
     )
 
 
+# Every column in THIS database that points at a project, discovered rather than
+# listed. 26 tables carry one today (ind_indents, stk_ledger, pro_purchase_orders,
+# wf_instances, inv_sto's two, …) and the list grows with every module, so a
+# hand-written one would go stale in exactly the direction that hurts: a table left
+# off it reads as "nobody points at this project" and the row gets deactivated anyway.
+#
+# Identifiers are interpolated below because an identifier cannot be a bind parameter.
+# They come from this database's own information_schema, never from a request —
+# the same reasoning `shared/masters/crud.row_usage` records for its usage counts.
+_PROJECT_REF_COLUMNS_SQL = text("""
+    SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND COLUMN_NAME IN ('project_id', 'from_project_id', 'to_project_id')
+      AND TABLE_NAME <> 'mst_projects'
+""")
+
+_project_ref_columns: list[tuple[str, str]] | None = None
+
+
+async def _project_referent(db: AsyncSession, project_id: int) -> str | None:
+    """The first place that points at this project, or None if nothing does.
+
+    Deliberately stops at the first hit: this answers "is it safe to deactivate", not
+    "how much is there", and the whole point is to be cheap enough to run on every
+    project of every sync.
+    """
+    global _project_ref_columns
+    if _project_ref_columns is None:
+        _project_ref_columns = [
+            (table, column)
+            for table, column in (await db.execute(_PROJECT_REF_COLUMNS_SQL)).all()
+        ]
+    for table, column in _project_ref_columns:
+        hit = await db.scalar(
+            text(f"SELECT 1 FROM {table} WHERE {column} = :pid LIMIT 1"),
+            {"pid": project_id},
+        )
+        if hit:
+            return f"{table}.{column}"
+    return None
+
+
 async def _upsert_project(db: AsyncSession, cols: dict) -> bool:
     """mst_projects has no raw/synced_at, and is_active is SCM's call once a project
     exists, so only HCM's identity fields are refreshed on an update."""
@@ -396,13 +438,45 @@ async def _upsert_project(db: AsyncSession, cols: dict) -> bool:
     # Same story as _release_emp_code: HCM re-keys, `mst_projects.code` is unique, and
     # the project arriving under a new id carries the code an older row still holds.
     # The old row keeps its id (documents point at it) and loses the code.
+    #
+    # FIXED 2026-08-28 — this used to free the code and set `is_active = 0` in one
+    # blind UPDATE, and that is the only place in the whole sync where HCM overrides
+    # SCM's call on `is_active`. On a deployment whose SUPPLY CHAIN MANAGEMENT row
+    # predated the HCM cutover, the project arriving under its new id demoted the row
+    # every indent, stock balance, workflow instance and `PROFILE:<id>:<job>` grant
+    # pointed at — the project and its whole job-profile list vanished from every
+    # screen at once, with nothing said and no way back: `mst_projects` is
+    # `read_only=True` in `masters/defs.py`, so no admin can reactivate it by hand.
+    #
+    # Freeing the code is the part the UNIQUE constraint actually requires.
+    # Deactivating is not, so it now happens ONLY when nothing points at the old row —
+    # a genuinely unused stale row still retires exactly as before, and one carrying
+    # live documents stays visible and says so loudly. A duplicate an admin can see is
+    # always better than a disappearance they cannot.
     if cols.get("code"):
-        await db.execute(
-            update(Project)
-            .where(Project.code == cols["code"], Project.id != row_id)
-            .values(code=f"{cols['code'][:40]}-OLD", is_active=False)
-            .execution_options(synchronize_session=False)
-        )
+        superseded = (await db.execute(
+            select(Project).where(Project.code == cols["code"], Project.id != row_id)
+        )).scalars().all()
+        for old in superseded:
+            # The id, not a bare "-OLD" suffix: a second re-key of the same code would
+            # otherwise mint a second `SCM-OLD` and die on the unique key it is here to
+            # protect. 35 + 5 + the id fits `code`'s String(50).
+            old.code = f"{old.code[:35]}-OLD-{old.id}"
+            referent = await _project_referent(db, old.id)
+            if referent is None:
+                old.is_active = False
+                logger.warning(
+                    "hcm sync: project %s (%s) was re-keyed to id %s; the old row is "
+                    "unused and has been retired", old.id, old.name, row_id,
+                )
+            else:
+                logger.error(
+                    "hcm sync: project %s (%s) was re-keyed to id %s, but %s still "
+                    "points at the old id — it has been left ACTIVE under code %s. "
+                    "Its documents and job profiles are keyed on the OLD id and will "
+                    "not follow the new one; move them before retiring it.",
+                    old.id, old.name, row_id, referent, old.code,
+                )
     existing = await db.get(Project, row_id)
     if existing is None:
         cols.setdefault("code", f"PRJ-{row_id}")
@@ -415,6 +489,55 @@ async def _upsert_project(db: AsyncSession, cols: dict) -> bool:
     return True
 
 
+# How many times a whole entity is pulled again before the pull is called a failure.
+_ENTITY_ATTEMPTS = 4
+
+
+def _retry_delay(entity_key: str, attempt: int, exc: Exception) -> float:
+    """How long to wait before pulling this entity again.
+
+    The backoff is 3s, 6s, 9s. A breaker REFUSAL overrides it: that is not an answer
+    about HCM, it is the client declining to ask, and waiting less than the cooldown
+    spends the rest of the ladder on refusals that cannot come out any other way. That
+    is how one unreachable entity used to fail the seven that came after it — the run
+    at 14:39 on 2026-08-31 lost six entities to "HCM circuit is open" without sending
+    a packet, seconds after the link was back.
+    """
+    delay = 3.0 * (attempt + 1)
+    refused_for = getattr(exc, "retry_after", 0.0) or 0.0
+    if refused_for:
+        delay = max(delay, refused_for + 1.0)
+    logger.warning("hcm sync: %s attempt %s/%s failed (%s) — trying again in %.0fs",
+                   entity_key, attempt + 1, _ENTITY_ATTEMPTS, exc, delay)
+    return delay
+
+
+async def close_interrupted_runs(db: AsyncSession) -> int:
+    """Close out RUNNING rows left behind by a process that stopped mid-sync.
+
+    `sync_entity` commits a RUNNING row before it pulls, so the screen can follow a run
+    live. If the server is restarted or reloaded while that entity is in flight, nobody
+    ever writes the row again: the entity spins on Settings > HCM & Config for ever,
+    and because the page only polls while a sync is running, it never corrects itself.
+    Called when the status is read with nothing actually running, so it is self-healing.
+    """
+    result = await db.execute(
+        update(HcmSyncLog)
+        .where(HcmSyncLog.status == "RUNNING")
+        .values(status="FAILED", finished_at=utcnow(),
+                error_message="Interrupted — the server stopped or reloaded while this "
+                              "entity was syncing. Nothing was pulled; run the sync "
+                              "again.")
+        .execution_options(synchronize_session=False)
+    )
+    closed = result.rowcount or 0
+    if closed:
+        await db.commit()
+        logger.warning("hcm sync: closed %s sync rows left RUNNING by a stopped process",
+                       closed)
+    return closed
+
+
 async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | None = None) -> HcmSyncLog:
     if entity_key == _PROJECT_ENTITY:
         return await _sync_projects(db, client)
@@ -422,7 +545,12 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
     if plan is None:
         raise ValueError(f"Unknown HCM entity: {entity_key}")
     _, endpoint, model, mapper = plan
-    client = client or HcmClient()
+    # One entity synced on its own (POST /api/hcm/sync/{entity}) owns its client and
+    # starts on a clean breaker; inside a run the caller owns both.
+    owns_client = client is None
+    if owns_client:
+        reset_breaker()
+        client = HcmClient()
 
     # Commit the RUNNING row immediately so the Admin UI can track progress live.
     log = HcmSyncLog(entity=entity_key, started_at=utcnow(), status="RUNNING")
@@ -435,13 +563,15 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
         rows = None
         complete = False
         last_exc = None
-        for attempt in range(4):
+        for attempt in range(_ENTITY_ATTEMPTS):
             try:
                 rows, complete = await client.fetch_all_checked(endpoint)
                 break
             except Exception as exc:  # noqa: BLE001 — retry on any fetch error
                 last_exc = exc
-                await asyncio.sleep(3 * (attempt + 1))
+                if attempt == _ENTITY_ATTEMPTS - 1:
+                    break          # nothing left to wait for
+                await asyncio.sleep(_retry_delay(entity_key, attempt, exc))
         if rows is None:
             raise last_exc or RuntimeError("HCM fetch failed")
         upserted = 0
@@ -516,12 +646,17 @@ async def sync_entity(db: AsyncSession, entity_key: str, client: HcmClient | Non
         log.error_message = str(exc)[:1000]
         log.finished_at = utcnow()
         await db.commit()
+    if owns_client:
+        await client.aclose()
     return log
 
 
 async def _sync_projects(db: AsyncSession, client: HcmClient | None = None) -> HcmSyncLog:
     """Pull HCM projects into mst_projects. Same logging shape as any other entity."""
-    client = client or HcmClient()
+    owns_client = client is None
+    if owns_client:
+        reset_breaker()
+        client = HcmClient()
     log = HcmSyncLog(entity=_PROJECT_ENTITY, started_at=utcnow(), status="RUNNING")
     db.add(log)
     await db.commit()
@@ -543,14 +678,23 @@ async def _sync_projects(db: AsyncSession, client: HcmClient | None = None) -> H
         log.error_message = str(exc)[:1000]
         log.finished_at = utcnow()
         await db.commit()
+    if owns_client:
+        await client.aclose()
     return log
 
 
 async def sync_all(db: AsyncSession, client: HcmClient | None = None) -> list[HcmSyncLog]:
-    client = client or HcmClient()
+    owns_client = client is None
+    if owns_client:
+        reset_breaker()
+        client = HcmClient()
     logs = []
-    for entity_key, *_ in PLAN:
-        logs.append(await sync_entity(db, entity_key, client))
+    try:
+        for entity_key, *_ in PLAN:
+            logs.append(await sync_entity(db, entity_key, client))
+    finally:
+        if owns_client:
+            await client.aclose()
     from app.platform.rbac.service import sync_hcm_roles
     await sync_hcm_roles(db)
     await db.commit()
@@ -579,10 +723,17 @@ NEEDED_ENTITIES = [
 
 
 async def sync_needed(db: AsyncSession, client: HcmClient | None = None) -> list[HcmSyncLog]:
-    client = client or HcmClient()
+    owns_client = client is None
+    if owns_client:
+        reset_breaker()
+        client = HcmClient()
     logs = []
-    for entity_key in NEEDED_ENTITIES:
-        logs.append(await sync_entity(db, entity_key, client))
+    try:
+        for entity_key in NEEDED_ENTITIES:
+            logs.append(await sync_entity(db, entity_key, client))
+    finally:
+        if owns_client:
+            await client.aclose()
     from app.platform.rbac.service import sync_hcm_roles
     await sync_hcm_roles(db)
     await db.commit()
@@ -611,11 +762,18 @@ async def run_background(entities: list[str] | None = None) -> None:
     try:
         from app.core.database import SessionLocal
 
+        # A run a person just asked for starts on a clean breaker: whether the link
+        # was down ten minutes ago is no reason to refuse to look now, and an armed
+        # breaker used to fail the FIRST entity without sending a packet.
+        reset_breaker()
         client = HcmClient()
         keys = entities or NEEDED_ENTITIES
         async with SessionLocal() as db:
-            for key in keys:
-                await sync_entity(db, key, client)
+            try:
+                for key in keys:
+                    await sync_entity(db, key, client)
+            finally:
+                await client.aclose()
             if "positions" in keys:
                 from app.platform.rbac.service import sync_hcm_roles
                 await sync_hcm_roles(db)

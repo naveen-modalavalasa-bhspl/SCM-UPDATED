@@ -566,10 +566,12 @@ async def update_consignment(consignment_id: int, data: s.ConsignmentWrite,
 @router.get("/dispatches", response_model=Page[s.DispatchRead])
 async def list_dispatches(params: PageParams = Depends(), status: str | None = None,
                           warehouse_id: int | None = None, search: str | None = None,
+                          inbound: bool = False,
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(DISPATCH_VIEW))):
     return await service.list_dispatches(db, params, status=status,
-                                         warehouse_id=warehouse_id, search=search, user=user)
+                                         warehouse_id=warehouse_id, search=search,
+                                         inbound=inbound, user=user)
 
 
 @router.get("/dispatches/{dispatch_id}", response_model=s.DispatchDetail)

@@ -153,9 +153,21 @@ const LIVE_MS = 10_000;
 const oneLine = (help?: string) =>
   (help ?? "").match(/^[^.]*\./)?.[0] ?? (help ?? "");
 
+/** Where this consignment is ACTUALLY going, which is not always where the request
+ *  it serves ends up.
+ *
+ *  `to_warehouse_name` is the consignment's own destination — the point the warehouse
+ *  addressed it to. `destination_office_name` is derived from the INDENT's office
+ *  (`_issue_destination`) and so always names the requester's own point, whatever leg
+ *  this is. On a direct WH -> LIP run the two agree, which is why the wrong one being
+ *  read first went unnoticed; on a relay hop (WH -> MDP -> LIP) they do not, and the
+ *  shipment was stamped with the final LIP while the lorry drove to the MDP.
+ *
+ *  The consignment's own destination wins. The office name stays as the fallback for
+ *  a dispatch with no receiving warehouse at all — a customer or a vendor return. */
 const destinationOf = (row?: Consignment | null) =>
-  row?.destination_office_name
-  ?? row?.to_warehouse_name
+  row?.to_warehouse_name
+  ?? row?.destination_office_name
   ?? row?.customer_name
   ?? row?.delivery_address
   ?? "—";

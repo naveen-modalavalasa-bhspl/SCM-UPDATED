@@ -5,6 +5,7 @@ import { Inbox } from "lucide-react";
 // that imports its own barrel is a cycle waiting to bite at load time.
 import { Button, Card } from "./ui";
 import { Alert } from "./Alert";
+import { claimError, describeError } from "@/shared/api/errors";
 
 /**
  * Error, empty and confirm surfaces.
@@ -16,13 +17,33 @@ import { Alert } from "./Alert";
  * miss; failures belong in an `<ErrorBanner>` that stays put.
  */
 
-/** Renders nothing when there is no error, so call sites need no conditional. */
+/**
+ * Renders nothing when there is no error, so call sites need no conditional.
+ *
+ * The wording is not decided here: `describeError` in `shared/api/errors.ts` is the
+ * one translation from a failure to something a storekeeper can read, and the dozens
+ * of call sites that pass a raw axios rejection straight in get it without being
+ * touched. A refusal the person can fix on this screen (a missing field, a duplicate)
+ * shows amber; one they cannot (no permission, session gone, server down) shows red.
+ */
 export function ErrorBanner({ error, className = "" }: { error?: unknown; className?: string }) {
   if (!error) return null;
-  const message = error instanceof Error ? error.message : String(error);
-  // The shape lives in <Alert> now, so the dozens of call sites already using
-  // ErrorBanner pick up the new one without being touched.
-  return <Alert tone="danger" title={message} className={`mb-4 ${className}`} />;
+  const notice = describeError(error);
+  if (!notice.message) return null;
+  // This failure now has somewhere to be read. `useAction` checks before adding a
+  // toast, so the twelve screens that do both stop saying it twice.
+  claimError(error);
+  return (
+    <Alert
+      tone={notice.level === "warning" ? "warning" : "danger"}
+      // A screen that threw its own `new Error("Pick at least one row")` gets no
+      // title: it wrote the sentence and heading it with a generic one is noise.
+      title={notice.title ?? notice.message}
+      className={`mb-4 ${className}`}
+    >
+      {notice.title ? notice.message : undefined}
+    </Alert>
+  );
 }
 
 export function EmptyState({
