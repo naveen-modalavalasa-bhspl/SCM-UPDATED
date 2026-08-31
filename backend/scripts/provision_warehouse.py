@@ -17,6 +17,7 @@ from sqlalchemy import select
 from app.core.database import SessionLocal
 from app.platform.rbac import permissions as P
 from app.platform.rbac.models import Page, Permission, Role, RolePermission
+from app.platform.rbac.page_registry import RETIRED_PAGES
 from app.shared.enums import UserRole
 
 # The permission rows the module's endpoints check. Sourced from ALL_PERMISSIONS so
@@ -105,8 +106,25 @@ async def provision() -> None:
         group.required_permission, group.is_active = perm, True
         await db.flush()
 
-        added_pages = 0
+        # A retired screen stays retired.
+        #
+        # `page_registry.RETIRED_PAGES` is the one list that says a screen is gone, and
+        # `sync_pages` acts on it at every API start. This loop force-sets `is_active =
+        # True` on everything it owns, so a page retired at startup came back the next
+        # time this ran — and `wh_dispatch` and `wh_consignments` are BOTH in its list
+        # and in RETIRED_PAGES. On the v1.11 deployment that is exactly what happened:
+        # the API retired the rival Dispatch door, bootstrap's warehouse step switched
+        # it back on, and a screen whose `gate_out` releases a load with no carrier, no
+        # freight and no LR was on the menu again.
+        #
+        # Filtered rather than deleted from PAGES: the rows must still be REACHABLE (the
+        # gate pass prints from them and 26 live consignments went out that way), and
+        # keeping them here records what the module used to own.
+        added_pages, skipped = 0, 0
         for code, path, name, icon, perm, order in PAGES:
+            if code in RETIRED_PAGES:
+                skipped += 1
+                continue
             page = await _one(db, Page, code=code)
             if page is None:
                 page = Page(code=code)
@@ -120,7 +138,9 @@ async def provision() -> None:
         print(f"Permissions: {added_perms} added, {len(wanted) - added_perms} already present.")
         print(f"Role grants: {granted} added (admin = all, store = all but "
               f"{', '.join(sorted(STORE_EXCLUDES))}).")
-        print(f"Menu: {added_pages} pages added, {len(PAGES) - added_pages} updated.")
+        print(f"Menu: {added_pages} pages added, "
+              f"{len(PAGES) - added_pages - skipped} updated, "
+              f"{skipped} left retired.")
         print("Restart the API so the new router and permissions are picked up.")
 
 
