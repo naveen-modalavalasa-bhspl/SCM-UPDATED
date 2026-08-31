@@ -6,13 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi.exceptions import RequestValidationError
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from starlette.requests import Request
 
 from app.core.database import Base
 from app.core.exceptions import (
-    ConflictError, PermissionError_, app_exception_handler,
+    ConflictError, PermissionError_, app_exception_handler, data_error_handler,
+    integrity_error_handler, request_validation_exception_handler,
     unhandled_exception_handler,
 )
 from app.main import app
@@ -111,7 +113,12 @@ async def test_warning_and_error_handlers_keep_the_normal_response_shape():
     warning_response = await app_exception_handler(warning_request, warning)
     assert warning_response.status_code == 409
     assert json.loads(warning_response.body) == {
-        "success": False, "error": "Already exists",
+        "success": False,
+        "error": "Already exists",
+        "error_code": "CONFLICT",
+        "title": "Already done",
+        "detail": "Already exists",
+        "field": None,
     }
     reported = warning_request.app.state.error_reporter.await_args.args
     assert reported[2:] == (409, "Already exists")
@@ -121,9 +128,14 @@ async def test_warning_and_error_handlers_keep_the_normal_response_shape():
         error_request, RuntimeError("database_url=mysql://secret"),
     )
     assert error_response.status_code == 500
-    assert json.loads(error_response.body) == {
-        "success": False, "error": "Internal server error",
-    }
+    body = json.loads(error_response.body)
+    # Nothing derived from the exception reaches the browser — the connection string
+    # in it is in the log and nowhere else.
+    assert body["success"] is False
+    assert body["error"] == "Internal server error"
+    assert body["error_code"] == "SERVER_ERROR"
+    assert "secret" not in json.dumps(body)
+    assert "mysql" not in json.dumps(body).lower()
     reported = error_request.app.state.error_reporter.await_args.args
     assert reported[2:] == (500, "Internal server error")
 
@@ -286,3 +298,85 @@ async def test_admin_can_filter_search_and_paginate_newest_first(
         )
         assert response.status_code == 200, (name, response.text)
         assert [item["request_id"] for item in response.json()["items"]] == ["newer-id"]
+
+
+# --------------------------------------------------------------------------- #
+# The user-facing half of the envelope                                         #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_validation_errors_name_the_field_in_a_sentence():
+    """"body.required_by: Field required" is a stack trace with the stack removed."""
+    exc = RequestValidationError([
+        {"type": "missing", "loc": ("body", "required_by"), "msg": "Field required"},
+    ])
+    body = json.loads((await request_validation_exception_handler(_request(), exc)).body)
+    assert body["error"] == "required_by is required."
+    assert body["field"] == "required_by"
+    assert body["error_code"] == "VALIDATION_ERROR"
+
+    rows = RequestValidationError([
+        {"type": "greater_than", "loc": ("body", "items", 0, "qty"),
+         "msg": "Input should be greater than 0"},
+    ])
+    row_body = json.loads(
+        (await request_validation_exception_handler(_request(), rows)).body)
+    # Which line, not just which column: "qty must be larger" on a ten-line indent
+    # is not an answer.
+    assert "row 1" in row_body["error"]
+
+    both = RequestValidationError([
+        {"type": "missing", "loc": ("body", "username"), "msg": "Field required"},
+        {"type": "missing", "loc": ("body", "password"), "msg": "Field required"},
+    ])
+    both_body = json.loads(
+        (await request_validation_exception_handler(_request(), both)).body)
+    assert both_body["error"] == "These details are required: username, password."
+
+
+@pytest.mark.asyncio
+async def test_a_custom_validator_keeps_its_own_sentence():
+    exc = RequestValidationError([
+        {"type": "value_error", "loc": ("query", "date_from"),
+         "msg": "date_from must be the same as or earlier than date_to"},
+    ])
+    body = json.loads((await request_validation_exception_handler(_request(), exc)).body)
+    assert body["error"] == "date_from must be the same as or earlier than date_to."
+
+
+@pytest.mark.asyncio
+async def test_driver_errors_keep_the_column_and_drop_the_sql():
+    too_long = SimpleNamespace(
+        orig="(1406, \"Data too long for column 'vendor_name' at row 1\")")
+    body = json.loads((await data_error_handler(_request(), too_long)).body)
+    assert body["error"] == "vendor_name is too long for this field. Shorten it and save again."
+    assert body["field"] == "vendor_name"
+    for leaked in ("1406", "at row 1", "Data too long"):
+        assert leaked not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_says_what_already_exists_instead_of_500():
+    duplicate = SimpleNamespace(
+        orig="(1062, \"Duplicate entry 'GRN-0007' for key 'wh_grn.uq_wh_grn_no'\")")
+    response = await integrity_error_handler(_request(), duplicate)
+    body = json.loads(response.body)
+    assert response.status_code == 409
+    assert body["error_code"] == "DUPLICATE"
+    assert "GRN-0007" in body["error"]
+    # The index name is ours, not the storekeeper's.
+    assert "uq_wh_grn_no" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_permission_reads_as_an_answer():
+    response = await app_exception_handler(
+        _request(), PermissionError_(f"Missing permission: {perms.INDENT_APPROVE}"),
+    )
+    body = json.loads(response.body)
+    assert response.status_code == 403
+    assert body["error_code"] == "PERMISSION_DENIED"
+    assert body["error"].startswith("You don't have permission to perform this action.")
+    # Still names the code: an administrator has to know what to grant.
+    assert perms.INDENT_APPROVE in body["error"]

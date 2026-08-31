@@ -4,6 +4,10 @@ export interface SyncResult {
   records_fetched: number;
   records_upserted: number;
   error_message?: string | null;
+  /** When this entity last ran. The card shows the newest row per entity, and a row
+   *  from an older run looks identical to one from this one without it. */
+  started_at?: string | null;
+  finished_at?: string | null;
 }
 
 /** One piece of follow-up work a sync triggers, and whether it landed. */

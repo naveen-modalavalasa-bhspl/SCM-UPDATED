@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, Clock, Check, AlertTriangle } from "lucide-react";
 import { Spinner, Switch } from "@heroui/react";
 import { PageHeader, Card, Button, Field, Input } from "@/shared/components";
+import { fmtDateTime, fmtRelative } from "@/shared/datetime";
 import { adminApi } from "../api";
 import type { SyncFollowUp, SyncResult } from "../types";
 
@@ -13,14 +14,19 @@ const PRESETS = [
   { label: "Daily", minutes: 1440 },
 ];
 
-// Display order = the sync order.
+// Display order = the sync order. These are `sync.NEEDED_ENTITIES`, and nothing else:
+// the card used to list `position_assignments`, which is deliberately never pulled
+// (seats are derived from each position's `assigned_employee`), so it sat at "—" for
+// ever; and it omitted sections, roles and projects, which every run does pull.
 const ENTITIES = [
   ["offices", "Offices"],
   ["departments", "Departments"],
+  ["sections", "Sections"],
+  ["roles", "Roles"],
   ["position_levels", "Position levels"],
+  ["projects", "Projects"],
   ["positions", "Positions"],
   ["employees", "Employees"],
-  ["position_assignments", "Position assignments"],
 ] as const;
 
 function latestByEntity(items: SyncResult[]): Record<string, SyncResult> {
@@ -41,11 +47,19 @@ function EntityRow({ label, r }: { label: string; r?: SyncResult }) {
           {!status && <span className="h-2 w-2 rounded-full bg-line" />}
           <span className="text-sm font-medium text-body">{label}</span>
         </div>
-        <div className="text-xs tabular text-muted">
-          {status === "SUCCESS" && `${r?.records_upserted} synced`}
-          {status === "RUNNING" && "syncing…"}
+        <div className="flex items-center gap-2 text-xs tabular text-muted">
+          {/* WHEN, next to WHAT. The card shows the newest row per entity, so a
+              success from a run two days ago sat under today's failures and read as
+              part of the same run — which is how a broken sync looked half-green. */}
+          {status && status !== "RUNNING" && (
+            <span title={fmtDateTime(r?.finished_at ?? r?.started_at)}>
+              {fmtRelative(r?.finished_at ?? r?.started_at)}
+            </span>
+          )}
+          {status === "SUCCESS" && <span>{r?.records_upserted} synced</span>}
+          {status === "RUNNING" && <span>syncing…</span>}
           {status === "FAILED" && <span className="text-bad">failed</span>}
-          {!status && "—"}
+          {!status && <span>—</span>}
         </div>
       </div>
       {/* `sys_hcm_sync_log` has stored the reason all along — a bad key, a refused
