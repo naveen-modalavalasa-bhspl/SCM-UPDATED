@@ -22,12 +22,9 @@ from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.exceptions import NotFoundError
 from app.core.pagination import PageParams
-from app.modules.integrations.adapters.cams import ingest, reads
+from app.modules.integrations.adapters.cams import docs, ingest, reads
 from app.modules.integrations.adapters.cams.enums import SIGNATURE_HEADER
-from app.modules.integrations.adapters.cams.schemas import (
-    AckIn, ConsumptionIn, ReceiptOut, SecretOut, StockBalanceIn, StockTransferIn,
-    WastageIn,
-)
+from app.modules.integrations.adapters.cams.schemas import ReceiptOut, SecretOut
 from app.modules.integrations.security import Caller, require_api_key
 from app.platform.rbac import permissions as perms
 
@@ -173,38 +170,54 @@ async def serial_numbers(request: Request, consumable_code: str = "", item_id: s
 # Write endpoints — §4
 # --------------------------------------------------------------------------- #
 # Each is the same four steps in `ingest.accept`; only the schema and what counts as a
-# row differ. Registered through a table so the two path aliases cannot fall out of
-# step with each other.
+# row differ. Registered from `docs.WRITES` — the same table the connection document
+# is built from, so the URL a partner is handed is by construction a URL that exists,
+# and the two path aliases cannot fall out of step with each other.
 
-WRITES = (
-    ("material-issue-ack", AckIn, lambda p: len(p.items)),
-    ("consumption", ConsumptionIn, lambda p: len(p.records)),
-    ("stock-balance", StockBalanceIn,
-     lambda p: sum(len(f.items) for f in p.facilities)),
-    ("stock-transfer", StockTransferIn, lambda p: len(p.items)),
-    ("wastage", WastageIn, lambda p: len(p.records)),
-)
-
-
-def _register(path: str, model, count) -> None:
+def _register(write: docs.Write) -> None:
     async def handler(request: Request, db: AsyncSession = Depends(get_db),
                       caller: Caller = Depends(cams_caller)):
         return await ingest.accept(
-            db, await request.body(), request.headers.get(SIGNATURE_HEADER), model,
-            client_code=caller.client_code, count=count)
+            db, await request.body(), request.headers.get(SIGNATURE_HEADER),
+            write.model, client_code=caller.client_code, count=write.count)
 
-    handler.__name__ = f"cams_{path.replace('-', '_')}"
-    for route in (f"/{path}", f"/cams/{path}"):
+    handler.__name__ = f"cams_{write.path.replace('-', '_')}"
+    for route in (f"/{write.path}", f"/cams/{write.path}"):
         feeds.post(route)(handler)
 
 
-for _path, _model, _count in WRITES:
-    _register(_path, _model, _count)
+for _write in docs.WRITES:
+    _register(_write)
 
 
 # --------------------------------------------------------------------------- #
 # Console — the SCM side
 # --------------------------------------------------------------------------- #
+
+@console.get("/status")
+async def cams_status(db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(VIEW))):
+    """Whether the shared secret exists and what has arrived. Never the secret."""
+    return await ingest.status(db)
+
+
+@console.get("/docs")
+async def connection_docs(request: Request, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(VIEW))):
+    """Where B-CAMS posts, how it signs, and an example of each of the five bodies.
+
+    The host comes from the request, not from configuration: whoever opens this screen
+    reached SCM on some address, and that is the address to hand the partner. The read
+    feeds are listed from the routes that are actually registered."""
+    feed_paths = tuple(
+        route.path.rsplit("/", 1)[-1] for route in feeds.routes
+        if "GET" in getattr(route, "methods", ()) and not route.path.endswith("_ping")
+    )
+    config = await ingest.config(db)
+    return docs.connection_docs(
+        str(request.base_url), configured=bool(config.get("secret_hmac_key")),
+        feeds=feed_paths)
+
 
 @console.post("/secret", response_model=SecretOut, status_code=201)
 async def rotate_secret(db: AsyncSession = Depends(get_db),

@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy.dialects import mysql
 
 from app.core.exceptions import AuthenticationError, ValidationError
+from app.modules.integrations.adapters.cams import docs as cams_docs
 from app.modules.integrations.adapters.cams import ingest, reads, router
 from app.modules.integrations.adapters.cams.enums import MAX_EVENT_ID, Tier
 from app.modules.integrations.adapters.cams.schemas import (
@@ -634,3 +635,36 @@ def test_the_field_feed_never_claims_an_scm_identity():
     the ledger says where the movement came from, not who they say they are."""
     assert cams_apply.ACTOR.id is None
     assert "B-CAMS" in cams_apply.ACTOR.full_name
+
+
+# --------------------------------------------------------------------------- #
+# The connection document
+# --------------------------------------------------------------------------- #
+# A doc a partner integrates against is a promise, and the two ways it goes wrong are
+# an example that no longer validates and a URL that was never registered. Both are
+# mechanical, so both are checked here rather than discovered by B-CAMS.
+
+class TestConnectionDocs:
+    def test_every_sample_validates_against_the_model_it_documents(self):
+        for write in cams_docs.WRITES:
+            payload = write.model.model_validate(write.sample)
+            assert payload.event == write.event
+            assert write.count(payload) >= 1
+
+    def test_every_documented_url_is_a_registered_route(self):
+        registered = {route.path for route in router.feeds.routes}
+        doc = cams_docs.connection_docs("http://scm.example")
+        for entry in doc["writes"]:
+            path = entry["url"].removeprefix("http://scm.example")
+            assert path in registered, f"{path} is documented but not registered"
+
+    def test_the_host_comes_from_the_caller_not_from_source(self):
+        """Rule 13: the address is never a literal. Whoever opens the screen reached
+        SCM on some host, and that is the host the partner is handed."""
+        doc = cams_docs.connection_docs("http://103.174.161.68:8023/")
+        assert doc["base_url"] == "http://103.174.161.68:8023/api/ext/v1/cams"
+
+    def test_the_two_events_that_move_stock_say_so(self):
+        deducting = {w["event"] for w in cams_docs.connection_docs()["writes"]
+                     if w["deducts_stock"]}
+        assert deducting == {"facility.consumption", "facility.wastage"}
