@@ -12,6 +12,12 @@ export { SubNav, type SubNavItem } from "./SubNav";
 export { Can } from "./Can";
 export { Alert, type AlertTone } from "./Alert";
 export { ErrorBanner, EmptyState, ConfirmModal } from "./Feedback";
+// The one notification card — the toast strip, the alert dialog and the confirm
+// modal are all this, so a popup cannot be styled differently by being written
+// somewhere else.
+export {
+  NoticeCard, NoticeChip, NoticeCountdown, NOTICE_TONES, NOTICE_WIDTH, type NoticeTone,
+} from "./notice";
 export { ToastProvider, useToast, type ToastInput, type ToastContent } from "./Toast";
 // The one translation from a failure to a sentence. Import it directly when a
 // screen needs the level or the field rather than just the message.

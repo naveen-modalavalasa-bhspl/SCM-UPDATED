@@ -225,6 +225,10 @@ export function PODetailPage() {
     .includes(po.data.status);
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
   const busy = submit.isPending || send.isPending || decide.isPending;
+  // What the asterisks on the amend line editor actually mean — an item and a
+  // quantity on every line, the same rule the new-order screen refuses on.
+  const incompleteAmendLines = amendLines
+    .some((line) => line.item_id === "" || !(Number(line.quantity) > 0));
 
   const steps: Step[] = (() => {
     const s = po.data.status;
@@ -563,12 +567,22 @@ export function PODetailPage() {
         />
       </div>
       {amend.error && <p className="text-sm text-danger">{(amend.error as Error).message}</p>}
+      {/* FIXED — the line editor marks Item and Quantity with an asterisk and the
+        * amend sent whatever was on screen: a line added and left blank went out as
+        * item NaN with a quantity of 0, so the revision the vendor was asked to accept
+        * carried a line for nothing. The same rule the new-order screen states. */}
+      {incompleteAmendLines && (
+        <p className="text-sm text-danger">
+          Every line needs an item and a quantity. Remove the empty one, or fill it in.
+        </p>
+      )}
       <div className="flex justify-end gap-2">
         <Button variant="subtle" onClick={() => { setAmending(false); setAmendReason(""); }}>
           Cancel
         </Button>
         <Button
-          disabled={amend.isPending || !amendReason.trim() || amendLines.length === 0}
+          disabled={amend.isPending || !amendReason.trim() || amendLines.length === 0
+            || incompleteAmendLines}
           onClick={() => amend.mutate()}
         >
           {amend.isPending ? "Amending…" : "Save as a new revision"}

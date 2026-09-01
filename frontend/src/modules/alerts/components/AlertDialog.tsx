@@ -1,57 +1,27 @@
 import { useEffect, useRef } from "react";
 import { Modal, ModalContent } from "@heroui/react";
-import {
-  CheckCircle2, CircleAlert, Info, Trash2, TriangleAlert, X,
-} from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { Button } from "@/shared/components";
-import type { ActiveAlert, AlertVariant } from "../types";
+import { NoticeCard, NOTICE_TONES } from "@/shared/components/notice";
+import type { ActiveAlert } from "../types";
 
 /**
  * One popup card.
  *
- * Built on HeroUI's `Modal` for the overlay, focus trap and Escape handling
- * rather than a hand-rolled fixed div — everything below it is a form, and a
- * dialog that leaks focus back into that form is how people confirm the wrong
- * record. The card itself is composed here because this is a module-owned
- * surface; the buttons still come from `@/shared/components` per CLAUDE.md.
+ * The CARD is `shared/components/notice.tsx` — the same one the toast strip draws,
+ * at the same width, with the same tone chip, the same type scale and the same
+ * countdown hairline. This file owns only the SHELL: the overlay, the focus trap and
+ * Escape handling, which come from HeroUI's `Modal` rather than a hand-rolled fixed
+ * div because everything below a dialog is a form, and a dialog that leaks focus
+ * back into that form is how people confirm the wrong record.
+ *
+ * Before this it drew its own: a 48px circle, a centred `text-lg` title and `pt-7`
+ * padding, against the toast's 36px chip and left-aligned `text-sm`. Same news,
+ * two faces, and the two share a lane on desktop.
  */
 
-const LOOK: Record<AlertVariant, {
-  icon: typeof Info;
-  /** Tinted circle behind the icon. */
-  ring: string;
-  button: "primary" | "danger";
-}> = {
-  success: { icon: CheckCircle2, ring: "bg-ok-bg text-ok", button: "primary" },
-  info: { icon: Info, ring: "bg-info-bg text-info", button: "primary" },
-  warning: { icon: CircleAlert, ring: "bg-warn-bg text-warn", button: "primary" },
-  danger: { icon: TriangleAlert, ring: "bg-bad-bg text-bad", button: "danger" },
-  error: { icon: TriangleAlert, ring: "bg-bad-bg text-bad", button: "primary" },
-};
-
-/** Drains left to right for exactly as long as the dialog has left. */
-function Countdown({ ms }: { ms: number }) {
-  const bar = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    // Written straight to the node rather than through state: the callback runs
-    // a frame later, outside anything React is tracking, and a `setState` there
-    // is an act() warning in every test that opens a self-closing alert.
-    const frame = requestAnimationFrame(() => {
-      if (bar.current) bar.current.style.width = "0%";
-    });
-    return () => cancelAnimationFrame(frame);
-  }, []);
-  return (
-    <div aria-hidden className="mt-5 h-1 w-full overflow-hidden rounded-full bg-line">
-      <div
-        ref={bar}
-        className="h-full rounded-full bg-brand"
-        style={{ width: "100%", transition: `width ${ms}ms linear` }}
-      />
-    </div>
-  );
-}
-
+/** Drives the confirm button's colour, and nothing else on the card. `danger` is
+ *  the only tone that destroys, so it is the only one that recolours. */
 export function AlertDialog({
   alert,
   onResolve,
@@ -59,7 +29,6 @@ export function AlertDialog({
   alert: ActiveAlert;
   onResolve: (confirmed: boolean) => void;
 }) {
-  const { icon: Icon, ring, button } = LOOK[alert.variant];
   const isConfirm = alert.mode === "confirm";
   // The one line that decides the whole desktop treatment below. A dialog that
   // drains its own countdown is a notification — it must not seize the page. A
@@ -71,10 +40,12 @@ export function AlertDialog({
   // Focus the safe choice. On a destructive confirm the keyboard should not be
   // one Enter away from deleting the record, so Cancel takes focus there.
   useEffect(() => {
-    const target = confirmRef.current?.querySelector<HTMLButtonElement>(
-      alert.variant === "danger" && isConfirm ? "button:last-of-type" : "button:first-of-type",
-    );
-    target?.focus();
+    const buttons = confirmRef.current?.querySelectorAll<HTMLButtonElement>("button");
+    if (!buttons?.length) return;
+    // Cancel is drawn FIRST and Confirm last, the usual reading order for a pair of
+    // choices, so the safe one is the first button rather than the last.
+    const safeFirst = alert.variant === "danger" && isConfirm;
+    (safeFirst ? buttons[0] : buttons[buttons.length - 1])?.focus();
   }, [alert.id, alert.variant, isConfirm]);
 
   return (
@@ -109,69 +80,40 @@ export function AlertDialog({
           ? "bg-overlay/50 backdrop-blur-sm md:bg-transparent md:backdrop-filter-none"
           : "bg-overlay/50 backdrop-blur-sm",
         wrapper: "md:items-start md:justify-center md:pt-4",
-        base: "rounded-2xl border border-line/70 bg-content1 md:max-w-sm md:shadow-2xl",
+        // No card chrome of its own: `NoticeCard` brings the border, the radius and
+        // the shadow, and a second set around it would draw a box inside a box.
+        base: "bg-transparent shadow-none md:max-w-[23rem]",
       }}
     >
       <ModalContent>
-        <div
-          className="relative px-6 pb-6 pt-7 text-center md:px-5 md:pb-5 md:pt-6"
-          data-testid="alert-dialog"
-        >
-          <button
-            type="button"
-            onClick={() => onResolve(false)}
-            aria-label="Close"
-            className="absolute right-4 top-4 rounded-lg p-1.5 text-muted transition hover:bg-content2 hover:text-ink"
-          >
-            <X className="h-4 w-4" />
-          </button>
-
-          <div className={`mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full ${ring}`}>
-            <Icon className="h-6 w-6" />
-          </div>
-
-          <h2
-            role={alert.variant === "success" || alert.variant === "info" ? "status" : "alert"}
-            className="font-display text-lg font-bold text-ink"
-          >
-            {alert.title}
-          </h2>
-          {alert.message && (
-            <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted">
-              {alert.message}
-            </p>
-          )}
-
-          {(alert.confirmLabel || alert.cancelLabel) && (
-            <div
-              ref={confirmRef}
-              className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-center"
-            >
-              {alert.confirmLabel && (
-                <Button
-                  variant={button}
-                  onClick={() => onResolve(true)}
-                  className="w-full sm:flex-1"
-                >
-                  <span className="flex items-center justify-center gap-2">
-                    {alert.variant === "danger" && isConfirm && <Trash2 className="h-4 w-4" />}
-                    {alert.confirmLabel}
-                  </span>
-                </Button>
-              )}
-              {alert.cancelLabel && (
-                <Button
-                  variant="subtle"
-                  onClick={() => onResolve(false)}
-                  className="w-full sm:flex-1"
-                >
-                  {alert.cancelLabel}
-                </Button>
-              )}
-            </div>
-          )}
-
-          {alert.autoCloseMs !== null && <Countdown ms={alert.autoCloseMs} />}
+        <div data-testid="alert-dialog">
+          <NoticeCard
+            tone={alert.variant}
+            title={alert.title}
+            message={alert.message}
+            onClose={() => onResolve(false)}
+            countdownMs={alert.autoCloseMs}
+            actions={(alert.confirmLabel || alert.cancelLabel) ? (
+              <div ref={confirmRef} className="flex w-full flex-wrap items-center justify-end gap-2">
+                {alert.cancelLabel && (
+                  <Button variant="subtle" onClick={() => onResolve(false)}>
+                    {alert.cancelLabel}
+                  </Button>
+                )}
+                {alert.confirmLabel && (
+                  <Button
+                    variant={NOTICE_TONES[alert.variant].button}
+                    onClick={() => onResolve(true)}
+                  >
+                    <span className="flex items-center justify-center gap-2">
+                      {alert.variant === "danger" && isConfirm && <Trash2 className="h-4 w-4" />}
+                      {alert.confirmLabel}
+                    </span>
+                  </Button>
+                )}
+              </div>
+            ) : undefined}
+          />
         </div>
       </ModalContent>
     </Modal>

@@ -2,8 +2,8 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
   type ReactNode,
 } from "react";
-import { CheckCircle2, CircleAlert, Info, TriangleAlert, X } from "lucide-react";
 import { describeError, type Notice, type NoticeLevel } from "@/shared/api/errors";
+import { NoticeCard, NOTICE_WIDTH } from "./notice";
 
 /**
  * The app's transient notification strip.
@@ -71,53 +71,13 @@ interface ToastApi {
 
 const ToastContext = createContext<ToastApi | null>(null);
 
-/**
- * Deliberately the same vocabulary as `modules/alerts/components/AlertDialog.tsx`:
- * a white card, a tinted circular chip carrying the icon, a dark title and a muted
- * sentence under it. The colour says which KIND of thing happened; the words stay
- * black on white, where they are easiest to read.
- *
- * The old treatment tinted the whole card and painted the title AND the message in
- * the status colour — green text on green, amber on amber. It shouted, and it was
- * the hardest of the three to actually read.
- */
-const TONES: Record<ToastTone, { icon: typeof CheckCircle2; chip: string; bar: string }> = {
-  success: { icon: CheckCircle2, chip: "bg-ok-bg text-ok", bar: "bg-ok/60" },
-  error: { icon: TriangleAlert, chip: "bg-bad-bg text-bad", bar: "bg-bad/60" },
-  warning: { icon: CircleAlert, chip: "bg-warn-bg text-warn", bar: "bg-warn/60" },
-  info: { icon: Info, chip: "bg-info-bg text-info", bar: "bg-info/60" },
-};
+/* The card, the tones, the icons and the countdown all come from `notice.tsx`, so
+ * the strip and the alert dialog are literally the same component wearing the same
+ * measurements. They used to be two hand-kept copies that drifted. */
 
 const DISMISS_AFTER = 3500;
 /** Beyond three, a strip of toasts is a wall nobody reads. Oldest goes. */
 const MAX_VISIBLE = 3;
-
-/**
- * Drains left to right for exactly as long as the toast has left.
- *
- * Written straight to the node rather than through state, for the same reason as
- * the alert dialog's: the callback runs a frame later, outside anything React is
- * tracking, and a `setState` there is an act() warning in every test that shows a
- * self-closing toast.
- */
-function Countdown({ ms, className }: { ms: number; className: string }) {
-  const bar = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      if (bar.current) bar.current.style.width = "0%";
-    });
-    return () => cancelAnimationFrame(frame);
-  }, []);
-  return (
-    <div aria-hidden className="h-0.5 w-full bg-line/60">
-      <div
-        ref={bar}
-        className={`h-full ${className}`}
-        style={{ width: "100%", transition: `width ${ms}ms linear` }}
-      />
-    </div>
-  );
-}
 
 const asContent = (content: ToastInput): ToastContent =>
   typeof content === "string" ? { title: content } : content;
@@ -185,48 +145,26 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div
         aria-live="polite"
         // `top-20`, not `top-4`: the app shell's header and its module tab strip
-        // occupy the first ~66px, and a toast pinned to the top of the viewport
-        // sat ON them — covering the tabs and reading as part of the chrome.
-        // Same width as the alert dialog (`max-w-sm`) so the two never look like
-        // two different systems talking.
-        className="pointer-events-none fixed left-1/2 top-20 z-100 flex w-[min(24rem,calc(100vw-2rem))] -translate-x-1/2 flex-col items-center gap-2"
+        // occupy the first ~66px, and a toast pinned to the top of the viewport sat
+        // ON them — covering the tabs and reading as part of the chrome.
+        //
+        // Same lane, same width and same card as the alert dialog (`NOTICE_WIDTH`),
+        // so a toast and a dialog never look like two different systems talking.
+        className={`pointer-events-none fixed left-1/2 top-20 z-100 flex ${NOTICE_WIDTH} -translate-x-1/2 flex-col items-center gap-2`}
       >
         {toasts.map((toast) => {
-          const { icon: Icon, chip, bar } = TONES[toast.tone];
-          const loud = toast.tone === "error" || toast.tone === "warning";
+          // Only the two quiet levels draw a countdown; a failure with no bar is
+          // itself the signal that this one is waiting to be read.
           const selfCloses = toast.tone === "success" || toast.tone === "info";
           return (
-            <div
-              key={toast.id}
-              role={loud ? "alert" : "status"}
-              className="pointer-events-auto w-full overflow-hidden rounded-2xl border border-line/70 bg-content1 shadow-lg"
-            >
-              <div className="flex items-start gap-3 px-4 py-3.5">
-                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${chip}`}>
-                  <Icon className="h-4.5 w-4.5" />
-                </div>
-                <div className="min-w-0 flex-1 pt-0.5">
-                  <div className="font-display text-sm font-bold leading-5 text-ink">
-                    {toast.title}
-                  </div>
-                  {toast.message && (
-                    <div className="mt-1 text-sm leading-relaxed text-muted">
-                      {toast.message}
-                    </div>
-                  )}
-                </div>
-                <button
-                  onClick={() => remove(toast.id)}
-                  aria-label="Dismiss"
-                  className="-mr-1.5 -mt-1 shrink-0 rounded-lg p-1.5 text-muted transition hover:bg-content2 hover:text-ink"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              {/* The same countdown the alert dialog draws, so "it will go on its
-                  own" is visible rather than a surprise. Failures have no bar,
-                  which is itself the signal that this one is waiting to be read. */}
-              {selfCloses && <Countdown ms={DISMISS_AFTER} className={bar} />}
+            <div key={toast.id} className="pointer-events-auto w-full">
+              <NoticeCard
+                tone={toast.tone}
+                title={toast.title}
+                message={toast.message}
+                onClose={() => remove(toast.id)}
+                countdownMs={selfCloses ? DISMISS_AFTER : null}
+              />
             </div>
           );
         })}

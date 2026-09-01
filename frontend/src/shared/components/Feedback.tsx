@@ -5,6 +5,7 @@ import { Inbox } from "lucide-react";
 // that imports its own barrel is a cycle waiting to bite at load time.
 import { Button, Card } from "./ui";
 import { Alert } from "./Alert";
+import { NoticeChip, NOTICE_TONES, type NoticeTone } from "./notice";
 import { claimError, describeError } from "@/shared/api/errors";
 
 /**
@@ -70,6 +71,17 @@ export function EmptyState({
  *
  * `danger` is for the irreversible ones — completing a receipt writes a ledger row
  * and there is no undo, so those get the red button and a spelled-out consequence.
+ *
+ * Wears the same face as every other popup in the app: the tone chip, the title
+ * scale and the button pair all come from `notice.tsx`, so this and the catalog
+ * dialog in `modules/alerts` read as one system rather than two. It was a plain
+ * HeroUI header/body/footer at `size="lg"` before — no chip, no tone, and a large
+ * box for a question that is often two lines long.
+ *
+ * It sizes itself to what it holds: a bare question is the same small card the
+ * alert dialog draws, and only a body that collects something (a list to pick from,
+ * a reason to type) opens out. A modal bigger than its contents reads as though
+ * something failed to load.
  */
 export function ConfirmModal({
   isOpen,
@@ -77,6 +89,7 @@ export function ConfirmModal({
   message,
   confirmLabel = "Confirm",
   danger = false,
+  tone,
   busy = false,
   confirmDisabled = false,
   error,
@@ -89,6 +102,9 @@ export function ConfirmModal({
   message?: ReactNode;
   confirmLabel?: string;
   danger?: boolean;
+  /** Overrides the chip where the question is neither destructive nor neutral —
+   *  a warning for one that moves a document or touches stock. */
+  tone?: NoticeTone;
   busy?: boolean;
   /**
    * For a modal whose body collects something required. Without it the caller's
@@ -100,19 +116,36 @@ export function ConfirmModal({
   onClose: () => void;
   children?: ReactNode;
 }) {
+  const shown = tone ?? (danger ? "danger" : "info");
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="lg" scrollBehavior="inside">
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      size={children ? "lg" : "sm"}
+      scrollBehavior="inside"
+      classNames={{ base: "rounded-2xl border border-line/70" }}
+    >
       <ModalContent>
-        <ModalHeader className="font-display text-lg font-bold text-ink">{title}</ModalHeader>
-        <ModalBody>
+        {/* Chip and title on one row, at the notification card's scale. `gap-3`
+            and the 32px chip are the same measurements, so a confirm and a toast
+            line up when they are on screen together. */}
+        <ModalHeader className="flex items-start gap-3 pb-2">
+          <NoticeChip tone={shown} />
+          <span className="min-w-0 flex-1 pt-1 text-sm font-semibold leading-5 text-ink">
+            {title}
+          </span>
+        </ModalHeader>
+        <ModalBody className="pt-0">
           <ErrorBanner error={error} />
-          {message && <p className="text-sm text-body">{message}</p>}
+          {/* Indented to the chip, so the sentence hangs off the title rather than
+              starting again at the card's edge. */}
+          {message && <p className="text-[13px] leading-5 text-muted sm:pl-11">{message}</p>}
           {children}
         </ModalBody>
-        <ModalFooter>
+        <ModalFooter className="pt-2">
           <Button variant="subtle" onClick={onClose}>Cancel</Button>
           <Button
-            variant={danger ? "danger" : "primary"}
+            variant={NOTICE_TONES[shown].button}
             onClick={onConfirm}
             disabled={busy || confirmDisabled}
           >
