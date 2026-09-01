@@ -342,3 +342,73 @@ export interface WebhookDocs {
   samples: { event: string; body: unknown }[];
   signing_note: string;
 }
+
+
+/* ---------------------------------------------------------------- B-CAMS -- */
+/* The clinic app pushes field movements at us and reads 14 feeds back. It is a
+ * hand-written adapter rather than a registered webhook — a webhook only RECORDS what
+ * arrives, and consumption and wastage have to move stock — so none of the Webhook
+ * types above describe it. */
+
+/** Whether B-CAMS is wired up and what has landed. Carries no secret: the key itself
+ *  is kept server-side because verifying an HMAC needs it, and nothing reads it out. */
+export interface CamsStatus {
+  configured: boolean;
+  rotated_at: string | null;
+  rotated_by_name: string | null;
+  require_signature: boolean;
+  events: number;
+  last_received_at: string | null;
+  lines_posted: number;
+  lines_skipped: number;
+}
+
+/** Where B-CAMS posts, how it signs, and an example of each of the five bodies.
+ *  Every URL is built from the request that asked for the document, so the host in it
+ *  is the host the reader reached SCM on — never a literal (rule 13). */
+export interface CamsDocs {
+  base_url: string;
+  configured: boolean;
+  signature_header: string;
+  headers: { name: string; note: string }[];
+  signing_note: string;
+  envelope: { field: string; note: string }[];
+  writes: {
+    event: string;
+    label: string;
+    url: string;
+    method: string;
+    deducts_stock: boolean;
+    effect: string;
+    sample: unknown;
+  }[];
+  feeds: string[];
+  answers: { status: number; note: string }[];
+}
+
+export interface CamsSecret {
+  shared_secret: string;
+  rotated_at: string;
+  note: string;
+}
+
+/** What one push did. `posting` is absent on the three events that only record —
+ *  an issue acknowledgement, a field stock report and a transfer — and present on
+ *  consumption and wastage, which deduct. */
+export interface CamsEvent {
+  event_id: string;
+  event: string;
+  received_at: string;
+  generated_at?: string | null;
+  client_code?: string | null;
+  rows?: number;
+  body_sha256?: string;
+  payload_truncated?: boolean;
+  payload?: unknown;
+  posting?: {
+    posted: number;
+    skipped: number;
+    problems: string[];
+    applied_at?: string;
+  } | null;
+}

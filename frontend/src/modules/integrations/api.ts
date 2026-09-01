@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
-  ApiClient, ApiEndpoint, ApiKey, CallLog, ClientWrite, EndpointClip, EndpointWrite,
+  ApiClient, ApiEndpoint, ApiKey, CallLog, CamsDocs, CamsEvent, CamsSecret, CamsStatus,
+  ClientWrite, EndpointClip, EndpointWrite,
   ImportResult, IssuedKey,
   KeyWrite, LinkLogRow, LinkLogStats, LinkReveal, LinkTest, Page, PlatformLink,
   ConnectionDocs, Preview, SourceColumn, SourceTable, Usage, Webhook,
@@ -147,6 +148,37 @@ export const webhooksApi = {
     (await api.get(`${BASE}/webhook-deliveries`, {
       params: clean({ source, size: 50 }),
     })).data,
+};
+
+/** B-CAMS is a hand-written adapter, not a registered webhook, so it has none of the
+ *  rows the Webhooks tab reads: its writes go to `/api/ext/v1/cams/*` and are signed
+ *  with their own header and their own shared secret. Everything a desk needs to
+ *  operate it therefore lives behind these four calls and nowhere else. */
+export const camsApi = {
+  /** Whether a secret exists and what has arrived. Never the secret itself. */
+  status: async (): Promise<CamsStatus> =>
+    (await api.get(`${BASE}/cams/status`)).data,
+
+  /** Where B-CAMS posts, how it signs, and one example per event. Derived on the
+   *  server from the same table that registers the endpoints, so a URL in it is by
+   *  construction a URL that exists. */
+  docs: async (): Promise<CamsDocs> =>
+    (await api.get(`${BASE}/cams/docs`)).data,
+
+  /** The only response that carries the shared secret. Shown once, never retrievable
+   *  — and it INVALIDATES the one B-CAMS is signing with, so the screen asks first. */
+  rotateSecret: async (): Promise<CamsSecret> =>
+    (await api.post(`${BASE}/cams/secret`)).data,
+
+  /** What arrived, newest first. Bodies are excluded from the list — one is fetched
+   *  by id — because a nightly sweep's payload is far too big to render in a table. */
+  events: async (event?: string): Promise<Page<CamsEvent>> =>
+    (await api.get(`${BASE}/cams/events`, {
+      params: clean({ event, size: 50 }),
+    })).data,
+
+  event: async (eventId: string): Promise<CamsEvent> =>
+    (await api.get(`${BASE}/cams/events/${eventId}`)).data,
 };
 
 /** What THIS app connects out to — HCM, mail, the database — and their own logs.

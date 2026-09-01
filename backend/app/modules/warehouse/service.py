@@ -2965,7 +2965,19 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
     item = await db.get(Item, task.item_id)
     wh = await db.get(Warehouse, task.warehouse_id)
     batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
-    receipt = await get_receipt(db, task.grn_id) if task.grn_id else None
+    # `db.get`, not `get_receipt`: a decorator must not be able to fail the LIST.
+    #
+    # `get_receipt` raises NotFoundError when the row is gone, and this runs once per
+    # task in `list_putaways`, so ONE task whose GRN no longer exists took down the
+    # whole Put-away screen — every other task with it, and with an error naming a
+    # receipt rather than the task that pointed at it. That is what a fresh deployment
+    # hit: putaway tasks restored without the receipts behind them.
+    #
+    # A missing GRN is not a reason to refuse to show the work. The row renders with a
+    # blank GRN number, which is the truth about it. All this needs is `grn_no`, so
+    # the tolerant read is also the cheaper one — `get_receipt` loads every line and
+    # queries the item master to flag assets, none of which is used here.
+    receipt = await db.get(m.Receipt, task.grn_id) if task.grn_id else None
     receipt_item = (
         await db.get(m.ReceiptItem, task.grn_item_id)
         if task.grn_item_id else None

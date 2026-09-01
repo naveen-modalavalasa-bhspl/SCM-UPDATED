@@ -2,12 +2,13 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { Plug, Plus, Radio } from "lucide-react";
+import { Plug, Plus, Radio, Stethoscope } from "lucide-react";
 import {
   Button, Card, EmptyState, ErrorBanner, Field, Input, PageHeader, ResponsiveList,
   StatusPill, SubNav, useToast, type Column,
 } from "@/shared/components";
 import { integrationsApi } from "../api";
+import { CamsPanel } from "../components/CamsPanel";
 import { WebhooksPanel } from "../components/WebhooksPanel";
 import type { ApiClient, ClientWrite } from "../types";
 
@@ -17,6 +18,10 @@ import type { ApiClient, ClientWrite } from "../types";
 const TABS = [
   { key: "clients", label: "Applications", icon: Plug },
   { key: "webhooks", label: "Webhooks", icon: Radio },
+  // Its own tab, not a webhook row: B-CAMS is a hand-written adapter because its
+  // writes MOVE STOCK, which a webhook handler may not do, so nothing on the Webhooks
+  // tab can describe or operate it.
+  { key: "cams", label: "B-CAMS", icon: Stethoscope },
 ];
 
 const BLANK: ClientWrite = {
@@ -119,12 +124,12 @@ export default function ApiClientsPage() {
     },
   ];
 
-  if (tab === "webhooks") {
+  if (tab === "webhooks" || tab === "cams") {
     return (
       <div>
         <PageHeader eyebrow="APIS" title="Integrations" />
         <SubNav label="Integrations" items={TABS} value={tab} onChange={setTab} />
-        <WebhooksPanel />
+        {tab === "webhooks" ? <WebhooksPanel /> : <CamsPanel />}
       </div>
     );
   }

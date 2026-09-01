@@ -293,6 +293,32 @@ async def _save_outcome(db: AsyncSession, event_id: str, outcome: dict) -> None:
 # Console
 # --------------------------------------------------------------------------- #
 
+async def status(db: AsyncSession) -> dict:
+    """Is B-CAMS wired up, and has anything arrived — WITHOUT revealing the secret.
+
+    The console needs this before it offers the rotate button. Minting a new secret
+    silently invalidates the one the partner is signing with, so an admin has to be
+    able to see that one already exists, and when it was issued, before they press it.
+    Only the fact and the date, never the key: `hmac_storable` keeps the secret itself
+    because verifying an HMAC needs the key, and nothing outside `verify` may read it.
+    """
+    doc = await config(db)
+    events = await store.all_of(db, EVENT_PREFIX)
+    received = [str(d.get("received_at", "")) for d in events if d.get("received_at")]
+    posted = sum((d.get("posting") or {}).get("posted", 0) for d in events)
+    skipped = sum((d.get("posting") or {}).get("skipped", 0) for d in events)
+    return {
+        "configured": bool(doc.get("secret_hmac_key")),
+        "rotated_at": doc.get("rotated_at"),
+        "rotated_by_name": doc.get("rotated_by_name"),
+        "require_signature": doc.get("require_signature", True),
+        "events": len(events),
+        "last_received_at": max(received) if received else None,
+        "lines_posted": posted,
+        "lines_skipped": skipped,
+    }
+
+
 async def receipts(db: AsyncSession, params, event: str | None = None) -> dict:
     """What arrived, newest first — the screen that answers "did last night land"."""
     docs = [d for d in await store.all_of(db, EVENT_PREFIX)
